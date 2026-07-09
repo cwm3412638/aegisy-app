@@ -3,6 +3,7 @@
 #include "env_config_dialog.h"
 #include "env_manager_dialog.h"
 #include "models_dialog.h"
+#include "quick_setup_wizard.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGroupBox>
@@ -64,6 +65,23 @@ void MainWindow::setupUi()
     QVBoxLayout *envLayout = new QVBoxLayout(envGroup);
 
     QHBoxLayout *envButtonLayout = new QHBoxLayout();
+
+    m_quickSetupButton = new QPushButton("🚀 快速配置", this);
+    m_quickSetupButton->setStyleSheet(
+        "QPushButton {"
+        "  background-color: #27ae60;"
+        "  color: white;"
+        "  border: none;"
+        "  border-radius: 4px;"
+        "  padding: 6px 12px;"
+        "  font-weight: bold;"
+        "  font-size: 14px;"
+        "}"
+        "QPushButton:hover {"
+        "  background-color: #229954;"
+        "}"
+    );
+
     m_refreshButton = new QPushButton("刷新检测", this);
     m_configureButton = new QPushButton("配置环境", this);
     m_manageKeysButton = new QPushButton("管理 API Keys", this);
@@ -111,6 +129,7 @@ void MainWindow::setupUi()
         "}"
     );
 
+    envButtonLayout->addWidget(m_quickSetupButton);
     envButtonLayout->addWidget(m_refreshButton);
     envButtonLayout->addWidget(m_configureButton);
     envButtonLayout->addWidget(m_manageKeysButton);
@@ -148,6 +167,7 @@ void MainWindow::setupUi()
     mainLayout->addWidget(logGroup);
 
     // Connections
+    connect(m_quickSetupButton, &QPushButton::clicked, this, &MainWindow::onQuickSetupClicked);
     connect(m_refreshButton, &QPushButton::clicked, this, &MainWindow::onRefreshEnvClicked);
     connect(m_configureButton, &QPushButton::clicked, this, &MainWindow::onConfigureEnvClicked);
     connect(m_manageKeysButton, &QPushButton::clicked, this, &MainWindow::onManageKeysClicked);
@@ -160,10 +180,24 @@ void MainWindow::setAuthToken(const QString &token)
 {
     m_authToken = token;
     m_apiClient->setAuthToken(token);
-    m_userLabel->setText("User: Logged in");
+    m_userLabel->setText("用户: 已登录");
 
     // 自动刷新环境检测
     onRefreshEnvClicked();
+
+    // 首次登录自动弹出快速配置向导
+    QTimer::singleShot(1000, this, [this]() {
+        QMessageBox::StandardButton reply;
+        reply = QMessageBox::question(this, "快速配置",
+                                      "🚀 欢迎使用 Aegisy 客户端！\n\n"
+                                      "是否立即使用「快速配置向导」自动完成所有配置？\n\n"
+                                      "只需 10-20 秒，无需任何操作！",
+                                      QMessageBox::Yes | QMessageBox::No);
+
+        if (reply == QMessageBox::Yes) {
+            onQuickSetupClicked();
+        }
+    });
 }
 
 void MainWindow::onRefreshEnvClicked()
@@ -318,6 +352,29 @@ void MainWindow::onViewModelsClicked()
     dialog->deleteLater();
 
     m_logOutput->append("[INFO] 模型管理对话框已关闭");
+}
+
+void MainWindow::onQuickSetupClicked()
+{
+    m_logOutput->append("[INFO] 启动快速配置向导...");
+
+    QuickSetupWizard *wizard = new QuickSetupWizard(m_apiClient, m_configManager, m_envDetector, this);
+
+    // 连接配置完成信号
+    connect(wizard, &QuickSetupWizard::setupCompleted,
+            [this]() {
+        m_logOutput->append("[✓] 快速配置已完成！");
+
+        // 自动刷新环境检测
+        QTimer::singleShot(1000, this, [this]() {
+            onRefreshEnvClicked();
+        });
+    });
+
+    wizard->exec();
+    wizard->deleteLater();
+
+    m_logOutput->append("[INFO] 快速配置向导已关闭");
 }
 
 void MainWindow::onLogoutClicked()

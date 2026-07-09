@@ -26,6 +26,7 @@ private slots:
     void onManageKeysClicked();
     void onManageEnvironmentsClicked();
     void onViewModelsClicked();
+    void onQuickSetupClicked();
     void onLogoutClicked();
     void onEnvDetectionFinished();
 
@@ -39,6 +40,7 @@ private:
 
     // UI Elements
     QLabel *m_userLabel;
+    QPushButton *m_quickSetupButton;
     QPushButton *m_refreshButton;
     QPushButton *m_configureButton;
     QPushButton *m_manageKeysButton;

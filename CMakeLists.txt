@@ -34,6 +34,7 @@ set(SOURCES
     src/env_config_dialog.cpp
     src/env_manager_dialog.cpp
     src/models_dialog.cpp
+    src/quick_setup_wizard.cpp
 )
 
 set(HEADERS
@@ -47,6 +48,7 @@ set(HEADERS
     include/env_config_dialog.h
     include/env_manager_dialog.h
     include/models_dialog.h
+    include/quick_setup_wizard.h
 )
 
 # 可执行文件
