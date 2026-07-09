@@ -1,0 +1,341 @@
+#include "api_keys_dialog.h"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QClipboard>
+#include <QApplication>
+#include <QMessageBox>
+#include <QJsonObject>
+#include <QDateTime>
+#include <QTimer>
+
+ApiKeyInfo ApiKeyInfo::fromJson(const QJsonObject &obj)
+{
+    ApiKeyInfo info;
+    info.id = obj["id"].toString();
+    info.name = obj["name"].toString();
+    info.key = obj["key"].toString();
+    info.status = obj["status"].toString();
+    info.quota = obj["quota"].toInt(0);
+    info.used = obj["used"].toInt(0);
+    info.createdAt = obj["created_at"].toString();
+    info.expiresAt = obj["expires_at"].toString();
+    info.isActive = obj["is_active"].toBool(false);
+    return info;
+}
+
+ApiKeysDialog::ApiKeysDialog(ApiClient *apiClient, QWidget *parent)
+    : QDialog(parent)
+    , m_apiClient(apiClient)
+{
+    setupUi();
+    setWindowTitle("API Keys Management");
+    resize(900, 500);
+
+    // 连接 API 客户端信号
+    connect(m_apiClient, &ApiClient::apiKeysReceived, this, &ApiKeysDialog::onKeysReceived);
+    connect(m_apiClient, &ApiClient::requestFailed, this, &ApiKeysDialog::onRequestFailed);
+
+    // 自动加载
+    loadApiKeys();
+}
+
+void ApiKeysDialog::setupUi()
+{
+    QVBoxLayout *mainLayout = new QVBoxLayout(this);
+    mainLayout->setSpacing(15);
+    mainLayout->setContentsMargins(20, 20, 20, 20);
+
+    // Header
+    QHBoxLayout *headerLayout = new QHBoxLayout();
+
+    QLabel *titleLabel = new QLabel("API Keys Management", this);
+    QFont titleFont = titleLabel->font();
+    titleFont.setPointSize(16);
+    titleFont.setBold(true);
+    titleLabel->setFont(titleFont);
+    headerLayout->addWidget(titleLabel);
+
+    headerLayout->addStretch();
+
+    m_totalKeysLabel = new QLabel("Total: 0 keys", this);
+    m_totalKeysLabel->setStyleSheet("color: #666; font-size: 13px;");
+    headerLayout->addWidget(m_totalKeysLabel);
+
+    mainLayout->addLayout(headerLayout);
+
+    // Toolbar
+    QHBoxLayout *toolbarLayout = new QHBoxLayout();
+
+    m_refreshButton = new QPushButton("🔄 Refresh", this);
+    m_refreshButton->setMinimumHeight(35);
+    toolbarLayout->addWidget(m_refreshButton);
+
+    m_copyButton = new QPushButton("📋 Copy Key", this);
+    m_copyButton->setMinimumHeight(35);
+    m_copyButton->setEnabled(false);
+    toolbarLayout->addWidget(m_copyButton);
+
+    m_activateButton = new QPushButton("✓ Set as Active", this);
+    m_activateButton->setMinimumHeight(35);
+    m_activateButton->setEnabled(false);
+    m_activateButton->setStyleSheet(
+        "QPushButton {"
+        "  background-color: #27ae60;"
+        "  color: white;"
+        "  border: none;"
+        "  border-radius: 4px;"
+        "  padding: 5px 15px;"
+        "}"
+        "QPushButton:hover {"
+        "  background-color: #229954;"
+        "}"
+        "QPushButton:disabled {"
+        "  background-color: #bdc3c7;"
+        "}"
+    );
+    toolbarLayout->addWidget(m_activateButton);
+
+    toolbarLayout->addStretch();
+
+    mainLayout->addLayout(toolbarLayout);
+
+    // Keys Table
+    m_keysTable = new QTableWidget(this);
+    m_keysTable->setColumnCount(7);
+    m_keysTable->setHorizontalHeaderLabels({
+        "Name", "Status", "Key", "Quota", "Used", "Usage %", "Created"
+    });
+
+    m_keysTable->horizontalHeader()->setStretchLastSection(false);
+    m_keysTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_keysTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    m_keysTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_keysTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_keysTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_keysTable->setAlternatingRowColors(true);
+    m_keysTable->verticalHeader()->setVisible(false);
+    m_keysTable->setStyleSheet(
+        "QTableWidget {"
+        "  border: 1px solid #ddd;"
+        "  border-radius: 4px;"
+        "  gridline-color: #e0e0e0;"
+        "}"
+        "QHeaderView::section {"
+        "  background-color: #f5f5f5;"
+        "  padding: 8px;"
+        "  border: none;"
+        "  border-bottom: 2px solid #ddd;"
+        "  font-weight: bold;"
+        "}"
+    );
+
+    mainLayout->addWidget(m_keysTable);
+
+    // Status Label
+    m_statusLabel = new QLabel(this);
+    m_statusLabel->setStyleSheet("color: #666; font-size: 12px;");
+    m_statusLabel->setAlignment(Qt::AlignCenter);
+    mainLayout->addWidget(m_statusLabel);
+
+    // Close button
+    QHBoxLayout *bottomLayout = new QHBoxLayout();
+    bottomLayout->addStretch();
+
+    QPushButton *closeButton = new QPushButton("Close", this);
+    closeButton->setMinimumHeight(35);
+    closeButton->setMinimumWidth(100);
+    connect(closeButton, &QPushButton::clicked, this, &QDialog::accept);
+    bottomLayout->addWidget(closeButton);
+
+    mainLayout->addLayout(bottomLayout);
+
+    // Connections
+    connect(m_refreshButton, &QPushButton::clicked, this, &ApiKeysDialog::onRefreshClicked);
+    connect(m_copyButton, &QPushButton::clicked, this, &ApiKeysDialog::onCopyKeyClicked);
+    connect(m_activateButton, &QPushButton::clicked, this, &ApiKeysDialog::onActivateKeyClicked);
+    connect(m_keysTable, &QTableWidget::itemSelectionChanged, this, &ApiKeysDialog::onTableSelectionChanged);
+}
+
+void ApiKeysDialog::loadApiKeys()
+{
+    m_statusLabel->setText("Loading API keys...");
+    m_statusLabel->setStyleSheet("color: #3498db; font-size: 12px;");
+    m_refreshButton->setEnabled(false);
+
+    m_apiClient->getApiKeys();
+}
+
+void ApiKeysDialog::onRefreshClicked()
+{
+    loadApiKeys();
+}
+
+void ApiKeysDialog::onCopyKeyClicked()
+{
+    ApiKeyInfo selectedKey = getSelectedKey();
+    if (selectedKey.key.isEmpty()) {
+        QMessageBox::warning(this, "No Selection", "Please select an API key first.");
+        return;
+    }
+
+    QClipboard *clipboard = QApplication::clipboard();
+    clipboard->setText(selectedKey.key);
+
+    m_statusLabel->setText("✓ API key copied to clipboard!");
+    m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
+
+    // 临时提示
+    QTimer::singleShot(3000, this, [this]() {
+        m_statusLabel->setText("");
+    });
+}
+
+void ApiKeysDialog::onActivateKeyClicked()
+{
+    ApiKeyInfo selectedKey = getSelectedKey();
+    if (selectedKey.key.isEmpty()) {
+        QMessageBox::warning(this, "No Selection", "Please select an API key first.");
+        return;
+    }
+
+    // 更新本地状态
+    for (int i = 0; i < m_keys.size(); ++i) {
+        m_keys[i].isActive = (m_keys[i].id == selectedKey.id);
+    }
+
+    m_activeKeyId = selectedKey.id;
+
+    // 刷新表格显示
+    updateKeysTable(m_keys);
+
+    // 发送信号
+    emit keyActivated(selectedKey.id, selectedKey.key);
+
+    m_statusLabel->setText(QString("✓ Key '%1' is now active!").arg(selectedKey.name));
+    m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
+}
+
+void ApiKeysDialog::onKeysReceived(const QJsonArray &keys)
+{
+    m_keys.clear();
+
+    for (const QJsonValue &val : keys) {
+        ApiKeyInfo info = ApiKeyInfo::fromJson(val.toObject());
+        m_keys.append(info);
+    }
+
+    updateKeysTable(m_keys);
+
+    m_refreshButton->setEnabled(true);
+    m_totalKeysLabel->setText(QString("Total: %1 keys").arg(m_keys.size()));
+    m_statusLabel->setText(QString("✓ Loaded %1 API keys").arg(m_keys.size()));
+    m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
+}
+
+void ApiKeysDialog::onRequestFailed(const QString &error)
+{
+    m_refreshButton->setEnabled(true);
+    m_statusLabel->setText(QString("✗ Error: %1").arg(error));
+    m_statusLabel->setStyleSheet("color: #e74c3c; font-size: 12px;");
+
+    QMessageBox::warning(this, "Error", QString("Failed to load API keys:\n%1").arg(error));
+}
+
+void ApiKeysDialog::updateKeysTable(const QList<ApiKeyInfo> &keys)
+{
+    m_keysTable->setRowCount(0);
+
+    for (int i = 0; i < keys.size(); ++i) {
+        const ApiKeyInfo &info = keys[i];
+        m_keysTable->insertRow(i);
+
+        // Name (with active indicator)
+        QString displayName = info.name;
+        if (info.isActive || info.id == m_activeKeyId) {
+            displayName = "★ " + displayName;
+        }
+        QTableWidgetItem *nameItem = new QTableWidgetItem(displayName);
+        if (info.isActive || info.id == m_activeKeyId) {
+            QFont font = nameItem->font();
+            font.setBold(true);
+            nameItem->setFont(font);
+            nameItem->setForeground(QBrush(QColor("#27ae60")));
+        }
+        m_keysTable->setItem(i, 0, nameItem);
+
+        // Status
+        QTableWidgetItem *statusItem = new QTableWidgetItem(info.status);
+        if (info.status.toLower() == "active") {
+            statusItem->setForeground(QBrush(QColor("#27ae60")));
+        } else {
+            statusItem->setForeground(QBrush(QColor("#e74c3c")));
+        }
+        m_keysTable->setItem(i, 1, statusItem);
+
+        // Key (masked)
+        QString maskedKey = info.key;
+        if (maskedKey.length() > 12) {
+            maskedKey = maskedKey.left(8) + "..." + maskedKey.right(4);
+        }
+        m_keysTable->setItem(i, 2, new QTableWidgetItem(maskedKey));
+
+        // Quota
+        QString quotaStr = info.quota > 0 ? QString::number(info.quota) : "Unlimited";
+        m_keysTable->setItem(i, 3, new QTableWidgetItem(quotaStr));
+
+        // Used
+        m_keysTable->setItem(i, 4, new QTableWidgetItem(QString::number(info.used)));
+
+        // Usage %
+        QString usagePercent = "-";
+        if (info.quota > 0) {
+            double percent = (double)info.used / info.quota * 100;
+            usagePercent = QString::number(percent, 'f', 1) + "%";
+        }
+        QTableWidgetItem *usageItem = new QTableWidgetItem(usagePercent);
+        if (info.quota > 0) {
+            double percent = (double)info.used / info.quota * 100;
+            if (percent >= 90) {
+                usageItem->setForeground(QBrush(QColor("#e74c3c")));
+            } else if (percent >= 70) {
+                usageItem->setForeground(QBrush(QColor("#f39c12")));
+            }
+        }
+        m_keysTable->setItem(i, 5, usageItem);
+
+        // Created At
+        QString createdAt = info.createdAt;
+        if (!createdAt.isEmpty()) {
+            QDateTime dt = QDateTime::fromString(createdAt, Qt::ISODate);
+            if (dt.isValid()) {
+                createdAt = dt.toString("yyyy-MM-dd");
+            }
+        }
+        m_keysTable->setItem(i, 6, new QTableWidgetItem(createdAt));
+    }
+
+    m_keysTable->resizeColumnsToContents();
+}
+
+void ApiKeysDialog::onTableSelectionChanged()
+{
+    bool hasSelection = !m_keysTable->selectedItems().isEmpty();
+    m_copyButton->setEnabled(hasSelection);
+    m_activateButton->setEnabled(hasSelection);
+}
+
+ApiKeyInfo ApiKeysDialog::getSelectedKey() const
+{
+    int currentRow = m_keysTable->currentRow();
+    if (currentRow >= 0 && currentRow < m_keys.size()) {
+        return m_keys[currentRow];
+    }
+    return ApiKeyInfo();
+}
+
+void ApiKeysDialog::setActiveKey(const QString &keyId)
+{
+    m_activeKeyId = keyId;
+    updateKeysTable(m_keys);
+}
