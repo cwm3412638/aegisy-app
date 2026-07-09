@@ -121,6 +121,9 @@ void ApiClient::onLoginFinished()
         return;
     }
 
+    // 调试：打印完整响应
+    qDebug() << "Login response:" << response;
+
     // 检查 sub2api 响应格式
     int code = response["code"].toInt(-1);
     if (code != 0 && code != 200) {
@@ -130,12 +133,30 @@ void ApiClient::onLoginFinished()
         return;
     }
 
-    // 提取 token 和用户数据
+    // 提取 token - 尝试多种可能的位置
+    QString token;
+
+    // 尝试 1: data.token
     QJsonObject data = response["data"].toObject();
-    QString token = data["token"].toString();
+    token = data["token"].toString();
+
+    // 尝试 2: 直接在 response.token
+    if (token.isEmpty()) {
+        token = response["token"].toString();
+    }
+
+    // 尝试 3: data.access_token (常见的 JWT 命名)
+    if (token.isEmpty()) {
+        token = data["access_token"].toString();
+    }
+
+    qDebug() << "Extracted token:" << token;
 
     if (token.isEmpty()) {
-        emit loginFailed("No token received");
+        // 打印详细错误信息
+        qDebug() << "Response keys:" << response.keys();
+        qDebug() << "Data keys:" << data.keys();
+        emit loginFailed("No token received. Response: " + QString(QJsonDocument(response).toJson()));
         reply->deleteLater();
         return;
     }

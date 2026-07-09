@@ -28,7 +28,7 @@ void LoginDialog::setupUi()
     mainLayout->addWidget(titleLabel);
 
     // Subtitle
-    QLabel *subtitleLabel = new QLabel("Login to your account", this);
+    QLabel *subtitleLabel = new QLabel("请使用您的 Aegisy 账号登录", this);
     subtitleLabel->setAlignment(Qt::AlignCenter);
     subtitleLabel->setStyleSheet("color: #666;");
     mainLayout->addWidget(subtitleLabel);
@@ -53,7 +53,7 @@ void LoginDialog::setupUi()
     mainLayout->addLayout(formLayout);
 
     // Remember me
-    m_rememberCheckBox = new QCheckBox("Remember me", this);
+    m_rememberCheckBox = new QCheckBox("记住我", this);
     mainLayout->addWidget(m_rememberCheckBox);
 
     // Error label
