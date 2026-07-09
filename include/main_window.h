@@ -4,11 +4,13 @@
 #include <QMainWindow>
 #include <QLabel>
 #include <QPushButton>
+#include <QComboBox>
 #include <QTextEdit>
 #include <QJsonArray>
 #include <QMap>
 #include "api_client.h"
 #include "tool_manager.h"
+#include "profile_manager.h"
 
 // 单个工具卡片的控件集合
 struct ToolCard {
@@ -28,7 +30,6 @@ public:
     void setAuthToken(const QString &token);
 
 signals:
-    // 用户点击退出登录（token 已清除），由 main.cpp 决定后续流程
     void loggedOut();
 
 private slots:
@@ -41,40 +42,53 @@ private slots:
     void onViewModelsClicked();
     void onLogoutClicked();
 
+    // 档案相关
+    void onProfileComboChanged(int index);
+    void onAddProfileClicked();
+    void onManageProfileClicked();
+
 private:
     void setupUi();
     QWidget* createToolCard(AiTool tool);
     void refreshToolCard(AiTool tool);
     void refreshAllCards();
 
-    // 按分组 platform 列出当前登录用户所有可用的 Key（用于选择）
     struct KeyChoice {
         QString key;
-        QString label;   // "名称 — 分组 (sk-xxx...xxxx)"
+        QString label;
     };
     QList<KeyChoice> keysForTool(AiTool tool) const;
-    // 一键接入的配置阶段（安装完成后也会走到这里）
     void configureTool(AiTool tool);
 
-    void logMessage(const QString &message, const QString &color = "#333");
+    // 档案操作
+    void refreshProfileCombo();
+    void applyProfile(const Profile &profile);
+
+    void logMessage(const QString &message, const QString &color = "#94a3b8");
     static QString maskKey(const QString &key);
 
-    ApiClient *m_apiClient;
-    ToolManager *m_toolManager;
+    ApiClient    *m_apiClient;
+    ToolManager  *m_toolManager;
+    ProfileManager *m_profileManager;
 
-    // UI
-    QLabel *m_userLabel;
-    QPushButton *m_logoutButton;
+    // UI — 顶栏
+    QLabel       *m_userLabel;
+    QPushButton  *m_logoutButton;
+    QComboBox    *m_profileCombo;
+    QPushButton  *m_addProfileButton;
+    QPushButton  *m_manageProfileButton;
+
+    // UI — 工具卡片 + 高级区 + 日志
     QMap<AiTool, ToolCard> m_cards;
-    QPushButton *m_manageKeysButton;
-    QPushButton *m_viewModelsButton;
-    QTextEdit *m_logOutput;
+    QPushButton  *m_manageKeysButton;
+    QPushButton  *m_viewModelsButton;
+    QTextEdit    *m_logOutput;
 
     // 状态
     QString m_authToken;
-    QJsonArray m_keys;          // 当前登录用户的 API Keys（含 group）
+    QJsonArray m_keys;
     bool m_keysLoaded = false;
-    QMap<AiTool, KeyChoice> m_pendingChoice;  // 接入流程中用户选定的 Key（跨安装步骤传递）
+    QMap<AiTool, KeyChoice> m_pendingChoice;
 };
 
 #endif // MAIN_WINDOW_H

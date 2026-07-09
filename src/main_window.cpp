@@ -6,6 +6,7 @@
 #include <QHBoxLayout>
 #include <QFrame>
 #include <QMap>
+#include <QMenu>
 #include <QMessageBox>
 #include <QInputDialog>
 #include <QDesktopServices>
@@ -52,6 +53,7 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_apiClient(new ApiClient(this))
     , m_toolManager(new ToolManager(this))
+    , m_profileManager(new ProfileManager(this))
 {
     setupUi();
     setWindowTitle("Aegisy 客户端 — AI 工具一键接入");
@@ -124,6 +126,71 @@ void MainWindow::setupUi()
     appTitle->setFont(appTitleFont);
     appTitle->setStyleSheet("color: #1e293b;");
     topBarLayout->addWidget(appTitle);
+
+    // 竖分隔线
+    QFrame *profileDiv = new QFrame(this);
+    profileDiv->setFrameShape(QFrame::VLine);
+    profileDiv->setFixedHeight(18);
+    profileDiv->setStyleSheet("color: #e2e8f0;");
+    topBarLayout->addWidget(profileDiv);
+
+    QLabel *profileLabel = new QLabel("档案", this);
+    profileLabel->setStyleSheet("color: #94a3b8; font-size: 12px;");
+    topBarLayout->addWidget(profileLabel);
+
+    // 档案下拉框
+    m_profileCombo = new QComboBox(this);
+    m_profileCombo->setMinimumWidth(120);
+    m_profileCombo->setMaximumWidth(160);
+    m_profileCombo->setMinimumHeight(28);
+    m_profileCombo->setCursor(Qt::PointingHandCursor);
+    m_profileCombo->setStyleSheet(
+        "QComboBox {"
+        "  background: #f8fafc;"
+        "  border: 1.5px solid #e2e8f0;"
+        "  border-radius: 6px;"
+        "  padding: 2px 8px;"
+        "  font-size: 13px;"
+        "  color: #1e293b;"
+        "}"
+        "QComboBox:focus { border-color: #6366f1; }"
+        "QComboBox::drop-down { border: none; padding-right: 6px; }"
+        "QComboBox QAbstractItemView {"
+        "  border: 1.5px solid #e2e8f0;"
+        "  background: white;"
+        "  selection-background-color: #eef2ff;"
+        "  selection-color: #3730a3;"
+        "}"
+    );
+    topBarLayout->addWidget(m_profileCombo);
+
+    const QString iconBtnStyle =
+        "QPushButton {"
+        "  background: transparent;"
+        "  color: #64748b;"
+        "  border: 1.5px solid #e2e8f0;"
+        "  border-radius: 6px;"
+        "  font-size: 14px;"
+        "  padding: 2px 7px;"
+        "}"
+        "QPushButton:hover {"
+        "  background: #f1f5f9;"
+        "  color: #1e293b;"
+        "}";
+
+    m_addProfileButton = new QPushButton("+", this);
+    m_addProfileButton->setFixedSize(28, 28);
+    m_addProfileButton->setCursor(Qt::PointingHandCursor);
+    m_addProfileButton->setToolTip("新建档案");
+    m_addProfileButton->setStyleSheet(iconBtnStyle);
+    topBarLayout->addWidget(m_addProfileButton);
+
+    m_manageProfileButton = new QPushButton("⋯", this);
+    m_manageProfileButton->setFixedSize(28, 28);
+    m_manageProfileButton->setCursor(Qt::PointingHandCursor);
+    m_manageProfileButton->setToolTip("管理档案（重命名 / 删除）");
+    m_manageProfileButton->setStyleSheet(iconBtnStyle);
+    topBarLayout->addWidget(m_manageProfileButton);
 
     topBarLayout->addStretch();
 
@@ -229,6 +296,13 @@ void MainWindow::setupUi()
     connect(m_logoutButton, &QPushButton::clicked, this, &MainWindow::onLogoutClicked);
     connect(m_manageKeysButton, &QPushButton::clicked, this, &MainWindow::onManageKeysClicked);
     connect(m_viewModelsButton, &QPushButton::clicked, this, &MainWindow::onViewModelsClicked);
+
+    // 档案信号
+    refreshProfileCombo();
+    connect(m_profileCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onProfileComboChanged);
+    connect(m_addProfileButton,    &QPushButton::clicked, this, &MainWindow::onAddProfileClicked);
+    connect(m_manageProfileButton, &QPushButton::clicked, this, &MainWindow::onManageProfileClicked);
 }
 
 QWidget* MainWindow::createToolCard(AiTool tool)
@@ -557,6 +631,9 @@ void MainWindow::configureTool(AiTool tool)
 
     const bool ok = m_toolManager->configure(tool, apiKey);
     if (ok) {
+        // 将 Key 保存到当前档案，下次切换回来可自动恢复
+        m_profileManager->saveKey(m_profileManager->activeIndex(), tool, apiKey);
+
         logMessage(QString("🎉 %1 接入完成！重新打开终端后运行 `%2` 即可使用。")
                        .arg(ToolManager::toolName(tool), ToolManager::cliCommand(tool)),
                    kLogSuccess);
@@ -610,4 +687,112 @@ void MainWindow::onLogoutClicked()
 void MainWindow::logMessage(const QString &message, const QString &color)
 {
     m_logOutput->append(QString("<span style='color:%1'>%2</span>").arg(color, message));
+}
+
+// ── 档案管理 ──────────────────────────────────────────────────
+
+void MainWindow::refreshProfileCombo()
+{
+    m_profileCombo->blockSignals(true);
+    m_profileCombo->clear();
+    const auto profiles = m_profileManager->allProfiles();
+    for (const Profile &p : profiles) {
+        m_profileCombo->addItem(p.name);
+    }
+    m_profileCombo->setCurrentIndex(m_profileManager->activeIndex());
+    m_profileCombo->blockSignals(false);
+}
+
+void MainWindow::applyProfile(const Profile &profile)
+{
+    bool anyApplied = false;
+    for (AiTool tool : {AiTool::ClaudeCode, AiTool::CodexCli, AiTool::GeminiCli}) {
+        const QString key = profile.keyFor(tool);
+        if (key.isEmpty()) continue;
+
+        const ToolStatus status = m_toolManager->detect(tool);
+        if (!status.installed) {
+            logMessage(QString("跳过 %1（未安装）").arg(ToolManager::toolName(tool)), kLogMuted);
+            continue;
+        }
+        if (m_toolManager->configure(tool, key)) {
+            logMessage(QString("✓ %1 已切换至档案「%2」")
+                       .arg(ToolManager::toolName(tool), profile.name), kLogSuccess);
+            anyApplied = true;
+        } else {
+            logMessage(QString("✗ %1 切换失败：%2")
+                       .arg(ToolManager::toolName(tool), m_toolManager->lastError()), kLogError);
+        }
+    }
+    if (!anyApplied && profile.hasAnyKey()) {
+        logMessage("档案中的工具均未安装，无法自动切换配置", kLogMuted);
+    }
+    refreshAllCards();
+}
+
+void MainWindow::onProfileComboChanged(int index)
+{
+    if (index < 0) return;
+    m_profileManager->setActiveIndex(index);
+    const Profile profile = m_profileManager->activeProfile();
+    logMessage(QString("已切换到档案「%1」").arg(profile.name), kLogInfo);
+    applyProfile(profile);
+}
+
+void MainWindow::onAddProfileClicked()
+{
+    const int nextNum = m_profileManager->count() + 1;
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+        this, "新建档案", "档案名称：",
+        QLineEdit::Normal, QString("档案 %1").arg(nextNum), &ok);
+    if (!ok || name.trimmed().isEmpty()) return;
+
+    const int newIdx = m_profileManager->addProfile(name.trimmed());
+    refreshProfileCombo();
+
+    // 切换到新建档案（blockSignals 避免触发 applyProfile，新档案没有 Key）
+    m_profileCombo->blockSignals(true);
+    m_profileCombo->setCurrentIndex(newIdx);
+    m_profileCombo->blockSignals(false);
+    m_profileManager->setActiveIndex(newIdx);
+    logMessage(QString("已创建档案「%1」，请为各工具点击「一键接入」选择 Key").arg(name.trimmed()), kLogInfo);
+}
+
+void MainWindow::onManageProfileClicked()
+{
+    const int idx = m_profileManager->activeIndex();
+    if (idx < 0) return;
+    const auto profiles = m_profileManager->allProfiles();
+    const QString currentName = profiles.value(idx).name;
+
+    QMenu menu(this);
+    QAction *renameAct = menu.addAction(QString("✏️  重命名「%1」").arg(currentName));
+    menu.addSeparator();
+    QAction *deleteAct = menu.addAction(QString("🗑  删除「%1」").arg(currentName));
+    deleteAct->setEnabled(profiles.size() > 1);
+
+    QAction *chosen = menu.exec(
+        m_manageProfileButton->mapToGlobal(m_manageProfileButton->rect().bottomLeft()));
+    if (!chosen) return;
+
+    if (chosen == renameAct) {
+        bool ok = false;
+        const QString newName = QInputDialog::getText(
+            this, "重命名档案", "新名称：",
+            QLineEdit::Normal, currentName, &ok);
+        if (ok && !newName.trimmed().isEmpty()) {
+            m_profileManager->renameProfile(idx, newName.trimmed());
+            refreshProfileCombo();
+        }
+    } else if (chosen == deleteAct) {
+        const auto reply = QMessageBox::question(
+            this, "删除档案",
+            QString("确定删除档案「%1」吗？\n该档案保存的 Key 将一并删除。").arg(currentName));
+        if (reply == QMessageBox::Yes) {
+            m_profileManager->removeProfile(idx);
+            refreshProfileCombo();
+            applyProfile(m_profileManager->activeProfile());
+        }
+    }
 }

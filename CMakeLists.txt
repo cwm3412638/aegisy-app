@@ -31,6 +31,7 @@ set(SOURCES
     src/secure_storage.cpp
     src/api_keys_dialog.cpp
     src/models_dialog.cpp
+    src/profile_manager.cpp
 )
 
 set(HEADERS
@@ -41,6 +42,7 @@ set(HEADERS
     include/secure_storage.h
     include/api_keys_dialog.h
     include/models_dialog.h
+    include/profile_manager.h
 )
 
 # 可执行文件
