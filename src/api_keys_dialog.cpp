@@ -9,22 +9,20 @@
 #include <QDateTime>
 #include <QTimer>
 #include <QSettings>
+#include <QFrame>
 
 ApiKeyInfo ApiKeyInfo::fromJson(const QJsonObject &obj)
 {
     ApiKeyInfo info;
-    info.id = QString::number(obj["id"].toInt());  // id 是数字
+    info.id = QString::number(obj["id"].toInt());
     info.name = obj["name"].toString();
     info.key = obj["key"].toString();
     info.status = obj["status"].toString();
     info.quota = obj["quota"].toInt(0);
-    info.used = obj["quota_used"].toInt(0);  // 字段名是 quota_used
+    info.used = obj["quota_used"].toInt(0);
     info.createdAt = obj["created_at"].toString();
     info.expiresAt = obj["expires_at"].toString();
-
-    // 判断是否活跃：status == "active"
     info.isActive = (obj["status"].toString() == "active");
-
     return info;
 }
 
@@ -32,161 +30,244 @@ ApiKeysDialog::ApiKeysDialog(ApiClient *apiClient, QWidget *parent)
     : QDialog(parent)
     , m_apiClient(apiClient)
 {
-    // 读取上次激活的 Key（持久化，退出后仍记住）
     QSettings settings;
     m_activeKeyId = settings.value("apikeys/activeKeyId").toString();
 
     setupUi();
     setWindowTitle("API Keys 管理");
     resize(900, 500);
-    // 铺满整个屏幕
     setWindowState(windowState() | Qt::WindowMaximized);
 
-    // 连接 API 客户端信号
     connect(m_apiClient, &ApiClient::apiKeysReceived, this, &ApiKeysDialog::onKeysReceived);
     connect(m_apiClient, &ApiClient::requestFailed, this, &ApiKeysDialog::onRequestFailed);
 
-    // 自动加载
     loadApiKeys();
 }
 
 void ApiKeysDialog::setupUi()
 {
+    setStyleSheet("QDialog { background-color: #f1f5f9; }");
+
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
-    mainLayout->setSpacing(15);
+    mainLayout->setSpacing(12);
     mainLayout->setContentsMargins(20, 20, 20, 20);
 
-    // Header
-    QHBoxLayout *headerLayout = new QHBoxLayout();
+    // ── 顶部标题卡片 ───────────────────────────────────────
+    QFrame *headerCard = new QFrame(this);
+    headerCard->setStyleSheet(
+        "QFrame {"
+        "  background: white;"
+        "  border: 1.5px solid #e2e8f0;"
+        "  border-radius: 10px;"
+        "}"
+    );
+    QHBoxLayout *headerLayout = new QHBoxLayout(headerCard);
+    headerLayout->setContentsMargins(18, 14, 18, 14);
 
-    QLabel *titleLabel = new QLabel("API Keys 管理", this);
+    QLabel *titleLabel = new QLabel("🔑  API Keys 管理", this);
     QFont titleFont = titleLabel->font();
-    titleFont.setPointSize(16);
+    titleFont.setPointSize(15);
     titleFont.setBold(true);
     titleLabel->setFont(titleFont);
+    titleLabel->setStyleSheet("color: #1e293b;");
     headerLayout->addWidget(titleLabel);
 
     headerLayout->addStretch();
 
-    m_totalKeysLabel = new QLabel("总计: 0 个 Key", this);
-    m_totalKeysLabel->setStyleSheet("color: #666; font-size: 13px;");
+    m_totalKeysLabel = new QLabel("共 0 个 Key", this);
+    m_totalKeysLabel->setStyleSheet(
+        "QLabel {"
+        "  color: #6366f1;"
+        "  background: #eef2ff;"
+        "  border: 1px solid #c7d2fe;"
+        "  border-radius: 12px;"
+        "  padding: 3px 12px;"
+        "  font-size: 12px;"
+        "  font-weight: bold;"
+        "}"
+    );
     headerLayout->addWidget(m_totalKeysLabel);
 
-    mainLayout->addLayout(headerLayout);
+    mainLayout->addWidget(headerCard);
 
-    // Toolbar
-    QHBoxLayout *toolbarLayout = new QHBoxLayout();
+    // ── 工具栏 ─────────────────────────────────────────────
+    QFrame *toolbarCard = new QFrame(this);
+    toolbarCard->setStyleSheet(
+        "QFrame {"
+        "  background: white;"
+        "  border: 1.5px solid #e2e8f0;"
+        "  border-radius: 8px;"
+        "}"
+    );
+    QHBoxLayout *toolbarLayout = new QHBoxLayout(toolbarCard);
+    toolbarLayout->setContentsMargins(14, 8, 14, 8);
+    toolbarLayout->setSpacing(8);
 
-    m_refreshButton = new QPushButton("🔄 刷新", this);
-    m_refreshButton->setMinimumHeight(35);
-    toolbarLayout->addWidget(m_refreshButton);
-
-    m_copyButton = new QPushButton("📋 复制 Key", this);
-    m_copyButton->setMinimumHeight(35);
-    m_copyButton->setEnabled(false);
-    toolbarLayout->addWidget(m_copyButton);
-
-    m_activateButton = new QPushButton("✓ 设为活跃", this);
-    m_activateButton->setMinimumHeight(35);
-    m_activateButton->setEnabled(false);
-    m_activateButton->setStyleSheet(
+    const QString ghostBtnStyle =
         "QPushButton {"
-        "  background-color: #27ae60;"
-        "  color: white;"
-        "  border: none;"
-        "  border-radius: 4px;"
-        "  padding: 5px 15px;"
+        "  background: transparent;"
+        "  color: #475569;"
+        "  border: 1.5px solid #e2e8f0;"
+        "  border-radius: 6px;"
+        "  padding: 5px 14px;"
+        "  font-size: 13px;"
         "}"
         "QPushButton:hover {"
-        "  background-color: #229954;"
+        "  background: #f8fafc;"
+        "  border-color: #cbd5e1;"
         "}"
         "QPushButton:disabled {"
-        "  background-color: #bdc3c7;"
+        "  color: #cbd5e1;"
+        "  border-color: #f1f5f9;"
+        "}";
+
+    m_refreshButton = new QPushButton("🔄  刷新", this);
+    m_refreshButton->setMinimumHeight(34);
+    m_refreshButton->setCursor(Qt::PointingHandCursor);
+    m_refreshButton->setStyleSheet(ghostBtnStyle);
+    toolbarLayout->addWidget(m_refreshButton);
+
+    m_copyButton = new QPushButton("📋  复制 Key", this);
+    m_copyButton->setMinimumHeight(34);
+    m_copyButton->setEnabled(false);
+    m_copyButton->setCursor(Qt::PointingHandCursor);
+    m_copyButton->setStyleSheet(ghostBtnStyle);
+    toolbarLayout->addWidget(m_copyButton);
+
+    m_activateButton = new QPushButton("★  设为活跃", this);
+    m_activateButton->setMinimumHeight(34);
+    m_activateButton->setEnabled(false);
+    m_activateButton->setCursor(Qt::PointingHandCursor);
+    m_activateButton->setStyleSheet(
+        "QPushButton {"
+        "  background: #22c55e;"
+        "  color: white;"
+        "  border: none;"
+        "  border-radius: 6px;"
+        "  padding: 5px 14px;"
+        "  font-size: 13px;"
+        "  font-weight: bold;"
         "}"
+        "QPushButton:hover { background: #16a34a; }"
+        "QPushButton:disabled { background: #e2e8f0; color: #94a3b8; }"
     );
     toolbarLayout->addWidget(m_activateButton);
 
     toolbarLayout->addStretch();
+    mainLayout->addWidget(toolbarCard);
 
-    mainLayout->addLayout(toolbarLayout);
-
-    // Keys Table
+    // ── Keys 表格 ──────────────────────────────────────────
     m_keysTable = new QTableWidget(this);
     m_keysTable->setColumnCount(7);
     m_keysTable->setHorizontalHeaderLabels({
         "名称", "状态", "Key", "配额", "已用", "使用率", "创建时间"
     });
 
-    // 让各列铺满整个表格宽度：名称、Key 两列自动拉伸，其余按内容自适应
     QHeaderView *header = m_keysTable->horizontalHeader();
     header->setStretchLastSection(false);
-    header->setSectionResizeMode(0, QHeaderView::Stretch);          // 名称
-    header->setSectionResizeMode(1, QHeaderView::ResizeToContents); // 状态
-    header->setSectionResizeMode(2, QHeaderView::Stretch);          // Key
-    header->setSectionResizeMode(3, QHeaderView::ResizeToContents); // 配额
-    header->setSectionResizeMode(4, QHeaderView::ResizeToContents); // 已用
-    header->setSectionResizeMode(5, QHeaderView::ResizeToContents); // 使用率
-    header->setSectionResizeMode(6, QHeaderView::ResizeToContents); // 创建时间
+    header->setSectionResizeMode(0, QHeaderView::Stretch);
+    header->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    header->setSectionResizeMode(2, QHeaderView::Stretch);
+    header->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    header->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    header->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+    header->setSectionResizeMode(6, QHeaderView::ResizeToContents);
+
     m_keysTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_keysTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_keysTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_keysTable->setAlternatingRowColors(true);
     m_keysTable->verticalHeader()->setVisible(false);
+    m_keysTable->setShowGrid(false);
     m_keysTable->setStyleSheet(
         "QTableWidget {"
-        "  border: 1px solid #ddd;"
-        "  border-radius: 4px;"
-        "  gridline-color: #e0e0e0;"
+        "  background: white;"
+        "  border: 1.5px solid #e2e8f0;"
+        "  border-radius: 8px;"
+        "  outline: none;"
+        "}"
+        "QTableWidget::item {"
+        "  padding: 8px 10px;"
+        "  border: none;"
+        "  color: #334155;"
+        "}"
+        "QTableWidget::item:selected {"
+        "  background: #eef2ff;"
+        "  color: #3730a3;"
+        "}"
+        "QTableWidget::item:alternate {"
+        "  background: #fafbfc;"
         "}"
         "QHeaderView::section {"
-        "  background-color: #f5f5f5;"
-        "  padding: 8px;"
+        "  background: #f8fafc;"
+        "  padding: 9px 10px;"
         "  border: none;"
-        "  border-bottom: 2px solid #ddd;"
+        "  border-bottom: 2px solid #e2e8f0;"
         "  font-weight: bold;"
+        "  color: #64748b;"
+        "  font-size: 12px;"
+        "}"
+        "QScrollBar:vertical {"
+        "  border: none;"
+        "  background: #f8fafc;"
+        "  width: 8px;"
+        "  border-radius: 4px;"
+        "}"
+        "QScrollBar::handle:vertical {"
+        "  background: #cbd5e1;"
+        "  border-radius: 4px;"
         "}"
     );
-
     mainLayout->addWidget(m_keysTable);
 
-    // Status Label
-    m_statusLabel = new QLabel(this);
-    m_statusLabel->setStyleSheet("color: #666; font-size: 12px;");
-    m_statusLabel->setAlignment(Qt::AlignCenter);
-    mainLayout->addWidget(m_statusLabel);
-
-    // Close button
+    // ── 底栏（状态 + 关闭按钮）────────────────────────────
     QHBoxLayout *bottomLayout = new QHBoxLayout();
+
+    m_statusLabel = new QLabel(this);
+    m_statusLabel->setStyleSheet("color: #64748b; font-size: 12px;");
+    bottomLayout->addWidget(m_statusLabel);
+
     bottomLayout->addStretch();
 
     QPushButton *closeButton = new QPushButton("关闭", this);
-    closeButton->setMinimumHeight(35);
-    closeButton->setMinimumWidth(100);
+    closeButton->setMinimumHeight(36);
+    closeButton->setMinimumWidth(90);
+    closeButton->setCursor(Qt::PointingHandCursor);
+    closeButton->setStyleSheet(
+        "QPushButton {"
+        "  background: #f1f5f9;"
+        "  color: #475569;"
+        "  border: 1.5px solid #e2e8f0;"
+        "  border-radius: 7px;"
+        "  font-size: 13px;"
+        "  padding: 5px 18px;"
+        "}"
+        "QPushButton:hover {"
+        "  background: #e2e8f0;"
+        "}"
+    );
     connect(closeButton, &QPushButton::clicked, this, &QDialog::accept);
     bottomLayout->addWidget(closeButton);
 
     mainLayout->addLayout(bottomLayout);
 
-    // Connections
-    connect(m_refreshButton, &QPushButton::clicked, this, &ApiKeysDialog::onRefreshClicked);
-    connect(m_copyButton, &QPushButton::clicked, this, &ApiKeysDialog::onCopyKeyClicked);
+    // 信号连接
+    connect(m_refreshButton,  &QPushButton::clicked, this, &ApiKeysDialog::onRefreshClicked);
+    connect(m_copyButton,     &QPushButton::clicked, this, &ApiKeysDialog::onCopyKeyClicked);
     connect(m_activateButton, &QPushButton::clicked, this, &ApiKeysDialog::onActivateKeyClicked);
-    connect(m_keysTable, &QTableWidget::itemSelectionChanged, this, &ApiKeysDialog::onTableSelectionChanged);
+    connect(m_keysTable, &QTableWidget::itemSelectionChanged,
+            this, &ApiKeysDialog::onTableSelectionChanged);
 }
 
 void ApiKeysDialog::loadApiKeys()
 {
     m_statusLabel->setText("加载 API Keys...");
-    m_statusLabel->setStyleSheet("color: #3498db; font-size: 12px;");
+    m_statusLabel->setStyleSheet("color: #6366f1; font-size: 12px;");
     m_refreshButton->setEnabled(false);
-
     m_apiClient->getApiKeys();
 }
 
-void ApiKeysDialog::onRefreshClicked()
-{
-    loadApiKeys();
-}
+void ApiKeysDialog::onRefreshClicked()  { loadApiKeys(); }
 
 void ApiKeysDialog::onCopyKeyClicked()
 {
@@ -196,16 +277,11 @@ void ApiKeysDialog::onCopyKeyClicked()
         return;
     }
 
-    QClipboard *clipboard = QApplication::clipboard();
-    clipboard->setText(selectedKey.key);
+    QApplication::clipboard()->setText(selectedKey.key);
 
     m_statusLabel->setText("✓ API Key 已复制到剪贴板！");
-    m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
-
-    // 临时提示
-    QTimer::singleShot(3000, this, [this]() {
-        m_statusLabel->setText("");
-    });
+    m_statusLabel->setStyleSheet("color: #16a34a; font-size: 12px;");
+    QTimer::singleShot(3000, this, [this]() { m_statusLabel->setText(""); });
 }
 
 void ApiKeysDialog::onActivateKeyClicked()
@@ -216,52 +292,42 @@ void ApiKeysDialog::onActivateKeyClicked()
         return;
     }
 
-    // 更新本地状态
     for (int i = 0; i < m_keys.size(); ++i) {
         m_keys[i].isActive = (m_keys[i].id == selectedKey.id);
     }
-
     m_activeKeyId = selectedKey.id;
 
-    // 持久化激活的 Key，退出后仍记住
     QSettings settings;
     settings.setValue("apikeys/activeKeyId", m_activeKeyId);
     settings.setValue("apikeys/activeKey", selectedKey.key);
 
-    // 刷新表格显示
     updateKeysTable(m_keys);
-
-    // 发送信号
     emit keyActivated(selectedKey.id, selectedKey.key);
 
-    m_statusLabel->setText(QString("✓ Key %1 已设为活跃！").arg(selectedKey.name));
-    m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
+    m_statusLabel->setText(QString("★ Key「%1」已设为活跃").arg(selectedKey.name));
+    m_statusLabel->setStyleSheet("color: #16a34a; font-size: 12px;");
 }
 
 void ApiKeysDialog::onKeysReceived(const QJsonArray &keys)
 {
     m_keys.clear();
-
     for (const QJsonValue &val : keys) {
-        ApiKeyInfo info = ApiKeyInfo::fromJson(val.toObject());
-        m_keys.append(info);
+        m_keys.append(ApiKeyInfo::fromJson(val.toObject()));
     }
 
     updateKeysTable(m_keys);
-
     m_refreshButton->setEnabled(true);
-    m_totalKeysLabel->setText(QString("总计: %1 个 Key").arg(m_keys.size()));
+    m_totalKeysLabel->setText(QString("共 %1 个 Key").arg(m_keys.size()));
     m_statusLabel->setText(QString("✓ 已加载 %1 个 API Keys").arg(m_keys.size()));
-    m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
+    m_statusLabel->setStyleSheet("color: #16a34a; font-size: 12px;");
 }
 
 void ApiKeysDialog::onRequestFailed(const QString &error)
 {
     m_refreshButton->setEnabled(true);
-    m_statusLabel->setText(QString("✗ 错误: %1").arg(error));
-    m_statusLabel->setStyleSheet("color: #e74c3c; font-size: 12px;");
-
-    QMessageBox::warning(this, "错误", QString("Failed to load API keys:\n%1").arg(error));
+    m_statusLabel->setText(QString("✗ 错误：%1").arg(error));
+    m_statusLabel->setStyleSheet("color: #dc2626; font-size: 12px;");
+    QMessageBox::warning(this, "错误", QString("加载 API Keys 失败：\n%1").arg(error));
 }
 
 void ApiKeysDialog::updateKeysTable(const QList<ApiKeyInfo> &keys)
@@ -272,88 +338,75 @@ void ApiKeysDialog::updateKeysTable(const QList<ApiKeyInfo> &keys)
         const ApiKeyInfo &info = keys[i];
         m_keysTable->insertRow(i);
 
-        // Name（★ 仅标记用户选中的激活 Key，与服务端 status 区分开）
         const bool isSelectedActive = (!m_activeKeyId.isEmpty() && info.id == m_activeKeyId);
-        QString displayName = info.name;
-        if (isSelectedActive) {
-            displayName = "★ " + displayName;
-        }
+
+        // 名称（活跃 Key 加星号 + 加粗）
+        QString displayName = isSelectedActive ? ("★ " + info.name) : info.name;
         QTableWidgetItem *nameItem = new QTableWidgetItem(displayName);
         if (isSelectedActive) {
-            QFont font = nameItem->font();
-            font.setBold(true);
-            nameItem->setFont(font);
-            nameItem->setForeground(QBrush(QColor("#27ae60")));
+            QFont f = nameItem->font();
+            f.setBold(true);
+            nameItem->setFont(f);
+            nameItem->setForeground(QBrush(QColor("#4f46e5")));
         }
         m_keysTable->setItem(i, 0, nameItem);
 
-        // Status
+        // 状态
         QTableWidgetItem *statusItem = new QTableWidgetItem(info.status);
-        if (info.status.toLower() == "active") {
-            statusItem->setForeground(QBrush(QColor("#27ae60")));
-        } else {
-            statusItem->setForeground(QBrush(QColor("#e74c3c")));
-        }
+        statusItem->setForeground(QBrush(QColor(
+            info.status.toLower() == "active" ? "#16a34a" : "#dc2626")));
         m_keysTable->setItem(i, 1, statusItem);
 
-        // Key (masked)
-        QString maskedKey = info.key;
-        if (maskedKey.length() > 12) {
-            maskedKey = maskedKey.left(8) + "..." + maskedKey.right(4);
+        // Key（掩码）
+        QString masked = info.key;
+        if (masked.length() > 12) {
+            masked = masked.left(8) + "..." + masked.right(4);
         }
-        m_keysTable->setItem(i, 2, new QTableWidgetItem(maskedKey));
+        QTableWidgetItem *keyItem = new QTableWidgetItem(masked);
+        QFont mono; mono.setFamily("Courier New");
+        keyItem->setFont(mono);
+        keyItem->setForeground(QBrush(QColor("#475569")));
+        m_keysTable->setItem(i, 2, keyItem);
 
-        // Quota
+        // 配额
         QString quotaStr = info.quota > 0 ? QString::number(info.quota) : "无限制";
         m_keysTable->setItem(i, 3, new QTableWidgetItem(quotaStr));
 
-        // Used
+        // 已用
         m_keysTable->setItem(i, 4, new QTableWidgetItem(QString::number(info.used)));
 
-        // Usage %
+        // 使用率
         QString usagePercent = "-";
+        QColor usageColor("#475569");
         if (info.quota > 0) {
-            double percent = (double)info.used / info.quota * 100;
-            usagePercent = QString::number(percent, 'f', 1) + "%";
+            double pct = (double)info.used / info.quota * 100.0;
+            usagePercent = QString::number(pct, 'f', 1) + "%";
+            if (pct >= 90)      usageColor = QColor("#dc2626");
+            else if (pct >= 70) usageColor = QColor("#d97706");
         }
         QTableWidgetItem *usageItem = new QTableWidgetItem(usagePercent);
-        if (info.quota > 0) {
-            double percent = (double)info.used / info.quota * 100;
-            if (percent >= 90) {
-                usageItem->setForeground(QBrush(QColor("#e74c3c")));
-            } else if (percent >= 70) {
-                usageItem->setForeground(QBrush(QColor("#f39c12")));
-            }
-        }
+        usageItem->setForeground(QBrush(usageColor));
         m_keysTable->setItem(i, 5, usageItem);
 
-        // Created At
+        // 创建时间
         QString createdAt = info.createdAt;
-        if (!createdAt.isEmpty()) {
-            QDateTime dt = QDateTime::fromString(createdAt, Qt::ISODate);
-            if (dt.isValid()) {
-                createdAt = dt.toString("yyyy-MM-dd");
-            }
-        }
+        QDateTime dt = QDateTime::fromString(createdAt, Qt::ISODate);
+        if (dt.isValid()) createdAt = dt.toString("yyyy-MM-dd");
         m_keysTable->setItem(i, 6, new QTableWidgetItem(createdAt));
     }
-    // 注意：不要调用 resizeColumnsToContents()，否则会覆盖上面的 Stretch 设置，
-    // 导致各列挤在左侧无法铺满窗口宽度。
 }
 
 void ApiKeysDialog::onTableSelectionChanged()
 {
-    bool hasSelection = !m_keysTable->selectedItems().isEmpty();
-    m_copyButton->setEnabled(hasSelection);
-    m_activateButton->setEnabled(hasSelection);
+    bool has = !m_keysTable->selectedItems().isEmpty();
+    m_copyButton->setEnabled(has);
+    m_activateButton->setEnabled(has);
 }
 
 ApiKeyInfo ApiKeysDialog::getSelectedKey() const
 {
-    int currentRow = m_keysTable->currentRow();
-    if (currentRow >= 0 && currentRow < m_keys.size()) {
-        return m_keys[currentRow];
-    }
+    int row = m_keysTable->currentRow();
+    if (row >= 0 && row < m_keys.size()) return m_keys[row];
     return ApiKeyInfo();
 }
 
