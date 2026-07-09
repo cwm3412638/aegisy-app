@@ -32,6 +32,7 @@ set(SOURCES
     src/api_keys_dialog.cpp
     src/models_dialog.cpp
     src/profile_manager.cpp
+    src/connect_wizard.cpp
 )
 
 set(HEADERS
@@ -43,6 +44,7 @@ set(HEADERS
     include/api_keys_dialog.h
     include/models_dialog.h
     include/profile_manager.h
+    include/connect_wizard.h
 )
 
 # 可执行文件

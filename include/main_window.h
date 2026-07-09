@@ -4,20 +4,14 @@
 #include <QMainWindow>
 #include <QLabel>
 #include <QPushButton>
-#include <QComboBox>
 #include <QTextEdit>
+#include <QScrollArea>
+#include <QHBoxLayout>
 #include <QJsonArray>
-#include <QMap>
+#include <QList>
 #include "api_client.h"
 #include "tool_manager.h"
 #include "profile_manager.h"
-
-// 单个工具卡片的控件集合
-struct ToolCard {
-    QLabel *statusLabel = nullptr;
-    QLabel *warnLabel = nullptr;
-    QPushButton *actionButton = nullptr;
-};
 
 class MainWindow : public QMainWindow
 {
@@ -33,62 +27,60 @@ signals:
     void loggedOut();
 
 private slots:
-    void onConnectToolClicked(AiTool tool);
-    void onInstallOutput(AiTool tool, const QString &line);
-    void onInstallFinished(AiTool tool, bool success);
     void onApiKeysReceived(const QJsonArray &keys);
     void onRequestFailed(const QString &error);
+    void onInstallOutput(AiTool tool, const QString &line);
+    void onInstallFinished(AiTool tool, bool success);
     void onManageKeysClicked();
     void onViewModelsClicked();
     void onLogoutClicked();
-
-    // 档案相关
-    void onProfileComboChanged(int index);
-    void onAddProfileClicked();
-    void onManageProfileClicked();
+    void onNewConnectClicked();
 
 private:
     void setupUi();
-    QWidget* createToolCard(AiTool tool);
-    void refreshToolCard(AiTool tool);
-    void refreshAllCards();
 
-    struct KeyChoice {
-        QString key;
-        QString label;
-    };
-    QList<KeyChoice> keysForTool(AiTool tool) const;
-    void configureTool(AiTool tool);
+    // 档案卡片
+    void rebuildCards();
+    QWidget* createProfileCard(const Profile &profile, bool isActive);
+    QWidget* createAddCard();
 
     // 档案操作
-    void refreshProfileCombo();
-    void applyProfile(const Profile &profile);
+    void activateProfile(int index);
+    void processActivationQueue();
+    void configureFromProfile(int profileIndex, AiTool tool);
+    void editProfile(int index);
+    void deleteProfile(int index);
 
     void logMessage(const QString &message, const QString &color = "#94a3b8");
     static QString maskKey(const QString &key);
 
-    ApiClient    *m_apiClient;
-    ToolManager  *m_toolManager;
+    ApiClient      *m_apiClient;
+    ToolManager    *m_toolManager;
     ProfileManager *m_profileManager;
 
     // UI — 顶栏
-    QLabel       *m_userLabel;
-    QPushButton  *m_logoutButton;
-    QComboBox    *m_profileCombo;
-    QPushButton  *m_addProfileButton;
-    QPushButton  *m_manageProfileButton;
+    QLabel      *m_userLabel;
+    QPushButton *m_logoutButton;
 
-    // UI — 工具卡片 + 高级区 + 日志
-    QMap<AiTool, ToolCard> m_cards;
-    QPushButton  *m_manageKeysButton;
-    QPushButton  *m_viewModelsButton;
-    QTextEdit    *m_logOutput;
+    // UI — 档案卡片区
+    QPushButton *m_newConnectButton;
+    QScrollArea *m_cardsScroll;
+    QWidget     *m_cardsContainer;
+    QHBoxLayout *m_cardsLayout;
+
+    // UI — 高级区 + 日志
+    QPushButton *m_manageKeysButton;
+    QPushButton *m_viewModelsButton;
+    QTextEdit   *m_logOutput;
 
     // 状态
-    QString m_authToken;
+    QString    m_authToken;
     QJsonArray m_keys;
-    bool m_keysLoaded = false;
-    QMap<AiTool, KeyChoice> m_pendingChoice;
+    bool       m_keysLoaded = false;
+
+    // 激活流程状态（含自动安装的异步队列）
+    QList<AiTool> m_activationQueue;
+    int           m_activatingIndex = -1;
 };
 
 #endif // MAIN_WINDOW_H

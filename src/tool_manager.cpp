@@ -227,18 +227,18 @@ void ToolManager::install(AiTool tool)
     process->start(kNpmCmd, QStringList() << "install" << "-g" << npmPackage(tool));
 }
 
-bool ToolManager::configure(AiTool tool, const QString &apiKey)
+bool ToolManager::configure(AiTool tool, const QString &apiKey, const QString &model)
 {
     m_lastError.clear();
     switch (tool) {
-    case AiTool::ClaudeCode: return configureClaudeCode(apiKey);
-    case AiTool::CodexCli:   return configureCodexCli(apiKey);
-    case AiTool::GeminiCli:  return configureGeminiCli(apiKey);
+    case AiTool::ClaudeCode: return configureClaudeCode(apiKey, model);
+    case AiTool::CodexCli:   return configureCodexCli(apiKey, model);
+    case AiTool::GeminiCli:  return configureGeminiCli(apiKey, model);
     }
     return false;
 }
 
-bool ToolManager::configureClaudeCode(const QString &apiKey)
+bool ToolManager::configureClaudeCode(const QString &apiKey, const QString &/*model*/)
 {
     // ~/.claude/settings.json：合并 env 三变量，保留其它字段
     const QString path = homeFilePath(".claude/settings.json");
@@ -264,8 +264,9 @@ bool ToolManager::configureClaudeCode(const QString &apiKey)
     return writeTextFile(path, QJsonDocument(root).toJson(QJsonDocument::Indented));
 }
 
-bool ToolManager::configureCodexCli(const QString &apiKey)
+bool ToolManager::configureCodexCli(const QString &apiKey, const QString &model)
 {
+    const QString effectiveModel = model.isEmpty() ? QStringLiteral("gpt-4o") : model;
     // 1) ~/.codex/auth.json
     const QString authPath = homeFilePath(".codex/auth.json");
     if (!backupFile(authPath)) {
@@ -341,8 +342,9 @@ bool ToolManager::configureCodexCli(const QString &apiKey)
     // 与官网「使用总指南」逐字段一致
     result += QStringLiteral(
         "model_provider = \"OpenAI\"\n"
-        "model = \"gpt-5.5\"\n"
-        "review_model = \"gpt-5.5\"\n"
+        "model = \"%1\"\n"
+        "review_model = \"%1\"\n").arg(effectiveModel);
+    result += QStringLiteral(
         "model_reasoning_effort = \"xhigh\"\n"
         "disable_response_storage = true\n"
         "network_access = \"enabled\"\n"
@@ -360,8 +362,9 @@ bool ToolManager::configureCodexCli(const QString &apiKey)
     return writeTextFile(tomlPath, result.toUtf8());
 }
 
-bool ToolManager::configureGeminiCli(const QString &apiKey)
+bool ToolManager::configureGeminiCli(const QString &apiKey, const QString &model)
 {
+    const QString effectiveModel = model.isEmpty() ? QStringLiteral("gemini-2.5-pro") : model;
     // ~/.gemini/.env：按行合并三个变量，保留其它行
     const QString path = homeFilePath(".gemini/.env");
 
@@ -406,7 +409,7 @@ bool ToolManager::configureGeminiCli(const QString &apiKey)
     result += QStringLiteral(
         "GOOGLE_GEMINI_BASE_URL=\"%1\"\n"
         "GEMINI_API_KEY=\"%2\"\n"
-        "GEMINI_MODEL=\"gemini-2.5-pro\"\n").arg(kBaseUrl, apiKey);
+        "GEMINI_MODEL=\"%3\"\n").arg(kBaseUrl, apiKey, effectiveModel);
 
     return writeTextFile(path, result.toUtf8());
 }

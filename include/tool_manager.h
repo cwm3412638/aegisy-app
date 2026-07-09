@@ -42,8 +42,8 @@ public:
     // 异步安装：npm install -g <pkg>；输出与结果通过信号回传
     void install(AiTool tool);
 
-    // 写入官方格式配置（先备份）。失败返回 false，详情见 lastError()
-    bool configure(AiTool tool, const QString &apiKey);
+    // 写入官方格式配置（先备份）。model 为空时使用各工具默认值。失败返回 false，详情见 lastError()
+    bool configure(AiTool tool, const QString &apiKey, const QString &model = QString());
 
     QString lastError() const { return m_lastError; }
 
@@ -55,9 +55,9 @@ signals:
     void installFinished(AiTool tool, bool success);
 
 private:
-    bool configureClaudeCode(const QString &apiKey);
-    bool configureCodexCli(const QString &apiKey);
-    bool configureGeminiCli(const QString &apiKey);
+    bool configureClaudeCode(const QString &apiKey, const QString &model);
+    bool configureCodexCli(const QString &apiKey, const QString &model);
+    bool configureGeminiCli(const QString &apiKey, const QString &model);
 
     // 探测辅助
     bool commandExists(const QString &command);
