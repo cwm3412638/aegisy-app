@@ -46,11 +46,12 @@ public:
     bool isNpmPackageInstalled(const QString &packageName);
     QStringList getInstalledNpmPackages();
 
-private:
-    // 获取配置文件路径
+    // 获取配置文件路径（公开方法）
     QString getClaudeConfigPath();
     QString getCursorConfigPath();
     QString getContinueConfigPath();
+
+private:
 
     // 读取 JSON 配置
     EnvStatus readJsonConfig(const QString &path,
