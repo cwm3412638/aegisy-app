@@ -7,6 +7,8 @@
 #include <QProgressBar>
 #include <QTextEdit>
 #include <QCheckBox>
+#include <QTableWidget>
+#include <QHash>
 #include "api_client.h"
 #include "config_manager.h"
 #include "env_detector.h"
@@ -25,18 +27,19 @@ signals:
     void setupCompleted();
 
 private slots:
-    void onStartSetup();
+    void onStartAccess();
     void onSkipSetup();
     void onApiKeysReceived(const QJsonArray &keys);
+    void onApiKeyTested(const QString &keyId, bool supported, const QString &detail);
+    void onKeySelectionChanged();
     void onRequestFailed(const QString &error);
 
 private:
     void setupUi();
-    void startAutoSetup();
-    void detectEnvironments();
-    void selectBestApiKey();
+    void populateAppList();
+    void loadApiKeys();
+    QString selectedApiKey() const;
     void applyConfiguration();
-    void testConnection();
     void showSuccess();
     void showError(const QString &error);
 
@@ -47,9 +50,16 @@ private:
     ConfigManager *m_configManager;
     EnvDetector *m_envDetector;
 
-    // UI Elements
-    QLabel *m_titleLabel;
-    QLabel *m_descLabel;
+    // ① 应用勾选
+    QCheckBox *m_claudeCheck;
+    QCheckBox *m_cursorCheck;
+    QCheckBox *m_continueCheck;
+    QCheckBox *m_codexCheck;
+
+    // ② API Key 测试表
+    QTableWidget *m_keyTable;
+
+    // ③ 接入
     QProgressBar *m_progressBar;
     QLabel *m_statusLabel;
     QTextEdit *m_logOutput;
@@ -57,13 +67,12 @@ private:
     QPushButton *m_skipButton;
     QPushButton *m_closeButton;
 
-    // Auto-detected settings
-    QString m_selectedApiKey;
+    // 状态
     QString m_baseUrl;
-    QStringList m_targetApps;
-
-    // Step tracking
-    int m_currentStep;
+    QString m_selectedKeyId;                 // 当前选中的 key id
+    QHash<QString, QString> m_keyValue;      // id -> 完整 key
+    QHash<QString, bool> m_keySupported;     // id -> 是否可用
+    QHash<QString, int> m_keyRow;            // id -> 表格行号
     bool m_setupInProgress;
 };
 

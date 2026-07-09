@@ -244,6 +244,33 @@ void ApiClient::getModels(const QString &apiKey)
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onModelsFinished);
 }
 
+void ApiClient::testApiKey(const QString &keyId, const QString &apiKey)
+{
+    // 用被测 key 请求 /v1/models：200 表示可用。
+    // 用按 reply 的 lambda 关联 keyId，支持并发测试多个 key 而不串扰。
+    QNetworkReply *reply = get("/v1/models", apiKey);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, keyId]() {
+        const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body = reply->readAll();
+        const QString errStr = reply->errorString();
+        reply->deleteLater();
+
+        const QJsonDocument doc = QJsonDocument::fromJson(body);
+        const QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject();
+
+        if (http == 200) {
+            const int n = obj["data"].toArray().size();
+            emit apiKeyTested(keyId, true, QStringLiteral("可用（%1 个模型）").arg(n));
+        } else {
+            QString detail = obj["message"].toString();
+            if (detail.isEmpty()) {
+                detail = http > 0 ? QStringLiteral("HTTP %1").arg(http) : errStr;
+            }
+            emit apiKeyTested(keyId, false, detail);
+        }
+    });
+}
+
 void ApiClient::onChannelsFinished()
 {
     QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());

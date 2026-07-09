@@ -1,13 +1,14 @@
 #include "quick_setup_wizard.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QGroupBox>
+#include <QHeaderView>
 #include <QMessageBox>
 #include <QJsonArray>
 #include <QJsonObject>
-#include <QTimer>
-#include <QFile>
-#include <QDir>
-#include <QStandardPaths>
+#include <functional>
+
+static const QString kFixedBaseUrl = "https://www.aegisy.cc/v1";
 
 QuickSetupWizard::QuickSetupWizard(ApiClient *apiClient,
                                    ConfigManager *configManager,
@@ -17,94 +18,97 @@ QuickSetupWizard::QuickSetupWizard(ApiClient *apiClient,
     , m_apiClient(apiClient)
     , m_configManager(configManager)
     , m_envDetector(envDetector)
-    , m_currentStep(0)
+    , m_baseUrl(kFixedBaseUrl)
     , m_setupInProgress(false)
 {
     setupUi();
     setWindowTitle("快速配置向导");
-    resize(700, 500);
+    resize(760, 720);
 
-    // 设置默认值
-    m_baseUrl = "https://www.aegisy.cc/v1";
-
-    // 连接信号
     connect(m_apiClient, &ApiClient::apiKeysReceived, this, &QuickSetupWizard::onApiKeysReceived);
+    connect(m_apiClient, &ApiClient::apiKeyTested, this, &QuickSetupWizard::onApiKeyTested);
     connect(m_apiClient, &ApiClient::requestFailed, this, &QuickSetupWizard::onRequestFailed);
+
+    populateAppList();
+    loadApiKeys();
 }
 
 void QuickSetupWizard::setupUi()
 {
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
-    mainLayout->setSpacing(20);
-    mainLayout->setContentsMargins(30, 30, 30, 30);
+    mainLayout->setSpacing(15);
+    mainLayout->setContentsMargins(24, 24, 24, 24);
 
-    // Icon and Title
-    m_titleLabel = new QLabel("🚀 欢迎使用 Aegisy 客户端", this);
-    QFont titleFont = m_titleLabel->font();
-    titleFont.setPointSize(20);
+    // Title
+    QLabel *titleLabel = new QLabel("🚀 快速配置 — 一键接入 Aegisy", this);
+    QFont titleFont = titleLabel->font();
+    titleFont.setPointSize(17);
     titleFont.setBold(true);
-    m_titleLabel->setFont(titleFont);
-    m_titleLabel->setAlignment(Qt::AlignCenter);
-    m_titleLabel->setStyleSheet("color: #2c3e50; margin: 20px;");
-    mainLayout->addWidget(m_titleLabel);
+    titleLabel->setFont(titleFont);
+    titleLabel->setStyleSheet("color: #2c3e50;");
+    mainLayout->addWidget(titleLabel);
 
-    // Description
-    m_descLabel = new QLabel(
-        "只需一键，我们将自动为您完成所有配置：\n\n"
-        "✅ 自动选择最优 API Key\n"
-        "✅ 检测已安装的应用（Claude、Cursor、Continue）\n"
-        "✅ 自动配置所有应用\n"
-        "✅ 测试连接确保一切正常\n\n"
-        "整个过程只需 10-20 秒，您无需做任何操作！",
-        this
-    );
-    m_descLabel->setWordWrap(true);
-    m_descLabel->setAlignment(Qt::AlignCenter);
-    m_descLabel->setStyleSheet(
-        "background-color: #ecf0f1;"
-        "border-radius: 8px;"
-        "padding: 20px;"
-        "color: #34495e;"
-        "font-size: 14px;"
-        "line-height: 1.6;"
-    );
-    mainLayout->addWidget(m_descLabel);
+    QLabel *subtitle = new QLabel(
+        "① 勾选要接入的应用 → ② 选择一个可用的 API Key → ③ 开始接入", this);
+    subtitle->setStyleSheet("color: #7f8c8d;");
+    mainLayout->addWidget(subtitle);
 
-    // Progress Bar
+    // ① 应用选择
+    QGroupBox *appGroup = new QGroupBox("① 选择要接入的应用", this);
+    QVBoxLayout *appLayout = new QVBoxLayout(appGroup);
+    appLayout->setSpacing(8);
+
+    auto makeAppRow = [&](QCheckBox *&checkBox, const QString &name) {
+        QHBoxLayout *row = new QHBoxLayout();
+        checkBox = new QCheckBox(name, this);
+        row->addWidget(checkBox);
+        row->addStretch();
+        appLayout->addLayout(row);
+    };
+    makeAppRow(m_claudeCheck, "Claude Desktop");
+    makeAppRow(m_cursorCheck, "Cursor 编辑器");
+    makeAppRow(m_continueCheck, "Continue.dev");
+    makeAppRow(m_codexCheck, "Codex CLI");
+
+    mainLayout->addWidget(appGroup);
+
+    // ② API Key 选择
+    QGroupBox *keyGroup = new QGroupBox("② 选择 API Key（自动检测可用性）", this);
+    QVBoxLayout *keyLayout = new QVBoxLayout(keyGroup);
+
+    m_keyTable = new QTableWidget(this);
+    m_keyTable->setColumnCount(3);
+    m_keyTable->setHorizontalHeaderLabels({"名称", "Key", "状态"});
+    m_keyTable->horizontalHeader()->setStretchLastSection(true);
+    m_keyTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_keyTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_keyTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_keyTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_keyTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_keyTable->setAlternatingRowColors(true);
+    m_keyTable->verticalHeader()->setVisible(false);
+    m_keyTable->setMinimumHeight(160);
+    keyLayout->addWidget(m_keyTable);
+
+    mainLayout->addWidget(keyGroup);
+
+    // ③ 接入 + 进度 + 日志
+    QGroupBox *runGroup = new QGroupBox("③ 接入", this);
+    QVBoxLayout *runLayout = new QVBoxLayout(runGroup);
+
     m_progressBar = new QProgressBar(this);
-    m_progressBar->setMinimum(0);
-    m_progressBar->setMaximum(100);
+    m_progressBar->setRange(0, 100);
     m_progressBar->setValue(0);
     m_progressBar->setTextVisible(true);
-    m_progressBar->setStyleSheet(
-        "QProgressBar {"
-        "  border: 2px solid #bdc3c7;"
-        "  border-radius: 5px;"
-        "  text-align: center;"
-        "  height: 30px;"
-        "  font-weight: bold;"
-        "}"
-        "QProgressBar::chunk {"
-        "  background-color: #3498db;"
-        "  border-radius: 3px;"
-        "}"
-    );
-    mainLayout->addWidget(m_progressBar);
+    runLayout->addWidget(m_progressBar);
 
-    // Status Label
-    m_statusLabel = new QLabel("准备开始配置...", this);
-    m_statusLabel->setAlignment(Qt::AlignCenter);
-    m_statusLabel->setStyleSheet("color: #7f8c8d; font-size: 13px; font-weight: bold;");
-    mainLayout->addWidget(m_statusLabel);
-
-    // Log Output
-    QLabel *logLabel = new QLabel("配置日志:", this);
-    logLabel->setStyleSheet("font-weight: bold; color: #2c3e50;");
-    mainLayout->addWidget(logLabel);
+    m_statusLabel = new QLabel("准备就绪", this);
+    m_statusLabel->setStyleSheet("color: #7f8c8d; font-weight: bold;");
+    runLayout->addWidget(m_statusLabel);
 
     m_logOutput = new QTextEdit(this);
     m_logOutput->setReadOnly(true);
-    m_logOutput->setMaximumHeight(150);
+    m_logOutput->setMaximumHeight(140);
     m_logOutput->setStyleSheet(
         "QTextEdit {"
         "  background-color: #f8f9fa;"
@@ -112,57 +116,40 @@ void QuickSetupWizard::setupUi()
         "  border-radius: 4px;"
         "  font-family: monospace;"
         "  font-size: 11px;"
-        "  padding: 10px;"
         "}"
     );
-    mainLayout->addWidget(m_logOutput);
+    runLayout->addWidget(m_logOutput);
+
+    mainLayout->addWidget(runGroup);
 
     // Buttons
     QHBoxLayout *buttonLayout = new QHBoxLayout();
 
-    m_skipButton = new QPushButton("跳过，手动配置", this);
-    m_skipButton->setMinimumHeight(40);
-    m_skipButton->setStyleSheet(
-        "QPushButton {"
-        "  background-color: #95a5a6;"
-        "  color: white;"
-        "  border: none;"
-        "  border-radius: 5px;"
-        "  padding: 10px 20px;"
-        "  font-size: 13px;"
-        "}"
-        "QPushButton:hover {"
-        "  background-color: #7f8c8d;"
-        "}"
-    );
+    m_skipButton = new QPushButton("跳过", this);
+    m_skipButton->setMinimumHeight(38);
     buttonLayout->addWidget(m_skipButton);
 
     buttonLayout->addStretch();
 
-    m_startButton = new QPushButton("🚀 开始自动配置", this);
-    m_startButton->setMinimumHeight(40);
-    m_startButton->setMinimumWidth(200);
+    m_startButton = new QPushButton("🚀 开始接入", this);
+    m_startButton->setMinimumHeight(38);
+    m_startButton->setMinimumWidth(180);
     m_startButton->setStyleSheet(
         "QPushButton {"
         "  background-color: #27ae60;"
         "  color: white;"
         "  border: none;"
         "  border-radius: 5px;"
-        "  padding: 10px 30px;"
-        "  font-size: 15px;"
+        "  font-size: 14px;"
         "  font-weight: bold;"
         "}"
-        "QPushButton:hover {"
-        "  background-color: #229954;"
-        "}"
-        "QPushButton:disabled {"
-        "  background-color: #bdc3c7;"
-        "}"
+        "QPushButton:hover { background-color: #229954; }"
+        "QPushButton:disabled { background-color: #bdc3c7; }"
     );
     buttonLayout->addWidget(m_startButton);
 
     m_closeButton = new QPushButton("完成", this);
-    m_closeButton->setMinimumHeight(40);
+    m_closeButton->setMinimumHeight(38);
     m_closeButton->setMinimumWidth(120);
     m_closeButton->setStyleSheet(
         "QPushButton {"
@@ -170,240 +157,238 @@ void QuickSetupWizard::setupUi()
         "  color: white;"
         "  border: none;"
         "  border-radius: 5px;"
-        "  padding: 10px 20px;"
-        "  font-size: 13px;"
         "  font-weight: bold;"
         "}"
-        "QPushButton:hover {"
-        "  background-color: #2980b9;"
-        "}"
+        "QPushButton:hover { background-color: #2980b9; }"
     );
     m_closeButton->setVisible(false);
     buttonLayout->addWidget(m_closeButton);
 
     mainLayout->addLayout(buttonLayout);
 
-    // Connections
-    connect(m_startButton, &QPushButton::clicked, this, &QuickSetupWizard::onStartSetup);
+    connect(m_startButton, &QPushButton::clicked, this, &QuickSetupWizard::onStartAccess);
     connect(m_skipButton, &QPushButton::clicked, this, &QuickSetupWizard::onSkipSetup);
     connect(m_closeButton, &QPushButton::clicked, this, &QDialog::accept);
+    connect(m_keyTable, &QTableWidget::itemSelectionChanged, this, &QuickSetupWizard::onKeySelectionChanged);
 }
 
-void QuickSetupWizard::onStartSetup()
+void QuickSetupWizard::populateAppList()
+{
+    // 显示各应用安装状态：已安装默认勾选，未安装仍可勾选配置
+    struct AppRow { QCheckBox *cb; QString name; bool installed; };
+    const QList<AppRow> rows = {
+        { m_claudeCheck,   QStringLiteral("Claude Desktop"), m_envDetector->isClaudeInstalled() },
+        { m_cursorCheck,   QStringLiteral("Cursor 编辑器"),  m_envDetector->isCursorInstalled() },
+        { m_continueCheck, QStringLiteral("Continue.dev"),   m_envDetector->isContinueInstalled() },
+        { m_codexCheck,    QStringLiteral("Codex CLI"),      m_envDetector->isCodexCliInstalled() },
+    };
+
+    for (const AppRow &r : rows) {
+        r.cb->setChecked(r.installed);
+        const QString base = r.name;
+        if (r.installed) {
+            r.cb->setText(base + "  —  ✓ 已安装");
+            r.cb->setStyleSheet("color: #27ae60;");
+        } else {
+            r.cb->setText(base + "  —  ✗ 未安装（仍可配置）");
+            r.cb->setStyleSheet("color: #95a5a6;");
+        }
+    }
+}
+
+void QuickSetupWizard::loadApiKeys()
+{
+    logMessage("正在获取账号 API Key 并检测可用性...", "#3498db");
+    m_apiClient->getApiKeys();
+}
+
+void QuickSetupWizard::onApiKeysReceived(const QJsonArray &keys)
+{
+    m_keyTable->setRowCount(0);
+    m_keyValue.clear();
+    m_keySupported.clear();
+    m_keyRow.clear();
+    m_selectedKeyId.clear();
+
+    int row = 0;
+    for (const QJsonValue &val : keys) {
+        const QJsonObject obj = val.toObject();
+        const QString key = obj["key"].toString();
+        if (key.isEmpty()) {
+            continue;
+        }
+        const QString id = QString::number(obj["id"].toInt());
+        const QString name = obj["name"].toString();
+
+        QString masked = key;
+        if (masked.length() > 12) {
+            masked = masked.left(8) + "..." + masked.right(4);
+        }
+
+        m_keyTable->insertRow(row);
+
+        QTableWidgetItem *nameItem = new QTableWidgetItem(name.isEmpty() ? "(未命名)" : name);
+        nameItem->setData(Qt::UserRole, id);   // 行 -> keyId
+        m_keyTable->setItem(row, 0, nameItem);
+        m_keyTable->setItem(row, 1, new QTableWidgetItem(masked));
+
+        QTableWidgetItem *statusItem = new QTableWidgetItem("⏳ 测试中…");
+        statusItem->setForeground(QBrush(QColor("#7f8c8d")));
+        m_keyTable->setItem(row, 2, statusItem);
+
+        m_keyValue.insert(id, key);
+        m_keyRow.insert(id, row);
+
+        // 触发可用性测试
+        m_apiClient->testApiKey(id, key);
+
+        row++;
+    }
+
+    if (row == 0) {
+        logMessage("✗ 未找到可用的 API Key，请先在 aegisy.cc 创建", "#e74c3c");
+        m_statusLabel->setText("未找到 API Key");
+        return;
+    }
+
+    logMessage(QString("✓ 找到 %1 个 API Key，正在逐个检测可用性...").arg(row), "#27ae60");
+}
+
+void QuickSetupWizard::onApiKeyTested(const QString &keyId, bool supported, const QString &detail)
+{
+    m_keySupported.insert(keyId, supported);
+
+    const int row = m_keyRow.value(keyId, -1);
+    if (row >= 0) {
+        QTableWidgetItem *statusItem = m_keyTable->item(row, 2);
+        if (statusItem) {
+            statusItem->setText((supported ? "✓ 支持  " : "✗ 不支持  ") + detail);
+            statusItem->setForeground(QBrush(QColor(supported ? "#27ae60" : "#e74c3c")));
+        }
+    }
+
+    // 首个可用 Key 自动选中
+    if (supported && m_selectedKeyId.isEmpty() && row >= 0) {
+        m_keyTable->selectRow(row);   // 触发 onKeySelectionChanged
+    }
+}
+
+void QuickSetupWizard::onKeySelectionChanged()
+{
+    const int row = m_keyTable->currentRow();
+    if (row < 0) {
+        m_selectedKeyId.clear();
+        return;
+    }
+    QTableWidgetItem *nameItem = m_keyTable->item(row, 0);
+    if (nameItem) {
+        m_selectedKeyId = nameItem->data(Qt::UserRole).toString();
+    }
+}
+
+QString QuickSetupWizard::selectedApiKey() const
+{
+    return m_keyValue.value(m_selectedKeyId);
+}
+
+void QuickSetupWizard::onStartAccess()
 {
     if (m_setupInProgress) return;
+
+    // 至少勾选一个应用
+    if (!m_claudeCheck->isChecked() && !m_cursorCheck->isChecked() &&
+        !m_continueCheck->isChecked() && !m_codexCheck->isChecked()) {
+        QMessageBox::warning(this, "未选择应用", "请至少勾选一个要接入的应用。");
+        return;
+    }
+
+    // 必须选中一个 Key
+    const QString apiKey = selectedApiKey();
+    if (apiKey.isEmpty()) {
+        QMessageBox::warning(this, "未选择 API Key", "请在列表中选择一个 API Key。");
+        return;
+    }
+
+    // 选中的 Key 若测试未通过，二次确认
+    if (!m_keySupported.value(m_selectedKeyId, false)) {
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this, "该 Key 可能不可用",
+            "所选 API Key 的可用性检测未通过，仍要用它接入吗？",
+            QMessageBox::Yes | QMessageBox::No);
+        if (reply != QMessageBox::Yes) {
+            return;
+        }
+    }
 
     m_setupInProgress = true;
     m_startButton->setEnabled(false);
     m_skipButton->setEnabled(false);
 
-    logMessage("========================================");
-    logMessage("开始自动配置...", "#3498db");
-    logMessage("========================================");
-
-    startAutoSetup();
-}
-
-void QuickSetupWizard::onSkipSetup()
-{
-    QMessageBox::StandardButton reply;
-    reply = QMessageBox::question(this, "确认跳过",
-                                  "确定要跳过自动配置吗？\n\n"
-                                  "您可以稍后手动配置每个应用。",
-                                  QMessageBox::Yes | QMessageBox::No);
-
-    if (reply == QMessageBox::Yes) {
-        reject();
-    }
-}
-
-void QuickSetupWizard::startAutoSetup()
-{
-    // Step 1: 检测环境
-    m_currentStep = 1;
-    updateProgress(10, "步骤 1/5: 检测本地环境...");
-    logMessage("[1/5] 检测本地环境...");
-
-    QTimer::singleShot(500, this, [this]() {
-        detectEnvironments();
-    });
-}
-
-void QuickSetupWizard::detectEnvironments()
-{
-    QMap<QString, EnvStatus> envStatuses = m_envDetector->detectAll();
-
-    m_targetApps.clear();
-
-    for (auto it = envStatuses.begin(); it != envStatuses.end(); ++it) {
-        const QString &appName = it.key();
-        const EnvStatus &status = it.value();
-
-        if (appName == "Claude" || appName == "Cursor" || appName == "Continue") {
-            // 检查是否安装
-            bool isInstalled = false;
-            if (appName == "Claude") {
-                isInstalled = m_envDetector->isClaudeInstalled();
-            } else if (appName == "Cursor") {
-                isInstalled = m_envDetector->isCursorInstalled();
-            } else if (appName == "Continue") {
-                isInstalled = m_envDetector->isContinueInstalled();
-            }
-
-            if (isInstalled) {
-                m_targetApps.append(appName);
-                logMessage(QString("   ✓ 检测到 %1").arg(appName), "#27ae60");
-            } else {
-                logMessage(QString("   ✗ 未检测到 %1").arg(appName), "#95a5a6");
-            }
-        }
-    }
-
-    if (m_targetApps.isEmpty()) {
-        logMessage("⚠️ 未检测到任何已安装的应用", "#f39c12");
-        logMessage("请先安装 Claude Desktop、Cursor 或 Continue.dev", "#f39c12");
-        showError("未检测到任何已安装的应用。\n请先安装 Claude Desktop、Cursor 或 Continue.dev。");
-        return;
-    }
-
-    logMessage(QString("✓ 检测完成，找到 %1 个应用").arg(m_targetApps.size()), "#27ae60");
-
-    // Step 2: 获取 API Keys
-    m_currentStep = 2;
-    updateProgress(30, "步骤 2/5: 获取您的 API Keys...");
-    logMessage("[2/5] 获取您的 API Keys...");
-
-    QTimer::singleShot(500, this, [this]() {
-        m_apiClient->getApiKeys();
-    });
-}
-
-void QuickSetupWizard::onApiKeysReceived(const QJsonArray &keys)
-{
-    if (keys.isEmpty()) {
-        logMessage("✗ 未找到可用的 API Key", "#e74c3c");
-        showError("未找到可用的 API Key。\n请先在 aegisy.cc 网站上创建 API Key。");
-        return;
-    }
-
-    logMessage(QString("✓ 找到 %1 个 API Key").arg(keys.size()), "#27ae60");
-
-    // Step 3: 选择最优 API Key
-    m_currentStep = 3;
-    updateProgress(50, "步骤 3/5: 选择最优 API Key...");
-    logMessage("[3/5] 选择最优 API Key...");
-
-    QTimer::singleShot(500, this, [this, keys]() {
-        selectBestApiKey();
-    });
-}
-
-void QuickSetupWizard::selectBestApiKey()
-{
-    // 简单策略：选择第一个活跃的 Key
-    // TODO: 可以根据配额、使用率等选择最优
-    m_apiClient->getApiKeys();
-
-    // 暂时使用模拟数据
-    m_selectedApiKey = "sk-ant-api03-xxx"; // 这里应该从实际 API 获取
-
-    logMessage(QString("✓ 已选择 API Key: %1...").arg(m_selectedApiKey.left(15)), "#27ae60");
-
-    // Step 4: 应用配置
-    m_currentStep = 4;
-    updateProgress(70, "步骤 4/5: 配置应用...");
-    logMessage("[4/5] 配置应用...");
-
-    QTimer::singleShot(500, this, [this]() {
-        applyConfiguration();
-    });
+    applyConfiguration();
 }
 
 void QuickSetupWizard::applyConfiguration()
 {
-    bool success = true;
+    const QString apiKey = selectedApiKey();
+    const QString baseUrl = kFixedBaseUrl;
 
-    for (const QString &appName : m_targetApps) {
-        logMessage(QString("   正在配置 %1...").arg(appName));
+    struct Target { QCheckBox *cb; QString name; std::function<bool()> write; };
+    const QList<Target> targets = {
+        { m_claudeCheck,   "Claude Desktop", [&]{ return m_configManager->writeClaudeConfig(apiKey, baseUrl); } },
+        { m_cursorCheck,   "Cursor",         [&]{ return m_configManager->writeCursorConfig(apiKey, baseUrl); } },
+        { m_continueCheck, "Continue.dev",   [&]{ return m_configManager->writeContinueConfig(apiKey, baseUrl); } },
+        { m_codexCheck,    "Codex CLI",      [&]{ return m_configManager->writeCodexConfig(apiKey, baseUrl); } },
+    };
 
-        // 根据不同应用配置
-        // TODO: 实际实现配置逻辑
-
-        QTimer::singleShot(300, this, [this, appName]() {
-            logMessage(QString("   ✓ %1 配置成功").arg(appName), "#27ae60");
-        });
+    int total = 0;
+    for (const Target &t : targets) {
+        if (t.cb->isChecked()) total++;
     }
 
-    // Step 5: 测试连接
-    QTimer::singleShot(1000, this, [this]() {
-        m_currentStep = 5;
-        updateProgress(90, "步骤 5/5: 测试连接...");
-        logMessage("[5/5] 测试连接...");
+    logMessage("========================================");
+    logMessage("开始接入...", "#3498db");
 
-        QTimer::singleShot(1000, this, [this]() {
-            testConnection();
-        });
-    });
-}
+    int done = 0;
+    bool allOk = true;
+    for (const Target &t : targets) {
+        if (!t.cb->isChecked()) continue;
 
-void QuickSetupWizard::testConnection()
-{
-    logMessage("正在测试连接...");
+        logMessage(QString("🔧 正在配置 %1 ...").arg(t.name));
+        const bool ok = t.write();
+        if (ok) {
+            logMessage(QString("   ✓ %1 已接入").arg(t.name), "#27ae60");
+        } else {
+            logMessage(QString("   ✗ %1 配置写入失败").arg(t.name), "#e74c3c");
+            allOk = false;
+        }
 
-    // TODO: 实际测试 API 连接
-    bool connectionOk = true;
+        done++;
+        updateProgress(total > 0 ? (done * 100 / total) : 100,
+                       QString("配置中 %1/%2 ...").arg(done).arg(total));
+    }
 
-    if (connectionOk) {
-        logMessage("✓ 连接测试成功！", "#27ae60");
-        QTimer::singleShot(500, this, [this]() {
-            showSuccess();
-        });
+    if (allOk) {
+        showSuccess();
     } else {
-        logMessage("✗ 连接测试失败", "#e74c3c");
-        showError("配置完成，但连接测试失败。\n请检查网络连接或 API Key 是否有效。");
+        updateProgress(100, "⚠️ 部分应用配置失败");
+        m_statusLabel->setStyleSheet("color: #e67e22; font-weight: bold;");
+        logMessage("部分应用未能写入配置，请查看上方日志。", "#e67e22");
+        m_startButton->setEnabled(true);
+        m_skipButton->setEnabled(true);
+        m_setupInProgress = false;
+        m_closeButton->setVisible(true);
+        emit setupCompleted();
     }
 }
 
 void QuickSetupWizard::showSuccess()
 {
-    updateProgress(100, "✅ 配置完成！");
+    updateProgress(100, "✅ 接入完成！");
+    m_statusLabel->setStyleSheet("color: #27ae60; font-weight: bold;");
 
     logMessage("========================================");
-    logMessage("🎉 恭喜！所有配置已完成！", "#27ae60");
-    logMessage("========================================");
-    logMessage("");
-    logMessage("下一步操作：", "#3498db");
-
-    for (const QString &app : m_targetApps) {
-        if (app == "Claude") {
-            logMessage("  1️⃣ 重启 Claude Desktop");
-        } else if (app == "Cursor") {
-            logMessage("  2️⃣ 重启 Cursor 编辑器");
-        } else if (app == "Continue") {
-            logMessage("  3️⃣ 重新加载 VS Code 窗口");
-        }
-    }
-
-    logMessage("");
-    logMessage("💡 提示：重启后即可开始使用 Aegisy 的 AI 服务！", "#f39c12");
-
-    m_titleLabel->setText("🎉 配置成功！");
-    m_descLabel->setText(
-        QString("已成功配置 %1 个应用：\n\n").arg(m_targetApps.size()) +
-        m_targetApps.join("、") +
-        "\n\n请重启这些应用以使配置生效。\n"
-        "然后就可以开始使用 Aegisy 的 AI 服务了！"
-    );
-    m_descLabel->setStyleSheet(
-        "background-color: #d5f4e6;"
-        "border: 2px solid #27ae60;"
-        "border-radius: 8px;"
-        "padding: 20px;"
-        "color: #27ae60;"
-        "font-size: 14px;"
-        "line-height: 1.6;"
-        "font-weight: bold;"
-    );
+    logMessage("🎉 所有选中的应用已成功接入 Aegisy！", "#27ae60");
+    logMessage("💡 提示：请重启对应应用（Codex 重开终端）以使配置生效。", "#f39c12");
 
     m_startButton->setVisible(false);
     m_skipButton->setVisible(false);
@@ -412,25 +397,25 @@ void QuickSetupWizard::showSuccess()
     emit setupCompleted();
 }
 
-void QuickSetupWizard::showError(const QString &error)
+void QuickSetupWizard::onSkipSetup()
 {
-    updateProgress(0, "❌ 配置失败");
-
-    logMessage("========================================");
-    logMessage("❌ 配置失败", "#e74c3c");
-    logMessage("========================================");
-    logMessage(error, "#e74c3c");
-
-    m_startButton->setEnabled(true);
-    m_skipButton->setEnabled(true);
-    m_setupInProgress = false;
-
-    QMessageBox::critical(this, "配置失败", error);
+    reject();
 }
 
 void QuickSetupWizard::onRequestFailed(const QString &error)
 {
-    showError(QString("API 请求失败：%1").arg(error));
+    logMessage(QString("✗ API 请求失败：%1").arg(error), "#e74c3c");
+    m_statusLabel->setText("获取 API Key 失败");
+}
+
+void QuickSetupWizard::showError(const QString &error)
+{
+    updateProgress(0, "❌ 失败");
+    logMessage(error, "#e74c3c");
+    m_startButton->setEnabled(true);
+    m_skipButton->setEnabled(true);
+    m_setupInProgress = false;
+    QMessageBox::critical(this, "失败", error);
 }
 
 void QuickSetupWizard::updateProgress(int value, const QString &status)
@@ -441,8 +426,6 @@ void QuickSetupWizard::updateProgress(int value, const QString &status)
 
 void QuickSetupWizard::logMessage(const QString &message, const QString &color)
 {
-    QString html = QString("<span style='color: %1;'>%2</span>")
-                   .arg(color)
-                   .arg(message);
+    QString html = QString("<span style='color: %1;'>%2</span>").arg(color, message);
     m_logOutput->append(html);
 }

@@ -58,6 +58,7 @@ public:
     bool writeClaudeConfig(const QString &apiKey, const QString &baseUrl);
     bool writeCursorConfig(const QString &apiKey, const QString &baseUrl);
     bool writeContinueConfig(const QString &apiKey, const QString &baseUrl);
+    bool writeCodexConfig(const QString &apiKey, const QString &baseUrl);
 
 signals:
     void environmentChanged(const Environment &env);

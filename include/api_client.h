@@ -29,6 +29,9 @@ public:
     // 获取账号支持的模型列表（调用 OpenAI 兼容的 /v1/models，需传入 sk- API Key）
     void getModels(const QString &apiKey);
 
+    // 测试某个 API Key 是否可用（对 /v1/models 发起请求），结果通过 apiKeyTested 返回
+    void testApiKey(const QString &keyId, const QString &apiKey);
+
 signals:
     // 登录成功信号
     void loginSuccess(const QString &token, const QJsonObject &userData);
@@ -47,6 +50,9 @@ signals:
 
     // 模型列表获取成功
     void modelsReceived(const QJsonArray &models);
+
+    // 某个 API Key 测试完成：supported 表示是否可用，detail 为说明
+    void apiKeyTested(const QString &keyId, bool supported, const QString &detail);
 
     // 通用错误信号
     void requestFailed(const QString &errorMessage);

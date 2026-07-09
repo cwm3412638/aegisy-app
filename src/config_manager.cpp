@@ -342,3 +342,97 @@ bool ConfigManager::writeContinueConfig(const QString &apiKey, const QString &ba
     qDebug() << "Continue config written to:" << configPath;
     return true;
 }
+
+bool ConfigManager::writeCodexConfig(const QString &apiKey, const QString &baseUrl)
+{
+    EnvDetector detector;
+    const QString codexDir = detector.getCodexConfigDir();
+
+    // 确保 ~/.codex 目录存在
+    QDir dir(codexDir);
+    if (!dir.exists()) {
+        dir.mkpath(".");
+    }
+
+    const QString url = baseUrl.isEmpty() ? QStringLiteral("https://www.aegisy.cc/v1") : baseUrl;
+
+    // 1) 写 auth.json：{"OPENAI_API_KEY": "<key>"}
+    bool authOk = false;
+    {
+        QJsonObject auth;
+        auth["OPENAI_API_KEY"] = apiKey;
+
+        QFile authFile(codexDir + "/auth.json");
+        if (authFile.open(QIODevice::WriteOnly)) {
+            authFile.write(QJsonDocument(auth).toJson(QJsonDocument::Indented));
+            authFile.close();
+            authOk = true;
+        } else {
+            qWarning() << "Cannot write Codex auth.json";
+        }
+    }
+
+    // 2) 合并写 config.toml：保留已有内容，替换 aegisy provider 段
+    const QString tomlPath = codexDir + "/config.toml";
+    QString existing;
+    {
+        QFile tomlFile(tomlPath);
+        if (tomlFile.exists() && tomlFile.open(QIODevice::ReadOnly)) {
+            existing = QString::fromUtf8(tomlFile.readAll());
+            tomlFile.close();
+        }
+    }
+
+    // 移除旧的顶层 model_provider 行与旧的 [model_providers.aegisy] 段
+    QStringList outLines;
+    const QStringList lines = existing.split('\n');
+    bool inAegisyBlock = false;
+    for (const QString &raw : lines) {
+        const QString trimmed = raw.trimmed();
+
+        if (trimmed.startsWith('[')) {
+            // 进入新的表段：判断是否是 aegisy provider 段
+            inAegisyBlock = (trimmed == "[model_providers.aegisy]");
+            if (inAegisyBlock) {
+                continue;  // 丢弃旧段的段头
+            }
+        }
+        if (inAegisyBlock) {
+            continue;  // 丢弃旧 aegisy 段内的行
+        }
+        if (trimmed.startsWith("model_provider")) {
+            continue;  // 丢弃旧的顶层 model_provider 行
+        }
+        outLines.append(raw);
+    }
+
+    // 去掉尾部多余空行
+    while (!outLines.isEmpty() && outLines.last().trimmed().isEmpty()) {
+        outLines.removeLast();
+    }
+
+    QString result = outLines.join('\n');
+    if (!result.isEmpty()) {
+        result += "\n\n";
+    }
+    result += QStringLiteral(
+        "model_provider = \"aegisy\"\n\n"
+        "[model_providers.aegisy]\n"
+        "name = \"Aegisy\"\n"
+        "base_url = \"%1\"\n"
+        "env_key = \"OPENAI_API_KEY\"\n"
+        "wire_api = \"chat\"\n").arg(url);
+
+    bool tomlOk = false;
+    QFile tomlFile(tomlPath);
+    if (tomlFile.open(QIODevice::WriteOnly)) {
+        tomlFile.write(result.toUtf8());
+        tomlFile.close();
+        tomlOk = true;
+    } else {
+        qWarning() << "Cannot write Codex config.toml";
+    }
+
+    qDebug() << "Codex config written to:" << codexDir << "auth:" << authOk << "toml:" << tomlOk;
+    return authOk && tomlOk;
+}
