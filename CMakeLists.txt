@@ -90,6 +90,15 @@ if(APPLE)
         ${SECURITY_FRAMEWORK}
         ${COREFOUNDATION_FRAMEWORK}
     )
+    # 生成 .app bundle，macdeployqt 才能打包并出 dmg
+    set_target_properties(${PROJECT_NAME} PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_BUNDLE_NAME "Aegisy Client"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "cc.aegisy.client"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_INFO_PLIST_COPYRIGHT "© Aegisy"
+    )
 endif()
 
 # 安装规则
