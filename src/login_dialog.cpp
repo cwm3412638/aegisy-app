@@ -8,7 +8,7 @@ LoginDialog::LoginDialog(QWidget *parent)
     : QDialog(parent)
 {
     setupUi();
-    setWindowTitle("Aegisy Client - Login");
+    setWindowTitle("Aegisy 客户端 - 登录");
     resize(400, 250);
 }
 
@@ -42,13 +42,13 @@ void LoginDialog::setupUi()
     m_emailEdit = new QLineEdit(this);
     m_emailEdit->setPlaceholderText("your@email.com");
     m_emailEdit->setMinimumHeight(35);
-    formLayout->addRow("Email:", m_emailEdit);
+    formLayout->addRow("邮箱:", m_emailEdit);
 
     m_passwordEdit = new QLineEdit(this);
     m_passwordEdit->setPlaceholderText("Password");
     m_passwordEdit->setEchoMode(QLineEdit::Password);
     m_passwordEdit->setMinimumHeight(35);
-    formLayout->addRow("Password:", m_passwordEdit);
+    formLayout->addRow("密码:", m_passwordEdit);
 
     mainLayout->addLayout(formLayout);
 
@@ -72,7 +72,7 @@ void LoginDialog::setupUi()
     mainLayout->addWidget(m_statusLabel);
 
     // Login button
-    m_loginButton = new QPushButton("Login", this);
+    m_loginButton = new QPushButton("登录", this);
     m_loginButton->setMinimumHeight(40);
     m_loginButton->setStyleSheet(
         "QPushButton {"
@@ -138,7 +138,7 @@ void LoginDialog::setLoading(bool loading)
 
     if (loading) {
         m_errorLabel->hide();
-        m_statusLabel->setText("Logging in...");
+        m_statusLabel->setText("登录中...");
         m_statusLabel->show();
     } else {
         m_statusLabel->hide();

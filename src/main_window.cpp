@@ -17,7 +17,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_envDetector(new EnvDetector(this))
 {
     setupUi();
-    setWindowTitle("Aegisy Client");
+    setWindowTitle("Aegisy 客户端");
     resize(800, 600);
 
     // 加载配置
@@ -40,7 +40,7 @@ void MainWindow::setupUi()
     // Header
     QHBoxLayout *headerLayout = new QHBoxLayout();
 
-    QLabel *titleLabel = new QLabel("Aegisy Configuration Manager", this);
+    QLabel *titleLabel = new QLabel("Aegisy 配置管理器", this);
     QFont titleFont = titleLabel->font();
     titleFont.setPointSize(16);
     titleFont.setBold(true);
@@ -49,23 +49,23 @@ void MainWindow::setupUi()
 
     headerLayout->addStretch();
 
-    m_userLabel = new QLabel("User: Not logged in", this);
+    m_userLabel = new QLabel("用户: 未登录", this);
     headerLayout->addWidget(m_userLabel);
 
-    m_logoutButton = new QPushButton("Logout", this);
+    m_logoutButton = new QPushButton("退出登录", this);
     m_logoutButton->setMaximumWidth(100);
     headerLayout->addWidget(m_logoutButton);
 
     mainLayout->addLayout(headerLayout);
 
     // Environment Detection Section
-    QGroupBox *envGroup = new QGroupBox("Environment Detection", this);
+    QGroupBox *envGroup = new QGroupBox("环境检测", this);
     QVBoxLayout *envLayout = new QVBoxLayout(envGroup);
 
     QHBoxLayout *envButtonLayout = new QHBoxLayout();
-    m_refreshButton = new QPushButton("Refresh Detection", this);
-    m_configureButton = new QPushButton("Configure Environment", this);
-    m_manageKeysButton = new QPushButton("Manage API Keys", this);
+    m_refreshButton = new QPushButton("刷新检测", this);
+    m_configureButton = new QPushButton("配置环境", this);
+    m_manageKeysButton = new QPushButton("管理 API Keys", this);
     m_manageKeysButton->setStyleSheet(
         "QPushButton {"
         "  background-color: #3498db;"
@@ -80,7 +80,7 @@ void MainWindow::setupUi()
         "}"
     );
 
-    m_manageEnvsButton = new QPushButton("Manage Environments", this);
+    m_manageEnvsButton = new QPushButton("管理环境", this);
     m_manageEnvsButton->setStyleSheet(
         "QPushButton {"
         "  background-color: #9b59b6;"
@@ -106,7 +106,7 @@ void MainWindow::setupUi()
     // Environment status table
     m_envTable = new QTableWidget(this);
     m_envTable->setColumnCount(4);
-    m_envTable->setHorizontalHeaderLabels({"Application", "Status", "API Key", "Base URL"});
+    m_envTable->setHorizontalHeaderLabels({"应用", "状态", "API Key", "Base URL"});
     m_envTable->horizontalHeader()->setStretchLastSection(true);
     m_envTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_envTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -118,7 +118,7 @@ void MainWindow::setupUi()
     mainLayout->addWidget(envGroup);
 
     // Log output
-    QGroupBox *logGroup = new QGroupBox("Log", this);
+    QGroupBox *logGroup = new QGroupBox("日志", this);
     QVBoxLayout *logLayout = new QVBoxLayout(logGroup);
 
     m_logOutput = new QTextEdit(this);
@@ -179,7 +179,7 @@ void MainWindow::updateEnvDisplay(const QMap<QString, EnvStatus> &envStatuses)
         m_envTable->setItem(row, 0, nameItem);
 
         // Status
-        QString statusText = status.isConfigured ? "✓ Configured" : "✗ Not Configured";
+        QString statusText = status.isConfigured ? "✓ 已配置" : "✗ 未配置";
         QTableWidgetItem *statusItem = new QTableWidgetItem(statusText);
         if (status.isConfigured) {
             statusItem->setForeground(QBrush(QColor("#27ae60")));
@@ -288,7 +288,7 @@ void MainWindow::onLogoutClicked()
 {
     QMessageBox::StandardButton reply;
     reply = QMessageBox::question(this, "Logout",
-                                  "Are you sure you want to logout?",
+                                  "确定要退出登录吗？",
                                   QMessageBox::Yes | QMessageBox::No);
 
     if (reply == QMessageBox::Yes) {

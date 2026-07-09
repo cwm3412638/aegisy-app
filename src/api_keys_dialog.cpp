@@ -29,7 +29,7 @@ ApiKeysDialog::ApiKeysDialog(ApiClient *apiClient, QWidget *parent)
     , m_apiClient(apiClient)
 {
     setupUi();
-    setWindowTitle("API Keys Management");
+    setWindowTitle("API Keys 管理");
     resize(900, 500);
 
     // 连接 API 客户端信号
@@ -49,7 +49,7 @@ void ApiKeysDialog::setupUi()
     // Header
     QHBoxLayout *headerLayout = new QHBoxLayout();
 
-    QLabel *titleLabel = new QLabel("API Keys Management", this);
+    QLabel *titleLabel = new QLabel("API Keys 管理", this);
     QFont titleFont = titleLabel->font();
     titleFont.setPointSize(16);
     titleFont.setBold(true);
@@ -58,7 +58,7 @@ void ApiKeysDialog::setupUi()
 
     headerLayout->addStretch();
 
-    m_totalKeysLabel = new QLabel("Total: 0 keys", this);
+    m_totalKeysLabel = new QLabel("总计: 0 个 Key", this);
     m_totalKeysLabel->setStyleSheet("color: #666; font-size: 13px;");
     headerLayout->addWidget(m_totalKeysLabel);
 
@@ -67,16 +67,16 @@ void ApiKeysDialog::setupUi()
     // Toolbar
     QHBoxLayout *toolbarLayout = new QHBoxLayout();
 
-    m_refreshButton = new QPushButton("🔄 Refresh", this);
+    m_refreshButton = new QPushButton("🔄 刷新", this);
     m_refreshButton->setMinimumHeight(35);
     toolbarLayout->addWidget(m_refreshButton);
 
-    m_copyButton = new QPushButton("📋 Copy Key", this);
+    m_copyButton = new QPushButton("📋 复制 Key", this);
     m_copyButton->setMinimumHeight(35);
     m_copyButton->setEnabled(false);
     toolbarLayout->addWidget(m_copyButton);
 
-    m_activateButton = new QPushButton("✓ Set as Active", this);
+    m_activateButton = new QPushButton("✓ 设为活跃", this);
     m_activateButton->setMinimumHeight(35);
     m_activateButton->setEnabled(false);
     m_activateButton->setStyleSheet(
@@ -104,7 +104,7 @@ void ApiKeysDialog::setupUi()
     m_keysTable = new QTableWidget(this);
     m_keysTable->setColumnCount(7);
     m_keysTable->setHorizontalHeaderLabels({
-        "Name", "Status", "Key", "Quota", "Used", "Usage %", "Created"
+        "名称", "状态", "Key", "配额", "已用", "使用率", "创建时间"
     });
 
     m_keysTable->horizontalHeader()->setStretchLastSection(false);
@@ -142,7 +142,7 @@ void ApiKeysDialog::setupUi()
     QHBoxLayout *bottomLayout = new QHBoxLayout();
     bottomLayout->addStretch();
 
-    QPushButton *closeButton = new QPushButton("Close", this);
+    QPushButton *closeButton = new QPushButton("关闭", this);
     closeButton->setMinimumHeight(35);
     closeButton->setMinimumWidth(100);
     connect(closeButton, &QPushButton::clicked, this, &QDialog::accept);
@@ -159,7 +159,7 @@ void ApiKeysDialog::setupUi()
 
 void ApiKeysDialog::loadApiKeys()
 {
-    m_statusLabel->setText("Loading API keys...");
+    m_statusLabel->setText("加载 API Keys...");
     m_statusLabel->setStyleSheet("color: #3498db; font-size: 12px;");
     m_refreshButton->setEnabled(false);
 
@@ -175,14 +175,14 @@ void ApiKeysDialog::onCopyKeyClicked()
 {
     ApiKeyInfo selectedKey = getSelectedKey();
     if (selectedKey.key.isEmpty()) {
-        QMessageBox::warning(this, "No Selection", "Please select an API key first.");
+        QMessageBox::warning(this, "未选择", "请先选择一个 API Key。");
         return;
     }
 
     QClipboard *clipboard = QApplication::clipboard();
     clipboard->setText(selectedKey.key);
 
-    m_statusLabel->setText("✓ API key copied to clipboard!");
+    m_statusLabel->setText("✓ API Key 已复制到剪贴板！");
     m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
 
     // 临时提示
@@ -195,7 +195,7 @@ void ApiKeysDialog::onActivateKeyClicked()
 {
     ApiKeyInfo selectedKey = getSelectedKey();
     if (selectedKey.key.isEmpty()) {
-        QMessageBox::warning(this, "No Selection", "Please select an API key first.");
+        QMessageBox::warning(this, "未选择", "请先选择一个 API Key。");
         return;
     }
 
@@ -212,7 +212,7 @@ void ApiKeysDialog::onActivateKeyClicked()
     // 发送信号
     emit keyActivated(selectedKey.id, selectedKey.key);
 
-    m_statusLabel->setText(QString("✓ Key '%1' is now active!").arg(selectedKey.name));
+    m_statusLabel->setText(QString("✓ Key %1 已设为活跃！").arg(selectedKey.name));
     m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
 }
 
@@ -228,18 +228,18 @@ void ApiKeysDialog::onKeysReceived(const QJsonArray &keys)
     updateKeysTable(m_keys);
 
     m_refreshButton->setEnabled(true);
-    m_totalKeysLabel->setText(QString("Total: %1 keys").arg(m_keys.size()));
-    m_statusLabel->setText(QString("✓ Loaded %1 API keys").arg(m_keys.size()));
+    m_totalKeysLabel->setText(QString("总计: %1 个 Key").arg(m_keys.size()));
+    m_statusLabel->setText(QString("✓ 已加载 %1 个 API Keys").arg(m_keys.size()));
     m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
 }
 
 void ApiKeysDialog::onRequestFailed(const QString &error)
 {
     m_refreshButton->setEnabled(true);
-    m_statusLabel->setText(QString("✗ Error: %1").arg(error));
+    m_statusLabel->setText(QString("✗ 错误: %1").arg(error));
     m_statusLabel->setStyleSheet("color: #e74c3c; font-size: 12px;");
 
-    QMessageBox::warning(this, "Error", QString("Failed to load API keys:\n%1").arg(error));
+    QMessageBox::warning(this, "错误", QString("Failed to load API keys:\n%1").arg(error));
 }
 
 void ApiKeysDialog::updateKeysTable(const QList<ApiKeyInfo> &keys)
@@ -281,7 +281,7 @@ void ApiKeysDialog::updateKeysTable(const QList<ApiKeyInfo> &keys)
         m_keysTable->setItem(i, 2, new QTableWidgetItem(maskedKey));
 
         // Quota
-        QString quotaStr = info.quota > 0 ? QString::number(info.quota) : "Unlimited";
+        QString quotaStr = info.quota > 0 ? QString::number(info.quota) : "无限制";
         m_keysTable->setItem(i, 3, new QTableWidgetItem(quotaStr));
 
         // Used

@@ -18,7 +18,7 @@ EnvManagerDialog::EnvManagerDialog(ConfigManager *configManager, QWidget *parent
     , m_configManager(configManager)
 {
     setupUi();
-    setWindowTitle("Environment Manager");
+    setWindowTitle("环境管理");
     resize(800, 600);
 
     loadEnvironments();
@@ -33,7 +33,7 @@ void EnvManagerDialog::setupUi()
     // Left Panel - Environment List
     QVBoxLayout *leftLayout = new QVBoxLayout();
 
-    QLabel *titleLabel = new QLabel("Environments", this);
+    QLabel *titleLabel = new QLabel("环境列表", this);
     QFont titleFont = titleLabel->font();
     titleFont.setPointSize(14);
     titleFont.setBold(true);
@@ -65,16 +65,16 @@ void EnvManagerDialog::setupUi()
     // Left Panel Buttons
     QHBoxLayout *leftButtonLayout = new QHBoxLayout();
 
-    m_addButton = new QPushButton("➕ Add", this);
+    m_addButton = new QPushButton("➕ 新建", this);
     m_addButton->setMinimumHeight(35);
     leftButtonLayout->addWidget(m_addButton);
 
-    m_editButton = new QPushButton("✏️ Edit", this);
+    m_editButton = new QPushButton("✏️ 编辑", this);
     m_editButton->setMinimumHeight(35);
     m_editButton->setEnabled(false);
     leftButtonLayout->addWidget(m_editButton);
 
-    m_deleteButton = new QPushButton("🗑️ Delete", this);
+    m_deleteButton = new QPushButton("🗑️ 删除", this);
     m_deleteButton->setMinimumHeight(35);
     m_deleteButton->setEnabled(false);
     leftButtonLayout->addWidget(m_deleteButton);
@@ -86,7 +86,7 @@ void EnvManagerDialog::setupUi()
     // Right Panel - Details and Actions
     QVBoxLayout *rightLayout = new QVBoxLayout();
 
-    QLabel *detailsTitle = new QLabel("Environment Details", this);
+    QLabel *detailsTitle = new QLabel("环境详情", this);
     QFont detailsTitleFont = detailsTitle->font();
     detailsTitleFont.setPointSize(14);
     detailsTitleFont.setBold(true);
@@ -112,7 +112,7 @@ void EnvManagerDialog::setupUi()
     rightLayout->addSpacing(20);
 
     // Action Buttons
-    m_activateButton = new QPushButton("✓ Activate Environment", this);
+    m_activateButton = new QPushButton("✓ 激活环境", this);
     m_activateButton->setMinimumHeight(45);
     m_activateButton->setEnabled(false);
     m_activateButton->setStyleSheet(
@@ -164,7 +164,7 @@ void EnvManagerDialog::loadEnvironments()
     updateEnvList();
 
     if (m_environments.isEmpty()) {
-        m_statusLabel->setText("No environments configured. Click 'Add' to create one.");
+        m_statusLabel->setText("未配置环境。点击.*新建.*创建一个。");
         m_statusLabel->setStyleSheet("color: #f39c12; font-size: 12px;");
     }
 }
@@ -276,26 +276,26 @@ void EnvManagerDialog::onDeleteClicked()
     }
 
     if (env.active) {
-        QMessageBox::warning(this, "Cannot Delete",
+        QMessageBox::warning(this, "无法删除",
                            "Cannot delete the active environment.\n"
-                           "Please activate another environment first.");
+                           "请先激活其他环境。");
         return;
     }
 
     QMessageBox::StandardButton reply;
-    reply = QMessageBox::question(this, "Confirm Delete",
+    reply = QMessageBox::question(this, "确认删除",
                                   QString("Are you sure you want to delete the environment '%1'?\n\n"
-                                         "This action cannot be undone.")
+                                         "此操作无法撤销。")
                                   .arg(env.name),
                                   QMessageBox::Yes | QMessageBox::No);
 
     if (reply == QMessageBox::Yes) {
         if (m_configManager->removeEnvironment(env.id)) {
-            m_statusLabel->setText(QString("✓ Environment '%1' deleted").arg(env.name));
+            m_statusLabel->setText(QString("✓ 环境 %1 已删除").arg(env.name));
             m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
             loadEnvironments();
         } else {
-            m_statusLabel->setText("✗ Failed to delete environment");
+            m_statusLabel->setText("✗ 删除环境失败");
             m_statusLabel->setStyleSheet("color: #e74c3c; font-size: 12px;");
         }
     }
@@ -309,28 +309,28 @@ void EnvManagerDialog::onActivateClicked()
     }
 
     QMessageBox::StandardButton reply;
-    reply = QMessageBox::question(this, "Confirm Activation",
+    reply = QMessageBox::question(this, "确认激活",
                                   QString("Activate environment '%1'?\n\n"
-                                         "This will apply the configuration to selected applications.")
+                                         "这将应用配置到选定的应用。")
                                   .arg(env.name),
                                   QMessageBox::Yes | QMessageBox::No);
 
     if (reply == QMessageBox::Yes) {
         if (m_configManager->setActiveEnvironment(env.id)) {
-            m_statusLabel->setText(QString("✓ Environment '%1' activated!").arg(env.name));
+            m_statusLabel->setText(QString("✓ 环境 %1 已激活！").arg(env.name));
             m_statusLabel->setStyleSheet("color: #27ae60; font-weight: bold; font-size: 12px;");
 
             emit environmentSwitched(env.id);
 
             loadEnvironments();
 
-            QMessageBox::information(this, "Environment Activated",
+            QMessageBox::information(this, "环境已激活",
                                    QString("Environment '%1' is now active!\n\n"
                                           "Note: You may need to restart your applications "
-                                          "for the changes to take effect.")
+                                          "以使更改生效。")
                                    .arg(env.name));
         } else {
-            m_statusLabel->setText("✗ Failed to activate environment");
+            m_statusLabel->setText("✗ 激活环境失败");
             m_statusLabel->setStyleSheet("color: #e74c3c; font-size: 12px;");
         }
     }
@@ -345,15 +345,15 @@ void EnvManagerDialog::showEnvEditor(const Environment &env, bool isEdit)
 
         if (isEdit) {
             if (m_configManager->updateEnvironment(env.id, newEnv)) {
-                m_statusLabel->setText(QString("✓ Environment '%1' updated").arg(newEnv.name));
+                m_statusLabel->setText(QString("✓ 环境 %1 已更新").arg(newEnv.name));
                 m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
             } else {
-                m_statusLabel->setText("✗ Failed to update environment");
+                m_statusLabel->setText("✗ 更新环境失败");
                 m_statusLabel->setStyleSheet("color: #e74c3c; font-size: 12px;");
             }
         } else {
             m_configManager->addEnvironment(newEnv);
-            m_statusLabel->setText(QString("✓ Environment '%1' created").arg(newEnv.name));
+            m_statusLabel->setText(QString("✓ 环境 %1 已创建").arg(newEnv.name));
             m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
         }
 
@@ -373,7 +373,7 @@ EnvEditorDialog::EnvEditorDialog(const Environment &env, bool isEdit, QWidget *p
     , m_isEdit(isEdit)
 {
     setupUi();
-    setWindowTitle(isEdit ? "Edit Environment" : "New Environment");
+    setWindowTitle(isEdit ? "编辑环境" : "新建环境");
     resize(500, 400);
 }
 
@@ -384,7 +384,7 @@ void EnvEditorDialog::setupUi()
     mainLayout->setContentsMargins(20, 20, 20, 20);
 
     // Title
-    QLabel *titleLabel = new QLabel(m_isEdit ? "Edit Environment" : "Create New Environment", this);
+    QLabel *titleLabel = new QLabel(m_isEdit ? "编辑环境" : "创建新环境", this);
     QFont titleFont = titleLabel->font();
     titleFont.setPointSize(14);
     titleFont.setBold(true);
@@ -396,7 +396,7 @@ void EnvEditorDialog::setupUi()
     formLayout->setSpacing(10);
 
     m_nameEdit = new QLineEdit(this);
-    m_nameEdit->setPlaceholderText("e.g., Production, Development, Testing");
+    m_nameEdit->setPlaceholderText("例如：生产环境、开发环境、测试环境");
     m_nameEdit->setText(m_environment.name);
     m_nameEdit->setMinimumHeight(35);
     formLayout->addRow("Name:", m_nameEdit);
@@ -447,7 +447,7 @@ void EnvEditorDialog::setupUi()
     connect(cancelButton, &QPushButton::clicked, this, &QDialog::reject);
     buttonLayout->addWidget(cancelButton);
 
-    QPushButton *saveButton = new QPushButton(m_isEdit ? "Save" : "Create", this);
+    QPushButton *saveButton = new QPushButton(m_isEdit ? "保存" : "创建", this);
     saveButton->setMinimumHeight(35);
     saveButton->setMinimumWidth(100);
     saveButton->setStyleSheet(

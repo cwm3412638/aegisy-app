@@ -18,7 +18,7 @@ EnvConfigDialog::EnvConfigDialog(ConfigManager *configManager,
     , m_envDetector(envDetector)
 {
     setupUi();
-    setWindowTitle("Environment Configuration");
+    setWindowTitle("环境配置");
     resize(700, 600);
 
     // 设置默认值
@@ -32,7 +32,7 @@ void EnvConfigDialog::setupUi()
     mainLayout->setContentsMargins(20, 20, 20, 20);
 
     // Title
-    QLabel *titleLabel = new QLabel("Configure AI Applications", this);
+    QLabel *titleLabel = new QLabel("配置 AI 应用", this);
     QFont titleFont = titleLabel->font();
     titleFont.setPointSize(16);
     titleFont.setBold(true);
@@ -40,13 +40,13 @@ void EnvConfigDialog::setupUi()
     mainLayout->addWidget(titleLabel);
 
     QLabel *subtitleLabel = new QLabel(
-        "Apply your Aegisy API configuration to Claude Desktop, Cursor, and Continue.dev", this);
+        "将您的 Aegisy API 配置应用到 Claude Desktop、Cursor 和 Continue.dev", this);
     subtitleLabel->setStyleSheet("color: #666;");
     subtitleLabel->setWordWrap(true);
     mainLayout->addWidget(subtitleLabel);
 
     // Configuration Section
-    QGroupBox *configGroup = new QGroupBox("Configuration", this);
+    QGroupBox *configGroup = new QGroupBox("配置", this);
     QFormLayout *configLayout = new QFormLayout(configGroup);
     configLayout->setSpacing(10);
 
@@ -63,14 +63,14 @@ void EnvConfigDialog::setupUi()
     mainLayout->addWidget(configGroup);
 
     // Target Applications Section
-    QGroupBox *targetGroup = new QGroupBox("Target Applications", this);
+    QGroupBox *targetGroup = new QGroupBox("目标应用", this);
     QVBoxLayout *targetLayout = new QVBoxLayout(targetGroup);
 
     m_claudeCheckBox = new QCheckBox("Claude Desktop", this);
     m_claudeCheckBox->setChecked(true);
     targetLayout->addWidget(m_claudeCheckBox);
 
-    m_cursorCheckBox = new QCheckBox("Cursor Editor", this);
+    m_cursorCheckBox = new QCheckBox("Cursor 编辑器", this);
     m_cursorCheckBox->setChecked(true);
     targetLayout->addWidget(m_cursorCheckBox);
 
@@ -94,7 +94,7 @@ void EnvConfigDialog::setupUi()
     mainLayout->addWidget(m_statusLabel);
 
     // Log Output
-    QLabel *logLabel = new QLabel("Log:", this);
+    QLabel *logLabel = new QLabel("日志:", this);
     mainLayout->addWidget(logLabel);
 
     m_logOutput = new QTextEdit(this);
@@ -114,18 +114,18 @@ void EnvConfigDialog::setupUi()
     // Buttons
     QHBoxLayout *buttonLayout = new QHBoxLayout();
 
-    m_backupButton = new QPushButton("📦 Backup Current", this);
+    m_backupButton = new QPushButton("📦 备份当前配置", this);
     m_backupButton->setMinimumHeight(35);
     buttonLayout->addWidget(m_backupButton);
 
-    m_restoreButton = new QPushButton("♻️ Restore Backup", this);
+    m_restoreButton = new QPushButton("♻️ 恢复备份", this);
     m_restoreButton->setMinimumHeight(35);
     m_restoreButton->setEnabled(false);
     buttonLayout->addWidget(m_restoreButton);
 
     buttonLayout->addStretch();
 
-    m_applyButton = new QPushButton("✓ Apply Configuration", this);
+    m_applyButton = new QPushButton("✓ 应用配置", this);
     m_applyButton->setMinimumHeight(35);
     m_applyButton->setMinimumWidth(150);
     m_applyButton->setStyleSheet(
@@ -176,12 +176,12 @@ void EnvConfigDialog::onApplyClicked()
     QString baseUrl = m_baseUrlEdit->text().trimmed();
 
     if (apiKey.isEmpty()) {
-        QMessageBox::warning(this, "Invalid Input", "Please enter an API Key.");
+        QMessageBox::warning(this, "输入无效", "请输入 API Key。");
         return;
     }
 
     if (baseUrl.isEmpty()) {
-        QMessageBox::warning(this, "Invalid Input", "Please enter a Base URL.");
+        QMessageBox::warning(this, "输入无效", "请输入 Base URL。");
         return;
     }
 
@@ -189,17 +189,17 @@ void EnvConfigDialog::onApplyClicked()
     if (!m_claudeCheckBox->isChecked() &&
         !m_cursorCheckBox->isChecked() &&
         !m_continueCheckBox->isChecked()) {
-        QMessageBox::warning(this, "No Target Selected",
-                           "Please select at least one application to configure.");
+        QMessageBox::warning(this, "未选择目标",
+                           "请至少选择一个应用进行配置。");
         return;
     }
 
     // 确认对话框
     QMessageBox::StandardButton reply;
-    reply = QMessageBox::question(this, "Confirm Configuration",
+    reply = QMessageBox::question(this, "确认配置",
                                   "This will modify your application configurations.\n"
                                   "A backup will be created automatically.\n\n"
-                                  "Do you want to proceed?",
+                                  "是否继续？",
                                   QMessageBox::Yes | QMessageBox::No);
 
     if (reply != QMessageBox::Yes) {
@@ -216,16 +216,16 @@ void EnvConfigDialog::onApplyClicked()
 
     // 应用配置
     if (applyConfiguration()) {
-        updateProgress(100, "✓ Configuration applied successfully!");
+        updateProgress(100, "✓ 配置应用成功！");
         m_statusLabel->setStyleSheet("color: #27ae60; font-weight: bold;");
 
-        QMessageBox::information(this, "Success",
+        QMessageBox::information(this, "成功",
                                "Configuration applied successfully!\n\n"
-                               "Note: You may need to restart the applications for changes to take effect.");
+                               "注意：您可能需要重启应用以使更改生效。");
 
         emit configurationApplied();
     } else {
-        updateProgress(0, "✗ Configuration failed");
+        updateProgress(0, "✗ 配置失败");
         m_statusLabel->setStyleSheet("color: #e74c3c; font-weight: bold;");
     }
 
@@ -247,7 +247,7 @@ bool EnvConfigDialog::applyConfiguration()
     totalSteps++; // 备份步骤
 
     // 1. 自动备份
-    updateProgress(0, "Creating backup...");
+    updateProgress(0, "创建备份...");
     logMessage("📦 Creating backup of current configurations...");
 
     if (!backupConfigurations()) {
@@ -263,7 +263,7 @@ bool EnvConfigDialog::applyConfiguration()
 
     // 2. 配置 Claude Desktop
     if (m_claudeCheckBox->isChecked()) {
-        updateProgress((currentStep * 100) / totalSteps, "Configuring Claude Desktop...");
+        updateProgress((currentStep * 100) / totalSteps, "配置 Claude Desktop...");
         logMessage("🔧 Configuring Claude Desktop...");
 
         if (m_configManager->writeClaudeConfig(apiKey, baseUrl)) {
@@ -276,7 +276,7 @@ bool EnvConfigDialog::applyConfiguration()
 
     // 3. 配置 Cursor
     if (m_cursorCheckBox->isChecked()) {
-        updateProgress((currentStep * 100) / totalSteps, "Configuring Cursor...");
+        updateProgress((currentStep * 100) / totalSteps, "配置 Cursor...");
         logMessage("🔧 Configuring Cursor...");
 
         if (m_configManager->writeCursorConfig(apiKey, baseUrl)) {
@@ -289,7 +289,7 @@ bool EnvConfigDialog::applyConfiguration()
 
     // 4. 配置 Continue.dev
     if (m_continueCheckBox->isChecked()) {
-        updateProgress((currentStep * 100) / totalSteps, "Configuring Continue.dev...");
+        updateProgress((currentStep * 100) / totalSteps, "配置 Continue.dev...");
         logMessage("🔧 Configuring Continue.dev...");
 
         if (m_configManager->writeContinueConfig(apiKey, baseUrl)) {
@@ -371,11 +371,11 @@ void EnvConfigDialog::onBackupClicked()
 
     if (backupConfigurations()) {
         m_restoreButton->setEnabled(true);
-        QMessageBox::information(this, "Backup Complete",
+        QMessageBox::information(this, "备份完成",
                                QString("Backup created successfully!\n\nLocation:\n%1")
                                .arg(m_backupPath));
     } else {
-        QMessageBox::warning(this, "Backup Failed",
+        QMessageBox::warning(this, "备份失败",
                            "Some files could not be backed up.\nCheck the log for details.");
     }
 }
@@ -388,7 +388,7 @@ void EnvConfigDialog::onRestoreClicked()
         QDir dir(backupDir);
 
         if (!dir.exists()) {
-            QMessageBox::warning(this, "No Backups", "No backup directory found.");
+            QMessageBox::warning(this, "无备份", "未找到备份目录。");
             return;
         }
 
@@ -396,7 +396,7 @@ void EnvConfigDialog::onRestoreClicked()
         QStringList backups = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
 
         if (backups.isEmpty()) {
-            QMessageBox::warning(this, "No Backups", "No backups available to restore.");
+            QMessageBox::warning(this, "无备份", "没有可恢复的备份。");
             return;
         }
 
@@ -423,8 +423,8 @@ void EnvConfigDialog::onRestoreClicked()
         }
 
         bool ok;
-        QString selected = QInputDialog::getItem(this, "Select Backup",
-                                                "Choose a backup to restore:",
+        QString selected = QInputDialog::getItem(this, "选择备份",
+                                                "选择要恢复的备份:",
                                                 displayList, 0, false, &ok);
         if (!ok) {
             return;
@@ -435,10 +435,10 @@ void EnvConfigDialog::onRestoreClicked()
     }
 
     QMessageBox::StandardButton reply;
-    reply = QMessageBox::question(this, "Confirm Restore",
+    reply = QMessageBox::question(this, "确认恢复",
                                   QString("This will restore configurations from:\n%1\n\n"
                                          "Current configurations will be overwritten.\n\n"
-                                         "Do you want to proceed?")
+                                         "是否继续？")
                                   .arg(m_backupPath),
                                   QMessageBox::Yes | QMessageBox::No);
 
@@ -508,20 +508,20 @@ void EnvConfigDialog::onRestoreClicked()
 
     if (success && restored > 0) {
         logMessage(QString("✓ Successfully restored %1 configuration(s)").arg(restored), "#27ae60");
-        QMessageBox::information(this, "Restore Complete",
+        QMessageBox::information(this, "恢复完成",
                                QString("Successfully restored %1 configuration file(s)!\n\n"
                                       "Note: You may need to restart your applications "
                                       "for the changes to take effect.")
                                .arg(restored));
     } else if (restored == 0) {
         logMessage("⚠️ No configuration files found in backup", "#f39c12");
-        QMessageBox::warning(this, "Restore Failed",
-                           "No configuration files were found in the selected backup.");
+        QMessageBox::warning(this, "恢复失败",
+                           "在选定的备份中未找到配置文件。");
     } else {
         logMessage("⚠️ Some files could not be restored", "#f39c12");
-        QMessageBox::warning(this, "Partial Restore",
+        QMessageBox::warning(this, "部分恢复",
                            "Some configuration files could not be restored.\n"
-                           "Check the log for details.");
+                           "请查看日志了解详情。");
     }
 }
 
