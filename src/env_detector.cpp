@@ -1,5 +1,6 @@
 #include "env_detector.h"
 #include <QFile>
+#include <QFileInfo>
 #include <QDir>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -39,6 +40,12 @@ QString EnvDetector::getCursorConfigPath()
 QString EnvDetector::getContinueConfigPath()
 {
     return QDir::homePath() + "/.continue/config.json";
+}
+
+QString EnvDetector::getCodexConfigDir()
+{
+    // Codex CLI 配置目录：~/.codex（含 config.toml / auth.json）
+    return QDir::homePath() + "/.codex";
 }
 
 EnvStatus EnvDetector::detectClaude()
@@ -106,6 +113,49 @@ EnvStatus EnvDetector::detectContinue()
     return status;
 }
 
+EnvStatus EnvDetector::detectCodex()
+{
+    // Codex CLI 使用 ~/.codex 目录，密钥存于 auth.json，base_url 常见于环境变量
+    EnvStatus status;
+    status.isConfigured = false;
+    status.configPath = getCodexConfigDir();
+
+    // 1) 读取 ~/.codex/auth.json 中的 OPENAI_API_KEY
+    const QString authPath = getCodexConfigDir() + "/auth.json";
+    QFile authFile(authPath);
+    if (authFile.exists() && authFile.open(QIODevice::ReadOnly)) {
+        QJsonDocument doc = QJsonDocument::fromJson(authFile.readAll());
+        authFile.close();
+        if (doc.isObject()) {
+            const QJsonObject obj = doc.object();
+            QString key = obj["OPENAI_API_KEY"].toString();
+            if (key.isEmpty()) {
+                key = obj["api_key"].toString();
+            }
+            if (!key.isEmpty()) {
+                status.apiKey = key;
+                status.isConfigured = true;
+            }
+        }
+    }
+
+    // 2) 回退到环境变量
+    if (status.apiKey.isEmpty()) {
+        QByteArray envKey = qgetenv("OPENAI_API_KEY");
+        if (!envKey.isEmpty()) {
+            status.apiKey = QString::fromUtf8(envKey);
+            status.isConfigured = true;
+        }
+    }
+
+    QByteArray envBase = qgetenv("OPENAI_BASE_URL");
+    if (!envBase.isEmpty()) {
+        status.baseUrl = QString::fromUtf8(envBase);
+    }
+
+    return status;
+}
+
 QMap<QString, QString> EnvDetector::detectEnvVars()
 {
     QMap<QString, QString> envVars;
@@ -150,6 +200,25 @@ QMap<QString, EnvStatus> EnvDetector::detectAll()
         (continueStatus.isConfigured ? "" : "未安装") :
         "未安装";
     results["Continue"] = continueStatus;
+
+    // 检测 Codex CLI（npm 全局包 / PATH）
+    EnvStatus codexCliStatus = detectCodex();
+    const bool codexCliInstalled = isCodexCliInstalled();
+    codexCliStatus.isConfigured = codexCliInstalled;
+    if (codexCliInstalled) {
+        codexCliStatus.error = codexCliStatus.apiKey.isEmpty() ? "已安装(未配置密钥)" : "";
+    } else {
+        codexCliStatus.error = "未安装 (npm i -g @openai/codex)";
+    }
+    results["Codex CLI"] = codexCliStatus;
+
+    // 检测 Codex 桌面版
+    EnvStatus codexDesktopStatus;
+    codexDesktopStatus.configPath = "Codex 桌面应用";
+    const bool codexDesktopInstalled = isCodexDesktopInstalled();
+    codexDesktopStatus.isConfigured = codexDesktopInstalled;
+    codexDesktopStatus.error = codexDesktopInstalled ? "" : "未安装";
+    results["Codex 桌面版"] = codexDesktopStatus;
 
     // 环境变量检测
     QMap<QString, QString> envVars = detectEnvVars();
@@ -274,12 +343,90 @@ bool EnvDetector::isContinueInstalled()
     return QFile::exists(getContinueConfigPath());
 }
 
+bool EnvDetector::isCodexCliInstalled()
+{
+    // 1) npm 全局包 @openai/codex
+    if (isNpmPackageInstalled("@openai/codex")) {
+        return true;
+    }
+
+    // 2) PATH 中存在 codex 可执行文件
+#ifdef Q_OS_WIN
+    QProcess process;
+    process.start("where", QStringList() << "codex");
+#else
+    QProcess process;
+    process.start("which", QStringList() << "codex");
+#endif
+    if (process.waitForFinished(5000) && process.exitCode() == 0) {
+        return true;
+    }
+
+    // 3) 存在配置目录，间接证明用过 Codex CLI
+    return QDir(getCodexConfigDir()).exists();
+}
+
+bool EnvDetector::isCodexDesktopInstalled()
+{
+    // 检测 Codex 桌面版应用是否安装
+#ifdef Q_OS_WIN
+    QStringList possiblePaths = {
+        QDir::cleanPath(QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation) + "/../Local/Programs/Codex"),
+        QDir::cleanPath(QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation) + "/../Local/Programs/codex"),
+        "C:/Program Files/Codex",
+        "C:/Program Files (x86)/Codex"
+    };
+    for (const QString &path : possiblePaths) {
+        if (QDir(path).exists()) {
+            return true;
+        }
+    }
+    return false;
+
+#elif defined(Q_OS_MACOS)
+    QStringList possiblePaths = {
+        "/Applications/Codex.app",
+        QDir::homePath() + "/Applications/Codex.app"
+    };
+    for (const QString &path : possiblePaths) {
+        if (QDir(path).exists()) {
+            return true;
+        }
+    }
+    return false;
+
+#else
+    // Linux：检查常见桌面应用目录
+    QStringList possiblePaths = {
+        "/opt/Codex",
+        "/usr/local/bin/codex-desktop",
+        QDir::homePath() + "/.local/share/applications/codex.desktop"
+    };
+    for (const QString &path : possiblePaths) {
+        if (QFileInfo::exists(path)) {
+            return true;
+        }
+    }
+    return false;
+#endif
+}
+
 bool EnvDetector::isNpmPackageInstalled(const QString &packageName)
 {
     // 检测 npm 全局包是否安装
+    // 注意：Windows 上 npm 是 npm.cmd，直接用 "npm" QProcess 可能找不到
+#ifdef Q_OS_WIN
+    const QString npmCmd = "npm.cmd";
+#else
+    const QString npmCmd = "npm";
+#endif
+
     QProcess process;
-    process.start("npm", QStringList() << "list" << "-g" << packageName << "--depth=0");
-    process.waitForFinished(3000);
+    process.start(npmCmd, QStringList() << "list" << "-g" << packageName << "--depth=0");
+    if (!process.waitForFinished(5000)) {
+        process.kill();
+        return false;
+    }
 
     QString output = process.readAllStandardOutput();
     return !output.contains("(empty)") && output.contains(packageName);
@@ -291,6 +438,7 @@ QStringList EnvDetector::getInstalledNpmPackages()
     QStringList checkPackages = {
         "@anthropic-ai/sdk",
         "@anthropic-ai/claude-cli",
+        "@openai/codex",
         "continue",
         "cursor"
     };

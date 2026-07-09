@@ -230,8 +230,14 @@ void MainWindow::updateEnvDisplay(const QMap<QString, EnvStatus> &envStatuses)
         QTableWidgetItem *nameItem = new QTableWidgetItem(appName);
         m_envTable->setItem(row, 0, nameItem);
 
-        // Status
-        QString statusText = status.isConfigured ? "✓ 已配置" : "✗ 未配置";
+        // Status（Codex 这类以“是否安装”为主，措辞用已安装/未安装）
+        const bool isInstallCheck = appName.startsWith("Codex");
+        QString statusText;
+        if (isInstallCheck) {
+            statusText = status.isConfigured ? "✓ 已安装" : "✗ 未安装";
+        } else {
+            statusText = status.isConfigured ? "✓ 已配置" : "✗ 未配置";
+        }
         QTableWidgetItem *statusItem = new QTableWidgetItem(statusText);
         if (status.isConfigured) {
             statusItem->setForeground(QBrush(QColor("#27ae60")));

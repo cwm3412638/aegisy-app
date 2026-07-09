@@ -31,6 +31,9 @@ public:
     // 检测 Continue.dev 配置
     EnvStatus detectContinue();
 
+    // 检测 Codex（OpenAI Codex CLI）配置
+    EnvStatus detectCodex();
+
     // 检测系统环境变量
     QMap<QString, QString> detectEnvVars();
 
@@ -41,6 +44,8 @@ public:
     bool isClaudeInstalled();
     bool isCursorInstalled();
     bool isContinueInstalled();
+    bool isCodexCliInstalled();      // Codex CLI：npm 全局包 @openai/codex 或 PATH 中的 codex
+    bool isCodexDesktopInstalled();  // Codex 桌面版应用
 
     // 检测 npm 全局包
     bool isNpmPackageInstalled(const QString &packageName);
@@ -50,6 +55,7 @@ public:
     QString getClaudeConfigPath();
     QString getCursorConfigPath();
     QString getContinueConfigPath();
+    QString getCodexConfigDir();     // ~/.codex 目录
 
 private:
 

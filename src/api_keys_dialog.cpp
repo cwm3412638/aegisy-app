@@ -117,9 +117,16 @@ void ApiKeysDialog::setupUi()
         "名称", "状态", "Key", "配额", "已用", "使用率", "创建时间"
     });
 
-    m_keysTable->horizontalHeader()->setStretchLastSection(false);
-    m_keysTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    m_keysTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    // 让各列铺满整个表格宽度：名称、Key 两列自动拉伸，其余按内容自适应
+    QHeaderView *header = m_keysTable->horizontalHeader();
+    header->setStretchLastSection(false);
+    header->setSectionResizeMode(0, QHeaderView::Stretch);          // 名称
+    header->setSectionResizeMode(1, QHeaderView::ResizeToContents); // 状态
+    header->setSectionResizeMode(2, QHeaderView::Stretch);          // Key
+    header->setSectionResizeMode(3, QHeaderView::ResizeToContents); // 配额
+    header->setSectionResizeMode(4, QHeaderView::ResizeToContents); // 已用
+    header->setSectionResizeMode(5, QHeaderView::ResizeToContents); // 使用率
+    header->setSectionResizeMode(6, QHeaderView::ResizeToContents); // 创建时间
     m_keysTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_keysTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_keysTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -330,8 +337,8 @@ void ApiKeysDialog::updateKeysTable(const QList<ApiKeyInfo> &keys)
         }
         m_keysTable->setItem(i, 6, new QTableWidgetItem(createdAt));
     }
-
-    m_keysTable->resizeColumnsToContents();
+    // 注意：不要调用 resizeColumnsToContents()，否则会覆盖上面的 Stretch 设置，
+    // 导致各列挤在左侧无法铺满窗口宽度。
 }
 
 void ApiKeysDialog::onTableSelectionChanged()
