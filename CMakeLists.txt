@@ -33,6 +33,7 @@ set(SOURCES
     src/api_keys_dialog.cpp
     src/env_config_dialog.cpp
     src/env_manager_dialog.cpp
+    src/models_dialog.cpp
 )
 
 set(HEADERS
@@ -45,6 +46,7 @@ set(HEADERS
     include/api_keys_dialog.h
     include/env_config_dialog.h
     include/env_manager_dialog.h
+    include/models_dialog.h
 )
 
 # 可执行文件

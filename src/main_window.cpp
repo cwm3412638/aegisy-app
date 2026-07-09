@@ -2,6 +2,7 @@
 #include "api_keys_dialog.h"
 #include "env_config_dialog.h"
 #include "env_manager_dialog.h"
+#include "models_dialog.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGroupBox>
@@ -95,10 +96,26 @@ void MainWindow::setupUi()
         "}"
     );
 
+    m_viewModelsButton = new QPushButton("查看模型", this);
+    m_viewModelsButton->setStyleSheet(
+        "QPushButton {"
+        "  background-color: #e67e22;"
+        "  color: white;"
+        "  border: none;"
+        "  border-radius: 4px;"
+        "  padding: 6px 12px;"
+        "  font-weight: bold;"
+        "}"
+        "QPushButton:hover {"
+        "  background-color: #d35400;"
+        "}"
+    );
+
     envButtonLayout->addWidget(m_refreshButton);
     envButtonLayout->addWidget(m_configureButton);
     envButtonLayout->addWidget(m_manageKeysButton);
     envButtonLayout->addWidget(m_manageEnvsButton);
+    envButtonLayout->addWidget(m_viewModelsButton);
     envButtonLayout->addStretch();
 
     envLayout->addLayout(envButtonLayout);
@@ -135,6 +152,7 @@ void MainWindow::setupUi()
     connect(m_configureButton, &QPushButton::clicked, this, &MainWindow::onConfigureEnvClicked);
     connect(m_manageKeysButton, &QPushButton::clicked, this, &MainWindow::onManageKeysClicked);
     connect(m_manageEnvsButton, &QPushButton::clicked, this, &MainWindow::onManageEnvironmentsClicked);
+    connect(m_viewModelsButton, &QPushButton::clicked, this, &MainWindow::onViewModelsClicked);
     connect(m_logoutButton, &QPushButton::clicked, this, &MainWindow::onLogoutClicked);
 }
 
@@ -282,6 +300,24 @@ void MainWindow::onManageEnvironmentsClicked()
     dialog->deleteLater();
 
     m_logOutput->append("[INFO] Environment manager closed");
+}
+
+void MainWindow::onViewModelsClicked()
+{
+    m_logOutput->append("[INFO] 打开模型和价格管理...");
+
+    ModelsDialog *dialog = new ModelsDialog(m_apiClient, this);
+
+    // 连接模型选择信号
+    connect(dialog, &ModelsDialog::modelSelected,
+            [this](const QString &modelName) {
+        m_logOutput->append(QString("[✓] 模型已选择: %1").arg(modelName));
+    });
+
+    dialog->exec();
+    dialog->deleteLater();
+
+    m_logOutput->append("[INFO] 模型管理对话框已关闭");
 }
 
 void MainWindow::onLogoutClicked()

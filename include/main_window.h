@@ -25,6 +25,7 @@ private slots:
     void onConfigureEnvClicked();
     void onManageKeysClicked();
     void onManageEnvironmentsClicked();
+    void onViewModelsClicked();
     void onLogoutClicked();
     void onEnvDetectionFinished();
 
@@ -42,6 +43,7 @@ private:
     QPushButton *m_configureButton;
     QPushButton *m_manageKeysButton;
     QPushButton *m_manageEnvsButton;
+    QPushButton *m_viewModelsButton;
     QPushButton *m_logoutButton;
     QTableWidget *m_envTable;
     QTextEdit *m_logOutput;

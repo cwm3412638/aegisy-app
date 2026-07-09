@@ -25,6 +25,8 @@ public:
     void login(const QString &email, const QString &password);
     void getApiKeys();
     void getUserInfo();
+    void getChannels();        // 获取渠道列表
+    void getModels();          // 获取模型列表
 
 signals:
     // 登录成功信号
@@ -39,6 +41,12 @@ signals:
     // 用户信息获取成功
     void userInfoReceived(const QJsonObject &userInfo);
 
+    // 渠道列表获取成功
+    void channelsReceived(const QJsonArray &channels);
+
+    // 模型列表获取成功
+    void modelsReceived(const QJsonArray &models);
+
     // 通用错误信号
     void requestFailed(const QString &errorMessage);
 
@@ -46,6 +54,8 @@ private slots:
     void onLoginFinished();
     void onApiKeysFinished();
     void onUserInfoFinished();
+    void onChannelsFinished();
+    void onModelsFinished();
 
 private:
     QNetworkAccessManager *m_networkManager;

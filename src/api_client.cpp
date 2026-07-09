@@ -199,3 +199,69 @@ void ApiClient::onUserInfoFinished()
 
     reply->deleteLater();
 }
+
+void ApiClient::getChannels()
+{
+    QNetworkReply *reply = get("/api/channels");
+    connect(reply, &QNetworkReply::finished, this, &ApiClient::onChannelsFinished);
+}
+
+void ApiClient::getModels()
+{
+    QNetworkReply *reply = get("/api/models");
+    connect(reply, &QNetworkReply::finished, this, &ApiClient::onModelsFinished);
+}
+
+void ApiClient::onChannelsFinished()
+{
+    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply) return;
+
+    bool ok;
+    QJsonObject response = parseResponse(reply, ok);
+
+    if (!ok) {
+        emit requestFailed(response["error"].toString());
+        reply->deleteLater();
+        return;
+    }
+
+    int code = response["code"].toInt(-1);
+    if (code != 0 && code != 200) {
+        emit requestFailed(response["message"].toString());
+        reply->deleteLater();
+        return;
+    }
+
+    QJsonArray channels = response["data"].toArray();
+    emit channelsReceived(channels);
+
+    reply->deleteLater();
+}
+
+void ApiClient::onModelsFinished()
+{
+    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply) return;
+
+    bool ok;
+    QJsonObject response = parseResponse(reply, ok);
+
+    if (!ok) {
+        emit requestFailed(response["error"].toString());
+        reply->deleteLater();
+        return;
+    }
+
+    int code = response["code"].toInt(-1);
+    if (code != 0 && code != 200) {
+        emit requestFailed(response["message"].toString());
+        reply->deleteLater();
+        return;
+    }
+
+    QJsonArray models = response["data"].toArray();
+    emit modelsReceived(models);
+
+    reply->deleteLater();
+}
