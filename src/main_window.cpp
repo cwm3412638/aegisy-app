@@ -456,9 +456,10 @@ void MainWindow::activateProfile(int index)
         logMessage("该档案未配置任何 Key，无法激活", kLogWarn);
         return;
     }
-    if (m_activatingIndex >= 0) {
-        logMessage("有激活任务正在进行，请稍候...", kLogWarn);
-        return;
+    // 允许在上一次激活尚未跑完时直接切换：重置队列后重新开始。
+    // 旧的异步安装若还在进行，其回调会被 onInstallFinished 里的“陈旧回调”判断忽略。
+    if (m_activatingIndex >= 0 && m_activatingIndex != index) {
+        logMessage("切换到新档案，中断上一个激活任务", kLogMuted);
     }
 
     m_profileManager->setActiveIndex(index);
@@ -552,6 +553,13 @@ void MainWindow::onInstallOutput(AiTool tool, const QString &line)
 void MainWindow::onInstallFinished(AiTool tool, bool success)
 {
     if (m_activatingIndex < 0) return;  // 不在激活流程中
+
+    // 陈旧回调：若完成的工具已不是当前队列的队首，说明用户已切换到别的档案，
+    // 这个安装结果作废，直接忽略，避免破坏新队列。
+    if (m_activationQueue.isEmpty() || m_activationQueue.first() != tool) {
+        logMessage(QString("忽略过期的安装回调：%1").arg(ToolManager::toolName(tool)), kLogMuted);
+        return;
+    }
 
     if (!success) {
         logMessage(QString("✗ %1 安装失败，请检查网络或手动运行：npm install -g %2")
