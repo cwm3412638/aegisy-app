@@ -5,6 +5,8 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QLabel>
+#include <QLineEdit>
+#include <QCheckBox>
 #include "config_manager.h"
 
 class EnvManagerDialog : public QDialog

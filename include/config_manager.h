@@ -54,6 +54,11 @@ public:
     // 应用环境配置到目标应用
     bool applyEnvironment(const Environment &env);
 
+    // 写入配置到目标应用（公有方法）
+    bool writeClaudeConfig(const QString &apiKey, const QString &baseUrl);
+    bool writeCursorConfig(const QString &apiKey, const QString &baseUrl);
+    bool writeContinueConfig(const QString &apiKey, const QString &baseUrl);
+
 signals:
     void environmentChanged(const Environment &env);
     void configSaved();
@@ -61,11 +66,6 @@ signals:
 private:
     QString m_configPath;
     QList<Environment> m_environments;
-
-    // 写入配置到目标应用
-    bool writeClaudeConfig(const QString &apiKey, const QString &baseUrl);
-    bool writeCursorConfig(const QString &apiKey, const QString &baseUrl);
-    bool writeContinueConfig(const QString &apiKey, const QString &baseUrl);
 
     // 获取配置路径
     QString getConfigPath() const;
