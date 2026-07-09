@@ -12,15 +12,18 @@
 ApiKeyInfo ApiKeyInfo::fromJson(const QJsonObject &obj)
 {
     ApiKeyInfo info;
-    info.id = obj["id"].toString();
+    info.id = QString::number(obj["id"].toInt());  // id 是数字
     info.name = obj["name"].toString();
     info.key = obj["key"].toString();
     info.status = obj["status"].toString();
     info.quota = obj["quota"].toInt(0);
-    info.used = obj["used"].toInt(0);
+    info.used = obj["quota_used"].toInt(0);  // 字段名是 quota_used
     info.createdAt = obj["created_at"].toString();
     info.expiresAt = obj["expires_at"].toString();
-    info.isActive = obj["is_active"].toBool(false);
+
+    // 判断是否活跃：status == "active"
+    info.isActive = (obj["status"].toString() == "active");
+
     return info;
 }
 

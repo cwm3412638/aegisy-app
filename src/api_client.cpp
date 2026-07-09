@@ -190,7 +190,11 @@ void ApiClient::onApiKeysFinished()
         return;
     }
 
-    QJsonArray keys = response["data"].toArray();
+    // 正确解析：data.items 才是实际的 keys 数组
+    QJsonObject data = response["data"].toObject();
+    QJsonArray keys = data["items"].toArray();
+
+    qDebug() << "Received" << keys.size() << "API keys";
     emit apiKeysReceived(keys);
 
     reply->deleteLater();
@@ -258,7 +262,11 @@ void ApiClient::onChannelsFinished()
         return;
     }
 
-    QJsonArray channels = response["data"].toArray();
+    // 解析：data.items 才是实际数组
+    QJsonObject data = response["data"].toObject();
+    QJsonArray channels = data["items"].toArray();
+
+    qDebug() << "Received" << channels.size() << "channels";
     emit channelsReceived(channels);
 
     reply->deleteLater();
@@ -285,7 +293,11 @@ void ApiClient::onModelsFinished()
         return;
     }
 
-    QJsonArray models = response["data"].toArray();
+    // 解析：data.items 才是实际数组
+    QJsonObject data = response["data"].toObject();
+    QJsonArray models = data["items"].toArray();
+
+    qDebug() << "Received" << models.size() << "models";
     emit modelsReceived(models);
 
     reply->deleteLater();
