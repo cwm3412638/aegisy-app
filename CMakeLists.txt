@@ -27,28 +27,20 @@ set(SOURCES
     src/main_window.cpp
     src/login_dialog.cpp
     src/api_client.cpp
-    src/config_manager.cpp
-    src/env_detector.cpp
+    src/tool_manager.cpp
     src/secure_storage.cpp
     src/api_keys_dialog.cpp
-    src/env_config_dialog.cpp
-    src/env_manager_dialog.cpp
     src/models_dialog.cpp
-    src/quick_setup_wizard.cpp
 )
 
 set(HEADERS
     include/main_window.h
     include/login_dialog.h
     include/api_client.h
-    include/config_manager.h
-    include/env_detector.h
+    include/tool_manager.h
     include/secure_storage.h
     include/api_keys_dialog.h
-    include/env_config_dialog.h
-    include/env_manager_dialog.h
     include/models_dialog.h
-    include/quick_setup_wizard.h
 )
 
 # 可执行文件

@@ -4,11 +4,18 @@
 #include <QMainWindow>
 #include <QLabel>
 #include <QPushButton>
-#include <QTableWidget>
 #include <QTextEdit>
+#include <QJsonArray>
+#include <QMap>
 #include "api_client.h"
-#include "config_manager.h"
-#include "env_detector.h"
+#include "tool_manager.h"
+
+// 单个工具卡片的控件集合
+struct ToolCard {
+    QLabel *statusLabel = nullptr;
+    QLabel *warnLabel = nullptr;
+    QPushButton *actionButton = nullptr;
+};
 
 class MainWindow : public QMainWindow
 {
@@ -20,37 +27,49 @@ public:
 
     void setAuthToken(const QString &token);
 
+signals:
+    // 用户点击退出登录（token 已清除），由 main.cpp 决定后续流程
+    void loggedOut();
+
 private slots:
-    void onRefreshEnvClicked();
-    void onConfigureEnvClicked();
+    void onConnectToolClicked(AiTool tool);
+    void onInstallOutput(AiTool tool, const QString &line);
+    void onInstallFinished(AiTool tool, bool success);
+    void onApiKeysReceived(const QJsonArray &keys);
+    void onRequestFailed(const QString &error);
     void onManageKeysClicked();
-    void onManageEnvironmentsClicked();
     void onViewModelsClicked();
-    void onQuickSetupClicked();
     void onLogoutClicked();
-    void onEnvDetectionFinished();
 
 private:
     void setupUi();
-    void updateEnvDisplay(const QMap<QString, EnvStatus> &envStatuses);
+    QWidget* createToolCard(AiTool tool);
+    void refreshToolCard(AiTool tool);
+    void refreshAllCards();
+
+    // 按分组 platform 从缓存 keys 中挑选可用 Key；无则返回空
+    QString pickKeyForTool(AiTool tool, QString *keyLabel = nullptr) const;
+    // 一键接入的配置阶段（安装完成后也会走到这里）
+    void configureTool(AiTool tool);
+
+    void logMessage(const QString &message, const QString &color = "#333");
+    static QString maskKey(const QString &key);
 
     ApiClient *m_apiClient;
-    ConfigManager *m_configManager;
-    EnvDetector *m_envDetector;
+    ToolManager *m_toolManager;
 
-    // UI Elements
+    // UI
     QLabel *m_userLabel;
-    QPushButton *m_quickSetupButton;
-    QPushButton *m_refreshButton;
-    QPushButton *m_configureButton;
-    QPushButton *m_manageKeysButton;
-    QPushButton *m_manageEnvsButton;
-    QPushButton *m_viewModelsButton;
     QPushButton *m_logoutButton;
-    QTableWidget *m_envTable;
+    QMap<AiTool, ToolCard> m_cards;
+    QPushButton *m_manageKeysButton;
+    QPushButton *m_viewModelsButton;
     QTextEdit *m_logOutput;
 
+    // 状态
     QString m_authToken;
+    QJsonArray m_keys;          // 账号 API Keys（含 group）
+    bool m_keysLoaded = false;
 };
 
 #endif // MAIN_WINDOW_H
