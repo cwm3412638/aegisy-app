@@ -37,7 +37,9 @@ void ApiClient::login(const QString &email, const QString &password)
 
 void ApiClient::getApiKeys()
 {
-    QNetworkReply *reply = get("/api/v1/keys");
+    // 添加分页参数
+    QString endpoint = "/api/v1/keys?page=1&page_size=100&sort_by=created_at&sort_order=desc";
+    QNetworkReply *reply = get(endpoint);
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onApiKeysFinished);
 }
 
@@ -223,13 +225,15 @@ void ApiClient::onUserInfoFinished()
 
 void ApiClient::getChannels()
 {
-    QNetworkReply *reply = get("/api/channels");
+    // 尝试 v1 API
+    QNetworkReply *reply = get("/api/v1/channels?page=1&page_size=100");
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onChannelsFinished);
 }
 
 void ApiClient::getModels()
 {
-    QNetworkReply *reply = get("/api/models");
+    // 尝试 v1 API
+    QNetworkReply *reply = get("/api/v1/models?page=1&page_size=100");
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onModelsFinished);
 }
 
