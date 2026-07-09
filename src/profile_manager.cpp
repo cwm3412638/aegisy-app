@@ -3,6 +3,14 @@
 
 static const QString kPfx = "profiles";
 
+// 复制 profile 时需要迁移的所有子键
+static const QStringList kProfileKeys = {
+    "name", "type",
+    "claude_key", "claude_model",
+    "codex_key",  "codex_model",
+    "gemini_key", "gemini_model",
+};
+
 ProfileManager::ProfileManager(QObject *parent) : QObject(parent)
 {
     ensureDefaultProfile();
@@ -29,6 +37,8 @@ QList<Profile> ProfileManager::allProfiles() const
         p.index       = i;
         p.name        = s.value(QString("%1/%2/name").arg(kPfx).arg(i),
                                 QString("档案 %1").arg(i+1)).toString();
+        p.type        = static_cast<ProfileType>(
+                            s.value(QString("%1/%2/type").arg(kPfx).arg(i), 0).toInt());
         p.claudeKey   = s.value(QString("%1/%2/claude_key").arg(kPfx).arg(i)).toString();
         p.claudeModel = s.value(QString("%1/%2/claude_model").arg(kPfx).arg(i)).toString();
         p.codexKey    = s.value(QString("%1/%2/codex_key").arg(kPfx).arg(i)).toString();
@@ -54,11 +64,12 @@ Profile ProfileManager::activeProfile() const
     return (idx >= 0 && idx < all.size()) ? all[idx] : Profile{};
 }
 
-int ProfileManager::addProfile(const QString &name)
+int ProfileManager::addProfile(const QString &name, ProfileType type)
 {
     QSettings s;
     const int n = s.value(kPfx + "/count", 0).toInt();
     s.setValue(QString("%1/%2/name").arg(kPfx).arg(n), name);
+    s.setValue(QString("%1/%2/type").arg(kPfx).arg(n), static_cast<int>(type));
     s.setValue(kPfx + "/count", n + 1);
     emit profilesChanged();
     return n;
@@ -72,9 +83,7 @@ void ProfileManager::removeProfile(int index)
     for (int i = index; i < n - 1; ++i) {
         const QString src = QString("%1/%2").arg(kPfx).arg(i + 1);
         const QString dst = QString("%1/%2").arg(kPfx).arg(i);
-        for (const QString &k : {"name","claude_key","claude_model",
-                                  "codex_key","codex_model",
-                                  "gemini_key","gemini_model"}) {
+        for (const QString &k : kProfileKeys) {
             s.setValue(dst + "/" + k, s.value(src + "/" + k));
         }
     }
@@ -96,6 +105,12 @@ void ProfileManager::setActiveIndex(int index)
     const int old = activeIndex();
     QSettings().setValue(kPfx + "/active", index);
     emit activeProfileChanged(old, index);
+}
+
+void ProfileManager::setProfileType(int index, ProfileType type)
+{
+    QSettings().setValue(QString("%1/%2/type").arg(kPfx).arg(index), static_cast<int>(type));
+    emit profilesChanged();
 }
 
 void ProfileManager::saveToolConfig(int profileIndex, AiTool tool,

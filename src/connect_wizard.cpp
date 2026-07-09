@@ -6,6 +6,9 @@
 #include <QFrame>
 #include <QScrollArea>
 #include <QMessageBox>
+#include <QButtonGroup>
+#include <QDesktopServices>
+#include <QUrl>
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -62,11 +65,18 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
     // Kick off key load
     m_apiClient->getApiKeys();
 
-    // Pre-fill name when editing
+    // 编辑时回填名称和类型
     if (m_editIndex >= 0) {
         const auto profiles = m_profileManager->allProfiles();
-        if (m_editIndex < profiles.size())
+        if (m_editIndex < profiles.size()) {
             m_nameEdit->setText(profiles[m_editIndex].name);
+            m_selectedType = profiles[m_editIndex].type;
+            const int typeId = static_cast<int>(m_selectedType);
+            if (auto *btn = m_typeGroup->button(typeId))
+                btn->setChecked(true);
+            // buildPage2 尚未初始化，updateSectionVisibility 会在进入第2步时由
+            // goNext() 末尾手动调用一次；此处只更新按钮状态即可
+        }
     }
 }
 
@@ -215,6 +225,43 @@ QWidget *ConnectWizardDialog::buildPage1()
         "}"
         "QLineEdit:focus { border-color: #6366f1; }"));
 
+    // ── 类型选择 ──────────────────────────────────────────────────
+    auto *typeLabel = new QLabel(QString::fromUtf8("配置类型"), page);
+    typeLabel->setStyleSheet(QStringLiteral(
+        "font-size: 11px; color: #6b7280; font-weight: 500; margin-top: 8px;"));
+
+    auto *typePillRow = new QHBoxLayout;
+    typePillRow->setSpacing(6);
+
+    m_typeGroup = new QButtonGroup(this);
+    m_typeGroup->setExclusive(true);
+
+    const struct { int id; QString label; } kTypes[] = {
+        { 0, QString::fromUtf8("混合") },
+        { 1, QStringLiteral("Claude") },
+        { 2, QStringLiteral("Codex") },
+        { 3, QStringLiteral("Gemini") },
+    };
+    for (const auto &t : kTypes) {
+        auto *btn = new QPushButton(t.label, page);
+        btn->setCheckable(true);
+        btn->setChecked(t.id == 0);
+        btn->setFixedHeight(30);
+        btn->setStyleSheet(QStringLiteral(
+            "QPushButton {"
+            "  background: #f3f4f6; color: #374151; border: 1.5px solid #d1d5db;"
+            "  border-radius: 6px; font-size: 12px; padding: 0 12px; }"
+            "QPushButton:checked {"
+            "  background: #6366f1; color: white; border-color: #6366f1; }"
+            "QPushButton:hover:!checked { background: #e5e7eb; }"));
+        m_typeGroup->addButton(btn, t.id);
+        typePillRow->addWidget(btn);
+    }
+    typePillRow->addStretch();
+
+    connect(m_typeGroup, QOverload<int>::of(&QButtonGroup::idClicked),
+            this, &ConnectWizardDialog::onTypeChanged);
+
     layout->addStretch();
     layout->addWidget(iconLabel);
     layout->addSpacing(8);
@@ -222,6 +269,9 @@ QWidget *ConnectWizardDialog::buildPage1()
     layout->addWidget(descLabel);
     layout->addSpacing(24);
     layout->addWidget(m_nameEdit);
+    layout->addSpacing(12);
+    layout->addWidget(typeLabel);
+    layout->addLayout(typePillRow);
     layout->addStretch();
 
     return page;
@@ -277,6 +327,7 @@ QWidget *ConnectWizardDialog::buildPage2()
 
         // Card
         auto *card = new QFrame;
+        sec.card = card;   // 保存引用，供 updateSectionVisibility 显隐
         card->setStyleSheet(QStringLiteral(
             "QFrame {"
             "  background: #ffffff;"
@@ -600,6 +651,26 @@ void ConnectWizardDialog::onRequestFailed(const QString &error)
 }
 
 // ---------------------------------------------------------------------------
+// 类型切换
+// ---------------------------------------------------------------------------
+
+void ConnectWizardDialog::onTypeChanged(int id)
+{
+    m_selectedType = static_cast<ProfileType>(id);
+    updateSectionVisibility();
+}
+
+void ConnectWizardDialog::updateSectionVisibility()
+{
+    const QList<AiTool> visible = toolsForType(m_selectedType);
+    for (ToolSection &s : m_sections) {
+        if (s.card) {
+            s.card->setVisible(visible.contains(s.tool));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -647,6 +718,7 @@ void ConnectWizardDialog::goNext()
             return;
         }
         m_stack->setCurrentIndex(1);
+        updateSectionVisibility();  // 按当前类型显隐工具 section
         updateNavButtons();
 
     } else if (idx == 1) {
@@ -674,19 +746,20 @@ void ConnectWizardDialog::finish()
     int profileIdx;
 
     if (m_editIndex == -1) {
-        profileIdx = m_profileManager->addProfile(name);
+        profileIdx = m_profileManager->addProfile(name, m_selectedType);
     } else {
         profileIdx = m_editIndex;
         m_profileManager->renameProfile(profileIdx, name);
+        m_profileManager->setProfileType(profileIdx, m_selectedType);
     }
 
     for (const ToolSection &sec : m_sections) {
         if (!sec.enableCheck->isChecked()) continue;
+        if (sec.card && !sec.card->isVisible()) continue;  // 类型过滤掉的工具跳过
 
         const QString key = currentKey(sec);
         if (key.isEmpty()) continue;
 
-        // Use empty string for model if placeholder is still selected
         const bool hasModel = sec.modelCombo->count() > 0
                               && sec.modelCombo->currentIndex() >= 0
                               && !sec.modelCombo->currentText().startsWith(

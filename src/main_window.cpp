@@ -11,6 +11,10 @@
 #include <QUrl>
 #include <QJsonObject>
 #include <QFont>
+#include <QButtonGroup>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QProgressDialog>
 
 static const QString kSiteUrl = "https://www.aegisy.cc";
 
@@ -165,6 +169,39 @@ void MainWindow::setupUi()
     sectionBar->addWidget(m_newConnectButton);
     mainLayout->addLayout(sectionBar);
 
+    // ===== 类型筛选栏 =====
+    QHBoxLayout *filterBar = new QHBoxLayout();
+    filterBar->setSpacing(6);
+    filterBar->setContentsMargins(0, 0, 0, 0);
+
+    m_filterGroup = new QButtonGroup(this);
+    m_filterGroup->setExclusive(true);
+
+    const struct { int id; QString label; } kFilters[] = {
+        { 0, QString::fromUtf8("全部") },
+        { 1, QStringLiteral("Claude") },
+        { 2, QStringLiteral("Codex") },
+        { 3, QStringLiteral("Gemini") },
+    };
+    const QString filterBtnStyle =
+        "QPushButton {"
+        "  background: #f8fafc; color: #64748b; border: 1.5px solid #e2e8f0;"
+        "  border-radius: 6px; font-size: 12px; padding: 3px 12px; }"
+        "QPushButton:checked {"
+        "  background: #eff6ff; color: #6366f1; border-color: #6366f1; font-weight: bold; }"
+        "QPushButton:hover:!checked { background: #f1f5f9; }";
+    for (const auto &f : kFilters) {
+        auto *btn = new QPushButton(f.label, this);
+        btn->setCheckable(true);
+        btn->setChecked(f.id == 0);
+        btn->setFixedHeight(28);
+        btn->setStyleSheet(filterBtnStyle);
+        m_filterGroup->addButton(btn, f.id);
+        filterBar->addWidget(btn);
+    }
+    filterBar->addStretch();
+    mainLayout->addLayout(filterBar);
+
     // ===== 档案卡片横向滚动区 =====
     m_cardsScroll = new QScrollArea(this);
     m_cardsScroll->setWidgetResizable(true);
@@ -231,12 +268,13 @@ void MainWindow::setupUi()
     connect(m_newConnectButton, &QPushButton::clicked, this, &MainWindow::onNewConnectClicked);
     connect(m_manageKeysButton, &QPushButton::clicked, this, &MainWindow::onManageKeysClicked);
     connect(m_viewModelsButton, &QPushButton::clicked, this, &MainWindow::onViewModelsClicked);
+    connect(m_filterGroup, QOverload<int>::of(&QButtonGroup::idClicked),
+            this, &MainWindow::onFilterChanged);
 }
 
 // ── 重建全部档案卡片 ────────────────────────────────────────────
 void MainWindow::rebuildCards()
 {
-    // 清空现有卡片
     QLayoutItem *item;
     while ((item = m_cardsLayout->takeAt(0)) != nullptr) {
         if (item->widget()) item->widget()->deleteLater();
@@ -247,6 +285,12 @@ void MainWindow::rebuildCards()
     const int activeIdx = m_profileManager->activeIndex();
 
     for (const Profile &p : profiles) {
+        // 筛选：Mixed 表示显示全部；否则只显示类型匹配的（Mixed 档案始终显示）
+        if (m_filterType != ProfileType::Mixed
+                && p.type != ProfileType::Mixed
+                && p.type != m_filterType) {
+            continue;
+        }
         m_cardsLayout->addWidget(createProfileCard(p, p.index == activeIdx));
     }
     m_cardsLayout->addWidget(createAddCard());
@@ -393,18 +437,25 @@ QWidget* MainWindow::createAddCard()
     return addCard;
 }
 
+// ── 筛选类型切换 ─────────────────────────────────────────────────
+void MainWindow::onFilterChanged(int typeId)
+{
+    m_filterType = static_cast<ProfileType>(typeId);
+    rebuildCards();
+}
+
 // ── 新建接入：打开向导 ──────────────────────────────────────────
 void MainWindow::onNewConnectClicked()
 {
     ConnectWizardDialog dlg(m_apiClient, m_profileManager, -1, this);
     const int result = dlg.exec();
-    // 向导会占用 apiKeysReceived 信号，关闭后刷新自己的缓存
     m_apiClient->getApiKeys();
 
     if (result == QDialog::Accepted) {
         const int newIdx = dlg.resultIndex();
-        logMessage("✓ 新档案创建完成，开始接入...", kLogSuccess);
+        logMessage("✓ 新档案创建完成，正在检测环境...", kLogSuccess);
         rebuildCards();
+        showEnvCheckDialog(newIdx);   // 先检测再激活
         if (newIdx >= 0) {
             activateProfile(newIdx);
         }
@@ -421,7 +472,8 @@ void MainWindow::editProfile(int index)
     m_apiClient->getApiKeys();
 
     if (result == QDialog::Accepted) {
-        logMessage("✓ 档案已更新", kLogSuccess);
+        logMessage("✓ 档案已更新，正在检测环境...", kLogSuccess);
+        showEnvCheckDialog(index);
     }
     rebuildCards();
 }
@@ -485,8 +537,13 @@ void MainWindow::processActivationQueue()
         return;
     }
 
-    const AiTool tool = m_activationQueue.first();  // 队首，安装完成后再出队
+    const AiTool tool = m_activationQueue.first();
     const ToolStatus status = m_toolManager->detect(tool);
+
+    // 如果检测到环境变量冲突，先警告（激活照常继续，configure() 会强制覆写配置文件）
+    if (!status.conflictWarning.isEmpty()) {
+        logMessage(QString("⚠ %1").arg(status.conflictWarning), kLogWarn);
+    }
 
     if (!status.nodeOk) {
         logMessage(QString("✗ %1 跳过：未检测到 Node.js").arg(ToolManager::toolName(tool)), kLogError);
@@ -574,6 +631,176 @@ void MainWindow::onInstallFinished(AiTool tool, bool success)
     configureFromProfile(m_activatingIndex, tool);
     m_activationQueue.removeFirst();
     processActivationQueue();
+}
+
+// ── 保存后环境检测弹窗 ──────────────────────────────────────────
+void MainWindow::showEnvCheckDialog(int profileIndex)
+{
+    if (profileIndex < 0) return;
+    const QList<Profile> profiles = m_profileManager->allProfiles();
+    if (profileIndex >= profiles.size()) return;
+    const Profile &profile = profiles[profileIndex];
+
+    // 只检测该档案实际配置了 Key 的工具
+    QList<AiTool> tools;
+    for (AiTool t : toolsForType(profile.type)) {
+        if (!profile.keyFor(t).isEmpty()) tools.append(t);
+    }
+    if (tools.isEmpty()) return;
+
+    // 构建检测结果（同步，最多 2s/工具）
+    struct CheckRow {
+        QString toolName;
+        bool    nodeOk;
+        bool    cliOk;
+        bool    desktopOk;
+        QString desktopName;
+        QString desktopUrl;
+        QString conflict;
+    };
+    QList<CheckRow> rows;
+    bool anyIssue = false;
+
+    for (AiTool t : tools) {
+        const ToolStatus     ts = m_toolManager->detectFast(t);
+        const DesktopAppStatus ds = m_toolManager->detectDesktop(t);
+        CheckRow row;
+        row.toolName    = ToolManager::toolName(t);
+        row.nodeOk      = ts.nodeOk;
+        row.cliOk       = ts.installed;
+        row.desktopOk   = ds.installed;
+        row.desktopName = ds.appName;
+        row.desktopUrl  = ds.downloadUrl;
+        row.conflict    = ts.conflictWarning;
+        rows.append(row);
+        if (!ts.nodeOk || !ts.installed || !ts.conflictWarning.isEmpty())
+            anyIssue = true;
+    }
+
+    if (!anyIssue) {
+        // 全部就绪时不打扰用户，只在日志里输出一条简报
+        for (const CheckRow &r : rows) {
+            logMessage(QString("✓ %1 环境就绪").arg(r.toolName), kLogSuccess);
+        }
+        return;
+    }
+
+    // ── 有问题时弹出检测报告 ──────────────────────────────────────
+    QDialog dlg(this);
+    dlg.setWindowTitle(QString::fromUtf8("环境检测报告"));
+    dlg.setFixedWidth(480);
+    dlg.setWindowFlags(dlg.windowFlags() & ~Qt::WindowContextHelpButtonHint);
+    dlg.setStyleSheet("QDialog { background: #ffffff; }");
+
+    auto *root = new QVBoxLayout(&dlg);
+    root->setContentsMargins(24, 20, 24, 16);
+    root->setSpacing(12);
+
+    auto *title = new QLabel(QString::fromUtf8("🔍 保存档案后的环境检测"), &dlg);
+    title->setStyleSheet("font-size: 15px; font-weight: bold; color: #111827;");
+    root->addWidget(title);
+
+    auto *sub = new QLabel(QString::fromUtf8("以下工具需要你完成额外的安装步骤后才能正常使用："), &dlg);
+    sub->setWordWrap(true);
+    sub->setStyleSheet("font-size: 12px; color: #6b7280;");
+    root->addWidget(sub);
+
+    for (const CheckRow &r : rows) {
+        auto *card = new QFrame(&dlg);
+        card->setStyleSheet(
+            "QFrame { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; }");
+        auto *cv = new QVBoxLayout(card);
+        cv->setContentsMargins(14, 12, 14, 12);
+        cv->setSpacing(6);
+
+        auto *hdr = new QLabel(r.toolName, card);
+        hdr->setStyleSheet("font-size: 13px; font-weight: bold; color: #111827;");
+        cv->addWidget(hdr);
+
+        // Node.js
+        if (!r.nodeOk) {
+            auto *row2 = new QHBoxLayout;
+            auto *icon = new QLabel("❌", card);
+            auto *txt  = new QLabel(QString::fromUtf8("Node.js 未安装"), card);
+            txt->setStyleSheet("font-size: 12px; color: #ef4444;");
+            auto *btn  = new QPushButton(QString::fromUtf8("下载 Node.js"), card);
+            btn->setFixedHeight(26);
+            btn->setStyleSheet(
+                "QPushButton { background: #3b82f6; color: white; border: none;"
+                "  border-radius: 5px; font-size: 11px; padding: 0 10px; }"
+                "QPushButton:hover { background: #2563eb; }");
+            connect(btn, &QPushButton::clicked, [](){ QDesktopServices::openUrl(QUrl("https://nodejs.org/")); });
+            row2->addWidget(icon); row2->addWidget(txt, 1); row2->addWidget(btn);
+            cv->addLayout(row2);
+        }
+
+        // CLI
+        if (!r.cliOk) {
+            auto *row2 = new QHBoxLayout;
+            auto *icon = new QLabel("❌", card);
+            auto *txt  = new QLabel(QString::fromUtf8("CLI 未安装"), card);
+            txt->setStyleSheet("font-size: 12px; color: #ef4444;");
+            auto *btn  = new QPushButton(QString::fromUtf8("一键安装"), card);
+            btn->setEnabled(r.nodeOk);
+            btn->setFixedHeight(26);
+            btn->setStyleSheet(
+                "QPushButton { background: #6366f1; color: white; border: none;"
+                "  border-radius: 5px; font-size: 11px; padding: 0 10px; }"
+                "QPushButton:hover { background: #4f46e5; }"
+                "QPushButton:disabled { background: #d1d5db; color: #9ca3af; }");
+            // 找到对应工具
+            for (AiTool t : tools) {
+                if (ToolManager::toolName(t) == r.toolName) {
+                    connect(btn, &QPushButton::clicked, this, [this, t, btn](){
+                        btn->setEnabled(false);
+                        btn->setText(QString::fromUtf8("安装中..."));
+                        m_toolManager->install(t);
+                    });
+                    break;
+                }
+            }
+            row2->addWidget(icon); row2->addWidget(txt, 1); row2->addWidget(btn);
+            cv->addLayout(row2);
+        }
+
+        // Desktop
+        if (!r.desktopOk) {
+            auto *row2 = new QHBoxLayout;
+            auto *icon = new QLabel("⬇️", card);
+            auto *txt  = new QLabel(r.desktopName + QString::fromUtf8(" 未安装"), card);
+            txt->setStyleSheet("font-size: 12px; color: #f59e0b;");
+            auto *btn  = new QPushButton(QString::fromUtf8("下载安装"), card);
+            btn->setFixedHeight(26);
+            const QString url = r.desktopUrl;
+            btn->setStyleSheet(
+                "QPushButton { background: #f59e0b; color: white; border: none;"
+                "  border-radius: 5px; font-size: 11px; padding: 0 10px; }"
+                "QPushButton:hover { background: #d97706; }");
+            connect(btn, &QPushButton::clicked, [url](){ QDesktopServices::openUrl(QUrl(url)); });
+            row2->addWidget(icon); row2->addWidget(txt, 1); row2->addWidget(btn);
+            cv->addLayout(row2);
+        }
+
+        // 冲突警告
+        if (!r.conflict.isEmpty()) {
+            auto *row2 = new QHBoxLayout;
+            auto *icon = new QLabel("⚠️", card);
+            auto *txt  = new QLabel(r.conflict, card);
+            txt->setWordWrap(true);
+            txt->setStyleSheet("font-size: 11px; color: #b45309;");
+            row2->addWidget(icon); row2->addWidget(txt, 1);
+            cv->addLayout(row2);
+        }
+
+        root->addWidget(card);
+    }
+
+    auto *btns = new QDialogButtonBox(QDialogButtonBox::Ok, &dlg);
+    btns->button(QDialogButtonBox::Ok)->setText(QString::fromUtf8("知道了"));
+    connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    root->addWidget(btns);
+
+    dlg.exec();
 }
 
 // ── 高级功能 / 退出 ─────────────────────────────────────────────

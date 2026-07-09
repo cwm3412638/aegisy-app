@@ -8,12 +8,13 @@
 #include <QPushButton>
 #include <QLabel>
 #include <QCheckBox>
+#include <QButtonGroup>
 #include <QJsonArray>
 #include "api_client.h"
 #include "profile_manager.h"
 #include "tool_manager.h"
 
-// 三步接入向导
+// 三步接入向导（Step 1: 命名 + 类型选择 / Step 2: 工具配置 / Step 3: 确认摘要）
 // 用法：
 //   ConnectWizardDialog dlg(apiClient, profileMgr, -1, this);   // 新建
 //   ConnectWizardDialog dlg(apiClient, profileMgr, idx, this);  // 编辑
@@ -36,6 +37,7 @@ private slots:
     void onModelsReceived(const QJsonArray &models);
     void onRequestFailed(const QString &error);
     void onQueryModels(AiTool tool);
+    void onTypeChanged(int id);
     void goNext();
     void goBack();
     void finish();
@@ -44,37 +46,41 @@ private:
     // 每个工具对应的 UI 控件集合
     struct ToolSection {
         AiTool        tool;
-        QCheckBox    *enableCheck  = nullptr;
-        QComboBox    *keyCombo     = nullptr;
-        QPushButton  *queryButton  = nullptr;
-        QLabel       *loadingLabel = nullptr;
-        QComboBox    *modelCombo   = nullptr;
+        QWidget      *card          = nullptr;   // 整张卡片（用于显隐）
+        QCheckBox    *enableCheck   = nullptr;
+        QComboBox    *keyCombo      = nullptr;
+        QPushButton  *queryButton   = nullptr;
+        QLabel       *loadingLabel  = nullptr;
+        QComboBox    *modelCombo    = nullptr;
     };
 
     void setupUi();
-    QWidget* buildPage1();  // 档案命名
+    QWidget* buildPage1();  // 档案命名 + 类型选择
     QWidget* buildPage2();  // 工具配置
     QWidget* buildPage3();  // 确认摘要
     void refreshPage3();
     void populateKeyDropdowns();
     void setPage2Loading(AiTool tool, bool loading);
     void updateNavButtons();
+    void updateSectionVisibility();   // 根据 m_selectedType 显隐各 section
     QString currentKey(const ToolSection &s) const;
 
     ApiClient       *m_apiClient;
     ProfileManager  *m_profileManager;
     int              m_editIndex;     // -1 = 新建
-    int              m_resultIndex = -1;
-    AiTool           m_queryingTool = AiTool::ClaudeCode;
+    int              m_resultIndex   = -1;
+    AiTool           m_queryingTool  = AiTool::ClaudeCode;
     bool             m_waitingModels = false;
+    ProfileType      m_selectedType  = ProfileType::Mixed;
 
-    QStackedWidget  *m_stack        = nullptr;
-    QLabel          *m_stepLabel    = nullptr;
-    QPushButton     *m_backBtn      = nullptr;
-    QPushButton     *m_nextBtn      = nullptr;
+    QStackedWidget  *m_stack      = nullptr;
+    QLabel          *m_stepLabel  = nullptr;
+    QPushButton     *m_backBtn    = nullptr;
+    QPushButton     *m_nextBtn    = nullptr;
 
     // Page 1
-    QLineEdit *m_nameEdit = nullptr;
+    QLineEdit    *m_nameEdit   = nullptr;
+    QButtonGroup *m_typeGroup  = nullptr;   // 类型选择按钮组
 
     // Page 2 — 三个工具 section
     QList<ToolSection> m_sections;

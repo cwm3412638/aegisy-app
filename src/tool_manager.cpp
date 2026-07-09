@@ -11,10 +11,10 @@
 static const QString kBaseUrl = "https://aegisy.cc";
 
 #ifdef Q_OS_WIN
-static const QString kNpmCmd = "npm.cmd";
+static const QString kNpmCmd  = "npm.cmd";
 static const QString kWhichCmd = "where";
 #else
-static const QString kNpmCmd = "npm";
+static const QString kNpmCmd  = "npm";
 static const QString kWhichCmd = "which";
 #endif
 
@@ -63,11 +63,11 @@ QString ToolManager::cliCommand(AiTool tool)
     return QString();
 }
 
-bool ToolManager::commandExists(const QString &command)
+bool ToolManager::commandExists(const QString &command, int timeoutMs)
 {
     QProcess process;
     process.start(kWhichCmd, QStringList() << command);
-    if (!process.waitForFinished(5000)) {
+    if (!process.waitForFinished(timeoutMs)) {
         process.kill();
         return false;
     }
@@ -113,17 +113,18 @@ bool ToolManager::writeTextFile(const QString &path, const QByteArray &data)
     return true;
 }
 
-ToolStatus ToolManager::detect(AiTool tool)
+// ── 核心检测（可指定超时）────────────────────────────────────────
+ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
 {
     ToolStatus status;
-    status.nodeOk = isNodeAvailable();
-    status.installed = commandExists(cliCommand(tool));
+    status.nodeOk    = commandExists("node", timeoutMs);
+    status.installed = commandExists(cliCommand(tool), timeoutMs);
 
     // 兜底：PATH 里找不到时查 npm 全局包（有些环境 npm bin 不在 PATH）
     if (!status.installed && status.nodeOk) {
         QProcess process;
         process.start(kNpmCmd, QStringList() << "list" << "-g" << npmPackage(tool) << "--depth=0");
-        if (process.waitForFinished(5000)) {
+        if (process.waitForFinished(timeoutMs)) {
             const QString output = QString::fromUtf8(process.readAllStandardOutput());
             status.installed = output.contains(npmPackage(tool)) && !output.contains("(empty)");
         } else {
@@ -133,21 +134,20 @@ ToolStatus ToolManager::detect(AiTool tool)
 
     switch (tool) {
     case AiTool::ClaudeCode: {
-        // ~/.claude/settings.json 的 env.ANTHROPIC_BASE_URL 指向 aegisy.cc 即视为已接入
         QFile file(homeFilePath(".claude/settings.json"));
         if (file.exists() && file.open(QIODevice::ReadOnly)) {
             const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
             file.close();
             const QJsonObject env = root["env"].toObject();
             if (env["ANTHROPIC_BASE_URL"].toString().contains("aegisy.cc")) {
-                status.configured = true;
+                status.configured    = true;
                 status.configuredKey = env["ANTHROPIC_AUTH_TOKEN"].toString();
             }
         }
         // 官方指南：ANTHROPIC_API_KEY 与 AUTH_TOKEN 并存会 401
         if (!qgetenv("ANTHROPIC_API_KEY").isEmpty()) {
             status.conflictWarning =
-                QStringLiteral("检测到系统环境变量 ANTHROPIC_API_KEY，会与接入配置冲突导致 401，请删除该环境变量");
+                QStringLiteral("检测到系统环境变量 ANTHROPIC_API_KEY，会与接入配置冲突导致 401，建议删除该变量");
         }
         break;
     }
@@ -166,8 +166,12 @@ ToolStatus ToolManager::detect(AiTool tool)
             auth.close();
         }
         status.configured = baseOk && !key.isEmpty();
-        if (status.configured) {
-            status.configuredKey = key;
+        if (status.configured) status.configuredKey = key;
+        // 检查 OPENAI_API_KEY 是否指向别的账号
+        const QString envKey = qgetenv("OPENAI_API_KEY");
+        if (!envKey.isEmpty() && (!status.configured || envKey != key)) {
+            status.conflictWarning =
+                QStringLiteral("检测到系统环境变量 OPENAI_API_KEY，可能覆盖档案配置，建议删除该变量");
         }
         break;
     }
@@ -188,9 +192,7 @@ ToolStatus ToolManager::detect(AiTool tool)
                 }
             }
             status.configured = baseOk && !key.isEmpty();
-            if (status.configured) {
-                status.configuredKey = key;
-            }
+            if (status.configured) status.configuredKey = key;
         }
         break;
     }
@@ -199,6 +201,66 @@ ToolStatus ToolManager::detect(AiTool tool)
     return status;
 }
 
+ToolStatus ToolManager::detect(AiTool tool)
+{
+    return detectWithTimeout(tool, 5000);
+}
+
+ToolStatus ToolManager::detectFast(AiTool tool)
+{
+    return detectWithTimeout(tool, 2000);
+}
+
+// ── 桌面应用检测 ─────────────────────────────────────────────────
+DesktopAppStatus ToolManager::detectDesktop(AiTool tool)
+{
+    DesktopAppStatus result;
+
+    switch (tool) {
+    case AiTool::ClaudeCode: {
+        result.appName     = QStringLiteral("Claude 桌面版");
+        result.downloadUrl = QStringLiteral("https://claude.ai/download");
+#if defined(Q_OS_MACOS)
+        result.installed = QFile::exists("/Applications/Claude.app");
+#elif defined(Q_OS_WIN)
+        // 常见安装路径
+        const QString localApp = qgetenv("LOCALAPPDATA");
+        result.installed = QFile::exists(localApp + "\\Programs\\Claude\\claude.exe")
+                        || QFile::exists(localApp + "\\Claude\\claude.exe");
+#else
+        // Linux：检查常见位置
+        result.installed = commandExists("claude-desktop", 2000)
+                        || QFile::exists(QDir::homePath() + "/.local/share/applications/claude.desktop");
+#endif
+        break;
+    }
+    case AiTool::CodexCli: {
+        // Codex 本身是 CLI 工具；OpenAI 桌面客户端是 ChatGPT
+        result.appName     = QStringLiteral("ChatGPT 桌面版");
+        result.downloadUrl = QStringLiteral("https://chatgpt.com/download");
+#if defined(Q_OS_MACOS)
+        result.installed = QFile::exists("/Applications/ChatGPT.app");
+#elif defined(Q_OS_WIN)
+        const QString localApp = qgetenv("LOCALAPPDATA");
+        result.installed = QFile::exists(localApp + "\\Programs\\OpenAI\\ChatGPT\\chatgpt.exe");
+#else
+        result.installed = false;  // Linux 暂无官方桌面版
+#endif
+        break;
+    }
+    case AiTool::GeminiCli: {
+        // Gemini 暂无独立桌面版，指向 Web
+        result.appName     = QStringLiteral("Gemini Web");
+        result.downloadUrl = QStringLiteral("https://gemini.google.com/");
+        result.installed   = true;  // 网页版始终"可用"
+        break;
+    }
+    }
+
+    return result;
+}
+
+// ── 异步安装 ─────────────────────────────────────────────────────
 void ToolManager::install(AiTool tool)
 {
     QProcess *process = new QProcess(this);
@@ -227,6 +289,7 @@ void ToolManager::install(AiTool tool)
     process->start(kNpmCmd, QStringList() << "install" << "-g" << npmPackage(tool));
 }
 
+// ── 配置写入 ─────────────────────────────────────────────────────
 bool ToolManager::configure(AiTool tool, const QString &apiKey, const QString &model)
 {
     m_lastError.clear();
@@ -256,9 +319,9 @@ bool ToolManager::configureClaudeCode(const QString &apiKey, const QString &/*mo
     }
 
     QJsonObject env = root["env"].toObject();
-    env["ANTHROPIC_BASE_URL"] = kBaseUrl;
-    env["ANTHROPIC_AUTH_TOKEN"] = apiKey;
-    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1";
+    env["ANTHROPIC_BASE_URL"]                      = kBaseUrl;
+    env["ANTHROPIC_AUTH_TOKEN"]                    = apiKey;
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = QStringLiteral("1");
     root["env"] = env;
 
     return writeTextFile(path, QJsonDocument(root).toJson(QJsonDocument::Indented));
@@ -275,7 +338,6 @@ bool ToolManager::configureCodexCli(const QString &apiKey, const QString &model)
     }
     QJsonObject auth;
     {
-        // 保留 auth.json 其它字段（如 OAuth token）
         QFile f(authPath);
         if (f.exists() && f.open(QIODevice::ReadOnly)) {
             auth = QJsonDocument::fromJson(f.readAll()).object();
@@ -302,12 +364,10 @@ bool ToolManager::configureCodexCli(const QString &apiKey, const QString &model)
         return false;
     }
 
-    // 我们管理的顶层键（旧值删除后重写）
     static const QStringList managedTopKeys = {
         "model_provider", "model", "review_model", "model_reasoning_effort",
         "disable_response_storage", "network_access", "windows_wsl_setup_acknowledged",
     };
-    // 我们管理的表段
     static const QStringList managedSections = {
         "[model_providers.OpenAI]", "[model_providers.aegisy]", "[features]",
     };
@@ -336,10 +396,8 @@ bool ToolManager::configureCodexCli(const QString &apiKey, const QString &model)
     }
 
     QString result = outLines.join('\n');
-    if (!result.isEmpty()) {
-        result += "\n\n";
-    }
-    // 与官网「使用总指南」逐字段一致
+    if (!result.isEmpty()) result += "\n\n";
+
     result += QStringLiteral(
         "model_provider = \"OpenAI\"\n"
         "model = \"%1\"\n"
@@ -365,7 +423,6 @@ bool ToolManager::configureCodexCli(const QString &apiKey, const QString &model)
 bool ToolManager::configureGeminiCli(const QString &apiKey, const QString &model)
 {
     const QString effectiveModel = model.isEmpty() ? QStringLiteral("gemini-2.5-pro") : model;
-    // ~/.gemini/.env：按行合并三个变量，保留其它行
     const QString path = homeFilePath(".gemini/.env");
 
     QString existing;
@@ -389,23 +446,16 @@ bool ToolManager::configureGeminiCli(const QString &apiKey, const QString &model
         const QString t = raw.trimmed();
         bool managed = false;
         for (const QString &k : managedKeys) {
-            if (t.startsWith(k)) {
-                managed = true;
-                break;
-            }
+            if (t.startsWith(k)) { managed = true; break; }
         }
-        if (!managed) {
-            outLines.append(raw);
-        }
+        if (!managed) outLines.append(raw);
     }
     while (!outLines.isEmpty() && outLines.last().trimmed().isEmpty()) {
         outLines.removeLast();
     }
 
     QString result = outLines.join('\n');
-    if (!result.isEmpty()) {
-        result += "\n";
-    }
+    if (!result.isEmpty()) result += "\n";
     result += QStringLiteral(
         "GOOGLE_GEMINI_BASE_URL=\"%1\"\n"
         "GEMINI_API_KEY=\"%2\"\n"

@@ -21,6 +21,13 @@ struct ToolStatus {
     QString conflictWarning;     // 冲突警告（如 ANTHROPIC_API_KEY 环境变量）
 };
 
+// 桌面应用检测结果
+struct DesktopAppStatus {
+    bool    installed   = false;   // 是否已安装
+    QString downloadUrl;           // 下载链接
+    QString appName;               // 应用名称
+};
+
 // 三件套的检测 / 一键安装 / 配置写入。
 // 所有写入均为「读-合并-写」并先备份，不整文件覆盖。
 class ToolManager : public QObject
@@ -38,6 +45,12 @@ public:
 
     // 同步检测（含 QProcess 探测，最长约 5s）
     ToolStatus detect(AiTool tool);
+
+    // 快速检测：超时缩短为 2s，适合 UI 场景
+    ToolStatus detectFast(AiTool tool);
+
+    // 检测桌面应用安装状态（Claude 桌面版 / ChatGPT 桌面版）
+    DesktopAppStatus detectDesktop(AiTool tool);
 
     // 异步安装：npm install -g <pkg>；输出与结果通过信号回传
     void install(AiTool tool);
@@ -59,8 +72,9 @@ private:
     bool configureCodexCli(const QString &apiKey, const QString &model);
     bool configureGeminiCli(const QString &apiKey, const QString &model);
 
-    // 探测辅助
-    bool commandExists(const QString &command);
+    // 探测辅助：timeout 单位 ms
+    bool commandExists(const QString &command, int timeoutMs = 5000);
+    ToolStatus detectWithTimeout(AiTool tool, int timeoutMs);
 
     // 文件辅助
     static QString homeFilePath(const QString &relative);

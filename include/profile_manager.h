@@ -3,12 +3,44 @@
 
 #include <QObject>
 #include <QString>
+#include <QList>
 #include "tool_manager.h"
+
+// 档案类型：决定这个档案管理哪些工具
+enum class ProfileType {
+    Mixed  = 0,   // 三工具均可配置（旧默认）
+    Claude = 1,   // 仅 Claude Code
+    Codex  = 2,   // 仅 Codex CLI
+    Gemini = 3,   // 仅 Gemini CLI
+};
+
+// 按类型返回该档案应包含的工具列表
+inline QList<AiTool> toolsForType(ProfileType t)
+{
+    switch (t) {
+    case ProfileType::Claude: return { AiTool::ClaudeCode };
+    case ProfileType::Codex:  return { AiTool::CodexCli   };
+    case ProfileType::Gemini: return { AiTool::GeminiCli  };
+    default:                  return { AiTool::ClaudeCode, AiTool::CodexCli, AiTool::GeminiCli };
+    }
+}
+
+// 按类型返回显示名称
+inline QString profileTypeName(ProfileType t)
+{
+    switch (t) {
+    case ProfileType::Claude: return QStringLiteral("Claude");
+    case ProfileType::Codex:  return QStringLiteral("Codex");
+    case ProfileType::Gemini: return QStringLiteral("Gemini");
+    default:                  return QStringLiteral("混合");
+    }
+}
 
 // 一个配置档案：每个工具独立保存 API Key + 模型名
 struct Profile {
-    int     index  = -1;
-    QString name;
+    int         index  = -1;
+    QString     name;
+    ProfileType type   = ProfileType::Mixed;
 
     QString claudeKey,   claudeModel;
     QString codexKey,    codexModel;
@@ -48,6 +80,7 @@ struct Profile {
 //   profiles/count               = N
 //   profiles/active              = 0
 //   profiles/<i>/name            = "默认"
+//   profiles/<i>/type            = 0   (ProfileType int)
 //   profiles/<i>/claude_key      = "sk-ant-..."
 //   profiles/<i>/claude_model    = "claude-opus-4-5"
 //   profiles/<i>/codex_key       = "sk-..."
@@ -66,10 +99,11 @@ public:
     Profile activeProfile() const;
     int     count() const;
 
-    int  addProfile(const QString &name);
+    int  addProfile(const QString &name, ProfileType type = ProfileType::Mixed);
     void removeProfile(int index);
     void renameProfile(int index, const QString &name);
     void setActiveIndex(int index);
+    void setProfileType(int index, ProfileType type);
 
     // 保存单个工具的 Key + Model
     void saveToolConfig(int profileIndex, AiTool tool,

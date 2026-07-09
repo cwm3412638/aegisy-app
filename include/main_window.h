@@ -9,6 +9,7 @@
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QList>
+#include <QButtonGroup>
 #include "api_client.h"
 #include "tool_manager.h"
 #include "profile_manager.h"
@@ -35,6 +36,7 @@ private slots:
     void onViewModelsClicked();
     void onLogoutClicked();
     void onNewConnectClicked();
+    void onFilterChanged(int typeId);
 
 private:
     void setupUi();
@@ -51,6 +53,9 @@ private:
     void editProfile(int index);
     void deleteProfile(int index);
 
+    // 保存后环境检测弹窗
+    void showEnvCheckDialog(int profileIndex);
+
     void logMessage(const QString &message, const QString &color = "#94a3b8");
     static QString maskKey(const QString &key);
 
@@ -63,10 +68,11 @@ private:
     QPushButton *m_logoutButton;
 
     // UI — 档案卡片区
-    QPushButton *m_newConnectButton;
-    QScrollArea *m_cardsScroll;
-    QWidget     *m_cardsContainer;
-    QHBoxLayout *m_cardsLayout;
+    QPushButton  *m_newConnectButton;
+    QScrollArea  *m_cardsScroll;
+    QWidget      *m_cardsContainer;
+    QHBoxLayout  *m_cardsLayout;
+    QButtonGroup *m_filterGroup = nullptr;   // 类型筛选按钮组
 
     // UI — 高级区 + 日志
     QPushButton *m_manageKeysButton;
@@ -77,6 +83,9 @@ private:
     QString    m_authToken;
     QJsonArray m_keys;
     bool       m_keysLoaded = false;
+
+    // 当前筛选类型（Mixed = 全部显示）
+    ProfileType m_filterType = ProfileType::Mixed;
 
     // 激活流程状态（含自动安装的异步队列）
     QList<AiTool> m_activationQueue;
