@@ -47,8 +47,12 @@ private:
     void refreshToolCard(AiTool tool);
     void refreshAllCards();
 
-    // 按分组 platform 从缓存 keys 中挑选可用 Key；无则返回空
-    QString pickKeyForTool(AiTool tool, QString *keyLabel = nullptr) const;
+    // 按分组 platform 列出当前登录用户所有可用的 Key（用于选择）
+    struct KeyChoice {
+        QString key;
+        QString label;   // "名称 — 分组 (sk-xxx...xxxx)"
+    };
+    QList<KeyChoice> keysForTool(AiTool tool) const;
     // 一键接入的配置阶段（安装完成后也会走到这里）
     void configureTool(AiTool tool);
 
@@ -68,8 +72,9 @@ private:
 
     // 状态
     QString m_authToken;
-    QJsonArray m_keys;          // 账号 API Keys（含 group）
+    QJsonArray m_keys;          // 当前登录用户的 API Keys（含 group）
     bool m_keysLoaded = false;
+    QMap<AiTool, KeyChoice> m_pendingChoice;  // 接入流程中用户选定的 Key（跨安装步骤传递）
 };
 
 #endif // MAIN_WINDOW_H

@@ -6,6 +6,7 @@
 #include <QHBoxLayout>
 #include <QGroupBox>
 #include <QMessageBox>
+#include <QInputDialog>
 #include <QDesktopServices>
 #include <QUrl>
 #include <QJsonObject>
@@ -243,9 +244,10 @@ void MainWindow::onRequestFailed(const QString &error)
     logMessage(QString("✗ 请求失败：%1").arg(error), "#e74c3c");
 }
 
-QString MainWindow::pickKeyForTool(AiTool tool, QString *keyLabel) const
+QList<MainWindow::KeyChoice> MainWindow::keysForTool(AiTool tool) const
 {
     const QString platform = ToolManager::toolPlatform(tool);
+    QList<KeyChoice> choices;
 
     for (const QJsonValue &val : m_keys) {
         const QJsonObject obj = val.toObject();
@@ -254,14 +256,18 @@ QString MainWindow::pickKeyForTool(AiTool tool, QString *keyLabel) const
         if (key.isEmpty()) continue;
 
         const QJsonObject group = obj["group"].toObject();
-        if (group["platform"].toString() == platform) {
-            if (keyLabel) {
-                *keyLabel = QString("%1 / %2 组").arg(obj["name"].toString(), group["name"].toString());
-            }
-            return key;
-        }
+        if (group["platform"].toString() != platform) continue;
+
+        KeyChoice c;
+        c.key = key;
+        const QString name = obj["name"].toString();
+        c.label = QString("%1 — %2 (%3)")
+                      .arg(name.isEmpty() ? QStringLiteral("(未命名)") : name,
+                           group["name"].toString(),
+                           maskKey(key));
+        choices.append(c);
     }
-    return QString();
+    return choices;
 }
 
 void MainWindow::onConnectToolClicked(AiTool tool)
@@ -288,14 +294,14 @@ void MainWindow::onConnectToolClicked(AiTool tool)
         return;
     }
 
-    // 2) Key 前置：必须有对应分组的 Key
+    // 2) Key 前置：从当前登录用户的 Key 里按分组匹配，由用户选择
     if (!m_keysLoaded) {
         logMessage("API Keys 尚未加载完成，请稍候再试...", "#e67e22");
         m_apiClient->getApiKeys();
         return;
     }
-    const QString apiKey = pickKeyForTool(tool);
-    if (apiKey.isEmpty()) {
+    const QList<KeyChoice> choices = keysForTool(tool);
+    if (choices.isEmpty()) {
         const QString platform = ToolManager::toolPlatform(tool);
         QMessageBox msg(this);
         msg.setWindowTitle("没有可用的 API Key");
@@ -312,6 +318,23 @@ void MainWindow::onConnectToolClicked(AiTool tool)
         }
         return;
     }
+
+    // 让用户选择用哪个 Key（默认第一个；只有一个时也展示以便确认）
+    QStringList labels;
+    for (const KeyChoice &c : choices) {
+        labels << c.label;
+    }
+    bool ok = false;
+    const QString picked = QInputDialog::getItem(
+        this,
+        QString("选择 API Key — %1").arg(ToolManager::toolName(tool)),
+        "将使用以下 API Key 接入（可下拉更换）：",
+        labels, 0, false, &ok);
+    if (!ok) {
+        return;  // 用户取消
+    }
+    const int idx = labels.indexOf(picked);
+    m_pendingChoice.insert(tool, choices.value(idx < 0 ? 0 : idx));
 
     card.actionButton->setEnabled(false);
 
@@ -338,6 +361,7 @@ void MainWindow::onInstallFinished(AiTool tool, bool success)
         logMessage(QString("✗ %1 安装失败，请检查网络或手动运行：npm install -g %2")
                        .arg(ToolManager::toolName(tool), ToolManager::npmPackage(tool)),
                    "#e74c3c");
+        m_pendingChoice.remove(tool);
         const ToolCard &card = m_cards.value(tool);
         if (card.actionButton) card.actionButton->setEnabled(true);
         return;
@@ -350,12 +374,14 @@ void MainWindow::configureTool(AiTool tool)
 {
     const ToolCard &card = m_cards.value(tool);
 
-    QString keyLabel;
-    const QString apiKey = pickKeyForTool(tool, &keyLabel);
-    if (apiKey.isEmpty()) {
+    // 用户在接入流程开始时选定的 Key（跨过安装步骤传到这里）
+    const KeyChoice choice = m_pendingChoice.take(tool);
+    if (choice.key.isEmpty()) {
         if (card.actionButton) card.actionButton->setEnabled(true);
         return;
     }
+    const QString apiKey = choice.key;
+    const QString keyLabel = choice.label;
 
     logMessage(QString("正在写入 %1 配置（%2）...").arg(ToolManager::toolName(tool), keyLabel), "#3498db");
 
