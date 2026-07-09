@@ -8,6 +8,7 @@
 #include <QJsonObject>
 #include <QDateTime>
 #include <QTimer>
+#include <QSettings>
 
 ApiKeyInfo ApiKeyInfo::fromJson(const QJsonObject &obj)
 {
@@ -31,9 +32,15 @@ ApiKeysDialog::ApiKeysDialog(ApiClient *apiClient, QWidget *parent)
     : QDialog(parent)
     , m_apiClient(apiClient)
 {
+    // 读取上次激活的 Key（持久化，退出后仍记住）
+    QSettings settings;
+    m_activeKeyId = settings.value("apikeys/activeKeyId").toString();
+
     setupUi();
     setWindowTitle("API Keys 管理");
     resize(900, 500);
+    // 铺满整个屏幕
+    setWindowState(windowState() | Qt::WindowMaximized);
 
     // 连接 API 客户端信号
     connect(m_apiClient, &ApiClient::apiKeysReceived, this, &ApiKeysDialog::onKeysReceived);
@@ -209,6 +216,11 @@ void ApiKeysDialog::onActivateKeyClicked()
 
     m_activeKeyId = selectedKey.id;
 
+    // 持久化激活的 Key，退出后仍记住
+    QSettings settings;
+    settings.setValue("apikeys/activeKeyId", m_activeKeyId);
+    settings.setValue("apikeys/activeKey", selectedKey.key);
+
     // 刷新表格显示
     updateKeysTable(m_keys);
 
@@ -253,13 +265,14 @@ void ApiKeysDialog::updateKeysTable(const QList<ApiKeyInfo> &keys)
         const ApiKeyInfo &info = keys[i];
         m_keysTable->insertRow(i);
 
-        // Name (with active indicator)
+        // Name（★ 仅标记用户选中的激活 Key，与服务端 status 区分开）
+        const bool isSelectedActive = (!m_activeKeyId.isEmpty() && info.id == m_activeKeyId);
         QString displayName = info.name;
-        if (info.isActive || info.id == m_activeKeyId) {
+        if (isSelectedActive) {
             displayName = "★ " + displayName;
         }
         QTableWidgetItem *nameItem = new QTableWidgetItem(displayName);
-        if (info.isActive || info.id == m_activeKeyId) {
+        if (isSelectedActive) {
             QFont font = nameItem->font();
             font.setBold(true);
             nameItem->setFont(font);

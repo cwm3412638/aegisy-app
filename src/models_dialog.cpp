@@ -11,6 +11,8 @@
 #include <QGroupBox>
 #include <QDateTime>
 #include <QSet>
+#include <QSettings>
+#include <QLineEdit>
 
 ModelInfo ModelInfo::fromJson(const QJsonObject &obj)
 {
@@ -69,15 +71,17 @@ void ModelsDialog::setupUi()
 
     mainLayout->addLayout(headerLayout);
 
-    // API Key 行（自动填充，也可手动粘贴）
+    // API Key 行（下拉从账号 API Keys 列表选择，也可手动粘贴）
     QHBoxLayout *keyLayout = new QHBoxLayout();
     QLabel *keyLabel = new QLabel("API Key:", this);
     keyLayout->addWidget(keyLabel);
 
-    m_keyEdit = new QLineEdit(this);
-    m_keyEdit->setPlaceholderText("sk-... （将自动从账号读取，也可手动粘贴）");
-    m_keyEdit->setMinimumWidth(300);
-    keyLayout->addWidget(m_keyEdit);
+    m_keyCombo = new QComboBox(this);
+    m_keyCombo->setEditable(true);
+    m_keyCombo->setInsertPolicy(QComboBox::NoInsert);
+    m_keyCombo->setMinimumWidth(340);
+    m_keyCombo->lineEdit()->setPlaceholderText("从账号 API Key 中选择，或手动粘贴 sk-...");
+    keyLayout->addWidget(m_keyCombo, 1);
 
     m_refreshButton = new QPushButton("🔄 查询模型", this);
     m_refreshButton->setMinimumHeight(32);
@@ -191,7 +195,10 @@ void ModelsDialog::setupUi()
 
     // Connections
     connect(m_refreshButton, &QPushButton::clicked, this, &ModelsDialog::onRefreshClicked);
-    connect(m_keyEdit, &QLineEdit::returnPressed, this, &ModelsDialog::onRefreshClicked);
+    // 用户从下拉中选择某个 Key 时自动查询（activated 仅由用户操作触发，程序设置不触发）
+    connect(m_keyCombo, QOverload<int>::of(&QComboBox::activated),
+            this, &ModelsDialog::onRefreshClicked);
+    connect(m_keyCombo->lineEdit(), &QLineEdit::returnPressed, this, &ModelsDialog::onRefreshClicked);
     connect(m_copyButton, &QPushButton::clicked, this, &ModelsDialog::onCopyModelClicked);
     connect(m_providerCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &ModelsDialog::onProviderChanged);
@@ -207,9 +214,21 @@ void ModelsDialog::loadApiKeys()
     m_apiClient->getApiKeys();
 }
 
+QString ModelsDialog::currentApiKey() const
+{
+    // 若当前文本与选中项的显示文本一致，说明是从下拉选择的 -> 取存储的完整 Key；
+    // 否则说明用户手动输入/粘贴了 Key -> 直接使用输入文本
+    const int idx = m_keyCombo->currentIndex();
+    const QString text = m_keyCombo->currentText().trimmed();
+    if (idx >= 0 && text == m_keyCombo->itemText(idx)) {
+        return m_keyCombo->itemData(idx).toString();
+    }
+    return text;
+}
+
 void ModelsDialog::loadModels()
 {
-    const QString key = m_keyEdit->text().trimmed();
+    const QString key = currentApiKey();
     if (key.isEmpty()) {
         m_statusLabel->setText("✗ 请先输入 API Key（sk- 开头）再查询模型");
         m_statusLabel->setStyleSheet("color: #e74c3c; font-size: 12px;");
@@ -263,35 +282,64 @@ void ModelsDialog::onTableSelectionChanged()
 
 void ModelsDialog::onApiKeysReceived(const QJsonArray &keys)
 {
-    // 若用户已手动填写 Key，则不覆盖
-    if (!m_keyEdit->text().trimmed().isEmpty()) {
-        return;
-    }
+    // 若用户已手动输入 Key，则不覆盖其选择
+    const bool userTyped = m_keyCombo->currentIndex() < 0
+            && !m_keyCombo->currentText().trimmed().isEmpty();
 
-    // 优先选择状态为 active 的 Key，其次取第一个可用的 Key
-    QString chosen;
+    const QString persistedId = QSettings().value("apikeys/activeKeyId").toString();
+
+    m_keyCombo->blockSignals(true);
+    m_keyCombo->clear();
+
+    int selectIdx = -1;      // 与 API Keys 页面激活的 Key 匹配
+    int firstActiveIdx = -1; // 服务端状态为 active 的第一个 Key
+
     for (const QJsonValue &val : keys) {
         const QJsonObject obj = val.toObject();
         const QString key = obj["key"].toString();
         if (key.isEmpty()) {
             continue;
         }
-        if (obj["status"].toString() == "active") {
-            chosen = key;
-            break;
+        const QString id = QString::number(obj["id"].toInt());
+        const QString name = obj["name"].toString();
+        const QString status = obj["status"].toString();
+
+        QString masked = key;
+        if (masked.length() > 12) {
+            masked = masked.left(8) + "..." + masked.right(4);
         }
-        if (chosen.isEmpty()) {
-            chosen = key;
+        const QString display = name.isEmpty() ? masked
+                                               : QString("%1 (%2)").arg(name, masked);
+
+        const int idx = m_keyCombo->count();
+        m_keyCombo->addItem(display, key);          // 完整 Key 存入 UserRole
+        m_keyCombo->setItemData(idx, id, Qt::UserRole + 1);
+
+        if (!persistedId.isEmpty() && id == persistedId) {
+            selectIdx = idx;
+        }
+        if (firstActiveIdx < 0 && status == "active") {
+            firstActiveIdx = idx;
         }
     }
+    m_keyCombo->blockSignals(false);
 
-    if (chosen.isEmpty()) {
-        m_statusLabel->setText("✗ 未找到可用的 API Key，请到「API Keys 管理」创建后再试，或手动粘贴 Key");
-        m_statusLabel->setStyleSheet("color: #e74c3c; font-size: 12px;");
+    if (m_keyCombo->count() == 0) {
+        if (!userTyped) {
+            m_statusLabel->setText("✗ 未找到可用的 API Key，请到「API Keys 管理」创建后再试，或手动粘贴 Key");
+            m_statusLabel->setStyleSheet("color: #e74c3c; font-size: 12px;");
+        }
         return;
     }
 
-    m_keyEdit->setText(chosen);
+    if (userTyped) {
+        // 保留用户手动输入的 Key，仅提供下拉可选
+        return;
+    }
+
+    const int idx = selectIdx >= 0 ? selectIdx
+                                   : (firstActiveIdx >= 0 ? firstActiveIdx : 0);
+    m_keyCombo->setCurrentIndex(idx);
     loadModels();
 }
 

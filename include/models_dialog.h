@@ -46,13 +46,14 @@ private:
     void loadModels();
     void updateModelsTable(const QList<ModelInfo> &models);
     void rebuildProviderFilter();
+    QString currentApiKey() const;
     ModelInfo getSelectedModel() const;
     void filterModels();
 
     ApiClient *m_apiClient;
 
     // UI Elements
-    QLineEdit *m_keyEdit;
+    QComboBox *m_keyCombo;      // API Key 下拉（可从账号列表选择，也可手动粘贴）
     QComboBox *m_providerCombo;
     QLineEdit *m_searchEdit;
     QPushButton *m_refreshButton;
