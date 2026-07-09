@@ -128,8 +128,6 @@ void MainWindow::setupUi()
         "  background-color: #d35400;"
         "}"
     );
-    // 暂时隐藏，等后端 API 准备好
-    m_viewModelsButton->setVisible(false);
 
     envButtonLayout->addWidget(m_quickSetupButton);
     envButtonLayout->addWidget(m_refreshButton);

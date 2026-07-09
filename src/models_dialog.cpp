@@ -9,32 +9,20 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QGroupBox>
+#include <QDateTime>
+#include <QSet>
 
 ModelInfo ModelInfo::fromJson(const QJsonObject &obj)
 {
     ModelInfo info;
+    // OpenAI 兼容格式：{ "id": "gpt-4", "object": "model", "created": 1687882411, "owned_by": "openai" }
     info.id = obj["id"].toString();
-    info.name = obj["name"].toString();
-    info.channel = obj["channel"].toString();
+    info.name = info.id;
+    info.provider = obj["owned_by"].toString();
 
-    // 价格信息（每百万 tokens）
-    info.inputPrice = obj["input_price"].toString();
-    info.outputPrice = obj["output_price"].toString();
-    info.description = obj["description"].toString();
-
-    return info;
-}
-
-ChannelInfo ChannelInfo::fromJson(const QJsonObject &obj)
-{
-    ChannelInfo info;
-    info.id = obj["id"].toString();
-    info.name = obj["name"].toString();
-    info.type = obj["type"].toString();
-
-    QJsonArray modelsArray = obj["models"].toArray();
-    for (const QJsonValue &val : modelsArray) {
-        info.models.append(val.toString());
+    qint64 created = obj["created"].toVariant().toLongLong();
+    if (created > 0) {
+        info.created = QDateTime::fromSecsSinceEpoch(created).toString("yyyy-MM-dd");
     }
 
     return info;
@@ -45,17 +33,16 @@ ModelsDialog::ModelsDialog(ApiClient *apiClient, QWidget *parent)
     , m_apiClient(apiClient)
 {
     setupUi();
-    setWindowTitle("模型和价格管理");
-    resize(1000, 600);
+    setWindowTitle("模型列表");
+    resize(760, 600);
 
     // 连接 API 信号
     connect(m_apiClient, &ApiClient::modelsReceived, this, &ModelsDialog::onModelsReceived);
-    connect(m_apiClient, &ApiClient::channelsReceived, this, &ModelsDialog::onChannelsReceived);
+    connect(m_apiClient, &ApiClient::apiKeysReceived, this, &ModelsDialog::onApiKeysReceived);
     connect(m_apiClient, &ApiClient::requestFailed, this, &ModelsDialog::onRequestFailed);
 
-    // 加载数据
-    loadChannels();
-    loadModels();
+    // 自动获取账号下的 API Key，用于查询账号支持的模型
+    loadApiKeys();
 }
 
 void ModelsDialog::setupUi()
@@ -67,7 +54,7 @@ void ModelsDialog::setupUi()
     // Header
     QHBoxLayout *headerLayout = new QHBoxLayout();
 
-    QLabel *titleLabel = new QLabel("模型和价格管理", this);
+    QLabel *titleLabel = new QLabel("账号支持的模型", this);
     QFont titleFont = titleLabel->font();
     titleFont.setPointSize(16);
     titleFont.setBold(true);
@@ -82,17 +69,33 @@ void ModelsDialog::setupUi()
 
     mainLayout->addLayout(headerLayout);
 
+    // API Key 行（自动填充，也可手动粘贴）
+    QHBoxLayout *keyLayout = new QHBoxLayout();
+    QLabel *keyLabel = new QLabel("API Key:", this);
+    keyLayout->addWidget(keyLabel);
+
+    m_keyEdit = new QLineEdit(this);
+    m_keyEdit->setPlaceholderText("sk-... （将自动从账号读取，也可手动粘贴）");
+    m_keyEdit->setMinimumWidth(300);
+    keyLayout->addWidget(m_keyEdit);
+
+    m_refreshButton = new QPushButton("🔄 查询模型", this);
+    m_refreshButton->setMinimumHeight(32);
+    keyLayout->addWidget(m_refreshButton);
+
+    mainLayout->addLayout(keyLayout);
+
     // Filters
     QGroupBox *filterGroup = new QGroupBox("筛选", this);
     QHBoxLayout *filterLayout = new QHBoxLayout(filterGroup);
 
-    QLabel *channelLabel = new QLabel("渠道:", this);
-    filterLayout->addWidget(channelLabel);
+    QLabel *providerLabel = new QLabel("提供方:", this);
+    filterLayout->addWidget(providerLabel);
 
-    m_channelCombo = new QComboBox(this);
-    m_channelCombo->setMinimumWidth(200);
-    m_channelCombo->addItem("所有渠道", "");
-    filterLayout->addWidget(m_channelCombo);
+    m_providerCombo = new QComboBox(this);
+    m_providerCombo->setMinimumWidth(180);
+    m_providerCombo->addItem("全部提供方", "");
+    filterLayout->addWidget(m_providerCombo);
 
     filterLayout->addSpacing(20);
 
@@ -105,10 +108,6 @@ void ModelsDialog::setupUi()
     filterLayout->addWidget(m_searchEdit);
 
     filterLayout->addStretch();
-
-    m_refreshButton = new QPushButton("🔄 刷新", this);
-    m_refreshButton->setMinimumHeight(35);
-    filterLayout->addWidget(m_refreshButton);
 
     mainLayout->addWidget(filterGroup);
 
@@ -142,9 +141,9 @@ void ModelsDialog::setupUi()
 
     // Models Table
     m_modelsTable = new QTableWidget(this);
-    m_modelsTable->setColumnCount(5);
+    m_modelsTable->setColumnCount(3);
     m_modelsTable->setHorizontalHeaderLabels({
-        "模型名称", "渠道", "输入价格 ($/1M tokens)", "输出价格 ($/1M tokens)", "说明"
+        "模型名称", "提供方", "创建时间"
     });
 
     m_modelsTable->horizontalHeader()->setStretchLastSection(true);
@@ -192,37 +191,46 @@ void ModelsDialog::setupUi()
 
     // Connections
     connect(m_refreshButton, &QPushButton::clicked, this, &ModelsDialog::onRefreshClicked);
+    connect(m_keyEdit, &QLineEdit::returnPressed, this, &ModelsDialog::onRefreshClicked);
     connect(m_copyButton, &QPushButton::clicked, this, &ModelsDialog::onCopyModelClicked);
-    connect(m_channelCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &ModelsDialog::onChannelChanged);
+    connect(m_providerCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &ModelsDialog::onProviderChanged);
     connect(m_searchEdit, &QLineEdit::textChanged, this, &ModelsDialog::onSearchTextChanged);
     connect(m_modelsTable, &QTableWidget::itemSelectionChanged,
             this, &ModelsDialog::onTableSelectionChanged);
 }
 
+void ModelsDialog::loadApiKeys()
+{
+    m_statusLabel->setText("正在读取账号 API Key...");
+    m_statusLabel->setStyleSheet("color: #3498db; font-size: 12px;");
+    m_apiClient->getApiKeys();
+}
+
 void ModelsDialog::loadModels()
 {
+    const QString key = m_keyEdit->text().trimmed();
+    if (key.isEmpty()) {
+        m_statusLabel->setText("✗ 请先输入 API Key（sk- 开头）再查询模型");
+        m_statusLabel->setStyleSheet("color: #e74c3c; font-size: 12px;");
+        return;
+    }
+
     m_statusLabel->setText("加载模型列表...");
     m_statusLabel->setStyleSheet("color: #3498db; font-size: 12px;");
     m_refreshButton->setEnabled(false);
 
-    m_apiClient->getModels();
-}
-
-void ModelsDialog::loadChannels()
-{
-    m_apiClient->getChannels();
+    m_apiClient->getModels(key);
 }
 
 void ModelsDialog::onRefreshClicked()
 {
-    loadChannels();
     loadModels();
 }
 
-void ModelsDialog::onChannelChanged(int index)
+void ModelsDialog::onProviderChanged(int index)
 {
-    m_selectedChannel = m_channelCombo->itemData(index).toString();
+    m_selectedProvider = m_providerCombo->itemData(index).toString();
     filterModels();
 }
 
@@ -253,34 +261,87 @@ void ModelsDialog::onTableSelectionChanged()
     m_copyButton->setEnabled(!model.name.isEmpty());
 }
 
+void ModelsDialog::onApiKeysReceived(const QJsonArray &keys)
+{
+    // 若用户已手动填写 Key，则不覆盖
+    if (!m_keyEdit->text().trimmed().isEmpty()) {
+        return;
+    }
+
+    // 优先选择状态为 active 的 Key，其次取第一个可用的 Key
+    QString chosen;
+    for (const QJsonValue &val : keys) {
+        const QJsonObject obj = val.toObject();
+        const QString key = obj["key"].toString();
+        if (key.isEmpty()) {
+            continue;
+        }
+        if (obj["status"].toString() == "active") {
+            chosen = key;
+            break;
+        }
+        if (chosen.isEmpty()) {
+            chosen = key;
+        }
+    }
+
+    if (chosen.isEmpty()) {
+        m_statusLabel->setText("✗ 未找到可用的 API Key，请到「API Keys 管理」创建后再试，或手动粘贴 Key");
+        m_statusLabel->setStyleSheet("color: #e74c3c; font-size: 12px;");
+        return;
+    }
+
+    m_keyEdit->setText(chosen);
+    loadModels();
+}
+
 void ModelsDialog::onModelsReceived(const QJsonArray &models)
 {
     m_models.clear();
 
     for (const QJsonValue &val : models) {
         ModelInfo info = ModelInfo::fromJson(val.toObject());
+        if (info.id.isEmpty()) {
+            continue;
+        }
         m_models.append(info);
     }
 
+    rebuildProviderFilter();
     filterModels();
 
     m_refreshButton->setEnabled(true);
-    m_totalLabel->setText(QString("总计: %1 个模型").arg(m_models.size()));
     m_statusLabel->setText(QString("✓ 已加载 %1 个模型").arg(m_models.size()));
     m_statusLabel->setStyleSheet("color: #27ae60; font-size: 12px;");
 }
 
-void ModelsDialog::onChannelsReceived(const QJsonArray &channels)
+void ModelsDialog::rebuildProviderFilter()
 {
-    m_channels.clear();
-    m_channelCombo->clear();
-    m_channelCombo->addItem("所有渠道", "");
-
-    for (const QJsonValue &val : channels) {
-        ChannelInfo info = ChannelInfo::fromJson(val.toObject());
-        m_channels.append(info);
-        m_channelCombo->addItem(info.name, info.id);
+    // 依据返回的模型，收集去重后的提供方列表
+    QStringList providers;
+    QSet<QString> seen;
+    for (const ModelInfo &model : m_models) {
+        if (!model.provider.isEmpty() && !seen.contains(model.provider)) {
+            seen.insert(model.provider);
+            providers.append(model.provider);
+        }
     }
+    providers.sort(Qt::CaseInsensitive);
+
+    const QString previous = m_selectedProvider;
+
+    m_providerCombo->blockSignals(true);
+    m_providerCombo->clear();
+    m_providerCombo->addItem("全部提供方", "");
+    for (const QString &p : providers) {
+        m_providerCombo->addItem(p, p);
+    }
+
+    // 尽量保留之前的选择
+    int idx = m_providerCombo->findData(previous);
+    m_providerCombo->setCurrentIndex(idx >= 0 ? idx : 0);
+    m_selectedProvider = m_providerCombo->currentData().toString();
+    m_providerCombo->blockSignals(false);
 }
 
 void ModelsDialog::onRequestFailed(const QString &error)
@@ -303,28 +364,19 @@ void ModelsDialog::updateModelsTable(const QList<ModelInfo> &models)
         nameItem->setFont(QFont("Monospace"));
         m_modelsTable->setItem(row, 0, nameItem);
 
-        // 渠道
-        QTableWidgetItem *channelItem = new QTableWidgetItem(model.channel);
-        m_modelsTable->setItem(row, 1, channelItem);
+        // 提供方
+        QTableWidgetItem *providerItem = new QTableWidgetItem(model.provider);
+        m_modelsTable->setItem(row, 1, providerItem);
 
-        // 输入价格
-        QTableWidgetItem *inputPriceItem = new QTableWidgetItem(model.inputPrice);
-        inputPriceItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        m_modelsTable->setItem(row, 2, inputPriceItem);
-
-        // 输出价格
-        QTableWidgetItem *outputPriceItem = new QTableWidgetItem(model.outputPrice);
-        outputPriceItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        m_modelsTable->setItem(row, 3, outputPriceItem);
-
-        // 说明
-        QTableWidgetItem *descItem = new QTableWidgetItem(model.description);
-        m_modelsTable->setItem(row, 4, descItem);
+        // 创建时间
+        QTableWidgetItem *createdItem = new QTableWidgetItem(model.created);
+        m_modelsTable->setItem(row, 2, createdItem);
 
         row++;
     }
 
     m_modelsTable->resizeColumnsToContents();
+    m_modelsTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
 }
 
 void ModelsDialog::filterModels()
@@ -333,8 +385,8 @@ void ModelsDialog::filterModels()
     QString searchText = m_searchEdit->text().toLower();
 
     for (const ModelInfo &model : m_models) {
-        // 渠道筛选
-        if (!m_selectedChannel.isEmpty() && model.channel != m_selectedChannel) {
+        // 提供方筛选
+        if (!m_selectedProvider.isEmpty() && model.provider != m_selectedProvider) {
             continue;
         }
 
@@ -358,10 +410,9 @@ ModelInfo ModelsDialog::getSelectedModel() const
     if (currentRow >= 0 && currentRow < m_modelsTable->rowCount()) {
         ModelInfo model;
         model.name = m_modelsTable->item(currentRow, 0)->text();
-        model.channel = m_modelsTable->item(currentRow, 1)->text();
-        model.inputPrice = m_modelsTable->item(currentRow, 2)->text();
-        model.outputPrice = m_modelsTable->item(currentRow, 3)->text();
-        model.description = m_modelsTable->item(currentRow, 4)->text();
+        model.id = model.name;
+        model.provider = m_modelsTable->item(currentRow, 1)->text();
+        model.created = m_modelsTable->item(currentRow, 2)->text();
         return model;
     }
     return ModelInfo();

@@ -9,26 +9,14 @@
 #include <QLineEdit>
 #include "api_client.h"
 
-// 模型信息结构
+// 模型信息结构（对应 OpenAI 兼容的 /v1/models 返回）
 struct ModelInfo {
-    QString id;
-    QString name;
-    QString channel;
-    QString inputPrice;   // 输入价格（每百万tokens）
-    QString outputPrice;  // 输出价格（每百万tokens）
-    QString description;
+    QString id;        // 模型 ID，即调用时使用的模型名称
+    QString name;      // 同 id，便于展示
+    QString provider;  // 提供方 owned_by
+    QString created;   // 创建时间（已格式化）
 
     static ModelInfo fromJson(const QJsonObject &obj);
-};
-
-// 渠道信息结构
-struct ChannelInfo {
-    QString id;
-    QString name;
-    QString type;
-    QStringList models;
-
-    static ChannelInfo fromJson(const QJsonObject &obj);
 };
 
 class ModelsDialog : public QDialog
@@ -43,27 +31,29 @@ signals:
 
 private slots:
     void onRefreshClicked();
-    void onChannelChanged(int index);
+    void onProviderChanged(int index);
     void onCopyModelClicked();
     void onSearchTextChanged(const QString &text);
     void onTableSelectionChanged();
 
     void onModelsReceived(const QJsonArray &models);
-    void onChannelsReceived(const QJsonArray &channels);
+    void onApiKeysReceived(const QJsonArray &keys);
     void onRequestFailed(const QString &error);
 
 private:
     void setupUi();
+    void loadApiKeys();
     void loadModels();
-    void loadChannels();
     void updateModelsTable(const QList<ModelInfo> &models);
+    void rebuildProviderFilter();
     ModelInfo getSelectedModel() const;
     void filterModels();
 
     ApiClient *m_apiClient;
 
     // UI Elements
-    QComboBox *m_channelCombo;
+    QLineEdit *m_keyEdit;
+    QComboBox *m_providerCombo;
     QLineEdit *m_searchEdit;
     QPushButton *m_refreshButton;
     QPushButton *m_copyButton;
@@ -72,8 +62,7 @@ private:
     QLabel *m_statusLabel;
 
     QList<ModelInfo> m_models;
-    QList<ChannelInfo> m_channels;
-    QString m_selectedChannel;
+    QString m_selectedProvider;
 };
 
 #endif // MODELS_DIALOG_H

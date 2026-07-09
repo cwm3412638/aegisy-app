@@ -69,13 +69,16 @@ QNetworkReply* ApiClient::post(const QString &endpoint, const QJsonObject &data)
     return m_networkManager->post(request, doc.toJson());
 }
 
-QNetworkReply* ApiClient::get(const QString &endpoint)
+QNetworkReply* ApiClient::get(const QString &endpoint, const QString &bearerToken)
 {
     QUrl url(m_baseUrl + endpoint);
     QNetworkRequest request(url);
 
-    if (!m_authToken.isEmpty()) {
-        request.setRawHeader("Authorization", QString("Bearer %1").arg(m_authToken).toUtf8());
+    // 优先使用显式传入的 token（例如调用 /v1/models 时需要 sk- API Key），
+    // 否则回退到登录得到的 JWT token
+    const QString token = bearerToken.isEmpty() ? m_authToken : bearerToken;
+    if (!token.isEmpty()) {
+        request.setRawHeader("Authorization", QString("Bearer %1").arg(token).toUtf8());
     }
 
     // SSL 配置
@@ -234,10 +237,10 @@ void ApiClient::getChannels()
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onChannelsFinished);
 }
 
-void ApiClient::getModels()
+void ApiClient::getModels(const QString &apiKey)
 {
-    // 尝试 v1 API
-    QNetworkReply *reply = get("/api/v1/models?page=1&page_size=100");
+    // 使用 OpenAI 兼容端点 /v1/models，Bearer 必须是 sk- 开头的 API Key
+    QNetworkReply *reply = get("/v1/models", apiKey);
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onModelsFinished);
 }
 
@@ -277,28 +280,27 @@ void ApiClient::onModelsFinished()
     QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
     if (!reply) return;
 
-    bool ok;
-    QJsonObject response = parseResponse(reply, ok);
+    // /v1/models 是 OpenAI 兼容端点，成功返回 {"object":"list","data":[...]}，
+    // 出错（如 401）返回 {"code":"INVALID_API_KEY","message":"..."}。
+    // 这里直接读取 body，即使 HTTP 401 也能拿到错误信息。
+    const QByteArray body = reply->readAll();
+    reply->deleteLater();
 
-    if (!ok) {
-        emit requestFailed(response["error"].toString());
-        reply->deleteLater();
+    QJsonDocument doc = QJsonDocument::fromJson(body);
+    if (doc.isNull() || !doc.isObject()) {
+        emit requestFailed(QStringLiteral("无效的响应: %1").arg(QString::fromUtf8(body.left(200))));
         return;
     }
 
-    int code = response["code"].toInt(-1);
-    if (code != 0 && code != 200) {
-        emit requestFailed(response["message"].toString());
-        reply->deleteLater();
+    QJsonObject response = doc.object();
+
+    // 错误响应带有 message 字段
+    if (response.contains("message") && !response.contains("data")) {
+        emit requestFailed(response["message"].toString(QStringLiteral("请求失败")));
         return;
     }
 
-    // 解析：data.items 才是实际数组
-    QJsonObject data = response["data"].toObject();
-    QJsonArray models = data["items"].toArray();
-
+    QJsonArray models = response["data"].toArray();
     qDebug() << "Received" << models.size() << "models";
     emit modelsReceived(models);
-
-    reply->deleteLater();
 }
