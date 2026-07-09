@@ -202,12 +202,12 @@ void MainWindow::updateEnvDisplay(const QMap<QString, EnvStatus> &envStatuses)
 
         // Log details
         if (status.isConfigured) {
-            m_logOutput->append(QString("[✓] %1: Configured").arg(appName));
-            m_logOutput->append(QString("    Config: %1").arg(status.configPath));
+            m_logOutput->append(QString("[✓] %1: 已配置").arg(appName));
+            m_logOutput->append(QString("    配置: %1").arg(status.configPath));
         } else {
-            m_logOutput->append(QString("[✗] %1: Not configured").arg(appName));
+            m_logOutput->append(QString("[✗] %1: 未配置").arg(appName));
             if (!status.error.isEmpty()) {
-                m_logOutput->append(QString("    Error: %1").arg(status.error));
+                m_logOutput->append(QString("    状态: %1").arg(status.error));
             }
         }
 

@@ -37,6 +37,15 @@ public:
     // 检测所有环境
     QMap<QString, EnvStatus> detectAll();
 
+    // 检测应用程序是否安装
+    bool isClaudeInstalled();
+    bool isCursorInstalled();
+    bool isContinueInstalled();
+
+    // 检测 npm 全局包
+    bool isNpmPackageInstalled(const QString &packageName);
+    QStringList getInstalledNpmPackages();
+
 private:
     // 获取配置文件路径
     QString getClaudeConfigPath();

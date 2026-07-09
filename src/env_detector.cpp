@@ -130,14 +130,31 @@ QMap<QString, EnvStatus> EnvDetector::detectAll()
 {
     QMap<QString, EnvStatus> results;
 
-    results["Claude"] = detectClaude();
-    results["Cursor"] = detectCursor();
-    results["Continue"] = detectContinue();
+    // 检测 Claude
+    EnvStatus claudeStatus = detectClaude();
+    claudeStatus.error = isClaudeInstalled() ?
+        (claudeStatus.isConfigured ? "" : "已安装但未配置") :
+        "未安装";
+    results["Claude"] = claudeStatus;
+
+    // 检测 Cursor
+    EnvStatus cursorStatus = detectCursor();
+    cursorStatus.error = isCursorInstalled() ?
+        (cursorStatus.isConfigured ? "" : "已安装但未配置") :
+        "未安装";
+    results["Cursor"] = cursorStatus;
+
+    // 检测 Continue
+    EnvStatus continueStatus = detectContinue();
+    continueStatus.error = isContinueInstalled() ?
+        (continueStatus.isConfigured ? "" : "未安装") :
+        "未安装";
+    results["Continue"] = continueStatus;
 
     // 环境变量检测
     QMap<QString, QString> envVars = detectEnvVars();
     EnvStatus envStatus;
-    envStatus.configPath = "System Environment Variables";
+    envStatus.configPath = "系统环境变量";
     envStatus.isConfigured = !envVars.isEmpty();
 
     if (!envVars.isEmpty()) {
@@ -150,9 +167,141 @@ QMap<QString, EnvStatus> EnvDetector::detectAll()
         }
     }
 
-    results["Environment Variables"] = envStatus;
+    results["环境变量"] = envStatus;
 
     return results;
+}
+
+bool EnvDetector::isClaudeInstalled()
+{
+    // 检测 Claude Desktop 是否安装
+#ifdef Q_OS_WIN
+    // Windows: 检查应用程序是否存在
+    QStringList possiblePaths = {
+        QDir::cleanPath(QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation) + "/../Local/Programs/Claude"),
+        "C:/Program Files/Claude",
+        "C:/Program Files (x86)/Claude"
+    };
+
+    for (const QString &path : possiblePaths) {
+        QDir dir(path);
+        if (dir.exists()) {
+            return true;
+        }
+    }
+
+    // 检查配置文件是否存在（间接证明）
+    return QFile::exists(getClaudeConfigPath());
+
+#elif defined(Q_OS_MACOS)
+    // macOS: 检查 Applications 文件夹
+    QStringList possiblePaths = {
+        "/Applications/Claude.app",
+        QDir::homePath() + "/Applications/Claude.app"
+    };
+
+    for (const QString &path : possiblePaths) {
+        if (QDir(path).exists()) {
+            return true;
+        }
+    }
+
+    return QFile::exists(getClaudeConfigPath());
+
+#else
+    // Linux: 检查配置文件和可执行文件
+    QProcess process;
+    process.start("which", QStringList() << "claude");
+    process.waitForFinished();
+
+    if (process.exitCode() == 0) {
+        return true;
+    }
+
+    return QFile::exists(getClaudeConfigPath());
+#endif
+}
+
+bool EnvDetector::isCursorInstalled()
+{
+    // 检测 Cursor 是否安装
+#ifdef Q_OS_WIN
+    QStringList possiblePaths = {
+        QDir::cleanPath(QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation) + "/../Local/Programs/Cursor"),
+        "C:/Program Files/Cursor",
+        "C:/Program Files (x86)/Cursor"
+    };
+
+    for (const QString &path : possiblePaths) {
+        QDir dir(path);
+        if (dir.exists()) {
+            return true;
+        }
+    }
+
+    return QFile::exists(getCursorConfigPath());
+
+#elif defined(Q_OS_MACOS)
+    QStringList possiblePaths = {
+        "/Applications/Cursor.app",
+        QDir::homePath() + "/Applications/Cursor.app"
+    };
+
+    for (const QString &path : possiblePaths) {
+        if (QDir(path).exists()) {
+            return true;
+        }
+    }
+
+    return QFile::exists(getCursorConfigPath());
+
+#else
+    QProcess process;
+    process.start("which", QStringList() << "cursor");
+    process.waitForFinished();
+
+    if (process.exitCode() == 0) {
+        return true;
+    }
+
+    return QFile::exists(getCursorConfigPath());
+#endif
+}
+
+bool EnvDetector::isContinueInstalled()
+{
+    // Continue.dev 是 VS Code 扩展，检查配置文件
+    return QFile::exists(getContinueConfigPath());
+}
+
+bool EnvDetector::isNpmPackageInstalled(const QString &packageName)
+{
+    // 检测 npm 全局包是否安装
+    QProcess process;
+    process.start("npm", QStringList() << "list" << "-g" << packageName << "--depth=0");
+    process.waitForFinished(3000);
+
+    QString output = process.readAllStandardOutput();
+    return !output.contains("(empty)") && output.contains(packageName);
+}
+
+QStringList EnvDetector::getInstalledNpmPackages()
+{
+    QStringList packages;
+    QStringList checkPackages = {
+        "@anthropic-ai/sdk",
+        "@anthropic-ai/claude-cli",
+        "continue",
+        "cursor"
+    };
+
+    for (const QString &pkg : checkPackages) {
+        if (isNpmPackageInstalled(pkg)) {
+            packages.append(pkg);
+        }
+    }
+
+    return packages;
 }
 
 EnvStatus EnvDetector::readJsonConfig(const QString &path,
