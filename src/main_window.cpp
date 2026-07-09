@@ -279,7 +279,7 @@ void MainWindow::onConfigureEnvClicked()
 {
     m_logOutput->append("[INFO] Opening environment configuration dialog...");
 
-    EnvConfigDialog *dialog = new EnvConfigDialog(m_configManager, m_envDetector, this);
+    EnvConfigDialog *dialog = new EnvConfigDialog(m_configManager, m_envDetector, m_apiClient, this);
 
     // 连接配置应用信号
     connect(dialog, &EnvConfigDialog::configurationApplied,

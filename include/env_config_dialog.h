@@ -3,13 +3,16 @@
 
 #include <QDialog>
 #include <QLineEdit>
+#include <QComboBox>
 #include <QCheckBox>
 #include <QPushButton>
 #include <QLabel>
 #include <QProgressBar>
 #include <QTextEdit>
+#include <QJsonArray>
 #include "config_manager.h"
 #include "env_detector.h"
+#include "api_client.h"
 
 class EnvConfigDialog : public QDialog
 {
@@ -18,6 +21,7 @@ class EnvConfigDialog : public QDialog
 public:
     explicit EnvConfigDialog(ConfigManager *configManager,
                             EnvDetector *envDetector,
+                            ApiClient *apiClient,
                             QWidget *parent = nullptr);
 
     // 设置要配置的 API Key 和 Base URL
@@ -30,9 +34,12 @@ private slots:
     void onApplyClicked();
     void onBackupClicked();
     void onRestoreClicked();
+    void onApiKeysReceived(const QJsonArray &keys);
 
 private:
     void setupUi();
+    void loadApiKeys();
+    QString currentApiKey() const;
     bool backupConfigurations();
     bool applyConfiguration();
     void updateProgress(int value, const QString &message);
@@ -40,10 +47,11 @@ private:
 
     ConfigManager *m_configManager;
     EnvDetector *m_envDetector;
+    ApiClient *m_apiClient;
 
     // UI Elements
-    QLineEdit *m_apiKeyEdit;
-    QLineEdit *m_baseUrlEdit;
+    QComboBox *m_apiKeyCombo;   // API Key 下拉（从账号列表选择，也可手动粘贴）
+    QLineEdit *m_baseUrlEdit;   // Base URL：固定不可更改
 
     QCheckBox *m_claudeCheckBox;
     QCheckBox *m_cursorCheckBox;

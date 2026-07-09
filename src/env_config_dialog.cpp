@@ -9,20 +9,34 @@
 #include <QFile>
 #include <QDateTime>
 #include <QStandardPaths>
+#include <QSettings>
+#include <QJsonObject>
+
+// 固定的 Base URL，不允许更改
+static const QString kFixedBaseUrl = "https://www.aegisy.cc/v1";
 
 EnvConfigDialog::EnvConfigDialog(ConfigManager *configManager,
                                  EnvDetector *envDetector,
+                                 ApiClient *apiClient,
                                  QWidget *parent)
     : QDialog(parent)
     , m_configManager(configManager)
     , m_envDetector(envDetector)
+    , m_apiClient(apiClient)
 {
     setupUi();
     setWindowTitle("环境配置");
     resize(700, 600);
 
-    // 设置默认值
-    m_baseUrlEdit->setText("https://www.aegisy.cc/v1");
+    // Base URL 固定
+    m_baseUrlEdit->setText(kFixedBaseUrl);
+
+    // 拉取账号 API Key 填充下拉
+    if (m_apiClient) {
+        connect(m_apiClient, &ApiClient::apiKeysReceived,
+                this, &EnvConfigDialog::onApiKeysReceived);
+        loadApiKeys();
+    }
 }
 
 void EnvConfigDialog::setupUi()
@@ -50,15 +64,20 @@ void EnvConfigDialog::setupUi()
     QFormLayout *configLayout = new QFormLayout(configGroup);
     configLayout->setSpacing(10);
 
-    m_apiKeyEdit = new QLineEdit(this);
-    m_apiKeyEdit->setPlaceholderText("sk-your-api-key");
-    m_apiKeyEdit->setMinimumHeight(35);
-    configLayout->addRow("API Key:", m_apiKeyEdit);
+    m_apiKeyCombo = new QComboBox(this);
+    m_apiKeyCombo->setEditable(true);
+    m_apiKeyCombo->setInsertPolicy(QComboBox::NoInsert);
+    m_apiKeyCombo->setMinimumHeight(35);
+    m_apiKeyCombo->lineEdit()->setPlaceholderText("从账号 API Key 中选择，或手动粘贴 sk-...");
+    configLayout->addRow("API Key:", m_apiKeyCombo);
 
     m_baseUrlEdit = new QLineEdit(this);
-    m_baseUrlEdit->setPlaceholderText("https://www.aegisy.cc/v1");
+    m_baseUrlEdit->setText(kFixedBaseUrl);
     m_baseUrlEdit->setMinimumHeight(35);
-    configLayout->addRow("Base URL:", m_baseUrlEdit);
+    m_baseUrlEdit->setReadOnly(true);              // 固定不可更改
+    m_baseUrlEdit->setToolTip("Base URL 已固定，不可更改");
+    m_baseUrlEdit->setStyleSheet("QLineEdit { background-color: #f0f0f0; color: #666; }");
+    configLayout->addRow("Base URL (固定):", m_baseUrlEdit);
 
     mainLayout->addWidget(configGroup);
 
@@ -161,27 +180,93 @@ void EnvConfigDialog::setupUi()
 
 void EnvConfigDialog::setConfiguration(const QString &apiKey, const QString &baseUrl)
 {
+    Q_UNUSED(baseUrl);  // Base URL 固定，忽略传入值
     m_apiKey = apiKey;
-    m_baseUrl = baseUrl;
+    m_baseUrl = kFixedBaseUrl;
 
-    m_apiKeyEdit->setText(apiKey);
-    if (!baseUrl.isEmpty()) {
-        m_baseUrlEdit->setText(baseUrl);
+    if (!apiKey.isEmpty()) {
+        m_apiKeyCombo->setCurrentText(apiKey);
     }
+    m_baseUrlEdit->setText(kFixedBaseUrl);
+}
+
+void EnvConfigDialog::loadApiKeys()
+{
+    if (m_apiClient) {
+        m_apiClient->getApiKeys();
+    }
+}
+
+QString EnvConfigDialog::currentApiKey() const
+{
+    // 从下拉选择的取存储的完整 Key；手动输入的直接用输入文本
+    const int idx = m_apiKeyCombo->currentIndex();
+    const QString text = m_apiKeyCombo->currentText().trimmed();
+    if (idx >= 0 && text == m_apiKeyCombo->itemText(idx)) {
+        return m_apiKeyCombo->itemData(idx).toString();
+    }
+    return text;
+}
+
+void EnvConfigDialog::onApiKeysReceived(const QJsonArray &keys)
+{
+    // 若用户已手动输入 Key，则不覆盖
+    const bool userTyped = m_apiKeyCombo->currentIndex() < 0
+            && !m_apiKeyCombo->currentText().trimmed().isEmpty();
+
+    const QString persistedId = QSettings().value("apikeys/activeKeyId").toString();
+
+    m_apiKeyCombo->blockSignals(true);
+    m_apiKeyCombo->clear();
+
+    int selectIdx = -1;
+    int firstActiveIdx = -1;
+
+    for (const QJsonValue &val : keys) {
+        const QJsonObject obj = val.toObject();
+        const QString key = obj["key"].toString();
+        if (key.isEmpty()) {
+            continue;
+        }
+        const QString id = QString::number(obj["id"].toInt());
+        const QString name = obj["name"].toString();
+        const QString status = obj["status"].toString();
+
+        QString masked = key;
+        if (masked.length() > 12) {
+            masked = masked.left(8) + "..." + masked.right(4);
+        }
+        const QString display = name.isEmpty() ? masked
+                                               : QString("%1 (%2)").arg(name, masked);
+
+        const int idx = m_apiKeyCombo->count();
+        m_apiKeyCombo->addItem(display, key);
+        m_apiKeyCombo->setItemData(idx, id, Qt::UserRole + 1);
+
+        if (!persistedId.isEmpty() && id == persistedId) {
+            selectIdx = idx;
+        }
+        if (firstActiveIdx < 0 && status == "active") {
+            firstActiveIdx = idx;
+        }
+    }
+    m_apiKeyCombo->blockSignals(false);
+
+    if (m_apiKeyCombo->count() == 0 || userTyped) {
+        return;
+    }
+
+    const int idx = selectIdx >= 0 ? selectIdx
+                                   : (firstActiveIdx >= 0 ? firstActiveIdx : 0);
+    m_apiKeyCombo->setCurrentIndex(idx);
 }
 
 void EnvConfigDialog::onApplyClicked()
 {
-    QString apiKey = m_apiKeyEdit->text().trimmed();
-    QString baseUrl = m_baseUrlEdit->text().trimmed();
+    QString apiKey = currentApiKey();
 
     if (apiKey.isEmpty()) {
-        QMessageBox::warning(this, "输入无效", "请输入 API Key。");
-        return;
-    }
-
-    if (baseUrl.isEmpty()) {
-        QMessageBox::warning(this, "输入无效", "请输入 Base URL。");
+        QMessageBox::warning(this, "输入无效", "请选择或输入 API Key。");
         return;
     }
 
@@ -258,8 +343,8 @@ bool EnvConfigDialog::applyConfiguration()
     }
     currentStep++;
 
-    QString apiKey = m_apiKeyEdit->text().trimmed();
-    QString baseUrl = m_baseUrlEdit->text().trimmed();
+    QString apiKey = currentApiKey();
+    QString baseUrl = kFixedBaseUrl;  // Base URL 固定
 
     // 2. 配置 Claude Desktop
     if (m_claudeCheckBox->isChecked()) {
