@@ -6,7 +6,6 @@ on:
     branches:
       - main
     paths:
-      - .github/workflows/windows-package.yml
       - CMakeLists.txt
       - cmake/**
       - include/**
@@ -23,17 +22,22 @@ permissions:
 
 concurrency:
   group: windows-package-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   package:
     runs-on: windows-2022
+    timeout-minutes: 45
 
     steps:
       - name: Check out source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Mark build as running
+        shell: pwsh
+        run: git push --force origin HEAD:refs/heads/ci/windows-package-running
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
@@ -102,3 +106,8 @@ jobs:
           }
           git commit -m "build: add Windows $version installer [skip ci]"
           git push origin HEAD:main
+
+      - name: Clear build marker
+        if: success()
+        shell: pwsh
+        run: git push origin --delete ci/windows-package-running
