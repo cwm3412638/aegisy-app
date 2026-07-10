@@ -700,8 +700,13 @@ void MainWindow::setupUi()
     m_balanceRefreshTimer->setInterval(60 * 1000);
     connect(m_balanceRefreshTimer, &QTimer::timeout,
             this, &MainWindow::refreshBalance);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     connect(m_filterGroup, QOverload<int>::of(&QButtonGroup::idClicked),
             this, &MainWindow::onFilterChanged);
+#else
+    connect(m_filterGroup, QOverload<int>::of(&QButtonGroup::buttonClicked),
+            this, &MainWindow::onFilterChanged);
+#endif
     connect(clearLogButton, &QPushButton::clicked, m_logOutput, &QTextEdit::clear);
 }
 

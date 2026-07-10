@@ -260,8 +260,13 @@ QWidget *ConnectWizardDialog::buildIdentityPage()
     layout->addWidget(note);
     layout->addStretch();
 
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     connect(m_typeGroup, QOverload<int>::of(&QButtonGroup::idClicked),
             this, &ConnectWizardDialog::onTypeChanged);
+#else
+    connect(m_typeGroup, QOverload<int>::of(&QButtonGroup::buttonClicked),
+            this, &ConnectWizardDialog::onTypeChanged);
+#endif
     return page;
 }
 

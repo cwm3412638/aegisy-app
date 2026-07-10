@@ -79,7 +79,9 @@ QNetworkReply* ApiClient::post(const QString &endpoint, const QJsonObject &data)
     QNetworkRequest request(url);
 
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     request.setTransferTimeout(15000);
+#endif
 
     if (!m_authToken.isEmpty()) {
         request.setRawHeader("Authorization", QString("Bearer %1").arg(m_authToken).toUtf8());
@@ -98,7 +100,9 @@ QNetworkReply* ApiClient::get(const QString &endpoint, const QString &bearerToke
 {
     QUrl url(m_baseUrl + endpoint);
     QNetworkRequest request(url);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     request.setTransferTimeout(15000);
+#endif
 
     // 优先使用显式传入的 token（例如调用 /v1/models 时需要 sk- API Key），
     // 否则回退到登录得到的 JWT token
