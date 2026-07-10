@@ -20,7 +20,11 @@ if not "%AEGISY_WINDOWS_UPDATE_BASE_URL%"=="" set "UPDATE_BASE_URL=%AEGISY_WINDO
 echo.
 echo [1/6] 编译 Release (%WINDOWS_ARCH%)...
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
-cmake -S . -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A %WINDOWS_ARCH% -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF || exit /b 1
+if "%OPENSSL_ROOT_DIR%"=="" (
+    cmake -S . -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A %WINDOWS_ARCH% -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF || exit /b 1
+) else (
+    cmake -S . -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A %WINDOWS_ARCH% -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DOPENSSL_ROOT_DIR="%OPENSSL_ROOT_DIR%" || exit /b 1
+)
 cmake --build "%BUILD_DIR%" --config Release || exit /b 1
 
 set "EXE=%BUILD_DIR%\Release\AegisyClient.exe"
