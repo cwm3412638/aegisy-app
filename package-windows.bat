@@ -72,7 +72,8 @@ echo [6/6] 生成 WinSparkle 更新源...
 if exist "%UPDATE_DIR%" rmdir /s /q "%UPDATE_DIR%"
 mkdir "%UPDATE_DIR%"
 copy /y "%SETUP%" "%UPDATE_DIR%\" >nul || exit /b 1
-set "NOTES=release\notes\%VERSION%.md"
+set "NOTES=release\notes\%VERSION%-windows.md"
+if not exist "%NOTES%" set "NOTES=release\notes\%VERSION%.md"
 if not exist "%NOTES%" (echo [错误] 缺少发布说明 %NOTES% & exit /b 1)
 copy /y "%NOTES%" "%UPDATE_DIR%\AegisyClient-%VERSION%-Windows-%WINDOWS_ARCH%.md" >nul || exit /b 1
 

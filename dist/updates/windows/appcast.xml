@@ -1,0 +1,16 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<rss xmlns:sparkle='http://www.andymatuschak.org/xml-namespaces/sparkle' version='2.0'>
+    <channel>
+        <title>AegisyClient Windows Updates</title>
+        <item>
+            <title>2.3.1</title>
+            <pubDate>Fri, 10 Jul 2026 09:36:32 GMT</pubDate>
+            <link>https://aegisy.cc</link>
+            <sparkle:version>2.3.1</sparkle:version>
+            <sparkle:shortVersionString>2.3.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>10.0</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://aegisy.cc/desktop/windows/AegisyClient-2.3.1-Windows-x64.md</sparkle:releaseNotesLink>
+            <enclosure url='https://aegisy.cc/desktop/windows/AegisyClientSetup-2.3.1.exe' length='14269320' type='application/octet-stream' sparkle:os='windows-x64' sparkle:edSignature='LBecIGEtRvuzpDOnOGvERCHNqhxxCWnCjkkvhtP2KvY6RlupdT3fDIFXTnnMlgLko8azquRgoH7V5HRDJVIhDw==' sparkle:installerArguments='/CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS'/>
+        </item>
+    </channel>
+</rss>
