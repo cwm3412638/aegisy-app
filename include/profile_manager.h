@@ -1,92 +1,95 @@
 #ifndef PROFILE_MANAGER_H
 #define PROFILE_MANAGER_H
 
+#include <QList>
 #include <QObject>
 #include <QString>
-#include <QList>
+
 #include "tool_manager.h"
 
-// 档案类型：决定这个档案管理哪些工具
+// ProfileType 只表示一个具体工具。筛选栏的“全部”使用独立的 UI id，
+// 不再作为可持久化的档案类型。
 enum class ProfileType {
-    Mixed  = 0,   // 三工具均可配置（旧默认）
-    Claude = 1,   // 仅 Claude Code
-    Codex  = 2,   // 仅 Codex CLI
-    Gemini = 3,   // 仅 Gemini CLI
+    Claude = 1,
+    Codex  = 2,
+    Gemini = 3,
 };
 
-// 按类型返回该档案应包含的工具列表
-inline QList<AiTool> toolsForType(ProfileType t)
+inline QList<ProfileType> allProfileTypes()
 {
-    switch (t) {
-    case ProfileType::Claude: return { AiTool::ClaudeCode };
-    case ProfileType::Codex:  return { AiTool::CodexCli   };
-    case ProfileType::Gemini: return { AiTool::GeminiCli  };
-    default:                  return { AiTool::ClaudeCode, AiTool::CodexCli, AiTool::GeminiCli };
-    }
+    return { ProfileType::Claude, ProfileType::Codex, ProfileType::Gemini };
 }
 
-// 按类型返回显示名称
-inline QString profileTypeName(ProfileType t)
+inline bool isValidProfileType(ProfileType type)
 {
-    switch (t) {
+    return type == ProfileType::Claude
+        || type == ProfileType::Codex
+        || type == ProfileType::Gemini;
+}
+
+inline AiTool toolForType(ProfileType type)
+{
+    switch (type) {
+    case ProfileType::Claude: return AiTool::ClaudeCode;
+    case ProfileType::Gemini: return AiTool::GeminiCli;
+    case ProfileType::Codex:  return AiTool::CodexCli;
+    }
+    return AiTool::CodexCli;
+}
+
+inline ProfileType profileTypeForTool(AiTool tool)
+{
+    switch (tool) {
+    case AiTool::ClaudeCode: return ProfileType::Claude;
+    case AiTool::GeminiCli:  return ProfileType::Gemini;
+    case AiTool::CodexCli:   return ProfileType::Codex;
+    }
+    return ProfileType::Codex;
+}
+
+inline QString profileTypeName(ProfileType type)
+{
+    switch (type) {
     case ProfileType::Claude: return QStringLiteral("Claude");
     case ProfileType::Codex:  return QStringLiteral("Codex");
     case ProfileType::Gemini: return QStringLiteral("Gemini");
-    default:                  return QStringLiteral("混合");
     }
+    return QStringLiteral("Codex");
 }
 
-// 一个配置档案：每个工具独立保存 API Key + 模型名
+// 一个档案只绑定一个工具，并只保存这一工具的 Key 与模型。
 struct Profile {
-    int         index  = -1;
+    int         index = -1;
     QString     name;
-    ProfileType type   = ProfileType::Mixed;
+    ProfileType type  = ProfileType::Codex;
+    QString     key;
+    QString     model;
 
-    QString claudeKey,   claudeModel;
-    QString codexKey,    codexModel;
-    QString geminiKey,   geminiModel;
+    AiTool tool() const { return toolForType(type); }
 
-    // 按工具取 Key / Model（便于遍历）
-    QString keyFor(AiTool tool) const {
-        switch (tool) {
-            case AiTool::ClaudeCode: return claudeKey;
-            case AiTool::CodexCli:  return codexKey;
-            case AiTool::GeminiCli: return geminiKey;
-            default:                return {};
-        }
-    }
-    QString modelFor(AiTool tool) const {
-        switch (tool) {
-            case AiTool::ClaudeCode: return claudeModel;
-            case AiTool::CodexCli:  return codexModel;
-            case AiTool::GeminiCli: return geminiModel;
-            default:                return {};
-        }
+    QString keyFor(AiTool requestedTool) const
+    {
+        return requestedTool == tool() ? key : QString();
     }
 
-    // 有几个工具配置了 Key
-    int configuredCount() const {
-        int n = 0;
-        if (!claudeKey.isEmpty()) ++n;
-        if (!codexKey.isEmpty())  ++n;
-        if (!geminiKey.isEmpty()) ++n;
-        return n;
+    QString modelFor(AiTool requestedTool) const
+    {
+        return requestedTool == tool() ? model : QString();
     }
-    bool hasAnyKey() const { return configuredCount() > 0; }
+
+    int configuredCount() const { return key.isEmpty() ? 0 : 1; }
+    bool hasAnyKey() const { return !key.isEmpty(); }
 };
 
-// 档案管理器：持久化到 QSettings
-// 键布局：
+// 档案管理器：持久化到 QSettings。
+// 新布局：
+//   profiles/schema_version      = 2
 //   profiles/count               = N
 //   profiles/active              = 0
-//   profiles/<i>/name            = "默认"
-//   profiles/<i>/type            = 0   (ProfileType int)
-//   profiles/<i>/claude_key      = "sk-ant-..."
-//   profiles/<i>/claude_model    = "claude-opus-4-5"
-//   profiles/<i>/codex_key       = "sk-..."
-//   profiles/<i>/codex_model     = "gpt-4o"
-//   profiles/<i>/gemini_key      = "..."
-//   profiles/<i>/gemini_model    = "gemini-2.5-pro"
+//   profiles/<i>/name            = "工作 Codex"
+//   profiles/<i>/type            = 2
+//   profiles/<i>/key             = "sk-..."
+//   profiles/<i>/model           = "gpt-5"
 class ProfileManager : public QObject
 {
     Q_OBJECT
@@ -99,24 +102,20 @@ public:
     Profile activeProfile() const;
     int     count() const;
 
-    int  addProfile(const QString &name, ProfileType type = ProfileType::Mixed);
+    int addProfile(const QString &name, ProfileType type,
+                   const QString &key = QString(),
+                   const QString &model = QString());
+    void updateProfile(int index, const QString &name, ProfileType type,
+                       const QString &key, const QString &model);
     void removeProfile(int index);
-    void renameProfile(int index, const QString &name);
     void setActiveIndex(int index);
-    void setProfileType(int index, ProfileType type);
-
-    // 保存单个工具的 Key + Model
-    void saveToolConfig(int profileIndex, AiTool tool,
-                        const QString &key, const QString &model);
-
-    // 兼容旧接口（只保存 Key）
-    void saveKey(int profileIndex, AiTool tool, const QString &key);
 
 signals:
     void profilesChanged();
     void activeProfileChanged(int oldIndex, int newIndex);
 
 private:
+    void migrateLegacyProfiles();
     void ensureDefaultProfile();
 };
 

@@ -7,6 +7,7 @@
 #include <QTextEdit>
 #include <QScrollArea>
 #include <QHBoxLayout>
+#include <QVBoxLayout>
 #include <QJsonArray>
 #include <QList>
 #include <QButtonGroup>
@@ -67,12 +68,14 @@ private:
     QLabel      *m_userLabel;
     QPushButton *m_logoutButton;
 
-    // UI — 档案卡片区
+    // UI — 档案列表区
     QPushButton  *m_newConnectButton;
     QScrollArea  *m_cardsScroll;
     QWidget      *m_cardsContainer;
-    QHBoxLayout  *m_cardsLayout;
+    QVBoxLayout  *m_cardsLayout;
     QButtonGroup *m_filterGroup = nullptr;   // 类型筛选按钮组
+    QLabel       *m_profileCountLabel = nullptr;
+    QLabel       *m_activeProfileLabel = nullptr;
 
     // UI — 高级区 + 日志
     QPushButton *m_manageKeysButton;
@@ -84,8 +87,8 @@ private:
     QJsonArray m_keys;
     bool       m_keysLoaded = false;
 
-    // 当前筛选类型（Mixed = 全部显示）
-    ProfileType m_filterType = ProfileType::Mixed;
+    // 当前筛选类型：0 = 全部，其余值对应 ProfileType
+    int m_filterType = 0;
 
     // 激活流程状态（含自动安装的异步队列）
     QList<AiTool> m_activationQueue;

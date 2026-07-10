@@ -1,95 +1,82 @@
 #ifndef CONNECT_WIZARD_H
 #define CONNECT_WIZARD_H
 
-#include <QDialog>
-#include <QStackedWidget>
-#include <QLineEdit>
-#include <QComboBox>
-#include <QPushButton>
-#include <QLabel>
-#include <QCheckBox>
 #include <QButtonGroup>
+#include <QComboBox>
+#include <QDialog>
 #include <QJsonArray>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QStackedWidget>
+
 #include "api_client.h"
 #include "profile_manager.h"
-#include "tool_manager.h"
 
-// 三步接入向导（Step 1: 命名 + 类型选择 / Step 2: 工具配置 / Step 3: 确认摘要）
-// 用法：
-//   ConnectWizardDialog dlg(apiClient, profileMgr, -1, this);   // 新建
-//   ConnectWizardDialog dlg(apiClient, profileMgr, idx, this);  // 编辑
-//   if (dlg.exec() == QDialog::Accepted) { ... dlg.resultIndex() ... }
+// 两步配置向导：先命名并选择唯一工具，再选择 Key 与模型。
 class ConnectWizardDialog : public QDialog
 {
     Q_OBJECT
 
 public:
     explicit ConnectWizardDialog(ApiClient *client,
-                                  ProfileManager *pm,
-                                  int editIndex = -1,
-                                  QWidget *parent = nullptr);
+                                 ProfileManager *profileManager,
+                                 int editIndex = -1,
+                                 QWidget *parent = nullptr);
 
-    // 成功完成后返回新建或编辑的 Profile index；未完成返回 -1
     int resultIndex() const { return m_resultIndex; }
 
 private slots:
     void onApiKeysReceived(const QJsonArray &keys);
     void onModelsReceived(const QJsonArray &models);
     void onRequestFailed(const QString &error);
-    void onQueryModels(AiTool tool);
+    void onQueryModels();
     void onTypeChanged(int id);
     void goNext();
     void goBack();
-    void finish();
 
 private:
-    // 每个工具对应的 UI 控件集合
-    struct ToolSection {
-        AiTool        tool;
-        QWidget      *card          = nullptr;   // 整张卡片（用于显隐）
-        QCheckBox    *enableCheck   = nullptr;
-        QComboBox    *keyCombo      = nullptr;
-        QPushButton  *queryButton   = nullptr;
-        QLabel       *loadingLabel  = nullptr;
-        QComboBox    *modelCombo    = nullptr;
-    };
-
     void setupUi();
-    QWidget* buildPage1();  // 档案命名 + 类型选择
-    QWidget* buildPage2();  // 工具配置
-    QWidget* buildPage3();  // 确认摘要
-    void refreshPage3();
-    void populateKeyDropdowns();
-    void setPage2Loading(AiTool tool, bool loading);
-    void updateNavButtons();
-    void updateSectionVisibility();   // 根据 m_selectedType 显隐各 section
-    QString currentKey(const ToolSection &s) const;
+    QWidget *buildIdentityPage();
+    QWidget *buildConnectionPage();
+    void updateNavigation();
+    void updateToolContext();
+    void populateKeyDropdown();
+    void setModelLoading(bool loading, const QString &message = QString());
+    void finishProfile();
 
-    ApiClient       *m_apiClient;
-    ProfileManager  *m_profileManager;
-    int              m_editIndex;     // -1 = 新建
-    int              m_resultIndex   = -1;
-    AiTool           m_queryingTool  = AiTool::ClaudeCode;
-    bool             m_waitingModels = false;
-    ProfileType      m_selectedType  = ProfileType::Mixed;
+    AiTool selectedTool() const;
+    QString currentKey() const;
+    QString currentModel() const;
 
-    QStackedWidget  *m_stack      = nullptr;
-    QLabel          *m_stepLabel  = nullptr;
-    QPushButton     *m_backBtn    = nullptr;
-    QPushButton     *m_nextBtn    = nullptr;
+    ApiClient      *m_apiClient;
+    ProfileManager *m_profileManager;
+    int             m_editIndex = -1;
+    int             m_resultIndex = -1;
 
-    // Page 1
-    QLineEdit    *m_nameEdit   = nullptr;
-    QButtonGroup *m_typeGroup  = nullptr;   // 类型选择按钮组
+    ProfileType m_selectedType = ProfileType::Codex;
+    ProfileType m_existingType = ProfileType::Codex;
+    QString     m_existingKey;
+    QString     m_existingModel;
+    bool        m_waitingModels = false;
 
-    // Page 2 — 三个工具 section
-    QList<ToolSection> m_sections;
-
-    // Page 3
-    QLabel *m_summaryLabel = nullptr;
-
-    // 账号 Keys 原始数据
     QJsonArray m_allKeys;
+
+    QStackedWidget *m_stack = nullptr;
+    QLabel         *m_stepLabel = nullptr;
+    QPushButton    *m_backButton = nullptr;
+    QPushButton    *m_nextButton = nullptr;
+
+    QLineEdit    *m_nameEdit = nullptr;
+    QButtonGroup *m_typeGroup = nullptr;
+
+    QLabel      *m_toolBadge = nullptr;
+    QLabel      *m_toolTitle = nullptr;
+    QLabel      *m_toolPath = nullptr;
+    QComboBox   *m_keyCombo = nullptr;
+    QPushButton *m_queryButton = nullptr;
+    QLabel      *m_loadingLabel = nullptr;
+    QComboBox   *m_modelCombo = nullptr;
 };
 
 #endif // CONNECT_WIZARD_H

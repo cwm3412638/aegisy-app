@@ -4,6 +4,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSaveFile>
 #include <QDateTime>
 #include <QDebug>
 
@@ -63,6 +64,16 @@ QString ToolManager::cliCommand(AiTool tool)
     return QString();
 }
 
+QString ToolManager::configFilePath(AiTool tool)
+{
+    switch (tool) {
+    case AiTool::ClaudeCode: return QStringLiteral("~/.claude/settings.json");
+    case AiTool::CodexCli:   return QStringLiteral("~/.codex/auth.json");
+    case AiTool::GeminiCli:  return QStringLiteral("~/.gemini/.env");
+    }
+    return QString();
+}
+
 bool ToolManager::commandExists(const QString &command, int timeoutMs)
 {
     QProcess process;
@@ -107,14 +118,71 @@ bool ToolManager::writeTextFile(const QString &path, const QByteArray &data)
         m_lastError = QStringLiteral("无法创建目录：%1").arg(dir.path());
         return false;
     }
-    QFile file(path);
+    QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
         m_lastError = QStringLiteral("无法写入文件：%1").arg(path);
         return false;
     }
-    file.write(data);
-    file.close();
+    if (file.write(data) != data.size()) {
+        m_lastError = QStringLiteral("配置文件写入不完整：%1").arg(path);
+        file.cancelWriting();
+        return false;
+    }
+    if (!file.commit()) {
+        m_lastError = QStringLiteral("无法提交配置文件：%1").arg(path);
+        return false;
+    }
     return true;
+}
+
+QString ToolManager::readConfiguredKey(AiTool tool) const
+{
+    switch (tool) {
+    case AiTool::ClaudeCode: {
+        QFile file(homeFilePath(QStringLiteral(".claude/settings.json")));
+        if (!file.open(QIODevice::ReadOnly)) {
+            return QString();
+        }
+        const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
+        return root.value(QStringLiteral("env")).toObject()
+            .value(QStringLiteral("ANTHROPIC_AUTH_TOKEN")).toString();
+    }
+    case AiTool::CodexCli: {
+        QFile file(homeFilePath(QStringLiteral(".codex/auth.json")));
+        if (!file.open(QIODevice::ReadOnly)) {
+            return QString();
+        }
+        return QJsonDocument::fromJson(file.readAll()).object()
+            .value(QStringLiteral("OPENAI_API_KEY")).toString();
+    }
+    case AiTool::GeminiCli: {
+        QFile file(homeFilePath(QStringLiteral(".gemini/.env")));
+        if (!file.open(QIODevice::ReadOnly)) {
+            return QString();
+        }
+        const QString content = QString::fromUtf8(file.readAll());
+        for (const QString &line : content.split(QLatin1Char('\n'))) {
+            const QString trimmed = line.trimmed();
+            if (trimmed.isEmpty() || trimmed.startsWith(QLatin1Char('#'))) {
+                continue;
+            }
+            const int separator = trimmed.indexOf(QLatin1Char('='));
+            if (separator < 0
+                    || trimmed.left(separator).trimmed() != QStringLiteral("GEMINI_API_KEY")) {
+                continue;
+            }
+            QString value = trimmed.mid(separator + 1).trimmed();
+            if (value.size() >= 2
+                    && ((value.startsWith(QLatin1Char('"')) && value.endsWith(QLatin1Char('"')))
+                        || (value.startsWith(QLatin1Char('\'')) && value.endsWith(QLatin1Char('\''))))) {
+                value = value.mid(1, value.size() - 2);
+            }
+            return value;
+        }
+        return QString();
+    }
+    }
+    return QString();
 }
 
 // ── 核心检测（可指定超时）────────────────────────────────────────
@@ -138,14 +206,16 @@ ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
 
     switch (tool) {
     case AiTool::ClaudeCode: {
+        const QString key = readConfiguredKey(tool);
         QFile file(homeFilePath(".claude/settings.json"));
         if (file.exists() && file.open(QIODevice::ReadOnly)) {
             const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
             file.close();
             const QJsonObject env = root["env"].toObject();
-            if (env["ANTHROPIC_BASE_URL"].toString().contains("aegisy.cc")) {
-                status.configured    = true;
-                status.configuredKey = env["ANTHROPIC_AUTH_TOKEN"].toString();
+            if (env["ANTHROPIC_BASE_URL"].toString().contains("aegisy.cc")
+                    && !key.isEmpty()) {
+                status.configured = true;
+                status.configuredKey = key;
             }
         }
         // 官方指南：ANTHROPIC_API_KEY 与 AUTH_TOKEN 并存会 401
@@ -156,18 +226,13 @@ ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
         break;
     }
     case AiTool::CodexCli: {
+        const QString key = readConfiguredKey(tool);
         QFile toml(homeFilePath(".codex/config.toml"));
         bool baseOk = false;
         if (toml.exists() && toml.open(QIODevice::ReadOnly)) {
             const QString content = QString::fromUtf8(toml.readAll());
             toml.close();
             baseOk = content.contains("aegisy.cc");
-        }
-        QFile auth(homeFilePath(".codex/auth.json"));
-        QString key;
-        if (auth.exists() && auth.open(QIODevice::ReadOnly)) {
-            key = QJsonDocument::fromJson(auth.readAll()).object()["OPENAI_API_KEY"].toString();
-            auth.close();
         }
         status.configured = baseOk && !key.isEmpty();
         if (status.configured) status.configuredKey = key;
@@ -180,19 +245,16 @@ ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
         break;
     }
     case AiTool::GeminiCli: {
+        const QString key = readConfiguredKey(tool);
         QFile envFile(homeFilePath(".gemini/.env"));
         if (envFile.exists() && envFile.open(QIODevice::ReadOnly)) {
             const QString content = QString::fromUtf8(envFile.readAll());
             envFile.close();
-            QString key;
             bool baseOk = false;
             for (const QString &line : content.split('\n')) {
                 const QString t = line.trimmed();
                 if (t.startsWith("GOOGLE_GEMINI_BASE_URL") && t.contains("aegisy.cc")) {
                     baseOk = true;
-                } else if (t.startsWith("GEMINI_API_KEY")) {
-                    key = t.section('=', 1).trimmed();
-                    key.remove('"');
                 }
             }
             status.configured = baseOk && !key.isEmpty();
@@ -270,6 +332,15 @@ void ToolManager::install(AiTool tool, int requestId)
     QProcess *process = new QProcess(this);
     process->setProcessChannelMode(QProcess::MergedChannels);
 
+    const auto complete = [this, process, tool, requestId](bool success) {
+        if (process->property("aegisyCompletionEmitted").toBool()) {
+            return;
+        }
+        process->setProperty("aegisyCompletionEmitted", true);
+        process->deleteLater();
+        emit installFinished(tool, requestId, success);
+    };
+
     connect(process, &QProcess::readyReadStandardOutput, this, [this, process, tool]() {
         const QString text = QString::fromUtf8(process->readAllStandardOutput()).trimmed();
         if (!text.isEmpty()) {
@@ -278,15 +349,13 @@ void ToolManager::install(AiTool tool, int requestId)
     });
 
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, process, tool, requestId](int exitCode, QProcess::ExitStatus exitStatus) {
-        process->deleteLater();
-        emit installFinished(tool, requestId, exitStatus == QProcess::NormalExit && exitCode == 0);
+            this, [complete](int exitCode, QProcess::ExitStatus exitStatus) {
+        complete(exitStatus == QProcess::NormalExit && exitCode == 0);
     });
 
-    connect(process, &QProcess::errorOccurred, this, [this, process, tool, requestId](QProcess::ProcessError) {
+    connect(process, &QProcess::errorOccurred, this, [this, process, tool, complete](QProcess::ProcessError) {
         emit installOutput(tool, QStringLiteral("无法启动 npm：%1").arg(process->errorString()));
-        process->deleteLater();
-        emit installFinished(tool, requestId, false);
+        complete(false);
     });
 
     emit installOutput(tool, QStringLiteral("$ %1 install -g %2").arg(kNpmCmd, npmPackage(tool)));
@@ -297,12 +366,26 @@ void ToolManager::install(AiTool tool, int requestId)
 bool ToolManager::configure(AiTool tool, const QString &apiKey, const QString &model)
 {
     m_lastError.clear();
-    switch (tool) {
-    case AiTool::ClaudeCode: return configureClaudeCode(apiKey, model);
-    case AiTool::CodexCli:   return configureCodexCli(apiKey, model);
-    case AiTool::GeminiCli:  return configureGeminiCli(apiKey, model);
+    if (apiKey.trimmed().isEmpty()) {
+        m_lastError = QStringLiteral("API Key 不能为空");
+        return false;
     }
-    return false;
+
+    bool success = false;
+    switch (tool) {
+    case AiTool::ClaudeCode: success = configureClaudeCode(apiKey, model); break;
+    case AiTool::CodexCli:   success = configureCodexCli(apiKey, model); break;
+    case AiTool::GeminiCli:  success = configureGeminiCli(apiKey, model); break;
+    }
+    if (!success) {
+        return false;
+    }
+
+    if (readConfiguredKey(tool) != apiKey) {
+        m_lastError = QStringLiteral("写入后校验失败：%1").arg(configFilePath(tool));
+        return false;
+    }
+    return true;
 }
 
 bool ToolManager::configureClaudeCode(const QString &apiKey, const QString &/*model*/)
@@ -448,10 +531,9 @@ bool ToolManager::configureGeminiCli(const QString &apiKey, const QString &model
     QStringList outLines;
     for (const QString &raw : existing.split('\n')) {
         const QString t = raw.trimmed();
-        bool managed = false;
-        for (const QString &k : managedKeys) {
-            if (t.startsWith(k)) { managed = true; break; }
-        }
+        const int separator = t.indexOf(QLatin1Char('='));
+        const QString variable = separator >= 0 ? t.left(separator).trimmed() : QString();
+        const bool managed = managedKeys.contains(variable);
         if (!managed) outLines.append(raw);
     }
     while (!outLines.isEmpty() && outLines.last().trimmed().isEmpty()) {

@@ -10,6 +10,7 @@
 #include <QTimer>
 #include <QSettings>
 #include <QFrame>
+#include <QStyle>
 
 ApiKeyInfo ApiKeyInfo::fromJson(const QJsonObject &obj)
 {
@@ -35,8 +36,8 @@ ApiKeysDialog::ApiKeysDialog(ApiClient *apiClient, QWidget *parent)
 
     setupUi();
     setWindowTitle("API Keys 管理");
-    resize(900, 500);
-    setWindowState(windowState() | Qt::WindowMaximized);
+    resize(960, 620);
+    setMinimumSize(820, 500);
 
     connect(m_apiClient, &ApiClient::apiKeysReceived, this, &ApiKeysDialog::onKeysReceived);
     connect(m_apiClient, &ApiClient::requestFailed, this, &ApiKeysDialog::onRequestFailed);
@@ -46,7 +47,7 @@ ApiKeysDialog::ApiKeysDialog(ApiClient *apiClient, QWidget *parent)
 
 void ApiKeysDialog::setupUi()
 {
-    setStyleSheet("QDialog { background-color: #f1f5f9; }");
+    setStyleSheet("QDialog { background-color: #f6f7f9; }");
 
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     mainLayout->setSpacing(12);
@@ -56,17 +57,16 @@ void ApiKeysDialog::setupUi()
     QFrame *headerCard = new QFrame(this);
     headerCard->setStyleSheet(
         "QFrame {"
-        "  background: white;"
-        "  border: 1.5px solid #e2e8f0;"
-        "  border-radius: 10px;"
+        "  background: transparent;"
+        "  border: none;"
         "}"
     );
     QHBoxLayout *headerLayout = new QHBoxLayout(headerCard);
     headerLayout->setContentsMargins(18, 14, 18, 14);
 
-    QLabel *titleLabel = new QLabel("🔑  API Keys 管理", this);
+    QLabel *titleLabel = new QLabel("API Keys", this);
     QFont titleFont = titleLabel->font();
-    titleFont.setPointSize(15);
+    titleFont.setPointSize(18);
     titleFont.setBold(true);
     titleLabel->setFont(titleFont);
     titleLabel->setStyleSheet("color: #1e293b;");
@@ -77,10 +77,10 @@ void ApiKeysDialog::setupUi()
     m_totalKeysLabel = new QLabel("共 0 个 Key", this);
     m_totalKeysLabel->setStyleSheet(
         "QLabel {"
-        "  color: #6366f1;"
-        "  background: #eef2ff;"
-        "  border: 1px solid #c7d2fe;"
-        "  border-radius: 12px;"
+        "  color: #0f5f59;"
+        "  background: #e7f5f2;"
+        "  border: 1px solid #b7e4da;"
+        "  border-radius: 7px;"
         "  padding: 3px 12px;"
         "  font-size: 12px;"
         "  font-weight: bold;"
@@ -121,26 +121,29 @@ void ApiKeysDialog::setupUi()
         "  border-color: #f1f5f9;"
         "}";
 
-    m_refreshButton = new QPushButton("🔄  刷新", this);
+    m_refreshButton = new QPushButton("刷新", this);
+    m_refreshButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     m_refreshButton->setMinimumHeight(34);
     m_refreshButton->setCursor(Qt::PointingHandCursor);
     m_refreshButton->setStyleSheet(ghostBtnStyle);
     toolbarLayout->addWidget(m_refreshButton);
 
-    m_copyButton = new QPushButton("📋  复制 Key", this);
+    m_copyButton = new QPushButton("复制 Key", this);
+    m_copyButton->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
     m_copyButton->setMinimumHeight(34);
     m_copyButton->setEnabled(false);
     m_copyButton->setCursor(Qt::PointingHandCursor);
     m_copyButton->setStyleSheet(ghostBtnStyle);
     toolbarLayout->addWidget(m_copyButton);
 
-    m_activateButton = new QPushButton("★  设为活跃", this);
+    m_activateButton = new QPushButton("设为当前", this);
+    m_activateButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
     m_activateButton->setMinimumHeight(34);
     m_activateButton->setEnabled(false);
     m_activateButton->setCursor(Qt::PointingHandCursor);
     m_activateButton->setStyleSheet(
         "QPushButton {"
-        "  background: #22c55e;"
+        "  background: #0f766e;"
         "  color: white;"
         "  border: none;"
         "  border-radius: 6px;"
@@ -148,7 +151,7 @@ void ApiKeysDialog::setupUi()
         "  font-size: 13px;"
         "  font-weight: bold;"
         "}"
-        "QPushButton:hover { background: #16a34a; }"
+        "QPushButton:hover { background: #0b625c; }"
         "QPushButton:disabled { background: #e2e8f0; color: #94a3b8; }"
     );
     toolbarLayout->addWidget(m_activateButton);
@@ -192,8 +195,8 @@ void ApiKeysDialog::setupUi()
         "  color: #334155;"
         "}"
         "QTableWidget::item:selected {"
-        "  background: #eef2ff;"
-        "  color: #3730a3;"
+        "  background: #e7f5f2;"
+        "  color: #0f5f59;"
         "}"
         "QTableWidget::item:alternate {"
         "  background: #fafbfc;"
@@ -230,6 +233,7 @@ void ApiKeysDialog::setupUi()
     bottomLayout->addStretch();
 
     QPushButton *closeButton = new QPushButton("关闭", this);
+    closeButton->setIcon(style()->standardIcon(QStyle::SP_DialogCloseButton));
     closeButton->setMinimumHeight(36);
     closeButton->setMinimumWidth(90);
     closeButton->setCursor(Qt::PointingHandCursor);
@@ -262,7 +266,7 @@ void ApiKeysDialog::setupUi()
 void ApiKeysDialog::loadApiKeys()
 {
     m_statusLabel->setText("加载 API Keys...");
-    m_statusLabel->setStyleSheet("color: #6366f1; font-size: 12px;");
+    m_statusLabel->setStyleSheet("color: #0f766e; font-size: 12px;");
     m_refreshButton->setEnabled(false);
     m_apiClient->getApiKeys();
 }
@@ -304,7 +308,7 @@ void ApiKeysDialog::onActivateKeyClicked()
     updateKeysTable(m_keys);
     emit keyActivated(selectedKey.id, selectedKey.key);
 
-    m_statusLabel->setText(QString("★ Key「%1」已设为活跃").arg(selectedKey.name));
+    m_statusLabel->setText(QString("Key「%1」已设为当前使用").arg(selectedKey.name));
     m_statusLabel->setStyleSheet("color: #16a34a; font-size: 12px;");
 }
 
@@ -341,13 +345,13 @@ void ApiKeysDialog::updateKeysTable(const QList<ApiKeyInfo> &keys)
         const bool isSelectedActive = (!m_activeKeyId.isEmpty() && info.id == m_activeKeyId);
 
         // 名称（活跃 Key 加星号 + 加粗）
-        QString displayName = isSelectedActive ? ("★ " + info.name) : info.name;
+        QString displayName = isSelectedActive ? ("当前 · " + info.name) : info.name;
         QTableWidgetItem *nameItem = new QTableWidgetItem(displayName);
         if (isSelectedActive) {
             QFont f = nameItem->font();
             f.setBold(true);
             nameItem->setFont(f);
-            nameItem->setForeground(QBrush(QColor("#4f46e5")));
+            nameItem->setForeground(QBrush(QColor("#0f766e")));
         }
         m_keysTable->setItem(i, 0, nameItem);
 

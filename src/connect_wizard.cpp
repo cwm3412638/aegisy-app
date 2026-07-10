@@ -1,56 +1,110 @@
 #include "connect_wizard.h"
-#include "tool_manager.h"
 
-#include <QVBoxLayout>
-#include <QHBoxLayout>
 #include <QFrame>
-#include <QScrollArea>
+#include <QHBoxLayout>
+#include <QJsonObject>
 #include <QMessageBox>
-#include <QButtonGroup>
-#include <QDesktopServices>
-#include <QUrl>
+#include <QStyle>
+#include <QVBoxLayout>
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+namespace {
 
-static QString toolLabel(AiTool tool)
+QString toolAccent(AiTool tool)
 {
     switch (tool) {
-    case AiTool::ClaudeCode: return QString::fromUtf8("🤖 Claude Code");
-    case AiTool::CodexCli:   return QString::fromUtf8("⚡ Codex CLI");
-    case AiTool::GeminiCli:  return QString::fromUtf8("💎 Gemini CLI");
+    case AiTool::ClaudeCode: return QStringLiteral("#c15f3c");
+    case AiTool::CodexCli:   return QStringLiteral("#111827");
+    case AiTool::GeminiCli:  return QStringLiteral("#1a73e8");
     }
-    return {};
+    return QStringLiteral("#0f766e");
 }
 
-static QString toolAccent(AiTool tool)
+QString toolSoftColor(AiTool tool)
 {
     switch (tool) {
-    case AiTool::ClaudeCode: return QStringLiteral("#6366f1");
-    case AiTool::CodexCli:   return QStringLiteral("#3b82f6");
-    case AiTool::GeminiCli:  return QStringLiteral("#0d9488");
+    case AiTool::ClaudeCode: return QStringLiteral("#fff4ef");
+    case AiTool::CodexCli:   return QStringLiteral("#f3f4f6");
+    case AiTool::GeminiCli:  return QStringLiteral("#eef5ff");
     }
-    return QStringLiteral("#6366f1");
+    return QStringLiteral("#ecfdf5");
 }
 
-// ---------------------------------------------------------------------------
-// Constructor
-// ---------------------------------------------------------------------------
+QString toolLetter(AiTool tool)
+{
+    switch (tool) {
+    case AiTool::ClaudeCode: return QStringLiteral("C");
+    case AiTool::CodexCli:   return QStringLiteral("O");
+    case AiTool::GeminiCli:  return QStringLiteral("G");
+    }
+    return QStringLiteral("A");
+}
+
+QString toolConfigPath(AiTool tool)
+{
+    return ToolManager::configFilePath(tool);
+}
+
+QString toolSelectorText(AiTool tool)
+{
+    switch (tool) {
+    case AiTool::ClaudeCode: return QStringLiteral("Claude Code\nAnthropic");
+    case AiTool::CodexCli:   return QStringLiteral("Codex CLI\nOpenAI");
+    case AiTool::GeminiCli:  return QStringLiteral("Gemini CLI\nGoogle");
+    }
+    return QString();
+}
+
+QString primaryButtonStyle()
+{
+    return QStringLiteral(
+        "QPushButton {"
+        "  background: #0f766e; color: white; border: none; border-radius: 7px;"
+        "  padding: 0 18px; font-size: 13px; font-weight: 600;"
+        "}"
+        "QPushButton:hover { background: #0b625c; }"
+        "QPushButton:pressed { background: #094f4a; }"
+        "QPushButton:disabled { background: #d7dde3; color: #8a96a3; }");
+}
+
+QString secondaryButtonStyle()
+{
+    return QStringLiteral(
+        "QPushButton {"
+        "  background: white; color: #344054; border: 1px solid #d0d5dd;"
+        "  border-radius: 7px; padding: 0 15px; font-size: 13px;"
+        "}"
+        "QPushButton:hover { background: #f8fafb; border-color: #98a2b3; }"
+        "QPushButton:disabled { color: #98a2b3; background: #f8fafb; }");
+}
+
+} // namespace
 
 ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
-                                          ProfileManager *pm,
-                                          int editIndex,
-                                          QWidget *parent)
+                                         ProfileManager *profileManager,
+                                         int editIndex,
+                                         QWidget *parent)
     : QDialog(parent)
     , m_apiClient(client)
-    , m_profileManager(pm)
+    , m_profileManager(profileManager)
     , m_editIndex(editIndex)
 {
-    setWindowTitle(editIndex == -1
-                   ? QString::fromUtf8("新建配置档案")
-                   : QString::fromUtf8("编辑配置档案"));
-    setFixedSize(500, 600);
+    if (m_editIndex >= 0) {
+        const QList<Profile> profiles = m_profileManager->allProfiles();
+        if (m_editIndex < profiles.size()) {
+            const Profile &profile = profiles[m_editIndex];
+            m_selectedType = profile.type;
+            m_existingType = profile.type;
+            m_existingKey = profile.key;
+            m_existingModel = profile.model;
+        }
+    }
+
+    setupUi();
+
+    setWindowTitle(m_editIndex < 0 ? QStringLiteral("新建连接配置")
+                                   : QStringLiteral("编辑连接配置"));
+    resize(600, 570);
+    setMinimumSize(560, 540);
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
     connect(m_apiClient, &ApiClient::apiKeysReceived,
@@ -60,715 +114,507 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
     connect(m_apiClient, &ApiClient::requestFailed,
             this, &ConnectWizardDialog::onRequestFailed);
 
-    setupUi();
-
-    // Kick off key load
-    m_apiClient->getApiKeys();
-
-    // 编辑时回填名称和类型
     if (m_editIndex >= 0) {
-        const auto profiles = m_profileManager->allProfiles();
+        const QList<Profile> profiles = m_profileManager->allProfiles();
         if (m_editIndex < profiles.size()) {
             m_nameEdit->setText(profiles[m_editIndex].name);
-            m_selectedType = profiles[m_editIndex].type;
-            const int typeId = static_cast<int>(m_selectedType);
-            if (auto *btn = m_typeGroup->button(typeId))
-                btn->setChecked(true);
-            // buildPage2 尚未初始化，updateSectionVisibility 会在进入第2步时由
-            // goNext() 末尾手动调用一次；此处只更新按钮状态即可
         }
     }
-}
 
-// ---------------------------------------------------------------------------
-// setupUi
-// ---------------------------------------------------------------------------
+    if (QAbstractButton *button = m_typeGroup->button(static_cast<int>(m_selectedType))) {
+        button->setChecked(true);
+    }
+    updateToolContext();
+    m_apiClient->getApiKeys();
+}
 
 void ConnectWizardDialog::setupUi()
 {
-    setStyleSheet(QStringLiteral("QDialog { background: #ffffff; }"));
+    setStyleSheet(QStringLiteral(
+        "QDialog { background: #f6f7f9; }"
+        "QLabel { color: #182230; }"
+        "QLineEdit, QComboBox {"
+        "  background: white; color: #182230; border: 1px solid #d0d5dd;"
+        "  border-radius: 7px; padding: 0 12px; font-size: 13px;"
+        "}"
+        "QLineEdit:focus, QComboBox:focus { border: 2px solid #0f766e; }"
+        "QComboBox::drop-down { border: none; width: 28px; }"
+        "QComboBox QAbstractItemView {"
+        "  background: white; color: #182230; border: 1px solid #d0d5dd;"
+        "  selection-background-color: #e7f5f2; selection-color: #134e4a;"
+        "}"
+        "QToolTip { background: #182230; color: white; border: none; padding: 5px; }"));
 
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
-    // ── Header ──────────────────────────────────────────────────────────────
     auto *header = new QFrame(this);
     header->setObjectName(QStringLiteral("wizardHeader"));
+    header->setFixedHeight(76);
     header->setStyleSheet(QStringLiteral(
-        "QFrame#wizardHeader {"
-        "  background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-        "    stop:0 #6366f1, stop:1 #8b5cf6);"
-        "  border: none;"
-        "}"));
-    header->setFixedHeight(64);
+        "QFrame#wizardHeader { background: white; border-bottom: 1px solid #e4e7ec; }"));
 
     auto *headerLayout = new QHBoxLayout(header);
-    headerLayout->setContentsMargins(24, 0, 24, 0);
+    headerLayout->setContentsMargins(26, 14, 26, 14);
+    headerLayout->setSpacing(12);
 
-    auto *titleLabel = new QLabel(
-        m_editIndex == -1
-            ? QString::fromUtf8("✨ 新建配置档案")
-            : QString::fromUtf8("✏️ 编辑配置档案"),
+    auto *brand = new QLabel(QStringLiteral("A"), header);
+    brand->setFixedSize(40, 40);
+    brand->setAlignment(Qt::AlignCenter);
+    brand->setStyleSheet(QStringLiteral(
+        "background: #0f766e; color: white; border-radius: 8px;"
+        "font-size: 18px; font-weight: 700;"));
+    headerLayout->addWidget(brand);
+
+    auto *titleColumn = new QVBoxLayout;
+    titleColumn->setSpacing(1);
+    auto *title = new QLabel(
+        m_editIndex < 0 ? QStringLiteral("新建连接配置") : QStringLiteral("编辑连接配置"),
         header);
-    titleLabel->setStyleSheet(QStringLiteral(
-        "color: white; font-size: 16px; font-weight: bold;"));
-
-    m_stepLabel = new QLabel(QString::fromUtf8("第 1 步 / 共 3 步"), header);
-    m_stepLabel->setStyleSheet(QStringLiteral(
-        "color: rgba(255,255,255,0.8); font-size: 12px;"));
-    m_stepLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-
-    headerLayout->addWidget(titleLabel);
+    title->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700; color: #101828;"));
+    auto *subtitle = new QLabel(QStringLiteral("一个配置只连接一个 AI 工具"), header);
+    subtitle->setStyleSheet(QStringLiteral("font-size: 12px; color: #667085;"));
+    titleColumn->addWidget(title);
+    titleColumn->addWidget(subtitle);
+    headerLayout->addLayout(titleColumn);
     headerLayout->addStretch();
+
+    m_stepLabel = new QLabel(header);
+    m_stepLabel->setAlignment(Qt::AlignCenter);
+    m_stepLabel->setFixedSize(92, 30);
+    m_stepLabel->setStyleSheet(QStringLiteral(
+        "background: #ecfdf5; color: #0f766e; border: 1px solid #a7f3d0;"
+        "border-radius: 7px; font-size: 12px; font-weight: 600;"));
     headerLayout->addWidget(m_stepLabel);
     root->addWidget(header);
 
-    // ── Stacked pages ───────────────────────────────────────────────────────
     m_stack = new QStackedWidget(this);
-    m_stack->addWidget(buildPage1());
-    m_stack->addWidget(buildPage2());
-    m_stack->addWidget(buildPage3());
+    m_stack->addWidget(buildIdentityPage());
+    m_stack->addWidget(buildConnectionPage());
     root->addWidget(m_stack, 1);
 
-    // ── Nav bar ─────────────────────────────────────────────────────────────
-    auto *navBar = new QFrame(this);
-    navBar->setStyleSheet(QStringLiteral(
-        "QFrame { background: #f9fafb; border-top: 1px solid #e5e7eb; }"));
-    navBar->setFixedHeight(60);
+    auto *footer = new QFrame(this);
+    footer->setObjectName(QStringLiteral("wizardFooter"));
+    footer->setFixedHeight(68);
+    footer->setStyleSheet(QStringLiteral(
+        "QFrame#wizardFooter { background: white; border-top: 1px solid #e4e7ec; }"));
+    auto *footerLayout = new QHBoxLayout(footer);
+    footerLayout->setContentsMargins(26, 13, 26, 13);
 
-    auto *navLayout = new QHBoxLayout(navBar);
-    navLayout->setContentsMargins(24, 12, 24, 12);
+    m_backButton = new QPushButton(QStringLiteral("上一步"), footer);
+    m_backButton->setIcon(style()->standardIcon(QStyle::SP_ArrowBack));
+    m_backButton->setFixedHeight(40);
+    m_backButton->setStyleSheet(secondaryButtonStyle());
+    footerLayout->addWidget(m_backButton);
+    footerLayout->addStretch();
 
-    m_backBtn = new QPushButton(QString::fromUtf8("← 上一步"), navBar);
-    m_backBtn->setFixedSize(100, 36);
-    m_backBtn->setStyleSheet(QStringLiteral(
-        "QPushButton {"
-        "  background: #ffffff;"
-        "  color: #374151;"
-        "  border: 1px solid #d1d5db;"
-        "  border-radius: 6px;"
-        "  font-size: 13px;"
-        "}"
-        "QPushButton:hover { background: #f3f4f6; }"
-        "QPushButton:disabled { color: #9ca3af; border-color: #e5e7eb; }"));
+    m_nextButton = new QPushButton(footer);
+    m_nextButton->setFixedHeight(40);
+    m_nextButton->setMinimumWidth(116);
+    m_nextButton->setStyleSheet(primaryButtonStyle());
+    footerLayout->addWidget(m_nextButton);
+    root->addWidget(footer);
 
-    m_nextBtn = new QPushButton(QString::fromUtf8("下一步 →"), navBar);
-    m_nextBtn->setFixedSize(120, 36);
-    m_nextBtn->setStyleSheet(QStringLiteral(
-        "QPushButton {"
-        "  background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-        "    stop:0 #6366f1, stop:1 #8b5cf6);"
-        "  color: white;"
-        "  border: none;"
-        "  border-radius: 6px;"
-        "  font-size: 13px;"
-        "  font-weight: bold;"
-        "}"
-        "QPushButton:hover {"
-        "  background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-        "    stop:0 #4f46e5, stop:1 #7c3aed);"
-        "}"
-        "QPushButton:disabled { background: #d1d5db; color: #9ca3af; }"));
-
-    navLayout->addWidget(m_backBtn);
-    navLayout->addStretch();
-    navLayout->addWidget(m_nextBtn);
-    root->addWidget(navBar);
-
-    connect(m_backBtn, &QPushButton::clicked, this, &ConnectWizardDialog::goBack);
-    connect(m_nextBtn, &QPushButton::clicked, this, &ConnectWizardDialog::goNext);
-
-    updateNavButtons();
+    connect(m_backButton, &QPushButton::clicked, this, &ConnectWizardDialog::goBack);
+    connect(m_nextButton, &QPushButton::clicked, this, &ConnectWizardDialog::goNext);
+    updateNavigation();
 }
 
-// ---------------------------------------------------------------------------
-// buildPage1 — profile name
-// ---------------------------------------------------------------------------
-
-QWidget *ConnectWizardDialog::buildPage1()
+QWidget *ConnectWizardDialog::buildIdentityPage()
 {
-    auto *page = new QWidget;
+    auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
-    layout->setContentsMargins(32, 40, 32, 32);
+    layout->setContentsMargins(32, 28, 32, 26);
     layout->setSpacing(12);
 
-    auto *iconLabel = new QLabel(QString::fromUtf8("📋"));
-    iconLabel->setAlignment(Qt::AlignCenter);
-    iconLabel->setStyleSheet(QStringLiteral("font-size: 48px;"));
+    auto *title = new QLabel(QStringLiteral("配置基本信息"), page);
+    title->setStyleSheet(QStringLiteral("font-size: 18px; font-weight: 700; color: #101828;"));
+    layout->addWidget(title);
 
-    auto *headLabel = new QLabel(QString::fromUtf8("给档案起个名字"));
-    headLabel->setAlignment(Qt::AlignCenter);
-    headLabel->setStyleSheet(QStringLiteral(
-        "font-size: 18px; font-weight: bold; color: #111827;"));
+    auto *nameLabel = new QLabel(QStringLiteral("配置名称"), page);
+    nameLabel->setStyleSheet(QStringLiteral("font-size: 12px; font-weight: 600; color: #475467;"));
+    layout->addSpacing(10);
+    layout->addWidget(nameLabel);
 
-    auto *descLabel = new QLabel(
-        QString::fromUtf8(
-            "档案用于保存一组 AI 工具的 API Key 和模型配置，\n"
-            "您可以随时切换不同的档案。"));
-    descLabel->setAlignment(Qt::AlignCenter);
-    descLabel->setWordWrap(true);
-    descLabel->setStyleSheet(QStringLiteral(
-        "font-size: 13px; color: #6b7280;"));
-
-    m_nameEdit = new QLineEdit;
-    m_nameEdit->setPlaceholderText(QString::fromUtf8("给这个档案起个名字..."));
+    m_nameEdit = new QLineEdit(page);
     m_nameEdit->setFixedHeight(44);
-    m_nameEdit->setStyleSheet(QStringLiteral(
-        "QLineEdit {"
-        "  border: 2px solid #e5e7eb;"
-        "  border-radius: 8px;"
-        "  padding: 0 16px;"
-        "  font-size: 14px;"
-        "  color: #111827;"
-        "  background: #ffffff;"
-        "}"
-        "QLineEdit:focus { border-color: #6366f1; }"));
+    m_nameEdit->setPlaceholderText(QStringLiteral("例如：工作账号 Codex"));
+    layout->addWidget(m_nameEdit);
 
-    // ── 类型选择 ──────────────────────────────────────────────────
-    auto *typeLabel = new QLabel(QString::fromUtf8("配置类型"), page);
-    typeLabel->setStyleSheet(QStringLiteral(
-        "font-size: 11px; color: #6b7280; font-weight: 500; margin-top: 8px;"));
+    auto *typeLabel = new QLabel(QStringLiteral("连接工具"), page);
+    typeLabel->setStyleSheet(QStringLiteral("font-size: 12px; font-weight: 600; color: #475467;"));
+    layout->addSpacing(14);
+    layout->addWidget(typeLabel);
 
-    auto *typePillRow = new QHBoxLayout;
-    typePillRow->setSpacing(6);
-
+    auto *typeRow = new QHBoxLayout;
+    typeRow->setSpacing(10);
     m_typeGroup = new QButtonGroup(this);
     m_typeGroup->setExclusive(true);
 
-    const struct { int id; QString label; } kTypes[] = {
-        { 0, QString::fromUtf8("混合") },
-        { 1, QStringLiteral("Claude") },
-        { 2, QStringLiteral("Codex") },
-        { 3, QStringLiteral("Gemini") },
-    };
-    for (const auto &t : kTypes) {
-        auto *btn = new QPushButton(t.label, page);
-        btn->setCheckable(true);
-        btn->setChecked(t.id == 0);
-        btn->setFixedHeight(30);
-        btn->setStyleSheet(QStringLiteral(
+    for (ProfileType type : allProfileTypes()) {
+        const AiTool tool = toolForType(type);
+        auto *button = new QPushButton(toolSelectorText(tool), page);
+        button->setCheckable(true);
+        button->setMinimumHeight(84);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setStyleSheet(QStringLiteral(
             "QPushButton {"
-            "  background: #f3f4f6; color: #374151; border: 1.5px solid #d1d5db;"
-            "  border-radius: 6px; font-size: 12px; padding: 0 12px; }"
-            "QPushButton:checked {"
-            "  background: #6366f1; color: white; border-color: #6366f1; }"
-            "QPushButton:hover:!checked { background: #e5e7eb; }"));
-        m_typeGroup->addButton(btn, t.id);
-        typePillRow->addWidget(btn);
+            "  background: white; color: #344054; border: 1px solid #d0d5dd;"
+            "  border-radius: 8px; padding: 10px; font-size: 13px; font-weight: 600;"
+            "}"
+            "QPushButton:hover { border-color: %1; background: %2; }"
+            "QPushButton:checked { border: 2px solid %1; background: %2; color: %1; }")
+            .arg(toolAccent(tool), toolSoftColor(tool)));
+        m_typeGroup->addButton(button, static_cast<int>(type));
+        typeRow->addWidget(button);
     }
-    typePillRow->addStretch();
+    layout->addLayout(typeRow);
+
+    auto *note = new QLabel(
+        QStringLiteral("切换配置时，只会更新所选工具的本地认证文件。"), page);
+    note->setWordWrap(true);
+    note->setStyleSheet(QStringLiteral(
+        "background: #f0fdf9; color: #0f5f59; border: 1px solid #b7e4da;"
+        "border-radius: 7px; padding: 10px 12px; font-size: 12px;"));
+    layout->addSpacing(10);
+    layout->addWidget(note);
+    layout->addStretch();
 
     connect(m_typeGroup, QOverload<int>::of(&QButtonGroup::idClicked),
             this, &ConnectWizardDialog::onTypeChanged);
-
-    layout->addStretch();
-    layout->addWidget(iconLabel);
-    layout->addSpacing(8);
-    layout->addWidget(headLabel);
-    layout->addWidget(descLabel);
-    layout->addSpacing(24);
-    layout->addWidget(m_nameEdit);
-    layout->addSpacing(12);
-    layout->addWidget(typeLabel);
-    layout->addLayout(typePillRow);
-    layout->addStretch();
-
     return page;
 }
 
-// ---------------------------------------------------------------------------
-// buildPage2 — tool configuration
-// ---------------------------------------------------------------------------
-
-QWidget *ConnectWizardDialog::buildPage2()
+QWidget *ConnectWizardDialog::buildConnectionPage()
 {
-    auto *page = new QWidget;
-    auto *outerLayout = new QVBoxLayout(page);
-    outerLayout->setContentsMargins(0, 0, 0, 0);
-    outerLayout->setSpacing(0);
-
-    // Title strip
-    auto *titleWidget = new QWidget;
-    auto *titleLayout = new QVBoxLayout(titleWidget);
-    titleLayout->setContentsMargins(32, 20, 32, 10);
-    titleLayout->setSpacing(2);
-
-    auto *titleLabel = new QLabel(QString::fromUtf8("配置 AI 工具"));
-    titleLabel->setStyleSheet(QStringLiteral(
-        "font-size: 16px; font-weight: bold; color: #111827;"));
-    auto *subLabel = new QLabel(
-        QString::fromUtf8("为每个工具选择 API Key 并查询可用模型"));
-    subLabel->setStyleSheet(QStringLiteral(
-        "font-size: 12px; color: #6b7280;"));
-    titleLayout->addWidget(titleLabel);
-    titleLayout->addWidget(subLabel);
-    outerLayout->addWidget(titleWidget);
-
-    // Scroll area
-    auto *scrollArea = new QScrollArea;
-    scrollArea->setWidgetResizable(true);
-    scrollArea->setFrameShape(QFrame::NoFrame);
-    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scrollArea->setStyleSheet(QStringLiteral(
-        "QScrollArea { background: #f9fafb; border: none; }"));
-
-    auto *scrollContent = new QWidget;
-    scrollContent->setStyleSheet(QStringLiteral("background: #f9fafb;"));
-    auto *scrollLayout = new QVBoxLayout(scrollContent);
-    scrollLayout->setContentsMargins(24, 8, 24, 24);
-    scrollLayout->setSpacing(12);
-
-    for (AiTool tool : { AiTool::ClaudeCode, AiTool::CodexCli, AiTool::GeminiCli }) {
-        const QString accent = toolAccent(tool);
-
-        ToolSection sec;
-        sec.tool = tool;
-
-        // Card
-        auto *card = new QFrame;
-        sec.card = card;   // 保存引用，供 updateSectionVisibility 显隐
-        card->setStyleSheet(QStringLiteral(
-            "QFrame {"
-            "  background: #ffffff;"
-            "  border: 1px solid #e5e7eb;"
-            "  border-left: 4px solid %1;"
-            "  border-radius: 8px;"
-            "}").arg(accent));
-
-        auto *cardLayout = new QVBoxLayout(card);
-        cardLayout->setContentsMargins(16, 14, 16, 14);
-        cardLayout->setSpacing(10);
-
-        // Title row with enable checkbox
-        auto *titleRow = new QHBoxLayout;
-        sec.enableCheck = new QCheckBox(toolLabel(tool));
-        sec.enableCheck->setChecked(true);
-        sec.enableCheck->setStyleSheet(QStringLiteral(
-            "QCheckBox {"
-            "  font-size: 14px; font-weight: bold; color: #111827; spacing: 8px;"
-            "}"
-            "QCheckBox::indicator { width: 16px; height: 16px; border-radius: 3px;"
-            "  border: 2px solid #d1d5db; }"
-            "QCheckBox::indicator:checked {"
-            "  background: %1; border-color: %1;"
-            "}").arg(accent));
-        titleRow->addWidget(sec.enableCheck);
-        titleRow->addStretch();
-        cardLayout->addLayout(titleRow);
-
-        // Key label
-        auto *keyLabel = new QLabel(QString::fromUtf8("API Key"));
-        keyLabel->setStyleSheet(QStringLiteral(
-            "font-size: 11px; color: #6b7280; font-weight: 500;"));
-        cardLayout->addWidget(keyLabel);
-
-        // Key combo + query button
-        auto *keyRow = new QHBoxLayout;
-        keyRow->setSpacing(8);
-
-        sec.keyCombo = new QComboBox;
-        sec.keyCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        sec.keyCombo->setFixedHeight(34);
-        sec.keyCombo->setStyleSheet(QStringLiteral(
-            "QComboBox {"
-            "  border: 1px solid #d1d5db; border-radius: 6px;"
-            "  padding: 0 12px; font-size: 12px; color: #374151; background: #ffffff;"
-            "}"
-            "QComboBox:focus { border-color: #6366f1; }"
-            "QComboBox::drop-down { border: none; width: 24px; }"));
-
-        sec.queryButton = new QPushButton(QString::fromUtf8("🔄 查询模型"));
-        sec.queryButton->setFixedHeight(34);
-        sec.queryButton->setFixedWidth(100);
-        sec.queryButton->setStyleSheet(QStringLiteral(
-            "QPushButton {"
-            "  background: %1; color: white; border: none;"
-            "  border-radius: 6px; font-size: 12px; font-weight: bold; padding: 0 8px;"
-            "}"
-            "QPushButton:hover { background: %2; }"
-            "QPushButton:disabled { background: #d1d5db; color: #9ca3af; }")
-            .arg(accent)
-            .arg(accent)); // hover same — slight opacity handled by Qt
-
-        const AiTool capTool = tool;
-        connect(sec.queryButton, &QPushButton::clicked,
-                this, [this, capTool]() { onQueryModels(capTool); });
-
-        keyRow->addWidget(sec.keyCombo);
-        keyRow->addWidget(sec.queryButton);
-        cardLayout->addLayout(keyRow);
-
-        // Loading label
-        sec.loadingLabel = new QLabel(QString::fromUtf8("⏳ 查询中..."));
-        sec.loadingLabel->setStyleSheet(QStringLiteral(
-            "font-size: 11px; color: #6b7280;"));
-        sec.loadingLabel->setVisible(false);
-        cardLayout->addWidget(sec.loadingLabel);
-
-        // Model label
-        auto *modelLabel = new QLabel(QString::fromUtf8("模型"));
-        modelLabel->setStyleSheet(QStringLiteral(
-            "font-size: 11px; color: #6b7280; font-weight: 500;"));
-        cardLayout->addWidget(modelLabel);
-
-        // Model combo
-        sec.modelCombo = new QComboBox;
-        sec.modelCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        sec.modelCombo->setFixedHeight(34);
-        sec.modelCombo->addItem(QString::fromUtf8("— 请先查询模型 —"));
-        sec.modelCombo->setStyleSheet(QStringLiteral(
-            "QComboBox {"
-            "  border: 1px solid #d1d5db; border-radius: 6px;"
-            "  padding: 0 12px; font-size: 12px; color: #374151; background: #ffffff;"
-            "}"
-            "QComboBox:focus { border-color: #6366f1; }"
-            "QComboBox::drop-down { border: none; width: 24px; }"));
-        cardLayout->addWidget(sec.modelCombo);
-
-        scrollLayout->addWidget(card);
-        m_sections.append(sec);
-    }
-
-    scrollLayout->addStretch();
-    scrollArea->setWidget(scrollContent);
-    outerLayout->addWidget(scrollArea, 1);
-
-    return page;
-}
-
-// ---------------------------------------------------------------------------
-// buildPage3 — confirmation summary
-// ---------------------------------------------------------------------------
-
-QWidget *ConnectWizardDialog::buildPage3()
-{
-    auto *page = new QWidget;
+    auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
-    layout->setContentsMargins(32, 40, 32, 32);
-    layout->setSpacing(16);
+    layout->setContentsMargins(32, 26, 32, 26);
+    layout->setSpacing(10);
 
-    auto *iconLabel = new QLabel(QString::fromUtf8("✅"));
-    iconLabel->setAlignment(Qt::AlignCenter);
-    iconLabel->setStyleSheet(QStringLiteral("font-size: 48px;"));
+    auto *context = new QFrame(page);
+    context->setObjectName(QStringLiteral("toolContext"));
+    context->setStyleSheet(QStringLiteral(
+        "QFrame#toolContext { background: white; border: 1px solid #e4e7ec; border-radius: 8px; }"));
+    auto *contextLayout = new QHBoxLayout(context);
+    contextLayout->setContentsMargins(14, 12, 14, 12);
+    contextLayout->setSpacing(12);
 
-    auto *headLabel = new QLabel(QString::fromUtf8("确认配置摘要"));
-    headLabel->setAlignment(Qt::AlignCenter);
-    headLabel->setStyleSheet(QStringLiteral(
-        "font-size: 18px; font-weight: bold; color: #111827;"));
+    m_toolBadge = new QLabel(context);
+    m_toolBadge->setFixedSize(42, 42);
+    m_toolBadge->setAlignment(Qt::AlignCenter);
+    contextLayout->addWidget(m_toolBadge);
 
-    auto *summaryCard = new QFrame;
-    summaryCard->setStyleSheet(QStringLiteral(
-        "QFrame {"
-        "  background: #f9fafb;"
-        "  border: 1px solid #e5e7eb;"
-        "  border-radius: 8px;"
-        "}"));
-    auto *summaryInner = new QVBoxLayout(summaryCard);
-    summaryInner->setContentsMargins(16, 16, 16, 16);
+    auto *toolText = new QVBoxLayout;
+    toolText->setSpacing(1);
+    m_toolTitle = new QLabel(context);
+    m_toolTitle->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: 700; color: #101828;"));
+    m_toolPath = new QLabel(context);
+    m_toolPath->setStyleSheet(QStringLiteral(
+        "font-size: 11px; color: #667085; font-family: monospace;"));
+    toolText->addWidget(m_toolTitle);
+    toolText->addWidget(m_toolPath);
+    contextLayout->addLayout(toolText, 1);
+    layout->addWidget(context);
 
-    m_summaryLabel = new QLabel;
-    m_summaryLabel->setWordWrap(true);
-    m_summaryLabel->setAlignment(Qt::AlignTop | Qt::AlignLeft);
-    m_summaryLabel->setTextFormat(Qt::RichText);
-    m_summaryLabel->setStyleSheet(QStringLiteral(
-        "font-size: 13px; color: #374151; background: transparent;"));
-    summaryInner->addWidget(m_summaryLabel);
+    auto *keyLabel = new QLabel(QStringLiteral("API Key"), page);
+    keyLabel->setStyleSheet(QStringLiteral("font-size: 12px; font-weight: 600; color: #475467;"));
+    layout->addSpacing(12);
+    layout->addWidget(keyLabel);
 
-    layout->addStretch();
-    layout->addWidget(iconLabel);
-    layout->addWidget(headLabel);
+    auto *keyRow = new QHBoxLayout;
+    keyRow->setSpacing(8);
+    m_keyCombo = new QComboBox(page);
+    m_keyCombo->setFixedHeight(42);
+    m_keyCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    keyRow->addWidget(m_keyCombo, 1);
+
+    m_queryButton = new QPushButton(QStringLiteral("查询模型"), page);
+    m_queryButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+    m_queryButton->setFixedHeight(42);
+    m_queryButton->setStyleSheet(secondaryButtonStyle());
+    keyRow->addWidget(m_queryButton);
+    layout->addLayout(keyRow);
+
+    m_loadingLabel = new QLabel(page);
+    m_loadingLabel->setWordWrap(true);
+    m_loadingLabel->setVisible(false);
+    m_loadingLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #667085;"));
+    layout->addWidget(m_loadingLabel);
+
+    auto *modelLabel = new QLabel(QStringLiteral("模型"), page);
+    modelLabel->setStyleSheet(QStringLiteral("font-size: 12px; font-weight: 600; color: #475467;"));
     layout->addSpacing(8);
-    layout->addWidget(summaryCard);
+    layout->addWidget(modelLabel);
+
+    m_modelCombo = new QComboBox(page);
+    m_modelCombo->setEditable(true);
+    m_modelCombo->setInsertPolicy(QComboBox::NoInsert);
+    m_modelCombo->setFixedHeight(42);
+    m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
+    if (m_modelCombo->lineEdit()) {
+        m_modelCombo->lineEdit()->setPlaceholderText(QStringLiteral("使用默认模型，或输入模型名称"));
+    }
+    layout->addWidget(m_modelCombo);
+
+    auto *hint = new QLabel(
+        QStringLiteral("模型可以留空；激活时会写入该工具的默认模型。"), page);
+    hint->setStyleSheet(QStringLiteral("font-size: 11px; color: #667085;"));
+    layout->addWidget(hint);
     layout->addStretch();
 
+    connect(m_queryButton, &QPushButton::clicked,
+            this, &ConnectWizardDialog::onQueryModels);
     return page;
 }
-
-// ---------------------------------------------------------------------------
-// refreshPage3
-// ---------------------------------------------------------------------------
-
-void ConnectWizardDialog::refreshPage3()
-{
-    const QString name = m_nameEdit->text().trimmed();
-    QString html;
-    html += QStringLiteral("<b>") + QString::fromUtf8("📋 档案名称：") + QStringLiteral("</b>")
-            + name.toHtmlEscaped() + QStringLiteral("<br><br>");
-
-    for (const ToolSection &sec : m_sections) {
-        if (!sec.enableCheck->isChecked())
-            continue;
-
-        const QString key = currentKey(sec);
-        const QString keyDisplay = key.isEmpty()
-            ? QStringLiteral("<i>") + QString::fromUtf8("未选择") + QStringLiteral("</i>")
-            : key.left(8) + QStringLiteral("****");
-
-        const bool hasModel = sec.modelCombo->count() > 0
-                              && sec.modelCombo->currentIndex() >= 0
-                              && !sec.modelCombo->currentText().startsWith(
-                                     QString::fromUtf8("—"));
-        const QString model = hasModel
-            ? sec.modelCombo->currentText().toHtmlEscaped()
-            : QStringLiteral("<i>") + QString::fromUtf8("未选择") + QStringLiteral("</i>");
-
-        html += QStringLiteral("<b>") + toolLabel(sec.tool).toHtmlEscaped()
-                + QStringLiteral("</b><br>");
-        html += QString::fromUtf8("　Key：") + keyDisplay + QStringLiteral("<br>");
-        html += QString::fromUtf8("　模型：") + model + QStringLiteral("<br><br>");
-    }
-
-    m_summaryLabel->setText(html);
-}
-
-// ---------------------------------------------------------------------------
-// populateKeyDropdowns
-// ---------------------------------------------------------------------------
-
-void ConnectWizardDialog::populateKeyDropdowns()
-{
-    for (ToolSection &sec : m_sections) {
-        const QString platform = ToolManager::toolPlatform(sec.tool);
-        sec.keyCombo->clear();
-        sec.keyCombo->addItem(QString::fromUtf8("— 请选择 Key —"), QString());
-
-        for (const QJsonValue &val : m_allKeys) {
-            const QJsonObject obj   = val.toObject();
-            const QJsonObject group = obj[QStringLiteral("group")].toObject();
-            if (group[QStringLiteral("platform")].toString() != platform)
-                continue;
-
-            const QString displayName = obj[QStringLiteral("name")].toString();
-            const QString keyValue    = obj[QStringLiteral("key")].toString();
-            sec.keyCombo->addItem(displayName, keyValue);
-        }
-    }
-
-    // Pre-select when editing
-    if (m_editIndex >= 0) {
-        const auto profiles = m_profileManager->allProfiles();
-        if (m_editIndex < profiles.size()) {
-            const auto &profile = profiles[m_editIndex];
-            for (ToolSection &sec : m_sections) {
-                QString existingKey;
-                switch (sec.tool) {
-                case AiTool::ClaudeCode: existingKey = profile.claudeKey; break;
-                case AiTool::CodexCli:   existingKey = profile.codexKey;  break;
-                case AiTool::GeminiCli:  existingKey = profile.geminiKey; break;
-                }
-                if (existingKey.isEmpty()) continue;
-                for (int i = 1; i < sec.keyCombo->count(); ++i) {
-                    if (sec.keyCombo->itemData(i, Qt::UserRole).toString() == existingKey) {
-                        sec.keyCombo->setCurrentIndex(i);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Slots
-// ---------------------------------------------------------------------------
 
 void ConnectWizardDialog::onApiKeysReceived(const QJsonArray &keys)
 {
     m_allKeys = keys;
-    populateKeyDropdowns();
+    populateKeyDropdown();
 }
 
-void ConnectWizardDialog::onQueryModels(AiTool tool)
+void ConnectWizardDialog::populateKeyDropdown()
 {
-    ToolSection *sec = nullptr;
-    for (ToolSection &s : m_sections) {
-        if (s.tool == tool) { sec = &s; break; }
-    }
-    if (!sec) return;
-
-    const QString key = currentKey(*sec);
-    if (key.isEmpty()) {
-        QMessageBox::warning(this,
-            QString::fromUtf8("提示"),
-            QString::fromUtf8("请先选择一个 API Key。"));
+    if (!m_keyCombo) {
         return;
     }
 
-    m_waitingModels = true;
-    m_queryingTool  = tool;
-    setPage2Loading(tool, true);
-    m_apiClient->getModels(key);
+    const QString previousKey = currentKey();
+    const QString platform = ToolManager::toolPlatform(selectedTool());
+    m_keyCombo->clear();
+    m_keyCombo->addItem(QStringLiteral("请选择 API Key"), QString());
+
+    for (const QJsonValue &value : m_allKeys) {
+        const QJsonObject object = value.toObject();
+        const QJsonObject group = object.value(QStringLiteral("group")).toObject();
+        if (group.value(QStringLiteral("platform")).toString() != platform) {
+            continue;
+        }
+
+        const QString key = object.value(QStringLiteral("key")).toString();
+        if (key.isEmpty()) {
+            continue;
+        }
+        QString name = object.value(QStringLiteral("name")).toString();
+        if (name.isEmpty()) {
+            name = key.left(8) + QStringLiteral("...");
+        }
+        m_keyCombo->addItem(name, key);
+    }
+
+    QString keyToSelect = previousKey;
+    if (keyToSelect.isEmpty() && m_selectedType == m_existingType) {
+        keyToSelect = m_existingKey;
+    }
+
+    int selectedIndex = -1;
+    for (int i = 1; i < m_keyCombo->count(); ++i) {
+        if (m_keyCombo->itemData(i).toString() == keyToSelect) {
+            selectedIndex = i;
+            break;
+        }
+    }
+
+    if (selectedIndex < 0 && !keyToSelect.isEmpty()) {
+        m_keyCombo->addItem(
+            QStringLiteral("当前保存的 Key (%1...)").arg(keyToSelect.left(8)),
+            keyToSelect);
+        selectedIndex = m_keyCombo->count() - 1;
+    }
+    m_keyCombo->setCurrentIndex(selectedIndex >= 0 ? selectedIndex : 0);
+
+    if (m_selectedType == m_existingType && !m_existingModel.isEmpty()) {
+        const int modelIndex = m_modelCombo->findText(m_existingModel);
+        if (modelIndex >= 0) {
+            m_modelCombo->setCurrentIndex(modelIndex);
+        } else {
+            m_modelCombo->addItem(m_existingModel, m_existingModel);
+            m_modelCombo->setCurrentIndex(m_modelCombo->count() - 1);
+        }
+    } else if (m_selectedType != m_existingType) {
+        m_modelCombo->setCurrentIndex(0);
+    }
 }
 
 void ConnectWizardDialog::onModelsReceived(const QJsonArray &models)
 {
-    if (!m_waitingModels) return;
-
-    ToolSection *sec = nullptr;
-    for (ToolSection &s : m_sections) {
-        if (s.tool == m_queryingTool) { sec = &s; break; }
+    if (!m_waitingModels) {
+        return;
     }
 
     m_waitingModels = false;
+    const QString previousModel = currentModel();
+    m_modelCombo->clear();
+    m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
 
-    if (!sec) return;
-
-    sec->modelCombo->clear();
-    if (models.isEmpty()) {
-        sec->modelCombo->addItem(QString::fromUtf8("— 无可用模型 —"));
-    } else {
-        for (const QJsonValue &val : models) {
-            QString modelId;
-            if (val.isObject())
-                modelId = val.toObject()[QStringLiteral("id")].toString();
-            if (modelId.isEmpty())
-                modelId = val.toString();
-            if (!modelId.isEmpty())
-                sec->modelCombo->addItem(modelId);
+    for (const QJsonValue &value : models) {
+        QString modelId;
+        if (value.isObject()) {
+            modelId = value.toObject().value(QStringLiteral("id")).toString();
+        } else {
+            modelId = value.toString();
+        }
+        if (!modelId.isEmpty() && m_modelCombo->findText(modelId) < 0) {
+            m_modelCombo->addItem(modelId, modelId);
         }
     }
 
-    setPage2Loading(m_queryingTool, false);
+    if (!previousModel.isEmpty()) {
+        int index = m_modelCombo->findText(previousModel);
+        if (index < 0) {
+            m_modelCombo->addItem(previousModel, previousModel);
+            index = m_modelCombo->count() - 1;
+        }
+        m_modelCombo->setCurrentIndex(index);
+    }
+
+    setModelLoading(false, models.isEmpty()
+        ? QStringLiteral("当前 Key 未返回可用模型，可以手动输入模型名称。")
+        : QStringLiteral("已加载 %1 个模型").arg(models.size()));
 }
 
 void ConnectWizardDialog::onRequestFailed(const QString &error)
 {
-    if (!m_waitingModels) return;
-
-    m_waitingModels = false;
-
-    ToolSection *sec = nullptr;
-    for (ToolSection &s : m_sections) {
-        if (s.tool == m_queryingTool) { sec = &s; break; }
+    if (!m_waitingModels) {
+        return;
     }
-    if (!sec) return;
-
-    sec->queryButton->setEnabled(true);
-    sec->loadingLabel->setText(
-        QString::fromUtf8("❌ 查询失败：") + error);
-    sec->loadingLabel->setVisible(true);
+    m_waitingModels = false;
+    setModelLoading(false, QStringLiteral("模型查询失败：%1").arg(error));
 }
 
-// ---------------------------------------------------------------------------
-// 类型切换
-// ---------------------------------------------------------------------------
+void ConnectWizardDialog::onQueryModels()
+{
+    const QString key = currentKey();
+    if (key.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("请选择 Key"),
+                                 QStringLiteral("请先选择一个 API Key。"));
+        m_keyCombo->setFocus();
+        return;
+    }
+
+    m_waitingModels = true;
+    setModelLoading(true);
+    m_apiClient->getModels(key);
+}
+
+void ConnectWizardDialog::setModelLoading(bool loading, const QString &message)
+{
+    m_queryButton->setEnabled(!loading);
+    m_loadingLabel->setVisible(loading || !message.isEmpty());
+    m_loadingLabel->setText(loading ? QStringLiteral("正在查询可用模型...") : message);
+    m_loadingLabel->setStyleSheet(loading || !message.startsWith(QStringLiteral("模型查询失败"))
+        ? QStringLiteral("font-size: 12px; color: #667085;")
+        : QStringLiteral("font-size: 12px; color: #b42318;"));
+}
 
 void ConnectWizardDialog::onTypeChanged(int id)
 {
-    m_selectedType = static_cast<ProfileType>(id);
-    updateSectionVisibility();
-}
-
-void ConnectWizardDialog::updateSectionVisibility()
-{
-    const QList<AiTool> visible = toolsForType(m_selectedType);
-    for (ToolSection &s : m_sections) {
-        if (s.card) {
-            s.card->setVisible(visible.contains(s.tool));
-        }
+    const ProfileType type = static_cast<ProfileType>(id);
+    if (!isValidProfileType(type)) {
+        return;
     }
+    m_selectedType = type;
+    updateToolContext();
+    populateKeyDropdown();
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-void ConnectWizardDialog::setPage2Loading(AiTool tool, bool loading)
+void ConnectWizardDialog::updateToolContext()
 {
-    for (ToolSection &s : m_sections) {
-        if (s.tool != tool) continue;
-        s.loadingLabel->setText(QString::fromUtf8("⏳ 查询中..."));
-        s.loadingLabel->setVisible(loading);
-        s.queryButton->setEnabled(!loading);
-        break;
+    if (!m_toolBadge) {
+        return;
     }
+
+    const AiTool tool = selectedTool();
+    const QString accent = toolAccent(tool);
+    m_toolBadge->setText(toolLetter(tool));
+    m_toolBadge->setStyleSheet(QStringLiteral(
+        "background: %1; color: white; border-radius: 8px;"
+        "font-size: 17px; font-weight: 700;").arg(accent));
+    m_toolTitle->setText(ToolManager::toolName(tool));
+    m_toolPath->setText(QStringLiteral("激活时更新 %1").arg(toolConfigPath(tool)));
 }
 
-void ConnectWizardDialog::updateNavButtons()
+void ConnectWizardDialog::updateNavigation()
 {
-    const int idx = m_stack->currentIndex();
-    m_backBtn->setEnabled(idx > 0);
-    m_nextBtn->setText(idx == 2
-                       ? QString::fromUtf8("✅ 完成")
-                       : QString::fromUtf8("下一步 →"));
-    m_stepLabel->setText(
-        QString::fromUtf8("第 %1 步 / 共 3 步").arg(idx + 1));
+    const int page = m_stack->currentIndex();
+    m_backButton->setEnabled(page > 0);
+    m_stepLabel->setText(page == 0 ? QStringLiteral("1 / 2  基本信息")
+                                   : QStringLiteral("2 / 2  接入设置"));
+    m_nextButton->setText(page == 0 ? QStringLiteral("下一步")
+                                    : QStringLiteral("保存配置"));
+    m_nextButton->setIcon(style()->standardIcon(
+        page == 0 ? QStyle::SP_ArrowForward : QStyle::SP_DialogApplyButton));
 }
-
-QString ConnectWizardDialog::currentKey(const ToolSection &s) const
-{
-    return s.keyCombo->currentData(Qt::UserRole).toString();
-}
-
-// ---------------------------------------------------------------------------
-// Navigation
-// ---------------------------------------------------------------------------
 
 void ConnectWizardDialog::goNext()
 {
-    const int idx = m_stack->currentIndex();
-
-    if (idx == 0) {
+    if (m_stack->currentIndex() == 0) {
         if (m_nameEdit->text().trimmed().isEmpty()) {
-            QMessageBox::warning(this,
-                QString::fromUtf8("提示"),
-                QString::fromUtf8("档案名称不能为空，请输入一个名称。"));
+            QMessageBox::information(this, QStringLiteral("填写配置名称"),
+                                     QStringLiteral("请输入一个便于识别的配置名称。"));
             m_nameEdit->setFocus();
             return;
         }
         m_stack->setCurrentIndex(1);
-        updateSectionVisibility();  // 按当前类型显隐工具 section
-        updateNavButtons();
-
-    } else if (idx == 1) {
-        refreshPage3();
-        m_stack->setCurrentIndex(2);
-        updateNavButtons();
-
-    } else {
-        finish();
+        updateToolContext();
+        populateKeyDropdown();
+        updateNavigation();
+        return;
     }
+
+    finishProfile();
 }
 
 void ConnectWizardDialog::goBack()
 {
-    const int idx = m_stack->currentIndex();
-    if (idx > 0) {
-        m_stack->setCurrentIndex(idx - 1);
-        updateNavButtons();
+    if (m_stack->currentIndex() == 0) {
+        return;
     }
+    m_stack->setCurrentIndex(0);
+    updateNavigation();
 }
 
-void ConnectWizardDialog::finish()
+void ConnectWizardDialog::finishProfile()
 {
+    const QString key = currentKey();
+    if (key.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("请选择 Key"),
+                                 QStringLiteral("每个连接配置都需要绑定一个 API Key。"));
+        m_keyCombo->setFocus();
+        return;
+    }
+
     const QString name = m_nameEdit->text().trimmed();
-    int profileIdx;
-
-    if (m_editIndex == -1) {
-        profileIdx = m_profileManager->addProfile(name, m_selectedType);
+    const QString model = currentModel();
+    if (m_editIndex < 0) {
+        m_resultIndex = m_profileManager->addProfile(
+            name, m_selectedType, key, model);
     } else {
-        profileIdx = m_editIndex;
-        m_profileManager->renameProfile(profileIdx, name);
-        m_profileManager->setProfileType(profileIdx, m_selectedType);
+        m_profileManager->updateProfile(
+            m_editIndex, name, m_selectedType, key, model);
+        m_resultIndex = m_editIndex;
     }
-
-    for (const ToolSection &sec : m_sections) {
-        if (!sec.enableCheck->isChecked()) continue;
-        if (sec.card && !sec.card->isVisible()) continue;  // 类型过滤掉的工具跳过
-
-        const QString key = currentKey(sec);
-        if (key.isEmpty()) continue;
-
-        const bool hasModel = sec.modelCombo->count() > 0
-                              && sec.modelCombo->currentIndex() >= 0
-                              && !sec.modelCombo->currentText().startsWith(
-                                     QString::fromUtf8("—"));
-        const QString model = hasModel ? sec.modelCombo->currentText() : QString();
-
-        m_profileManager->saveToolConfig(profileIdx, sec.tool, key, model);
-    }
-
-    m_resultIndex = profileIdx;
     accept();
+}
+
+AiTool ConnectWizardDialog::selectedTool() const
+{
+    return toolForType(m_selectedType);
+}
+
+QString ConnectWizardDialog::currentKey() const
+{
+    return m_keyCombo ? m_keyCombo->currentData(Qt::UserRole).toString() : QString();
+}
+
+QString ConnectWizardDialog::currentModel() const
+{
+    if (!m_modelCombo) {
+        return QString();
+    }
+    const QString model = m_modelCombo->currentText().trimmed();
+    return model == QStringLiteral("使用工具默认模型") ? QString() : model;
 }

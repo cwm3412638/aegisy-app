@@ -12,6 +12,7 @@
 #include <QSettings>
 #include <QLineEdit>
 #include <QFrame>
+#include <QStyle>
 
 ModelInfo ModelInfo::fromJson(const QJsonObject &obj)
 {
@@ -43,7 +44,7 @@ ModelsDialog::ModelsDialog(ApiClient *apiClient, QWidget *parent)
 
 void ModelsDialog::setupUi()
 {
-    setStyleSheet("QDialog { background-color: #f1f5f9; }");
+    setStyleSheet("QDialog { background-color: #f6f7f9; }");
 
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     mainLayout->setSpacing(12);
@@ -53,17 +54,16 @@ void ModelsDialog::setupUi()
     QFrame *headerCard = new QFrame(this);
     headerCard->setStyleSheet(
         "QFrame {"
-        "  background: white;"
-        "  border: 1.5px solid #e2e8f0;"
-        "  border-radius: 10px;"
+        "  background: transparent;"
+        "  border: none;"
         "}"
     );
     QHBoxLayout *headerLayout = new QHBoxLayout(headerCard);
     headerLayout->setContentsMargins(18, 14, 18, 14);
 
-    QLabel *titleLabel = new QLabel("📋  账号支持的模型", this);
+    QLabel *titleLabel = new QLabel("账号支持的模型", this);
     QFont titleFont = titleLabel->font();
-    titleFont.setPointSize(15);
+    titleFont.setPointSize(18);
     titleFont.setBold(true);
     titleLabel->setFont(titleFont);
     titleLabel->setStyleSheet("color: #1e293b;");
@@ -74,10 +74,10 @@ void ModelsDialog::setupUi()
     m_totalLabel = new QLabel("共 0 个模型", this);
     m_totalLabel->setStyleSheet(
         "QLabel {"
-        "  color: #6366f1;"
-        "  background: #eef2ff;"
-        "  border: 1px solid #c7d2fe;"
-        "  border-radius: 12px;"
+        "  color: #0f5f59;"
+        "  background: #e7f5f2;"
+        "  border: 1px solid #b7e4da;"
+        "  border-radius: 7px;"
         "  padding: 3px 12px;"
         "  font-size: 12px;"
         "  font-weight: bold;"
@@ -120,7 +120,7 @@ void ModelsDialog::setupUi()
         "  color: #1e293b;"
         "}"
         "QComboBox:focus {"
-        "  border-color: #6366f1;"
+        "  border-color: #0f766e;"
         "}"
         "QComboBox::drop-down {"
         "  border: none;"
@@ -130,19 +130,19 @@ void ModelsDialog::setupUi()
         "  border: 1.5px solid #e2e8f0;"
         "  border-radius: 6px;"
         "  background: white;"
-        "  selection-background-color: #eef2ff;"
-        "  selection-color: #3730a3;"
+        "  selection-background-color: #e7f5f2;"
+        "  selection-color: #0f5f59;"
         "}"
     );
     keyLayout->addWidget(m_keyCombo, 1);
 
-    m_refreshButton = new QPushButton("🔄  查询模型", this);
+    m_refreshButton = new QPushButton("查询模型", this);
+    m_refreshButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     m_refreshButton->setMinimumHeight(34);
     m_refreshButton->setCursor(Qt::PointingHandCursor);
     m_refreshButton->setStyleSheet(
         "QPushButton {"
-        "  background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
-        "    stop:0 #6366f1, stop:1 #8b5cf6);"
+        "  background: #0f766e;"
         "  color: white;"
         "  border: none;"
         "  border-radius: 7px;"
@@ -150,8 +150,7 @@ void ModelsDialog::setupUi()
         "  font-weight: bold;"
         "  padding: 0 18px;"
         "}"
-        "QPushButton:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
-        "    stop:0 #4f46e5, stop:1 #7c3aed); }"
+        "QPushButton:hover { background: #0b625c; }"
         "QPushButton:disabled { background: #e2e8f0; color: #94a3b8; }"
     );
     keyLayout->addWidget(m_refreshButton);
@@ -183,7 +182,7 @@ void ModelsDialog::setupUi()
         "  min-height: 32px;"
         "}"
         "QComboBox:focus, QLineEdit:focus {"
-        "  border-color: #6366f1;"
+        "  border-color: #0f766e;"
         "  background: white;"
         "}";
 
@@ -198,7 +197,7 @@ void ModelsDialog::setupUi()
         "QComboBox::drop-down { border: none; padding-right: 8px; }"
         "QComboBox QAbstractItemView {"
         "  border: 1.5px solid #e2e8f0; background: white;"
-        "  selection-background-color: #eef2ff; selection-color: #3730a3;"
+        "  selection-background-color: #e7f5f2; selection-color: #0f5f59;"
         "}");
     filterLayout->addWidget(m_providerCombo);
 
@@ -225,13 +224,14 @@ void ModelsDialog::setupUi()
     QHBoxLayout *toolbarLayout = new QHBoxLayout();
     toolbarLayout->setContentsMargins(0, 0, 0, 0);
 
-    m_copyButton = new QPushButton("📋  复制模型名称", this);
+    m_copyButton = new QPushButton("复制模型名称", this);
+    m_copyButton->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
     m_copyButton->setMinimumHeight(34);
     m_copyButton->setEnabled(false);
     m_copyButton->setCursor(Qt::PointingHandCursor);
     m_copyButton->setStyleSheet(
         "QPushButton {"
-        "  background: #6366f1;"
+        "  background: #0f766e;"
         "  color: white;"
         "  border: none;"
         "  border-radius: 7px;"
@@ -239,7 +239,7 @@ void ModelsDialog::setupUi()
         "  font-weight: bold;"
         "  padding: 0 18px;"
         "}"
-        "QPushButton:hover { background: #4f46e5; }"
+        "QPushButton:hover { background: #0b625c; }"
         "QPushButton:disabled { background: #e2e8f0; color: #94a3b8; }"
     );
     toolbarLayout->addWidget(m_copyButton);
@@ -273,8 +273,8 @@ void ModelsDialog::setupUi()
         "  color: #334155;"
         "}"
         "QTableWidget::item:selected {"
-        "  background: #eef2ff;"
-        "  color: #3730a3;"
+        "  background: #e7f5f2;"
+        "  color: #0f5f59;"
         "}"
         "QTableWidget::item:alternate { background: #fafbfc; }"
         "QHeaderView::section {"
@@ -309,6 +309,7 @@ void ModelsDialog::setupUi()
     bottomLayout->addStretch();
 
     QPushButton *closeButton = new QPushButton("关闭", this);
+    closeButton->setIcon(style()->standardIcon(QStyle::SP_DialogCloseButton));
     closeButton->setMinimumHeight(36);
     closeButton->setMinimumWidth(90);
     closeButton->setCursor(Qt::PointingHandCursor);
@@ -345,7 +346,7 @@ void ModelsDialog::setupUi()
 void ModelsDialog::loadApiKeys()
 {
     m_statusLabel->setText("正在读取账号 API Key...");
-    m_statusLabel->setStyleSheet("color: #6366f1; font-size: 12px;");
+    m_statusLabel->setStyleSheet("color: #0f766e; font-size: 12px;");
     m_apiClient->getApiKeys();
 }
 
@@ -368,7 +369,7 @@ void ModelsDialog::loadModels()
         return;
     }
     m_statusLabel->setText("加载模型列表...");
-    m_statusLabel->setStyleSheet("color: #6366f1; font-size: 12px;");
+    m_statusLabel->setStyleSheet("color: #0f766e; font-size: 12px;");
     m_refreshButton->setEnabled(false);
     m_apiClient->getModels(key);
 }

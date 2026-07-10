@@ -42,6 +42,7 @@ public:
     static QString toolPlatform(AiTool tool);    // "anthropic" | "openai" | "gemini"
     static QString npmPackage(AiTool tool);      // npm 全局包名
     static QString cliCommand(AiTool tool);      // 可执行名 claude / codex / gemini
+    static QString configFilePath(AiTool tool);  // UI 展示用的主认证文件路径
 
     // 同步检测（含 QProcess 探测，最长约 5s）
     ToolStatus detect(AiTool tool);
@@ -71,6 +72,7 @@ private:
     bool configureClaudeCode(const QString &apiKey, const QString &model);
     bool configureCodexCli(const QString &apiKey, const QString &model);
     bool configureGeminiCli(const QString &apiKey, const QString &model);
+    QString readConfiguredKey(AiTool tool) const;
 
     // 探测辅助：timeout 单位 ms
     bool commandExists(const QString &command, int timeoutMs = 5000);
