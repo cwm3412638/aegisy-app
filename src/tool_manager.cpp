@@ -5,10 +5,13 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QProcessEnvironment>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QDateTime>
 #include <QDebug>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QUuid>
 #include <algorithm>
 
@@ -39,6 +42,101 @@ static const QString kWhichCmd = "where";
 static const QString kNpmCmd  = "npm";
 static const QString kWhichCmd = "which";
 #endif
+
+static void addSearchPath(QStringList &paths, const QString &path, bool prepend = false)
+{
+    if (path.isEmpty() || !QDir(path).exists() || paths.contains(path)) {
+        return;
+    }
+    if (prepend) {
+        paths.prepend(path);
+    } else {
+        paths.append(path);
+    }
+}
+
+static QStringList commandSearchPaths()
+{
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    QStringList paths = environment.value(QStringLiteral("PATH"))
+        .split(QDir::listSeparator(), Qt::SkipEmptyParts);
+    const QString home = QDir::homePath();
+
+#if defined(Q_OS_MAC)
+    const QStringList preferredPaths = {
+        QStringLiteral("/opt/homebrew/bin"),
+        QStringLiteral("/usr/local/bin"),
+        home + QStringLiteral("/.volta/bin"),
+        home + QStringLiteral("/.local/bin"),
+        home + QStringLiteral("/.npm-global/bin"),
+        home + QStringLiteral("/Library/pnpm"),
+        home + QStringLiteral("/.bun/bin"),
+        home + QStringLiteral("/.asdf/shims"),
+        home + QStringLiteral("/.local/share/mise/shims"),
+        home + QStringLiteral("/.local/share/fnm/aliases/default/bin"),
+    };
+    for (auto it = preferredPaths.crbegin(); it != preferredPaths.crend(); ++it) {
+        addSearchPath(paths, *it, true);
+    }
+
+    QDir nvmVersions(home + QStringLiteral("/.nvm/versions/node"));
+    const QFileInfoList nodeVersions = nvmVersions.entryInfoList(
+        QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
+    for (auto it = nodeVersions.crbegin(); it != nodeVersions.crend(); ++it) {
+        addSearchPath(paths, it->filePath() + QStringLiteral("/bin"), true);
+    }
+#elif defined(Q_OS_WIN)
+    addSearchPath(paths,
+                  QString::fromLocal8Bit(qgetenv("APPDATA")) + QStringLiteral("\\npm"),
+                  true);
+    addSearchPath(paths,
+                  QString::fromLocal8Bit(qgetenv("ProgramFiles"))
+                      + QStringLiteral("\\nodejs"),
+                  true);
+    addSearchPath(paths,
+                  QString::fromLocal8Bit(qgetenv("ProgramFiles(x86)"))
+                      + QStringLiteral("\\nodejs"),
+                  true);
+    addSearchPath(paths,
+                  QString::fromLocal8Bit(qgetenv("LOCALAPPDATA"))
+                      + QStringLiteral("\\Programs\\nodejs"),
+                  true);
+#else
+    addSearchPath(paths, home + QStringLiteral("/.local/bin"), true);
+    addSearchPath(paths, home + QStringLiteral("/.volta/bin"), true);
+    addSearchPath(paths, home + QStringLiteral("/.npm-global/bin"), true);
+    addSearchPath(paths, home + QStringLiteral("/.asdf/shims"), true);
+#endif
+    return paths;
+}
+
+static QProcessEnvironment commandEnvironment()
+{
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(
+        QStringLiteral("PATH"), commandSearchPaths().join(QDir::listSeparator()));
+    return environment;
+}
+
+static QString extractVersion(const QString &output)
+{
+    static const QRegularExpression versionPattern(
+        QStringLiteral("(\\d+(?:\\.\\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?)"));
+    const QRegularExpressionMatch match = versionPattern.match(output);
+    return match.hasMatch() ? match.captured(1) : QString();
+}
+
+static QString npmVersionFromJson(const QByteArray &data, const QString &packageName)
+{
+    const QJsonDocument document = QJsonDocument::fromJson(data);
+    if (!document.isObject()) {
+        return QString();
+    }
+    return document.object()
+        .value(QStringLiteral("dependencies")).toObject()
+        .value(packageName).toObject()
+        .value(QStringLiteral("version")).toString();
+}
 
 ToolManager::ToolManager(QObject *parent)
     : QObject(parent)
@@ -97,13 +195,77 @@ QString ToolManager::configFilePath(AiTool tool)
 
 bool ToolManager::commandExists(const QString &command, int timeoutMs)
 {
+    return !resolveCommand(command, timeoutMs).isEmpty();
+}
+
+QString ToolManager::resolveCommand(const QString &command, int timeoutMs) const
+{
+    const QFileInfo directPath(command);
+    if (directPath.isAbsolute() && directPath.exists() && directPath.isExecutable()) {
+        return directPath.absoluteFilePath();
+    }
+
+    const QString executable = QStandardPaths::findExecutable(command, commandSearchPaths());
+    if (!executable.isEmpty()) {
+        return executable;
+    }
+
     QProcess process;
+    process.setProcessEnvironment(commandEnvironment());
     process.start(kWhichCmd, QStringList() << command);
     if (!process.waitForFinished(timeoutMs)) {
         process.kill();
-        return false;
+        process.waitForFinished();
+        return QString();
     }
-    return process.exitCode() == 0;
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        return QString();
+    }
+    return QString::fromLocal8Bit(process.readAllStandardOutput())
+        .split(QLatin1Char('\n'), Qt::SkipEmptyParts)
+        .value(0).trimmed();
+}
+
+QString ToolManager::commandVersion(const QString &executable, int timeoutMs) const
+{
+    if (executable.isEmpty()) {
+        return QString();
+    }
+
+    QProcess process;
+    process.setProcessEnvironment(commandEnvironment());
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.start(executable, QStringList() << QStringLiteral("--version"));
+    if (!process.waitForStarted(qMin(timeoutMs, 1000))) {
+        return QString();
+    }
+    if (!process.waitForFinished(timeoutMs)) {
+        process.kill();
+        process.waitForFinished();
+        return QString();
+    }
+    return extractVersion(QString::fromUtf8(process.readAll()));
+}
+
+QString ToolManager::npmPackageVersion(AiTool tool, int timeoutMs) const
+{
+    const QString npmExecutable = resolveCommand(kNpmCmd, timeoutMs);
+    if (npmExecutable.isEmpty()) {
+        return QString();
+    }
+
+    QProcess process;
+    process.setProcessEnvironment(commandEnvironment());
+    process.start(npmExecutable,
+                  QStringList() << QStringLiteral("list") << QStringLiteral("-g")
+                                << npmPackage(tool) << QStringLiteral("--depth=0")
+                                << QStringLiteral("--json"));
+    if (!process.waitForFinished(timeoutMs)) {
+        process.kill();
+        process.waitForFinished();
+        return QString();
+    }
+    return npmVersionFromJson(process.readAllStandardOutput(), npmPackage(tool));
 }
 
 bool ToolManager::isNodeAvailable()
@@ -387,19 +549,17 @@ QString ToolManager::readConfiguredKey(AiTool tool) const
 ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
 {
     ToolStatus status;
-    status.nodeOk    = commandExists("node", timeoutMs);
-    status.installed = commandExists(cliCommand(tool), timeoutMs);
+    status.nodeOk = commandExists(QStringLiteral("node"), timeoutMs);
+    const QString executable = resolveCommand(cliCommand(tool), timeoutMs);
+    status.installed = !executable.isEmpty();
+    if (status.installed) {
+        status.version = commandVersion(executable, timeoutMs);
+    }
 
     // 兜底：PATH 里找不到时查 npm 全局包（有些环境 npm bin 不在 PATH）
     if (!status.installed && status.nodeOk) {
-        QProcess process;
-        process.start(kNpmCmd, QStringList() << "list" << "-g" << npmPackage(tool) << "--depth=0");
-        if (process.waitForFinished(timeoutMs)) {
-            const QString output = QString::fromUtf8(process.readAllStandardOutput());
-            status.installed = output.contains(npmPackage(tool)) && !output.contains("(empty)");
-        } else {
-            process.kill();
-        }
+        status.version = npmPackageVersion(tool, timeoutMs);
+        status.installed = !status.version.isEmpty();
     }
 
     switch (tool) {
@@ -475,6 +635,89 @@ ToolStatus ToolManager::detectFast(AiTool tool)
     return detectWithTimeout(tool, 2000);
 }
 
+void ToolManager::detectVersion(AiTool tool)
+{
+    const QString executable = resolveCommand(cliCommand(tool), 500);
+    if (executable.isEmpty()) {
+        detectNpmVersion(tool);
+        return;
+    }
+
+    auto *process = new QProcess(this);
+    process->setProcessEnvironment(commandEnvironment());
+    process->setProcessChannelMode(QProcess::MergedChannels);
+
+    const auto complete = [this, process, tool](bool installed, const QString &version) {
+        if (process->property("aegisyVersionComplete").toBool()) {
+            return;
+        }
+        process->setProperty("aegisyVersionComplete", true);
+        emit toolVersionDetected(tool, installed, version);
+        process->deleteLater();
+    };
+
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [process, complete](int, QProcess::ExitStatus) {
+        complete(true, extractVersion(QString::fromUtf8(process->readAll())));
+    });
+    connect(process, &QProcess::errorOccurred, this,
+            [complete](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            complete(false, QString());
+        }
+    });
+    QTimer::singleShot(4000, process, [process]() {
+        if (process->state() != QProcess::NotRunning) {
+            process->kill();
+        }
+    });
+    process->start(executable, QStringList() << QStringLiteral("--version"));
+}
+
+void ToolManager::detectNpmVersion(AiTool tool)
+{
+    const QString npmExecutable = resolveCommand(kNpmCmd, 500);
+    if (npmExecutable.isEmpty()) {
+        QTimer::singleShot(0, this, [this, tool]() {
+            emit toolVersionDetected(tool, false, QString());
+        });
+        return;
+    }
+
+    auto *process = new QProcess(this);
+    process->setProcessEnvironment(commandEnvironment());
+
+    const auto complete = [this, process, tool](const QString &version) {
+        if (process->property("aegisyVersionComplete").toBool()) {
+            return;
+        }
+        process->setProperty("aegisyVersionComplete", true);
+        emit toolVersionDetected(tool, !version.isEmpty(), version);
+        process->deleteLater();
+    };
+
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [process, tool, complete](int, QProcess::ExitStatus) {
+        complete(npmVersionFromJson(process->readAllStandardOutput(),
+                                    ToolManager::npmPackage(tool)));
+    });
+    connect(process, &QProcess::errorOccurred, this,
+            [complete](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            complete(QString());
+        }
+    });
+    QTimer::singleShot(4000, process, [process]() {
+        if (process->state() != QProcess::NotRunning) {
+            process->kill();
+        }
+    });
+    process->start(npmExecutable,
+                   QStringList() << QStringLiteral("list") << QStringLiteral("-g")
+                                 << npmPackage(tool) << QStringLiteral("--depth=0")
+                                 << QStringLiteral("--json"));
+}
+
 // ── 桌面应用检测 ─────────────────────────────────────────────────
 DesktopAppStatus ToolManager::detectDesktop(AiTool tool)
 {
@@ -527,7 +770,106 @@ DesktopAppStatus ToolManager::detectDesktop(AiTool tool)
 // ── 异步安装 ─────────────────────────────────────────────────────
 void ToolManager::install(AiTool tool, int requestId)
 {
+    if (!resolveCommand(kNpmCmd, 1000).isEmpty()) {
+        installCli(tool, requestId);
+        return;
+    }
+
+    QString installer;
+    QStringList arguments;
+    QString displayCommand;
+
+#if defined(Q_OS_WIN)
+    installer = resolveCommand(QStringLiteral("winget.exe"), 1000);
+    arguments = {
+        QStringLiteral("install"), QStringLiteral("--id"),
+        QStringLiteral("OpenJS.NodeJS.LTS"), QStringLiteral("--exact"),
+        QStringLiteral("--source"), QStringLiteral("winget"),
+        QStringLiteral("--accept-package-agreements"),
+        QStringLiteral("--accept-source-agreements"),
+        QStringLiteral("--silent"),
+    };
+    displayCommand = QStringLiteral("winget install OpenJS.NodeJS.LTS");
+#elif defined(Q_OS_MAC)
+    installer = resolveCommand(QStringLiteral("brew"), 1000);
+    arguments = { QStringLiteral("install"), QStringLiteral("node") };
+    displayCommand = QStringLiteral("brew install node");
+#else
+    const QString privilegeTool = resolveCommand(QStringLiteral("pkexec"), 1000);
+    const QString apt = resolveCommand(QStringLiteral("apt-get"), 1000);
+    const QString dnf = resolveCommand(QStringLiteral("dnf"), 1000);
+    const QString pacman = resolveCommand(QStringLiteral("pacman"), 1000);
+    if (!privilegeTool.isEmpty() && !apt.isEmpty()) {
+        installer = privilegeTool;
+        arguments = { apt, QStringLiteral("install"), QStringLiteral("-y"),
+                      QStringLiteral("nodejs"), QStringLiteral("npm") };
+        displayCommand = QStringLiteral("pkexec apt-get install -y nodejs npm");
+    } else if (!privilegeTool.isEmpty() && !dnf.isEmpty()) {
+        installer = privilegeTool;
+        arguments = { dnf, QStringLiteral("install"), QStringLiteral("-y"),
+                      QStringLiteral("nodejs"), QStringLiteral("npm") };
+        displayCommand = QStringLiteral("pkexec dnf install -y nodejs npm");
+    } else if (!privilegeTool.isEmpty() && !pacman.isEmpty()) {
+        installer = privilegeTool;
+        arguments = { pacman, QStringLiteral("-S"), QStringLiteral("--noconfirm"),
+                      QStringLiteral("nodejs"), QStringLiteral("npm") };
+        displayCommand = QStringLiteral("pkexec pacman -S --noconfirm nodejs npm");
+    }
+#endif
+
+    if (installer.isEmpty()) {
+        emit installOutput(
+            tool,
+            QStringLiteral("未找到可用的 Node.js 安装器，请先安装 Node.js LTS。"));
+        emit installFinished(tool, requestId, false);
+        return;
+    }
+
+    auto *process = new QProcess(this);
+    process->setProcessEnvironment(commandEnvironment());
+    process->setProcessChannelMode(QProcess::MergedChannels);
+
+    const auto complete = [this, process, tool, requestId](bool success) {
+        if (process->property("aegisyCompletionEmitted").toBool()) {
+            return;
+        }
+        process->setProperty("aegisyCompletionEmitted", true);
+        process->deleteLater();
+        if (!success) {
+            emit installFinished(tool, requestId, false);
+            return;
+        }
+        emit installOutput(tool, QStringLiteral("Node.js 安装完成，正在安装 CLI..."));
+        QTimer::singleShot(0, this, [this, tool, requestId]() {
+            installCli(tool, requestId);
+        });
+    };
+
+    connect(process, &QProcess::readyReadStandardOutput, this, [this, process, tool]() {
+        const QString text = QString::fromUtf8(process->readAllStandardOutput()).trimmed();
+        if (!text.isEmpty()) {
+            emit installOutput(tool, text);
+        }
+    });
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [complete](int exitCode, QProcess::ExitStatus exitStatus) {
+        complete(exitStatus == QProcess::NormalExit && exitCode == 0);
+    });
+    connect(process, &QProcess::errorOccurred, this,
+            [this, process, tool, complete](QProcess::ProcessError) {
+        emit installOutput(
+            tool, QStringLiteral("无法启动 Node.js 安装器：%1").arg(process->errorString()));
+        complete(false);
+    });
+
+    emit installOutput(tool, QStringLiteral("$ %1").arg(displayCommand));
+    process->start(installer, arguments);
+}
+
+void ToolManager::installCli(AiTool tool, int requestId)
+{
     QProcess *process = new QProcess(this);
+    process->setProcessEnvironment(commandEnvironment());
     process->setProcessChannelMode(QProcess::MergedChannels);
 
     const auto complete = [this, process, tool, requestId](bool success) {
@@ -556,8 +898,17 @@ void ToolManager::install(AiTool tool, int requestId)
         complete(false);
     });
 
+    const QString npmExecutable = resolveCommand(kNpmCmd, 1000);
+    if (npmExecutable.isEmpty()) {
+        emit installOutput(
+            tool,
+            QStringLiteral("Node.js 已安装，但当前进程仍未找到 npm，请重启应用后重试。"));
+        complete(false);
+        return;
+    }
+
     emit installOutput(tool, QStringLiteral("$ %1 install -g %2").arg(kNpmCmd, npmPackage(tool)));
-    process->start(kNpmCmd, QStringList() << "install" << "-g" << npmPackage(tool));
+    process->start(npmExecutable, QStringList() << "install" << "-g" << npmPackage(tool));
 }
 
 // ── 配置写入 ─────────────────────────────────────────────────────

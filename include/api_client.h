@@ -67,6 +67,7 @@ private slots:
 
 private:
     void requestApiKeysPage(int page, int generation);
+    void requestUserInfo(const QString &endpoint);
 
     QNetworkAccessManager *m_networkManager;
     QString m_baseUrl;

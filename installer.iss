@@ -6,7 +6,9 @@
 ; ============================================================
 
 #define MyAppName "Aegisy Client"
-#define MyAppVersion "1.0.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "2.3.0"
+#endif
 #define MyAppPublisher "Aegisy"
 #define MyAppURL "https://www.aegisy.cc"
 #define MyAppExeName "AegisyClient.exe"
@@ -29,8 +31,12 @@ OutputBaseFilename=AegisyClientSetup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-; 若有图标可取消注释：
-; SetupIconFile=resources\app.ico
+SetupIconFile=assets\AegisyClient.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+CloseApplications=yes
+RestartApplications=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

@@ -1,62 +1,104 @@
 @echo off
-REM ============================================================
-REM  Aegisy Client - Windows 打包脚本
-REM  产出：dist\AegisyClient\  可分发目录（含全部依赖）
-REM  可选：用 Inno Setup 再打成单文件安装程序
-REM ============================================================
-setlocal enabledelayedexpansion
+setlocal EnableExtensions EnableDelayedExpansion
 
 echo ==================================
 echo  Aegisy Client Windows 打包
 echo ==================================
 
-REM ---- 1) 前置检查 ----
-where cmake >nul 2>nul || (echo [错误] 未找到 cmake & pause & exit /b 1)
-where windeployqt >nul 2>nul || (echo [错误] 未找到 windeployqt，请确认 Qt 的 bin 目录在 PATH 中 & pause & exit /b 1)
+where cmake >nul 2>nul || (echo [错误] 未找到 cmake & exit /b 1)
+where windeployqt >nul 2>nul || (echo [错误] 未找到 windeployqt，请把 Qt bin 加入 PATH & exit /b 1)
+where powershell >nul 2>nul || (echo [错误] 未找到 PowerShell & exit /b 1)
 
-REM ---- 2) 编译 Release ----
-echo.
-echo [1/4] 编译 Release...
-if not exist build mkdir build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release || (echo [错误] CMake 配置失败 & cd .. & pause & exit /b 1)
-cmake --build . --config Release || (echo [错误] 编译失败 & cd .. & pause & exit /b 1)
-cd ..
-
-set EXE=build\Release\AegisyClient.exe
-if not exist "%EXE%" (echo [错误] 未找到 %EXE% & pause & exit /b 1)
-
-REM ---- 3) 组装 dist 目录 ----
-echo.
-echo [2/4] 组装分发目录 dist\AegisyClient ...
-if exist dist\AegisyClient rmdir /s /q dist\AegisyClient
-mkdir dist\AegisyClient
-copy /y "%EXE%" dist\AegisyClient\ >nul
+set "BUILD_DIR=build"
+set "DIST_DIR=dist\AegisyClient"
+set "UPDATE_DIR=dist\updates\windows"
+set "WINDOWS_ARCH=x64"
+set "UPDATE_OS=windows-x64"
+set "UPDATE_BASE_URL=https://aegisy.cc/desktop/windows"
+if not "%AEGISY_WINDOWS_UPDATE_BASE_URL%"=="" set "UPDATE_BASE_URL=%AEGISY_WINDOWS_UPDATE_BASE_URL%"
 
 echo.
-echo [3/4] windeployqt 收集 Qt 依赖...
-windeployqt --release --no-translations --dir dist\AegisyClient dist\AegisyClient\AegisyClient.exe || (echo [错误] windeployqt 失败 & pause & exit /b 1)
+echo [1/6] 编译 Release (%WINDOWS_ARCH%)...
+if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+cmake -S . -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A %WINDOWS_ARCH% -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF || exit /b 1
+cmake --build "%BUILD_DIR%" --config Release || exit /b 1
 
-REM ---- 4) 补 OpenSSL DLL（windeployqt 不含）----
+set "EXE=%BUILD_DIR%\Release\AegisyClient.exe"
+if not exist "%EXE%" (echo [错误] 未找到 %EXE% & exit /b 1)
+if not exist "%BUILD_DIR%\aegisy-version.txt" (echo [错误] 缺少版本文件 & exit /b 1)
+set /p VERSION=<"%BUILD_DIR%\aegisy-version.txt"
+
 echo.
-echo [4/4] 拷贝 OpenSSL DLL...
+echo [2/6] 组装分发目录...
+if exist "%DIST_DIR%" rmdir /s /q "%DIST_DIR%"
+mkdir "%DIST_DIR%"
+copy /y "%EXE%" "%DIST_DIR%\AegisyClient.exe" >nul || exit /b 1
+copy /y "%BUILD_DIR%\Release\WinSparkle.dll" "%DIST_DIR%\WinSparkle.dll" >nul || exit /b 1
+windeployqt --release --no-translations --dir "%DIST_DIR%" "%DIST_DIR%\AegisyClient.exe" || exit /b 1
+
+echo.
+echo [3/6] 补充 OpenSSL 运行库...
 if "%OPENSSL_DIR%"=="" (
-    echo [警告] 环境变量 OPENSSL_DIR 未设置，跳过 OpenSSL DLL 拷贝。
-    echo        请手动把 libssl-3-x64.dll 和 libcrypto-3-x64.dll 拷到 dist\AegisyClient\
+    echo [警告] OPENSSL_DIR 未设置，请确认 OpenSSL DLL 已在 PATH 或手动复制到 %DIST_DIR%
 ) else (
-    copy /y "%OPENSSL_DIR%\libssl-3-x64.dll" dist\AegisyClient\ >nul 2>nul
-    copy /y "%OPENSSL_DIR%\libcrypto-3-x64.dll" dist\AegisyClient\ >nul 2>nul
-    echo 已从 %OPENSSL_DIR% 拷贝 OpenSSL DLL
+    copy /y "%OPENSSL_DIR%\libssl-3-x64.dll" "%DIST_DIR%\" >nul 2>nul
+    copy /y "%OPENSSL_DIR%\libcrypto-3-x64.dll" "%DIST_DIR%\" >nul 2>nul
+)
+
+echo.
+echo [4/6] 生成 Inno Setup 安装程序...
+set "ISCC="
+for /f "delims=" %%I in ('where iscc.exe 2^>nul') do if not defined ISCC set "ISCC=%%I"
+if not defined ISCC if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+if not defined ISCC (echo [错误] 未找到 Inno Setup 6 的 ISCC.exe & exit /b 1)
+"%ISCC%" /DMyAppVersion=%VERSION% installer.iss || exit /b 1
+
+set "SETUP=dist\AegisyClientSetup-%VERSION%.exe"
+if not exist "%SETUP%" (echo [错误] 未生成安装程序 %SETUP% & exit /b 1)
+
+if not "%AEGISY_WINDOWS_CERT_SHA1%"=="" (
+    echo.
+    echo [5/6] Authenticode 签名...
+    where signtool.exe >nul 2>nul || (echo [错误] 已配置证书但未找到 signtool.exe & exit /b 1)
+    signtool sign /sha1 "%AEGISY_WINDOWS_CERT_SHA1%" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "%SETUP%" || exit /b 1
+) else (
+    echo.
+    echo [5/6] 未配置 AEGISY_WINDOWS_CERT_SHA1，跳过 Authenticode 签名
+)
+
+echo.
+echo [6/6] 生成 WinSparkle 更新源...
+if exist "%UPDATE_DIR%" rmdir /s /q "%UPDATE_DIR%"
+mkdir "%UPDATE_DIR%"
+copy /y "%SETUP%" "%UPDATE_DIR%\" >nul || exit /b 1
+set "NOTES=release\notes\%VERSION%.md"
+if not exist "%NOTES%" (echo [错误] 缺少发布说明 %NOTES% & exit /b 1)
+copy /y "%NOTES%" "%UPDATE_DIR%\AegisyClient-%VERSION%-Windows-%WINDOWS_ARCH%.md" >nul || exit /b 1
+
+set "PRIVATE_KEY=%AEGISY_SPARKLE_PRIVATE_KEY_FILE%"
+if "%PRIVATE_KEY%"=="" set "PRIVATE_KEY=%USERPROFILE%\.aegisy\sparkle-private-key"
+set "WINSPARKLE_TOOL=%BUILD_DIR%\_deps\WinSparkle-0.9.3\bin\winsparkle-tool.exe"
+if not exist "%PRIVATE_KEY%" (
+    echo [警告] 未找到 Sparkle 私钥：%PRIVATE_KEY%
+    echo [警告] 安装程序已生成，但跳过 appcast 签名。发布更新前请设置 AEGISY_SPARKLE_PRIVATE_KEY_FILE。
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File release\generate-windows-appcast.ps1 ^
+        -Version "%VERSION%" ^
+        -Installer "%CD%\%UPDATE_DIR%\AegisyClientSetup-%VERSION%.exe" ^
+        -ReleaseNotes "%CD%\%UPDATE_DIR%\AegisyClient-%VERSION%-Windows-%WINDOWS_ARCH%.md" ^
+        -BaseUrl "%UPDATE_BASE_URL%" ^
+        -PrivateKey "%PRIVATE_KEY%" ^
+        -ToolPath "%CD%\%WINSPARKLE_TOOL%" ^
+        -OutputPath "%CD%\%UPDATE_DIR%\appcast.xml" ^
+        -Architecture "%UPDATE_OS%" || exit /b 1
+    copy /y "%UPDATE_DIR%\appcast.xml" "dist\windows-appcast.xml" >nul
 )
 
 echo.
 echo ==================================
-echo  完成！可分发目录：dist\AegisyClient
+echo  Windows 打包完成
+echo  安装程序：%SETUP%
+echo  更新目录：%UPDATE_DIR%
 echo ==================================
-echo.
-echo 下一步（生成单文件安装程序）：
-echo   1. 安装 Inno Setup: https://jrsoftware.org/isdl.php
-echo   2. 用 Inno Setup 打开项目根目录的 installer.iss 并编译（或命令行 iscc installer.iss）
-echo   3. 产出：dist\AegisyClientSetup-1.0.0.exe
-echo.
-pause
+exit /b 0

@@ -10,7 +10,8 @@ namespace {
 
 const QString kProfilesPrefix = QStringLiteral("profiles");
 constexpr int kSingleToolSchemaVersion = 2;
-constexpr int kSchemaVersion = 3;
+constexpr int kCredentialSchemaVersion = 3;
+constexpr int kSchemaVersion = 4;
 
 const QStringList kProfileKeys = {
     QStringLiteral("id"),
@@ -27,6 +28,17 @@ QString profilePath(int index, const QString &field)
         .arg(kProfilesPrefix)
         .arg(index)
         .arg(field);
+}
+
+QString activeProfileKey(ProfileType type)
+{
+    QString suffix;
+    switch (type) {
+    case ProfileType::Claude: suffix = QStringLiteral("claude"); break;
+    case ProfileType::Codex:  suffix = QStringLiteral("codex"); break;
+    case ProfileType::Gemini: suffix = QStringLiteral("gemini"); break;
+    }
+    return QStringLiteral("%1/active/%2").arg(kProfilesPrefix, suffix);
 }
 
 QString newProfileId()
@@ -52,6 +64,7 @@ ProfileManager::ProfileManager(QObject *parent)
 {
     migrateLegacyProfiles();
     migrateProfileCredentials();
+    migrateActiveProfiles();
     ensureDefaultProfile();
 }
 
@@ -179,9 +192,12 @@ void ProfileManager::migrateLegacyProfiles()
     settings.remove(kProfilesPrefix);
     settings.setValue(kProfilesPrefix + QStringLiteral("/schema_version"), kSchemaVersion);
     settings.setValue(kProfilesPrefix + QStringLiteral("/count"), migrated.size());
-    settings.setValue(
-        kProfilesPrefix + QStringLiteral("/active"),
-        newActive >= 0 ? newActive : 0);
+    for (ProfileType type : allProfileTypes()) {
+        settings.setValue(activeProfileKey(type), -1);
+    }
+    if (newActive >= 0 && newActive < migrated.size()) {
+        settings.setValue(activeProfileKey(migrated[newActive].type), newActive);
+    }
 
     for (int i = 0; i < migrated.size(); ++i) {
         const Profile &profile = migrated[i];
@@ -203,7 +219,8 @@ void ProfileManager::migrateProfileCredentials()
     QSettings settings;
     const int storedVersion = settings.value(
         kProfilesPrefix + QStringLiteral("/schema_version"), 0).toInt();
-    if (storedVersion >= kSchemaVersion || storedVersion < kSingleToolSchemaVersion) {
+    if (storedVersion >= kCredentialSchemaVersion
+            || storedVersion < kSingleToolSchemaVersion) {
         return;
     }
 
@@ -232,11 +249,37 @@ void ProfileManager::migrateProfileCredentials()
     }
 
     if (migrated) {
-        settings.setValue(kProfilesPrefix + QStringLiteral("/schema_version"), kSchemaVersion);
+        settings.setValue(
+            kProfilesPrefix + QStringLiteral("/schema_version"),
+            kCredentialSchemaVersion);
     } else {
         m_lastError = QStringLiteral(
             "部分档案凭据无法迁移到系统安全存储。Linux 请安装并启用 secret-tool/Secret Service。");
     }
+    settings.sync();
+}
+
+void ProfileManager::migrateActiveProfiles()
+{
+    QSettings settings;
+    const int storedVersion = settings.value(
+        kProfilesPrefix + QStringLiteral("/schema_version"), 0).toInt();
+    if (storedVersion >= kSchemaVersion || storedVersion < kCredentialSchemaVersion) {
+        return;
+    }
+
+    const int legacyActive = settings.value(
+        kProfilesPrefix + QStringLiteral("/active"), -1).toInt();
+    settings.remove(kProfilesPrefix + QStringLiteral("/active"));
+    for (ProfileType type : allProfileTypes()) {
+        settings.setValue(activeProfileKey(type), -1);
+    }
+
+    const QList<Profile> profiles = allProfiles();
+    if (legacyActive >= 0 && legacyActive < profiles.size()) {
+        settings.setValue(activeProfileKey(profiles[legacyActive].type), legacyActive);
+    }
+    settings.setValue(kProfilesPrefix + QStringLiteral("/schema_version"), kSchemaVersion);
     settings.sync();
 }
 
@@ -287,22 +330,32 @@ QList<Profile> ProfileManager::allProfiles() const
     return result;
 }
 
-int ProfileManager::activeIndex() const
+int ProfileManager::activeIndex(ProfileType type) const
 {
-    const int profileCount = count();
-    if (profileCount == 0) {
+    if (!isValidProfileType(type)) {
         return -1;
     }
-    const int stored = QSettings().value(
-        kProfilesPrefix + QStringLiteral("/active"), 0).toInt();
-    return stored < 0 ? -1 : qMin(stored, profileCount - 1);
+
+    const int stored = QSettings().value(activeProfileKey(type), -1).toInt();
+    const QList<Profile> profiles = allProfiles();
+    if (stored < 0 || stored >= profiles.size() || profiles[stored].type != type) {
+        return -1;
+    }
+    return stored;
 }
 
-Profile ProfileManager::activeProfile() const
+Profile ProfileManager::activeProfile(ProfileType type) const
 {
     const QList<Profile> profiles = allProfiles();
-    const int index = activeIndex();
+    const int index = activeIndex(type);
     return index >= 0 && index < profiles.size() ? profiles[index] : Profile{};
+}
+
+bool ProfileManager::isActive(int index) const
+{
+    const QList<Profile> profiles = allProfiles();
+    return index >= 0 && index < profiles.size()
+        && activeIndex(profiles[index].type) == index;
 }
 
 int ProfileManager::addProfile(const QString &name, ProfileType type,
@@ -344,6 +397,11 @@ bool ProfileManager::updateProfile(int index, const QString &name, ProfileType t
     }
 
     QSettings settings;
+    const ProfileType oldType = static_cast<ProfileType>(settings.value(
+        profilePath(index, QStringLiteral("type")),
+        static_cast<int>(ProfileType::Codex)).toInt());
+    const bool clearOldActive = isValidProfileType(oldType)
+        && oldType != type && activeIndex(oldType) == index;
     QString id = settings.value(profilePath(index, QStringLiteral("id"))).toString();
     if (id.isEmpty()) {
         id = newProfileId();
@@ -362,6 +420,10 @@ bool ProfileManager::updateProfile(int index, const QString &name, ProfileType t
     settings.setValue(profilePath(index, QStringLiteral("credential_ref")), credentialRef);
     settings.remove(profilePath(index, QStringLiteral("key")));
     settings.setValue(profilePath(index, QStringLiteral("model")), model);
+    if (clearOldActive) {
+        settings.setValue(activeProfileKey(oldType), -1);
+        emit activeProfileChanged(index, -1);
+    }
     emit profilesChanged();
     return true;
 }
@@ -373,6 +435,11 @@ void ProfileManager::removeProfile(int index)
         kProfilesPrefix + QStringLiteral("/count"), 0).toInt();
     if (profileCount <= 1 || index < 0 || index >= profileCount) {
         return;
+    }
+
+    QList<QPair<ProfileType, int>> activeBefore;
+    for (ProfileType type : allProfileTypes()) {
+        activeBefore.append(qMakePair(type, activeIndex(type)));
     }
 
     const QString credentialRef = settings.value(
@@ -388,15 +455,20 @@ void ProfileManager::removeProfile(int index)
     settings.remove(QStringLiteral("%1/%2").arg(kProfilesPrefix).arg(profileCount - 1));
     settings.setValue(kProfilesPrefix + QStringLiteral("/count"), profileCount - 1);
 
-    const int active = settings.value(
-        kProfilesPrefix + QStringLiteral("/active"), 0).toInt();
-    int nextActive = active;
-    if (active == index) {
-        nextActive = qMin(index, profileCount - 2);
-    } else if (active > index) {
-        nextActive = active - 1;
+    for (const auto &entry : activeBefore) {
+        const ProfileType type = entry.first;
+        const int active = entry.second;
+        int nextActive = active;
+        if (active == index) {
+            nextActive = -1;
+        } else if (active > index) {
+            nextActive = active - 1;
+        }
+        settings.setValue(activeProfileKey(type), nextActive);
+        if (nextActive != active) {
+            emit activeProfileChanged(active, nextActive);
+        }
     }
-    settings.setValue(kProfilesPrefix + QStringLiteral("/active"), nextActive);
     if (!credentialRef.isEmpty()) {
         SecureStorage::remove(credentialRef);
     }
@@ -405,19 +477,24 @@ void ProfileManager::removeProfile(int index)
 
 void ProfileManager::setActiveIndex(int index)
 {
-    if (index < 0 || index >= count()) {
+    const QList<Profile> profiles = allProfiles();
+    if (index < 0 || index >= profiles.size()) {
         return;
     }
 
-    const int oldIndex = activeIndex();
-    QSettings().setValue(kProfilesPrefix + QStringLiteral("/active"), index);
+    const ProfileType type = profiles[index].type;
+    const int oldIndex = activeIndex(type);
+    QSettings().setValue(activeProfileKey(type), index);
     emit activeProfileChanged(oldIndex, index);
 }
 
-void ProfileManager::clearActiveProfile()
+void ProfileManager::clearActiveProfile(ProfileType type)
 {
-    const int oldIndex = activeIndex();
-    QSettings().setValue(kProfilesPrefix + QStringLiteral("/active"), -1);
+    if (!isValidProfileType(type)) {
+        return;
+    }
+    const int oldIndex = activeIndex(type);
+    QSettings().setValue(activeProfileKey(type), -1);
     emit activeProfileChanged(oldIndex, -1);
 }
 

@@ -4,17 +4,18 @@ Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账�
 
 ## 当前功能
 
-- 使用 Aegisy 账号登录并分页同步 API Keys
+- 使用 Aegisy 账号登录，支持密码显隐、余额展示，并分页同步 API Keys
 - 每个档案只绑定一个终端：Claude Code、Codex CLI 或 Gemini CLI
-- 按终端筛选、编辑、删除和激活档案
+- 按终端筛选、编辑、删除和激活档案；三种终端分别保留一个当前配置
 - 系统托盘快速切换档案，关闭主窗口后可继续运行
 - 查询 API Key 可用模型并保存模型选择
-- 检测 Node.js、CLI 安装状态和冲突环境变量
-- 按需安装对应 npm CLI
+- 检测 Node.js、CLI 安装状态、本地版本和冲突环境变量
+- 缺少环境时通过 Homebrew、WinGet 或 Linux 系统包管理器一键安装 Node.js 和对应 CLI
 - 原子写入本地配置，写入失败自动回滚
 - 每个终端保留最近 10 次配置备份，并支持手动恢复
 - 使用密码加密导入、导出档案（PBKDF2 + AES-256-GCM）
 - Windows DPAPI、macOS Keychain、Linux Secret Service 安全保存凭据
+- macOS 使用 Sparkle 2、Windows 使用 WinSparkle 检查、下载、验证并安装应用更新
 
 ## 支持的终端
 
@@ -42,6 +43,8 @@ brew install cmake qt@6 openssl@3
 open build/AegisyClient.app
 ```
 
+首次配置会从 Sparkle 官方发布页下载固定版本的 Framework 到 `build/_deps`。
+
 也可以直接运行：
 
 ```bash
@@ -66,13 +69,24 @@ build.bat
 build\Release\AegisyClient.exe
 ```
 
+生成完整 Windows 安装程序：
+
+```bat
+set OPENSSL_DIR=C:\path\to\openssl\bin
+set AEGISY_SPARKLE_PRIVATE_KEY_FILE=C:\Users\you\.aegisy\sparkle-private-key
+package-windows.bat
+```
+
+需要预先安装 Qt、OpenSSL、CMake、Visual Studio 2022 和 Inno Setup 6。
+
 ## 使用流程
 
 1. 登录 Aegisy 账号。
 2. 点击“新建配置”，输入名称并选择唯一终端。
 3. 选择与该终端平台匹配的 API Key，可选查询并指定模型。
-4. 保存并激活档案。应用会先备份，再更新对应终端配置。
+4. 保存并激活档案。应用会先备份，再更新对应终端配置；其它终端的当前档案不会被清除。
 5. 需要回退时，点击顶部“备份”并恢复历史版本。
+6. macOS 和 Windows 可从顶部“更新”菜单检查新版本或调整自动检查开关。
 
 “迁移”菜单提供加密档案导入和导出。导出密码无法找回，请单独妥善保存。
 
@@ -104,14 +118,18 @@ src/api_client.cpp       Aegisy API、分页和超时处理
 src/profile_manager.cpp  单终端档案和安全凭据引用
 src/profile_archive.cpp  加密档案导入导出
 src/tool_manager.cpp     CLI 检测、配置事务、备份恢复
+src/update_manager_mac.mm  macOS Sparkle 应用内更新桥接
+src/update_manager_win.cpp Windows WinSparkle 应用内更新桥接
 src/main_window.cpp      主界面与档案操作
 tests/                   自动化测试
 ```
 
+macOS、Windows 发布流程和更新源说明见 `release/README.md`。
+
 ## 后续方向
 
 - 导入已有本地 Aegisy 配置
-- 自动更新和开机启动设置
+- 开机启动设置
 - 自定义服务地址与供应商预设
 - 用量统计和连接健康检测
 - MCP、Prompts、Skills 管理

@@ -17,6 +17,7 @@ enum class AiTool {
 struct ToolStatus {
     bool nodeOk = false;         // Node.js / npm 可用
     bool installed = false;      // CLI 已安装
+    QString version;             // 本地安装版本，如 0.144.0
     bool configured = false;     // 已接入 aegisy（配置文件指向 aegisy.cc）
     QString configuredKey;       // 已配置的 key（掩码显示用）
     QString conflictWarning;     // 冲突警告（如 ANTHROPIC_API_KEY 环境变量）
@@ -58,10 +59,14 @@ public:
     // 快速检测：超时缩短为 2s，适合 UI 场景
     ToolStatus detectFast(AiTool tool);
 
+    // 异步读取本地 CLI 版本，适合主界面展示
+    void detectVersion(AiTool tool);
+
     // 检测桌面应用安装状态（Claude 桌面版 / ChatGPT 桌面版）
     DesktopAppStatus detectDesktop(AiTool tool);
 
-    // 异步安装：npm install -g <pkg>；输出与结果通过信号回传
+    // 异步安装完整 CLI 环境。缺少 Node.js 时先调用系统包管理器安装 Node.js，
+    // 然后执行 npm install -g <pkg>；输出与结果通过信号回传。
     void install(AiTool tool, int requestId = 0);
 
     // 写入官方格式配置（先备份）。model 为空时使用各工具默认值。失败返回 false，详情见 lastError()
@@ -78,6 +83,7 @@ public:
 signals:
     void installOutput(AiTool tool, const QString &line);
     void installFinished(AiTool tool, int requestId, bool success);
+    void toolVersionDetected(AiTool tool, bool installed, const QString &version);
 
 private:
     bool configureClaudeCode(const QString &apiKey, const QString &model);
@@ -87,6 +93,11 @@ private:
 
     // 探测辅助：timeout 单位 ms
     bool commandExists(const QString &command, int timeoutMs = 5000);
+    QString resolveCommand(const QString &command, int timeoutMs = 5000) const;
+    QString commandVersion(const QString &executable, int timeoutMs) const;
+    QString npmPackageVersion(AiTool tool, int timeoutMs) const;
+    void detectNpmVersion(AiTool tool);
+    void installCli(AiTool tool, int requestId);
     ToolStatus detectWithTimeout(AiTool tool, int timeoutMs);
 
     // 文件辅助

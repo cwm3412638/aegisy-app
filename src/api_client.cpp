@@ -63,7 +63,13 @@ void ApiClient::requestApiKeysPage(int page, int generation)
 
 void ApiClient::getUserInfo()
 {
-    QNetworkReply *reply = get("/api/v1/user");
+    requestUserInfo(QStringLiteral("/api/v1/auth/me"));
+}
+
+void ApiClient::requestUserInfo(const QString &endpoint)
+{
+    QNetworkReply *reply = get(endpoint);
+    reply->setProperty("aegisyUserInfoEndpoint", endpoint);
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onUserInfoFinished);
 }
 
@@ -245,6 +251,15 @@ void ApiClient::onUserInfoFinished()
 {
     QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
     if (!reply) return;
+
+    const QString endpoint = reply->property("aegisyUserInfoEndpoint").toString();
+    const int httpStatus = reply->attribute(
+        QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (httpStatus == 404 && endpoint == QStringLiteral("/api/v1/auth/me")) {
+        reply->deleteLater();
+        requestUserInfo(QStringLiteral("/api/v1/user/profile"));
+        return;
+    }
 
     bool ok;
     QJsonObject response = parseResponse(reply, ok);

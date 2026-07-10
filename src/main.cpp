@@ -7,13 +7,14 @@
 #include "api_client.h"
 #include "secure_storage.h"
 #include "app_theme.h"
+#include "update_manager.h"
 
 // 显示登录对话框并在成功后打开主窗口
-static void showLoginFlow(ApiClient *apiClient);
+static void showLoginFlow(ApiClient *apiClient, UpdateManager *updateManager);
 
-static void showMainWindow(const QString &token)
+static void showMainWindow(const QString &token, UpdateManager *updateManager)
 {
-    MainWindow *mainWindow = new MainWindow();
+    MainWindow *mainWindow = new MainWindow(updateManager);
     mainWindow->setAttribute(Qt::WA_DeleteOnClose);
     mainWindow->setAuthToken(token);
 
@@ -26,7 +27,7 @@ static void showMainWindow(const QString &token)
     mainWindow->show();
 }
 
-static void showLoginFlow(ApiClient *apiClient)
+static void showLoginFlow(ApiClient *apiClient, UpdateManager *updateManager)
 {
     LoginDialog *loginDialog = new LoginDialog();
 
@@ -49,7 +50,7 @@ static void showLoginFlow(ApiClient *apiClient)
         }
 
         loginDialog->hide();
-        showMainWindow(token);
+        showMainWindow(token, updateManager);
         loginDialog->deleteLater();
     });
 
@@ -77,14 +78,15 @@ int main(int argc, char *argv[])
     QSettings().remove(QStringLiteral("apikeys/activeKey"));
 
     ApiClient *apiClient = new ApiClient(&app);
+    UpdateManager *updateManager = new UpdateManager(&app);
 
     // 有保存的 Token 直接进主界面
     const QString savedToken = SecureStorage::loadToken();
     if (!savedToken.isEmpty()) {
         apiClient->setAuthToken(savedToken);
-        showMainWindow(savedToken);
+        showMainWindow(savedToken, updateManager);
     } else {
-        showLoginFlow(apiClient);
+        showLoginFlow(apiClient, updateManager);
     }
 
     return app.exec();

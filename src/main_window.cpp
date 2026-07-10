@@ -5,6 +5,7 @@
 #include "models_dialog.h"
 #include "secure_storage.h"
 #include "app_theme.h"
+#include "update_manager.h"
 
 #include <QButtonGroup>
 #include <QDesktopServices>
@@ -15,6 +16,7 @@
 #include <QHBoxLayout>
 #include <QJsonObject>
 #include <QListWidget>
+#include <QLocale>
 #include <QMessageBox>
 #include <QComboBox>
 #include <QFileDialog>
@@ -24,6 +26,7 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QStyle>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -72,30 +75,36 @@ const QString kLogMuted   = QStringLiteral("#667085");
 
 } // namespace
 
-MainWindow::MainWindow(QWidget *parent)
+MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
     : QMainWindow(parent)
     , m_apiClient(new ApiClient(this))
     , m_toolManager(new ToolManager(this))
     , m_profileManager(new ProfileManager(this))
+    , m_updateManager(updateManager)
 {
     setupUi();
     setWindowTitle(QStringLiteral("Aegisy - AI 工具连接管理"));
     resize(1080, 720);
-    setMinimumSize(900, 620);
+    setMinimumSize(1024, 620);
 
     connect(m_apiClient, &ApiClient::apiKeysReceived,
             this, &MainWindow::onApiKeysReceived);
+    connect(m_apiClient, &ApiClient::userInfoReceived,
+            this, &MainWindow::onUserInfoReceived);
     connect(m_apiClient, &ApiClient::requestFailed,
             this, &MainWindow::onRequestFailed);
     connect(m_toolManager, &ToolManager::installOutput,
             this, &MainWindow::onInstallOutput);
     connect(m_toolManager, &ToolManager::installFinished,
             this, &MainWindow::onInstallFinished);
+    connect(m_toolManager, &ToolManager::toolVersionDetected,
+            this, &MainWindow::onToolVersionDetected);
     connect(m_profileManager, &ProfileManager::profilesChanged,
             this, &MainWindow::rebuildTrayMenu);
     connect(m_profileManager, &ProfileManager::activeProfileChanged,
             this, [this](int, int) { rebuildTrayMenu(); });
 
+    refreshToolVersions();
     rebuildCards();
     setupTray();
     if (!m_profileManager->lastError().isEmpty()) {
@@ -149,8 +158,8 @@ void MainWindow::rebuildTrayMenu()
     m_trayMenu->addSeparator();
 
     const QList<Profile> profiles = m_profileManager->allProfiles();
-    const int activeIndex = m_profileManager->activeIndex();
     for (ProfileType type : allProfileTypes()) {
+        const int activeIndex = m_profileManager->activeIndex(type);
         QAction *section = m_trayMenu->addAction(profileTypeName(type));
         section->setEnabled(false);
         bool hasProfile = false;
@@ -181,6 +190,11 @@ void MainWindow::rebuildTrayMenu()
         raise();
         onBackupsClicked();
     });
+    if (m_updateManager && m_updateManager->isSupported()) {
+        QAction *updateAction = m_trayMenu->addAction(QStringLiteral("检查更新"));
+        connect(updateAction, &QAction::triggered,
+                m_updateManager, &UpdateManager::checkForUpdates);
+    }
     QAction *quitAction = m_trayMenu->addAction(QStringLiteral("退出"));
     connect(quitAction, &QAction::triggered, this, [this]() {
         m_quitting = true;
@@ -215,6 +229,90 @@ void MainWindow::setAuthToken(const QString &token)
     m_apiClient->setAuthToken(token);
     logMessage(QStringLiteral("正在同步账号 API Keys..."), kLogInfo);
     m_apiClient->getApiKeys();
+    refreshBalance();
+    if (m_balanceRefreshTimer) {
+        m_balanceRefreshTimer->start();
+    }
+}
+
+void MainWindow::refreshBalance()
+{
+    if (!m_authToken.isEmpty()) {
+        m_apiClient->getUserInfo();
+    }
+}
+
+void MainWindow::refreshToolVersions()
+{
+    if (m_pendingToolVersionChecks > 0) {
+        return;
+    }
+
+    const QList<AiTool> tools = {
+        AiTool::ClaudeCode,
+        AiTool::CodexCli,
+        AiTool::GeminiCli,
+    };
+    m_pendingToolVersionChecks = tools.size();
+    if (m_refreshToolVersionsButton) {
+        m_refreshToolVersionsButton->setEnabled(false);
+    }
+
+    for (AiTool tool : tools) {
+        const int id = static_cast<int>(tool);
+        m_toolVersionTexts.insert(id, QStringLiteral("检测中..."));
+        if (QLabel *label = m_toolVersionLabels.value(id, nullptr)) {
+            label->setText(QStringLiteral("检测中..."));
+            label->setToolTip(QString());
+            label->setStyleSheet(QStringLiteral(
+                "font-family: monospace; font-size: 10px; color: #98a2b3;"));
+        }
+        m_toolManager->detectVersion(tool);
+    }
+}
+
+void MainWindow::onToolVersionDetected(AiTool tool, bool installed, const QString &version)
+{
+    const int id = static_cast<int>(tool);
+    QString displayText;
+    QString tooltip;
+    QString color;
+    if (!installed) {
+        displayText = QStringLiteral("未安装");
+        tooltip = QStringLiteral("未检测到 %1").arg(ToolManager::toolName(tool));
+        color = QStringLiteral("#b54708");
+    } else if (version.isEmpty()) {
+        displayText = QStringLiteral("已安装");
+        tooltip = QStringLiteral("已安装，但未能读取版本号");
+        color = QStringLiteral("#067647");
+    } else {
+        displayText = QStringLiteral("v%1").arg(version);
+        tooltip = QStringLiteral("%1 %2").arg(ToolManager::toolName(tool), version);
+        color = QStringLiteral("#067647");
+    }
+
+    m_toolVersionTexts.insert(id, displayText);
+    if (QLabel *label = m_toolVersionLabels.value(id, nullptr)) {
+        label->setText(displayText);
+        label->setToolTip(tooltip);
+        label->setStyleSheet(QStringLiteral(
+            "font-family: monospace; font-size: 10px; color: %1; font-weight: 600;")
+            .arg(color));
+    }
+    if (QPushButton *button = m_toolInstallButtons.value(id, nullptr)) {
+        button->setVisible(!installed);
+        button->setEnabled(!m_installingTools.contains(id));
+        button->setText(m_installingTools.contains(id)
+            ? QStringLiteral("...") : QStringLiteral("安装"));
+    }
+
+    m_pendingToolVersionChecks = qMax(0, m_pendingToolVersionChecks - 1);
+    if (m_pendingToolVersionChecks == 0) {
+        if (m_refreshToolVersionsButton) {
+            m_refreshToolVersionsButton->setEnabled(true);
+        }
+        rebuildCards();
+    }
 }
 
 QString MainWindow::maskKey(const QString &key)
@@ -277,10 +375,23 @@ void MainWindow::setupUi()
     topLayout->addStretch();
 
     m_userLabel = new QLabel(QStringLiteral("● 账号已连接"), topBar);
+    m_userLabel->setMaximumWidth(150);
     m_userLabel->setStyleSheet(QStringLiteral(
         "color: #067647; background: #ecfdf3; border: 1px solid #abefc6;"
         "border-radius: 7px; padding: 6px 10px; font-size: 11px; font-weight: 600;"));
     topLayout->addWidget(m_userLabel);
+
+    m_balanceButton = new QPushButton(QStringLiteral("余额  --"), topBar);
+    m_balanceButton->setToolTip(QStringLiteral("点击刷新账号余额"));
+    m_balanceButton->setFixedHeight(36);
+    m_balanceButton->setMinimumWidth(112);
+    m_balanceButton->setMaximumWidth(150);
+    m_balanceButton->setCursor(Qt::PointingHandCursor);
+    m_balanceButton->setStyleSheet(QStringLiteral(
+        "QPushButton { background: #eff8ff; color: #175cd3; border: 1px solid #b2ddff;"
+        "border-radius: 7px; padding: 0 10px; font-size: 11px; font-weight: 700; }"
+        "QPushButton:hover { background: #dff0ff; border-color: #84caff; }"));
+    topLayout->addWidget(m_balanceButton);
 
     m_manageKeysButton = new QPushButton(QStringLiteral("API Keys"), topBar);
     m_manageKeysButton->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton));
@@ -290,8 +401,29 @@ void MainWindow::setupUi()
     m_backupsButton->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
     m_transferButton = new QPushButton(QStringLiteral("迁移"), topBar);
     m_transferButton->setIcon(style()->standardIcon(QStyle::SP_DirLinkIcon));
+    m_checkUpdatesButton = new QPushButton(QStringLiteral("更新"), topBar);
+    m_checkUpdatesButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+
+    m_manageKeysButton->setFixedWidth(92);
+    m_viewModelsButton->setFixedWidth(70);
+    m_backupsButton->setFixedWidth(70);
+    m_transferButton->setFixedWidth(70);
+    m_checkUpdatesButton->setFixedWidth(70);
+
+    auto *updatesMenu = new QMenu(m_checkUpdatesButton);
+    m_checkUpdatesAction = updatesMenu->addAction(
+        style()->standardIcon(QStyle::SP_BrowserReload), QStringLiteral("检查更新"));
+    m_autoUpdateChecksAction = updatesMenu->addAction(QStringLiteral("自动检查更新"));
+    m_autoUpdateChecksAction->setCheckable(true);
+    updatesMenu->addSeparator();
+    QAction *currentVersionAction = updatesMenu->addAction(
+        QStringLiteral("当前版本  v%1").arg(QApplication::applicationVersion()));
+    currentVersionAction->setEnabled(false);
+    m_checkUpdatesButton->setMenu(updatesMenu);
+
     for (QPushButton *button : {
-             m_manageKeysButton, m_viewModelsButton, m_backupsButton, m_transferButton }) {
+             m_manageKeysButton, m_viewModelsButton, m_backupsButton,
+             m_transferButton, m_checkUpdatesButton }) {
         button->setFixedHeight(36);
         button->setCursor(Qt::PointingHandCursor);
         button->setStyleSheet(AppTheme::secondaryButtonStyle());
@@ -360,6 +492,70 @@ void MainWindow::setupUi()
         m_filterGroup->addButton(button, filter.id);
         sideLayout->addWidget(button);
     }
+    sideLayout->addSpacing(14);
+
+    auto *terminalHeader = new QHBoxLayout;
+    terminalHeader->setContentsMargins(8, 0, 2, 0);
+    auto *terminalTitle = new QLabel(QStringLiteral("本地终端"), sidebar);
+    terminalTitle->setStyleSheet(QStringLiteral(
+        "font-size: 11px; font-weight: 700; color: #667085;"));
+    terminalHeader->addWidget(terminalTitle);
+    terminalHeader->addStretch();
+    m_refreshToolVersionsButton = new QPushButton(sidebar);
+    m_refreshToolVersionsButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+    m_refreshToolVersionsButton->setToolTip(QStringLiteral("刷新本地终端版本"));
+    m_refreshToolVersionsButton->setFixedSize(26, 26);
+    m_refreshToolVersionsButton->setCursor(Qt::PointingHandCursor);
+    m_refreshToolVersionsButton->setStyleSheet(QStringLiteral(
+        "QPushButton { background: transparent; border: none; border-radius: 6px; }"
+        "QPushButton:hover { background: #eaecf0; }"
+        "QPushButton:disabled { background: transparent; }"));
+    terminalHeader->addWidget(m_refreshToolVersionsButton);
+    sideLayout->addLayout(terminalHeader);
+
+    const struct {
+        AiTool tool;
+        const char *name;
+    } terminals[] = {
+        { AiTool::ClaudeCode, "Claude" },
+        { AiTool::CodexCli, "Codex" },
+        { AiTool::GeminiCli, "Gemini" },
+    };
+    for (const auto &terminal : terminals) {
+        auto *row = new QWidget(sidebar);
+        auto *rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(8, 2, 4, 2);
+        rowLayout->setSpacing(6);
+        auto *name = new QLabel(QString::fromUtf8(terminal.name), row);
+        name->setStyleSheet(QStringLiteral("font-size: 11px; color: #475467;"));
+        rowLayout->addWidget(name);
+        rowLayout->addStretch();
+        auto *version = new QLabel(QStringLiteral("检测中..."), row);
+        version->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        version->setStyleSheet(QStringLiteral(
+            "font-family: monospace; font-size: 10px; color: #98a2b3;"));
+        rowLayout->addWidget(version);
+        m_toolVersionLabels.insert(static_cast<int>(terminal.tool), version);
+        m_toolVersionTexts.insert(static_cast<int>(terminal.tool), QStringLiteral("检测中..."));
+
+        auto *installButton = new QPushButton(QStringLiteral("安装"), row);
+        installButton->setFixedSize(44, 26);
+        installButton->setCursor(Qt::PointingHandCursor);
+        installButton->setToolTip(
+            QStringLiteral("一键安装 %1 运行环境").arg(ToolManager::toolName(terminal.tool)));
+        installButton->setStyleSheet(QStringLiteral(
+            "QPushButton { background: #fff7ed; color: #b54708; border: 1px solid #fed7aa;"
+            "border-radius: 6px; font-size: 10px; font-weight: 600; }"
+            "QPushButton:hover { background: #ffedd5; border-color: #fdba74; }"
+            "QPushButton:disabled { color: #98a2b3; background: #f2f4f7; border-color: #e4e7ec; }"));
+        installButton->hide();
+        rowLayout->addWidget(installButton);
+        m_toolInstallButtons.insert(static_cast<int>(terminal.tool), installButton);
+        connect(installButton, &QPushButton::clicked, this,
+                [this, tool = terminal.tool]() { installToolEnvironment(tool); });
+        sideLayout->addWidget(row);
+    }
+
     sideLayout->addStretch();
 
     auto *localTitle = new QLabel(QStringLiteral("认证文件"), sidebar);
@@ -477,6 +673,33 @@ void MainWindow::setupUi()
             this, &MainWindow::onBackupsClicked);
     connect(m_transferButton, &QPushButton::clicked,
             this, &MainWindow::onTransferClicked);
+    if (m_updateManager && m_updateManager->isSupported()) {
+        m_autoUpdateChecksAction->setChecked(
+            m_updateManager->automaticallyChecksForUpdates());
+        connect(m_checkUpdatesAction, &QAction::triggered,
+                m_updateManager, &UpdateManager::checkForUpdates);
+        connect(m_autoUpdateChecksAction, &QAction::toggled,
+                this, [this](bool enabled) {
+            m_updateManager->setAutomaticallyChecksForUpdates(enabled);
+            logMessage(
+                enabled ? QStringLiteral("已开启自动检查更新")
+                        : QStringLiteral("已关闭自动检查更新"),
+                enabled ? kLogSuccess : kLogMuted);
+        });
+        connect(m_updateManager, &UpdateManager::automaticChecksChanged,
+                m_autoUpdateChecksAction, &QAction::setChecked);
+    } else {
+        m_checkUpdatesButton->setEnabled(false);
+        m_checkUpdatesButton->setToolTip(QStringLiteral("当前平台暂不支持应用内更新"));
+    }
+    connect(m_refreshToolVersionsButton, &QPushButton::clicked,
+            this, &MainWindow::refreshToolVersions);
+    connect(m_balanceButton, &QPushButton::clicked,
+            this, &MainWindow::refreshBalance);
+    m_balanceRefreshTimer = new QTimer(this);
+    m_balanceRefreshTimer->setInterval(60 * 1000);
+    connect(m_balanceRefreshTimer, &QTimer::timeout,
+            this, &MainWindow::refreshBalance);
     connect(m_filterGroup, QOverload<int>::of(&QButtonGroup::idClicked),
             this, &MainWindow::onFilterChanged);
     connect(clearLogButton, &QPushButton::clicked, m_logOutput, &QTextEdit::clear);
@@ -493,17 +716,24 @@ void MainWindow::rebuildCards()
     }
 
     const QList<Profile> profiles = m_profileManager->allProfiles();
-    const int activeIndex = m_profileManager->activeIndex();
     m_profileCountLabel->setText(QStringLiteral("配置总数  %1").arg(profiles.size()));
 
-    if (activeIndex >= 0 && activeIndex < profiles.size()
-            && profiles[activeIndex].hasAnyKey()) {
-        const Profile &active = profiles[activeIndex];
-        m_activeProfileLabel->setText(
-            QStringLiteral("当前：%1 · %2")
-                .arg(active.name, ToolManager::toolName(active.tool())));
-    } else {
+    QStringList activeDescriptions;
+    for (ProfileType type : allProfileTypes()) {
+        const int activeIndex = m_profileManager->activeIndex(type);
+        if (activeIndex >= 0 && activeIndex < profiles.size()
+                && profiles[activeIndex].hasAnyKey()) {
+            activeDescriptions.append(
+                QStringLiteral("%1：%2").arg(profileTypeName(type), profiles[activeIndex].name));
+        }
+    }
+    if (activeDescriptions.isEmpty()) {
         m_activeProfileLabel->setText(QStringLiteral("尚未激活有效配置"));
+        m_activeProfileLabel->setToolTip(QString());
+    } else {
+        m_activeProfileLabel->setText(
+            QStringLiteral("已激活  %1 / 3 个终端").arg(activeDescriptions.size()));
+        m_activeProfileLabel->setToolTip(activeDescriptions.join(QLatin1Char('\n')));
     }
 
     int visibleCount = 0;
@@ -511,7 +741,8 @@ void MainWindow::rebuildCards()
         if (m_filterType != 0 && static_cast<int>(profile.type) != m_filterType) {
             continue;
         }
-        const bool isActive = profile.index == activeIndex && profile.hasAnyKey();
+        const bool isActive = m_profileManager->isActive(profile.index)
+            && profile.hasAnyKey();
         m_cardsLayout->addWidget(createProfileCard(profile, isActive));
         ++visibleCount;
     }
@@ -593,8 +824,10 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive)
     details->addLayout(titleRow);
 
     auto *toolLine = new QLabel(
-        QStringLiteral("%1  ·  %2")
-            .arg(ToolManager::toolName(tool), toolConfigPath(tool)), card);
+        QStringLiteral("%1  ·  %2  ·  %3")
+            .arg(ToolManager::toolName(tool),
+                 m_toolVersionTexts.value(static_cast<int>(tool), QStringLiteral("检测中...")),
+                 toolConfigPath(tool)), card);
     toolLine->setStyleSheet(QStringLiteral(
         "font-size: 11px; color: #667085; border: none;"));
     details->addWidget(toolLine);
@@ -705,7 +938,7 @@ void MainWindow::onNewConnectClicked()
 
 void MainWindow::editProfile(int index)
 {
-    const bool wasActive = m_profileManager->activeIndex() == index;
+    const bool wasActive = m_profileManager->isActive(index);
     ConnectWizardDialog dialog(m_apiClient, m_profileManager, index, this);
     const int result = dialog.exec();
     m_apiClient->getApiKeys();
@@ -821,7 +1054,7 @@ void MainWindow::processActivationQueue()
         logMessage(status.conflictWarning, kLogWarn);
     }
 
-    if (!status.nodeOk) {
+    if (!status.installed && !status.nodeOk) {
         logMessage(
             QStringLiteral("%1 认证已更新；安装 Node.js 后即可运行 CLI")
                 .arg(ToolManager::toolName(tool)),
@@ -877,6 +1110,25 @@ void MainWindow::onApiKeysReceived(const QJsonArray &keys)
     logMessage(QStringLiteral("已同步 %1 个 API Key").arg(keys.size()), kLogSuccess);
 }
 
+void MainWindow::onUserInfoReceived(const QJsonObject &userInfo)
+{
+    const double balance = userInfo.value(QStringLiteral("balance")).toDouble();
+    const QString formatted = QLocale(QLocale::English).toString(balance, 'f', 2);
+    m_balanceButton->setText(QStringLiteral("余额  $%1").arg(formatted));
+
+    QString displayName = userInfo.value(QStringLiteral("username")).toString().trimmed();
+    if (displayName.isEmpty()) {
+        displayName = userInfo.value(QStringLiteral("email")).toString().trimmed();
+    }
+    const QString compactName = displayName.size() > 16
+        ? displayName.left(13) + QStringLiteral("...") : displayName;
+    m_userLabel->setText(displayName.isEmpty()
+        ? QStringLiteral("● 账号已连接")
+        : QStringLiteral("● %1").arg(compactName));
+    m_userLabel->setToolTip(displayName);
+    m_balanceButton->setToolTip(QStringLiteral("点击刷新账号余额"));
+}
+
 void MainWindow::onRequestFailed(const QString &error)
 {
     logMessage(QStringLiteral("请求失败：%1").arg(error), kLogError);
@@ -890,7 +1142,21 @@ void MainWindow::onInstallOutput(AiTool tool, const QString &line)
 
 void MainWindow::onInstallFinished(AiTool tool, int requestId, bool success)
 {
+    const int toolId = static_cast<int>(tool);
+    m_installingTools.remove(toolId);
+    if (QPushButton *button = m_toolInstallButtons.value(toolId, nullptr)) {
+        button->setEnabled(true);
+        button->setText(QStringLiteral("安装"));
+    }
+    if (m_pendingToolVersionChecks == 0) {
+        QTimer::singleShot(0, this, &MainWindow::refreshToolVersions);
+    }
     if (m_activatingIndex < 0) {
+        logMessage(
+            success
+                ? QStringLiteral("%1 安装完成").arg(ToolManager::toolName(tool))
+                : QStringLiteral("%1 安装失败").arg(ToolManager::toolName(tool)),
+            success ? kLogSuccess : kLogError);
         return;
     }
     if (requestId != m_activationGeneration) {
@@ -918,6 +1184,24 @@ void MainWindow::onInstallFinished(AiTool tool, int requestId, bool success)
     processActivationQueue();
 }
 
+void MainWindow::installToolEnvironment(AiTool tool)
+{
+    const int toolId = static_cast<int>(tool);
+    if (m_installingTools.contains(toolId)) {
+        return;
+    }
+
+    m_installingTools.insert(toolId);
+    if (QPushButton *button = m_toolInstallButtons.value(toolId, nullptr)) {
+        button->setEnabled(false);
+        button->setText(QStringLiteral("..."));
+    }
+    logMessage(
+        QStringLiteral("正在检查并安装 %1 运行环境...").arg(ToolManager::toolName(tool)),
+        kLogInfo);
+    m_toolManager->install(tool, -1);
+}
+
 void MainWindow::showEnvCheckDialog(int profileIndex)
 {
     const QList<Profile> profiles = m_profileManager->allProfiles();
@@ -933,9 +1217,12 @@ void MainWindow::showEnvCheckDialog(int profileIndex)
     const AiTool tool = profile.tool();
     const ToolStatus status = m_toolManager->detectFast(tool);
     const DesktopAppStatus desktop = m_toolManager->detectDesktop(tool);
-    if (status.nodeOk && status.installed && status.conflictWarning.isEmpty()) {
+    if (status.installed && status.conflictWarning.isEmpty()) {
         logMessage(
-            QStringLiteral("%1 本地环境已就绪").arg(ToolManager::toolName(tool)),
+            status.version.isEmpty()
+                ? QStringLiteral("%1 本地环境已就绪").arg(ToolManager::toolName(tool))
+                : QStringLiteral("%1 %2 本地环境已就绪")
+                      .arg(ToolManager::toolName(tool), status.version),
             kLogSuccess);
         return;
     }
@@ -986,16 +1273,18 @@ void MainWindow::showEnvCheckDialog(int profileIndex)
         root->addWidget(row);
     };
 
-    if (!status.nodeOk) {
-        auto *button = new QPushButton(QStringLiteral("下载 Node.js"), &dialog);
+    if (!status.installed && !status.nodeOk) {
+        auto *button = new QPushButton(QStringLiteral("一键安装环境"), &dialog);
         button->setFixedHeight(34);
         button->setStyleSheet(AppTheme::primaryButtonStyle());
-        connect(button, &QPushButton::clicked, []() {
-            QDesktopServices::openUrl(QUrl(QStringLiteral("https://nodejs.org/")));
+        connect(button, &QPushButton::clicked, this, [this, tool, button]() {
+            button->setEnabled(false);
+            button->setText(QStringLiteral("安装中..."));
+            installToolEnvironment(tool);
         });
         addIssueRow(QStyle::SP_MessageBoxWarning,
                     QStringLiteral("Node.js 未安装"),
-                    QStringLiteral("CLI 的安装和运行需要 Node.js。"),
+                    QStringLiteral("将先安装 Node.js LTS，再安装对应 CLI。"),
                     button);
     } else if (!status.installed) {
         auto *button = new QPushButton(QStringLiteral("安装 CLI"), &dialog);
@@ -1004,7 +1293,7 @@ void MainWindow::showEnvCheckDialog(int profileIndex)
         connect(button, &QPushButton::clicked, this, [this, tool, button]() {
             button->setEnabled(false);
             button->setText(QStringLiteral("安装中..."));
-            m_toolManager->install(tool, -1);
+            installToolEnvironment(tool);
         });
         addIssueRow(QStyle::SP_MessageBoxWarning,
                     QStringLiteral("CLI 未安装"),
@@ -1084,9 +1373,20 @@ void MainWindow::onBackupsClicked()
     toolCombo->addItem(QStringLiteral("Claude Code"), static_cast<int>(AiTool::ClaudeCode));
     toolCombo->addItem(QStringLiteral("Codex CLI"), static_cast<int>(AiTool::CodexCli));
     toolCombo->addItem(QStringLiteral("Gemini CLI"), static_cast<int>(AiTool::GeminiCli));
-    const Profile active = m_profileManager->activeProfile();
+    Profile active;
+    if (m_filterType != 0) {
+        active = m_profileManager->activeProfile(static_cast<ProfileType>(m_filterType));
+    } else {
+        for (ProfileType type : allProfileTypes()) {
+            active = m_profileManager->activeProfile(type);
+            if (active.index >= 0) {
+                break;
+            }
+        }
+    }
     if (active.index >= 0) {
-        toolCombo->setCurrentIndex(toolCombo->findData(static_cast<int>(active.tool())));
+        toolCombo->setCurrentIndex(
+            toolCombo->findData(static_cast<int>(active.tool())));
     }
     root->addWidget(toolCombo);
 
@@ -1157,7 +1457,7 @@ void MainWindow::onBackupsClicked()
                 &dialog, QStringLiteral("恢复失败"), m_toolManager->lastError());
             return;
         }
-        m_profileManager->clearActiveProfile();
+        m_profileManager->clearActiveProfile(profileTypeForTool(tool));
         rebuildCards();
         logMessage(
             QStringLiteral("%1 配置已从备份恢复").arg(ToolManager::toolName(tool)),

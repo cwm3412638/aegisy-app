@@ -7,6 +7,8 @@
 #include <QLabel>
 #include <QCheckBox>
 
+class QAction;
+
 class LoginDialog : public QDialog
 {
     Q_OBJECT
@@ -31,6 +33,7 @@ private slots:
 private:
     QLineEdit *m_emailEdit;
     QLineEdit *m_passwordEdit;
+    QAction *m_passwordVisibilityAction;
     QPushButton *m_loginButton;
     QLabel *m_errorLabel;
     QCheckBox *m_rememberCheckBox;

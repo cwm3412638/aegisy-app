@@ -84,9 +84,11 @@ struct Profile {
 
 // 档案管理器：持久化到 QSettings。
 // 新布局：
-//   profiles/schema_version      = 3
+//   profiles/schema_version      = 4
 //   profiles/count               = N
-//   profiles/active              = 0
+//   profiles/active/claude       = 0
+//   profiles/active/codex        = 1
+//   profiles/active/gemini       = 2
 //   profiles/<i>/id              = UUID
 //   profiles/<i>/name            = "工作 Codex"
 //   profiles/<i>/type            = 2
@@ -100,8 +102,9 @@ public:
     explicit ProfileManager(QObject *parent = nullptr);
 
     QList<Profile> allProfiles() const;
-    int     activeIndex() const;
-    Profile activeProfile() const;
+    int     activeIndex(ProfileType type) const;
+    Profile activeProfile(ProfileType type) const;
+    bool    isActive(int index) const;
     int     count() const;
 
     int addProfile(const QString &name, ProfileType type,
@@ -111,7 +114,7 @@ public:
                        const QString &key, const QString &model);
     void removeProfile(int index);
     void setActiveIndex(int index);
-    void clearActiveProfile();
+    void clearActiveProfile(ProfileType type);
 
     bool exportProfiles(const QString &filePath, const QString &password);
     bool importProfiles(const QString &filePath, const QString &password,
@@ -126,6 +129,7 @@ signals:
 private:
     void migrateLegacyProfiles();
     void migrateProfileCredentials();
+    void migrateActiveProfiles();
     void ensureDefaultProfile();
 
     QString m_lastError;

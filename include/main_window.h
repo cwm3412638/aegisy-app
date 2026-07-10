@@ -10,6 +10,8 @@
 #include <QVBoxLayout>
 #include <QJsonArray>
 #include <QList>
+#include <QHash>
+#include <QSet>
 #include <QButtonGroup>
 #include <QSystemTrayIcon>
 #include <QMenu>
@@ -17,12 +19,16 @@
 #include "tool_manager.h"
 #include "profile_manager.h"
 
+class QAction;
+class UpdateManager;
+class QTimer;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget *parent = nullptr);
+    explicit MainWindow(UpdateManager *updateManager, QWidget *parent = nullptr);
     ~MainWindow();
 
     void setAuthToken(const QString &token);
@@ -32,9 +38,13 @@ signals:
 
 private slots:
     void onApiKeysReceived(const QJsonArray &keys);
+    void onUserInfoReceived(const QJsonObject &userInfo);
     void onRequestFailed(const QString &error);
     void onInstallOutput(AiTool tool, const QString &line);
     void onInstallFinished(AiTool tool, int requestId, bool success);
+    void onToolVersionDetected(AiTool tool, bool installed, const QString &version);
+    void refreshToolVersions();
+    void refreshBalance();
     void onManageKeysClicked();
     void onViewModelsClicked();
     void onBackupsClicked();
@@ -63,6 +73,7 @@ private:
 
     // 保存后环境检测弹窗
     void showEnvCheckDialog(int profileIndex);
+    void installToolEnvironment(AiTool tool);
 
     void logMessage(const QString &message, const QString &color = "#94a3b8");
     static QString maskKey(const QString &key);
@@ -70,9 +81,11 @@ private:
     ApiClient      *m_apiClient;
     ToolManager    *m_toolManager;
     ProfileManager *m_profileManager;
+    UpdateManager  *m_updateManager;
 
     // UI — 顶栏
     QLabel      *m_userLabel;
+    QPushButton *m_balanceButton;
     QPushButton *m_logoutButton;
 
     // UI — 档案列表区
@@ -89,6 +102,10 @@ private:
     QPushButton *m_viewModelsButton;
     QPushButton *m_backupsButton;
     QPushButton *m_transferButton;
+    QPushButton *m_checkUpdatesButton;
+    QPushButton *m_refreshToolVersionsButton = nullptr;
+    QAction *m_checkUpdatesAction = nullptr;
+    QAction *m_autoUpdateChecksAction = nullptr;
     QTextEdit   *m_logOutput;
     QSystemTrayIcon *m_trayIcon = nullptr;
     QMenu *m_trayMenu = nullptr;
@@ -97,6 +114,12 @@ private:
     QString    m_authToken;
     QJsonArray m_keys;
     bool       m_keysLoaded = false;
+    QHash<int, QLabel *> m_toolVersionLabels;
+    QHash<int, QPushButton *> m_toolInstallButtons;
+    QHash<int, QString> m_toolVersionTexts;
+    QSet<int> m_installingTools;
+    int m_pendingToolVersionChecks = 0;
+    QTimer *m_balanceRefreshTimer = nullptr;
 
     // 当前筛选类型：0 = 全部，其余值对应 ProfileType
     int m_filterType = 0;

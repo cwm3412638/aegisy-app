@@ -1,8 +1,11 @@
 #include "login_dialog.h"
 #include "app_theme.h"
 
+#include <QAction>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QPainter>
+#include <QPainterPath>
 #include <QStyle>
 #include <QVBoxLayout>
 
@@ -17,6 +20,34 @@ QString inputStyle()
         "}"
         "QLineEdit:focus { border: 1px solid #0f766e; }"
         "QLineEdit:disabled { background: #f2f4f7; color: #98a2b3; }");
+}
+
+QIcon passwordVisibilityIcon(bool passwordVisible)
+{
+    QPixmap pixmap(20, 20);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    QPen pen(QColor(QStringLiteral("#667085")), 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    painter.setPen(pen);
+    painter.setBrush(Qt::NoBrush);
+
+    QPainterPath eye;
+    eye.moveTo(2.2, 10.0);
+    eye.cubicTo(5.0, 5.8, 8.0, 4.8, 10.0, 4.8);
+    eye.cubicTo(12.0, 4.8, 15.0, 5.8, 17.8, 10.0);
+    eye.cubicTo(15.0, 14.2, 12.0, 15.2, 10.0, 15.2);
+    eye.cubicTo(8.0, 15.2, 5.0, 14.2, 2.2, 10.0);
+    painter.drawPath(eye);
+    painter.drawEllipse(QPointF(10.0, 10.0), 2.3, 2.3);
+
+    if (passwordVisible) {
+        painter.setPen(QPen(QColor(QStringLiteral("#475467")), 1.8,
+                            Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(QPointF(3.2, 3.2), QPointF(16.8, 16.8));
+    }
+    return QIcon(pixmap);
 }
 
 } // namespace
@@ -98,6 +129,9 @@ void LoginDialog::setupUi()
     m_passwordEdit->setEchoMode(QLineEdit::Password);
     m_passwordEdit->setFixedHeight(44);
     m_passwordEdit->setStyleSheet(inputStyle());
+    m_passwordVisibilityAction = m_passwordEdit->addAction(
+        passwordVisibilityIcon(false), QLineEdit::TrailingPosition);
+    m_passwordVisibilityAction->setToolTip(QStringLiteral("显示密码"));
     root->addWidget(m_passwordEdit);
 
     root->addSpacing(13);
@@ -147,6 +181,13 @@ void LoginDialog::setupUi()
             this, &LoginDialog::onLoginClicked);
     connect(m_passwordEdit, &QLineEdit::returnPressed,
             this, &LoginDialog::onLoginClicked);
+    connect(m_passwordVisibilityAction, &QAction::triggered, this, [this]() {
+        const bool showPassword = m_passwordEdit->echoMode() == QLineEdit::Password;
+        m_passwordEdit->setEchoMode(showPassword ? QLineEdit::Normal : QLineEdit::Password);
+        m_passwordVisibilityAction->setIcon(passwordVisibilityIcon(showPassword));
+        m_passwordVisibilityAction->setToolTip(
+            showPassword ? QStringLiteral("隐藏密码") : QStringLiteral("显示密码"));
+    });
 }
 
 QString LoginDialog::getEmail() const
@@ -181,6 +222,7 @@ void LoginDialog::setLoading(bool loading)
     m_loginButton->setEnabled(!loading);
     m_emailEdit->setEnabled(!loading);
     m_passwordEdit->setEnabled(!loading);
+    m_passwordVisibilityAction->setEnabled(!loading);
     m_rememberCheckBox->setEnabled(!loading);
 
     if (loading) {

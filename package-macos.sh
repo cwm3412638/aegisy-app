@@ -1,6 +1,6 @@
 #!/bin/bash
 # Aegisy Client - macOS release packaging
-# Output: dist/AegisyClient-<version>-macOS-<arch>.dmg
+# Output: DMG installer plus signed Sparkle update feed under dist/updates
 
 set -euo pipefail
 
@@ -13,7 +13,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 1
 fi
 
-for command_name in cmake hdiutil codesign otool ditto file install_name_tool lipo shasum; do
+for command_name in cmake hdiutil codesign otool ditto file install_name_tool lipo shasum xmllint; do
     command -v "$command_name" >/dev/null 2>&1 || {
         echo "[错误] 未找到 $command_name"
         exit 1
@@ -51,9 +51,15 @@ BUILD_DIR="build"
 APP="$BUILD_DIR/AegisyClient.app"
 STAGE="$BUILD_DIR/dmg-root"
 MOUNT_POINT="$BUILD_DIR/dmg-mount"
+SPARKLE_VERSION="2.9.4"
+SPARKLE_ROOT="$BUILD_DIR/_deps/sparkle-$SPARKLE_VERSION"
+SPARKLE_ACCOUNT="${AEGISY_SPARKLE_ACCOUNT:-aegisy}"
+UPDATE_BASE_URL="${AEGISY_UPDATE_BASE_URL:-https://aegisy.cc/desktop/macos}"
+MACOS_DEPLOYMENT_TARGET="${AEGISY_MACOS_DEPLOYMENT_TARGET:-26.0}"
+SIGNING_IDENTITY="${AEGISY_CODESIGN_IDENTITY:--}"
 
 echo ""
-echo "[1/5] 编译 Release..."
+echo "[1/6] 编译 Release..."
 rm -rf "$APP" "$STAGE" "$MOUNT_POINT"
 mkdir -p "$BUILD_DIR"
 
@@ -62,6 +68,7 @@ CMAKE_ARGS=(
     -B "$BUILD_DIR"
     -DCMAKE_BUILD_TYPE=Release
     -DBUILD_TESTING=OFF
+    "-DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOS_DEPLOYMENT_TARGET"
 )
 if [ -d "/opt/homebrew/opt/qt@6/lib/cmake/Qt6" ]; then
     CMAKE_ARGS+=("-DQt6_DIR=/opt/homebrew/opt/qt@6/lib/cmake/Qt6")
@@ -75,7 +82,7 @@ cmake --build "$BUILD_DIR" --config Release -j "$(sysctl -n hw.ncpu 2>/dev/null 
 }
 
 echo ""
-echo "[2/5] 部署 Qt 和运行库..."
+echo "[2/6] 部署 Qt 和运行库..."
 mkdir -p "$APP/Contents/PlugIns/platforms" "$APP/Contents/PlugIns/tls"
 cp "$QT_PLUGINS/platforms/libqcocoa.dylib" \
    "$APP/Contents/PlugIns/platforms/"
@@ -100,7 +107,7 @@ fi
 "$QT_BIN/macdeployqt" "${DEPLOY_ARGS[@]}" -verbose=2
 
 echo ""
-echo "[3/5] 检查依赖并签名..."
+echo "[3/6] 检查依赖并签名..."
 
 # Homebrew 的部分库会保留绝对安装名。它们作为 bundle 内文件的 ID
 # 没有运行时价值，还会让可移植性检查和后续签名变得不可靠。
@@ -125,6 +132,20 @@ while IFS= read -r -d '' binary; do
     esac
 done < <(find "$APP/Contents" -type f -print0)
 
+# 移除构建机路径，确保 @rpath 只从应用包内解析。
+while IFS= read -r -d '' binary; do
+    if ! file "$binary" | grep -q "Mach-O"; then
+        continue
+    fi
+    while IFS= read -r rpath; do
+        case "$rpath" in
+            /opt/homebrew/*|/usr/local/*|"$PWD"/*)
+                install_name_tool -delete_rpath "$rpath" "$binary"
+                ;;
+        esac
+    done < <(otool -l "$binary" | awk '/cmd LC_RPATH/{getline; getline; print $2}')
+done < <(find "$APP/Contents" -type f -print0)
+
 dependency_error=0
 while IFS= read -r -d '' binary; do
     if ! file "$binary" | grep -q "Mach-O"; then
@@ -144,22 +165,99 @@ if [ "$dependency_error" -ne 0 ]; then
     exit 1
 fi
 
-# 当前机器没有 Developer ID 时使用 ad-hoc 签名。先签内部二进制，再签 bundle。
+# 没有 Developer ID 时使用 ad-hoc 签名。正式发布可传 AEGISY_CODESIGN_IDENTITY。
+SIGN_ARGS=(--force --sign "$SIGNING_IDENTITY")
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    SIGN_ARGS+=(--timestamp=none)
+else
+    SIGN_ARGS+=(--options runtime --timestamp)
+fi
 while IFS= read -r -d '' binary; do
     if file "$binary" | grep -q "Mach-O"; then
-        codesign --force --sign - --timestamp=none "$binary"
+        codesign "${SIGN_ARGS[@]}" "$binary"
     fi
 done < <(find "$APP/Contents" -type f -print0)
-codesign --force --deep --sign - --timestamp=none "$APP"
+codesign --deep "${SIGN_ARGS[@]}" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 ARCH="$(lipo -archs "$APP/Contents/MacOS/AegisyClient" | tr ' ' '-')"
 DMG_NAME="AegisyClient-${VERSION}-macOS-${ARCH}.dmg"
 DMG_PATH="dist/$DMG_NAME"
+UPDATE_DIR="dist/updates/macos"
+UPDATE_BASENAME="AegisyClient-${VERSION}-macOS-${ARCH}"
+UPDATE_ZIP="$UPDATE_DIR/$UPDATE_BASENAME.zip"
+
+if [ -n "${AEGISY_NOTARY_PROFILE:-}" ]; then
+    if [ "$SIGNING_IDENTITY" = "-" ]; then
+        echo "[错误] 公证需要通过 AEGISY_CODESIGN_IDENTITY 指定 Developer ID"
+        exit 1
+    fi
+    command -v xcrun >/dev/null 2>&1 || {
+        echo "[错误] 未找到 xcrun，无法执行 Apple 公证"
+        exit 1
+    }
+    NOTARY_ARCHIVE="$BUILD_DIR/AegisyClient-notary.zip"
+    rm -f "$NOTARY_ARCHIVE"
+    ditto -c -k --sequesterRsrc --keepParent "$APP" "$NOTARY_ARCHIVE"
+    xcrun notarytool submit "$NOTARY_ARCHIVE" \
+        --keychain-profile "$AEGISY_NOTARY_PROFILE" --wait
+    xcrun stapler staple "$APP"
+    xcrun stapler validate "$APP"
+    rm -f "$NOTARY_ARCHIVE"
+fi
 
 echo ""
-echo "[4/5] 生成 DMG..."
+echo "[4/6] 生成 Sparkle 更新源..."
+[ -x "$SPARKLE_ROOT/bin/generate_appcast" ] || {
+    echo "[错误] 未找到 Sparkle 发布工具：$SPARKLE_ROOT/bin/generate_appcast"
+    exit 1
+}
+mkdir -p "$UPDATE_DIR"
+rm -f "$UPDATE_ZIP"
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$UPDATE_ZIP"
+
+RELEASE_NOTES="release/notes/$VERSION.md"
+if [ -f "$RELEASE_NOTES" ]; then
+    cp "$RELEASE_NOTES" "$UPDATE_DIR/$UPDATE_BASENAME.md"
+fi
+
+APPCAST_ARGS=(
+    --download-url-prefix "$UPDATE_BASE_URL/"
+    --release-notes-url-prefix "$UPDATE_BASE_URL/"
+    --link "https://aegisy.cc"
+    --maximum-versions 5
+    --maximum-deltas 5
+    "$UPDATE_DIR"
+)
+if [ -n "${AEGISY_SPARKLE_PRIVATE_KEY:-}" ]; then
+    printf '%s' "$AEGISY_SPARKLE_PRIVATE_KEY" | \
+        "$SPARKLE_ROOT/bin/generate_appcast" --ed-key-file - "${APPCAST_ARGS[@]}"
+else
+    "$SPARKLE_ROOT/bin/generate_appcast" \
+        --account "$SPARKLE_ACCOUNT" "${APPCAST_ARGS[@]}"
+fi
+cp "$UPDATE_DIR/appcast.xml" dist/appcast.xml
+cp "$UPDATE_DIR/appcast.xml" dist/macos-appcast.xml
+xmllint --noout "$UPDATE_DIR/appcast.xml"
+UPDATE_SIGNATURE="$(xmllint --xpath \
+    'string(//*[local-name()="enclosure"]/@*[local-name()="edSignature"])' \
+    "$UPDATE_DIR/appcast.xml")"
+[ -n "$UPDATE_SIGNATURE" ] || {
+    echo "[错误] appcast 中没有更新包签名"
+    exit 1
+}
+if [ -n "${AEGISY_SPARKLE_PRIVATE_KEY:-}" ]; then
+    printf '%s' "$AEGISY_SPARKLE_PRIVATE_KEY" | \
+        "$SPARKLE_ROOT/bin/sign_update" --ed-key-file - --verify \
+        "$UPDATE_ZIP" "$UPDATE_SIGNATURE"
+else
+    "$SPARKLE_ROOT/bin/sign_update" --account "$SPARKLE_ACCOUNT" --verify \
+        "$UPDATE_ZIP" "$UPDATE_SIGNATURE"
+fi
+
+echo ""
+echo "[5/6] 生成 DMG..."
 rm -f "$DMG_PATH" dist/AegisyClient.dmg
 mkdir -p dist "$STAGE"
 ditto "$APP" "$STAGE/AegisyClient.app"
@@ -173,7 +271,7 @@ hdiutil create \
 cp "$DMG_PATH" dist/AegisyClient.dmg
 
 echo ""
-echo "[5/5] 挂载回验..."
+echo "[6/6] 挂载回验..."
 mkdir -p "$MOUNT_POINT"
 hdiutil attach "$DMG_PATH" -nobrowse -readonly -mountpoint "$MOUNT_POINT" >/dev/null
 trap 'hdiutil detach "$MOUNT_POINT" >/dev/null 2>&1 || true' EXIT
@@ -185,6 +283,8 @@ trap - EXIT
 
 SHA256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
 SIZE="$(du -h "$DMG_PATH" | awk '{print $1}')"
+UPDATE_SHA256="$(shasum -a 256 "$UPDATE_ZIP" | awk '{print $1}')"
+UPDATE_SIZE="$(du -h "$UPDATE_ZIP" | awk '{print $1}')"
 
 echo ""
 echo "=================================="
@@ -194,6 +294,12 @@ echo "安装包：$DMG_PATH"
 echo "兼容架构：$ARCH"
 echo "文件大小：$SIZE"
 echo "SHA-256：$SHA256"
+echo "更新包：$UPDATE_ZIP"
+echo "更新包大小：$UPDATE_SIZE"
+echo "更新包 SHA-256：$UPDATE_SHA256"
+echo "更新源：$UPDATE_DIR/appcast.xml"
 echo ""
-echo "当前为 ad-hoc 签名、未公证版本。其他 Mac 首次打开时可能需要"
-echo "右键选择“打开”，或在“系统设置 → 隐私与安全性”中允许打开。"
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    echo "当前为 ad-hoc 签名、未公证版本。正式自动更新发布前请配置"
+    echo "AEGISY_CODESIGN_IDENTITY 和 AEGISY_NOTARY_PROFILE。"
+fi
