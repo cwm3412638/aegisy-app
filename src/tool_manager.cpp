@@ -781,14 +781,14 @@ void ToolManager::install(AiTool tool, int requestId)
 
 #if defined(Q_OS_WIN)
     installer = resolveCommand(QStringLiteral("winget.exe"), 1000);
-    arguments = {
+    arguments = QStringList({
         QStringLiteral("install"), QStringLiteral("--id"),
         QStringLiteral("OpenJS.NodeJS.LTS"), QStringLiteral("--exact"),
         QStringLiteral("--source"), QStringLiteral("winget"),
         QStringLiteral("--accept-package-agreements"),
         QStringLiteral("--accept-source-agreements"),
         QStringLiteral("--silent"),
-    };
+    });
     displayCommand = QStringLiteral("winget install OpenJS.NodeJS.LTS");
 #elif defined(Q_OS_MAC)
     installer = resolveCommand(QStringLiteral("brew"), 1000);

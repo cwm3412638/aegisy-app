@@ -7,7 +7,7 @@
 
 #define MyAppName "Aegisy Client"
 #ifndef MyAppVersion
-  #define MyAppVersion "2.3.0"
+  #define MyAppVersion "2.3.1"
 #endif
 #define MyAppPublisher "Aegisy"
 #define MyAppURL "https://www.aegisy.cc"
@@ -22,6 +22,7 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 DefaultDirName={autopf}\AegisyClient
 DefaultGroupName={#MyAppName}
+DisableDirPage=no
 DisableProgramGroupPage=yes
 ; 不需要管理员权限：装到当前用户目录
 PrivilegesRequired=lowest
@@ -55,6 +56,48 @@ Source: "dist\AegisyClient\*"; DestDir: "{app}"; Flags: recursesubdirs createall
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Code]
+function DirectoryHasContent(Path: string): Boolean;
+var
+  FindRec: TFindRec;
+begin
+  Result := False;
+  if FindFirst(AddBackslash(Path) + '*', FindRec) then
+  begin
+    try
+      repeat
+        if (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+        begin
+          Result := True;
+          Break;
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  InstallDir: string;
+begin
+  Result := True;
+  if CurPageID = wpSelectDir then
+  begin
+    InstallDir := WizardDirValue;
+    if DirExists(InstallDir) and DirectoryHasContent(InstallDir) then
+    begin
+      Result :=
+        MsgBox(
+          'The selected installation folder already exists and is not empty.' #13#10 #13#10
+          + 'Continue and overwrite files in this folder?',
+          mbConfirmation,
+          MB_YESNO) = IDYES;
+    end;
+  end;
+end;
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "立即运行 {#MyAppName}"; Flags: nowait postinstall skipifsilent
