@@ -78,6 +78,7 @@ package-windows.bat
 ```
 
 需要预先安装 Qt、OpenSSL、CMake、Visual Studio 2022 和 Inno Setup 6。
+`OPENSSL_DIR` 必须指向 OpenSSL 的运行库目录，其中应同时包含该发行版依赖的 zlib DLL；打包脚本会复制目录中的全部 DLL 并在生成安装包前执行启动测试。
 
 ## 使用流程
 

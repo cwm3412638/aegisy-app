@@ -49,6 +49,8 @@ set AEGISY_SPARKLE_PRIVATE_KEY_FILE=%USERPROFILE%\.aegisy\sparkle-private-key
 package-windows.bat
 ```
 
+`OPENSSL_DIR` 必须指向 OpenSSL 的运行库目录，并包含同一发行版附带的依赖 DLL（例如 `zlib1_.dll`）。脚本会复制该目录中的全部 DLL，并在调用 Inno Setup 前实际启动一次分发目录中的程序；运行时依赖不完整时打包会失败。
+
 脚本会构建 x64 Release、收集 Qt/WinSparkle/OpenSSL、调用 Inno Setup，并生成：
 
 - `dist/AegisyClientSetup-<version>.exe`

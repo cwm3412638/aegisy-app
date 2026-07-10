@@ -39,11 +39,18 @@ windeployqt --release --no-translations --dir "%DIST_DIR%" "%DIST_DIR%\AegisyCli
 echo.
 echo [3/6] 补充 OpenSSL 运行库...
 if "%OPENSSL_DIR%"=="" (
-    echo [警告] OPENSSL_DIR 未设置，请确认 OpenSSL DLL 已在 PATH 或手动复制到 %DIST_DIR%
-) else (
-    copy /y "%OPENSSL_DIR%\libssl-3-x64.dll" "%DIST_DIR%\" >nul 2>nul
-    copy /y "%OPENSSL_DIR%\libcrypto-3-x64.dll" "%DIST_DIR%\" >nul 2>nul
+    echo [错误] OPENSSL_DIR 未设置，无法收集 OpenSSL 及 zlib 运行库
+    exit /b 1
 )
+if not exist "%OPENSSL_DIR%\*.dll" (
+    echo [错误] OPENSSL_DIR 中没有 DLL：%OPENSSL_DIR%
+    exit /b 1
+)
+copy /y "%OPENSSL_DIR%\*.dll" "%DIST_DIR%\" >nul || exit /b 1
+
+echo 正在验证分发目录可启动...
+powershell -NoProfile -ExecutionPolicy Bypass -File release\smoke-test-windows-runtime.ps1 ^
+    -Executable "%CD%\%DIST_DIR%\AegisyClient.exe" || exit /b 1
 
 echo.
 echo [4/6] 生成 Inno Setup 安装程序...
