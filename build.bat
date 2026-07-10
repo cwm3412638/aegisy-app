@@ -35,7 +35,7 @@ cd build
 REM 配置 CMake
 echo.
 echo Configuring CMake...
-cmake .. -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Release
+cmake .. -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 
 if %ERRORLEVEL% NEQ 0 (
     echo Error: CMake configuration failed

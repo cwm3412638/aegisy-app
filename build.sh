@@ -58,24 +58,45 @@ if [ "$OS" = "Darwin" ]; then
     # macOS
     if [ -d "/opt/homebrew/opt/qt@6" ]; then
         cmake .. -DCMAKE_BUILD_TYPE=Release \
+                 -DBUILD_TESTING=OFF \
                  -DQt6_DIR=/opt/homebrew/opt/qt@6/lib/cmake/Qt6
     else
-        cmake .. -DCMAKE_BUILD_TYPE=Release
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
     fi
 else
     # Linux
-    cmake .. -DCMAKE_BUILD_TYPE=Release
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 fi
 
 # 编译
 echo ""
 echo "Building..."
 make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+cd ..
 
 echo ""
 echo "=================================="
 echo "Build completed successfully!"
 echo "=================================="
-echo "Executable: build/AegisyClient"
-echo ""
-echo "Run with: ./build/AegisyClient"
+if [ "$OS" = "Darwin" ]; then
+    APP_PATH="build/AegisyClient.app"
+    EXECUTABLE_PATH="$APP_PATH/Contents/MacOS/AegisyClient"
+    if [ ! -x "$EXECUTABLE_PATH" ]; then
+        echo "Error: macOS executable was not generated: $EXECUTABLE_PATH"
+        exit 1
+    fi
+    echo "Application: $APP_PATH"
+    echo "Executable:  $EXECUTABLE_PATH"
+    echo ""
+    echo "Run with: open $APP_PATH"
+    echo "CLI run:  $EXECUTABLE_PATH"
+else
+    EXECUTABLE_PATH="build/AegisyClient"
+    if [ ! -x "$EXECUTABLE_PATH" ]; then
+        echo "Error: executable was not generated: $EXECUTABLE_PATH"
+        exit 1
+    fi
+    echo "Executable: $EXECUTABLE_PATH"
+    echo ""
+    echo "Run with: ./$EXECUTABLE_PATH"
+fi

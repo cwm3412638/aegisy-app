@@ -1,5 +1,9 @@
 # Aegisy Desktop Client - MVP 完成总结
 
+> 归档说明：本文记录早期 MVP 方案，其中 `env_detector`、`config_manager`、
+> Claude Desktop/Cursor/Continue 等描述不代表当前代码。当前能力以 `README.md`
+> 和 `USER-GUIDE.md` 为准。
+
 ## 🎉 项目已完成
 
 经过详细调研和开发，**Aegisy 桌面客户端 MVP** 已经完成！

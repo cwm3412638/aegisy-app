@@ -1,10 +1,12 @@
 #include "connect_wizard.h"
+#include "app_theme.h"
 
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QJsonObject>
 #include <QMessageBox>
 #include <QStyle>
+#include <QSettings>
 #include <QVBoxLayout>
 
 namespace {
@@ -54,29 +56,6 @@ QString toolSelectorText(AiTool tool)
     return QString();
 }
 
-QString primaryButtonStyle()
-{
-    return QStringLiteral(
-        "QPushButton {"
-        "  background: #0f766e; color: white; border: none; border-radius: 7px;"
-        "  padding: 0 18px; font-size: 13px; font-weight: 600;"
-        "}"
-        "QPushButton:hover { background: #0b625c; }"
-        "QPushButton:pressed { background: #094f4a; }"
-        "QPushButton:disabled { background: #d7dde3; color: #8a96a3; }");
-}
-
-QString secondaryButtonStyle()
-{
-    return QStringLiteral(
-        "QPushButton {"
-        "  background: white; color: #344054; border: 1px solid #d0d5dd;"
-        "  border-radius: 7px; padding: 0 15px; font-size: 13px;"
-        "}"
-        "QPushButton:hover { background: #f8fafb; border-color: #98a2b3; }"
-        "QPushButton:disabled { color: #98a2b3; background: #f8fafb; }");
-}
-
 } // namespace
 
 ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
@@ -103,8 +82,8 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
 
     setWindowTitle(m_editIndex < 0 ? QStringLiteral("新建连接配置")
                                    : QStringLiteral("编辑连接配置"));
-    resize(600, 570);
-    setMinimumSize(560, 540);
+    resize(640, 600);
+    setMinimumSize(600, 570);
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 
     connect(m_apiClient, &ApiClient::apiKeysReceived,
@@ -131,13 +110,13 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
 void ConnectWizardDialog::setupUi()
 {
     setStyleSheet(QStringLiteral(
-        "QDialog { background: #f6f7f9; }"
+        "QDialog { background: #f4f7f9; }"
         "QLabel { color: #182230; }"
         "QLineEdit, QComboBox {"
         "  background: white; color: #182230; border: 1px solid #d0d5dd;"
-        "  border-radius: 7px; padding: 0 12px; font-size: 13px;"
+        "  border-radius: 8px; padding: 0 12px; font-size: 13px;"
         "}"
-        "QLineEdit:focus, QComboBox:focus { border: 2px solid #0f766e; }"
+        "QLineEdit:focus, QComboBox:focus { border: 1px solid #0f766e; }"
         "QComboBox::drop-down { border: none; width: 28px; }"
         "QComboBox QAbstractItemView {"
         "  background: white; color: #182230; border: 1px solid #d0d5dd;"
@@ -205,14 +184,14 @@ void ConnectWizardDialog::setupUi()
     m_backButton = new QPushButton(QStringLiteral("上一步"), footer);
     m_backButton->setIcon(style()->standardIcon(QStyle::SP_ArrowBack));
     m_backButton->setFixedHeight(40);
-    m_backButton->setStyleSheet(secondaryButtonStyle());
+    m_backButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     footerLayout->addWidget(m_backButton);
     footerLayout->addStretch();
 
     m_nextButton = new QPushButton(footer);
     m_nextButton->setFixedHeight(40);
     m_nextButton->setMinimumWidth(116);
-    m_nextButton->setStyleSheet(primaryButtonStyle());
+    m_nextButton->setStyleSheet(AppTheme::primaryButtonStyle());
     footerLayout->addWidget(m_nextButton);
     root->addWidget(footer);
 
@@ -242,7 +221,7 @@ QWidget *ConnectWizardDialog::buildIdentityPage()
     m_nameEdit->setPlaceholderText(QStringLiteral("例如：工作账号 Codex"));
     layout->addWidget(m_nameEdit);
 
-    auto *typeLabel = new QLabel(QStringLiteral("连接工具"), page);
+    auto *typeLabel = new QLabel(QStringLiteral("选择终端（一个档案只绑定一个）"), page);
     typeLabel->setStyleSheet(QStringLiteral("font-size: 12px; font-weight: 600; color: #475467;"));
     layout->addSpacing(14);
     layout->addWidget(typeLabel);
@@ -273,7 +252,7 @@ QWidget *ConnectWizardDialog::buildIdentityPage()
     layout->addLayout(typeRow);
 
     auto *note = new QLabel(
-        QStringLiteral("切换配置时，只会更新所选工具的本地认证文件。"), page);
+        QStringLiteral("选择一个终端后，这个档案只保存该终端的 API Key 和模型；激活时也只更新对应的本地认证文件。"), page);
     note->setWordWrap(true);
     note->setStyleSheet(QStringLiteral(
         "background: #f0fdf9; color: #0f5f59; border: 1px solid #b7e4da;"
@@ -334,7 +313,7 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
     m_queryButton = new QPushButton(QStringLiteral("查询模型"), page);
     m_queryButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     m_queryButton->setFixedHeight(42);
-    m_queryButton->setStyleSheet(secondaryButtonStyle());
+    m_queryButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     keyRow->addWidget(m_queryButton);
     layout->addLayout(keyRow);
 
@@ -382,7 +361,8 @@ void ConnectWizardDialog::populateKeyDropdown()
         return;
     }
 
-    const QString previousKey = currentKey();
+    // 终端切换后不复用上一终端的 Key，避免跨平台凭据被误写入。
+    const QString previousKey = m_selectedType == m_existingType ? currentKey() : QString();
     const QString platform = ToolManager::toolPlatform(selectedTool());
     m_keyCombo->clear();
     m_keyCombo->addItem(QStringLiteral("请选择 API Key"), QString());
@@ -403,6 +383,12 @@ void ConnectWizardDialog::populateKeyDropdown()
             name = key.left(8) + QStringLiteral("...");
         }
         m_keyCombo->addItem(name, key);
+        const QJsonValue idValue = object.value(QStringLiteral("id"));
+        const QString keyId = idValue.isString()
+            ? idValue.toString()
+            : QString::number(idValue.toVariant().toLongLong());
+        m_keyCombo->setItemData(
+            m_keyCombo->count() - 1, keyId, Qt::UserRole + 1);
     }
 
     QString keyToSelect = previousKey;
@@ -423,6 +409,17 @@ void ConnectWizardDialog::populateKeyDropdown()
             QStringLiteral("当前保存的 Key (%1...)").arg(keyToSelect.left(8)),
             keyToSelect);
         selectedIndex = m_keyCombo->count() - 1;
+    }
+    if (selectedIndex < 0) {
+        const QString preferredKeyId = QSettings().value(
+            QStringLiteral("apikeys/activeKeyId")).toString();
+        for (int i = 1; i < m_keyCombo->count(); ++i) {
+            if (m_keyCombo->itemData(i, Qt::UserRole + 1).toString()
+                    == preferredKeyId) {
+                selectedIndex = i;
+                break;
+            }
+        }
     }
     m_keyCombo->setCurrentIndex(selectedIndex >= 0 ? selectedIndex : 0);
 
@@ -517,6 +514,10 @@ void ConnectWizardDialog::onTypeChanged(int id)
         return;
     }
     m_selectedType = type;
+    m_waitingModels = false;
+    setModelLoading(false);
+    m_modelCombo->clear();
+    m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
     updateToolContext();
     populateKeyDropdown();
 }
@@ -592,9 +593,18 @@ void ConnectWizardDialog::finishProfile()
     if (m_editIndex < 0) {
         m_resultIndex = m_profileManager->addProfile(
             name, m_selectedType, key, model);
+        if (m_resultIndex < 0) {
+            QMessageBox::critical(this, QStringLiteral("保存失败"),
+                                  m_profileManager->lastError());
+            return;
+        }
     } else {
-        m_profileManager->updateProfile(
-            m_editIndex, name, m_selectedType, key, model);
+        if (!m_profileManager->updateProfile(
+                m_editIndex, name, m_selectedType, key, model)) {
+            QMessageBox::critical(this, QStringLiteral("保存失败"),
+                                  m_profileManager->lastError());
+            return;
+        }
         m_resultIndex = m_editIndex;
     }
     accept();

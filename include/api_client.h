@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -65,9 +66,13 @@ private slots:
     void onModelsFinished();
 
 private:
+    void requestApiKeysPage(int page, int generation);
+
     QNetworkAccessManager *m_networkManager;
     QString m_baseUrl;
     QString m_authToken;
+    QJsonArray m_apiKeyAccumulator;
+    int m_apiKeyGeneration = 0;
 
     // 通用 POST 请求
     QNetworkReply* post(const QString &endpoint, const QJsonObject &data);

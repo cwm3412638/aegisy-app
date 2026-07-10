@@ -1,218 +1,119 @@
 # Aegisy Desktop Client
 
-跨平台桌面客户端，用于管理 Aegisy API 配置和环境。
+Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账号中的 API Key 安全接入 Claude Code、Codex CLI 和 Gemini CLI。
 
-## 功能特性（MVP 版本）
+## 当前功能
 
-- ✅ **用户登录认证**：通过 Aegisy 账号登录
-- ✅ **环境检测**：自动检测 Claude Desktop、Cursor、Continue.dev 的配置状态
-- ✅ **安全存储**：使用系统密钥链（Windows DPAPI / macOS Keychain）加密存储凭证
-- ✅ **跨平台支持**：Windows、macOS、Linux
+- 使用 Aegisy 账号登录并分页同步 API Keys
+- 每个档案只绑定一个终端：Claude Code、Codex CLI 或 Gemini CLI
+- 按终端筛选、编辑、删除和激活档案
+- 系统托盘快速切换档案，关闭主窗口后可继续运行
+- 查询 API Key 可用模型并保存模型选择
+- 检测 Node.js、CLI 安装状态和冲突环境变量
+- 按需安装对应 npm CLI
+- 原子写入本地配置，写入失败自动回滚
+- 每个终端保留最近 10 次配置备份，并支持手动恢复
+- 使用密码加密导入、导出档案（PBKDF2 + AES-256-GCM）
+- Windows DPAPI、macOS Keychain、Linux Secret Service 安全保存凭据
+
+## 支持的终端
+
+| 终端 | 主要配置文件 |
+| --- | --- |
+| Claude Code | `~/.claude/settings.json` |
+| Codex CLI | `~/.codex/auth.json`、`~/.codex/config.toml` |
+| Gemini CLI | `~/.gemini/.env` |
+
+配置写入采用读、合并、原子提交，不会直接覆盖无关字段。每次激活前都会建立同批次备份。
 
 ## 系统要求
 
-### Windows
-- Windows 10/11
-- Visual Studio 2019 或更新版本
 - CMake 3.16+
-- Qt 5.15+ 或 Qt 6.x
+- C++17 编译器
+- Qt 5.15+ 或 Qt 6
 - OpenSSL
+- Linux：桌面 Secret Service 和 `secret-tool`，Ubuntu/Debian 可安装 `libsecret-tools`
 
 ### macOS
-- macOS 10.15+
-- Xcode Command Line Tools
-- CMake 3.16+
-- Qt 5.15+ 或 Qt 6.x (通过 Homebrew)
 
-### Linux
-- Ubuntu 20.04+ / Debian 11+ / Fedora 35+
-- GCC 7+ 或 Clang 5+
-- CMake 3.16+
-- Qt 5.15+ 或 Qt 6.x
-- OpenSSL
+```bash
+brew install cmake qt@6 openssl@3
+./build.sh
+open build/AegisyClient.app
+```
 
-## 快速开始
+也可以直接运行：
 
-### 1. 安装依赖
+```bash
+./build/AegisyClient.app/Contents/MacOS/AegisyClient
+```
 
-**Ubuntu/Debian:**
+### Ubuntu/Debian
+
 ```bash
 sudo apt update
-sudo apt install build-essential cmake qt6-base-dev libqt6network6 libssl-dev
-```
-
-**macOS:**
-```bash
-brew install cmake qt@6
-```
-
-**Windows:**
-1. 安装 [Visual Studio 2022 Community](https://visualstudio.microsoft.com/)
-2. 安装 [CMake](https://cmake.org/download/)
-3. 安装 [Qt](https://www.qt.io/download-open-source-installer)
-
-### 2. 克隆并构建
-
-```bash
-cd /root/aegisy-app
-
-# Linux/macOS
-chmod +x build.sh
+sudo apt install build-essential cmake qt6-base-dev libqt6network6 libssl-dev libsecret-tools
 ./build.sh
-
-# Windows (从 Developer Command Prompt 运行)
-build.bat
+./build/AegisyClient
 ```
 
-### 3. 运行
+### Windows
 
-```bash
-# Linux/macOS
-./build/AegisyClient
+在 Visual Studio 2022 Developer Command Prompt 中运行：
 
-# Windows
+```bat
+build.bat
 build\Release\AegisyClient.exe
 ```
 
-## API 端点
+## 使用流程
 
-客户端连接到 `https://www.aegisy.cc`，使用以下 API：
+1. 登录 Aegisy 账号。
+2. 点击“新建配置”，输入名称并选择唯一终端。
+3. 选择与该终端平台匹配的 API Key，可选查询并指定模型。
+4. 保存并激活档案。应用会先备份，再更新对应终端配置。
+5. 需要回退时，点击顶部“备份”并恢复历史版本。
 
-- `POST /api/v1/auth/login` - 用户登录
-- `GET /api/v1/keys` - 获取 API Keys
-- `GET /api/v1/user` - 获取用户信息
+“迁移”菜单提供加密档案导入和导出。导出密码无法找回，请单独妥善保存。
 
-## 配置文件检测
+## 安全说明
 
-客户端会自动检测以下应用的配置：
+- 登录 Token 和档案 API Key 不写入普通日志。
+- 档案元数据保存在 `QSettings`，真实 API Key 只保存在系统凭据库。
+- Linux 没有可用 Secret Service 时，应用拒绝持久化凭据，不会退回固定密钥 XOR。
+- 加密导出文件使用 PBKDF2-HMAC-SHA256（200,000 次）和 AES-256-GCM。
+- 备份文件权限限制为当前用户读写。
 
-### Claude Desktop
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+## 构建与测试
 
-### Cursor
-- **Windows**: `%APPDATA%\Cursor\User\settings.json`
-- **macOS**: `~/Library/Application Support/Cursor/User/settings.json`
-- **Linux**: `~/.config/Cursor/User/settings.json`
+开发构建及测试：
 
-### Continue.dev
-- **所有平台**: `~/.continue/config.json`
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+cmake --build build -j 4
+ctest --test-dir build --output-on-failure
+```
 
-### 环境变量
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- `ANTHROPIC_API_KEY`
-- `ANTHROPIC_BASE_URL`
+`build.sh` 和 `build.bat` 生成 Release 应用，不构建测试目标。
 
 ## 项目结构
 
-```
-aegisy-app/
-├── CMakeLists.txt           # CMake 构建配置
-├── build.sh                 # Linux/macOS 构建脚本
-├── build.bat                # Windows 构建脚本
-├── include/                 # 头文件
-│   ├── api_client.h         # API 客户端
-│   ├── secure_storage.h     # 安全存储
-│   ├── env_detector.h       # 环境检测
-│   ├── config_manager.h     # 配置管理
-│   ├── login_dialog.h       # 登录对话框
-│   └── main_window.h        # 主窗口
-├── src/                     # 源文件
-│   ├── main.cpp
-│   ├── api_client.cpp
-│   ├── secure_storage.cpp
-│   ├── env_detector.cpp
-│   ├── config_manager.cpp
-│   ├── login_dialog.cpp
-│   └── main_window.cpp
-└── resources/               # 资源文件（图标、图片等）
+```text
+include/                 公共接口
+src/api_client.cpp       Aegisy API、分页和超时处理
+src/profile_manager.cpp  单终端档案和安全凭据引用
+src/profile_archive.cpp  加密档案导入导出
+src/tool_manager.cpp     CLI 检测、配置事务、备份恢复
+src/main_window.cpp      主界面与档案操作
+tests/                   自动化测试
 ```
 
-## 安全特性
+## 后续方向
 
-### 凭证存储
-- **Windows**: 使用 DPAPI (Data Protection API) 加密
-- **macOS**: 使用 Keychain Services
-- **Linux**: 使用 XOR 加密 + 文件权限保护（后续可增强为 libsecret）
+- 导入已有本地 Aegisy 配置
+- 自动更新和开机启动设置
+- 自定义服务地址与供应商预设
+- 用量统计和连接健康检测
+- MCP、Prompts、Skills 管理
 
-### 网络通信
-- HTTPS/TLS 1.2+ 强制加密
-- 支持证书锁定（Certificate Pinning）
-- JWT Token 认证
-
-### 代码保护
-- 编译时字符串混淆（计划中）
-- VMProtect 集成（计划中）
-- 反调试机制（计划中）
-
-## 开发路线图
-
-### ✅ MVP (当前版本)
-- [x] 用户登录
-- [x] 环境检测
-- [x] 安全存储
-- [x] 基础 UI
-
-### 🚧 v1.1 (下一版本)
-- [ ] 多环境管理
-- [ ] API Key 切换
-- [ ] 自动配置写入
-- [ ] 配置备份/恢复
-
-### 📋 v1.2 (未来计划)
-- [ ] 自动更新
-- [ ] 使用统计
-- [ ] 通知系统
-- [ ] 暗色主题
-
-### 🔒 v2.0 (安全加固)
-- [ ] VMProtect 集成
-- [ ] 证书锁定
-- [ ] 反调试机制
-- [ ] 代码签名
-
-## 故障排除
-
-### Qt 未找到
-```bash
-# Linux
-export Qt6_DIR=/usr/lib/x86_64-linux-gnu/cmake/Qt6
-
-# macOS
-export Qt6_DIR=/opt/homebrew/opt/qt@6/lib/cmake/Qt6
-```
-
-### OpenSSL 错误
-```bash
-# Ubuntu/Debian
-sudo apt install libssl-dev
-
-# macOS (通常已安装)
-brew install openssl@3
-```
-
-### 编译错误
-1. 确保使用 C++17 或更新版本
-2. 清理构建目录：`rm -rf build && mkdir build`
-3. 检查 CMake 输出中的错误信息
-
-## 许可证
-
-本项目使用 LGPLv3 许可证（因使用开源 Qt）。
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 联系方式
-
-- 网站：https://www.aegisy.cc
-- 问题反馈：通过 GitHub Issues
-
-## 致谢
-
-- Qt Framework
-- OpenSSL
-- nlohmann/json (计划集成)
+网站：<https://www.aegisy.cc>

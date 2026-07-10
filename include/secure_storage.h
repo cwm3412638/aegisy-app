@@ -7,6 +7,9 @@
 class SecureStorage
 {
 public:
+    // 当前平台是否具备可用的系统凭据存储。
+    static bool isAvailable();
+
     // 保存加密数据
     static bool saveEncrypted(const QString &key, const QString &data);
 
@@ -35,8 +38,11 @@ private:
     static QString loadFromKeychain(const QString &service, const QString &account);
     static bool deleteFromKeychain(const QString &service, const QString &account);
 
-    // 简单的 XOR 加密（回退方案）
-    static QByteArray xorEncrypt(const QByteArray &data, const QByteArray &key);
+    // Linux Secret Service（通过 libsecret 提供的 secret-tool）。
+    static bool saveToSecretService(const QString &service, const QString &account,
+                                    const QString &data);
+    static QString loadFromSecretService(const QString &service, const QString &account);
+    static bool deleteFromSecretService(const QString &service, const QString &account);
 };
 
 #endif // SECURE_STORAGE_H

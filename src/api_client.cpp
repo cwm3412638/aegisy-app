@@ -4,6 +4,13 @@
 #include <QJsonArray>
 #include <QSslConfiguration>
 
+namespace {
+
+constexpr int kApiKeyPageSize = 100;
+constexpr int kMaxApiKeyPages = 100;
+
+} // namespace
+
 ApiClient::ApiClient(QObject *parent)
     : QObject(parent)
     , m_networkManager(new QNetworkAccessManager(this))
@@ -37,9 +44,20 @@ void ApiClient::login(const QString &email, const QString &password)
 
 void ApiClient::getApiKeys()
 {
-    // 添加分页参数
-    QString endpoint = "/api/v1/keys?page=1&page_size=100&sort_by=created_at&sort_order=desc";
+    ++m_apiKeyGeneration;
+    m_apiKeyAccumulator = QJsonArray();
+    requestApiKeysPage(1, m_apiKeyGeneration);
+}
+
+void ApiClient::requestApiKeysPage(int page, int generation)
+{
+    const QString endpoint = QStringLiteral(
+        "/api/v1/keys?page=%1&page_size=%2&sort_by=created_at&sort_order=desc")
+        .arg(page)
+        .arg(kApiKeyPageSize);
     QNetworkReply *reply = get(endpoint);
+    reply->setProperty("aegisyApiKeyGeneration", generation);
+    reply->setProperty("aegisyApiKeyPage", page);
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onApiKeysFinished);
 }
 
@@ -55,6 +73,7 @@ QNetworkReply* ApiClient::post(const QString &endpoint, const QJsonObject &data)
     QNetworkRequest request(url);
 
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    request.setTransferTimeout(15000);
 
     if (!m_authToken.isEmpty()) {
         request.setRawHeader("Authorization", QString("Bearer %1").arg(m_authToken).toUtf8());
@@ -73,6 +92,7 @@ QNetworkReply* ApiClient::get(const QString &endpoint, const QString &bearerToke
 {
     QUrl url(m_baseUrl + endpoint);
     QNetworkRequest request(url);
+    request.setTransferTimeout(15000);
 
     // 优先使用显式传入的 token（例如调用 /v1/models 时需要 sk- API Key），
     // 否则回退到登录得到的 JWT token
@@ -93,14 +113,20 @@ QJsonObject ApiClient::parseResponse(QNetworkReply *reply, bool &ok)
 {
     ok = false;
     QJsonObject result;
+    const QByteArray responseData = reply->readAll();
+    const QJsonDocument doc = QJsonDocument::fromJson(responseData);
 
     if (reply->error() != QNetworkReply::NoError) {
-        result["error"] = reply->errorString();
+        if (doc.isObject()) {
+            result = doc.object();
+        }
+        QString message = result.value(QStringLiteral("message")).toString();
+        if (message.isEmpty()) {
+            message = reply->errorString();
+        }
+        result["error"] = message;
         return result;
     }
-
-    QByteArray responseData = reply->readAll();
-    QJsonDocument doc = QJsonDocument::fromJson(responseData);
 
     if (doc.isNull() || !doc.isObject()) {
         result["error"] = "Invalid JSON response";
@@ -125,9 +151,6 @@ void ApiClient::onLoginFinished()
         reply->deleteLater();
         return;
     }
-
-    // 调试：打印完整响应
-    qDebug() << "Login response:" << response;
 
     // 检查 sub2api 响应格式
     int code = response["code"].toInt(-1);
@@ -155,13 +178,8 @@ void ApiClient::onLoginFinished()
         token = data["access_token"].toString();
     }
 
-    qDebug() << "Extracted token:" << token;
-
     if (token.isEmpty()) {
-        // 打印详细错误信息
-        qDebug() << "Response keys:" << response.keys();
-        qDebug() << "Data keys:" << data.keys();
-        emit loginFailed("No token received. Response: " + QString(QJsonDocument(response).toJson()));
+        emit loginFailed(QStringLiteral("服务器响应中缺少登录凭据。"));
         reply->deleteLater();
         return;
     }
@@ -176,6 +194,13 @@ void ApiClient::onApiKeysFinished()
 {
     QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
     if (!reply) return;
+
+    const int generation = reply->property("aegisyApiKeyGeneration").toInt();
+    const int page = reply->property("aegisyApiKeyPage").toInt();
+    if (generation != m_apiKeyGeneration) {
+        reply->deleteLater();
+        return;
+    }
 
     bool ok;
     QJsonObject response = parseResponse(reply, ok);
@@ -197,8 +222,21 @@ void ApiClient::onApiKeysFinished()
     QJsonObject data = response["data"].toObject();
     QJsonArray keys = data["items"].toArray();
 
-    qDebug() << "Received" << keys.size() << "API keys";
-    emit apiKeysReceived(keys);
+    for (const QJsonValue &key : keys) {
+        m_apiKeyAccumulator.append(key);
+    }
+
+    const int total = data.value(QStringLiteral("total")).toInt(-1);
+    const bool hasMoreByTotal = total >= 0 && m_apiKeyAccumulator.size() < total;
+    const bool hasMoreByPageSize = total < 0 && keys.size() == kApiKeyPageSize;
+    if ((hasMoreByTotal || hasMoreByPageSize) && page < kMaxApiKeyPages) {
+        reply->deleteLater();
+        requestApiKeysPage(page + 1, generation);
+        return;
+    }
+
+    qDebug() << "Received" << m_apiKeyAccumulator.size() << "API keys";
+    emit apiKeysReceived(m_apiKeyAccumulator);
 
     reply->deleteLater();
 }

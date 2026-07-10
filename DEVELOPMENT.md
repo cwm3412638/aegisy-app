@@ -1,5 +1,8 @@
 # Aegisy Desktop Client - MVP 开发说明
 
+> 注意：本文后半部分保留了早期 MVP 设计记录。当前支持 Claude Code、Codex CLI
+> 和 Gemini CLI，架构与功能清单以 `README.md`、`include/` 和 `src/` 为准。
+
 ## 当前状态
 
 ✅ **MVP 核心功能已完成**
@@ -159,7 +162,7 @@ chmod +x build.sh
 ./build.sh
 
 # 5. 运行
-./build/AegisyClient
+open build/AegisyClient.app
 ```
 
 **Linux (Ubuntu/Debian):**

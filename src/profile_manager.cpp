@@ -1,17 +1,23 @@
 #include "profile_manager.h"
+#include "secure_storage.h"
+#include "profile_archive.h"
 
 #include <QSettings>
 #include <QStringList>
+#include <QUuid>
 
 namespace {
 
 const QString kProfilesPrefix = QStringLiteral("profiles");
-constexpr int kSchemaVersion = 2;
+constexpr int kSingleToolSchemaVersion = 2;
+constexpr int kSchemaVersion = 3;
 
 const QStringList kProfileKeys = {
+    QStringLiteral("id"),
     QStringLiteral("name"),
     QStringLiteral("type"),
-    QStringLiteral("key"),
+    QStringLiteral("credential_ref"),
+    QStringLiteral("key"), // 仅用于安全存储迁移失败时保留旧档案。
     QStringLiteral("model"),
 };
 
@@ -21,6 +27,16 @@ QString profilePath(int index, const QString &field)
         .arg(kProfilesPrefix)
         .arg(index)
         .arg(field);
+}
+
+QString newProfileId()
+{
+    return QUuid::createUuid().toString(QUuid::WithoutBraces);
+}
+
+QString credentialRefForId(const QString &id)
+{
+    return QStringLiteral("profile/%1/api-key").arg(id);
 }
 
 struct LegacyToolConfig {
@@ -35,6 +51,7 @@ ProfileManager::ProfileManager(QObject *parent)
     : QObject(parent)
 {
     migrateLegacyProfiles();
+    migrateProfileCredentials();
     ensureDefaultProfile();
 }
 
@@ -42,13 +59,15 @@ void ProfileManager::migrateLegacyProfiles()
 {
     QSettings settings;
     if (settings.value(kProfilesPrefix + QStringLiteral("/schema_version"), 0).toInt()
-            >= kSchemaVersion) {
+            >= kSingleToolSchemaVersion) {
         return;
     }
 
     const int oldCount = settings.value(kProfilesPrefix + QStringLiteral("/count"), 0).toInt();
     if (oldCount <= 0) {
-        settings.setValue(kProfilesPrefix + QStringLiteral("/schema_version"), kSchemaVersion);
+        settings.setValue(
+            kProfilesPrefix + QStringLiteral("/schema_version"),
+            kSingleToolSchemaVersion);
         return;
     }
 
@@ -139,6 +158,24 @@ void ProfileManager::migrateLegacyProfiles()
         }
     }
 
+    QStringList stagedCredentialRefs;
+    for (Profile &profile : migrated) {
+        profile.id = newProfileId();
+        const QString credentialRef = credentialRefForId(profile.id);
+        if (!profile.key.isEmpty()
+                && !SecureStorage::saveEncrypted(credentialRef, profile.key)) {
+            for (const QString &stagedRef : stagedCredentialRefs) {
+                SecureStorage::remove(stagedRef);
+            }
+            m_lastError = QStringLiteral(
+                "旧档案无法迁移到系统安全存储，原数据已保留。Linux 请安装并启用 secret-tool/Secret Service。");
+            return;
+        }
+        if (!profile.key.isEmpty()) {
+            stagedCredentialRefs.append(credentialRef);
+        }
+    }
+
     settings.remove(kProfilesPrefix);
     settings.setValue(kProfilesPrefix + QStringLiteral("/schema_version"), kSchemaVersion);
     settings.setValue(kProfilesPrefix + QStringLiteral("/count"), migrated.size());
@@ -148,12 +185,57 @@ void ProfileManager::migrateLegacyProfiles()
 
     for (int i = 0; i < migrated.size(); ++i) {
         const Profile &profile = migrated[i];
+        settings.setValue(profilePath(i, QStringLiteral("id")), profile.id);
         settings.setValue(profilePath(i, QStringLiteral("name")), profile.name);
         settings.setValue(
             profilePath(i, QStringLiteral("type")),
             static_cast<int>(profile.type));
-        settings.setValue(profilePath(i, QStringLiteral("key")), profile.key);
+        settings.setValue(
+            profilePath(i, QStringLiteral("credential_ref")),
+            credentialRefForId(profile.id));
         settings.setValue(profilePath(i, QStringLiteral("model")), profile.model);
+    }
+    settings.sync();
+}
+
+void ProfileManager::migrateProfileCredentials()
+{
+    QSettings settings;
+    const int storedVersion = settings.value(
+        kProfilesPrefix + QStringLiteral("/schema_version"), 0).toInt();
+    if (storedVersion >= kSchemaVersion || storedVersion < kSingleToolSchemaVersion) {
+        return;
+    }
+
+    bool migrated = true;
+    const int profileCount = settings.value(
+        kProfilesPrefix + QStringLiteral("/count"), 0).toInt();
+    for (int i = 0; i < profileCount; ++i) {
+        QString id = settings.value(profilePath(i, QStringLiteral("id"))).toString();
+        if (id.isEmpty()) {
+            id = newProfileId();
+        }
+        const QString credentialRef = credentialRefForId(id);
+        const QString legacyKey = settings.value(
+            profilePath(i, QStringLiteral("key"))).toString();
+
+        if (!legacyKey.isEmpty()
+                && !SecureStorage::saveEncrypted(credentialRef, legacyKey)) {
+            migrated = false;
+            continue;
+        }
+
+        settings.setValue(profilePath(i, QStringLiteral("id")), id);
+        settings.setValue(
+            profilePath(i, QStringLiteral("credential_ref")), credentialRef);
+        settings.remove(profilePath(i, QStringLiteral("key")));
+    }
+
+    if (migrated) {
+        settings.setValue(kProfilesPrefix + QStringLiteral("/schema_version"), kSchemaVersion);
+    } else {
+        m_lastError = QStringLiteral(
+            "部分档案凭据无法迁移到系统安全存储。Linux 请安装并启用 secret-tool/Secret Service。");
     }
     settings.sync();
 }
@@ -181,6 +263,7 @@ QList<Profile> ProfileManager::allProfiles() const
     for (int i = 0; i < profileCount; ++i) {
         Profile profile;
         profile.index = i;
+        profile.id = settings.value(profilePath(i, QStringLiteral("id"))).toString();
         profile.name = settings.value(
             profilePath(i, QStringLiteral("name")),
             QStringLiteral("档案 %1").arg(i + 1)).toString();
@@ -190,7 +273,14 @@ QList<Profile> ProfileManager::allProfiles() const
         if (!isValidProfileType(profile.type)) {
             profile.type = ProfileType::Codex;
         }
-        profile.key = settings.value(profilePath(i, QStringLiteral("key"))).toString();
+        const QString credentialRef = settings.value(
+            profilePath(i, QStringLiteral("credential_ref")),
+            credentialRefForId(profile.id)).toString();
+        profile.key = SecureStorage::loadEncrypted(credentialRef);
+        // 安全存储不可用时保留旧数据的可读性，但不再新增或更新明文凭据。
+        if (profile.key.isEmpty()) {
+            profile.key = settings.value(profilePath(i, QStringLiteral("key"))).toString();
+        }
         profile.model = settings.value(profilePath(i, QStringLiteral("model"))).toString();
         result.append(profile);
     }
@@ -203,10 +293,9 @@ int ProfileManager::activeIndex() const
     if (profileCount == 0) {
         return -1;
     }
-    return qBound(
-        0,
-        QSettings().value(kProfilesPrefix + QStringLiteral("/active"), 0).toInt(),
-        profileCount - 1);
+    const int stored = QSettings().value(
+        kProfilesPrefix + QStringLiteral("/active"), 0).toInt();
+    return stored < 0 ? -1 : qMin(stored, profileCount - 1);
 }
 
 Profile ProfileManager::activeProfile() const
@@ -219,6 +308,7 @@ Profile ProfileManager::activeProfile() const
 int ProfileManager::addProfile(const QString &name, ProfileType type,
                                const QString &key, const QString &model)
 {
+    m_lastError.clear();
     if (!isValidProfileType(type)) {
         type = ProfileType::Codex;
     }
@@ -226,9 +316,17 @@ int ProfileManager::addProfile(const QString &name, ProfileType type,
     QSettings settings;
     const int index = settings.value(
         kProfilesPrefix + QStringLiteral("/count"), 0).toInt();
+    const QString id = newProfileId();
+    const QString credentialRef = credentialRefForId(id);
+    if (!key.isEmpty() && !SecureStorage::saveEncrypted(credentialRef, key)) {
+        m_lastError = QStringLiteral(
+            "无法将 API Key 保存到系统安全存储。Linux 请安装并启用 secret-tool/Secret Service。");
+        return -1;
+    }
+    settings.setValue(profilePath(index, QStringLiteral("id")), id);
     settings.setValue(profilePath(index, QStringLiteral("name")), name);
     settings.setValue(profilePath(index, QStringLiteral("type")), static_cast<int>(type));
-    settings.setValue(profilePath(index, QStringLiteral("key")), key);
+    settings.setValue(profilePath(index, QStringLiteral("credential_ref")), credentialRef);
     settings.setValue(profilePath(index, QStringLiteral("model")), model);
     settings.setValue(kProfilesPrefix + QStringLiteral("/count"), index + 1);
     settings.setValue(kProfilesPrefix + QStringLiteral("/schema_version"), kSchemaVersion);
@@ -236,19 +334,36 @@ int ProfileManager::addProfile(const QString &name, ProfileType type,
     return index;
 }
 
-void ProfileManager::updateProfile(int index, const QString &name, ProfileType type,
+bool ProfileManager::updateProfile(int index, const QString &name, ProfileType type,
                                    const QString &key, const QString &model)
 {
+    m_lastError.clear();
     if (index < 0 || index >= count() || !isValidProfileType(type)) {
-        return;
+        m_lastError = QStringLiteral("档案索引或终端类型无效。");
+        return false;
     }
 
     QSettings settings;
+    QString id = settings.value(profilePath(index, QStringLiteral("id"))).toString();
+    if (id.isEmpty()) {
+        id = newProfileId();
+    }
+    const QString credentialRef = settings.value(
+        profilePath(index, QStringLiteral("credential_ref")),
+        credentialRefForId(id)).toString();
+    if (!SecureStorage::saveEncrypted(credentialRef, key)) {
+        m_lastError = QStringLiteral(
+            "无法将 API Key 保存到系统安全存储。Linux 请安装并启用 secret-tool/Secret Service。");
+        return false;
+    }
+    settings.setValue(profilePath(index, QStringLiteral("id")), id);
     settings.setValue(profilePath(index, QStringLiteral("name")), name);
     settings.setValue(profilePath(index, QStringLiteral("type")), static_cast<int>(type));
-    settings.setValue(profilePath(index, QStringLiteral("key")), key);
+    settings.setValue(profilePath(index, QStringLiteral("credential_ref")), credentialRef);
+    settings.remove(profilePath(index, QStringLiteral("key")));
     settings.setValue(profilePath(index, QStringLiteral("model")), model);
     emit profilesChanged();
+    return true;
 }
 
 void ProfileManager::removeProfile(int index)
@@ -259,6 +374,9 @@ void ProfileManager::removeProfile(int index)
     if (profileCount <= 1 || index < 0 || index >= profileCount) {
         return;
     }
+
+    const QString credentialRef = settings.value(
+        profilePath(index, QStringLiteral("credential_ref"))).toString();
 
     for (int i = index; i < profileCount - 1; ++i) {
         for (const QString &key : kProfileKeys) {
@@ -279,6 +397,9 @@ void ProfileManager::removeProfile(int index)
         nextActive = active - 1;
     }
     settings.setValue(kProfilesPrefix + QStringLiteral("/active"), nextActive);
+    if (!credentialRef.isEmpty()) {
+        SecureStorage::remove(credentialRef);
+    }
     emit profilesChanged();
 }
 
@@ -291,4 +412,110 @@ void ProfileManager::setActiveIndex(int index)
     const int oldIndex = activeIndex();
     QSettings().setValue(kProfilesPrefix + QStringLiteral("/active"), index);
     emit activeProfileChanged(oldIndex, index);
+}
+
+void ProfileManager::clearActiveProfile()
+{
+    const int oldIndex = activeIndex();
+    QSettings().setValue(kProfilesPrefix + QStringLiteral("/active"), -1);
+    emit activeProfileChanged(oldIndex, -1);
+}
+
+bool ProfileManager::exportProfiles(const QString &filePath, const QString &password)
+{
+    m_lastError.clear();
+    QList<ArchiveProfile> archived;
+    const QList<Profile> profiles = allProfiles();
+    archived.reserve(profiles.size());
+    for (const Profile &profile : profiles) {
+        ArchiveProfile item;
+        item.name = profile.name;
+        item.type = static_cast<int>(profile.type);
+        item.key = profile.key;
+        item.model = profile.model;
+        archived.append(item);
+    }
+    return ProfileArchive::writeEncrypted(filePath, archived, password, &m_lastError);
+}
+
+bool ProfileManager::importProfiles(const QString &filePath, const QString &password,
+                                    int *importedCount)
+{
+    m_lastError.clear();
+    QList<ArchiveProfile> archived;
+    if (!ProfileArchive::readEncrypted(filePath, password, &archived, &m_lastError)) {
+        return false;
+    }
+    if (archived.isEmpty()) {
+        m_lastError = QStringLiteral("导入文件中没有档案。");
+        return false;
+    }
+
+    struct StagedProfile {
+        ArchiveProfile archive;
+        QString id;
+        QString credentialRef;
+    };
+    QList<StagedProfile> staged;
+    staged.reserve(archived.size());
+    for (const ArchiveProfile &item : archived) {
+        const ProfileType type = static_cast<ProfileType>(item.type);
+        if (!isValidProfileType(type)) {
+            m_lastError = QStringLiteral("导入文件包含不支持的终端类型。");
+            break;
+        }
+        StagedProfile profile;
+        profile.archive = item;
+        profile.id = newProfileId();
+        profile.credentialRef = credentialRefForId(profile.id);
+        if (!item.key.isEmpty()
+                && !SecureStorage::saveEncrypted(profile.credentialRef, item.key)) {
+            m_lastError = QStringLiteral(
+                "无法将导入凭据保存到系统安全存储。Linux 请安装并启用 secret-tool/Secret Service。");
+            break;
+        }
+        staged.append(profile);
+    }
+
+    if (staged.size() != archived.size()) {
+        for (const StagedProfile &profile : staged) {
+            SecureStorage::remove(profile.credentialRef);
+        }
+        return false;
+    }
+
+    QSettings settings;
+    int index = settings.value(kProfilesPrefix + QStringLiteral("/count"), 0).toInt();
+    for (const StagedProfile &profile : staged) {
+        settings.setValue(profilePath(index, QStringLiteral("id")), profile.id);
+        settings.setValue(profilePath(index, QStringLiteral("name")), profile.archive.name);
+        settings.setValue(
+            profilePath(index, QStringLiteral("type")), profile.archive.type);
+        settings.setValue(
+            profilePath(index, QStringLiteral("credential_ref")), profile.credentialRef);
+        settings.setValue(profilePath(index, QStringLiteral("model")), profile.archive.model);
+        ++index;
+    }
+    settings.setValue(kProfilesPrefix + QStringLiteral("/count"), index);
+    settings.setValue(kProfilesPrefix + QStringLiteral("/schema_version"), kSchemaVersion);
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        const int firstImportedIndex = index - staged.size();
+        for (int removeIndex = firstImportedIndex; removeIndex < index; ++removeIndex) {
+            settings.remove(QStringLiteral("%1/%2").arg(kProfilesPrefix).arg(removeIndex));
+        }
+        settings.setValue(kProfilesPrefix + QStringLiteral("/count"), firstImportedIndex);
+        settings.sync();
+        for (const StagedProfile &profile : staged) {
+            SecureStorage::remove(profile.credentialRef);
+        }
+        m_lastError = QStringLiteral("无法保存导入的档案元数据。");
+        return false;
+    }
+
+    if (importedCount) {
+        *importedCount = staged.size();
+    }
+    emit profilesChanged();
+    return true;
 }

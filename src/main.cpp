@@ -1,10 +1,12 @@
 #include <QApplication>
 #include <QMessageBox>
 #include <QProcess>
+#include <QSettings>
 #include "main_window.h"
 #include "login_dialog.h"
 #include "api_client.h"
 #include "secure_storage.h"
+#include "app_theme.h"
 
 // 显示登录对话框并在成功后打开主窗口
 static void showLoginFlow(ApiClient *apiClient);
@@ -39,8 +41,11 @@ static void showLoginFlow(ApiClient *apiClient)
         Q_UNUSED(userData);
         loginDialog->setLoading(false);
 
-        if (loginDialog->shouldRememberMe()) {
-            SecureStorage::saveToken(token);
+        if (loginDialog->shouldRememberMe() && !SecureStorage::saveToken(token)) {
+            QMessageBox::warning(
+                loginDialog,
+                QStringLiteral("无法记住登录状态"),
+                QStringLiteral("系统安全存储不可用，本次仍可继续使用，但下次启动需要重新登录。"));
         }
 
         loginDialog->hide();
@@ -61,10 +66,15 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
 
+    AppTheme::apply(app);
+
     QApplication::setApplicationName("AegisyClient");
-    QApplication::setApplicationVersion("2.0.0");
+    QApplication::setApplicationVersion(AEGISY_APP_VERSION);
     QApplication::setOrganizationName("Aegisy");
     QApplication::setOrganizationDomain("aegisy.cc");
+
+    // 清理旧版本曾写入普通设置的完整 Key，仅保留不敏感的首选 Key ID。
+    QSettings().remove(QStringLiteral("apikeys/activeKey"));
 
     ApiClient *apiClient = new ApiClient(&app);
 

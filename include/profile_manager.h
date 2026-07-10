@@ -60,6 +60,7 @@ inline QString profileTypeName(ProfileType type)
 // 一个档案只绑定一个工具，并只保存这一工具的 Key 与模型。
 struct Profile {
     int         index = -1;
+    QString     id;
     QString     name;
     ProfileType type  = ProfileType::Codex;
     QString     key;
@@ -83,12 +84,13 @@ struct Profile {
 
 // 档案管理器：持久化到 QSettings。
 // 新布局：
-//   profiles/schema_version      = 2
+//   profiles/schema_version      = 3
 //   profiles/count               = N
 //   profiles/active              = 0
+//   profiles/<i>/id              = UUID
 //   profiles/<i>/name            = "工作 Codex"
 //   profiles/<i>/type            = 2
-//   profiles/<i>/key             = "sk-..."
+//   profiles/<i>/credential_ref  = "profile/<uuid>/api-key"
 //   profiles/<i>/model           = "gpt-5"
 class ProfileManager : public QObject
 {
@@ -105,10 +107,17 @@ public:
     int addProfile(const QString &name, ProfileType type,
                    const QString &key = QString(),
                    const QString &model = QString());
-    void updateProfile(int index, const QString &name, ProfileType type,
+    bool updateProfile(int index, const QString &name, ProfileType type,
                        const QString &key, const QString &model);
     void removeProfile(int index);
     void setActiveIndex(int index);
+    void clearActiveProfile();
+
+    bool exportProfiles(const QString &filePath, const QString &password);
+    bool importProfiles(const QString &filePath, const QString &password,
+                        int *importedCount = nullptr);
+
+    QString lastError() const { return m_lastError; }
 
 signals:
     void profilesChanged();
@@ -116,7 +125,10 @@ signals:
 
 private:
     void migrateLegacyProfiles();
+    void migrateProfileCredentials();
     void ensureDefaultProfile();
+
+    QString m_lastError;
 };
 
 #endif // PROFILE_MANAGER_H

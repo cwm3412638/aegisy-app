@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QString>
 #include <QProcess>
+#include <QDateTime>
 
 // 支持的三个官方接入工具
 enum class AiTool {
@@ -26,6 +27,13 @@ struct DesktopAppStatus {
     bool    installed   = false;   // 是否已安装
     QString downloadUrl;           // 下载链接
     QString appName;               // 应用名称
+};
+
+struct ConfigBackup {
+    QString id;
+    AiTool tool = AiTool::CodexCli;
+    QDateTime createdAt;
+    int fileCount = 0;
 };
 
 // 三件套的检测 / 一键安装 / 配置写入。
@@ -59,6 +67,9 @@ public:
     // 写入官方格式配置（先备份）。model 为空时使用各工具默认值。失败返回 false，详情见 lastError()
     bool configure(AiTool tool, const QString &apiKey, const QString &model = QString());
 
+    QList<ConfigBackup> backupHistory(AiTool tool) const;
+    bool restoreBackup(const QString &backupId, AiTool tool);
+
     QString lastError() const { return m_lastError; }
 
     // Node.js 是否可用（供未装 Node 时给引导）
@@ -80,8 +91,11 @@ private:
 
     // 文件辅助
     static QString homeFilePath(const QString &relative);
-    bool backupFile(const QString &path);
     bool writeTextFile(const QString &path, const QByteArray &data);
+    QStringList managedConfigPaths(AiTool tool) const;
+    QString createBackup(AiTool tool);
+    bool restoreBackupInternal(const QString &backupId, AiTool tool);
+    void pruneBackups(AiTool tool);
 
     QString m_lastError;
 };

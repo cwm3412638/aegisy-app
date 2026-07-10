@@ -41,6 +41,8 @@ private slots:
     void onRefreshClicked();
     void onCopyKeyClicked();
     void onActivateKeyClicked();
+    void onTestKeyClicked();
+    void onKeyTested(const QString &keyId, bool supported, const QString &detail);
     void onKeysReceived(const QJsonArray &keys);
     void onRequestFailed(const QString &error);
     void onTableSelectionChanged();
@@ -56,6 +58,7 @@ private:
     QPushButton *m_refreshButton;
     QPushButton *m_copyButton;
     QPushButton *m_activateButton;
+    QPushButton *m_testButton;
     QLabel *m_statusLabel;
     QLabel *m_totalKeysLabel;
 

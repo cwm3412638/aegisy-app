@@ -1,4 +1,5 @@
 #include "login_dialog.h"
+#include "app_theme.h"
 
 #include <QFrame>
 #include <QHBoxLayout>
@@ -14,20 +15,8 @@ QString inputStyle()
         "  background: white; color: #182230; border: 1px solid #d0d5dd;"
         "  border-radius: 7px; padding: 0 13px; font-size: 13px;"
         "}"
-        "QLineEdit:focus { border: 2px solid #0f766e; }"
+        "QLineEdit:focus { border: 1px solid #0f766e; }"
         "QLineEdit:disabled { background: #f2f4f7; color: #98a2b3; }");
-}
-
-QString primaryButtonStyle()
-{
-    return QStringLiteral(
-        "QPushButton {"
-        "  background: #0f766e; color: white; border: none; border-radius: 7px;"
-        "  font-size: 14px; font-weight: 600;"
-        "}"
-        "QPushButton:hover { background: #0b625c; }"
-        "QPushButton:pressed { background: #094f4a; }"
-        "QPushButton:disabled { background: #d7dde3; color: #8a96a3; }");
 }
 
 } // namespace
@@ -145,7 +134,7 @@ void LoginDialog::setupUi()
     m_loginButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
     m_loginButton->setFixedHeight(44);
     m_loginButton->setCursor(Qt::PointingHandCursor);
-    m_loginButton->setStyleSheet(primaryButtonStyle());
+    m_loginButton->setStyleSheet(AppTheme::primaryButtonStyle());
     root->addWidget(m_loginButton);
 
     root->addStretch();

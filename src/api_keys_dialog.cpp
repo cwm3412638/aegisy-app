@@ -1,4 +1,5 @@
 #include "api_keys_dialog.h"
+#include "app_theme.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -15,7 +16,9 @@
 ApiKeyInfo ApiKeyInfo::fromJson(const QJsonObject &obj)
 {
     ApiKeyInfo info;
-    info.id = QString::number(obj["id"].toInt());
+    info.id = obj["id"].isString()
+        ? obj["id"].toString()
+        : QString::number(obj["id"].toVariant().toLongLong());
     info.name = obj["name"].toString();
     info.key = obj["key"].toString();
     info.status = obj["status"].toString();
@@ -33,6 +36,7 @@ ApiKeysDialog::ApiKeysDialog(ApiClient *apiClient, QWidget *parent)
 {
     QSettings settings;
     m_activeKeyId = settings.value("apikeys/activeKeyId").toString();
+    settings.remove("apikeys/activeKey");
 
     setupUi();
     setWindowTitle("API Keys 管理");
@@ -47,7 +51,7 @@ ApiKeysDialog::ApiKeysDialog(ApiClient *apiClient, QWidget *parent)
 
 void ApiKeysDialog::setupUi()
 {
-    setStyleSheet("QDialog { background-color: #f6f7f9; }");
+    setStyleSheet("QDialog { background-color: #f4f7f9; }");
 
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     mainLayout->setSpacing(12);
@@ -103,23 +107,7 @@ void ApiKeysDialog::setupUi()
     toolbarLayout->setContentsMargins(14, 8, 14, 8);
     toolbarLayout->setSpacing(8);
 
-    const QString ghostBtnStyle =
-        "QPushButton {"
-        "  background: transparent;"
-        "  color: #475569;"
-        "  border: 1.5px solid #e2e8f0;"
-        "  border-radius: 6px;"
-        "  padding: 5px 14px;"
-        "  font-size: 13px;"
-        "}"
-        "QPushButton:hover {"
-        "  background: #f8fafc;"
-        "  border-color: #cbd5e1;"
-        "}"
-        "QPushButton:disabled {"
-        "  color: #cbd5e1;"
-        "  border-color: #f1f5f9;"
-        "}";
+    const QString ghostBtnStyle = AppTheme::secondaryButtonStyle();
 
     m_refreshButton = new QPushButton("刷新", this);
     m_refreshButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
@@ -136,25 +124,21 @@ void ApiKeysDialog::setupUi()
     m_copyButton->setStyleSheet(ghostBtnStyle);
     toolbarLayout->addWidget(m_copyButton);
 
-    m_activateButton = new QPushButton("设为当前", this);
+    m_activateButton = new QPushButton("设为首选", this);
     m_activateButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
     m_activateButton->setMinimumHeight(34);
     m_activateButton->setEnabled(false);
     m_activateButton->setCursor(Qt::PointingHandCursor);
-    m_activateButton->setStyleSheet(
-        "QPushButton {"
-        "  background: #0f766e;"
-        "  color: white;"
-        "  border: none;"
-        "  border-radius: 6px;"
-        "  padding: 5px 14px;"
-        "  font-size: 13px;"
-        "  font-weight: bold;"
-        "}"
-        "QPushButton:hover { background: #0b625c; }"
-        "QPushButton:disabled { background: #e2e8f0; color: #94a3b8; }"
-    );
+    m_activateButton->setStyleSheet(AppTheme::primaryButtonStyle());
     toolbarLayout->addWidget(m_activateButton);
+
+    m_testButton = new QPushButton("测试 Key", this);
+    m_testButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
+    m_testButton->setMinimumHeight(34);
+    m_testButton->setEnabled(false);
+    m_testButton->setCursor(Qt::PointingHandCursor);
+    m_testButton->setStyleSheet(ghostBtnStyle);
+    toolbarLayout->addWidget(m_testButton);
 
     toolbarLayout->addStretch();
     mainLayout->addWidget(toolbarCard);
@@ -237,19 +221,7 @@ void ApiKeysDialog::setupUi()
     closeButton->setMinimumHeight(36);
     closeButton->setMinimumWidth(90);
     closeButton->setCursor(Qt::PointingHandCursor);
-    closeButton->setStyleSheet(
-        "QPushButton {"
-        "  background: #f1f5f9;"
-        "  color: #475569;"
-        "  border: 1.5px solid #e2e8f0;"
-        "  border-radius: 7px;"
-        "  font-size: 13px;"
-        "  padding: 5px 18px;"
-        "}"
-        "QPushButton:hover {"
-        "  background: #e2e8f0;"
-        "}"
-    );
+    closeButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     connect(closeButton, &QPushButton::clicked, this, &QDialog::accept);
     bottomLayout->addWidget(closeButton);
 
@@ -259,6 +231,9 @@ void ApiKeysDialog::setupUi()
     connect(m_refreshButton,  &QPushButton::clicked, this, &ApiKeysDialog::onRefreshClicked);
     connect(m_copyButton,     &QPushButton::clicked, this, &ApiKeysDialog::onCopyKeyClicked);
     connect(m_activateButton, &QPushButton::clicked, this, &ApiKeysDialog::onActivateKeyClicked);
+    connect(m_testButton, &QPushButton::clicked, this, &ApiKeysDialog::onTestKeyClicked);
+    connect(m_apiClient, &ApiClient::apiKeyTested,
+            this, &ApiKeysDialog::onKeyTested);
     connect(m_keysTable, &QTableWidget::itemSelectionChanged,
             this, &ApiKeysDialog::onTableSelectionChanged);
 }
@@ -286,6 +261,12 @@ void ApiKeysDialog::onCopyKeyClicked()
     m_statusLabel->setText("✓ API Key 已复制到剪贴板！");
     m_statusLabel->setStyleSheet("color: #16a34a; font-size: 12px;");
     QTimer::singleShot(3000, this, [this]() { m_statusLabel->setText(""); });
+    const QString copiedKey = selectedKey.key;
+    QTimer::singleShot(60000, this, [copiedKey]() {
+        if (QApplication::clipboard()->text() == copiedKey) {
+            QApplication::clipboard()->clear();
+        }
+    });
 }
 
 void ApiKeysDialog::onActivateKeyClicked()
@@ -303,13 +284,42 @@ void ApiKeysDialog::onActivateKeyClicked()
 
     QSettings settings;
     settings.setValue("apikeys/activeKeyId", m_activeKeyId);
-    settings.setValue("apikeys/activeKey", selectedKey.key);
+    settings.remove("apikeys/activeKey");
 
     updateKeysTable(m_keys);
     emit keyActivated(selectedKey.id, selectedKey.key);
 
-    m_statusLabel->setText(QString("Key「%1」已设为当前使用").arg(selectedKey.name));
+    m_statusLabel->setText(QString("Key「%1」已设为新档案首选").arg(selectedKey.name));
     m_statusLabel->setStyleSheet("color: #16a34a; font-size: 12px;");
+}
+
+void ApiKeysDialog::onTestKeyClicked()
+{
+    const ApiKeyInfo selectedKey = getSelectedKey();
+    if (selectedKey.key.isEmpty()) {
+        QMessageBox::warning(this, "未选择", "请先选择一个 API Key。");
+        return;
+    }
+    m_testButton->setEnabled(false);
+    m_statusLabel->setText(QString("正在测试 Key「%1」...").arg(selectedKey.name));
+    m_statusLabel->setStyleSheet("color: #0f766e; font-size: 12px;");
+    m_apiClient->testApiKey(selectedKey.id, selectedKey.key);
+}
+
+void ApiKeysDialog::onKeyTested(const QString &keyId, bool supported,
+                                const QString &detail)
+{
+    const ApiKeyInfo selectedKey = getSelectedKey();
+    if (selectedKey.id != keyId) {
+        return;
+    }
+    m_testButton->setEnabled(true);
+    m_statusLabel->setText(supported
+        ? QString("Key 可用：%1").arg(detail)
+        : QString("Key 不可用：%1").arg(detail));
+    m_statusLabel->setStyleSheet(supported
+        ? "color: #067647; font-size: 12px;"
+        : "color: #b42318; font-size: 12px;");
 }
 
 void ApiKeysDialog::onKeysReceived(const QJsonArray &keys)
@@ -405,6 +415,7 @@ void ApiKeysDialog::onTableSelectionChanged()
     bool has = !m_keysTable->selectedItems().isEmpty();
     m_copyButton->setEnabled(has);
     m_activateButton->setEnabled(has);
+    m_testButton->setEnabled(has);
 }
 
 ApiKeyInfo ApiKeysDialog::getSelectedKey() const

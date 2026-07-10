@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(AegisyClient VERSION 1.0.0 LANGUAGES CXX)
+project(AegisyClient VERSION 2.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -33,6 +33,8 @@ set(SOURCES
     src/models_dialog.cpp
     src/profile_manager.cpp
     src/connect_wizard.cpp
+    src/app_theme.cpp
+    src/profile_archive.cpp
 )
 
 set(HEADERS
@@ -45,10 +47,15 @@ set(HEADERS
     include/models_dialog.h
     include/profile_manager.h
     include/connect_wizard.h
+    include/app_theme.h
+    include/profile_archive.h
 )
 
 # 可执行文件
 add_executable(${PROJECT_NAME} ${SOURCES} ${HEADERS})
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    AEGISY_APP_VERSION="${PROJECT_VERSION}"
+)
 
 # 包含目录
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -106,3 +113,24 @@ install(TARGETS ${PROJECT_NAME}
     BUNDLE DESTINATION .
     RUNTIME DESTINATION bin
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(AegisyProfileArchiveTest
+        tests/profile_archive_test.cpp
+        src/profile_archive.cpp
+        include/profile_archive.h
+    )
+    target_include_directories(AegisyProfileArchiveTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OPENSSL_INCLUDE_DIR}
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyProfileArchiveTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyProfileArchiveTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    add_test(NAME profile_archive_round_trip COMMAND AegisyProfileArchiveTest)
+endif()

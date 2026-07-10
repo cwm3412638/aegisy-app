@@ -3,13 +3,34 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QSaveFile>
 #include <QDateTime>
 #include <QDebug>
+#include <QStandardPaths>
+#include <QUuid>
+#include <algorithm>
 
 // 官方指南规定：BASE_URL 一律裸域名，不带 /v1
 static const QString kBaseUrl = "https://aegisy.cc";
+constexpr int kMaxBackupsPerTool = 10;
+
+static QString toolSlug(AiTool tool)
+{
+    switch (tool) {
+    case AiTool::ClaudeCode: return QStringLiteral("claude");
+    case AiTool::CodexCli:   return QStringLiteral("codex");
+    case AiTool::GeminiCli:  return QStringLiteral("gemini");
+    }
+    return QStringLiteral("unknown");
+}
+
+static QString backupRootPath(AiTool tool)
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+        + QStringLiteral("/backups/") + toolSlug(tool);
+}
 
 #ifdef Q_OS_WIN
 static const QString kNpmCmd  = "npm.cmd";
@@ -95,19 +116,196 @@ QString ToolManager::homeFilePath(const QString &relative)
     return QDir::homePath() + "/" + relative;
 }
 
-bool ToolManager::backupFile(const QString &path)
+QStringList ToolManager::managedConfigPaths(AiTool tool) const
 {
-    QFile file(path);
-    if (!file.exists()) {
-        return true;  // 无需备份
+    switch (tool) {
+    case AiTool::ClaudeCode:
+        return { homeFilePath(QStringLiteral(".claude/settings.json")) };
+    case AiTool::CodexCli:
+        return {
+            homeFilePath(QStringLiteral(".codex/auth.json")),
+            homeFilePath(QStringLiteral(".codex/config.toml")),
+        };
+    case AiTool::GeminiCli:
+        return { homeFilePath(QStringLiteral(".gemini/.env")) };
     }
-    const QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
-    const QString baseBackupPath = path + ".bak." + stamp;
-    QString backupPath = baseBackupPath;
-    for (int i = 1; QFileInfo::exists(backupPath); ++i) {
-        backupPath = QString("%1.%2").arg(baseBackupPath).arg(i);
+    return {};
+}
+
+QString ToolManager::createBackup(AiTool tool)
+{
+    const QString rootPath = backupRootPath(tool);
+    QDir root;
+    if (!root.mkpath(rootPath)) {
+        m_lastError = QStringLiteral("无法创建备份目录：%1").arg(rootPath);
+        return QString();
     }
-    return QFile::copy(path, backupPath);
+
+    const QString id = QStringLiteral("%1_%2")
+        .arg(QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd_HHmmss_zzz")),
+             QUuid::createUuid().toString(QUuid::WithoutBraces).left(8));
+    const QString backupPath = rootPath + QLatin1Char('/') + id;
+    if (!root.mkpath(backupPath)) {
+        m_lastError = QStringLiteral("无法创建备份批次：%1").arg(backupPath);
+        return QString();
+    }
+
+    QJsonArray files;
+    const QStringList paths = managedConfigPaths(tool);
+    for (int i = 0; i < paths.size(); ++i) {
+        const QString path = paths[i];
+        const bool existed = QFileInfo::exists(path);
+        const QString payloadName = QStringLiteral("file_%1.bin").arg(i);
+        if (existed) {
+            QFile source(path);
+            if (!source.open(QIODevice::ReadOnly)) {
+                QDir(backupPath).removeRecursively();
+                m_lastError = QStringLiteral("无法读取待备份配置：%1").arg(path);
+                return QString();
+            }
+            const QByteArray payloadData = source.readAll();
+            QSaveFile payload(backupPath + QLatin1Char('/') + payloadName);
+            if (!payload.open(QIODevice::WriteOnly)
+                    || payload.write(payloadData) != payloadData.size()
+                    || !payload.commit()) {
+                QDir(backupPath).removeRecursively();
+                m_lastError = QStringLiteral("无法保存配置快照：%1").arg(path);
+                return QString();
+            }
+            QFile::setPermissions(
+                backupPath + QLatin1Char('/') + payloadName,
+                QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        }
+
+        QJsonObject entry;
+        entry.insert(QStringLiteral("path"), path);
+        entry.insert(QStringLiteral("existed"), existed);
+        entry.insert(QStringLiteral("payload"), payloadName);
+        files.append(entry);
+    }
+
+    QJsonObject manifest;
+    manifest.insert(QStringLiteral("version"), 1);
+    manifest.insert(QStringLiteral("tool"), static_cast<int>(tool));
+    manifest.insert(
+        QStringLiteral("created_at"),
+        QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    manifest.insert(QStringLiteral("files"), files);
+
+    const QString manifestPath = backupPath + QStringLiteral("/manifest.json");
+    QSaveFile manifestFile(manifestPath);
+    const QByteArray manifestData = QJsonDocument(manifest).toJson(QJsonDocument::Indented);
+    if (!manifestFile.open(QIODevice::WriteOnly)
+            || manifestFile.write(manifestData) != manifestData.size()
+            || !manifestFile.commit()) {
+        QDir(backupPath).removeRecursively();
+        m_lastError = QStringLiteral("无法写入备份清单：%1").arg(manifestPath);
+        return QString();
+    }
+    QFile::setPermissions(
+        manifestPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    return id;
+}
+
+QList<ConfigBackup> ToolManager::backupHistory(AiTool tool) const
+{
+    QList<ConfigBackup> result;
+    QDir root(backupRootPath(tool));
+    const QStringList ids = root.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    for (const QString &id : ids) {
+        QFile manifest(root.filePath(id + QStringLiteral("/manifest.json")));
+        if (!manifest.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+        const QJsonObject object = QJsonDocument::fromJson(manifest.readAll()).object();
+        if (object.value(QStringLiteral("tool")).toInt(-1) != static_cast<int>(tool)) {
+            continue;
+        }
+        ConfigBackup backup;
+        backup.id = id;
+        backup.tool = tool;
+        backup.createdAt = QDateTime::fromString(
+            object.value(QStringLiteral("created_at")).toString(), Qt::ISODateWithMs);
+        backup.fileCount = object.value(QStringLiteral("files")).toArray().size();
+        result.append(backup);
+    }
+    std::sort(result.begin(), result.end(), [](const ConfigBackup &left, const ConfigBackup &right) {
+        return left.createdAt > right.createdAt;
+    });
+    return result;
+}
+
+void ToolManager::pruneBackups(AiTool tool)
+{
+    const QList<ConfigBackup> history = backupHistory(tool);
+    const QString rootPath = backupRootPath(tool);
+    for (int i = kMaxBackupsPerTool; i < history.size(); ++i) {
+        QDir(rootPath + QLatin1Char('/') + history[i].id).removeRecursively();
+    }
+}
+
+bool ToolManager::restoreBackupInternal(const QString &backupId, AiTool tool)
+{
+    const QString backupPath = backupRootPath(tool) + QLatin1Char('/') + backupId;
+    QFile manifestFile(backupPath + QStringLiteral("/manifest.json"));
+    if (!manifestFile.open(QIODevice::ReadOnly)) {
+        m_lastError = QStringLiteral("无法读取备份清单。");
+        return false;
+    }
+    const QJsonObject manifest = QJsonDocument::fromJson(manifestFile.readAll()).object();
+    if (manifest.value(QStringLiteral("tool")).toInt(-1) != static_cast<int>(tool)) {
+        m_lastError = QStringLiteral("备份类型与目标终端不匹配。");
+        return false;
+    }
+
+    const QJsonArray files = manifest.value(QStringLiteral("files")).toArray();
+    for (const QJsonValue &value : files) {
+        const QJsonObject entry = value.toObject();
+        const QString path = entry.value(QStringLiteral("path")).toString();
+        if (path.isEmpty() || !managedConfigPaths(tool).contains(path)) {
+            m_lastError = QStringLiteral("备份清单包含无效路径。");
+            return false;
+        }
+        if (!entry.value(QStringLiteral("existed")).toBool()) {
+            if (QFileInfo::exists(path) && !QFile::remove(path)) {
+                m_lastError = QStringLiteral("无法删除备份前不存在的配置：%1").arg(path);
+                return false;
+            }
+            continue;
+        }
+
+        QFile payload(backupPath + QLatin1Char('/')
+                      + entry.value(QStringLiteral("payload")).toString());
+        if (!payload.open(QIODevice::ReadOnly)) {
+            m_lastError = QStringLiteral("备份内容缺失：%1").arg(path);
+            return false;
+        }
+        if (!writeTextFile(path, payload.readAll())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ToolManager::restoreBackup(const QString &backupId, AiTool tool)
+{
+    m_lastError.clear();
+    const QString safetyBackupId = createBackup(tool);
+    if (safetyBackupId.isEmpty()) {
+        return false;
+    }
+    if (restoreBackupInternal(backupId, tool)) {
+        pruneBackups(tool);
+        return true;
+    }
+
+    const QString restoreError = m_lastError;
+    const bool recovered = restoreBackupInternal(safetyBackupId, tool);
+    pruneBackups(tool);
+    m_lastError = recovered
+        ? QStringLiteral("%1（当前配置已恢复）").arg(restoreError)
+        : QStringLiteral("%1；恢复当前配置也失败：%2").arg(restoreError, m_lastError);
+    return false;
 }
 
 bool ToolManager::writeTextFile(const QString &path, const QByteArray &data)
@@ -286,7 +484,7 @@ DesktopAppStatus ToolManager::detectDesktop(AiTool tool)
     case AiTool::ClaudeCode: {
         result.appName     = QStringLiteral("Claude 桌面版");
         result.downloadUrl = QStringLiteral("https://claude.ai/download");
-#if defined(Q_OS_MACOS)
+#if defined(Q_OS_MAC)
         result.installed = QFile::exists("/Applications/Claude.app");
 #elif defined(Q_OS_WIN)
         // 常见安装路径
@@ -304,7 +502,7 @@ DesktopAppStatus ToolManager::detectDesktop(AiTool tool)
         // Codex 本身是 CLI 工具；OpenAI 桌面客户端是 ChatGPT
         result.appName     = QStringLiteral("ChatGPT 桌面版");
         result.downloadUrl = QStringLiteral("https://chatgpt.com/download");
-#if defined(Q_OS_MACOS)
+#if defined(Q_OS_MAC)
         result.installed = QFile::exists("/Applications/ChatGPT.app");
 #elif defined(Q_OS_WIN)
         const QString localApp = qgetenv("LOCALAPPDATA");
@@ -371,6 +569,11 @@ bool ToolManager::configure(AiTool tool, const QString &apiKey, const QString &m
         return false;
     }
 
+    const QString backupId = createBackup(tool);
+    if (backupId.isEmpty()) {
+        return false;
+    }
+
     bool success = false;
     switch (tool) {
     case AiTool::ClaudeCode: success = configureClaudeCode(apiKey, model); break;
@@ -378,13 +581,26 @@ bool ToolManager::configure(AiTool tool, const QString &apiKey, const QString &m
     case AiTool::GeminiCli:  success = configureGeminiCli(apiKey, model); break;
     }
     if (!success) {
+        const QString writeError = m_lastError;
+        const bool rolledBack = restoreBackupInternal(backupId, tool);
+        pruneBackups(tool);
+        m_lastError = rolledBack
+            ? QStringLiteral("%1（已自动回滚）").arg(writeError)
+            : QStringLiteral("%1；自动回滚失败：%2").arg(writeError, m_lastError);
         return false;
     }
 
     if (readConfiguredKey(tool) != apiKey) {
-        m_lastError = QStringLiteral("写入后校验失败：%1").arg(configFilePath(tool));
+        const QString validationError = QStringLiteral(
+            "写入后校验失败：%1").arg(configFilePath(tool));
+        const bool rolledBack = restoreBackupInternal(backupId, tool);
+        pruneBackups(tool);
+        m_lastError = rolledBack
+            ? QStringLiteral("%1（已自动回滚）").arg(validationError)
+            : QStringLiteral("%1；自动回滚失败：%2").arg(validationError, m_lastError);
         return false;
     }
+    pruneBackups(tool);
     return true;
 }
 
@@ -398,11 +614,6 @@ bool ToolManager::configureClaudeCode(const QString &apiKey, const QString &/*mo
     if (file.exists() && file.open(QIODevice::ReadOnly)) {
         root = QJsonDocument::fromJson(file.readAll()).object();
         file.close();
-    }
-
-    if (!backupFile(path)) {
-        m_lastError = QStringLiteral("备份失败：%1").arg(path);
-        return false;
     }
 
     QJsonObject env = root["env"].toObject();
@@ -419,10 +630,6 @@ bool ToolManager::configureCodexCli(const QString &apiKey, const QString &model)
     const QString effectiveModel = model.isEmpty() ? QStringLiteral("gpt-4o") : model;
     // 1) ~/.codex/auth.json
     const QString authPath = homeFilePath(".codex/auth.json");
-    if (!backupFile(authPath)) {
-        m_lastError = QStringLiteral("备份失败：%1").arg(authPath);
-        return false;
-    }
     QJsonObject auth;
     {
         QFile f(authPath);
@@ -446,11 +653,6 @@ bool ToolManager::configureCodexCli(const QString &apiKey, const QString &model)
             f.close();
         }
     }
-    if (!backupFile(tomlPath)) {
-        m_lastError = QStringLiteral("备份失败：%1").arg(tomlPath);
-        return false;
-    }
-
     static const QStringList managedTopKeys = {
         "model_provider", "model", "review_model", "model_reasoning_effort",
         "disable_response_storage", "network_access", "windows_wsl_setup_acknowledged",
@@ -517,11 +719,6 @@ bool ToolManager::configureGeminiCli(const QString &apiKey, const QString &model
     if (file.exists() && file.open(QIODevice::ReadOnly)) {
         existing = QString::fromUtf8(file.readAll());
         file.close();
-    }
-
-    if (!backupFile(path)) {
-        m_lastError = QStringLiteral("备份失败：%1").arg(path);
-        return false;
     }
 
     static const QStringList managedKeys = {

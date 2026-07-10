@@ -1,4 +1,5 @@
 #include "models_dialog.h"
+#include "app_theme.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -44,7 +45,7 @@ ModelsDialog::ModelsDialog(ApiClient *apiClient, QWidget *parent)
 
 void ModelsDialog::setupUi()
 {
-    setStyleSheet("QDialog { background-color: #f6f7f9; }");
+    setStyleSheet("QDialog { background-color: #f4f7f9; }");
 
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
     mainLayout->setSpacing(12);
@@ -140,19 +141,7 @@ void ModelsDialog::setupUi()
     m_refreshButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     m_refreshButton->setMinimumHeight(34);
     m_refreshButton->setCursor(Qt::PointingHandCursor);
-    m_refreshButton->setStyleSheet(
-        "QPushButton {"
-        "  background: #0f766e;"
-        "  color: white;"
-        "  border: none;"
-        "  border-radius: 7px;"
-        "  font-size: 13px;"
-        "  font-weight: bold;"
-        "  padding: 0 18px;"
-        "}"
-        "QPushButton:hover { background: #0b625c; }"
-        "QPushButton:disabled { background: #e2e8f0; color: #94a3b8; }"
-    );
+    m_refreshButton->setStyleSheet(AppTheme::primaryButtonStyle());
     keyLayout->addWidget(m_refreshButton);
 
     mainLayout->addWidget(keyCard);
@@ -229,19 +218,7 @@ void ModelsDialog::setupUi()
     m_copyButton->setMinimumHeight(34);
     m_copyButton->setEnabled(false);
     m_copyButton->setCursor(Qt::PointingHandCursor);
-    m_copyButton->setStyleSheet(
-        "QPushButton {"
-        "  background: #0f766e;"
-        "  color: white;"
-        "  border: none;"
-        "  border-radius: 7px;"
-        "  font-size: 13px;"
-        "  font-weight: bold;"
-        "  padding: 0 18px;"
-        "}"
-        "QPushButton:hover { background: #0b625c; }"
-        "QPushButton:disabled { background: #e2e8f0; color: #94a3b8; }"
-    );
+    m_copyButton->setStyleSheet(AppTheme::primaryButtonStyle());
     toolbarLayout->addWidget(m_copyButton);
     toolbarLayout->addStretch();
     mainLayout->addLayout(toolbarLayout);
@@ -313,17 +290,7 @@ void ModelsDialog::setupUi()
     closeButton->setMinimumHeight(36);
     closeButton->setMinimumWidth(90);
     closeButton->setCursor(Qt::PointingHandCursor);
-    closeButton->setStyleSheet(
-        "QPushButton {"
-        "  background: #f1f5f9;"
-        "  color: #475569;"
-        "  border: 1.5px solid #e2e8f0;"
-        "  border-radius: 7px;"
-        "  font-size: 13px;"
-        "  padding: 5px 18px;"
-        "}"
-        "QPushButton:hover { background: #e2e8f0; }"
-    );
+    closeButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     connect(closeButton, &QPushButton::clicked, this, &QDialog::accept);
     bottomLayout->addWidget(closeButton);
 
