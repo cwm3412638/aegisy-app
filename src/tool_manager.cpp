@@ -90,8 +90,12 @@ bool ToolManager::backupFile(const QString &path)
     if (!file.exists()) {
         return true;  // 无需备份
     }
-    const QString backupPath = path + ".bak." +
-        QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+    const QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
+    const QString baseBackupPath = path + ".bak." + stamp;
+    QString backupPath = baseBackupPath;
+    for (int i = 1; QFileInfo::exists(backupPath); ++i) {
+        backupPath = QString("%1.%2").arg(baseBackupPath).arg(i);
+    }
     return QFile::copy(path, backupPath);
 }
 
@@ -261,7 +265,7 @@ DesktopAppStatus ToolManager::detectDesktop(AiTool tool)
 }
 
 // ── 异步安装 ─────────────────────────────────────────────────────
-void ToolManager::install(AiTool tool)
+void ToolManager::install(AiTool tool, int requestId)
 {
     QProcess *process = new QProcess(this);
     process->setProcessChannelMode(QProcess::MergedChannels);
@@ -274,15 +278,15 @@ void ToolManager::install(AiTool tool)
     });
 
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, process, tool](int exitCode, QProcess::ExitStatus exitStatus) {
+            this, [this, process, tool, requestId](int exitCode, QProcess::ExitStatus exitStatus) {
         process->deleteLater();
-        emit installFinished(tool, exitStatus == QProcess::NormalExit && exitCode == 0);
+        emit installFinished(tool, requestId, exitStatus == QProcess::NormalExit && exitCode == 0);
     });
 
-    connect(process, &QProcess::errorOccurred, this, [this, process, tool](QProcess::ProcessError) {
+    connect(process, &QProcess::errorOccurred, this, [this, process, tool, requestId](QProcess::ProcessError) {
         emit installOutput(tool, QStringLiteral("无法启动 npm：%1").arg(process->errorString()));
         process->deleteLater();
-        emit installFinished(tool, false);
+        emit installFinished(tool, requestId, false);
     });
 
     emit installOutput(tool, QStringLiteral("$ %1 install -g %2").arg(kNpmCmd, npmPackage(tool)));

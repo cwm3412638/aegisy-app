@@ -31,7 +31,7 @@ private slots:
     void onApiKeysReceived(const QJsonArray &keys);
     void onRequestFailed(const QString &error);
     void onInstallOutput(AiTool tool, const QString &line);
-    void onInstallFinished(AiTool tool, bool success);
+    void onInstallFinished(AiTool tool, int requestId, bool success);
     void onManageKeysClicked();
     void onViewModelsClicked();
     void onLogoutClicked();
@@ -49,7 +49,7 @@ private:
     // 档案操作
     void activateProfile(int index);
     void processActivationQueue();
-    void configureFromProfile(int profileIndex, AiTool tool);
+    bool configureFromProfile(int profileIndex, AiTool tool);
     void editProfile(int index);
     void deleteProfile(int index);
 
@@ -90,6 +90,7 @@ private:
     // 激活流程状态（含自动安装的异步队列）
     QList<AiTool> m_activationQueue;
     int           m_activatingIndex = -1;
+    int           m_activationGeneration = 0;
 };
 
 #endif // MAIN_WINDOW_H

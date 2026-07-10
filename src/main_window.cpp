@@ -516,6 +516,7 @@ void MainWindow::activateProfile(int index)
 
     m_profileManager->setActiveIndex(index);
     m_activatingIndex = index;
+    ++m_activationGeneration;
     m_activationQueue.clear();
     for (AiTool tool : {AiTool::ClaudeCode, AiTool::CodexCli, AiTool::GeminiCli}) {
         if (!profile.keyFor(tool).isEmpty()) {
@@ -527,7 +528,7 @@ void MainWindow::activateProfile(int index)
     processActivationQueue();
 }
 
-// ── 逐个处理激活队列（安装 → 配置）────────────────────────────
+// ── 逐个处理激活队列（配置 → 安装）────────────────────────────
 void MainWindow::processActivationQueue()
 {
     if (m_activationQueue.isEmpty()) {
@@ -538,6 +539,9 @@ void MainWindow::processActivationQueue()
     }
 
     const AiTool tool = m_activationQueue.first();
+    // 配置落盘必须先发生：切换档案时即使 CLI/Node 缺失，也要立即更新 auth.json 等文件。
+    const bool configured = configureFromProfile(m_activatingIndex, tool);
+
     const ToolStatus status = m_toolManager->detect(tool);
 
     // 如果检测到环境变量冲突，先警告（激活照常继续，configure() 会强制覆写配置文件）
@@ -546,33 +550,37 @@ void MainWindow::processActivationQueue()
     }
 
     if (!status.nodeOk) {
-        logMessage(QString("✗ %1 跳过：未检测到 Node.js").arg(ToolManager::toolName(tool)), kLogError);
+        const QString detail = configured
+            ? QStringLiteral("已写入配置，但未检测到 Node.js，无法自动安装/运行 CLI")
+            : QStringLiteral("配置写入失败，且未检测到 Node.js");
+        logMessage(QString("✗ %1 %2").arg(ToolManager::toolName(tool), detail), kLogError);
         m_activationQueue.removeFirst();
         processActivationQueue();
         return;
     }
 
     if (!status.installed) {
-        logMessage(QString("%1 未安装，开始自动安装...").arg(ToolManager::toolName(tool)), kLogInfo);
-        m_toolManager->install(tool);  // 异步 → onInstallFinished 继续
+        const QString detail = configured
+            ? QStringLiteral("配置已写入，CLI 未安装，开始自动安装...")
+            : QStringLiteral("配置写入失败，CLI 未安装，仍尝试自动安装...");
+        logMessage(QString("%1 %2").arg(ToolManager::toolName(tool), detail), kLogInfo);
+        m_toolManager->install(tool, m_activationGeneration);  // 异步 → onInstallFinished 继续
         return;
     }
 
-    // 已安装 → 直接写配置，然后推进队列
-    configureFromProfile(m_activatingIndex, tool);
     m_activationQueue.removeFirst();
     processActivationQueue();
 }
 
 // ── 用档案里的 Key + Model 写入某个工具的配置 ──────────────────
-void MainWindow::configureFromProfile(int profileIndex, AiTool tool)
+bool MainWindow::configureFromProfile(int profileIndex, AiTool tool)
 {
     const QList<Profile> profiles = m_profileManager->allProfiles();
-    if (profileIndex < 0 || profileIndex >= profiles.size()) return;
+    if (profileIndex < 0 || profileIndex >= profiles.size()) return false;
     const Profile profile = profiles[profileIndex];
     const QString key = profile.keyFor(tool);
     const QString model = profile.modelFor(tool);
-    if (key.isEmpty()) return;
+    if (key.isEmpty()) return false;
 
     logMessage(QString("正在写入 %1 配置...").arg(ToolManager::toolName(tool)), kLogInfo);
     const bool ok = m_toolManager->configure(tool, key, model);
@@ -586,6 +594,7 @@ void MainWindow::configureFromProfile(int profileIndex, AiTool tool)
                        .arg(ToolManager::toolName(tool), m_toolManager->lastError()),
                    kLogError);
     }
+    return ok;
 }
 
 // ── API / 安装回调 ──────────────────────────────────────────────
@@ -607,9 +616,14 @@ void MainWindow::onInstallOutput(AiTool tool, const QString &line)
     logMessage(line, kLogMuted);
 }
 
-void MainWindow::onInstallFinished(AiTool tool, bool success)
+void MainWindow::onInstallFinished(AiTool tool, int requestId, bool success)
 {
     if (m_activatingIndex < 0) return;  // 不在激活流程中
+
+    if (requestId != m_activationGeneration) {
+        logMessage(QString("忽略过期的安装回调：%1").arg(ToolManager::toolName(tool)), kLogMuted);
+        return;
+    }
 
     // 陈旧回调：若完成的工具已不是当前队列的队首，说明用户已切换到别的档案，
     // 这个安装结果作废，直接忽略，避免破坏新队列。
@@ -628,7 +642,6 @@ void MainWindow::onInstallFinished(AiTool tool, bool success)
     }
 
     logMessage(QString("✓ %1 安装完成").arg(ToolManager::toolName(tool)), kLogSuccess);
-    configureFromProfile(m_activatingIndex, tool);
     m_activationQueue.removeFirst();
     processActivationQueue();
 }

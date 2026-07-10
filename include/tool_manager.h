@@ -53,7 +53,7 @@ public:
     DesktopAppStatus detectDesktop(AiTool tool);
 
     // 异步安装：npm install -g <pkg>；输出与结果通过信号回传
-    void install(AiTool tool);
+    void install(AiTool tool, int requestId = 0);
 
     // 写入官方格式配置（先备份）。model 为空时使用各工具默认值。失败返回 false，详情见 lastError()
     bool configure(AiTool tool, const QString &apiKey, const QString &model = QString());
@@ -65,7 +65,7 @@ public:
 
 signals:
     void installOutput(AiTool tool, const QString &line);
-    void installFinished(AiTool tool, bool success);
+    void installFinished(AiTool tool, int requestId, bool success);
 
 private:
     bool configureClaudeCode(const QString &apiKey, const QString &model);
