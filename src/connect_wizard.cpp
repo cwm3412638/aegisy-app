@@ -68,9 +68,8 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
     , m_editIndex(editIndex)
 {
     if (m_editIndex >= 0) {
-        const QList<Profile> profiles = m_profileManager->allProfiles();
-        if (m_editIndex < profiles.size()) {
-            const Profile &profile = profiles[m_editIndex];
+        const Profile profile = m_profileManager->profileWithCredential(m_editIndex);
+        if (profile.index >= 0) {
             m_selectedType = profile.type;
             m_existingType = profile.type;
             m_existingKey = profile.key;

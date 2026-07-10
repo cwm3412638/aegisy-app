@@ -71,6 +71,8 @@ Claude、Codex 和 Gemini 分别保存自己的当前档案。因此激活 Codex
 
 档案 API Key 不会写入普通 `QSettings`。Linux 没有 Secret Service 时，应用会拒绝保存凭据并显示错误。
 
+macOS 会在首次读取已保存的登录状态或档案 API Key 时请求钥匙串授权。请选择“始终允许”。使用 ad-hoc 签名的测试安装包在每次更新后仍可能再次请求一次授权；正式发布包需要使用同一个 Apple Developer ID 持续签名，才能让系统跨版本稳定识别应用身份。
+
 ## 常见问题
 
 ### 档案无法保存

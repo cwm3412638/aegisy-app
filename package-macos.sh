@@ -222,6 +222,11 @@ if [ -f "$RELEASE_NOTES" ]; then
     cp "$RELEASE_NOTES" "$UPDATE_DIR/$UPDATE_BASENAME.md"
 fi
 
+# Rebuilding the same version must not reuse a delta generated from an older
+# archive with that version number.
+find "$UPDATE_DIR" -maxdepth 1 -type f \
+    -name "AegisyClient${VERSION}-*.delta" -delete
+
 APPCAST_ARGS=(
     --download-url-prefix "$UPDATE_BASE_URL/"
     --release-notes-url-prefix "$UPDATE_BASE_URL/"

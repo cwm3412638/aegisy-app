@@ -2,6 +2,9 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QDebug>
+#include <QHash>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QProcess>
 
 #ifdef Q_OS_WIN
@@ -50,6 +53,33 @@ CFMutableDictionaryRef createKeychainQuery(const QString &service, const QString
 static const QString SERVICE_NAME = "AegisyClient";
 static const QString TOKEN_KEY = "auth_token";
 
+namespace {
+
+QMutex credentialCacheMutex;
+QHash<QString, QString> credentialCache;
+
+void cacheCredential(const QString &key, const QString &value)
+{
+    QMutexLocker locker(&credentialCacheMutex);
+    credentialCache.insert(key, value);
+}
+
+QString cachedCredential(const QString &key, bool *found)
+{
+    QMutexLocker locker(&credentialCacheMutex);
+    const auto it = credentialCache.constFind(key);
+    *found = it != credentialCache.cend();
+    return *found ? it.value() : QString();
+}
+
+void removeCachedCredential(const QString &key)
+{
+    QMutexLocker locker(&credentialCacheMutex);
+    credentialCache.remove(key);
+}
+
+} // namespace
+
 bool SecureStorage::isAvailable()
 {
 #if defined(Q_OS_WIN) || defined(Q_OS_MAC)
@@ -86,20 +116,36 @@ bool SecureStorage::saveEncrypted(const QString &key, const QString &data)
 
     QSettings settings(QSettings::NativeFormat, QSettings::UserScope, "Aegisy", "AegisyClient");
     settings.setValue(key, encrypted.toBase64());
+    cacheCredential(key, data);
     return true;
 
 #elif defined(Q_OS_MAC)
     // macOS: 使用 Keychain
-    return saveToKeychain(SERVICE_NAME, key, data);
+    const bool saved = saveToKeychain(SERVICE_NAME, key, data);
+    if (saved) {
+        cacheCredential(key, data);
+    }
+    return saved;
 
 #else
     // Linux 不再使用可逆的固定 XOR。没有 Secret Service 时拒绝持久化。
-    return saveToSecretService(SERVICE_NAME, key, data);
+    const bool saved = saveToSecretService(SERVICE_NAME, key, data);
+    if (saved) {
+        cacheCredential(key, data);
+    }
+    return saved;
 #endif
 }
 
 QString SecureStorage::loadEncrypted(const QString &key)
 {
+    bool foundInCache = false;
+    const QString cached = cachedCredential(key, &foundInCache);
+    if (foundInCache) {
+        return cached;
+    }
+
+    QString value;
 #ifdef Q_OS_WIN
     QSettings settings(QSettings::NativeFormat, QSettings::UserScope, "Aegisy", "AegisyClient");
     QString encryptedBase64 = settings.value(key).toString();
@@ -109,25 +155,58 @@ QString SecureStorage::loadEncrypted(const QString &key)
 
     QByteArray encrypted = QByteArray::fromBase64(encryptedBase64.toUtf8());
     QByteArray decrypted = decryptWindows(encrypted);
-    return QString::fromUtf8(decrypted);
+    value = QString::fromUtf8(decrypted);
 
 #elif defined(Q_OS_MAC)
-    return loadFromKeychain(SERVICE_NAME, key);
+    value = loadFromKeychain(SERVICE_NAME, key);
 
 #else
-    const QString value = loadFromSecretService(SERVICE_NAME, key);
+    value = loadFromSecretService(SERVICE_NAME, key);
     if (value.isEmpty()) {
         // 清理旧版本固定 XOR 留下的不可安全使用数据，避免继续误认为已安全保存。
         QSettings settings(QSettings::NativeFormat, QSettings::UserScope,
                            "Aegisy", "AegisyClient");
         settings.remove(key);
     }
+#endif
+
+    if (!value.isEmpty()) {
+        cacheCredential(key, value);
+    }
     return value;
+}
+
+bool SecureStorage::contains(const QString &key)
+{
+    bool foundInCache = false;
+    cachedCredential(key, &foundInCache);
+    if (foundInCache) {
+        return true;
+    }
+
+#ifdef Q_OS_WIN
+    QSettings settings(QSettings::NativeFormat, QSettings::UserScope,
+                       "Aegisy", "AegisyClient");
+    return settings.contains(key) && !settings.value(key).toString().isEmpty();
+#elif defined(Q_OS_MAC)
+    CFMutableDictionaryRef query = createKeychainQuery(SERVICE_NAME, key);
+    CFDictionarySetValue(query, kSecReturnAttributes, kCFBooleanTrue);
+    CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
+    CFTypeRef result = NULL;
+    const OSStatus status = SecItemCopyMatching(query, &result);
+    if (result) {
+        CFRelease(result);
+    }
+    CFRelease(query);
+    return status == errSecSuccess;
+#else
+    return !loadFromSecretService(SERVICE_NAME, key).isEmpty();
 #endif
 }
 
 bool SecureStorage::remove(const QString &key)
 {
+    removeCachedCredential(key);
 #ifdef Q_OS_MAC
     return deleteFromKeychain(SERVICE_NAME, key);
 #elif defined(Q_OS_WIN)

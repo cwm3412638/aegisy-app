@@ -65,6 +65,7 @@ struct Profile {
     ProfileType type  = ProfileType::Codex;
     QString     key;
     QString     model;
+    bool        hasCredential = false;
 
     AiTool tool() const { return toolForType(type); }
 
@@ -78,13 +79,13 @@ struct Profile {
         return requestedTool == tool() ? model : QString();
     }
 
-    int configuredCount() const { return key.isEmpty() ? 0 : 1; }
-    bool hasAnyKey() const { return !key.isEmpty(); }
+    int configuredCount() const { return hasAnyKey() ? 1 : 0; }
+    bool hasAnyKey() const { return hasCredential || !key.isEmpty(); }
 };
 
 // 档案管理器：持久化到 QSettings。
 // 新布局：
-//   profiles/schema_version      = 4
+//   profiles/schema_version      = 5
 //   profiles/count               = N
 //   profiles/active/claude       = 0
 //   profiles/active/codex        = 1
@@ -93,6 +94,7 @@ struct Profile {
 //   profiles/<i>/name            = "工作 Codex"
 //   profiles/<i>/type            = 2
 //   profiles/<i>/credential_ref  = "profile/<uuid>/api-key"
+//   profiles/<i>/has_credential  = true
 //   profiles/<i>/model           = "gpt-5"
 class ProfileManager : public QObject
 {
@@ -102,6 +104,7 @@ public:
     explicit ProfileManager(QObject *parent = nullptr);
 
     QList<Profile> allProfiles() const;
+    Profile profileWithCredential(int index);
     int     activeIndex(ProfileType type) const;
     Profile activeProfile(ProfileType type) const;
     bool    isActive(int index) const;
@@ -130,6 +133,7 @@ private:
     void migrateLegacyProfiles();
     void migrateProfileCredentials();
     void migrateActiveProfiles();
+    void migrateCredentialPresence();
     void ensureDefaultProfile();
 
     QString m_lastError;

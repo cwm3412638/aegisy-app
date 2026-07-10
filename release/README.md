@@ -37,6 +37,8 @@ export AEGISY_NOTARY_PROFILE="aegisy-notary"
 ./package-macos.sh
 ```
 
+不要用 ad-hoc 签名发布给长期使用的用户。ad-hoc 签名的代码身份会随每次构建变化，macOS 钥匙串会把更新后的程序视为新的访问方，导致已保存的登录 Token 或 API Key 再次出现授权提示。跨版本保持同一个 Developer ID 签名后，用户选择一次“始终允许”即可持续授权。
+
 ## Windows 发布
 
 在 Visual Studio 2022 Developer Command Prompt 中执行：

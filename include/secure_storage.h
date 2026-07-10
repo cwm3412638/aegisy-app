@@ -16,6 +16,9 @@ public:
     // 读取加密数据
     static QString loadEncrypted(const QString &key);
 
+    // 仅检查凭据是否存在，不读取明文。macOS 上不会触发解密授权弹窗。
+    static bool contains(const QString &key);
+
     // 删除数据
     static bool remove(const QString &key);
 

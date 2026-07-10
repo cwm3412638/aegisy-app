@@ -100,8 +100,34 @@ int main(int argc, char *argv[])
                 || !expect(migrated.activeIndex(ProfileType::Gemini) == -1,
                            "Legacy migration incorrectly activated Gemini")
                 || !expect(QSettings().value(
-                               QStringLiteral("profiles/schema_version")).toInt() == 4,
-                           "Profile schema was not upgraded to version 4")) {
+                               QStringLiteral("profiles/schema_version")).toInt() == 5,
+                           "Profile schema was not upgraded to version 5")) {
+            return 1;
+        }
+    }
+
+    {
+        QSettings settings;
+        settings.clear();
+        settings.setValue(QStringLiteral("profiles/schema_version"), 5);
+        settings.setValue(QStringLiteral("profiles/count"), 1);
+        settings.setValue(QStringLiteral("profiles/0/id"), QStringLiteral("lazy-profile"));
+        settings.setValue(QStringLiteral("profiles/0/name"), QStringLiteral("Lazy Codex"));
+        settings.setValue(
+            QStringLiteral("profiles/0/type"), static_cast<int>(ProfileType::Codex));
+        settings.setValue(
+            QStringLiteral("profiles/0/credential_ref"),
+            QStringLiteral("profile/lazy-profile/api-key"));
+        settings.setValue(QStringLiteral("profiles/0/has_credential"), true);
+        settings.sync();
+
+        ProfileManager manager;
+        const QList<Profile> profiles = manager.allProfiles();
+        if (!expect(profiles.size() == 1, "Lazy profile was not loaded")
+                || !expect(profiles[0].hasAnyKey(),
+                           "Saved credential presence was not exposed")
+                || !expect(profiles[0].key.isEmpty(),
+                           "Profile list unexpectedly loaded the credential plaintext")) {
             return 1;
         }
     }

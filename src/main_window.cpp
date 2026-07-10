@@ -835,11 +835,11 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive)
     auto *configRow = new QHBoxLayout;
     configRow->setSpacing(14);
     auto *keyLabel = new QLabel(
-        profile.key.isEmpty() ? QStringLiteral("Key：未配置")
-                              : QStringLiteral("Key：%1").arg(maskKey(profile.key)), card);
+        profile.hasAnyKey() ? QStringLiteral("Key：已安全保存")
+                            : QStringLiteral("Key：未配置"), card);
     keyLabel->setStyleSheet(QStringLiteral(
         "font-family: monospace; font-size: 11px; color: %1; border: none;")
-        .arg(profile.key.isEmpty() ? QStringLiteral("#b54708") : QStringLiteral("#475467")));
+        .arg(profile.hasAnyKey() ? QStringLiteral("#475467") : QStringLiteral("#b54708")));
     configRow->addWidget(keyLabel);
     auto *modelLabel = new QLabel(
         QStringLiteral("模型：%1")
@@ -1078,13 +1078,11 @@ void MainWindow::processActivationQueue()
 
 bool MainWindow::configureFromProfile(int profileIndex, AiTool tool)
 {
-    const QList<Profile> profiles = m_profileManager->allProfiles();
-    if (profileIndex < 0 || profileIndex >= profiles.size()) {
-        return false;
-    }
-
-    const Profile &profile = profiles[profileIndex];
+    const Profile profile = m_profileManager->profileWithCredential(profileIndex);
     if (profile.tool() != tool || profile.key.isEmpty()) {
+        if (!m_profileManager->lastError().isEmpty()) {
+            logMessage(m_profileManager->lastError(), kLogError);
+        }
         return false;
     }
 
