@@ -20,10 +20,25 @@ if not "%AEGISY_WINDOWS_UPDATE_BASE_URL%"=="" set "UPDATE_BASE_URL=%AEGISY_WINDO
 echo.
 echo [1/6] 编译 Release (%WINDOWS_ARCH%)...
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
-if "%OPENSSL_ROOT_DIR%"=="" (
-    cmake -S . -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A %WINDOWS_ARCH% -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF || exit /b 1
+
+REM 构建 CMAKE_PREFIX_PATH：Qt6 + OpenSSL
+set "CMAKE_PREFIX="
+if not "%QT_ROOT_DIR%"=="" set "CMAKE_PREFIX=%QT_ROOT_DIR%"
+if not "%OPENSSL_ROOT_DIR%"=="" (
+    if "%CMAKE_PREFIX%"=="" (
+        set "CMAKE_PREFIX=%OPENSSL_ROOT_DIR%"
+    ) else (
+        set "CMAKE_PREFIX=%CMAKE_PREFIX%;%OPENSSL_ROOT_DIR%"
+    )
+)
+
+set "OPENSSL_ARG="
+if not "%OPENSSL_ROOT_DIR%"=="" set "OPENSSL_ARG=-DOPENSSL_ROOT_DIR=%OPENSSL_ROOT_DIR%"
+
+if "%CMAKE_PREFIX%"=="" (
+    cmake -S . -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A %WINDOWS_ARCH% -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF %OPENSSL_ARG% || exit /b 1
 ) else (
-    cmake -S . -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A %WINDOWS_ARCH% -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DOPENSSL_ROOT_DIR="%OPENSSL_ROOT_DIR%" || exit /b 1
+    cmake -S . -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A %WINDOWS_ARCH% -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DCMAKE_PREFIX_PATH="%CMAKE_PREFIX%" %OPENSSL_ARG% || exit /b 1
 )
 cmake --build "%BUILD_DIR%" --config Release || exit /b 1
 
