@@ -10,8 +10,11 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QProgressDialog>
+#include <QScreen>
+#include <QStyle>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
@@ -37,6 +40,111 @@ QLabel *mutedLabel(const QString &text, QWidget *parent)
     label->setWordWrap(true);
     label->setStyleSheet(QStringLiteral("color: #667085; font-size: 12px;"));
     return label;
+}
+
+void sizeScrollableDialog(QDialog *dialog, QWidget *parent)
+{
+    const QScreen *screen = parent ? parent->screen() : QGuiApplication::primaryScreen();
+    const QSize available = screen ? screen->availableGeometry().size() : QSize(900, 700);
+    dialog->resize(qMax(520, qMin(720, available.width() - 80)),
+                   qMax(420, qMin(560, available.height() - 100)));
+    dialog->setMinimumSize(500, 380);
+}
+
+bool confirmPluginInstallation(QWidget *parent,
+                               const QList<CodexPluginInfo> &plugins)
+{
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("安装 Codex 插件"));
+    dialog.setWindowFlags(dialog.windowFlags() & ~Qt::WindowContextHelpButtonHint);
+    sizeScrollableDialog(&dialog, parent);
+
+    auto *root = new QVBoxLayout(&dialog);
+    root->setContentsMargins(20, 18, 20, 16);
+    root->setSpacing(12);
+
+    auto *header = new QHBoxLayout;
+    auto *icon = new QLabel(&dialog);
+    icon->setPixmap(dialog.style()->standardIcon(QStyle::SP_MessageBoxQuestion)
+                        .pixmap(36, 36));
+    icon->setFixedSize(42, 42);
+    icon->setAlignment(Qt::AlignCenter);
+    header->addWidget(icon, 0, Qt::AlignTop);
+    auto *titleColumn = new QVBoxLayout;
+    auto *title = new QLabel(
+        QStringLiteral("安装 %1 个已选插件？").arg(plugins.size()), &dialog);
+    title->setStyleSheet(QStringLiteral(
+        "font-size: 17px; font-weight: 700; color: #101828;"));
+    titleColumn->addWidget(title);
+    titleColumn->addWidget(mutedLabel(
+        QStringLiteral("插件将按列表顺序安装，安装过程中可以停止后续任务。"), &dialog));
+    header->addLayout(titleColumn, 1);
+    root->addLayout(header);
+
+    auto *table = new QTableWidget(&dialog);
+    table->setColumnCount(2);
+    table->setHorizontalHeaderLabels({ QStringLiteral("插件"), QStringLiteral("功能说明") });
+    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    table->verticalHeader()->setVisible(false);
+    table->setSelectionMode(QAbstractItemView::NoSelection);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setWordWrap(true);
+    table->setRowCount(plugins.size());
+    for (int row = 0; row < plugins.size(); ++row) {
+        const CodexPluginInfo &plugin = plugins.at(row);
+        auto *name = new QTableWidgetItem(plugin.name);
+        name->setToolTip(plugin.id);
+        table->setItem(row, 0, name);
+        auto *description = new QTableWidgetItem(plugin.description);
+        description->setToolTip(plugin.officialDescription.isEmpty()
+            ? plugin.description : plugin.officialDescription);
+        table->setItem(row, 1, description);
+        table->setRowHeight(row, 46);
+    }
+    root->addWidget(table, 1);
+
+    auto *notice = mutedLabel(
+        QStringLiteral("部分插件首次安装或使用时会根据 Codex 策略请求额外授权。"), &dialog);
+    root->addWidget(notice);
+
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
+    buttons->button(QDialogButtonBox::Cancel)->setStyleSheet(AppTheme::secondaryButtonStyle());
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("开始安装"));
+    buttons->button(QDialogButtonBox::Ok)->setStyleSheet(AppTheme::primaryButtonStyle());
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    root->addWidget(buttons);
+    return dialog.exec() == QDialog::Accepted;
+}
+
+void showBatchInstallResult(QWidget *parent, const QString &result)
+{
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("批量安装结果"));
+    dialog.setWindowFlags(dialog.windowFlags() & ~Qt::WindowContextHelpButtonHint);
+    sizeScrollableDialog(&dialog, parent);
+
+    auto *root = new QVBoxLayout(&dialog);
+    root->setContentsMargins(20, 18, 20, 16);
+    root->setSpacing(12);
+    auto *title = new QLabel(QStringLiteral("插件安装已结束"), &dialog);
+    title->setStyleSheet(QStringLiteral(
+        "font-size: 17px; font-weight: 700; color: #101828;"));
+    root->addWidget(title);
+    auto *details = new QPlainTextEdit(&dialog);
+    details->setReadOnly(true);
+    details->setPlainText(result);
+    details->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    root->addWidget(details, 1);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+    buttons->button(QDialogButtonBox::Close)->setStyleSheet(AppTheme::primaryButtonStyle());
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
+    root->addWidget(buttons);
+    dialog.exec();
 }
 
 } // namespace
@@ -358,21 +466,11 @@ void DesktopEnhancementDialog::installSelectedPlugin()
 {
     const QStringList pluginIds = selectedPluginIds();
     if (pluginIds.isEmpty()) return;
-    QStringList summary;
-    for (const QString &id : pluginIds) {
-        for (const CodexPluginInfo &plugin : m_plugins) {
-            if (plugin.id == id) {
-                summary.append(QStringLiteral("• %1：%2").arg(plugin.name, plugin.description));
-                break;
-            }
-        }
+    QList<CodexPluginInfo> selectedPlugins;
+    for (const CodexPluginInfo &plugin : m_plugins) {
+        if (pluginIds.contains(plugin.id)) selectedPlugins.append(plugin);
     }
-    if (QMessageBox::question(this, QStringLiteral("安装 Codex 插件"),
-            QStringLiteral("将按顺序安装以下 %1 个插件：\n\n%2\n\n"
-                           "部分插件首次使用或安装时会请求额外授权。")
-                .arg(pluginIds.size()).arg(summary.join(QLatin1Char('\n'))),
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No) != QMessageBox::Yes) return;
+    if (!confirmPluginInstallation(this, selectedPlugins)) return;
 
     m_installPluginButton->setEnabled(false);
     QProgressDialog progress(QStringLiteral("正在安装 Codex 插件..."),
@@ -409,7 +507,7 @@ void DesktopEnhancementDialog::installSelectedPlugin()
             .arg(failed.size()).arg(failed.join(QLatin1Char('\n')));
     }
     result += QStringLiteral("\n\n重启 Codex 后生效。");
-    QMessageBox::information(this, QStringLiteral("批量安装结果"), result);
+    showBatchInstallResult(this, result);
 }
 
 void DesktopEnhancementDialog::installComputerUse()
