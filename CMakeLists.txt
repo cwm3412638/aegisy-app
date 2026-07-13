@@ -45,6 +45,7 @@ set(SOURCES
     src/account_dialog.cpp
     src/models_dialog.cpp
     src/image_generation_dialog.cpp
+    src/chat_dialog.cpp
     src/system_doctor_dialog.cpp
     src/usage_dialog.cpp
     src/gateway_manager.cpp
@@ -76,6 +77,7 @@ set(HEADERS
     include/account_dialog.h
     include/models_dialog.h
     include/image_generation_dialog.h
+    include/chat_dialog.h
     include/system_doctor_dialog.h
     include/usage_dialog.h
     include/gateway_manager.h

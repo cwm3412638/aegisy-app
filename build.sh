@@ -50,6 +50,12 @@ echo "Creating build directory..."
 mkdir -p build
 cd build
 
+# macdeployqt 会把 Qt Frameworks 和插件写进 App Bundle。开发构建若直接复用
+# 该 Bundle，新二进制可能链接 Homebrew Qt、插件却加载包内 Qt，导致双 Qt 冲突。
+if [ "$OS" = "Darwin" ]; then
+    rm -rf AegisyClient.app
+fi
+
 # 配置 CMake
 echo ""
 echo "Configuring CMake..."

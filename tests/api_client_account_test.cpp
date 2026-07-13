@@ -40,6 +40,18 @@ public:
                     body = QJsonDocument::fromJson(
                         buffer->mid(headerEnd + 4, contentLength)).object();
 
+                    if (path == QStringLiteral("/v1/chat/completions")) {
+                        const QByteArray payload =
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"\\u4f60\\u597d\"}}]}\n\n"
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"！\"}}]}\n\n"
+                            "data: [DONE]\n\n";
+                        socket->write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: "
+                                      + QByteArray::number(payload.size())
+                                      + "\r\nConnection: close\r\n\r\n" + payload);
+                        socket->disconnectFromHost();
+                        return;
+                    }
+
                     QJsonValue data = QJsonObject();
                     if (path == QStringLiteral("/api/v1/groups/available")) {
                         data = QJsonArray{ QJsonObject{
@@ -197,5 +209,40 @@ int main(int argc, char **argv)
         if (!require(server.method == expectedMethod, "key method mismatch")
                 || !require(server.path == expectedPath, "key path mismatch")) return 1;
     }
+
+    server.clear();
+    succeeded = false;
+    QString streamedContent;
+    const QJsonArray messages{ QJsonObject{
+        { QStringLiteral("role"), QStringLiteral("user") },
+        { QStringLiteral("content"), QStringLiteral("你好") }
+    }};
+    if (!waitFor([&]() {
+            client.sendChatMessage(QStringLiteral("chat-test"), QStringLiteral("sk-chat-test"),
+                                   QStringLiteral("gpt-test"), messages);
+        }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::chatChunkReceived, &loop,
+                [&](const QString &requestId, const QString &chunk) {
+                    if (requestId == QStringLiteral("chat-test")) streamedContent += chunk;
+                });
+            QObject::connect(&client, &ApiClient::chatCompleted, &loop,
+                [&](const QString &requestId, const QString &content) {
+                    succeeded = requestId == QStringLiteral("chat-test")
+                        && content == QStringLiteral("你好！");
+                    loop.quit();
+                });
+            QObject::connect(&client, &ApiClient::chatFailed, &loop,
+                [&](const QString &, const QString &) { loop.quit(); });
+        })
+        || !require(succeeded, "streaming chat request failed")
+        || !require(streamedContent == QStringLiteral("你好！"), "chat chunks mismatch")
+        || !require(server.method == QStringLiteral("POST"), "chat method mismatch")
+        || !require(server.path == QStringLiteral("/v1/chat/completions"), "chat path mismatch")
+        || !require(server.body.value(QStringLiteral("model")).toString() == QStringLiteral("gpt-test"),
+                    "chat model mismatch")
+        || !require(server.body.value(QStringLiteral("stream")).toBool(), "chat stream flag mismatch")
+        || !require(server.body.value(QStringLiteral("messages")).toArray().size() == 1,
+                    "chat messages mismatch")) return 1;
+
     return 0;
 }

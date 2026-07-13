@@ -56,6 +56,7 @@ private slots:
     void onManageKeysClicked();
     void onViewModelsClicked();
     void onImageGenerationClicked();
+    void onChatClicked();
     void onSystemDoctorClicked();
     void onGatewayClicked();
     void onDesktopEnhancementsClicked();
@@ -125,6 +126,7 @@ private:
     QPushButton *m_doctorButton = nullptr;
     QPushButton *m_gatewayButton = nullptr;
     QPushButton *m_desktopEnhancementsButton = nullptr;
+    QPushButton *m_chatButton = nullptr;
     QAction *m_checkUpdatesAction = nullptr;
     QAction *m_autoUpdateChecksAction = nullptr;
     QTextEdit   *m_logOutput;

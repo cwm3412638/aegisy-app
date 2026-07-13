@@ -5,6 +5,7 @@
 #include "connect_wizard.h"
 #include "models_dialog.h"
 #include "image_generation_dialog.h"
+#include "chat_dialog.h"
 #include "system_doctor_dialog.h"
 #include "usage_dialog.h"
 #include "gateway_manager.h"
@@ -676,6 +677,14 @@ void MainWindow::setupUi()
     m_desktopEnhancementsButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     sideLayout->addWidget(m_desktopEnhancementsButton);
 
+    m_chatButton = new QPushButton(QStringLiteral("AI 对话"), sidebar);
+    m_chatButton->setIcon(style()->standardIcon(QStyle::SP_MessageBoxInformation));
+    m_chatButton->setToolTip(QStringLiteral("选择 API Key 和模型进行流式对话"));
+    m_chatButton->setFixedHeight(34);
+    m_chatButton->setCursor(Qt::PointingHandCursor);
+    m_chatButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    sideLayout->addWidget(m_chatButton);
+
     sideLayout->addStretch();
 
     auto *localTitle = new QLabel(QStringLiteral("认证文件"), sidebar);
@@ -822,6 +831,8 @@ void MainWindow::setupUi()
             this, &MainWindow::onGatewayClicked);
     connect(m_desktopEnhancementsButton, &QPushButton::clicked,
             this, &MainWindow::onDesktopEnhancementsClicked);
+    connect(m_chatButton, &QPushButton::clicked,
+            this, &MainWindow::onChatClicked);
     connect(m_balanceButton, &QPushButton::clicked,
             this, &MainWindow::onUsageClicked);
     connect(m_userLabel, &QPushButton::clicked,
@@ -1634,6 +1645,13 @@ void MainWindow::onViewModelsClicked()
 void MainWindow::onImageGenerationClicked()
 {
     auto *dialog = new ImageGenerationDialog(m_apiClient, this);
+    dialog->exec();
+    dialog->deleteLater();
+}
+
+void MainWindow::onChatClicked()
+{
+    auto *dialog = new ChatDialog(m_apiClient, this);
     dialog->exec();
     dialog->deleteLater();
 }

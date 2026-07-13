@@ -612,6 +612,118 @@ void ApiClient::cancelImageGeneration()
     m_imageGenerationReply = nullptr;
 }
 
+void ApiClient::sendChatMessage(const QString &requestId,
+                                const QString &apiKey,
+                                const QString &model,
+                                const QJsonArray &messages)
+{
+    cancelChatMessage();
+    m_chatRequestId = requestId;
+    m_chatBuffer.clear();
+    m_chatContent.clear();
+
+    QNetworkRequest request(QUrl(m_baseUrl + QStringLiteral("/v1/chat/completions")));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    request.setRawHeader("Authorization", QStringLiteral("Bearer %1").arg(apiKey).toUtf8());
+    request.setRawHeader("Accept", "text/event-stream");
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(10 * 60 * 1000);
+#endif
+    QSslConfiguration sslConfig = request.sslConfiguration();
+    sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+    request.setSslConfiguration(sslConfig);
+
+    const QJsonObject body{
+        { QStringLiteral("model"), model },
+        { QStringLiteral("messages"), messages },
+        { QStringLiteral("stream"), true }
+    };
+    QNetworkReply *reply = m_networkManager->post(
+        request, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    m_chatReply = reply;
+
+    connect(reply, &QNetworkReply::readyRead, this, [this, reply, requestId]() {
+        if (reply != m_chatReply) return;
+        m_chatBuffer.append(reply->readAll());
+        while (true) {
+            const int newline = m_chatBuffer.indexOf('\n');
+            if (newline < 0) break;
+            QByteArray line = m_chatBuffer.left(newline).trimmed();
+            m_chatBuffer.remove(0, newline + 1);
+            if (!line.startsWith("data:")) continue;
+            line = line.mid(5).trimmed();
+            if (line == "[DONE]") continue;
+            const QJsonObject event = QJsonDocument::fromJson(line).object();
+            const QJsonArray choices = event.value(QStringLiteral("choices")).toArray();
+            const QJsonObject choice = choices.isEmpty() ? QJsonObject() : choices.at(0).toObject();
+            const QJsonValue contentValue = choice.value(QStringLiteral("delta")).toObject()
+                .value(QStringLiteral("content"));
+            QString chunk;
+            if (contentValue.isString()) {
+                chunk = contentValue.toString();
+            } else if (contentValue.isArray()) {
+                for (const QJsonValue &part : contentValue.toArray()) {
+                    const QJsonObject object = part.toObject();
+                    chunk += object.value(QStringLiteral("text")).toString();
+                }
+            }
+            if (!chunk.isEmpty()) {
+                m_chatContent += chunk;
+                emit chatChunkReceived(requestId, chunk);
+            }
+        }
+    });
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId]() {
+        if (reply != m_chatReply) {
+            reply->deleteLater();
+            return;
+        }
+        const QByteArray remaining = m_chatBuffer + reply->readAll();
+        const bool canceled = reply->error() == QNetworkReply::OperationCanceledError;
+        if (reply->error() != QNetworkReply::NoError && !canceled) {
+            const QJsonObject errorObject = QJsonDocument::fromJson(remaining).object();
+            QString error = errorObject.value(QStringLiteral("detail")).toString();
+            if (error.isEmpty()) error = errorObject.value(QStringLiteral("message")).toString();
+            if (error.isEmpty()) {
+                error = errorObject.value(QStringLiteral("error")).toObject()
+                    .value(QStringLiteral("message")).toString();
+            }
+            if (error.isEmpty()) error = reply->errorString();
+            emit chatFailed(requestId, error);
+        } else if (!canceled) {
+            if (m_chatContent.isEmpty() && !remaining.trimmed().isEmpty()) {
+                const QJsonObject response = QJsonDocument::fromJson(remaining).object();
+                const QJsonArray choices = response.value(QStringLiteral("choices")).toArray();
+                const QJsonObject message = choices.isEmpty() ? QJsonObject()
+                    : choices.at(0).toObject().value(QStringLiteral("message")).toObject();
+                m_chatContent = message.value(QStringLiteral("content")).toString();
+                if (!m_chatContent.isEmpty()) {
+                    emit chatChunkReceived(requestId, m_chatContent);
+                }
+            }
+            emit chatCompleted(requestId, m_chatContent);
+        }
+        reply->deleteLater();
+        m_chatReply = nullptr;
+        m_chatBuffer.clear();
+        m_chatContent.clear();
+        m_chatRequestId.clear();
+    });
+}
+
+void ApiClient::cancelChatMessage()
+{
+    if (!m_chatReply) return;
+    disconnect(m_chatReply, nullptr, this, nullptr);
+    m_chatReply->abort();
+    m_chatReply->deleteLater();
+    m_chatReply = nullptr;
+    m_chatBuffer.clear();
+    m_chatContent.clear();
+    m_chatRequestId.clear();
+}
+
 void ApiClient::testApiKey(const QString &keyId, const QString &apiKey)
 {
     // 用被测 key 请求 /v1/models：200 表示可用。

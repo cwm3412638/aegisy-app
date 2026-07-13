@@ -47,6 +47,11 @@ public:
                        const QString &quality,
                        const QString &outputFormat);
     void cancelImageGeneration();
+    void sendChatMessage(const QString &requestId,
+                         const QString &apiKey,
+                         const QString &model,
+                         const QJsonArray &messages);
+    void cancelChatMessage();
 
     // 测试某个 API Key 是否可用（对 /v1/models 发起请求），结果通过 apiKeyTested 返回
     void testApiKey(const QString &keyId, const QString &apiKey);
@@ -89,6 +94,9 @@ signals:
                         const QString &outputFormat,
                         const QString &revisedPrompt);
     void imageGenerationFailed(const QString &errorMessage);
+    void chatChunkReceived(const QString &requestId, const QString &chunk);
+    void chatCompleted(const QString &requestId, const QString &content);
+    void chatFailed(const QString &requestId, const QString &errorMessage);
 
     // 某个 API Key 测试完成：supported 表示是否可用，detail 为说明
     void apiKeyTested(const QString &keyId, bool supported, const QString &detail);
@@ -121,6 +129,10 @@ private:
     QJsonArray m_apiKeyAccumulator;
     int m_apiKeyGeneration = 0;
     QNetworkReply *m_imageGenerationReply = nullptr;
+    QNetworkReply *m_chatReply = nullptr;
+    QByteArray m_chatBuffer;
+    QString m_chatContent;
+    QString m_chatRequestId;
     bool m_authExpirationEmitted = false;
 
     // 通用 POST 请求
