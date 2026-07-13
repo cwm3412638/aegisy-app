@@ -10,7 +10,10 @@
 - 点击右上角余额进入用量中心，支持今日、7 天、30 天汇总、模型统计和每个 API Key 的今日与累计消费。
 - 新增默认关闭的本地网关模式，仅监听 `127.0.0.1:43112`，支持 Claude、Codex、Gemini 独立路由和快速档案切换。
 - 本地网关请求监控只记录时间、工具、模型、路径、状态码和耗时，不保存提示词、回复或工具参数。
-- 档案支持系统原生终端和客户端内终端；“启动”会自动探测终端并直接运行，Windows 优先使用 Windows Terminal，其次 PowerShell 7、Windows PowerShell 和 cmd。
+- “启动”会自动探测系统原生终端并直接运行，Windows 优先使用 Windows Terminal，其次 PowerShell 7、Windows PowerShell 和 cmd。
+- 启动 CLI 时清除继承的旧 Provider 环境变量，避免它们覆盖刚切换的档案 Key；已运行进程会明确提示需要重启。
+- 系统体检比较本地版本与 npm 最新版本，仅在确有新版本时显示“更新”，最新版显示“已是最新”。
+- 移除无法完整支持交互式 TUI 的内置文本终端入口，避免 Claude 输入无响应和 Codex `TERM=dumb`。
 - 系统体检增加 OpenCode、OpenClaw、Hermes、VS Code、Claude Desktop 和 ChatGPT Desktop 检测。
 - 本地网关令牌保存在系统安全存储，真实 Aegisy Key 只通过进程管道传入网关内存。
 - 新增“桌面增强”中心，通过 Codex 官方 CLI 展示完整插件市场列表并安装插件。

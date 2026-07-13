@@ -19,6 +19,8 @@ struct ToolStatus {
     bool nodeOk = false;         // Node.js / npm 可用
     bool installed = false;      // CLI 已安装
     QString version;             // 本地安装版本，如 0.144.0
+    QString latestVersion;       // npm registry 最新版本
+    bool updateAvailable = false;
     bool configured = false;     // 已接入 aegisy（配置文件指向 aegisy.cc）
     QString configuredKey;       // 已配置的 key（掩码显示用）
     QString conflictWarning;     // 冲突警告（如 ANTHROPIC_API_KEY 环境变量）
@@ -80,6 +82,7 @@ public:
     // 异步读取本地 CLI 版本，适合主界面展示
     void detectVersion(AiTool tool);
     void checkLatestVersion(AiTool tool);
+    QString latestVersion(AiTool tool, int timeoutMs = 10000) const;
 
     // 检测桌面应用安装状态（Claude 桌面版 / ChatGPT 桌面版）
     DesktopAppStatus detectDesktop(AiTool tool);
@@ -112,7 +115,7 @@ public:
     bool launch(AiTool tool, const QString &workingDirectory = QString());
     QString resolvedExecutable(AiTool tool, int timeoutMs = 1500) const;
     QString resolvedRuntimeCommand(const QString &command, int timeoutMs = 1500) const;
-    QProcessEnvironment launchEnvironment() const;
+    QProcessEnvironment launchEnvironment(AiTool tool) const;
 
 signals:
     void installOutput(AiTool tool, const QString &line);

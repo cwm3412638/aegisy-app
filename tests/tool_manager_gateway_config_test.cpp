@@ -80,5 +80,43 @@ int main(int argc, char *argv[])
         || !require(restoredAuth.contains(directKey), "direct API key was not restored")) {
         return 1;
     }
+
+    qputenv("OPENAI_API_KEY", "sk-stale-openai");
+    qputenv("ANTHROPIC_AUTH_TOKEN", "sk-stale-anthropic");
+    qputenv("ANTHROPIC_BASE_URL", "https://old.example.com");
+    qputenv("GEMINI_API_KEY", "sk-stale-gemini");
+    qputenv("GOOGLE_API_KEY", "sk-stale-google");
+
+    const QProcessEnvironment codexEnvironment = manager.launchEnvironment(AiTool::CodexCli);
+    if (!require(!codexEnvironment.contains(QStringLiteral("OPENAI_API_KEY")),
+                 "Codex launch environment retained stale key")
+        || !require(!codexEnvironment.contains(QStringLiteral("ANTHROPIC_AUTH_TOKEN")),
+                    "Codex launch environment leaked Anthropic key")
+        || !require(codexEnvironment.value(QStringLiteral("TERM"))
+                        == QStringLiteral("xterm-256color"),
+                    "interactive terminal type was not configured")) {
+        return 1;
+    }
+
+    const QString claudeKey = QStringLiteral("sk-current-claude");
+    const QString geminiKey = QStringLiteral("sk-current-gemini");
+    if (!require(manager.configure(AiTool::ClaudeCode, claudeKey),
+                 "failed to write direct Claude configuration")
+        || !require(manager.configure(AiTool::GeminiCli, geminiKey),
+                    "failed to write direct Gemini configuration")) {
+        return 1;
+    }
+    const QProcessEnvironment claudeEnvironment = manager.launchEnvironment(AiTool::ClaudeCode);
+    const QProcessEnvironment geminiEnvironment = manager.launchEnvironment(AiTool::GeminiCli);
+    if (!require(!claudeEnvironment.contains(QStringLiteral("ANTHROPIC_AUTH_TOKEN")),
+                 "Claude launch environment retained stale key")
+        || !require(!claudeEnvironment.contains(QStringLiteral("ANTHROPIC_BASE_URL")),
+                    "Claude launch environment retained stale base URL")
+        || !require(!geminiEnvironment.contains(QStringLiteral("GEMINI_API_KEY")),
+                    "Gemini launch environment retained stale key")
+        || !require(!geminiEnvironment.contains(QStringLiteral("GOOGLE_API_KEY")),
+                    "Gemini launch environment retained GOOGLE_API_KEY")) {
+        return 1;
+    }
     return 0;
 }

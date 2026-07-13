@@ -21,6 +21,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QVersionNumber>
 
 SystemDoctorDialog::SystemDoctorDialog(ToolManager *toolManager, QWidget *parent)
     : QDialog(parent)
@@ -121,7 +122,15 @@ void SystemDoctorDialog::refreshReport()
         }
         QMap<int, ToolStatus> tools;
         for (AiTool tool : { AiTool::ClaudeCode, AiTool::CodexCli, AiTool::GeminiCli }) {
-            tools.insert(static_cast<int>(tool), detector.detectFast(tool));
+            ToolStatus status = detector.detectFast(tool);
+            if (status.installed) {
+                status.latestVersion = detector.latestVersion(tool, 10000);
+                const QVersionNumber local = QVersionNumber::fromString(status.version);
+                const QVersionNumber latest = QVersionNumber::fromString(status.latestVersion);
+                status.updateAvailable = !local.isNull() && !latest.isNull()
+                    && QVersionNumber::compare(local, latest) < 0;
+            }
+            tools.insert(static_cast<int>(tool), status);
         }
         const bool secureStorageAvailable = SecureStorage::isAvailable();
         const QString dataDirectory = QStandardPaths::writableLocation(
@@ -197,13 +206,19 @@ void SystemDoctorDialog::applyReport(const QList<RuntimeStatus> &runtimes,
             tone = QStringLiteral("warning");
             ++warningCount;
         } else {
-            state = QStringLiteral("正常");
-            tone = QStringLiteral("ok");
+            state = status.updateAvailable ? QStringLiteral("可更新")
+                                           : QStringLiteral("正常");
+            tone = status.updateAvailable ? QStringLiteral("warning")
+                                          : QStringLiteral("ok");
+            if (status.updateAvailable) ++warningCount;
         }
 
         QString detail = status.installed
-            ? QStringLiteral("版本 %1  ·  %2")
+            ? QStringLiteral("本地 %1%2  ·  %3")
                 .arg(status.version.isEmpty() ? QStringLiteral("未知") : status.version,
+                     status.latestVersion.isEmpty()
+                         ? QString()
+                         : QStringLiteral("  ·  最新 %1").arg(status.latestVersion),
                      status.configured ? QStringLiteral("已接入 Aegisy")
                                        : QStringLiteral("尚未写入 Aegisy 配置"))
             : QStringLiteral("未检测到 %1 命令").arg(ToolManager::cliCommand(tool));
@@ -211,8 +226,13 @@ void SystemDoctorDialog::applyReport(const QList<RuntimeStatus> &runtimes,
             detail = status.conflictWarning;
         }
         AiTool actionTool = tool;
+        AiTool *action = !status.installed || status.updateAvailable ? &actionTool : nullptr;
+        const QString passiveAction = status.installed && !status.updateAvailable
+            ? (status.latestVersion.isEmpty() ? QStringLiteral("已安装")
+                                              : QStringLiteral("已是最新"))
+            : QString();
         addRow(QStringLiteral("AI 工具"), ToolManager::toolName(tool),
-               state, detail, tone, &actionTool, status.installed);
+               state, detail, tone, action, status.installed, passiveAction);
     }
 
     if (!secureStorageAvailable) {
@@ -256,7 +276,8 @@ void SystemDoctorDialog::addRow(const QString &category,
                                 const QString &detail,
                                 const QString &tone,
                                 AiTool *actionTool,
-                                bool installed)
+                                bool installed,
+                                const QString &passiveAction)
 {
     const int row = m_table->rowCount();
     m_table->insertRow(row);
@@ -288,6 +309,10 @@ void SystemDoctorDialog::addRow(const QString &category,
         connect(button, &QPushButton::clicked, this,
                 [this, tool, installed]() { installOrUpdate(tool, installed); });
         m_table->setCellWidget(row, 4, button);
+    } else if (!passiveAction.isEmpty()) {
+        auto *actionItem = new QTableWidgetItem(passiveAction);
+        actionItem->setForeground(QColor(QStringLiteral("#667085")));
+        m_table->setItem(row, 4, actionItem);
     }
     m_table->setRowHeight(row, 42);
 }

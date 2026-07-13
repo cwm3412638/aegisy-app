@@ -118,6 +118,41 @@ static QProcessEnvironment commandEnvironment()
     return environment;
 }
 
+static const QStringList kProviderEnvironmentVariables = {
+    QStringLiteral("ANTHROPIC_API_KEY"),
+    QStringLiteral("ANTHROPIC_AUTH_TOKEN"),
+    QStringLiteral("ANTHROPIC_BASE_URL"),
+    QStringLiteral("OPENAI_API_KEY"),
+    QStringLiteral("OPENAI_BASE_URL"),
+    QStringLiteral("OPENAI_API_BASE"),
+    QStringLiteral("GEMINI_API_KEY"),
+    QStringLiteral("GOOGLE_API_KEY"),
+    QStringLiteral("GOOGLE_GEMINI_BASE_URL"),
+};
+
+static QString shellEnvironmentReset()
+{
+    QStringList arguments;
+    for (const QString &name : kProviderEnvironmentVariables) {
+        arguments << QStringLiteral("-u") << name;
+    }
+    return QStringLiteral("env %1 TERM=xterm-256color COLORTERM=truecolor")
+        .arg(arguments.join(QLatin1Char(' ')));
+}
+
+static bool startDetachedWithEnvironment(const QString &program,
+                                         const QStringList &arguments,
+                                         const QString &workingDirectory,
+                                         const QProcessEnvironment &environment)
+{
+    QProcess process;
+    process.setProgram(program);
+    process.setArguments(arguments);
+    process.setWorkingDirectory(workingDirectory);
+    process.setProcessEnvironment(environment);
+    return process.startDetached();
+}
+
 static QString extractVersion(const QString &output)
 {
     static const QRegularExpression versionPattern(
@@ -423,8 +458,8 @@ bool ToolManager::launch(AiTool tool, const QString &workingDirectory)
     }
 
 #if defined(Q_OS_MAC)
-    const QString command = QStringLiteral("cd %1 && exec %2")
-        .arg(shellQuote(directory), shellQuote(executable));
+    const QString command = QStringLiteral("cd %1 && exec %2 %3")
+        .arg(shellQuote(directory), shellEnvironmentReset(), shellQuote(executable));
     bool started = false;
     if (QDir(QStringLiteral("/Applications/iTerm.app")).exists()) {
         const QString script = QStringLiteral(
@@ -452,6 +487,7 @@ bool ToolManager::launch(AiTool tool, const QString &workingDirectory)
     quotedExecutable.replace(QLatin1Char('"'), QStringLiteral("\"\""));
     const QString command = QStringLiteral("cd /d \"%1\" && \"%2\"")
         .arg(quotedDirectory, quotedExecutable);
+    const QProcessEnvironment environment = launchEnvironment(tool);
     QString windowsTerminal = QStandardPaths::findExecutable(QStringLiteral("wt.exe"));
     if (windowsTerminal.isEmpty()) {
         const QString candidate = QString::fromLocal8Bit(qgetenv("LOCALAPPDATA"))
@@ -469,18 +505,21 @@ bool ToolManager::launch(AiTool tool, const QString &workingDirectory)
     }
     bool started = false;
     if (!windowsTerminal.isEmpty()) {
-        started = QProcess::startDetached(
+        started = startDetachedWithEnvironment(
             windowsTerminal,
             { QStringLiteral("-d"), directory,
-              QStringLiteral("cmd.exe"), QStringLiteral("/K"), command }, directory);
+              QStringLiteral("cmd.exe"), QStringLiteral("/K"), command }, directory,
+            environment);
     } else if (!powershell.isEmpty()) {
-        started = QProcess::startDetached(
+        started = startDetachedWithEnvironment(
             powershell,
             { QStringLiteral("-NoExit"), QStringLiteral("-Command"),
-              QStringLiteral("& \"%1\"").arg(quotedExecutable) }, directory);
+              QStringLiteral("& \"%1\"").arg(quotedExecutable) }, directory,
+            environment);
     } else {
-        started = QProcess::startDetached(
-            QStringLiteral("cmd.exe"), { QStringLiteral("/K"), command }, directory);
+        started = startDetachedWithEnvironment(
+            QStringLiteral("cmd.exe"), { QStringLiteral("/K"), command }, directory,
+            environment);
     }
 #else
     const QString gnomeTerminal = QStandardPaths::findExecutable(QStringLiteral("gnome-terminal"));
@@ -491,35 +530,36 @@ bool ToolManager::launch(AiTool tool, const QString &workingDirectory)
     const QString alacritty = QStandardPaths::findExecutable(QStringLiteral("alacritty"));
     bool started = false;
     if (!gnomeTerminal.isEmpty()) {
-        started = QProcess::startDetached(
+        started = startDetachedWithEnvironment(
             gnomeTerminal,
             { QStringLiteral("--working-directory=%1").arg(directory),
-              QStringLiteral("--"), executable });
+              QStringLiteral("--"), executable }, directory, launchEnvironment(tool));
     } else if (!konsole.isEmpty()) {
-        started = QProcess::startDetached(
+        started = startDetachedWithEnvironment(
             konsole,
             { QStringLiteral("--workdir"), directory,
-              QStringLiteral("-e"), executable });
+              QStringLiteral("-e"), executable }, directory, launchEnvironment(tool));
     } else if (!xfceTerminal.isEmpty()) {
-        started = QProcess::startDetached(
+        started = startDetachedWithEnvironment(
             xfceTerminal,
             { QStringLiteral("--working-directory"), directory,
-              QStringLiteral("--command"), executable });
+              QStringLiteral("--command"), executable }, directory, launchEnvironment(tool));
     } else if (!kitty.isEmpty()) {
-        started = QProcess::startDetached(
-            kitty, { QStringLiteral("--directory"), directory, executable });
+        started = startDetachedWithEnvironment(
+            kitty, { QStringLiteral("--directory"), directory, executable }, directory,
+            launchEnvironment(tool));
     } else if (!alacritty.isEmpty()) {
-        started = QProcess::startDetached(
+        started = startDetachedWithEnvironment(
             alacritty,
             { QStringLiteral("--working-directory"), directory,
-              QStringLiteral("-e"), executable });
+              QStringLiteral("-e"), executable }, directory, launchEnvironment(tool));
     } else if (!terminal.isEmpty()) {
-        const QString command = QStringLiteral("cd %1 && exec %2")
-            .arg(shellQuote(directory), shellQuote(executable));
-        started = QProcess::startDetached(
+        const QString command = QStringLiteral("cd %1 && exec %2 %3")
+            .arg(shellQuote(directory), shellEnvironmentReset(), shellQuote(executable));
+        started = startDetachedWithEnvironment(
             terminal,
             { QStringLiteral("-e"), QStringLiteral("sh"),
-              QStringLiteral("-lc"), command });
+              QStringLiteral("-lc"), command }, directory, launchEnvironment(tool));
     }
 #endif
 
@@ -539,9 +579,20 @@ QString ToolManager::resolvedRuntimeCommand(const QString &command, int timeoutM
     return resolveCommand(command, timeoutMs);
 }
 
-QProcessEnvironment ToolManager::launchEnvironment() const
+QProcessEnvironment ToolManager::launchEnvironment(AiTool tool) const
 {
-    return commandEnvironment();
+    Q_UNUSED(tool);
+    QProcessEnvironment environment = commandEnvironment();
+    for (const QString &name : kProviderEnvironmentVariables) {
+        environment.remove(name);
+    }
+    environment.remove(QStringLiteral("NO_COLOR"));
+    environment.remove(QStringLiteral("CI"));
+    environment.remove(QStringLiteral("CODEX_CI"));
+    environment.insert(QStringLiteral("TERM"), QStringLiteral("xterm-256color"));
+    environment.insert(QStringLiteral("COLORTERM"), QStringLiteral("truecolor"));
+
+    return environment;
 }
 
 QString ToolManager::homeFilePath(const QString &relative)
@@ -849,10 +900,14 @@ ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
                 status.configuredKey = key;
             }
         }
-        // 官方指南：ANTHROPIC_API_KEY 与 AUTH_TOKEN 并存会 401
-        if (!qgetenv("ANTHROPIC_API_KEY").isEmpty()) {
+        const QString envApiKey = QString::fromLocal8Bit(qgetenv("ANTHROPIC_API_KEY"));
+        const QString envToken = QString::fromLocal8Bit(qgetenv("ANTHROPIC_AUTH_TOKEN"));
+        const QString envBase = QString::fromLocal8Bit(qgetenv("ANTHROPIC_BASE_URL"));
+        if (!envApiKey.isEmpty()
+                || (!envToken.isEmpty() && envToken != key)
+                || (!envBase.isEmpty() && !envBase.contains(QStringLiteral("aegisy.cc")))) {
             status.conflictWarning =
-                QStringLiteral("检测到系统环境变量 ANTHROPIC_API_KEY，会与接入配置冲突导致 401，建议删除该变量");
+                QStringLiteral("检测到旧的 Anthropic 环境变量，可能覆盖当前档案；Aegisy 启动终端时会自动清除，外部终端请删除后重启");
         }
         break;
     }
@@ -869,10 +924,14 @@ ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
         status.configured = baseOk && !key.isEmpty();
         if (status.configured) status.configuredKey = key;
         // 检查 OPENAI_API_KEY 是否指向别的账号
-        const QString envKey = qgetenv("OPENAI_API_KEY");
-        if (!envKey.isEmpty() && (!status.configured || envKey != key)) {
+        const QString envKey = QString::fromLocal8Bit(qgetenv("OPENAI_API_KEY"));
+        const QString envBase = QString::fromLocal8Bit(qgetenv("OPENAI_BASE_URL"));
+        const QString envApiBase = QString::fromLocal8Bit(qgetenv("OPENAI_API_BASE"));
+        if ((!envKey.isEmpty() && (!status.configured || envKey != key))
+                || (!envBase.isEmpty() && !envBase.contains(QStringLiteral("aegisy.cc")))
+                || (!envApiBase.isEmpty() && !envApiBase.contains(QStringLiteral("aegisy.cc")))) {
             status.conflictWarning =
-                QStringLiteral("检测到系统环境变量 OPENAI_API_KEY，可能覆盖档案配置，建议删除该变量");
+                QStringLiteral("检测到旧的 OpenAI 环境变量，可能覆盖当前档案；Aegisy 启动终端时会自动清除，外部终端请删除后重启");
         }
         break;
     }
@@ -893,6 +952,14 @@ ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
             }
             status.configured = baseOk && !key.isEmpty();
             if (status.configured) status.configuredKey = key;
+        }
+        const QString envKey = QString::fromLocal8Bit(qgetenv("GEMINI_API_KEY"));
+        const QString googleKey = QString::fromLocal8Bit(qgetenv("GOOGLE_API_KEY"));
+        const QString envBase = QString::fromLocal8Bit(qgetenv("GOOGLE_GEMINI_BASE_URL"));
+        if ((!envKey.isEmpty() && envKey != key) || !googleKey.isEmpty()
+                || (!envBase.isEmpty() && !envBase.contains(QStringLiteral("aegisy.cc")))) {
+            status.conflictWarning =
+                QStringLiteral("检测到旧的 Gemini 环境变量，可能覆盖当前档案；Aegisy 启动终端时会自动清除，外部终端请删除后重启");
         }
         break;
     }
@@ -1006,6 +1073,28 @@ void ToolManager::checkLatestVersion(AiTool tool)
     process->start(npmExecutable,
                    { QStringLiteral("view"), npmPackage(tool),
                      QStringLiteral("version"), QStringLiteral("--json") });
+}
+
+QString ToolManager::latestVersion(AiTool tool, int timeoutMs) const
+{
+    const QString npmExecutable = resolveCommand(kNpmCmd, 800);
+    if (npmExecutable.isEmpty()) return QString();
+
+    QProcess process;
+    process.setProcessEnvironment(commandEnvironment());
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.start(npmExecutable,
+                  { QStringLiteral("view"), npmPackage(tool),
+                    QStringLiteral("version"), QStringLiteral("--json") });
+    if (!process.waitForStarted(2000) || !process.waitForFinished(timeoutMs)) {
+        process.kill();
+        process.waitForFinished(500);
+        return QString();
+    }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        return QString();
+    }
+    return extractVersion(QString::fromUtf8(process.readAll()).trimmed());
 }
 
 void ToolManager::detectNpmVersion(AiTool tool)

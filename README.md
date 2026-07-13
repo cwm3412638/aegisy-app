@@ -16,7 +16,8 @@ Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账�
 - 激活前预览目标文件、字段变化、模型、冲突和备份策略
 - 系统体检统一检查 Node.js、npm、Git、pnpm、Bun、AI CLI、额外开发工具、桌面客户端、Aegisy 配置和系统安全存储
 - 缺少环境时通过 Homebrew、WinGet 或 Linux 系统包管理器一键安装 Node.js 和对应 CLI
-- 支持确认后安装或更新三个 AI CLI，并从当前激活档案使用系统终端或客户端内终端启动
+- 支持确认后安装或更新三个 AI CLI，并从当前激活档案使用系统原生终端启动
+- 启动终端时清除可能覆盖档案的旧 Provider 环境变量，确保新进程使用当前激活 Key
 - 启动时自动适配 macOS Terminal/iTerm、Windows Terminal/PowerShell/cmd 和常见 Linux 终端，不要求选择目录
 - 可选本地网关模式支持快速切换档案和元数据级请求监控
 - “桌面增强”展示 Codex 官方市场中的已安装和可安装插件，并支持通过官方 CLI 安装所选插件
@@ -144,7 +145,7 @@ src/tool_manager.cpp     CLI 检测、配置事务、备份恢复
 src/system_doctor_dialog.cpp 系统依赖、CLI、配置和安全存储体检
 src/usage_dialog.cpp      账号、模型和 API Key 用量中心
 src/gateway_manager.cpp   本地网关生命周期、凭据管道和请求元数据
-src/terminal_dialog.cpp   客户端内交互终端
+src/tool_manager.cpp      配置、版本检测与跨平台原生终端启动
 src/update_manager_mac.mm  macOS Sparkle 应用内更新桥接
 src/update_manager_win.cpp Windows WinSparkle 应用内更新桥接
 src/main_window.cpp      主界面与档案操作

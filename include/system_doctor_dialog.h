@@ -36,7 +36,8 @@ private:
                 const QString &detail,
                 const QString &tone,
                 AiTool *actionTool = nullptr,
-                bool installed = false);
+                bool installed = false,
+                const QString &passiveAction = QString());
     void installOrUpdate(AiTool tool, bool installed);
 
     ToolManager *m_toolManager;

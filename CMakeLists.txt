@@ -48,7 +48,6 @@ set(SOURCES
     src/usage_dialog.cpp
     src/gateway_manager.cpp
     src/gateway_dialog.cpp
-    src/terminal_dialog.cpp
     src/desktop_enhancement_manager.cpp
     src/desktop_enhancement_dialog.cpp
     src/profile_manager.cpp
@@ -79,7 +78,6 @@ set(HEADERS
     include/usage_dialog.h
     include/gateway_manager.h
     include/gateway_dialog.h
-    include/terminal_dialog.h
     include/desktop_enhancement_manager.h
     include/desktop_enhancement_dialog.h
     include/profile_manager.h

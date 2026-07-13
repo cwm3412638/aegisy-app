@@ -8,7 +8,6 @@
 #include "usage_dialog.h"
 #include "gateway_manager.h"
 #include "gateway_dialog.h"
-#include "terminal_dialog.h"
 #include "desktop_enhancement_manager.h"
 #include "desktop_enhancement_dialog.h"
 #include "secure_storage.h"
@@ -997,17 +996,6 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive)
             this, [this, profileIndex]() { launchProfile(profileIndex, false); });
     layout->addWidget(launchButton);
 
-    auto *embeddedButton = new QPushButton(card);
-    embeddedButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
-    embeddedButton->setToolTip(QStringLiteral("在客户端内终端启动"));
-    embeddedButton->setFixedSize(38, 38);
-    embeddedButton->setCursor(Qt::PointingHandCursor);
-    embeddedButton->setEnabled(isActive && profile.hasAnyKey());
-    embeddedButton->setStyleSheet(AppTheme::secondaryButtonStyle());
-    connect(embeddedButton, &QPushButton::clicked,
-            this, [this, profileIndex]() { launchProfile(profileIndex, true); });
-    layout->addWidget(embeddedButton);
-
     auto *activateButton = new QPushButton(
         isActive ? QStringLiteral("已激活") : QStringLiteral("激活"), card);
     activateButton->setIcon(style()->standardIcon(
@@ -1050,6 +1038,7 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive)
 
 void MainWindow::launchProfile(int index, bool embedded)
 {
+    Q_UNUSED(embedded);
     const QList<Profile> profiles = m_profileManager->allProfiles();
     if (index < 0 || index >= profiles.size()) {
         return;
@@ -1062,21 +1051,6 @@ void MainWindow::launchProfile(int index, bool embedded)
     }
 
     const QString directory = QDir::homePath();
-
-    if (embedded) {
-        const QString executable = m_toolManager->resolvedExecutable(profile.tool());
-        if (executable.isEmpty()) {
-            QMessageBox::warning(this, QStringLiteral("启动失败"),
-                                 QStringLiteral("未找到 %1，请先安装运行环境。")
-                                     .arg(ToolManager::toolName(profile.tool())));
-            return;
-        }
-        TerminalDialog dialog(
-            ToolManager::toolName(profile.tool()), executable, directory,
-            m_toolManager->launchEnvironment(), this);
-        dialog.exec();
-        return;
-    }
 
     if (!m_toolManager->launch(profile.tool(), directory)) {
         QMessageBox::warning(this, QStringLiteral("启动失败"),
@@ -1265,7 +1239,8 @@ void MainWindow::processActivationQueue()
         if (m_activatingIndex >= 0 && m_activatingIndex < profiles.size()) {
             const Profile &profile = profiles[m_activatingIndex];
             logMessage(
-                QStringLiteral("「%1」已激活，本地认证配置已更新").arg(profile.name),
+                QStringLiteral("「%1」已激活，本地认证配置已更新；已运行的终端需重启后使用新 Key")
+                    .arg(profile.name),
                 kLogSuccess);
         }
         m_activatingIndex = -1;
