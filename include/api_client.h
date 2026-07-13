@@ -95,6 +95,10 @@ signals:
                         const QString &revisedPrompt);
     void imageGenerationFailed(const QString &errorMessage);
     void chatChunkReceived(const QString &requestId, const QString &chunk);
+    void chatUsageReceived(const QString &requestId,
+                           int promptTokens,
+                           int completionTokens,
+                           int totalTokens);
     void chatCompleted(const QString &requestId, const QString &content);
     void chatFailed(const QString &requestId, const QString &errorMessage);
 

@@ -2,4 +2,7 @@
     <qresource prefix="/gateway">
         <file alias="local_gateway.js">assets/local_gateway.js</file>
     </qresource>
+    <qresource prefix="/icons">
+        <file alias="aegisy-icon.png">assets/aegisy-icon.png</file>
+    </qresource>
 </RCC>

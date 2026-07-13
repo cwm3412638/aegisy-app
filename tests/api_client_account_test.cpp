@@ -44,6 +44,7 @@ public:
                         const QByteArray payload =
                             "data: {\"choices\":[{\"delta\":{\"content\":\"\\u4f60\\u597d\"}}]}\n\n"
                             "data: {\"choices\":[{\"delta\":{\"content\":\"！\"}}]}\n\n"
+                            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n\n"
                             "data: [DONE]\n\n";
                         socket->write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: "
                                       + QByteArray::number(payload.size())
@@ -213,6 +214,9 @@ int main(int argc, char **argv)
     server.clear();
     succeeded = false;
     QString streamedContent;
+    int promptTokens = 0;
+    int completionTokens = 0;
+    int totalTokens = 0;
     const QJsonArray messages{ QJsonObject{
         { QStringLiteral("role"), QStringLiteral("user") },
         { QStringLiteral("content"), QStringLiteral("你好") }
@@ -225,6 +229,14 @@ int main(int argc, char **argv)
                 [&](const QString &requestId, const QString &chunk) {
                     if (requestId == QStringLiteral("chat-test")) streamedContent += chunk;
                 });
+            QObject::connect(&client, &ApiClient::chatUsageReceived, &loop,
+                [&](const QString &requestId, int prompt, int completion, int total) {
+                    if (requestId == QStringLiteral("chat-test")) {
+                        promptTokens = prompt;
+                        completionTokens = completion;
+                        totalTokens = total;
+                    }
+                });
             QObject::connect(&client, &ApiClient::chatCompleted, &loop,
                 [&](const QString &requestId, const QString &content) {
                     succeeded = requestId == QStringLiteral("chat-test")
@@ -236,11 +248,16 @@ int main(int argc, char **argv)
         })
         || !require(succeeded, "streaming chat request failed")
         || !require(streamedContent == QStringLiteral("你好！"), "chat chunks mismatch")
+        || !require(promptTokens == 12 && completionTokens == 3 && totalTokens == 15,
+                    "chat usage mismatch")
         || !require(server.method == QStringLiteral("POST"), "chat method mismatch")
         || !require(server.path == QStringLiteral("/v1/chat/completions"), "chat path mismatch")
         || !require(server.body.value(QStringLiteral("model")).toString() == QStringLiteral("gpt-test"),
                     "chat model mismatch")
         || !require(server.body.value(QStringLiteral("stream")).toBool(), "chat stream flag mismatch")
+        || !require(server.body.value(QStringLiteral("stream_options")).toObject()
+                        .value(QStringLiteral("include_usage")).toBool(),
+                    "chat usage option mismatch")
         || !require(server.body.value(QStringLiteral("messages")).toArray().size() == 1,
                     "chat messages mismatch")) return 1;
 

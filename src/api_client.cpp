@@ -636,7 +636,10 @@ void ApiClient::sendChatMessage(const QString &requestId,
     const QJsonObject body{
         { QStringLiteral("model"), model },
         { QStringLiteral("messages"), messages },
-        { QStringLiteral("stream"), true }
+        { QStringLiteral("stream"), true },
+        { QStringLiteral("stream_options"), QJsonObject{
+            { QStringLiteral("include_usage"), true }
+        }}
     };
     QNetworkReply *reply = m_networkManager->post(
         request, QJsonDocument(body).toJson(QJsonDocument::Compact));
@@ -654,6 +657,14 @@ void ApiClient::sendChatMessage(const QString &requestId,
             line = line.mid(5).trimmed();
             if (line == "[DONE]") continue;
             const QJsonObject event = QJsonDocument::fromJson(line).object();
+            const QJsonObject usage = event.value(QStringLiteral("usage")).toObject();
+            if (!usage.isEmpty()) {
+                emit chatUsageReceived(
+                    requestId,
+                    usage.value(QStringLiteral("prompt_tokens")).toInt(),
+                    usage.value(QStringLiteral("completion_tokens")).toInt(),
+                    usage.value(QStringLiteral("total_tokens")).toInt());
+            }
             const QJsonArray choices = event.value(QStringLiteral("choices")).toArray();
             const QJsonObject choice = choices.isEmpty() ? QJsonObject() : choices.at(0).toObject();
             const QJsonValue contentValue = choice.value(QStringLiteral("delta")).toObject()
@@ -694,6 +705,14 @@ void ApiClient::sendChatMessage(const QString &requestId,
         } else if (!canceled) {
             if (m_chatContent.isEmpty() && !remaining.trimmed().isEmpty()) {
                 const QJsonObject response = QJsonDocument::fromJson(remaining).object();
+                const QJsonObject usage = response.value(QStringLiteral("usage")).toObject();
+                if (!usage.isEmpty()) {
+                    emit chatUsageReceived(
+                        requestId,
+                        usage.value(QStringLiteral("prompt_tokens")).toInt(),
+                        usage.value(QStringLiteral("completion_tokens")).toInt(),
+                        usage.value(QStringLiteral("total_tokens")).toInt());
+                }
                 const QJsonArray choices = response.value(QStringLiteral("choices")).toArray();
                 const QJsonObject message = choices.isEmpty() ? QJsonObject()
                     : choices.at(0).toObject().value(QStringLiteral("message")).toObject();
