@@ -3,6 +3,7 @@
 #include "app_theme.h"
 
 #include <QAbstractItemView>
+#include <QApplication>
 #include <QDialogButtonBox>
 #include <QFrame>
 #include <QHeaderView>
@@ -10,6 +11,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QProgressDialog>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
@@ -45,8 +47,8 @@ DesktopEnhancementDialog::DesktopEnhancementDialog(DesktopEnhancementManager *ma
     , m_manager(manager)
 {
     setWindowTitle(QStringLiteral("桌面增强"));
-    resize(820, 610);
-    setMinimumSize(720, 520);
+    resize(980, 680);
+    setMinimumSize(820, 560);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(20, 18, 20, 18);
@@ -89,19 +91,28 @@ DesktopEnhancementDialog::DesktopEnhancementDialog(DesktopEnhancementManager *ma
     m_pluginSearch->setPlaceholderText(QStringLiteral("搜索插件或市场..."));
     m_pluginSearch->setClearButtonEnabled(true);
     pluginToolbar->addWidget(m_pluginSearch, 1);
+    auto *selectAllButton = new QPushButton(QStringLiteral("全选可安装"), catalogPage);
+    selectAllButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    pluginToolbar->addWidget(selectAllButton);
+    auto *clearSelectionButton = new QPushButton(QStringLiteral("清空选择"), catalogPage);
+    clearSelectionButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    pluginToolbar->addWidget(clearSelectionButton);
     auto *refreshButton = new QPushButton(QStringLiteral("刷新列表"), catalogPage);
     refreshButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     pluginToolbar->addWidget(refreshButton);
     catalogLayout->addLayout(pluginToolbar);
 
     m_pluginTable = new QTableWidget(catalogPage);
-    m_pluginTable->setColumnCount(4);
-    m_pluginTable->setHorizontalHeaderLabels({ QStringLiteral("插件"), QStringLiteral("市场"),
-                                                QStringLiteral("版本"), QStringLiteral("状态") });
-    m_pluginTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_pluginTable->setColumnCount(6);
+    m_pluginTable->setHorizontalHeaderLabels({ QStringLiteral("选择"), QStringLiteral("插件"),
+        QStringLiteral("功能说明"), QStringLiteral("市场"), QStringLiteral("版本"),
+        QStringLiteral("状态") });
+    m_pluginTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     m_pluginTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    m_pluginTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_pluginTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     m_pluginTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_pluginTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    m_pluginTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
     m_pluginTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_pluginTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_pluginTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -109,10 +120,20 @@ DesktopEnhancementDialog::DesktopEnhancementDialog(DesktopEnhancementManager *ma
     m_pluginTable->setAlternatingRowColors(true);
     catalogLayout->addWidget(m_pluginTable, 1);
 
+    auto *detailFrame = sectionFrame(catalogPage);
+    auto *detailLayout = new QVBoxLayout(detailFrame);
+    detailLayout->setContentsMargins(12, 10, 12, 10);
+    m_pluginDetails = mutedLabel(
+        QStringLiteral("选择一行可查看插件的完整功能说明。勾选多个未安装插件后可批量安装。"),
+        detailFrame);
+    m_pluginDetails->setMinimumHeight(38);
+    detailLayout->addWidget(m_pluginDetails);
+    catalogLayout->addWidget(detailFrame);
+
     auto *pluginFooter = new QHBoxLayout;
     m_pluginStatus = mutedLabel(QStringLiteral("正在读取 Codex 插件目录..."), catalogPage);
     pluginFooter->addWidget(m_pluginStatus, 1);
-    m_installPluginButton = new QPushButton(QStringLiteral("安装所选插件"), catalogPage);
+    m_installPluginButton = new QPushButton(QStringLiteral("安装已选插件"), catalogPage);
     m_installPluginButton->setEnabled(false);
     m_installPluginButton->setStyleSheet(AppTheme::primaryButtonStyle());
     pluginFooter->addWidget(m_installPluginButton);
@@ -191,14 +212,26 @@ DesktopEnhancementDialog::DesktopEnhancementDialog(DesktopEnhancementManager *ma
 
     connect(refreshButton, &QPushButton::clicked, this, &DesktopEnhancementDialog::refreshPlugins);
     connect(m_pluginSearch, &QLineEdit::textChanged, this, &DesktopEnhancementDialog::filterPlugins);
-    connect(m_pluginTable, &QTableWidget::itemSelectionChanged, this, [this]() {
-        const QString id = selectedPluginId();
-        bool installable = false;
+    connect(selectAllButton, &QPushButton::clicked, this, [this]() {
         for (const CodexPluginInfo &plugin : m_plugins) {
-            if (plugin.id == id) installable = !plugin.installed;
+            if (!plugin.installed) m_checkedPluginIds.insert(plugin.id);
         }
-        m_installPluginButton->setEnabled(installable);
+        rebuildPluginTable();
     });
+    connect(clearSelectionButton, &QPushButton::clicked, this, [this]() {
+        m_checkedPluginIds.clear();
+        rebuildPluginTable();
+    });
+    connect(m_pluginTable, &QTableWidget::itemChanged, this,
+            [this](QTableWidgetItem *item) {
+        if (!item || item->column() != 0) return;
+        const QString id = item->data(Qt::UserRole).toString();
+        if (item->checkState() == Qt::Checked) m_checkedPluginIds.insert(id);
+        else m_checkedPluginIds.remove(id);
+        updateInstallButton();
+    });
+    connect(m_pluginTable, &QTableWidget::currentCellChanged, this,
+            [this](int row, int, int, int) { showPluginDetails(row); });
     connect(m_installPluginButton, &QPushButton::clicked,
             this, &DesktopEnhancementDialog::installSelectedPlugin);
     connect(m_computerUseButton, &QPushButton::clicked,
@@ -240,57 +273,143 @@ void DesktopEnhancementDialog::filterPlugins()
 void DesktopEnhancementDialog::rebuildPluginTable()
 {
     const QString search = m_pluginSearch->text().trimmed();
+    m_pluginTable->blockSignals(true);
     m_pluginTable->setRowCount(0);
     for (const CodexPluginInfo &plugin : m_plugins) {
         if (!search.isEmpty()
                 && !plugin.name.contains(search, Qt::CaseInsensitive)
-                && !plugin.marketplace.contains(search, Qt::CaseInsensitive)) {
+                && !plugin.marketplace.contains(search, Qt::CaseInsensitive)
+                && !plugin.description.contains(search, Qt::CaseInsensitive)) {
             continue;
         }
         const int row = m_pluginTable->rowCount();
         m_pluginTable->insertRow(row);
+
+        auto *check = new QTableWidgetItem;
+        check->setData(Qt::UserRole, plugin.id);
+        check->setTextAlignment(Qt::AlignCenter);
+        if (plugin.installed) {
+            check->setFlags(Qt::ItemIsEnabled);
+            check->setToolTip(QStringLiteral("该插件已经安装"));
+        } else {
+            check->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+            check->setCheckState(m_checkedPluginIds.contains(plugin.id)
+                ? Qt::Checked : Qt::Unchecked);
+        }
+        m_pluginTable->setItem(row, 0, check);
+
         auto *name = new QTableWidgetItem(plugin.name);
         name->setData(Qt::UserRole, plugin.id);
         name->setToolTip(plugin.path);
-        m_pluginTable->setItem(row, 0, name);
-        m_pluginTable->setItem(row, 1, new QTableWidgetItem(plugin.marketplace));
-        m_pluginTable->setItem(row, 2, new QTableWidgetItem(
+        m_pluginTable->setItem(row, 1, name);
+        auto *description = new QTableWidgetItem(plugin.description);
+        description->setToolTip(plugin.officialDescription.isEmpty()
+            ? plugin.description
+            : QStringLiteral("%1\n\n官方说明：%2")
+                .arg(plugin.description, plugin.officialDescription));
+        m_pluginTable->setItem(row, 2, description);
+        m_pluginTable->setItem(row, 3, new QTableWidgetItem(plugin.marketplace));
+        m_pluginTable->setItem(row, 4, new QTableWidgetItem(
             plugin.version.isEmpty() ? QStringLiteral("-") : plugin.version));
-        m_pluginTable->setItem(row, 3, new QTableWidgetItem(
+        m_pluginTable->setItem(row, 5, new QTableWidgetItem(
             plugin.installed ? (plugin.enabled ? QStringLiteral("已启用") : QStringLiteral("已安装"))
                              : QStringLiteral("可安装")));
+        m_pluginTable->setRowHeight(row, 44);
     }
-    m_installPluginButton->setEnabled(false);
+    m_pluginTable->blockSignals(false);
+    updateInstallButton();
 }
 
-QString DesktopEnhancementDialog::selectedPluginId() const
+QStringList DesktopEnhancementDialog::selectedPluginIds() const
 {
-    const int row = m_pluginTable->currentRow();
-    if (row < 0 || !m_pluginTable->item(row, 0)) return QString();
-    return m_pluginTable->item(row, 0)->data(Qt::UserRole).toString();
+    QStringList ids;
+    for (const CodexPluginInfo &plugin : m_plugins) {
+        if (!plugin.installed && m_checkedPluginIds.contains(plugin.id)) ids.append(plugin.id);
+    }
+    return ids;
+}
+
+void DesktopEnhancementDialog::updateInstallButton()
+{
+    const int count = selectedPluginIds().size();
+    m_installPluginButton->setEnabled(count > 0);
+    m_installPluginButton->setText(count > 0
+        ? QStringLiteral("安装已选插件 (%1)").arg(count)
+        : QStringLiteral("安装已选插件"));
+}
+
+void DesktopEnhancementDialog::showPluginDetails(int row)
+{
+    if (row < 0 || !m_pluginTable->item(row, 1)) return;
+    const QString id = m_pluginTable->item(row, 1)->data(Qt::UserRole).toString();
+    for (const CodexPluginInfo &plugin : m_plugins) {
+        if (plugin.id != id) continue;
+        QString text = QStringLiteral("%1：%2").arg(plugin.name, plugin.description);
+        if (!plugin.officialDescription.isEmpty()
+                && plugin.officialDescription != plugin.description) {
+            text += QStringLiteral("\n官方说明：%1").arg(plugin.officialDescription);
+        }
+        m_pluginDetails->setText(text);
+        return;
+    }
 }
 
 void DesktopEnhancementDialog::installSelectedPlugin()
 {
-    const QString pluginId = selectedPluginId();
-    if (pluginId.isEmpty()) return;
+    const QStringList pluginIds = selectedPluginIds();
+    if (pluginIds.isEmpty()) return;
+    QStringList summary;
+    for (const QString &id : pluginIds) {
+        for (const CodexPluginInfo &plugin : m_plugins) {
+            if (plugin.id == id) {
+                summary.append(QStringLiteral("• %1：%2").arg(plugin.name, plugin.description));
+                break;
+            }
+        }
+    }
     if (QMessageBox::question(this, QStringLiteral("安装 Codex 插件"),
-            QStringLiteral("将通过 Codex 官方插件命令安装：\n%1\n\n插件首次使用时仍可能请求额外授权。")
-                .arg(pluginId), QMessageBox::Yes | QMessageBox::No,
+            QStringLiteral("将按顺序安装以下 %1 个插件：\n\n%2\n\n"
+                           "部分插件首次使用或安装时会请求额外授权。")
+                .arg(pluginIds.size()).arg(summary.join(QLatin1Char('\n'))),
+            QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No) != QMessageBox::Yes) return;
 
     m_installPluginButton->setEnabled(false);
-    m_pluginStatus->setText(QStringLiteral("正在安装 %1...").arg(pluginId));
-    QString output;
-    QString error;
-    if (!m_manager->installCodexPlugin(pluginId, &output, &error)) {
-        QMessageBox::critical(this, QStringLiteral("安装失败"), error);
-    } else {
-        QMessageBox::information(this, QStringLiteral("安装完成"),
-                                 QStringLiteral("插件 %1 已安装。重启 Codex 后生效。")
-                                     .arg(pluginId));
+    QProgressDialog progress(QStringLiteral("正在安装 Codex 插件..."),
+                             QStringLiteral("停止后续安装"), 0, pluginIds.size(), this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setValue(0);
+    QStringList succeeded;
+    QStringList failed;
+    for (int i = 0; i < pluginIds.size(); ++i) {
+        if (progress.wasCanceled()) break;
+        const QString pluginId = pluginIds[i];
+        progress.setLabelText(QStringLiteral("正在安装 %1 (%2/%3)...")
+            .arg(pluginId).arg(i + 1).arg(pluginIds.size()));
+        QApplication::processEvents();
+        m_pluginStatus->setText(progress.labelText());
+        QString output;
+        QString error;
+        if (m_manager->installCodexPlugin(pluginId, &output, &error)) {
+            succeeded.append(pluginId);
+            m_checkedPluginIds.remove(pluginId);
+        } else {
+            failed.append(QStringLiteral("%1：%2").arg(pluginId, error.left(180)));
+        }
+        progress.setValue(i + 1);
     }
     refreshPlugins();
+    QString result = succeeded.isEmpty()
+        ? QStringLiteral("没有插件安装成功。")
+        : QStringLiteral("已安装 %1 个插件：\n%2")
+            .arg(succeeded.size()).arg(succeeded.join(QLatin1Char('\n')));
+    if (!failed.isEmpty()) {
+        result += QStringLiteral("\n\n安装失败 %1 个：\n%2")
+            .arg(failed.size()).arg(failed.join(QLatin1Char('\n')));
+    }
+    result += QStringLiteral("\n\n重启 Codex 后生效。");
+    QMessageBox::information(this, QStringLiteral("批量安装结果"), result);
 }
 
 void DesktopEnhancementDialog::installComputerUse()

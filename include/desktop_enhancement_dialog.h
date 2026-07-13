@@ -2,6 +2,7 @@
 #define DESKTOP_ENHANCEMENT_DIALOG_H
 
 #include <QDialog>
+#include <QSet>
 
 #include "desktop_enhancement_manager.h"
 
@@ -33,18 +34,22 @@ private slots:
 
 private:
     void rebuildPluginTable();
-    QString selectedPluginId() const;
+    QStringList selectedPluginIds() const;
+    void updateInstallButton();
+    void showPluginDetails(int row);
 
     DesktopEnhancementManager *m_manager;
     QList<CodexPluginInfo> m_plugins;
     QLineEdit *m_pluginSearch;
     QTableWidget *m_pluginTable;
     QLabel *m_pluginStatus;
+    QLabel *m_pluginDetails;
     QPushButton *m_installPluginButton;
     QPushButton *m_computerUseButton;
     QLabel *m_historyStatus;
     QLabel *m_claudeStatus;
     QPushButton *m_localizeClaudeButton;
+    QSet<QString> m_checkedPluginIds;
 };
 
 #endif // DESKTOP_ENHANCEMENT_DIALOG_H

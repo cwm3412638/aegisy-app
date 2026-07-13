@@ -23,6 +23,7 @@
 #include <QUuid>
 #include <QUrl>
 #include <QWebSocket>
+#include <QHash>
 
 namespace {
 
@@ -73,6 +74,69 @@ bool writeAtomically(const QString &path, const QByteArray &data, QString *error
         return false;
     }
     return true;
+}
+
+QString compactText(QString text)
+{
+    text.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
+    return text.trimmed();
+}
+
+QString officialPluginDescription(const QString &path)
+{
+    QFile file(path + QStringLiteral("/.codex-plugin/plugin.json"));
+    if (!file.open(QIODevice::ReadOnly)) return QString();
+    const QJsonObject manifest = QJsonDocument::fromJson(file.readAll()).object();
+    return compactText(manifest.value(QStringLiteral("description")).toString());
+}
+
+QString localizedPluginDescription(const QString &name, const QString &official)
+{
+    static const QHash<QString, QString> descriptions = {
+        { QStringLiteral("documents"), QStringLiteral("创建和编辑 Word、Google Docs 等文档，并检查排版结果。") },
+        { QStringLiteral("pdf"), QStringLiteral("读取、生成、渲染和校验 PDF，适合报告、表单和文档审阅。") },
+        { QStringLiteral("spreadsheets"), QStringLiteral("创建、编辑和分析 Excel、CSV、Google Sheets 表格及图表。") },
+        { QStringLiteral("presentations"), QStringLiteral("创建和修改 PowerPoint、Google Slides 演示文稿并检查版式。") },
+        { QStringLiteral("template-creator"), QStringLiteral("把常用文档、表格或演示稿制作成可复用的个人模板。") },
+        { QStringLiteral("browser"), QStringLiteral("控制 Codex 内置浏览器，打开网页、点击、输入、截图和测试本地网站。") },
+        { QStringLiteral("visualize"), QStringLiteral("生成交互式图表、地图、流程图、模拟器、3D 模型和界面预览。") },
+        { QStringLiteral("chrome"), QStringLiteral("控制用户现有的 Chrome 标签页和登录会话，适合需要已登录状态的网站。") },
+        { QStringLiteral("computer-use"), QStringLiteral("在用户授权后控制桌面应用和系统界面，执行点击、输入等操作。") },
+        { QStringLiteral("record-and-replay"), QStringLiteral("录制桌面操作流程，便于回放、复现和自动化重复步骤。") },
+        { QStringLiteral("latex"), QStringLiteral("编译和检查 LaTeX 项目，支持论文、公式和技术文档。") },
+        { QStringLiteral("game-studio"), QStringLiteral("设计、开发和测试浏览器 2D/3D 游戏及其素材流程。") },
+        { QStringLiteral("superpowers"), QStringLiteral("提供规划、测试驱动开发、系统调试和协作式开发工作流。") },
+        { QStringLiteral("circleci"), QStringLiteral("配置、检查和排查 CircleCI 持续集成与部署流水线。") },
+        { QStringLiteral("sentry"), QStringLiteral("查询 Sentry 错误、事件和堆栈，辅助定位线上问题。") },
+        { QStringLiteral("build-macos-apps"), QStringLiteral("使用 Xcode、SwiftUI 和 AppKit 开发、运行和调试 macOS 应用。") },
+        { QStringLiteral("build-web-apps"), QStringLiteral("开发和测试 Web 应用，覆盖界面、组件、支付和数据库等流程。") },
+        { QStringLiteral("build-web-data-visualization"), QStringLiteral("构建图表、地图、仪表盘、甘特图和 WebGL 数据可视化。") },
+        { QStringLiteral("test-android-apps"), QStringLiteral("通过 Android 模拟器测试应用、截图、抓取日志和分析性能。") },
+        { QStringLiteral("life-science-research"), QStringLiteral("辅助生命科学检索、证据整理和公共生物数据集分析。") },
+        { QStringLiteral("zotero"), QStringLiteral("搜索 Zotero 文献库、导出 BibTeX、插入引用和导入参考文献。") },
+        { QStringLiteral("expo"), QStringLiteral("开发、升级、调试和发布 Expo、React Native 应用。") },
+        { QStringLiteral("coderabbit"), QStringLiteral("使用 CodeRabbit 对代码变更进行自动审查并给出问题建议。") },
+        { QStringLiteral("remotion"), QStringLiteral("使用 React 和 Remotion 制作程序化视频、字幕、音频和动画。") },
+        { QStringLiteral("plugin-eval"), QStringLiteral("评估 Codex 插件和技能的效果、稳定性与 Token 消耗。") },
+        { QStringLiteral("render"), QStringLiteral("在 Render 平台部署、调试、监控和迁移应用。") },
+        { QStringLiteral("temporal"), QStringLiteral("开发和管理 Temporal 工作流、服务端及 Temporal Cloud。") },
+        { QStringLiteral("hyperframes"), QStringLiteral("把 HTML、动画、字幕和音频渲染为视频。") },
+        { QStringLiteral("codex-security"), QStringLiteral("执行安全扫描、漏洞分析和安全事件调查。") },
+        { QStringLiteral("twilio-developer-kit"), QStringLiteral("开发 Twilio 短信、语音、验证和 SendGrid 邮件功能。") },
+        { QStringLiteral("mixpanel-headless"), QStringLiteral("查询和分析 Mixpanel 产品数据、事件和用户行为。") },
+        { QStringLiteral("nvidia"), QStringLiteral("开发 NVIDIA CUDA、推理、机器人、Omniverse 和 GPU 加速项目。") },
+        { QStringLiteral("ngs-analysis"), QStringLiteral("分析 FASTQ、DNA/RNA 测序、单细胞和宏基因组数据。") },
+        { QStringLiteral("magicpath"), QStringLiteral("查找、安装、创建和修改 MagicPath UI 组件。") },
+        { QStringLiteral("openai-ads-conversions"), QStringLiteral("接入 OpenAI Ads Measurement Pixel 和转化 API。") },
+        { QStringLiteral("boltz-api-cli"), QStringLiteral("预测生物分子结构、筛选分子和设计蛋白结合物。") },
+        { QStringLiteral("linear"), QStringLiteral("查询和引用 Linear 中的 Issue、项目和开发任务。") },
+        { QStringLiteral("figma"), QStringLiteral("读取 Figma 设计、生成实现方案并维护设计系统规则。") },
+        { QStringLiteral("notion"), QStringLiteral("使用 Notion 进行计划、研究整理、会议准备和知识沉淀。") },
+        { QStringLiteral("github"), QStringLiteral("检查 GitHub 仓库、Issue、Pull Request 和 CI，并发布代码变更。") },
+    };
+    const QString translated = descriptions.value(name);
+    if (!translated.isEmpty()) return translated;
+    return official.isEmpty() ? QStringLiteral("该插件暂未提供功能说明。") : official;
 }
 
 } // namespace
@@ -127,6 +191,9 @@ QList<CodexPluginInfo> DesktopEnhancementManager::listCodexPlugins(QString *erro
             plugin.enabled = object.value(QStringLiteral("enabled")).toBool();
             plugin.path = object.value(QStringLiteral("source")).toObject()
                 .value(QStringLiteral("path")).toString();
+            plugin.officialDescription = officialPluginDescription(plugin.path);
+            plugin.description = localizedPluginDescription(
+                plugin.name, plugin.officialDescription);
             if (!plugin.id.isEmpty()) result.append(plugin);
         }
     };

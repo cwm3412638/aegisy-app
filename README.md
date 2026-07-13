@@ -22,7 +22,8 @@ Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账�
 - 启动终端时清除可能覆盖档案的旧 Provider 环境变量，确保新进程使用当前激活 Key
 - 启动时自动适配 macOS Terminal/iTerm、Windows Terminal/PowerShell/cmd 和常见 Linux 终端，不要求选择目录
 - 可选本地网关模式支持快速切换档案和元数据级请求监控
-- “桌面增强”展示 Codex 官方市场中的已安装和可安装插件，并支持通过官方 CLI 安装所选插件
+- “桌面增强”展示 Codex 官方市场中的已安装和可安装插件，读取插件清单并提供中文功能说明
+- 插件支持复选框多选、全选可安装项和批量安装，逐项展示进度与成功/失败结果
 - 支持一键安装 Codex Computer Use；电脑控制仍遵循 Codex 的授权、沙箱和确认策略
 - 支持把 Codex JSONL 历史会话与 SQLite 桌面索引同步到当前 Provider，写入前自动建立可恢复备份
 - 支持 Windows、macOS 以调试端口运行时注入 Claude Desktop 中文词典，不修改 Claude 安装文件

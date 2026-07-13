@@ -15,6 +15,8 @@ struct CodexPluginInfo
     QString marketplace;
     QString version;
     QString path;
+    QString description;
+    QString officialDescription;
     bool installed = false;
     bool enabled = false;
 };
