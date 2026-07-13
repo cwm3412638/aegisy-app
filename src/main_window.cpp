@@ -3,6 +3,14 @@
 #include "api_keys_dialog.h"
 #include "connect_wizard.h"
 #include "models_dialog.h"
+#include "image_generation_dialog.h"
+#include "system_doctor_dialog.h"
+#include "usage_dialog.h"
+#include "gateway_manager.h"
+#include "gateway_dialog.h"
+#include "terminal_dialog.h"
+#include "desktop_enhancement_manager.h"
+#include "desktop_enhancement_dialog.h"
 #include "secure_storage.h"
 #include "app_theme.h"
 #include "update_manager.h"
@@ -11,6 +19,7 @@
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QFont>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -20,8 +29,10 @@
 #include <QMessageBox>
 #include <QComboBox>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QInputDialog>
 #include <QMenu>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QApplication>
 #include <QCloseEvent>
@@ -29,6 +40,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QVersionNumber>
 
 namespace {
 
@@ -81,6 +93,8 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
     , m_toolManager(new ToolManager(this))
     , m_profileManager(new ProfileManager(this))
     , m_updateManager(updateManager)
+    , m_gatewayManager(new GatewayManager(this))
+    , m_desktopEnhancementManager(new DesktopEnhancementManager(this))
 {
     setupUi();
     setWindowTitle(QStringLiteral("Aegisy - AI 工具连接管理"));
@@ -93,12 +107,22 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
             this, &MainWindow::onUserInfoReceived);
     connect(m_apiClient, &ApiClient::requestFailed,
             this, &MainWindow::onRequestFailed);
+    connect(m_apiClient, &ApiClient::authenticationExpired,
+            this, &MainWindow::onAuthenticationExpired);
     connect(m_toolManager, &ToolManager::installOutput,
             this, &MainWindow::onInstallOutput);
     connect(m_toolManager, &ToolManager::installFinished,
             this, &MainWindow::onInstallFinished);
     connect(m_toolManager, &ToolManager::toolVersionDetected,
             this, &MainWindow::onToolVersionDetected);
+    connect(m_toolManager, &ToolManager::toolLatestVersionDetected,
+            this, &MainWindow::onToolLatestVersionDetected);
+    connect(m_gatewayManager, &GatewayManager::runningChanged,
+            this, &MainWindow::onGatewayRunningChanged);
+    connect(m_gatewayManager, &GatewayManager::gatewayError,
+            this, [this](const QString &error) {
+        logMessage(QStringLiteral("本地网关错误：%1").arg(error), kLogError);
+    });
     connect(m_profileManager, &ProfileManager::profilesChanged,
             this, &MainWindow::rebuildTrayMenu);
     connect(m_profileManager, &ProfileManager::activeProfileChanged,
@@ -112,7 +136,12 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
     }
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow()
+{
+    if (m_gatewayManager && m_gatewayManager->isRunning()) {
+        m_gatewayManager->stop();
+    }
+}
 
 void MainWindow::setupTray()
 {
@@ -180,6 +209,17 @@ void MainWindow::rebuildTrayMenu()
         if (!hasProfile) {
             QAction *empty = m_trayMenu->addAction(QStringLiteral("  暂无档案"));
             empty->setEnabled(false);
+        } else if (activeIndex >= 0 && activeIndex < profiles.size()
+                   && profiles[activeIndex].type == type
+                   && profiles[activeIndex].hasAnyKey()) {
+            QAction *launchAction = m_trayMenu->addAction(
+                QStringLiteral("启动当前 %1").arg(profileTypeName(type)));
+            connect(launchAction, &QAction::triggered, this,
+                    [this, activeIndex]() {
+                showNormal();
+                raise();
+                launchProfile(activeIndex);
+            });
         }
         m_trayMenu->addSeparator();
     }
@@ -233,6 +273,15 @@ void MainWindow::setAuthToken(const QString &token)
     if (m_balanceRefreshTimer) {
         m_balanceRefreshTimer->start();
     }
+    if (QSettings().value(QStringLiteral("gateway/enabled"), false).toBool()) {
+        QTimer::singleShot(0, this, [this]() {
+            if (!m_gatewayManager->start()) {
+                QSettings().setValue(QStringLiteral("gateway/enabled"), false);
+                logMessage(QStringLiteral("本地网关自动启动失败：%1")
+                    .arg(m_gatewayManager->lastError()), kLogError);
+            }
+        });
+    }
 }
 
 void MainWindow::refreshBalance()
@@ -278,6 +327,8 @@ void MainWindow::onToolVersionDetected(AiTool tool, bool installed, const QStrin
     QString tooltip;
     QString color;
     if (!installed) {
+        m_toolLocalVersions.remove(id);
+        m_toolLatestVersions.remove(id);
         displayText = QStringLiteral("未安装");
         tooltip = QStringLiteral("未检测到 %1").arg(ToolManager::toolName(tool));
         color = QStringLiteral("#b54708");
@@ -286,6 +337,7 @@ void MainWindow::onToolVersionDetected(AiTool tool, bool installed, const QStrin
         tooltip = QStringLiteral("已安装，但未能读取版本号");
         color = QStringLiteral("#067647");
     } else {
+        m_toolLocalVersions.insert(id, version);
         displayText = QStringLiteral("v%1").arg(version);
         tooltip = QStringLiteral("%1 %2").arg(ToolManager::toolName(tool), version);
         color = QStringLiteral("#067647");
@@ -306,12 +358,49 @@ void MainWindow::onToolVersionDetected(AiTool tool, bool installed, const QStrin
             ? QStringLiteral("...") : QStringLiteral("安装"));
     }
 
+    if (installed) {
+        m_toolManager->checkLatestVersion(tool);
+    }
+
     m_pendingToolVersionChecks = qMax(0, m_pendingToolVersionChecks - 1);
     if (m_pendingToolVersionChecks == 0) {
         if (m_refreshToolVersionsButton) {
             m_refreshToolVersionsButton->setEnabled(true);
         }
         rebuildCards();
+    }
+}
+
+void MainWindow::onToolLatestVersionDetected(AiTool tool,
+                                             bool success,
+                                             const QString &latestVersion,
+                                             const QString &error)
+{
+    const int id = static_cast<int>(tool);
+    QLabel *label = m_toolVersionLabels.value(id, nullptr);
+    if (!label || !success || latestVersion.isEmpty()) {
+        if (label && !error.isEmpty()) {
+            const QString original = label->toolTip();
+            label->setToolTip(original.isEmpty()
+                ? QStringLiteral("在线版本查询失败：%1").arg(error)
+                : original + QStringLiteral("\n在线版本查询失败：%1").arg(error));
+        }
+        return;
+    }
+
+    m_toolLatestVersions.insert(id, latestVersion);
+    const QString localVersion = m_toolLocalVersions.value(id);
+    const bool updateAvailable = !localVersion.isEmpty()
+        && QVersionNumber::compare(QVersionNumber::fromString(localVersion),
+                                   QVersionNumber::fromString(latestVersion)) < 0;
+    if (updateAvailable) {
+        label->setText(QStringLiteral("v%1 ↑").arg(localVersion));
+        label->setStyleSheet(QStringLiteral(
+            "font-family: monospace; font-size: 10px; color: #b54708; font-weight: 700;"));
+        label->setToolTip(QStringLiteral("当前 %1，最新 %2，可在系统体检中更新")
+            .arg(localVersion, latestVersion));
+    } else {
+        label->setToolTip(QStringLiteral("当前 %1，已是最新版本").arg(localVersion));
     }
 }
 
@@ -382,7 +471,7 @@ void MainWindow::setupUi()
     topLayout->addWidget(m_userLabel);
 
     m_balanceButton = new QPushButton(QStringLiteral("余额  --"), topBar);
-    m_balanceButton->setToolTip(QStringLiteral("点击刷新账号余额"));
+    m_balanceButton->setToolTip(QStringLiteral("查看账号与 API Key 用量"));
     m_balanceButton->setFixedHeight(36);
     m_balanceButton->setMinimumWidth(112);
     m_balanceButton->setMaximumWidth(150);
@@ -397,6 +486,8 @@ void MainWindow::setupUi()
     m_manageKeysButton->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton));
     m_viewModelsButton = new QPushButton(QStringLiteral("模型"), topBar);
     m_viewModelsButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogListView));
+    m_imageGenerationButton = new QPushButton(QStringLiteral("生图"), topBar);
+    m_imageGenerationButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogNewFolder));
     m_backupsButton = new QPushButton(QStringLiteral("备份"), topBar);
     m_backupsButton->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
     m_transferButton = new QPushButton(QStringLiteral("迁移"), topBar);
@@ -406,6 +497,7 @@ void MainWindow::setupUi()
 
     m_manageKeysButton->setFixedWidth(92);
     m_viewModelsButton->setFixedWidth(70);
+    m_imageGenerationButton->setFixedWidth(70);
     m_backupsButton->setFixedWidth(70);
     m_transferButton->setFixedWidth(70);
     m_checkUpdatesButton->setFixedWidth(70);
@@ -422,7 +514,7 @@ void MainWindow::setupUi()
     m_checkUpdatesButton->setMenu(updatesMenu);
 
     for (QPushButton *button : {
-             m_manageKeysButton, m_viewModelsButton, m_backupsButton,
+             m_manageKeysButton, m_viewModelsButton, m_imageGenerationButton, m_backupsButton,
              m_transferButton, m_checkUpdatesButton }) {
         button->setFixedHeight(36);
         button->setCursor(Qt::PointingHandCursor);
@@ -556,6 +648,31 @@ void MainWindow::setupUi()
         sideLayout->addWidget(row);
     }
 
+    m_doctorButton = new QPushButton(QStringLiteral("系统体检"), sidebar);
+    m_doctorButton->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
+    m_doctorButton->setToolTip(QStringLiteral("检查系统依赖、CLI、配置与安全存储"));
+    m_doctorButton->setFixedHeight(34);
+    m_doctorButton->setCursor(Qt::PointingHandCursor);
+    m_doctorButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    sideLayout->addWidget(m_doctorButton);
+
+    m_gatewayButton = new QPushButton(QStringLiteral("本地网关"), sidebar);
+    m_gatewayButton->setIcon(style()->standardIcon(QStyle::SP_DriveNetIcon));
+    m_gatewayButton->setToolTip(QStringLiteral("本地转发、快速档案切换与请求监控"));
+    m_gatewayButton->setFixedHeight(34);
+    m_gatewayButton->setCursor(Qt::PointingHandCursor);
+    m_gatewayButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    sideLayout->addWidget(m_gatewayButton);
+
+    m_desktopEnhancementsButton = new QPushButton(QStringLiteral("桌面增强"), sidebar);
+    m_desktopEnhancementsButton->setIcon(style()->standardIcon(QStyle::SP_DesktopIcon));
+    m_desktopEnhancementsButton->setToolTip(
+        QStringLiteral("全量模型、Codex 插件、历史会话、Computer Use 与 Claude 汉化"));
+    m_desktopEnhancementsButton->setFixedHeight(34);
+    m_desktopEnhancementsButton->setCursor(Qt::PointingHandCursor);
+    m_desktopEnhancementsButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    sideLayout->addWidget(m_desktopEnhancementsButton);
+
     sideLayout->addStretch();
 
     auto *localTitle = new QLabel(QStringLiteral("认证文件"), sidebar);
@@ -669,6 +786,8 @@ void MainWindow::setupUi()
             this, &MainWindow::onManageKeysClicked);
     connect(m_viewModelsButton, &QPushButton::clicked,
             this, &MainWindow::onViewModelsClicked);
+    connect(m_imageGenerationButton, &QPushButton::clicked,
+            this, &MainWindow::onImageGenerationClicked);
     connect(m_backupsButton, &QPushButton::clicked,
             this, &MainWindow::onBackupsClicked);
     connect(m_transferButton, &QPushButton::clicked,
@@ -694,8 +813,14 @@ void MainWindow::setupUi()
     }
     connect(m_refreshToolVersionsButton, &QPushButton::clicked,
             this, &MainWindow::refreshToolVersions);
+    connect(m_doctorButton, &QPushButton::clicked,
+            this, &MainWindow::onSystemDoctorClicked);
+    connect(m_gatewayButton, &QPushButton::clicked,
+            this, &MainWindow::onGatewayClicked);
+    connect(m_desktopEnhancementsButton, &QPushButton::clicked,
+            this, &MainWindow::onDesktopEnhancementsClicked);
     connect(m_balanceButton, &QPushButton::clicked,
-            this, &MainWindow::refreshBalance);
+            this, &MainWindow::onUsageClicked);
     m_balanceRefreshTimer = new QTimer(this);
     m_balanceRefreshTimer->setInterval(60 * 1000);
     connect(m_balanceRefreshTimer, &QTimer::timeout,
@@ -857,6 +982,32 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive)
     details->addLayout(configRow);
     layout->addLayout(details, 1);
 
+    auto *launchButton = new QPushButton(QStringLiteral("启动"), card);
+    launchButton->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
+    launchButton->setFixedSize(82, 38);
+    launchButton->setCursor(Qt::PointingHandCursor);
+    launchButton->setEnabled(isActive && profile.hasAnyKey());
+    launchButton->setToolTip(isActive
+        ? QStringLiteral("自动检测系统终端并启动 %1")
+            .arg(ToolManager::toolName(tool))
+        : QStringLiteral("请先激活该配置"));
+    launchButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    const int profileIndex = profile.index;
+    connect(launchButton, &QPushButton::clicked,
+            this, [this, profileIndex]() { launchProfile(profileIndex, false); });
+    layout->addWidget(launchButton);
+
+    auto *embeddedButton = new QPushButton(card);
+    embeddedButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+    embeddedButton->setToolTip(QStringLiteral("在客户端内终端启动"));
+    embeddedButton->setFixedSize(38, 38);
+    embeddedButton->setCursor(Qt::PointingHandCursor);
+    embeddedButton->setEnabled(isActive && profile.hasAnyKey());
+    embeddedButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    connect(embeddedButton, &QPushButton::clicked,
+            this, [this, profileIndex]() { launchProfile(profileIndex, true); });
+    layout->addWidget(embeddedButton);
+
     auto *activateButton = new QPushButton(
         isActive ? QStringLiteral("已激活") : QStringLiteral("激活"), card);
     activateButton->setIcon(style()->standardIcon(
@@ -869,7 +1020,6 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive)
             "QPushButton { background: #dcfae6; color: #067647; border: 1px solid #abefc6;"
             "border-radius: 7px; font-size: 12px; font-weight: 600; }")
         : AppTheme::primaryButtonStyle());
-    const int profileIndex = profile.index;
     connect(activateButton, &QPushButton::clicked,
             this, [this, profileIndex]() { activateProfile(profileIndex); });
     layout->addWidget(activateButton);
@@ -896,6 +1046,48 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive)
     layout->addWidget(deleteButton);
 
     return card;
+}
+
+void MainWindow::launchProfile(int index, bool embedded)
+{
+    const QList<Profile> profiles = m_profileManager->allProfiles();
+    if (index < 0 || index >= profiles.size()) {
+        return;
+    }
+    const Profile &profile = profiles[index];
+    if (!m_profileManager->isActive(index) || !profile.hasAnyKey()) {
+        QMessageBox::information(this, QStringLiteral("尚未激活"),
+                                 QStringLiteral("请先激活该配置，再启动对应终端。"));
+        return;
+    }
+
+    const QString directory = QDir::homePath();
+
+    if (embedded) {
+        const QString executable = m_toolManager->resolvedExecutable(profile.tool());
+        if (executable.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("启动失败"),
+                                 QStringLiteral("未找到 %1，请先安装运行环境。")
+                                     .arg(ToolManager::toolName(profile.tool())));
+            return;
+        }
+        TerminalDialog dialog(
+            ToolManager::toolName(profile.tool()), executable, directory,
+            m_toolManager->launchEnvironment(), this);
+        dialog.exec();
+        return;
+    }
+
+    if (!m_toolManager->launch(profile.tool(), directory)) {
+        QMessageBox::warning(this, QStringLiteral("启动失败"),
+                             m_toolManager->lastError());
+        logMessage(QStringLiteral("%1 启动失败：%2")
+            .arg(ToolManager::toolName(profile.tool()), m_toolManager->lastError()),
+            kLogError);
+        return;
+    }
+    logMessage(QStringLiteral("已在系统终端启动 %1，工作目录：%2")
+        .arg(ToolManager::toolName(profile.tool()), directory), kLogSuccess);
 }
 
 QWidget *MainWindow::createAddCard()
@@ -1007,6 +1199,11 @@ void MainWindow::activateProfile(int index)
         return;
     }
 
+    if (!confirmConfigurationPreview(profile)) {
+        logMessage(QStringLiteral("已取消激活「%1」").arg(profile.name), kLogMuted);
+        return;
+    }
+
     if (m_activatingIndex >= 0 && m_activatingIndex != index) {
         logMessage(QStringLiteral("已切换激活任务，之前的异步结果将被忽略"), kLogMuted);
     }
@@ -1022,6 +1219,43 @@ void MainWindow::activateProfile(int index)
         kLogInfo);
     rebuildCards();
     processActivationQueue();
+}
+
+bool MainWindow::confirmConfigurationPreview(const Profile &profile)
+{
+    const ConfigurationPreview preview = m_toolManager->previewConfiguration(
+        profile.tool(), profile.model,
+        QSettings().value(QStringLiteral("gateway/enabled"), false).toBool());
+    QString text = QStringLiteral(
+        "<b>将激活「%1」并更新 %2 配置</b><br><br>")
+        .arg(profile.name.toHtmlEscaped(),
+             ToolManager::toolName(profile.tool()).toHtmlEscaped());
+    text += QStringLiteral("<b>目标文件</b><br>");
+    for (const QString &file : preview.files) {
+        text += QStringLiteral("• %1<br>").arg(file.toHtmlEscaped());
+    }
+    text += QStringLiteral("<br><b>计划变更</b><br>");
+    for (const QString &change : preview.changes) {
+        text += QStringLiteral("• %1<br>").arg(change.toHtmlEscaped());
+    }
+    if (!preview.warnings.isEmpty()) {
+        text += QStringLiteral("<br><b style='color:#b54708'>需要注意</b><br>");
+        for (const QString &warning : preview.warnings) {
+            text += QStringLiteral("• %1<br>").arg(warning.toHtmlEscaped());
+        }
+    }
+
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("确认配置变更"));
+    box.setIcon(preview.warnings.isEmpty()
+        ? QMessageBox::Information : QMessageBox::Warning);
+    box.setTextFormat(Qt::RichText);
+    box.setText(text);
+    box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Ok);
+    box.setDefaultButton(QMessageBox::Ok);
+    box.button(QMessageBox::Ok)->setText(QStringLiteral("备份并激活"));
+    box.button(QMessageBox::Cancel)->setText(QStringLiteral("取消"));
+    return box.exec() == QMessageBox::Ok;
 }
 
 void MainWindow::processActivationQueue()
@@ -1091,7 +1325,24 @@ bool MainWindow::configureFromProfile(int profileIndex, AiTool tool)
         return false;
     }
 
-    const bool success = m_toolManager->configure(tool, profile.key, profile.model);
+    const bool gatewayEnabled = QSettings().value(
+        QStringLiteral("gateway/enabled"), false).toBool();
+    bool success = false;
+    if (gatewayEnabled) {
+        if (!m_gatewayManager->isRunning() && !m_gatewayManager->start()) {
+            logMessage(QStringLiteral("本地网关启动失败：%1")
+                .arg(m_gatewayManager->lastError()), kLogError);
+            return false;
+        }
+        if (!m_gatewayManager->configureProfile(tool, profile.key)) {
+            logMessage(QStringLiteral("无法把档案凭据加载到本地网关"), kLogError);
+            return false;
+        }
+        success = m_toolManager->configureGateway(
+            tool, m_gatewayManager->localToken(), profile.model);
+    } else {
+        success = m_toolManager->configure(tool, profile.key, profile.model);
+    }
     if (success) {
         logMessage(
             QStringLiteral("%1 已写入 %2")
@@ -1129,12 +1380,50 @@ void MainWindow::onUserInfoReceived(const QJsonObject &userInfo)
         ? QStringLiteral("● 账号已连接")
         : QStringLiteral("● %1").arg(compactName));
     m_userLabel->setToolTip(displayName);
-    m_balanceButton->setToolTip(QStringLiteral("点击刷新账号余额"));
+    m_balanceButton->setToolTip(QStringLiteral("查看账号与 API Key 用量"));
+}
+
+void MainWindow::onUsageClicked()
+{
+    auto *dialog = new UsageDialog(m_apiClient, this);
+    dialog->exec();
+    dialog->deleteLater();
+    refreshBalance();
 }
 
 void MainWindow::onRequestFailed(const QString &error)
 {
+    if (m_authExpiredHandled) {
+        return;
+    }
     logMessage(QStringLiteral("请求失败：%1").arg(error), kLogError);
+}
+
+void MainWindow::onAuthenticationExpired()
+{
+    if (m_authExpiredHandled) {
+        return;
+    }
+    m_authExpiredHandled = true;
+    m_authToken.clear();
+    if (m_balanceRefreshTimer) {
+        m_balanceRefreshTimer->stop();
+    }
+    if (m_gatewayManager && m_gatewayManager->isRunning()) {
+        QSettings().setValue(QStringLiteral("gateway/enabled"), false);
+        m_gatewayManager->stop();
+    }
+    SecureStorage::clearToken();
+    QMessageBox::information(
+        this,
+        QStringLiteral("登录已过期"),
+        QStringLiteral("登录状态已过期，请重新登录 Aegisy 账号。"));
+    m_quitting = true;
+    if (m_trayIcon) {
+        m_trayIcon->hide();
+    }
+    emit loggedOut();
+    close();
 }
 
 void MainWindow::onInstallOutput(AiTool tool, const QString &line)
@@ -1347,6 +1636,82 @@ void MainWindow::onViewModelsClicked()
     auto *dialog = new ModelsDialog(m_apiClient, this);
     dialog->exec();
     dialog->deleteLater();
+}
+
+void MainWindow::onImageGenerationClicked()
+{
+    auto *dialog = new ImageGenerationDialog(m_apiClient, this);
+    dialog->exec();
+    dialog->deleteLater();
+}
+
+void MainWindow::onSystemDoctorClicked()
+{
+    auto *dialog = new SystemDoctorDialog(m_toolManager, this);
+    dialog->exec();
+    dialog->deleteLater();
+    refreshToolVersions();
+}
+
+void MainWindow::onGatewayClicked()
+{
+    auto *dialog = new GatewayDialog(m_gatewayManager, this);
+    dialog->exec();
+    dialog->deleteLater();
+}
+
+void MainWindow::onDesktopEnhancementsClicked()
+{
+    auto *dialog = new DesktopEnhancementDialog(m_desktopEnhancementManager, this);
+    connect(dialog, &DesktopEnhancementDialog::openModelsRequested,
+            this, &MainWindow::onViewModelsClicked);
+    dialog->exec();
+    dialog->deleteLater();
+}
+
+void MainWindow::onGatewayRunningChanged(bool running)
+{
+    if (m_gatewayButton) {
+        m_gatewayButton->setText(running ? QStringLiteral("网关运行中")
+                                         : QStringLiteral("本地网关"));
+    }
+    const bool enabled = QSettings().value(
+        QStringLiteral("gateway/enabled"), false).toBool();
+    const QList<Profile> profiles = m_profileManager->allProfiles();
+    if (running && enabled) {
+        for (ProfileType type : allProfileTypes()) {
+            const int index = m_profileManager->activeIndex(type);
+            if (index < 0 || index >= profiles.size()) continue;
+            const Profile profile = m_profileManager->profileWithCredential(index);
+            if (profile.key.isEmpty()) continue;
+            if (!m_gatewayManager->configureProfile(profile.tool(), profile.key)
+                    || !m_toolManager->configureGateway(
+                        profile.tool(), m_gatewayManager->localToken(), profile.model)) {
+                logMessage(QStringLiteral("%1 切换到本地网关失败：%2")
+                    .arg(ToolManager::toolName(profile.tool()), m_toolManager->lastError()),
+                    kLogError);
+            }
+        }
+        logMessage(QStringLiteral("本地网关已启动，仅监听 127.0.0.1:43112"), kLogSuccess);
+    } else if (!running) {
+        if (enabled) {
+            QSettings().setValue(QStringLiteral("gateway/enabled"), false);
+            logMessage(QStringLiteral("本地网关意外停止，正在恢复直接连接"), kLogWarn);
+        }
+        for (ProfileType type : allProfileTypes()) {
+            const int index = m_profileManager->activeIndex(type);
+            if (index < 0 || index >= profiles.size()) continue;
+            const Profile profile = m_profileManager->profileWithCredential(index);
+            if (profile.key.isEmpty()) continue;
+            if (!m_toolManager->configure(profile.tool(), profile.key, profile.model)) {
+                logMessage(QStringLiteral("%1 恢复直接连接失败：%2")
+                    .arg(ToolManager::toolName(profile.tool()), m_toolManager->lastError()),
+                    kLogError);
+            }
+        }
+        logMessage(QStringLiteral("已关闭本地网关并恢复直接连接配置"), kLogInfo);
+    }
+    rebuildCards();
 }
 
 void MainWindow::onBackupsClicked()

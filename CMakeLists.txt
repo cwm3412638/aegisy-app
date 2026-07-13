@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(AegisyClient VERSION 2.3.2 LANGUAGES CXX)
+project(AegisyClient VERSION 2.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,11 +20,11 @@ if(WIN32)
 endif()
 
 # 查找 Qt6
-find_package(Qt6 COMPONENTS Core Widgets Network QUIET)
+find_package(Qt6 COMPONENTS Core Widgets Network Sql WebSockets QUIET)
 
 if(NOT Qt6_FOUND)
     message(STATUS "Qt6 not found, trying Qt5...")
-    find_package(Qt5 5.15 REQUIRED COMPONENTS Core Widgets Network)
+    find_package(Qt5 5.15 REQUIRED COMPONENTS Core Widgets Network Sql WebSockets)
     set(QT_VERSION_MAJOR 5)
 else()
     set(QT_VERSION_MAJOR 6)
@@ -43,10 +43,19 @@ set(SOURCES
     src/secure_storage.cpp
     src/api_keys_dialog.cpp
     src/models_dialog.cpp
+    src/image_generation_dialog.cpp
+    src/system_doctor_dialog.cpp
+    src/usage_dialog.cpp
+    src/gateway_manager.cpp
+    src/gateway_dialog.cpp
+    src/terminal_dialog.cpp
+    src/desktop_enhancement_manager.cpp
+    src/desktop_enhancement_dialog.cpp
     src/profile_manager.cpp
     src/connect_wizard.cpp
     src/app_theme.cpp
     src/profile_archive.cpp
+    resources.qrc
 )
 
 if(APPLE)
@@ -65,6 +74,14 @@ set(HEADERS
     include/secure_storage.h
     include/api_keys_dialog.h
     include/models_dialog.h
+    include/image_generation_dialog.h
+    include/system_doctor_dialog.h
+    include/usage_dialog.h
+    include/gateway_manager.h
+    include/gateway_dialog.h
+    include/terminal_dialog.h
+    include/desktop_enhancement_manager.h
+    include/desktop_enhancement_dialog.h
     include/profile_manager.h
     include/connect_wizard.h
     include/app_theme.h
@@ -92,6 +109,8 @@ if(QT_VERSION_MAJOR EQUAL 6)
         Qt6::Core
         Qt6::Widgets
         Qt6::Network
+        Qt6::Sql
+        Qt6::WebSockets
         OpenSSL::SSL
         OpenSSL::Crypto
     )
@@ -100,6 +119,8 @@ else()
         Qt5::Core
         Qt5::Widgets
         Qt5::Network
+        Qt5::Sql
+        Qt5::WebSockets
         OpenSSL::SSL
         OpenSSL::Crypto
     )
@@ -224,4 +245,56 @@ if(BUILD_TESTING)
         target_link_libraries(AegisyProfileActivationTest PRIVATE crypt32)
     endif()
     add_test(NAME profile_activation_per_tool COMMAND AegisyProfileActivationTest)
+
+    add_executable(AegisyToolManagerRuntimeTest
+        tests/tool_manager_runtime_test.cpp
+        src/tool_manager.cpp
+        include/tool_manager.h
+    )
+    target_include_directories(AegisyToolManagerRuntimeTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyToolManagerRuntimeTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyToolManagerRuntimeTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME tool_manager_runtime_registry COMMAND AegisyToolManagerRuntimeTest)
+
+    add_executable(AegisyToolManagerGatewayConfigTest
+        tests/tool_manager_gateway_config_test.cpp
+        src/tool_manager.cpp
+        include/tool_manager.h
+    )
+    target_include_directories(AegisyToolManagerGatewayConfigTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyToolManagerGatewayConfigTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyToolManagerGatewayConfigTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME tool_manager_gateway_config COMMAND AegisyToolManagerGatewayConfigTest)
+
+    find_program(AEGISY_NODE_EXECUTABLE NAMES node node.exe)
+    if(AEGISY_NODE_EXECUTABLE)
+        add_test(NAME local_gateway_security
+            COMMAND ${AEGISY_NODE_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/local_gateway_test.js)
+    endif()
+
+    add_executable(AegisyDesktopEnhancementTest
+        tests/desktop_enhancement_test.cpp
+        src/desktop_enhancement_manager.cpp
+        include/desktop_enhancement_manager.h
+    )
+    target_include_directories(AegisyDesktopEnhancementTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyDesktopEnhancementTest PRIVATE
+            Qt6::Core Qt6::Network Qt6::Sql Qt6::WebSockets)
+    else()
+        target_link_libraries(AegisyDesktopEnhancementTest PRIVATE
+            Qt5::Core Qt5::Network Qt5::Sql Qt5::WebSockets)
+    endif()
+    add_test(NAME desktop_enhancement_history_sync
+        COMMAND AegisyDesktopEnhancementTest)
 endif()

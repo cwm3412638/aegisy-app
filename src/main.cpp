@@ -16,7 +16,6 @@ static void showMainWindow(const QString &token, UpdateManager *updateManager)
 {
     MainWindow *mainWindow = new MainWindow(updateManager);
     mainWindow->setAttribute(Qt::WA_DeleteOnClose);
-    mainWindow->setAuthToken(token);
 
     // 退出登录：token 已清，重启应用回到登录页
     QObject::connect(mainWindow, &MainWindow::loggedOut, []() {
@@ -24,6 +23,7 @@ static void showMainWindow(const QString &token, UpdateManager *updateManager)
         QApplication::quit();
     });
 
+    mainWindow->setAuthToken(token);
     mainWindow->show();
 }
 

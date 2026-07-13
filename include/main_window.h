@@ -21,6 +21,8 @@
 
 class QAction;
 class UpdateManager;
+class GatewayManager;
+class DesktopEnhancementManager;
 class QTimer;
 
 class MainWindow : public QMainWindow
@@ -40,13 +42,23 @@ private slots:
     void onApiKeysReceived(const QJsonArray &keys);
     void onUserInfoReceived(const QJsonObject &userInfo);
     void onRequestFailed(const QString &error);
+    void onAuthenticationExpired();
     void onInstallOutput(AiTool tool, const QString &line);
     void onInstallFinished(AiTool tool, int requestId, bool success);
     void onToolVersionDetected(AiTool tool, bool installed, const QString &version);
+    void onToolLatestVersionDetected(AiTool tool, bool success,
+                                     const QString &latestVersion,
+                                     const QString &error);
     void refreshToolVersions();
     void refreshBalance();
+    void onUsageClicked();
     void onManageKeysClicked();
     void onViewModelsClicked();
+    void onImageGenerationClicked();
+    void onSystemDoctorClicked();
+    void onGatewayClicked();
+    void onDesktopEnhancementsClicked();
+    void onGatewayRunningChanged(bool running);
     void onBackupsClicked();
     void onTransferClicked();
     void onLogoutClicked();
@@ -70,6 +82,8 @@ private:
     bool configureFromProfile(int profileIndex, AiTool tool);
     void editProfile(int index);
     void deleteProfile(int index);
+    void launchProfile(int index, bool embedded = false);
+    bool confirmConfigurationPreview(const Profile &profile);
 
     // 保存后环境检测弹窗
     void showEnvCheckDialog(int profileIndex);
@@ -82,6 +96,8 @@ private:
     ToolManager    *m_toolManager;
     ProfileManager *m_profileManager;
     UpdateManager  *m_updateManager;
+    GatewayManager *m_gatewayManager;
+    DesktopEnhancementManager *m_desktopEnhancementManager;
 
     // UI — 顶栏
     QLabel      *m_userLabel;
@@ -100,10 +116,14 @@ private:
     // UI — 高级区 + 日志
     QPushButton *m_manageKeysButton;
     QPushButton *m_viewModelsButton;
+    QPushButton *m_imageGenerationButton;
     QPushButton *m_backupsButton;
     QPushButton *m_transferButton;
     QPushButton *m_checkUpdatesButton;
     QPushButton *m_refreshToolVersionsButton = nullptr;
+    QPushButton *m_doctorButton = nullptr;
+    QPushButton *m_gatewayButton = nullptr;
+    QPushButton *m_desktopEnhancementsButton = nullptr;
     QAction *m_checkUpdatesAction = nullptr;
     QAction *m_autoUpdateChecksAction = nullptr;
     QTextEdit   *m_logOutput;
@@ -117,6 +137,8 @@ private:
     QHash<int, QLabel *> m_toolVersionLabels;
     QHash<int, QPushButton *> m_toolInstallButtons;
     QHash<int, QString> m_toolVersionTexts;
+    QHash<int, QString> m_toolLocalVersions;
+    QHash<int, QString> m_toolLatestVersions;
     QSet<int> m_installingTools;
     int m_pendingToolVersionChecks = 0;
     QTimer *m_balanceRefreshTimer = nullptr;
@@ -130,6 +152,7 @@ private:
     int           m_activationGeneration = 0;
     bool          m_quitting = false;
     bool          m_trayHintShown = false;
+    bool          m_authExpiredHandled = false;
 };
 
 #endif // MAIN_WINDOW_H

@@ -31,6 +31,10 @@ private slots:
     void onModelsReceived(const QJsonArray &models);
     void onRequestFailed(const QString &error);
     void onQueryModels();
+    void onKeyChanged(int index);
+    void onTestConnection();
+    void onConnectionTested(const QString &requestId, bool success,
+                            const QString &detail, int latencyMs);
     void onTypeChanged(int id);
     void goNext();
     void goBack();
@@ -75,8 +79,10 @@ private:
     QLabel      *m_toolPath = nullptr;
     QComboBox   *m_keyCombo = nullptr;
     QPushButton *m_queryButton = nullptr;
+    QPushButton *m_testButton = nullptr;
     QLabel      *m_loadingLabel = nullptr;
     QComboBox   *m_modelCombo = nullptr;
+    bool         m_waitingConnectionTest = false;
 };
 
 #endif // CONNECT_WIZARD_H

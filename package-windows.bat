@@ -39,6 +39,14 @@ mkdir "%DIST_DIR%"
 copy /y "%EXE%" "%DIST_DIR%\AegisyClient.exe" >nul || exit /b 1
 copy /y "%BUILD_DIR%\Release\WinSparkle.dll" "%DIST_DIR%\WinSparkle.dll" >nul || exit /b 1
 windeployqt --release --no-translations --dir "%DIST_DIR%" "%DIST_DIR%\AegisyClient.exe" || exit /b 1
+if not exist "%DIST_DIR%\Qt6WebSockets.dll" if not exist "%DIST_DIR%\Qt5WebSockets.dll" (
+    echo [错误] windeployqt 未收集 Qt WebSockets 运行库
+    exit /b 1
+)
+if not exist "%DIST_DIR%\sqldrivers\qsqlite.dll" (
+    echo [错误] windeployqt 未收集 SQLite 驱动 sqldrivers\qsqlite.dll
+    exit /b 1
+)
 
 echo.
 echo [3/6] 补充 OpenSSL 运行库...

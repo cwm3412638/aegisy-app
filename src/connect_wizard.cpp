@@ -7,6 +7,7 @@
 #include <QMessageBox>
 #include <QStyle>
 #include <QSettings>
+#include <QTimer>
 #include <QVBoxLayout>
 
 namespace {
@@ -91,6 +92,8 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
             this, &ConnectWizardDialog::onModelsReceived);
     connect(m_apiClient, &ApiClient::requestFailed,
             this, &ConnectWizardDialog::onRequestFailed);
+    connect(m_apiClient, &ApiClient::connectionTested,
+            this, &ConnectWizardDialog::onConnectionTested);
 
     if (m_editIndex >= 0) {
         const QList<Profile> profiles = m_profileManager->allProfiles();
@@ -314,11 +317,17 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
     m_keyCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     keyRow->addWidget(m_keyCombo, 1);
 
-    m_queryButton = new QPushButton(QStringLiteral("查询模型"), page);
+    m_queryButton = new QPushButton(QStringLiteral("刷新模型"), page);
     m_queryButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     m_queryButton->setFixedHeight(42);
     m_queryButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     keyRow->addWidget(m_queryButton);
+
+    m_testButton = new QPushButton(QStringLiteral("测试连接"), page);
+    m_testButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
+    m_testButton->setFixedHeight(42);
+    m_testButton->setStyleSheet(AppTheme::primaryButtonStyle());
+    keyRow->addWidget(m_testButton);
     layout->addLayout(keyRow);
 
     m_loadingLabel = new QLabel(page);
@@ -333,24 +342,57 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
     layout->addWidget(modelLabel);
 
     m_modelCombo = new QComboBox(page);
-    m_modelCombo->setEditable(true);
-    m_modelCombo->setInsertPolicy(QComboBox::NoInsert);
+    m_modelCombo->setEditable(false);
     m_modelCombo->setFixedHeight(42);
     m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
-    if (m_modelCombo->lineEdit()) {
-        m_modelCombo->lineEdit()->setPlaceholderText(QStringLiteral("使用默认模型，或输入模型名称"));
-    }
     layout->addWidget(m_modelCombo);
 
     auto *hint = new QLabel(
-        QStringLiteral("模型可以留空；激活时会写入该工具的默认模型。"), page);
+        QStringLiteral("选择 API Key 后会自动加载可用模型，也可以使用工具默认模型。"), page);
     hint->setStyleSheet(QStringLiteral("font-size: 11px; color: #667085;"));
     layout->addWidget(hint);
     layout->addStretch();
 
     connect(m_queryButton, &QPushButton::clicked,
             this, &ConnectWizardDialog::onQueryModels);
+    connect(m_keyCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &ConnectWizardDialog::onKeyChanged);
+    connect(m_testButton, &QPushButton::clicked,
+            this, &ConnectWizardDialog::onTestConnection);
     return page;
+}
+
+void ConnectWizardDialog::onTestConnection()
+{
+    const QString key = currentKey();
+    if (key.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("未选择 API Key"),
+                             QStringLiteral("请先选择一个 API Key。"));
+        return;
+    }
+    m_waitingConnectionTest = true;
+    m_testButton->setEnabled(false);
+    m_loadingLabel->setVisible(true);
+    m_loadingLabel->setText(QStringLiteral("正在验证 Key、模型和连接延迟..."));
+    m_loadingLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #175cd3;"));
+    m_apiClient->testConnection(QStringLiteral("connect-wizard"), key, currentModel());
+}
+
+void ConnectWizardDialog::onConnectionTested(const QString &requestId,
+                                              bool success,
+                                              const QString &detail,
+                                              int latencyMs)
+{
+    if (requestId != QStringLiteral("connect-wizard") || !m_waitingConnectionTest) {
+        return;
+    }
+    m_waitingConnectionTest = false;
+    m_testButton->setEnabled(true);
+    m_loadingLabel->setVisible(true);
+    m_loadingLabel->setText(QStringLiteral("%1  ·  %2 ms").arg(detail).arg(latencyMs));
+    m_loadingLabel->setStyleSheet(success
+        ? QStringLiteral("font-size: 12px; color: #067647;")
+        : QStringLiteral("font-size: 12px; color: #b42318;"));
 }
 
 void ConnectWizardDialog::onApiKeysReceived(const QJsonArray &keys)
@@ -368,6 +410,7 @@ void ConnectWizardDialog::populateKeyDropdown()
     // 终端切换后不复用上一终端的 Key，避免跨平台凭据被误写入。
     const QString previousKey = m_selectedType == m_existingType ? currentKey() : QString();
     const QString platform = ToolManager::toolPlatform(selectedTool());
+    m_keyCombo->blockSignals(true);
     m_keyCombo->clear();
     m_keyCombo->addItem(QStringLiteral("请选择 API Key"), QString());
 
@@ -438,6 +481,22 @@ void ConnectWizardDialog::populateKeyDropdown()
     } else if (m_selectedType != m_existingType) {
         m_modelCombo->setCurrentIndex(0);
     }
+    m_keyCombo->blockSignals(false);
+
+    if (!currentKey().isEmpty() && !m_waitingModels) {
+        QTimer::singleShot(0, this, &ConnectWizardDialog::onQueryModels);
+    }
+}
+
+void ConnectWizardDialog::onKeyChanged(int)
+{
+    m_modelCombo->clear();
+    m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
+    if (currentKey().isEmpty()) {
+        setModelLoading(false);
+        return;
+    }
+    onQueryModels();
 }
 
 void ConnectWizardDialog::onModelsReceived(const QJsonArray &models)
@@ -473,7 +532,7 @@ void ConnectWizardDialog::onModelsReceived(const QJsonArray &models)
     }
 
     setModelLoading(false, models.isEmpty()
-        ? QStringLiteral("当前 Key 未返回可用模型，可以手动输入模型名称。")
+        ? QStringLiteral("当前 Key 未返回可用模型，将使用工具默认模型。")
         : QStringLiteral("已加载 %1 个模型").arg(models.size()));
 }
 
@@ -488,6 +547,9 @@ void ConnectWizardDialog::onRequestFailed(const QString &error)
 
 void ConnectWizardDialog::onQueryModels()
 {
+    if (m_waitingModels) {
+        return;
+    }
     const QString key = currentKey();
     if (key.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("请选择 Key"),
@@ -504,6 +566,8 @@ void ConnectWizardDialog::onQueryModels()
 void ConnectWizardDialog::setModelLoading(bool loading, const QString &message)
 {
     m_queryButton->setEnabled(!loading);
+    m_keyCombo->setEnabled(!loading);
+    m_modelCombo->setEnabled(!loading);
     m_loadingLabel->setVisible(loading || !message.isEmpty());
     m_loadingLabel->setText(loading ? QStringLiteral("正在查询可用模型...") : message);
     m_loadingLabel->setStyleSheet(loading || !message.startsWith(QStringLiteral("模型查询失败"))

@@ -7,7 +7,7 @@
 
 #define MyAppName "Aegisy Client"
 #ifndef MyAppVersion
-  #define MyAppVersion "2.3.2"
+  #define MyAppVersion "2.5.0"
 #endif
 #define MyAppPublisher "Aegisy"
 #define MyAppURL "https://www.aegisy.cc"

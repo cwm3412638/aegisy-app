@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/gateway">
+        <file alias="local_gateway.js">assets/local_gateway.js</file>
+    </qresource>
+</RCC>

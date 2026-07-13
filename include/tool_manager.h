@@ -5,6 +5,7 @@
 #include <QString>
 #include <QProcess>
 #include <QDateTime>
+#include <QProcessEnvironment>
 
 // 支持的三个官方接入工具
 enum class AiTool {
@@ -37,6 +38,23 @@ struct ConfigBackup {
     int fileCount = 0;
 };
 
+struct RuntimeStatus {
+    QString id;
+    QString category;
+    QString name;
+    QString command;
+    bool installed = false;
+    bool required = false;
+    QString version;
+    QString executablePath;
+};
+
+struct ConfigurationPreview {
+    QStringList files;
+    QStringList changes;
+    QStringList warnings;
+};
+
 // 三件套的检测 / 一键安装 / 配置写入。
 // 所有写入均为「读-合并-写」并先备份，不整文件覆盖。
 class ToolManager : public QObject
@@ -61,6 +79,7 @@ public:
 
     // 异步读取本地 CLI 版本，适合主界面展示
     void detectVersion(AiTool tool);
+    void checkLatestVersion(AiTool tool);
 
     // 检测桌面应用安装状态（Claude 桌面版 / ChatGPT 桌面版）
     DesktopAppStatus detectDesktop(AiTool tool);
@@ -71,6 +90,11 @@ public:
 
     // 写入官方格式配置（先备份）。model 为空时使用各工具默认值。失败返回 false，详情见 lastError()
     bool configure(AiTool tool, const QString &apiKey, const QString &model = QString());
+    bool configureGateway(AiTool tool, const QString &localToken,
+                          const QString &model = QString(), int port = 43112);
+    ConfigurationPreview previewConfiguration(AiTool tool,
+                                              const QString &model = QString(),
+                                              bool gatewayMode = false);
 
     QList<ConfigBackup> backupHistory(AiTool tool) const;
     bool restoreBackup(const QString &backupId, AiTool tool);
@@ -80,15 +104,33 @@ public:
     // Node.js 是否可用（供未装 Node 时给引导）
     bool isNodeAvailable();
 
+    // 系统体检使用的基础运行环境检测。
+    QList<RuntimeStatus> detectRuntimes(int timeoutMs = 1500) const;
+    QList<RuntimeStatus> detectCompanionTools(int timeoutMs = 1500) const;
+
+    // 在系统终端中启动对应 CLI，workingDirectory 为空时使用用户主目录。
+    bool launch(AiTool tool, const QString &workingDirectory = QString());
+    QString resolvedExecutable(AiTool tool, int timeoutMs = 1500) const;
+    QString resolvedRuntimeCommand(const QString &command, int timeoutMs = 1500) const;
+    QProcessEnvironment launchEnvironment() const;
+
 signals:
     void installOutput(AiTool tool, const QString &line);
     void installFinished(AiTool tool, int requestId, bool success);
     void toolVersionDetected(AiTool tool, bool installed, const QString &version);
+    void toolLatestVersionDetected(AiTool tool, bool success,
+                                   const QString &latestVersion,
+                                   const QString &error);
 
 private:
     bool configureClaudeCode(const QString &apiKey, const QString &model);
     bool configureCodexCli(const QString &apiKey, const QString &model);
     bool configureGeminiCli(const QString &apiKey, const QString &model);
+    bool configureClaudeCodeEndpoint(const QString &apiKey, const QString &baseUrl);
+    bool configureCodexCliEndpoint(const QString &apiKey, const QString &model,
+                                   const QString &baseUrl, const QString &providerId);
+    bool configureGeminiCliEndpoint(const QString &apiKey, const QString &model,
+                                    const QString &baseUrl);
     QString readConfiguredKey(AiTool tool) const;
 
     // 探测辅助：timeout 单位 ms

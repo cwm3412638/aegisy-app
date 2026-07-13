@@ -138,6 +138,19 @@ static QString npmVersionFromJson(const QByteArray &data, const QString &package
         .value(QStringLiteral("version")).toString();
 }
 
+static QString shellQuote(QString value)
+{
+    value.replace(QLatin1Char('\''), QStringLiteral("'\"'\"'"));
+    return QLatin1Char('\'') + value + QLatin1Char('\'');
+}
+
+static QString appleScriptQuote(QString value)
+{
+    value.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+    value.replace(QLatin1Char('"'), QStringLiteral("\\\""));
+    return value;
+}
+
 ToolManager::ToolManager(QObject *parent)
     : QObject(parent)
 {
@@ -271,6 +284,264 @@ QString ToolManager::npmPackageVersion(AiTool tool, int timeoutMs) const
 bool ToolManager::isNodeAvailable()
 {
     return commandExists("node");
+}
+
+ConfigurationPreview ToolManager::previewConfiguration(AiTool tool,
+                                                        const QString &model,
+                                                        bool gatewayMode)
+{
+    ConfigurationPreview preview;
+    preview.files = managedConfigPaths(tool);
+    const QString targetModel = model.trimmed().isEmpty()
+        ? QStringLiteral("工具默认模型") : model.trimmed();
+
+    for (const QString &path : preview.files) {
+        preview.changes.append(QFileInfo::exists(path)
+            ? QStringLiteral("更新现有文件：%1").arg(path)
+            : QStringLiteral("创建配置文件：%1").arg(path));
+    }
+    switch (tool) {
+    case AiTool::ClaudeCode:
+        preview.changes.append(QStringLiteral(
+            "设置 ANTHROPIC_BASE_URL = %1")
+            .arg(gatewayMode
+                ? QStringLiteral("http://127.0.0.1:43112/tools/claude")
+                : QStringLiteral("https://aegisy.cc")));
+        preview.changes.append(QStringLiteral(
+            "%1 ANTHROPIC_AUTH_TOKEN，并移除冲突的 ANTHROPIC_API_KEY 字段")
+            .arg(gatewayMode ? QStringLiteral("写入本地网关令牌到")
+                             : QStringLiteral("更新")));
+        break;
+    case AiTool::CodexCli:
+        preview.changes.append(QStringLiteral(
+            "设置模型提供方和 Base URL = %1")
+            .arg(gatewayMode
+                ? QStringLiteral("http://127.0.0.1:43112/tools/codex/v1")
+                : QStringLiteral("https://aegisy.cc")));
+        preview.changes.append(gatewayMode
+            ? QStringLiteral("OPENAI_API_KEY 仅写入本地网关令牌，真实 Key 保留在网关内存")
+            : QStringLiteral("更新 OPENAI_API_KEY 安全认证字段"));
+        preview.changes.append(QStringLiteral("模型：%1").arg(targetModel));
+        break;
+    case AiTool::GeminiCli:
+        preview.changes.append(QStringLiteral(
+            "设置 GOOGLE_GEMINI_BASE_URL = %1")
+            .arg(gatewayMode
+                ? QStringLiteral("http://127.0.0.1:43112/tools/gemini")
+                : QStringLiteral("https://aegisy.cc")));
+        preview.changes.append(gatewayMode
+            ? QStringLiteral("GEMINI_API_KEY 仅写入本地网关令牌，真实 Key 保留在网关内存")
+            : QStringLiteral("更新 GEMINI_API_KEY 安全认证字段"));
+        preview.changes.append(QStringLiteral("模型：%1").arg(targetModel));
+        break;
+    }
+
+    const ToolStatus status = detectFast(tool);
+    if (!status.conflictWarning.isEmpty()) {
+        preview.warnings.append(status.conflictWarning);
+    }
+    preview.changes.append(QStringLiteral("写入前自动创建可恢复备份"));
+    preview.changes.append(QStringLiteral("保留配置文件中的其它非托管字段"));
+    return preview;
+}
+
+QList<RuntimeStatus> ToolManager::detectRuntimes(int timeoutMs) const
+{
+    struct Definition {
+        QString id;
+        QString name;
+        QString command;
+        bool required;
+    };
+    const Definition definitions[] = {
+        { QStringLiteral("node"), QStringLiteral("Node.js"), QStringLiteral("node"), true },
+        { QStringLiteral("npm"), QStringLiteral("npm"), kNpmCmd, true },
+        { QStringLiteral("git"), QStringLiteral("Git"), QStringLiteral("git"), true },
+        { QStringLiteral("pnpm"), QStringLiteral("pnpm"), QStringLiteral("pnpm"), false },
+        { QStringLiteral("bun"), QStringLiteral("Bun"), QStringLiteral("bun"), false },
+    };
+
+    QList<RuntimeStatus> result;
+    for (const Definition &definition : definitions) {
+        RuntimeStatus status;
+        status.id = definition.id;
+        status.category = QStringLiteral("系统依赖");
+        status.name = definition.name;
+        status.command = definition.command;
+        status.required = definition.required;
+        status.executablePath = resolveCommand(status.command, timeoutMs);
+        status.installed = !status.executablePath.isEmpty();
+        if (status.installed) {
+            status.version = commandVersion(status.executablePath, timeoutMs);
+        }
+        result.append(status);
+    }
+    return result;
+}
+
+QList<RuntimeStatus> ToolManager::detectCompanionTools(int timeoutMs) const
+{
+    struct Definition { const char *id; const char *name; const char *command; };
+    const Definition definitions[] = {
+        { "opencode", "OpenCode", "opencode" },
+        { "openclaw", "OpenClaw", "openclaw" },
+        { "hermes", "Hermes", "hermes" },
+        { "vscode", "Visual Studio Code", "code" },
+    };
+    QList<RuntimeStatus> result;
+    for (const Definition &definition : definitions) {
+        RuntimeStatus status;
+        status.id = QString::fromLatin1(definition.id);
+        status.category = QStringLiteral("其它工具");
+        status.name = QString::fromLatin1(definition.name);
+        status.command = QString::fromLatin1(definition.command);
+        status.executablePath = resolveCommand(status.command, timeoutMs);
+        status.installed = !status.executablePath.isEmpty();
+        if (status.installed) status.version = commandVersion(status.executablePath, timeoutMs);
+        result.append(status);
+    }
+    return result;
+}
+
+bool ToolManager::launch(AiTool tool, const QString &workingDirectory)
+{
+    m_lastError.clear();
+    const QString executable = resolveCommand(cliCommand(tool), 1500);
+    if (executable.isEmpty()) {
+        m_lastError = QStringLiteral("未找到 %1 可执行程序，请先安装运行环境。")
+            .arg(toolName(tool));
+        return false;
+    }
+
+    QString directory = workingDirectory.trimmed();
+    if (directory.isEmpty()) {
+        directory = QDir::homePath();
+    }
+    if (!QFileInfo(directory).isDir()) {
+        m_lastError = QStringLiteral("工作目录不存在：%1").arg(directory);
+        return false;
+    }
+
+#if defined(Q_OS_MAC)
+    const QString command = QStringLiteral("cd %1 && exec %2")
+        .arg(shellQuote(directory), shellQuote(executable));
+    bool started = false;
+    if (QDir(QStringLiteral("/Applications/iTerm.app")).exists()) {
+        const QString script = QStringLiteral(
+            "tell application \"iTerm\"\n"
+            "activate\n"
+            "set newWindow to (create window with default profile)\n"
+            "tell current session of newWindow to write text \"%1\"\n"
+            "end tell").arg(appleScriptQuote(command));
+        started = QProcess::startDetached(
+            QStringLiteral("osascript"), { QStringLiteral("-e"), script });
+    }
+    if (!started) {
+        const QString script = QStringLiteral(
+            "tell application \"Terminal\" to do script \"%1\"")
+            .arg(appleScriptQuote(command));
+        started = QProcess::startDetached(
+            QStringLiteral("osascript"), { QStringLiteral("-e"), script,
+                                            QStringLiteral("-e"),
+                                            QStringLiteral("tell application \"Terminal\" to activate") });
+    }
+#elif defined(Q_OS_WIN)
+    QString quotedDirectory = directory;
+    quotedDirectory.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+    QString quotedExecutable = executable;
+    quotedExecutable.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+    const QString command = QStringLiteral("cd /d \"%1\" && \"%2\"")
+        .arg(quotedDirectory, quotedExecutable);
+    QString windowsTerminal = QStandardPaths::findExecutable(QStringLiteral("wt.exe"));
+    if (windowsTerminal.isEmpty()) {
+        const QString candidate = QString::fromLocal8Bit(qgetenv("LOCALAPPDATA"))
+            + QStringLiteral("\\Microsoft\\WindowsApps\\wt.exe");
+        if (QFileInfo(candidate).isFile()) windowsTerminal = candidate;
+    }
+    QString powershell = QStandardPaths::findExecutable(QStringLiteral("pwsh.exe"));
+    if (powershell.isEmpty()) {
+        powershell = QStandardPaths::findExecutable(QStringLiteral("powershell.exe"));
+    }
+    if (powershell.isEmpty()) {
+        const QString candidate = QString::fromLocal8Bit(qgetenv("SystemRoot"))
+            + QStringLiteral("\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+        if (QFileInfo(candidate).isFile()) powershell = candidate;
+    }
+    bool started = false;
+    if (!windowsTerminal.isEmpty()) {
+        started = QProcess::startDetached(
+            windowsTerminal,
+            { QStringLiteral("-d"), directory,
+              QStringLiteral("cmd.exe"), QStringLiteral("/K"), command }, directory);
+    } else if (!powershell.isEmpty()) {
+        started = QProcess::startDetached(
+            powershell,
+            { QStringLiteral("-NoExit"), QStringLiteral("-Command"),
+              QStringLiteral("& \"%1\"").arg(quotedExecutable) }, directory);
+    } else {
+        started = QProcess::startDetached(
+            QStringLiteral("cmd.exe"), { QStringLiteral("/K"), command }, directory);
+    }
+#else
+    const QString gnomeTerminal = QStandardPaths::findExecutable(QStringLiteral("gnome-terminal"));
+    const QString konsole = QStandardPaths::findExecutable(QStringLiteral("konsole"));
+    const QString terminal = QStandardPaths::findExecutable(QStringLiteral("x-terminal-emulator"));
+    const QString xfceTerminal = QStandardPaths::findExecutable(QStringLiteral("xfce4-terminal"));
+    const QString kitty = QStandardPaths::findExecutable(QStringLiteral("kitty"));
+    const QString alacritty = QStandardPaths::findExecutable(QStringLiteral("alacritty"));
+    bool started = false;
+    if (!gnomeTerminal.isEmpty()) {
+        started = QProcess::startDetached(
+            gnomeTerminal,
+            { QStringLiteral("--working-directory=%1").arg(directory),
+              QStringLiteral("--"), executable });
+    } else if (!konsole.isEmpty()) {
+        started = QProcess::startDetached(
+            konsole,
+            { QStringLiteral("--workdir"), directory,
+              QStringLiteral("-e"), executable });
+    } else if (!xfceTerminal.isEmpty()) {
+        started = QProcess::startDetached(
+            xfceTerminal,
+            { QStringLiteral("--working-directory"), directory,
+              QStringLiteral("--command"), executable });
+    } else if (!kitty.isEmpty()) {
+        started = QProcess::startDetached(
+            kitty, { QStringLiteral("--directory"), directory, executable });
+    } else if (!alacritty.isEmpty()) {
+        started = QProcess::startDetached(
+            alacritty,
+            { QStringLiteral("--working-directory"), directory,
+              QStringLiteral("-e"), executable });
+    } else if (!terminal.isEmpty()) {
+        const QString command = QStringLiteral("cd %1 && exec %2")
+            .arg(shellQuote(directory), shellQuote(executable));
+        started = QProcess::startDetached(
+            terminal,
+            { QStringLiteral("-e"), QStringLiteral("sh"),
+              QStringLiteral("-lc"), command });
+    }
+#endif
+
+    if (!started) {
+        m_lastError = QStringLiteral("无法启动系统终端。请确认终端应用可用。");
+    }
+    return started;
+}
+
+QString ToolManager::resolvedExecutable(AiTool tool, int timeoutMs) const
+{
+    return resolveCommand(cliCommand(tool), timeoutMs);
+}
+
+QString ToolManager::resolvedRuntimeCommand(const QString &command, int timeoutMs) const
+{
+    return resolveCommand(command, timeoutMs);
+}
+
+QProcessEnvironment ToolManager::launchEnvironment() const
+{
+    return commandEnvironment();
 }
 
 QString ToolManager::homeFilePath(const QString &relative)
@@ -570,7 +841,9 @@ ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
             const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
             file.close();
             const QJsonObject env = root["env"].toObject();
-            if (env["ANTHROPIC_BASE_URL"].toString().contains("aegisy.cc")
+            const QString baseUrl = env["ANTHROPIC_BASE_URL"].toString();
+            if ((baseUrl.contains(QStringLiteral("aegisy.cc"))
+                 || baseUrl.contains(QStringLiteral("127.0.0.1:43112")))
                     && !key.isEmpty()) {
                 status.configured = true;
                 status.configuredKey = key;
@@ -590,7 +863,8 @@ ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
         if (toml.exists() && toml.open(QIODevice::ReadOnly)) {
             const QString content = QString::fromUtf8(toml.readAll());
             toml.close();
-            baseOk = content.contains("aegisy.cc");
+            baseOk = content.contains(QStringLiteral("aegisy.cc"))
+                || content.contains(QStringLiteral("127.0.0.1:43112"));
         }
         status.configured = baseOk && !key.isEmpty();
         if (status.configured) status.configuredKey = key;
@@ -611,7 +885,9 @@ ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
             bool baseOk = false;
             for (const QString &line : content.split('\n')) {
                 const QString t = line.trimmed();
-                if (t.startsWith("GOOGLE_GEMINI_BASE_URL") && t.contains("aegisy.cc")) {
+                if (t.startsWith("GOOGLE_GEMINI_BASE_URL")
+                        && (t.contains(QStringLiteral("aegisy.cc"))
+                            || t.contains(QStringLiteral("127.0.0.1:43112")))) {
                     baseOk = true;
                 }
             }
@@ -672,6 +948,64 @@ void ToolManager::detectVersion(AiTool tool)
         }
     });
     process->start(executable, QStringList() << QStringLiteral("--version"));
+}
+
+void ToolManager::checkLatestVersion(AiTool tool)
+{
+    const QString npmExecutable = resolveCommand(kNpmCmd, 800);
+    if (npmExecutable.isEmpty()) {
+        emit toolLatestVersionDetected(
+            tool, false, QString(), QStringLiteral("未找到 npm"));
+        return;
+    }
+
+    auto *process = new QProcess(this);
+    process->setProcessEnvironment(commandEnvironment());
+    process->setProcessChannelMode(QProcess::MergedChannels);
+    auto *timeout = new QTimer(process);
+    timeout->setSingleShot(true);
+
+    const auto complete = [this, process, timeout, tool](bool success,
+                                                         const QString &version,
+                                                         const QString &error) {
+        if (process->property("aegisyCompleted").toBool()) {
+            return;
+        }
+        process->setProperty("aegisyCompleted", true);
+        timeout->stop();
+        emit toolLatestVersionDetected(tool, success, version, error);
+        process->deleteLater();
+    };
+
+    connect(timeout, &QTimer::timeout, this, [process, complete]() {
+        if (process->state() != QProcess::NotRunning) {
+            process->kill();
+        }
+        complete(false, QString(), QStringLiteral("查询最新版本超时"));
+    });
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [process, complete](int exitCode, QProcess::ExitStatus exitStatus) {
+        const QString output = QString::fromUtf8(process->readAll()).trimmed();
+        if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+            complete(false, QString(), output.isEmpty()
+                ? QStringLiteral("npm registry 查询失败") : output.left(200));
+            return;
+        }
+        const QString version = extractVersion(output);
+        complete(!version.isEmpty(), version,
+                 version.isEmpty() ? QStringLiteral("无法解析最新版本") : QString());
+    });
+    connect(process, &QProcess::errorOccurred, this,
+            [process, complete](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            complete(false, QString(), process->errorString());
+        }
+    });
+
+    timeout->start(10000);
+    process->start(npmExecutable,
+                   { QStringLiteral("view"), npmPackage(tool),
+                     QStringLiteral("version"), QStringLiteral("--json") });
 }
 
 void ToolManager::detectNpmVersion(AiTool tool)
@@ -955,7 +1289,52 @@ bool ToolManager::configure(AiTool tool, const QString &apiKey, const QString &m
     return true;
 }
 
+bool ToolManager::configureGateway(AiTool tool, const QString &localToken,
+                                   const QString &model, int port)
+{
+    m_lastError.clear();
+    if (localToken.trimmed().isEmpty()) {
+        m_lastError = QStringLiteral("本地网关令牌为空");
+        return false;
+    }
+    const QString backupId = createBackup(tool);
+    if (backupId.isEmpty()) return false;
+
+    const QString root = QStringLiteral("http://127.0.0.1:%1/tools/").arg(port);
+    bool success = false;
+    switch (tool) {
+    case AiTool::ClaudeCode:
+        success = configureClaudeCodeEndpoint(localToken, root + QStringLiteral("claude"));
+        break;
+    case AiTool::CodexCli:
+        success = configureCodexCliEndpoint(localToken, model,
+            root + QStringLiteral("codex/v1"), QStringLiteral("aegisy_local"));
+        break;
+    case AiTool::GeminiCli:
+        success = configureGeminiCliEndpoint(localToken, model,
+            root + QStringLiteral("gemini"));
+        break;
+    }
+    if (!success || readConfiguredKey(tool) != localToken) {
+        const QString writeError = success
+            ? QStringLiteral("本地网关配置写入后校验失败") : m_lastError;
+        const bool rolledBack = restoreBackupInternal(backupId, tool);
+        pruneBackups(tool);
+        m_lastError = rolledBack
+            ? QStringLiteral("%1（已自动回滚）").arg(writeError)
+            : QStringLiteral("%1；自动回滚失败：%2").arg(writeError, m_lastError);
+        return false;
+    }
+    pruneBackups(tool);
+    return true;
+}
+
 bool ToolManager::configureClaudeCode(const QString &apiKey, const QString &/*model*/)
+{
+    return configureClaudeCodeEndpoint(apiKey, kBaseUrl);
+}
+
+bool ToolManager::configureClaudeCodeEndpoint(const QString &apiKey, const QString &baseUrl)
 {
     // ~/.claude/settings.json：合并 env 三变量，保留其它字段
     const QString path = homeFilePath(".claude/settings.json");
@@ -968,8 +1347,9 @@ bool ToolManager::configureClaudeCode(const QString &apiKey, const QString &/*mo
     }
 
     QJsonObject env = root["env"].toObject();
-    env["ANTHROPIC_BASE_URL"]                      = kBaseUrl;
+    env["ANTHROPIC_BASE_URL"]                      = baseUrl;
     env["ANTHROPIC_AUTH_TOKEN"]                    = apiKey;
+    env.remove(QStringLiteral("ANTHROPIC_API_KEY"));
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = QStringLiteral("1");
     root["env"] = env;
 
@@ -977,6 +1357,15 @@ bool ToolManager::configureClaudeCode(const QString &apiKey, const QString &/*mo
 }
 
 bool ToolManager::configureCodexCli(const QString &apiKey, const QString &model)
+{
+    return configureCodexCliEndpoint(
+        apiKey, model, kBaseUrl, QStringLiteral("OpenAI"));
+}
+
+bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
+                                            const QString &model,
+                                            const QString &baseUrl,
+                                            const QString &providerId)
 {
     const QString effectiveModel = model.isEmpty() ? QStringLiteral("gpt-4o") : model;
     // 1) ~/.codex/auth.json
@@ -1009,7 +1398,8 @@ bool ToolManager::configureCodexCli(const QString &apiKey, const QString &model)
         "disable_response_storage", "network_access", "windows_wsl_setup_acknowledged",
     };
     static const QStringList managedSections = {
-        "[model_providers.OpenAI]", "[model_providers.aegisy]", "[features]",
+        "[model_providers.OpenAI]", "[model_providers.aegisy]",
+        "[model_providers.aegisy_local]", "[features]",
     };
 
     QStringList outLines;
@@ -1039,28 +1429,35 @@ bool ToolManager::configureCodexCli(const QString &apiKey, const QString &model)
     if (!result.isEmpty()) result += "\n\n";
 
     result += QStringLiteral(
-        "model_provider = \"OpenAI\"\n"
+        "model_provider = \"%2\"\n"
         "model = \"%1\"\n"
-        "review_model = \"%1\"\n").arg(effectiveModel);
+        "review_model = \"%1\"\n").arg(effectiveModel, providerId);
     result += QStringLiteral(
         "model_reasoning_effort = \"xhigh\"\n"
         "disable_response_storage = true\n"
         "network_access = \"enabled\"\n"
         "windows_wsl_setup_acknowledged = true\n"
         "\n"
-        "[model_providers.OpenAI]\n"
-        "name = \"OpenAI\"\n"
+        "[model_providers.%2]\n"
+        "name = \"%2\"\n"
         "base_url = \"%1\"\n"
         "wire_api = \"responses\"\n"
         "requires_openai_auth = true\n"
         "\n"
         "[features]\n"
-        "goals = true\n").arg(kBaseUrl);
+        "goals = true\n").arg(baseUrl, providerId);
 
     return writeTextFile(tomlPath, result.toUtf8());
 }
 
 bool ToolManager::configureGeminiCli(const QString &apiKey, const QString &model)
+{
+    return configureGeminiCliEndpoint(apiKey, model, kBaseUrl);
+}
+
+bool ToolManager::configureGeminiCliEndpoint(const QString &apiKey,
+                                             const QString &model,
+                                             const QString &baseUrl)
 {
     const QString effectiveModel = model.isEmpty() ? QStringLiteral("gemini-2.5-pro") : model;
     const QString path = homeFilePath(".gemini/.env");
@@ -1093,7 +1490,7 @@ bool ToolManager::configureGeminiCli(const QString &apiKey, const QString &model
     result += QStringLiteral(
         "GOOGLE_GEMINI_BASE_URL=\"%1\"\n"
         "GEMINI_API_KEY=\"%2\"\n"
-        "GEMINI_MODEL=\"%3\"\n").arg(kBaseUrl, apiKey, effectiveModel);
+        "GEMINI_MODEL=\"%3\"\n").arg(baseUrl, apiKey, effectiveModel);
 
     return writeTextFile(path, result.toUtf8());
 }

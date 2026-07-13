@@ -3,6 +3,9 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QSslConfiguration>
+#include <QUrl>
+#include <QElapsedTimer>
+#include <QDate>
 
 namespace {
 
@@ -30,6 +33,7 @@ void ApiClient::setBaseUrl(const QString &url)
 void ApiClient::setAuthToken(const QString &token)
 {
     m_authToken = token;
+    m_authExpirationEmitted = false;
 }
 
 void ApiClient::login(const QString &email, const QString &password)
@@ -64,6 +68,37 @@ void ApiClient::requestApiKeysPage(int page, int generation)
 void ApiClient::getUserInfo()
 {
     requestUserInfo(QStringLiteral("/api/v1/auth/me"));
+}
+
+void ApiClient::getUsageStats(int days)
+{
+    const QDate endDate = QDate::currentDate();
+    const QDate startDate = endDate.addDays(-qMax(1, days) + 1);
+    const QString endpoint = QStringLiteral(
+        "/api/v1/usage/stats?start_date=%1&end_date=%2&timezone=Asia/Shanghai")
+        .arg(startDate.toString(Qt::ISODate), endDate.toString(Qt::ISODate));
+    QNetworkReply *reply = get(endpoint);
+    connect(reply, &QNetworkReply::finished, this, &ApiClient::onUsageStatsFinished);
+}
+
+void ApiClient::getUsageModels(int days)
+{
+    const QDate endDate = QDate::currentDate();
+    const QDate startDate = endDate.addDays(-qMax(1, days) + 1);
+    const QString endpoint = QStringLiteral(
+        "/api/v1/usage/dashboard/models?start_date=%1&end_date=%2&model_source=requested&timezone=Asia/Shanghai")
+        .arg(startDate.toString(Qt::ISODate), endDate.toString(Qt::ISODate));
+    QNetworkReply *reply = get(endpoint);
+    connect(reply, &QNetworkReply::finished, this, &ApiClient::onUsageModelsFinished);
+}
+
+void ApiClient::getApiKeyUsage(const QJsonArray &apiKeyIds)
+{
+    QJsonObject body;
+    body.insert(QStringLiteral("api_key_ids"), apiKeyIds);
+    QNetworkReply *reply = post(
+        QStringLiteral("/api/v1/usage/dashboard/api-keys-usage"), body);
+    connect(reply, &QNetworkReply::finished, this, &ApiClient::onApiKeyUsageFinished);
 }
 
 void ApiClient::requestUserInfo(const QString &endpoint)
@@ -134,6 +169,18 @@ QJsonObject ApiClient::parseResponse(QNetworkReply *reply, bool &ok)
         if (message.isEmpty()) {
             message = reply->errorString();
         }
+        const int httpStatus = reply->attribute(
+            QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QString code = result.value(QStringLiteral("code")).toString();
+        const QString combined = (code + QLatin1Char(' ') + message).toLower();
+        if (httpStatus == 401 && !m_authToken.isEmpty()
+                && !m_authExpirationEmitted
+                && (combined.contains(QStringLiteral("token"))
+                    || combined.contains(QStringLiteral("expired"))
+                    || combined.contains(QStringLiteral("unauthorized")))) {
+            m_authExpirationEmitted = true;
+            emit authenticationExpired();
+        }
         result["error"] = message;
         return result;
     }
@@ -195,6 +242,7 @@ void ApiClient::onLoginFinished()
     }
 
     m_authToken = token;
+    m_authExpirationEmitted = false;
     emit loginSuccess(token, data);
 
     reply->deleteLater();
@@ -287,6 +335,72 @@ void ApiClient::onUserInfoFinished()
     reply->deleteLater();
 }
 
+void ApiClient::onUsageStatsFinished()
+{
+    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply) return;
+    bool ok = false;
+    const QJsonObject response = parseResponse(reply, ok);
+    reply->deleteLater();
+    if (!ok) {
+        emit requestFailed(response.value(QStringLiteral("error")).toString());
+        return;
+    }
+    const int code = response.value(QStringLiteral("code")).toInt(0);
+    if (code != 0 && code != 200) {
+        emit requestFailed(response.value(QStringLiteral("message")).toString());
+        return;
+    }
+    const QJsonValue data = response.value(QStringLiteral("data"));
+    emit usageStatsReceived(data.isObject() ? data.toObject() : response);
+}
+
+void ApiClient::onUsageModelsFinished()
+{
+    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply) return;
+    bool ok = false;
+    const QJsonObject response = parseResponse(reply, ok);
+    reply->deleteLater();
+    if (!ok) {
+        emit requestFailed(response.value(QStringLiteral("error")).toString());
+        return;
+    }
+    const int code = response.value(QStringLiteral("code")).toInt(0);
+    if (code != 0 && code != 200) {
+        emit requestFailed(response.value(QStringLiteral("message")).toString());
+        return;
+    }
+    const QJsonValue data = response.value(QStringLiteral("data"));
+    QJsonArray models;
+    if (data.isArray()) {
+        models = data.toArray();
+    } else if (data.isObject()) {
+        const QJsonObject object = data.toObject();
+        models = object.value(QStringLiteral("items")).toArray();
+        if (models.isEmpty()) models = object.value(QStringLiteral("models")).toArray();
+        if (models.isEmpty()) models = object.value(QStringLiteral("data")).toArray();
+    }
+    emit usageModelsReceived(models);
+}
+
+void ApiClient::onApiKeyUsageFinished()
+{
+    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply) return;
+    bool ok = false;
+    const QJsonObject response = parseResponse(reply, ok);
+    reply->deleteLater();
+    if (!ok) {
+        emit requestFailed(response.value(QStringLiteral("error")).toString());
+        return;
+    }
+    const QJsonObject data = response.value(QStringLiteral("data")).toObject();
+    QJsonObject stats = data.value(QStringLiteral("stats")).toObject();
+    if (stats.isEmpty()) stats = response.value(QStringLiteral("stats")).toObject();
+    emit apiKeyUsageReceived(stats);
+}
+
 void ApiClient::getChannels()
 {
     // 尝试 v1 API
@@ -299,6 +413,52 @@ void ApiClient::getModels(const QString &apiKey)
     // 使用 OpenAI 兼容端点 /v1/models，Bearer 必须是 sk- 开头的 API Key
     QNetworkReply *reply = get("/v1/models", apiKey);
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onModelsFinished);
+}
+
+void ApiClient::generateImage(const QString &apiKey,
+                              const QString &model,
+                              const QString &prompt,
+                              const QString &size,
+                              const QString &quality,
+                              const QString &outputFormat)
+{
+    cancelImageGeneration();
+
+    QNetworkRequest request(QUrl(m_baseUrl + QStringLiteral("/v1/images/generations")));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    request.setRawHeader("Authorization", QStringLiteral("Bearer %1").arg(apiKey).toUtf8());
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(20 * 60 * 1000);
+#endif
+
+    QSslConfiguration sslConfig = request.sslConfiguration();
+    sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+    request.setSslConfiguration(sslConfig);
+
+    QJsonObject data;
+    data[QStringLiteral("model")] = model;
+    data[QStringLiteral("prompt")] = prompt;
+    data[QStringLiteral("size")] = size;
+    data[QStringLiteral("quality")] = quality;
+    data[QStringLiteral("output_format")] = outputFormat;
+    data[QStringLiteral("n")] = 1;
+
+    m_imageGenerationReply = m_networkManager->post(
+        request, QJsonDocument(data).toJson(QJsonDocument::Compact));
+    m_imageGenerationReply->setProperty("aegisyImageOutputFormat", outputFormat);
+    connect(m_imageGenerationReply, &QNetworkReply::finished,
+            this, &ApiClient::onImageGenerationFinished);
+}
+
+void ApiClient::cancelImageGeneration()
+{
+    if (!m_imageGenerationReply) {
+        return;
+    }
+    disconnect(m_imageGenerationReply, nullptr, this, nullptr);
+    m_imageGenerationReply->abort();
+    m_imageGenerationReply->deleteLater();
+    m_imageGenerationReply = nullptr;
 }
 
 void ApiClient::testApiKey(const QString &keyId, const QString &apiKey)
@@ -325,6 +485,93 @@ void ApiClient::testApiKey(const QString &keyId, const QString &apiKey)
             }
             emit apiKeyTested(keyId, false, detail);
         }
+    });
+}
+
+void ApiClient::testConnection(const QString &requestId,
+                               const QString &apiKey,
+                               const QString &model)
+{
+    QNetworkReply *reply = get(QStringLiteral("/v1/models"), apiKey);
+    auto *timer = new QElapsedTimer();
+    timer->start();
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, requestId, model, timer]() {
+        const int latencyMs = static_cast<int>(timer->elapsed());
+        delete timer;
+        const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body = reply->readAll();
+        const QString networkError = reply->errorString();
+        reply->deleteLater();
+
+        const QJsonDocument document = QJsonDocument::fromJson(body);
+        const QJsonObject response = document.isObject()
+            ? document.object() : QJsonObject();
+        if (http == 200) {
+            const QJsonArray models = response.value(QStringLiteral("data")).toArray();
+            if (!model.trimmed().isEmpty()) {
+                bool found = false;
+                for (const QJsonValue &value : models) {
+                    const QString id = value.isObject()
+                        ? value.toObject().value(QStringLiteral("id")).toString()
+                        : value.toString();
+                    if (id == model.trimmed()) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    emit connectionTested(
+                        requestId, false,
+                        QStringLiteral("Key 可用，但模型「%1」不在该 Key 的模型列表中。")
+                            .arg(model.trimmed()),
+                        latencyMs);
+                    return;
+                }
+            }
+            emit connectionTested(
+                requestId, true,
+                model.trimmed().isEmpty()
+                    ? QStringLiteral("连接成功，可用模型 %1 个。 ").arg(models.size()).trimmed()
+                    : QStringLiteral("连接成功，模型「%1」可用。 ").arg(model.trimmed()).trimmed(),
+                latencyMs);
+            return;
+        }
+
+        QString code = response.value(QStringLiteral("code")).toString();
+        QString message = response.value(QStringLiteral("message")).toString();
+        const QJsonValue errorValue = response.value(QStringLiteral("error"));
+        if (errorValue.isObject()) {
+            const QJsonObject error = errorValue.toObject();
+            if (code.isEmpty()) code = error.value(QStringLiteral("code")).toString();
+            if (message.isEmpty()) message = error.value(QStringLiteral("message")).toString();
+        }
+        const QString combined = (code + QLatin1Char(' ') + message).toLower();
+        QString category;
+        if (http == 401 || http == 403 || combined.contains(QStringLiteral("key"))) {
+            category = QStringLiteral("API Key 无效或无权限");
+        } else if (combined.contains(QStringLiteral("balance"))
+                   || combined.contains(QStringLiteral("quota"))
+                   || combined.contains(QStringLiteral("余额"))) {
+            category = QStringLiteral("余额或配额不足");
+        } else if (combined.contains(QStringLiteral("model"))
+                   || combined.contains(QStringLiteral("模型"))) {
+            category = QStringLiteral("模型不可用");
+        } else if (combined.contains(QStringLiteral("channel"))
+                   || combined.contains(QStringLiteral("渠道"))) {
+            category = QStringLiteral("当前没有可用渠道");
+        } else {
+            category = http > 0
+                ? QStringLiteral("请求失败（HTTP %1）").arg(http)
+                : QStringLiteral("网络连接失败");
+        }
+        if (message.isEmpty()) {
+            message = networkError;
+        }
+        emit connectionTested(requestId, false,
+                              message.isEmpty() ? category
+                                                : QStringLiteral("%1：%2").arg(category, message),
+                              latencyMs);
     });
 }
 
@@ -387,4 +634,63 @@ void ApiClient::onModelsFinished()
     QJsonArray models = response["data"].toArray();
     qDebug() << "Received" << models.size() << "models";
     emit modelsReceived(models);
+}
+
+void ApiClient::onImageGenerationFinished()
+{
+    QNetworkReply *reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply || reply != m_imageGenerationReply) {
+        return;
+    }
+    m_imageGenerationReply = nullptr;
+
+    const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QString requestedFormat = reply->property("aegisyImageOutputFormat").toString();
+    const QByteArray body = reply->readAll();
+    const QString networkError = reply->errorString();
+    const QNetworkReply::NetworkError replyError = reply->error();
+    reply->deleteLater();
+
+    const QJsonDocument doc = QJsonDocument::fromJson(body);
+    const QJsonObject response = doc.isObject() ? doc.object() : QJsonObject();
+    if (replyError != QNetworkReply::NoError || httpStatus < 200 || httpStatus >= 300) {
+        QString message;
+        const QJsonValue errorValue = response.value(QStringLiteral("error"));
+        if (errorValue.isObject()) {
+            message = errorValue.toObject().value(QStringLiteral("message")).toString();
+        } else if (errorValue.isString()) {
+            message = errorValue.toString();
+        }
+        if (message.isEmpty()) {
+            message = response.value(QStringLiteral("message")).toString();
+        }
+        if (message.isEmpty()) {
+            message = httpStatus > 0
+                ? QStringLiteral("HTTP %1").arg(httpStatus)
+                : networkError;
+        }
+        emit imageGenerationFailed(message);
+        return;
+    }
+
+    const QJsonArray images = response.value(QStringLiteral("data")).toArray();
+    if (images.isEmpty()) {
+        emit imageGenerationFailed(QStringLiteral("服务器未返回图片数据。"));
+        return;
+    }
+
+    const QJsonObject image = images.first().toObject();
+    const QByteArray imageData = QByteArray::fromBase64(
+        image.value(QStringLiteral("b64_json")).toString().toLatin1());
+    if (imageData.isEmpty()) {
+        emit imageGenerationFailed(QStringLiteral("服务器返回的图片数据为空或格式不受支持。"));
+        return;
+    }
+
+    QString format = image.value(QStringLiteral("output_format")).toString();
+    if (format.isEmpty()) {
+        format = requestedFormat.isEmpty() ? QStringLiteral("png") : requestedFormat;
+    }
+    emit imageGenerated(imageData, format,
+                        image.value(QStringLiteral("revised_prompt")).toString());
 }
