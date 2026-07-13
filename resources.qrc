@@ -5,4 +5,11 @@
     <qresource prefix="/icons">
         <file alias="aegisy-icon.png">assets/aegisy-icon.png</file>
     </qresource>
+    <qresource prefix="/builtin-skills">
+        <file alias="image-generation/aegisy-skill.json">assets/builtin-skills/image-generation/aegisy-skill.json</file>
+        <file alias="image-generation/SKILL.md">assets/builtin-skills/image-generation/SKILL.md</file>
+        <file alias="presentation/aegisy-skill.json">assets/builtin-skills/presentation/aegisy-skill.json</file>
+        <file alias="presentation/SKILL.md">assets/builtin-skills/presentation/SKILL.md</file>
+        <file alias="presentation/scripts/create_ppt.py">assets/builtin-skills/presentation/scripts/create_ppt.py</file>
+    </qresource>
 </RCC>

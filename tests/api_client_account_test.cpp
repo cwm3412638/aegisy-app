@@ -41,6 +41,24 @@ public:
                         buffer->mid(headerEnd + 4, contentLength)).object();
 
                     if (path == QStringLiteral("/v1/chat/completions")) {
+                        if (!body.value(QStringLiteral("stream")).toBool()) {
+                            const QString plan = QStringLiteral(
+                                "{\"title\":\"测试演示\",\"subtitle\":\"Aegisy\","
+                                "\"slides\":[{\"title\":\"概览\",\"bullets\":[\"第一点\"]}]}" );
+                            const QByteArray payload = QJsonDocument(QJsonObject{
+                                { QStringLiteral("choices"), QJsonArray{ QJsonObject{
+                                    { QStringLiteral("message"), QJsonObject{
+                                        { QStringLiteral("role"), QStringLiteral("assistant") },
+                                        { QStringLiteral("content"), plan }
+                                    }}
+                                }} }
+                            }).toJson(QJsonDocument::Compact);
+                            socket->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                          + QByteArray::number(payload.size())
+                                          + "\r\nConnection: close\r\n\r\n" + payload);
+                            socket->disconnectFromHost();
+                            return;
+                        }
                         const QByteArray payload =
                             "data: {\"choices\":[{\"delta\":{\"content\":\"\\u4f60\\u597d\"}}]}\n\n"
                             "data: {\"choices\":[{\"delta\":{\"content\":\"！\"}}]}\n\n"
@@ -260,6 +278,32 @@ int main(int argc, char **argv)
                     "chat usage option mismatch")
         || !require(server.body.value(QStringLiteral("messages")).toArray().size() == 1,
                     "chat messages mismatch")) return 1;
+
+    server.clear();
+    succeeded = false;
+    if (!waitFor([&]() {
+            client.requestPresentationPlan(QStringLiteral("ppt-test"),
+                                           QStringLiteral("sk-ppt-test"),
+                                           QStringLiteral("gpt-test"),
+                                           QStringLiteral("制作测试 PPT"));
+        }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::presentationPlanReceived, &loop,
+                [&](const QString &requestId, const QJsonObject &plan) {
+                    succeeded = requestId == QStringLiteral("ppt-test")
+                        && plan.value(QStringLiteral("title")).toString() == QStringLiteral("测试演示")
+                        && plan.value(QStringLiteral("slides")).toArray().size() == 1;
+                    loop.quit();
+                });
+            QObject::connect(&client, &ApiClient::presentationPlanFailed, &loop,
+                [&](const QString &, const QString &) { loop.quit(); });
+        })
+        || !require(succeeded, "presentation plan request failed")
+        || !require(server.path == QStringLiteral("/v1/chat/completions"),
+                    "presentation plan path mismatch")
+        || !require(!server.body.value(QStringLiteral("stream")).toBool(),
+                    "presentation plan must be non-streaming")
+        || !require(server.body.value(QStringLiteral("messages")).toArray().size() == 2,
+                    "presentation plan messages mismatch")) return 1;
 
     return 0;
 }

@@ -6,6 +6,8 @@
 #include "models_dialog.h"
 #include "image_generation_dialog.h"
 #include "chat_dialog.h"
+#include "skill_manager.h"
+#include "skills_dialog.h"
 #include "system_doctor_dialog.h"
 #include "usage_dialog.h"
 #include "gateway_manager.h"
@@ -96,6 +98,7 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
     , m_updateManager(updateManager)
     , m_gatewayManager(new GatewayManager(this))
     , m_desktopEnhancementManager(new DesktopEnhancementManager(this))
+    , m_skillManager(new SkillManager(this))
 {
     setupUi();
     setWindowTitle(QStringLiteral("Aegisy - AI 工具连接管理"));
@@ -685,6 +688,14 @@ void MainWindow::setupUi()
     m_chatButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     sideLayout->addWidget(m_chatButton);
 
+    m_skillsButton = new QPushButton(QStringLiteral("Skills"), sidebar);
+    m_skillsButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+    m_skillsButton->setToolTip(QStringLiteral("安装、启用和管理对话自动调用的 Skills"));
+    m_skillsButton->setFixedHeight(34);
+    m_skillsButton->setCursor(Qt::PointingHandCursor);
+    m_skillsButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    sideLayout->addWidget(m_skillsButton);
+
     sideLayout->addStretch();
 
     auto *localTitle = new QLabel(QStringLiteral("认证文件"), sidebar);
@@ -833,6 +844,8 @@ void MainWindow::setupUi()
             this, &MainWindow::onDesktopEnhancementsClicked);
     connect(m_chatButton, &QPushButton::clicked,
             this, &MainWindow::onChatClicked);
+    connect(m_skillsButton, &QPushButton::clicked,
+            this, &MainWindow::onSkillsClicked);
     connect(m_balanceButton, &QPushButton::clicked,
             this, &MainWindow::onUsageClicked);
     connect(m_userLabel, &QPushButton::clicked,
@@ -1651,7 +1664,14 @@ void MainWindow::onImageGenerationClicked()
 
 void MainWindow::onChatClicked()
 {
-    auto *dialog = new ChatDialog(m_apiClient, this);
+    auto *dialog = new ChatDialog(m_apiClient, m_skillManager, this);
+    dialog->exec();
+    dialog->deleteLater();
+}
+
+void MainWindow::onSkillsClicked()
+{
+    auto *dialog = new SkillsDialog(m_skillManager, this);
     dialog->exec();
     dialog->deleteLater();
 }

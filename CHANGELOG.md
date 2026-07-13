@@ -32,6 +32,12 @@
 - 对话历史保存在本机应用数据目录，重启后可恢复；历史文件不保存 API Key。
 - 对话消息新增用户头像和 Aegisy 品牌头像，便于快速区分发言角色。
 - 插件批量安装确认与结果改为固定尺寸可滚动窗口，选择大量插件时按钮不会被挤出屏幕。
+- 新增 Skills 管理中心，支持通过 HTTPS 包地址和本地目录安装完整 Skill 结构、启用、禁用和删除。
+- URL 安装器兼容 `INSTALL.md`、`SKILL.md` 和目录地址，并自动保存主文件引用的 scripts、references、agents 与 package.json。
+- 第三方 Skill 默认仅作为指令资源，不自动执行脚本；内置 Skill 使用受信任执行器和声明式权限。
+- AI 对话自动匹配明确的生图与 PPT 请求，并支持 `/image`、`/ppt` 手动触发。
+- GPT Image Skill 自动选择 `gpt-image` 分组 Key，生成结果保存并显示在对话中。
+- PPT Skill 使用当前模型规划内容，通过应用数据目录中的隔离 python-pptx 环境输出 PPTX。
 - macOS `build.sh` 会清理旧部署 Bundle，避免复用打包残留造成 Homebrew Qt 与包内 Qt 同时加载。
 
 ## v2.4.0 - GPT Image 生图

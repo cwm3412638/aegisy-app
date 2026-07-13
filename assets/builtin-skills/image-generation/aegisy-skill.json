@@ -1,0 +1,13 @@
+{
+  "id": "aegisy.image.generate",
+  "name": "GPT Image 生图",
+  "version": "1.0.0",
+  "description": "生成海报、插画、产品图、图标和其他图片。",
+  "executor": "image",
+  "enabled": true,
+  "trusted": true,
+  "builtin": true,
+  "required_group": "gpt-image",
+  "permissions": ["aegisy-network", "files-write"],
+  "triggers": ["/image", "生成图片", "生成一张图", "画一张", "生图", "制作海报", "设计海报", "插画", "产品图", "图片素材"]
+}

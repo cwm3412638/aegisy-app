@@ -2,12 +2,14 @@
 
 #include "api_client.h"
 #include "app_theme.h"
+#include "skill_manager.h"
 
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
 #include <QDir>
+#include <QDesktopServices>
 #include <QEvent>
 #include <QFile>
 #include <QFileInfo>
@@ -22,6 +24,7 @@
 #include <QPlainTextEdit>
 #include <QPixmap>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -30,8 +33,11 @@
 #include <QStyle>
 #include <QTextBrowser>
 #include <QTimer>
+#include <QUrl>
 #include <QUuid>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 namespace {
 
@@ -95,9 +101,12 @@ QLabel *messageAvatar(bool user, QWidget *parent)
 
 } // namespace
 
-ChatDialog::ChatDialog(ApiClient *apiClient, QWidget *parent)
+ChatDialog::ChatDialog(ApiClient *apiClient,
+                       SkillManager *skillManager,
+                       QWidget *parent)
     : QDialog(parent)
     , m_apiClient(apiClient)
+    , m_skillManager(skillManager)
 {
     setupUi();
     setWindowTitle(QStringLiteral("AI 对话"));
@@ -119,6 +128,23 @@ ChatDialog::ChatDialog(ApiClient *apiClient, QWidget *parent)
             this, &ChatDialog::onChatFailed);
     connect(m_apiClient, &ApiClient::requestFailed,
             this, &ChatDialog::onRequestFailed);
+    connect(m_apiClient, &ApiClient::imageGenerated,
+            this, &ChatDialog::onSkillImageGenerated);
+    connect(m_apiClient, &ApiClient::imageGenerationFailed,
+            this, &ChatDialog::onSkillImageFailed);
+    connect(m_apiClient, &ApiClient::presentationPlanReceived,
+            this, &ChatDialog::onPresentationPlanReceived);
+    connect(m_apiClient, &ApiClient::presentationPlanFailed,
+            this, &ChatDialog::onPresentationPlanFailed);
+    if (m_skillManager) {
+        connect(m_skillManager, &SkillManager::skillsChanged, this, [this]() {
+            const QList<SkillInfo> current = m_skillManager->skills();
+            const int enabled = std::count_if(
+                current.cbegin(), current.cend(),
+                [](const SkillInfo &skill) { return skill.enabled; });
+            m_skillsLabel->setText(QStringLiteral("Skills 自动 · %1").arg(enabled));
+        });
+    }
 
     loadHistory();
     if (m_sessions.isEmpty()) {
@@ -222,6 +248,19 @@ void ChatDialog::setupUi()
     m_contextLabel->setStyleSheet(QStringLiteral(
         "font-size: 11px; color: #475467; background: #eef2f6;"
         " border: 1px solid #dfe6ee; border-radius: 6px; padding: 4px 8px;"));
+    m_skillsLabel = new QLabel(main);
+    m_skillsLabel->setStyleSheet(QStringLiteral(
+        "font-size: 11px; color: #0f5f59; background: #e7f5f2;"
+        " border: 1px solid #b7e4da; border-radius: 6px; padding: 4px 8px;"));
+    const QList<SkillInfo> currentSkills = m_skillManager
+        ? m_skillManager->skills() : QList<SkillInfo>();
+    const int enabledSkills = std::count_if(
+        currentSkills.cbegin(), currentSkills.cend(),
+        [](const SkillInfo &skill) { return skill.enabled; });
+    m_skillsLabel->setText(QStringLiteral("Skills 自动 · %1").arg(enabledSkills));
+    m_skillsLabel->setToolTip(QStringLiteral(
+        "明确匹配已启用 Skill 时自动调用；可使用 /image 或 /ppt 强制调用。"));
+    metaRow->addWidget(m_skillsLabel);
     metaRow->addWidget(m_contextLabel);
     mainLayout->addLayout(metaRow);
 
@@ -301,6 +340,7 @@ bool ChatDialog::eventFilter(QObject *watched, QEvent *event)
 
 void ChatDialog::onApiKeysReceived(const QJsonArray &keys)
 {
+    m_allApiKeys = keys;
     const QSignalBlocker blocker(m_keyCombo);
     m_keyCombo->clear();
     for (const QJsonValue &value : keys) {
@@ -445,7 +485,7 @@ void ChatDialog::onSendClicked()
     rebuildSessionList();
     m_sessionList->setCurrentRow(m_currentSession);
     saveHistory();
-    startRequest();
+    if (!startMatchedSkill(text)) startRequest();
 }
 
 void ChatDialog::startRequest()
@@ -477,9 +517,117 @@ void ChatDialog::startRequest()
     m_apiClient->sendChatMessage(m_requestId, key, model, session.messages);
 }
 
+bool ChatDialog::startMatchedSkill(const QString &requestText)
+{
+    if (!m_skillManager) return false;
+    const SkillInfo matched = m_skillManager->matchSkill(requestText);
+    if (matched.id.isEmpty()) return false;
+
+    m_pendingSkillId = matched.id;
+    m_pendingSkillRequest = requestText;
+    m_streamContent.clear();
+    addMessageWidget(QStringLiteral("assistant"),
+                     QStringLiteral("正在调用 Skill：%1...").arg(matched.name),
+                     -1, &m_streamBrowser);
+    setGenerating(true);
+    m_statusLabel->setText(QStringLiteral("正在调用 Skill：%1").arg(matched.name));
+
+    if (matched.executor == QStringLiteral("image")) {
+        const QString key = imageSkillApiKey();
+        if (key.isEmpty()) {
+            finishSkillRun(QStringLiteral(
+                "无法调用 GPT Image Skill：账号中没有启用的 `gpt-image` 分组 API Key。"));
+            return true;
+        }
+        QString prompt = requestText;
+        if (prompt.startsWith(QStringLiteral("/image"), Qt::CaseInsensitive)) {
+            prompt = prompt.mid(QStringLiteral("/image").size()).trimmed();
+        }
+        m_apiClient->generateImage(key, QStringLiteral("gpt-image-2"), prompt,
+                                   QStringLiteral("1024x1024"), QStringLiteral("auto"),
+                                   QStringLiteral("png"));
+        return true;
+    }
+
+    if (matched.executor == QStringLiteral("presentation")) {
+        if (!m_skillManager->presentationRuntimeReady()) {
+            finishSkillRun(QStringLiteral(
+                "已匹配 PPT Skill，但本机尚未安装 PPT 运行环境。请打开 **Skills 管理**，点击“安装 PPT 运行环境”后重试。"));
+            return true;
+        }
+        QString prompt = requestText;
+        if (prompt.startsWith(QStringLiteral("/ppt"), Qt::CaseInsensitive)) {
+            prompt = prompt.mid(QStringLiteral("/ppt").size()).trimmed();
+        }
+        m_skillRequestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        m_apiClient->requestPresentationPlan(
+            m_skillRequestId, selectedApiKey(), m_modelCombo->currentData().toString(), prompt);
+        return true;
+    }
+
+    m_pendingSkillId.clear();
+    m_pendingSkillRequest.clear();
+    setGenerating(false);
+    return false;
+}
+
+QString ChatDialog::imageSkillApiKey() const
+{
+    for (const QJsonValue &value : m_allApiKeys) {
+        const QJsonObject keyObject = value.toObject();
+        const QString status = keyObject.value(QStringLiteral("status")).toString();
+        if (!status.isEmpty() && status != QStringLiteral("active")) continue;
+        const QJsonObject group = keyObject.value(QStringLiteral("group")).toObject();
+        if (group.value(QStringLiteral("name")).toString()
+                    .compare(QStringLiteral("gpt-image"), Qt::CaseInsensitive) == 0
+                || group.value(QStringLiteral("allow_image_generation")).toBool()) {
+            const QString key = keyObject.value(QStringLiteral("key")).toString();
+            if (!key.isEmpty()) return key;
+        }
+    }
+    return QString();
+}
+
+void ChatDialog::finishSkillRun(const QString &content,
+                                const QString &attachmentPath,
+                                const QString &attachmentType)
+{
+    if (m_currentSession >= 0) {
+        QJsonObject message{
+            { QStringLiteral("role"), QStringLiteral("assistant") },
+            { QStringLiteral("content"), content },
+            { QStringLiteral("skill_id"), m_pendingSkillId }
+        };
+        if (!attachmentPath.isEmpty()) {
+            message.insert(QStringLiteral("attachment_path"), attachmentPath);
+            message.insert(QStringLiteral("attachment_type"), attachmentType);
+        }
+        m_sessions[m_currentSession].messages.append(message);
+        m_sessions[m_currentSession].updatedAt = QDateTime::currentDateTime();
+    }
+    m_pendingSkillId.clear();
+    m_pendingSkillRequest.clear();
+    m_skillRequestId.clear();
+    m_streamBrowser = nullptr;
+    setGenerating(false);
+    m_statusLabel->setText(QStringLiteral("Skill 执行完成。"));
+    rebuildMessages();
+    rebuildSessionList();
+    m_sessionList->setCurrentRow(m_currentSession);
+    saveHistory();
+    scrollToBottom();
+}
+
 void ChatDialog::onStopClicked()
 {
     if (!m_generating) return;
+    if (!m_pendingSkillId.isEmpty()) {
+        if (m_pendingSkillId == QStringLiteral("aegisy.image.generate")) {
+            m_apiClient->cancelImageGeneration();
+        }
+        finishSkillRun(QStringLiteral("Skill 执行已停止。"));
+        return;
+    }
     m_apiClient->cancelChatMessage();
     if (m_streamContent.isEmpty()) m_streamContent = QStringLiteral("已停止生成。");
     if (m_streamBrowser) m_streamBrowser->setMarkdown(m_streamContent);
@@ -675,6 +823,67 @@ void ChatDialog::onRequestFailed(const QString &error)
     }
 }
 
+void ChatDialog::onSkillImageGenerated(const QByteArray &imageData,
+                                       const QString &outputFormat,
+                                       const QString &revisedPrompt)
+{
+    if (m_pendingSkillId != QStringLiteral("aegisy.image.generate")) return;
+    const QString extension = outputFormat.compare(QStringLiteral("jpeg"), Qt::CaseInsensitive) == 0
+        ? QStringLiteral("jpg") : QStringLiteral("png");
+    const QString directory = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+        + QStringLiteral("/skill-artifacts/")
+        + (m_currentSession >= 0 ? m_sessions[m_currentSession].id : QStringLiteral("shared"));
+    QDir().mkpath(directory);
+    const QString path = directory + QStringLiteral("/image-")
+        + QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))
+        + QLatin1Char('.') + extension;
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(imageData) != imageData.size()
+            || !file.commit()) {
+        finishSkillRun(QStringLiteral("图片已生成，但保存到本机失败。"));
+        return;
+    }
+    const QString content = revisedPrompt.isEmpty()
+        ? QStringLiteral("已通过 **GPT Image 生图 Skill** 生成图片。")
+        : QStringLiteral("已通过 **GPT Image 生图 Skill** 生成图片。\n\n优化提示词：%1")
+              .arg(revisedPrompt);
+    finishSkillRun(content, path, QStringLiteral("image"));
+}
+
+void ChatDialog::onSkillImageFailed(const QString &error)
+{
+    if (m_pendingSkillId != QStringLiteral("aegisy.image.generate")) return;
+    finishSkillRun(QStringLiteral("GPT Image Skill 执行失败：%1").arg(error));
+}
+
+void ChatDialog::onPresentationPlanReceived(const QString &requestId, const QJsonObject &plan)
+{
+    if (requestId != m_skillRequestId
+            || m_pendingSkillId != QStringLiteral("aegisy.presentation.create")) return;
+    const QString directory = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+        + QStringLiteral("/skill-artifacts/")
+        + (m_currentSession >= 0 ? m_sessions[m_currentSession].id : QStringLiteral("shared"));
+    QDir().mkpath(directory);
+    QString fileName = plan.value(QStringLiteral("title")).toString(QStringLiteral("presentation"));
+    fileName.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|]+")), QStringLiteral("-"));
+    fileName = fileName.trimmed().left(60);
+    if (fileName.isEmpty()) fileName = QStringLiteral("presentation");
+    const QString path = directory + QLatin1Char('/') + fileName + QStringLiteral(".pptx");
+    QString error;
+    if (!m_skillManager->executePresentation(plan, path, &error)) {
+        finishSkillRun(QStringLiteral("PPT Skill 执行失败：%1").arg(error));
+        return;
+    }
+    finishSkillRun(QStringLiteral("已通过 **PPT 制作 Skill** 生成演示文稿。"),
+                   path, QStringLiteral("presentation"));
+}
+
+void ChatDialog::onPresentationPlanFailed(const QString &requestId, const QString &error)
+{
+    if (requestId != m_skillRequestId) return;
+    finishSkillRun(QStringLiteral("PPT 大纲生成失败：%1").arg(error));
+}
+
 void ChatDialog::setGenerating(bool generating)
 {
     m_generating = generating;
@@ -803,6 +1012,34 @@ void ChatDialog::addMessageWidget(const QString &role,
                 &QAbstractTextDocumentLayout::documentSizeChanged,
                 browser, updateHeight);
         columnLayout->addWidget(browser);
+        if (messageIndex >= 0 && m_currentSession >= 0) {
+            const QJsonObject stored = m_sessions[m_currentSession].messages.at(messageIndex).toObject();
+            const QString attachmentPath = stored.value(QStringLiteral("attachment_path")).toString();
+            const QString attachmentType = stored.value(QStringLiteral("attachment_type")).toString();
+            if (!attachmentPath.isEmpty() && QFileInfo::exists(attachmentPath)) {
+                if (attachmentType == QStringLiteral("image")) {
+                    const QPixmap image(attachmentPath);
+                    auto *preview = new QLabel(column);
+                    preview->setMaximumSize(640, 460);
+                    preview->setPixmap(image.scaled(640, 460, Qt::KeepAspectRatio,
+                                                    Qt::SmoothTransformation));
+                    preview->setStyleSheet(QStringLiteral(
+                        "QLabel { background: white; border: 1px solid #dfe6ee;"
+                        " border-radius: 8px; padding: 4px; }"));
+                    columnLayout->addWidget(preview, 0, Qt::AlignLeft);
+                }
+                auto *openButton = new QPushButton(
+                    attachmentType == QStringLiteral("presentation")
+                        ? QStringLiteral("打开 PPTX") : QStringLiteral("打开图片"), column);
+                openButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+                openButton->setFixedWidth(110);
+                connect(openButton, &QPushButton::clicked, this,
+                        [attachmentPath]() {
+                            QDesktopServices::openUrl(QUrl::fromLocalFile(attachmentPath));
+                        });
+                columnLayout->addWidget(openButton, 0, Qt::AlignLeft);
+            }
+        }
         if (contentBrowser) *contentBrowser = browser;
     }
 
@@ -998,6 +1235,9 @@ void ChatDialog::saveHistory() const
 
 void ChatDialog::reject()
 {
+    if (m_pendingSkillId == QStringLiteral("aegisy.image.generate")) {
+        m_apiClient->cancelImageGeneration();
+    }
     m_apiClient->cancelChatMessage();
     saveHistory();
     QDialog::reject();

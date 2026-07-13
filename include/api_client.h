@@ -52,6 +52,10 @@ public:
                          const QString &model,
                          const QJsonArray &messages);
     void cancelChatMessage();
+    void requestPresentationPlan(const QString &requestId,
+                                 const QString &apiKey,
+                                 const QString &model,
+                                 const QString &request);
 
     // 测试某个 API Key 是否可用（对 /v1/models 发起请求），结果通过 apiKeyTested 返回
     void testApiKey(const QString &keyId, const QString &apiKey);
@@ -101,6 +105,8 @@ signals:
                            int totalTokens);
     void chatCompleted(const QString &requestId, const QString &content);
     void chatFailed(const QString &requestId, const QString &errorMessage);
+    void presentationPlanReceived(const QString &requestId, const QJsonObject &plan);
+    void presentationPlanFailed(const QString &requestId, const QString &errorMessage);
 
     // 某个 API Key 测试完成：supported 表示是否可用，detail 为说明
     void apiKeyTested(const QString &keyId, bool supported, const QString &detail);

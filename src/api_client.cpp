@@ -743,6 +743,79 @@ void ApiClient::cancelChatMessage()
     m_chatRequestId.clear();
 }
 
+void ApiClient::requestPresentationPlan(const QString &requestId,
+                                        const QString &apiKey,
+                                        const QString &model,
+                                        const QString &requestText)
+{
+    QNetworkRequest request(QUrl(m_baseUrl + QStringLiteral("/v1/chat/completions")));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    request.setRawHeader("Authorization", QStringLiteral("Bearer %1").arg(apiKey).toUtf8());
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(2 * 60 * 1000);
+#endif
+    QSslConfiguration sslConfig = request.sslConfiguration();
+    sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+    request.setSslConfiguration(sslConfig);
+
+    const QString systemPrompt = QStringLiteral(
+        "你是演示文稿规划器。只输出一个 JSON 对象，不要 Markdown。结构必须是："
+        "{\"title\":\"标题\",\"subtitle\":\"副标题\",\"slides\":["
+        "{\"title\":\"页面标题\",\"bullets\":[\"要点1\",\"要点2\"]}]}。"
+        "生成 5 到 10 页，内容面向最终观众，每页最多 6 个简洁要点。"
+        "不要输出演讲过程说明、制作备注或代码。");
+    const QJsonObject body{
+        { QStringLiteral("model"), model },
+        { QStringLiteral("stream"), false },
+        { QStringLiteral("messages"), QJsonArray{
+            QJsonObject{{QStringLiteral("role"), QStringLiteral("system")},
+                        {QStringLiteral("content"), systemPrompt}},
+            QJsonObject{{QStringLiteral("role"), QStringLiteral("user")},
+                        {QStringLiteral("content"), requestText}}
+        }}
+    };
+    QNetworkReply *reply = m_networkManager->post(
+        request, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId]() {
+        const QByteArray data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            const QJsonObject root = QJsonDocument::fromJson(data).object();
+            QString message = root.value(QStringLiteral("message")).toString();
+            if (message.isEmpty()) message = root.value(QStringLiteral("error")).toObject()
+                .value(QStringLiteral("message")).toString();
+            if (message.isEmpty()) message = reply->errorString();
+            emit presentationPlanFailed(requestId, message);
+            reply->deleteLater();
+            return;
+        }
+        const QJsonObject root = QJsonDocument::fromJson(data).object();
+        const QJsonArray choices = root.value(QStringLiteral("choices")).toArray();
+        QString content;
+        if (!choices.isEmpty()) {
+            content = choices.at(0).toObject().value(QStringLiteral("message")).toObject()
+                .value(QStringLiteral("content")).toString().trimmed();
+        }
+        if (content.startsWith(QStringLiteral("```"))) {
+            const int firstNewline = content.indexOf(QLatin1Char('\n'));
+            const int lastFence = content.lastIndexOf(QStringLiteral("```"));
+            if (firstNewline >= 0 && lastFence > firstNewline) {
+                content = content.mid(firstNewline + 1, lastFence - firstNewline - 1).trimmed();
+            }
+        }
+        QJsonParseError parseError;
+        const QJsonDocument plan = QJsonDocument::fromJson(content.toUtf8(), &parseError);
+        if (parseError.error != QJsonParseError::NoError || !plan.isObject()
+                || plan.object().value(QStringLiteral("slides")).toArray().isEmpty()) {
+            emit presentationPlanFailed(
+                requestId, QStringLiteral("模型没有返回有效的 PPT 结构：%1")
+                    .arg(parseError.errorString()));
+        } else {
+            emit presentationPlanReceived(requestId, plan.object());
+        }
+        reply->deleteLater();
+    });
+}
+
 void ApiClient::testApiKey(const QString &keyId, const QString &apiKey)
 {
     // 用被测 key 请求 /v1/models：200 表示可用。

@@ -4,9 +4,11 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QList>
 
 class ApiClient;
+class SkillManager;
 class QComboBox;
 class QLabel;
 class QListWidget;
@@ -21,7 +23,9 @@ class ChatDialog : public QDialog
     Q_OBJECT
 
 public:
-    explicit ChatDialog(ApiClient *apiClient, QWidget *parent = nullptr);
+    explicit ChatDialog(ApiClient *apiClient,
+                        SkillManager *skillManager,
+                        QWidget *parent = nullptr);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -46,6 +50,12 @@ private slots:
     void onChatCompleted(const QString &requestId, const QString &content);
     void onChatFailed(const QString &requestId, const QString &error);
     void onRequestFailed(const QString &error);
+    void onSkillImageGenerated(const QByteArray &imageData,
+                               const QString &outputFormat,
+                               const QString &revisedPrompt);
+    void onSkillImageFailed(const QString &error);
+    void onPresentationPlanReceived(const QString &requestId, const QJsonObject &plan);
+    void onPresentationPlanFailed(const QString &requestId, const QString &error);
 
 private:
     struct ChatSession {
@@ -71,6 +81,11 @@ private:
                           int messageIndex,
                           QTextBrowser **contentBrowser = nullptr);
     void startRequest();
+    bool startMatchedSkill(const QString &requestText);
+    void finishSkillRun(const QString &content,
+                        const QString &attachmentPath = QString(),
+                        const QString &attachmentType = QString());
+    QString imageSkillApiKey() const;
     void resendUserMessage(int messageIndex);
     void editUserMessage(int messageIndex);
     void regenerateAssistantMessage(int messageIndex);
@@ -90,12 +105,14 @@ private:
     int selectedContextWindow() const;
 
     ApiClient *m_apiClient = nullptr;
+    SkillManager *m_skillManager = nullptr;
     QListWidget *m_sessionList = nullptr;
     QComboBox *m_keyCombo = nullptr;
     QComboBox *m_modelCombo = nullptr;
     QLabel *m_statusLabel = nullptr;
     QLabel *m_contextLabel = nullptr;
     QLabel *m_editingLabel = nullptr;
+    QLabel *m_skillsLabel = nullptr;
     QScrollArea *m_scrollArea = nullptr;
     QWidget *m_messagesContainer = nullptr;
     QVBoxLayout *m_messagesLayout = nullptr;
@@ -113,6 +130,10 @@ private:
     QString m_pendingModel;
     QString m_requestId;
     QString m_streamContent;
+    QString m_pendingSkillId;
+    QString m_pendingSkillRequest;
+    QString m_skillRequestId;
+    QJsonArray m_allApiKeys;
     bool m_generating = false;
     bool m_applyingSessionSelection = false;
 };

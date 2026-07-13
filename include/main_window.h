@@ -23,6 +23,7 @@ class QAction;
 class UpdateManager;
 class GatewayManager;
 class DesktopEnhancementManager;
+class SkillManager;
 class QTimer;
 
 class MainWindow : public QMainWindow
@@ -60,6 +61,7 @@ private slots:
     void onSystemDoctorClicked();
     void onGatewayClicked();
     void onDesktopEnhancementsClicked();
+    void onSkillsClicked();
     void onGatewayRunningChanged(bool running);
     void onBackupsClicked();
     void onTransferClicked();
@@ -100,6 +102,7 @@ private:
     UpdateManager  *m_updateManager;
     GatewayManager *m_gatewayManager;
     DesktopEnhancementManager *m_desktopEnhancementManager;
+    SkillManager *m_skillManager;
 
     // UI — 顶栏
     QPushButton *m_userLabel;
@@ -127,6 +130,7 @@ private:
     QPushButton *m_gatewayButton = nullptr;
     QPushButton *m_desktopEnhancementsButton = nullptr;
     QPushButton *m_chatButton = nullptr;
+    QPushButton *m_skillsButton = nullptr;
     QAction *m_checkUpdatesAction = nullptr;
     QAction *m_autoUpdateChecksAction = nullptr;
     QTextEdit   *m_logOutput;

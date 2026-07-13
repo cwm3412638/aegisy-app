@@ -1,0 +1,12 @@
+{
+  "id": "aegisy.presentation.create",
+  "name": "PPT 制作",
+  "version": "1.0.0",
+  "description": "根据主题和要求规划并生成 PowerPoint PPTX 演示文稿。",
+  "executor": "presentation",
+  "enabled": true,
+  "trusted": true,
+  "builtin": true,
+  "permissions": ["model-request", "files-write", "local-process"],
+  "triggers": ["/ppt", "制作ppt", "生成ppt", "做一个ppt", "制作演示文稿", "生成演示文稿", "制作幻灯片", "powerpoint"]
+}

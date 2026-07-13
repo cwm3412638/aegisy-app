@@ -16,6 +16,11 @@ Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账�
 - 内置类似 ChatGPT、Claude 的 AI 对话工作区，可切换 API Key 和该 Key 支持的模型，支持流式回复、上下文 Token、停止生成和持久历史
 - 每条消息支持复制；用户消息支持编辑后重新发送，助手消息支持重新生成，也可按 Markdown 复制完整对话
 - 用户与 Aegisy 助手消息使用独立头像，长回复和代码块滚动时保持身份位置稳定
+- 新增 Skills 管理中心，支持从 HTTPS Skill 目录、`SKILL.md`、`INSTALL.md` 地址安装完整技能包，或导入本地目录
+- Skill 安装会保留 `scripts/`、`references/`、`agents/` 等引用资源；第三方脚本默认不执行，内置执行器单独授权
+- AI 对话可自动识别明确的生图和 PPT 请求，也可使用 `/image`、`/ppt` 强制调用对应 Skill
+- 内置 GPT Image Skill 自动选择账号中的 `gpt-image` 分组 Key，并在对话中展示和保存图片
+- 内置 PPT Skill使用当前会话模型生成大纲，再通过隔离的 `python-pptx` 环境生成可打开的 PPTX 文件
 - 用量中心展示时间范围汇总、模型统计、Key 今日消费、累计消费、额度和使用率
 - 检测 CLI 本地版本和 npm 最新版本，并提示可更新状态
 - 激活前预览目标文件、字段变化、模型、冲突和备份策略
@@ -115,6 +120,7 @@ package-windows.bat
 10. 点击侧栏“桌面增强”查看全量模型与 Codex 插件、同步历史会话、安装 Computer Use 或以运行时方式启动 Claude 中文界面。
 11. 点击右上角头像修改密码或兑换密卡；点击“API Keys”创建和维护账号 Key。
 12. 点击侧栏“AI 对话”，选择 API Key 和模型后开始流式对话；历史保存在本机应用数据目录，不保存 API Key。
+13. 点击侧栏“Skills”安装、导入、启用或禁用技能；首次使用 PPT Skill 时在该页面安装隔离运行环境。
 
 “迁移”菜单提供加密档案导入和导出。导出密码无法找回，请单独妥善保存。
 
@@ -131,6 +137,8 @@ package-windows.bat
 - 插件安装调用 Codex 官方 `plugin add` 命令，不直接修改 Codex 插件缓存或绕过账号权限。
 - 修改密码、密卡兑换和 Key 增删改均使用登录 JWT 调用 Aegisy 官方接口，密码与兑换码不写入日志或本地配置。
 - AI 对话直接使用所选 API Key 调用兼容接口，提示词和回复不写入日志；历史记录只写入当前用户的本机应用数据目录，且不包含 API Key。
+- 通过 URL 或目录安装的第三方 Skill 默认是“仅指令”模式，脚本不会被自动执行；安装器仅接受 HTTPS、限制包大小并拒绝目录穿越路径。
+- PPT 运行时安装在应用数据目录的独立 Python 虚拟环境，不修改系统 Python；生成文件保存在当前用户的 Skill 产物目录。
 
 ## 构建与测试
 
@@ -154,6 +162,8 @@ src/profile_archive.cpp  加密档案导入导出
 src/tool_manager.cpp     CLI 检测、配置事务、备份恢复
 src/system_doctor_dialog.cpp 系统依赖、CLI、配置和安全存储体检
 src/usage_dialog.cpp      账号、模型和 API Key 用量中心
+src/skill_manager.cpp     Skills 安装、扫描、权限、路由与本地执行器
+src/skills_dialog.cpp      Skills 管理页面与 PPT 运行环境安装
 src/gateway_manager.cpp   本地网关生命周期、凭据管道和请求元数据
 src/tool_manager.cpp      配置、版本检测与跨平台原生终端启动
 src/update_manager_mac.mm  macOS Sparkle 应用内更新桥接
@@ -170,6 +180,6 @@ macOS、Windows 发布流程和更新源说明见 `release/README.md`。
 - 开机启动设置
 - 自定义服务地址与供应商预设
 - 用量统计和连接健康检测
-- MCP、Prompts、Skills 管理
+- MCP 与 Prompts 管理
 
 网站：<https://www.aegisy.cc>

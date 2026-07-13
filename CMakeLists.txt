@@ -46,6 +46,8 @@ set(SOURCES
     src/models_dialog.cpp
     src/image_generation_dialog.cpp
     src/chat_dialog.cpp
+    src/skill_manager.cpp
+    src/skills_dialog.cpp
     src/system_doctor_dialog.cpp
     src/usage_dialog.cpp
     src/gateway_manager.cpp
@@ -78,6 +80,8 @@ set(HEADERS
     include/models_dialog.h
     include/image_generation_dialog.h
     include/chat_dialog.h
+    include/skill_manager.h
+    include/skills_dialog.h
     include/system_doctor_dialog.h
     include/usage_dialog.h
     include/gateway_manager.h
@@ -316,4 +320,19 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME api_client_account_and_keys
         COMMAND AegisyApiClientAccountTest)
+
+    add_executable(AegisySkillManagerTest
+        tests/skill_manager_test.cpp
+        src/skill_manager.cpp
+        include/skill_manager.h
+        resources.qrc
+    )
+    target_include_directories(AegisySkillManagerTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisySkillManagerTest PRIVATE Qt6::Core Qt6::Network)
+    else()
+        target_link_libraries(AegisySkillManagerTest PRIVATE Qt5::Core Qt5::Network)
+    endif()
+    add_test(NAME skill_manager_install_and_routing COMMAND AegisySkillManagerTest)
 endif()
