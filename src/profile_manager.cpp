@@ -22,6 +22,7 @@ const QStringList kProfileKeys = {
     QStringLiteral("has_credential"),
     QStringLiteral("key"), // 仅用于安全存储迁移失败时保留旧档案。
     QStringLiteral("model"),
+    QStringLiteral("key_hint"),
 };
 
 QString profilePath(int index, const QString &field)
@@ -51,6 +52,17 @@ QString newProfileId()
 QString credentialRefForId(const QString &id)
 {
     return QStringLiteral("profile/%1/api-key").arg(id);
+}
+
+// 取 Key 末尾数位作为掩码提示（非敏感，类似银行卡后四位）。
+QString maskedTail(const QString &key)
+{
+    const QString trimmed = key.trimmed();
+    if (trimmed.isEmpty()) {
+        return QString();
+    }
+    const int tail = qMin(4, trimmed.size());
+    return trimmed.right(tail);
 }
 
 struct LegacyToolConfig {
@@ -358,9 +370,33 @@ QList<Profile> ProfileManager::allProfiles() const
             ? settings.value(presencePath).toBool()
             : !settings.value(profilePath(i, QStringLiteral("key"))).toString().isEmpty();
         profile.model = settings.value(profilePath(i, QStringLiteral("model"))).toString();
+        profile.keyHint = settings.value(profilePath(i, QStringLiteral("key_hint"))).toString();
         result.append(profile);
     }
     return result;
+}
+
+QString ProfileManager::maskedKeyHint(const QString &key)
+{
+    return maskedTail(key);
+}
+
+void ProfileManager::backfillKeyHints()
+{
+    QSettings settings;
+    const int profileCount = settings.value(
+        kProfilesPrefix + QStringLiteral("/count"), 0).toInt();
+    for (int i = 0; i < profileCount; ++i) {
+        const bool hasCredential = settings.value(
+            profilePath(i, QStringLiteral("has_credential")), false).toBool();
+        const QString existing = settings.value(
+            profilePath(i, QStringLiteral("key_hint"))).toString();
+        if (!hasCredential || !existing.isEmpty()) {
+            continue;
+        }
+        // profileWithCredential 载入凭据后会顺带补齐并持久化掩码。
+        profileWithCredential(i);
+    }
 }
 
 Profile ProfileManager::profileWithCredential(int index)
@@ -389,6 +425,13 @@ Profile ProfileManager::profileWithCredential(int index)
     if (profile.key.isEmpty()) {
         m_lastError = QStringLiteral(
             "无法读取该档案的 API Key。macOS 钥匙串询问时请选择“始终允许”，然后重试。");
+    } else {
+        // 补齐缺失的掩码提示，供卡片区分同类型配置。
+        const QString hint = maskedTail(profile.key);
+        if (!hint.isEmpty() && profile.keyHint != hint) {
+            profile.keyHint = hint;
+            settings.setValue(profilePath(index, QStringLiteral("key_hint")), hint);
+        }
     }
     return profile;
 }
@@ -446,6 +489,7 @@ int ProfileManager::addProfile(const QString &name, ProfileType type,
     settings.setValue(
         profilePath(index, QStringLiteral("has_credential")), !key.isEmpty());
     settings.setValue(profilePath(index, QStringLiteral("model")), model);
+    settings.setValue(profilePath(index, QStringLiteral("key_hint")), maskedTail(key));
     settings.setValue(kProfilesPrefix + QStringLiteral("/count"), index + 1);
     settings.setValue(kProfilesPrefix + QStringLiteral("/schema_version"), kSchemaVersion);
     emit profilesChanged();
@@ -494,6 +538,7 @@ bool ProfileManager::updateProfile(int index, const QString &name, ProfileType t
         profilePath(index, QStringLiteral("has_credential")), !key.isEmpty());
     settings.remove(profilePath(index, QStringLiteral("key")));
     settings.setValue(profilePath(index, QStringLiteral("model")), model);
+    settings.setValue(profilePath(index, QStringLiteral("key_hint")), maskedTail(key));
     if (clearOldActive) {
         settings.setValue(activeProfileKey(oldType), -1);
         emit activeProfileChanged(index, -1);
@@ -558,8 +603,17 @@ void ProfileManager::setActiveIndex(int index)
 
     const ProfileType type = profiles[index].type;
     const int oldIndex = activeIndex(type);
-    QSettings().setValue(activeProfileKey(type), index);
+    QSettings settings;
+    settings.setValue(activeProfileKey(type), index);
+    settings.setValue(kProfilesPrefix + QStringLiteral("/last_activated"), index);
     emit activeProfileChanged(oldIndex, index);
+}
+
+int ProfileManager::lastActivatedIndex() const
+{
+    const int stored = QSettings().value(
+        kProfilesPrefix + QStringLiteral("/last_activated"), -1).toInt();
+    return stored >= 0 && stored < count() ? stored : -1;
 }
 
 void ProfileManager::clearActiveProfile(ProfileType type)

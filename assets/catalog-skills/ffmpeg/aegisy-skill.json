@@ -1,0 +1,13 @@
+{
+  "id": "aegisy.video.ffmpeg",
+  "name": "FFmpeg Skill",
+  "version": "1.0.0",
+  "description": "完成剪辑、裁剪、压缩、转码、音频处理和字幕烧录。",
+  "executor": "instruction",
+  "enabled": true,
+  "trusted": true,
+  "builtin": false,
+  "source": "Aegisy Skills",
+  "permissions": ["files-read", "files-write", "local-process"],
+  "triggers": ["ffmpeg", "视频压缩", "压缩视频", "视频转码", "转码视频", "裁剪视频", "裁剪这个视频", "剪辑视频", "视频加字幕", "音视频合并"]
+}

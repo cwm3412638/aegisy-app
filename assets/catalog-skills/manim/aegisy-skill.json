@@ -1,0 +1,13 @@
+{
+  "id": "aegisy.video.manim",
+  "name": "Manim Skill",
+  "version": "1.0.0",
+  "description": "使用 Manim 制作数学、科技、图表和科普解释动画。",
+  "executor": "instruction",
+  "enabled": true,
+  "trusted": true,
+  "builtin": false,
+  "source": "Aegisy Skills",
+  "permissions": ["files-read", "files-write", "local-process"],
+  "triggers": ["manim", "数学动画", "科普动画", "公式动画", "函数动画", "科技动画"]
+}

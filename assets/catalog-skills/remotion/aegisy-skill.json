@@ -1,0 +1,13 @@
+{
+  "id": "aegisy.video.remotion",
+  "name": "Remotion Skills",
+  "version": "1.0.0",
+  "description": "使用 React 和 Remotion 制作模板化视频并进行批量渲染。",
+  "executor": "instruction",
+  "enabled": true,
+  "trusted": true,
+  "builtin": false,
+  "source": "Aegisy Skills",
+  "permissions": ["files-read", "files-write", "local-process"],
+  "triggers": ["remotion", "react视频", "模板视频", "批量渲染视频", "程序化视频"]
+}

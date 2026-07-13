@@ -58,6 +58,10 @@ set(SOURCES
     src/connect_wizard.cpp
     src/app_theme.cpp
     src/profile_archive.cpp
+    src/balance_orb.cpp
+    src/desktop_downloader.cpp
+    src/mcp_config_dialog.cpp
+    src/help_dialog.cpp
     resources.qrc
 )
 
@@ -93,6 +97,10 @@ set(HEADERS
     include/app_theme.h
     include/profile_archive.h
     include/update_manager.h
+    include/balance_orb.h
+    include/desktop_downloader.h
+    include/mcp_config_dialog.h
+    include/help_dialog.h
 )
 
 # 可执行文件

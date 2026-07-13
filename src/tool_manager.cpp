@@ -25,6 +25,7 @@ static QString toolSlug(AiTool tool)
     case AiTool::ClaudeCode: return QStringLiteral("claude");
     case AiTool::CodexCli:   return QStringLiteral("codex");
     case AiTool::GeminiCli:  return QStringLiteral("gemini");
+    case AiTool::OpenCode:   return QStringLiteral("opencode");
     }
     return QStringLiteral("unknown");
 }
@@ -197,6 +198,7 @@ QString ToolManager::toolName(AiTool tool)
     case AiTool::ClaudeCode: return QStringLiteral("Claude Code");
     case AiTool::CodexCli:   return QStringLiteral("Codex CLI");
     case AiTool::GeminiCli:  return QStringLiteral("Gemini CLI");
+    case AiTool::OpenCode:   return QStringLiteral("OpenCode");
     }
     return QString();
 }
@@ -207,6 +209,7 @@ QString ToolManager::toolPlatform(AiTool tool)
     case AiTool::ClaudeCode: return QStringLiteral("anthropic");
     case AiTool::CodexCli:   return QStringLiteral("openai");
     case AiTool::GeminiCli:  return QStringLiteral("gemini");
+    case AiTool::OpenCode:   return QStringLiteral("anthropic");
     }
     return QString();
 }
@@ -217,6 +220,7 @@ QString ToolManager::npmPackage(AiTool tool)
     case AiTool::ClaudeCode: return QStringLiteral("@anthropic-ai/claude-code");
     case AiTool::CodexCli:   return QStringLiteral("@openai/codex");
     case AiTool::GeminiCli:  return QStringLiteral("@google/gemini-cli");
+    case AiTool::OpenCode:   return QStringLiteral("opencode-ai");
     }
     return QString();
 }
@@ -227,6 +231,7 @@ QString ToolManager::cliCommand(AiTool tool)
     case AiTool::ClaudeCode: return QStringLiteral("claude");
     case AiTool::CodexCli:   return QStringLiteral("codex");
     case AiTool::GeminiCli:  return QStringLiteral("gemini");
+    case AiTool::OpenCode:   return QStringLiteral("opencode");
     }
     return QString();
 }
@@ -237,6 +242,7 @@ QString ToolManager::configFilePath(AiTool tool)
     case AiTool::ClaudeCode: return QStringLiteral("~/.claude/settings.json");
     case AiTool::CodexCli:   return QStringLiteral("~/.codex/auth.json");
     case AiTool::GeminiCli:  return QStringLiteral("~/.gemini/.env");
+    case AiTool::OpenCode:   return QStringLiteral("~/.config/opencode/config.json");
     }
     return QString();
 }
@@ -367,6 +373,17 @@ ConfigurationPreview ToolManager::previewConfiguration(AiTool tool,
         preview.changes.append(gatewayMode
             ? QStringLiteral("GEMINI_API_KEY 仅写入本地网关令牌，真实 Key 保留在网关内存")
             : QStringLiteral("更新 GEMINI_API_KEY 安全认证字段"));
+        preview.changes.append(QStringLiteral("模型：%1").arg(targetModel));
+        break;
+    case AiTool::OpenCode:
+        preview.changes.append(QStringLiteral(
+            "设置 provider.anthropic.base_url = %1")
+            .arg(gatewayMode
+                ? QStringLiteral("http://127.0.0.1:43112/tools/claude")
+                : QStringLiteral("https://aegisy.cc")));
+        preview.changes.append(gatewayMode
+            ? QStringLiteral("provider.anthropic.api_key 仅写入本地网关令牌")
+            : QStringLiteral("更新 provider.anthropic.api_key"));
         preview.changes.append(QStringLiteral("模型：%1").arg(targetModel));
         break;
     }
@@ -569,6 +586,46 @@ bool ToolManager::launch(AiTool tool, const QString &workingDirectory)
     return started;
 }
 
+bool ToolManager::isCliRunning(AiTool tool) const
+{
+    const QString command = cliCommand(tool);
+    if (command.isEmpty()) {
+        return false;
+    }
+
+    QProcess process;
+    process.setProcessEnvironment(commandEnvironment());
+    process.setProcessChannelMode(QProcess::MergedChannels);
+
+#if defined(Q_OS_WIN)
+    // tasklist 按精确映像名过滤；命中会输出对应行，否则输出提示信息。
+    const QString imageName = command + QStringLiteral(".exe");
+    process.start(QStringLiteral("tasklist"),
+                  { QStringLiteral("/FI"),
+                    QStringLiteral("IMAGENAME eq %1").arg(imageName),
+                    QStringLiteral("/NH") });
+    if (!process.waitForFinished(2000)) {
+        process.kill();
+        process.waitForFinished();
+        return false;
+    }
+    const QString output = QString::fromLocal8Bit(process.readAll());
+    return output.contains(imageName, Qt::CaseInsensitive);
+#else
+    // pgrep -x 精确匹配进程名，避免匹配到启动器命令行里的 "codex" 等误报。
+    process.start(QStringLiteral("pgrep"), { QStringLiteral("-x"), command });
+    if (!process.waitForFinished(2000)) {
+        process.kill();
+        process.waitForFinished();
+        return false;
+    }
+    // pgrep 命中返回 0 并打印 PID；无匹配返回 1。
+    return process.exitStatus() == QProcess::NormalExit
+        && process.exitCode() == 0
+        && !process.readAll().trimmed().isEmpty();
+#endif
+}
+
 QString ToolManager::resolvedExecutable(AiTool tool, int timeoutMs) const
 {
     return resolveCommand(cliCommand(tool), timeoutMs);
@@ -612,6 +669,8 @@ QStringList ToolManager::managedConfigPaths(AiTool tool) const
         };
     case AiTool::GeminiCli:
         return { homeFilePath(QStringLiteral(".gemini/.env")) };
+    case AiTool::OpenCode:
+        return { homeFilePath(QStringLiteral(".config/opencode/config.json")) };
     }
     return {};
 }
@@ -863,6 +922,14 @@ QString ToolManager::readConfiguredKey(AiTool tool) const
         }
         return QString();
     }
+    case AiTool::OpenCode: {
+        QFile file(homeFilePath(QStringLiteral(".config/opencode/config.json")));
+        if (!file.open(QIODevice::ReadOnly)) return QString();
+        const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
+        return root.value(QStringLiteral("provider")).toObject()
+            .value(QStringLiteral("anthropic")).toObject()
+            .value(QStringLiteral("api_key")).toString();
+    }
     }
     return QString();
 }
@@ -960,6 +1027,25 @@ ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
                 || (!envBase.isEmpty() && !envBase.contains(QStringLiteral("aegisy.cc")))) {
             status.conflictWarning =
                 QStringLiteral("检测到旧的 Gemini 环境变量，可能覆盖当前档案；Aegisy 启动终端时会自动清除，外部终端请删除后重启");
+        }
+        break;
+    }
+    case AiTool::OpenCode: {
+        QFile file(homeFilePath(".config/opencode/config.json"));
+        if (file.exists() && file.open(QIODevice::ReadOnly)) {
+            const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
+            file.close();
+            const QString key = root.value(QStringLiteral("provider")).toObject()
+                .value(QStringLiteral("anthropic")).toObject()
+                .value(QStringLiteral("api_key")).toString();
+            const QString base = root.value(QStringLiteral("provider")).toObject()
+                .value(QStringLiteral("anthropic")).toObject()
+                .value(QStringLiteral("base_url")).toString();
+            if (!key.isEmpty() && (base.contains(QStringLiteral("aegisy.cc"))
+                    || base.contains(QStringLiteral("127.0.0.1:43112")))) {
+                status.configured = true;
+                status.configuredKey = key;
+            }
         }
         break;
     }
@@ -1185,6 +1271,12 @@ DesktopAppStatus ToolManager::detectDesktop(AiTool tool)
         result.installed   = true;  // 网页版始终"可用"
         break;
     }
+    case AiTool::OpenCode: {
+        result.appName     = QStringLiteral("OpenCode");
+        result.downloadUrl = QStringLiteral("https://opencode.ai");
+        result.installed   = false;
+        break;
+    }
     }
 
     return result;
@@ -1353,6 +1445,7 @@ bool ToolManager::configure(AiTool tool, const QString &apiKey, const QString &m
     case AiTool::ClaudeCode: success = configureClaudeCode(apiKey, model); break;
     case AiTool::CodexCli:   success = configureCodexCli(apiKey, model); break;
     case AiTool::GeminiCli:  success = configureGeminiCli(apiKey, model); break;
+    case AiTool::OpenCode:   success = configureOpenCode(apiKey, model); break;
     }
     if (!success) {
         const QString writeError = m_lastError;
@@ -1402,6 +1495,10 @@ bool ToolManager::configureGateway(AiTool tool, const QString &localToken,
     case AiTool::GeminiCli:
         success = configureGeminiCliEndpoint(localToken, model,
             root + QStringLiteral("gemini"));
+        break;
+    case AiTool::OpenCode:
+        success = configureOpenCodeEndpoint(localToken, model,
+            root + QStringLiteral("claude"));
         break;
     }
     if (!success || readConfiguredKey(tool) != localToken) {
@@ -1582,4 +1679,36 @@ bool ToolManager::configureGeminiCliEndpoint(const QString &apiKey,
         "GEMINI_MODEL=\"%3\"\n").arg(baseUrl, apiKey, effectiveModel);
 
     return writeTextFile(path, result.toUtf8());
+}
+
+// ── OpenCode 配置写入 ─────────────────────────────────────────────
+bool ToolManager::configureOpenCode(const QString &apiKey, const QString &model)
+{
+    return configureOpenCodeEndpoint(apiKey, model, kBaseUrl);
+}
+
+bool ToolManager::configureOpenCodeEndpoint(const QString &apiKey,
+                                             const QString &model,
+                                             const QString &baseUrl)
+{
+    const QString effectiveModel = model.isEmpty()
+        ? QStringLiteral("anthropic/claude-opus-4-5") : model;
+    const QString path = homeFilePath(QStringLiteral(".config/opencode/config.json"));
+
+    QJsonObject root;
+    QFile file(path);
+    if (file.exists() && file.open(QIODevice::ReadOnly)) {
+        root = QJsonDocument::fromJson(file.readAll()).object();
+        file.close();
+    }
+
+    QJsonObject providers = root.value(QStringLiteral("provider")).toObject();
+    QJsonObject anthropic = providers.value(QStringLiteral("anthropic")).toObject();
+    anthropic[QStringLiteral("api_key")]  = apiKey;
+    anthropic[QStringLiteral("base_url")] = baseUrl;
+    providers[QStringLiteral("anthropic")] = anthropic;
+    root[QStringLiteral("provider")] = providers;
+    root[QStringLiteral("model")]    = effectiveModel;
+
+    return writeTextFile(path, QJsonDocument(root).toJson(QJsonDocument::Indented));
 }

@@ -9,6 +9,7 @@
 
 class ApiClient;
 class SkillManager;
+class ProfileManager;
 class QComboBox;
 class QLabel;
 class QListWidget;
@@ -25,6 +26,7 @@ class ChatDialog : public QDialog
 public:
     explicit ChatDialog(ApiClient *apiClient,
                         SkillManager *skillManager,
+                        ProfileManager *profileManager = nullptr,
                         QWidget *parent = nullptr);
 
 protected:
@@ -82,6 +84,8 @@ private:
                           QTextBrowser **contentBrowser = nullptr);
     void startRequest();
     bool startMatchedSkill(const QString &requestText);
+    void selectQuickSkill(const QString &skillId);
+    void clearQuickSkill();
     void finishSkillRun(const QString &content,
                         const QString &attachmentPath = QString(),
                         const QString &attachmentType = QString());
@@ -95,6 +99,8 @@ private:
     void updateSessionTitle(const QString &firstMessage);
     void updateContextInfo();
     void applyCurrentSessionSelection();
+    // 让 Key 下拉跟随最近激活的档案：匹配到则选中，返回是否命中。
+    bool selectActiveProfileKey(bool force);
     void loadHistory();
     void saveHistory() const;
     QString historyPath() const;
@@ -106,6 +112,7 @@ private:
 
     ApiClient *m_apiClient = nullptr;
     SkillManager *m_skillManager = nullptr;
+    ProfileManager *m_profileManager = nullptr;
     QListWidget *m_sessionList = nullptr;
     QComboBox *m_keyCombo = nullptr;
     QComboBox *m_modelCombo = nullptr;
@@ -122,6 +129,9 @@ private:
     QPushButton *m_newButton = nullptr;
     QPushButton *m_deleteButton = nullptr;
     QPushButton *m_copyConversationButton = nullptr;
+    QLabel *m_sessionStatsLabel = nullptr;
+    QPushButton *m_imageQuickButton = nullptr;
+    QPushButton *m_presentationQuickButton = nullptr;
     QTextBrowser *m_streamBrowser = nullptr;
 
     QList<ChatSession> m_sessions;
@@ -133,6 +143,8 @@ private:
     QString m_pendingSkillId;
     QString m_pendingSkillRequest;
     QString m_skillRequestId;
+    QString m_forcedSkillId;
+    QString m_instructionSkillId;
     QJsonArray m_allApiKeys;
     bool m_generating = false;
     bool m_applyingSessionSelection = false;

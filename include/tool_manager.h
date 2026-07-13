@@ -7,11 +7,12 @@
 #include <QDateTime>
 #include <QProcessEnvironment>
 
-// 支持的三个官方接入工具
+// 支持的四个官方接入工具
 enum class AiTool {
     ClaudeCode,   // Claude Code   -> anthropic 分组
     CodexCli,     // Codex CLI     -> openai 分组
-    GeminiCli     // Gemini CLI    -> gemini 分组
+    GeminiCli,    // Gemini CLI    -> gemini 分组
+    OpenCode,     // OpenCode      -> anthropic 分组
 };
 
 // 工具检测结果
@@ -113,6 +114,10 @@ public:
 
     // 在系统终端中启动对应 CLI，workingDirectory 为空时使用用户主目录。
     bool launch(AiTool tool, const QString &workingDirectory = QString());
+
+    // 该 CLI 是否已有进程在运行（用于激活后提示需重启终端才生效）。
+    // 使用系统进程扫描（pgrep / tasklist），检测失败时返回 false。
+    bool isCliRunning(AiTool tool) const;
     QString resolvedExecutable(AiTool tool, int timeoutMs = 1500) const;
     QString resolvedRuntimeCommand(const QString &command, int timeoutMs = 1500) const;
     QProcessEnvironment launchEnvironment(AiTool tool) const;
@@ -129,11 +134,14 @@ private:
     bool configureClaudeCode(const QString &apiKey, const QString &model);
     bool configureCodexCli(const QString &apiKey, const QString &model);
     bool configureGeminiCli(const QString &apiKey, const QString &model);
+    bool configureOpenCode(const QString &apiKey, const QString &model);
     bool configureClaudeCodeEndpoint(const QString &apiKey, const QString &baseUrl);
     bool configureCodexCliEndpoint(const QString &apiKey, const QString &model,
                                    const QString &baseUrl, const QString &providerId);
     bool configureGeminiCliEndpoint(const QString &apiKey, const QString &model,
                                     const QString &baseUrl);
+    bool configureOpenCodeEndpoint(const QString &apiKey, const QString &model,
+                                   const QString &baseUrl);
     QString readConfiguredKey(AiTool tool) const;
 
     // 探测辅助：timeout 单位 ms

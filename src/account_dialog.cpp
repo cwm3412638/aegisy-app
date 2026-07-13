@@ -11,6 +11,8 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTabWidget>
+#include <QDesktopServices>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 
@@ -117,6 +119,23 @@ AccountDialog::AccountDialog(ApiClient *apiClient, const QJsonObject &userInfo,
     m_redeemCode->setPlaceholderText(QStringLiteral("请输入密卡兑换码"));
     m_redeemCode->setClearButtonEnabled(true);
     m_redeemCode->setMinimumHeight(42);
+    // 购买密卡链接行
+    auto *buyRow = new QHBoxLayout;
+    auto *buyHint = new QLabel(QStringLiteral("还没有密卡？"), redeemPage);
+    buyHint->setStyleSheet(QStringLiteral("font-size: 12px; color: #667085;"));
+    auto *buyButton = new QPushButton(QStringLiteral("前往购买密卡 →"), redeemPage);
+    buyButton->setStyleSheet(QStringLiteral(
+        "QPushButton { background: transparent; color: #0f766e; border: none;"
+        " font-size: 12px; font-weight: 600; padding: 0; text-decoration: underline; }"
+        "QPushButton:hover { color: #0b625c; }"));
+    buyButton->setCursor(Qt::PointingHandCursor);
+    connect(buyButton, &QPushButton::clicked, []() {
+        QDesktopServices::openUrl(QUrl(QStringLiteral("https://pay.ldxp.cn/shop/6W0YTHLS")));
+    });
+    buyRow->addWidget(buyHint);
+    buyRow->addWidget(buyButton);
+    buyRow->addStretch();
+    redeemLayout->addLayout(buyRow);
     redeemLayout->addWidget(m_redeemCode);
     m_redeemStatus = hintLabel(QString(), redeemPage);
     redeemLayout->addWidget(m_redeemStatus);

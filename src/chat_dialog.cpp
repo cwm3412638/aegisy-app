@@ -2,6 +2,7 @@
 
 #include "api_client.h"
 #include "app_theme.h"
+#include "profile_manager.h"
 #include "skill_manager.h"
 
 #include <QAbstractTextDocumentLayout>
@@ -67,15 +68,20 @@ int modelContextWindow(const QJsonObject &model)
     return 0;
 }
 
-QPushButton *messageAction(const QString &text, QWidget *parent)
+// 消息操作按钮：带 Unicode 图标的轻量交互按钮
+QPushButton *messageAction(const QString &icon, const QString &text, QWidget *parent)
 {
-    auto *button = new QPushButton(text, parent);
+    auto *button = new QPushButton(QStringLiteral("%1  %2").arg(icon, text), parent);
     button->setCursor(Qt::PointingHandCursor);
     button->setFixedHeight(26);
     button->setStyleSheet(QStringLiteral(
-        "QPushButton { background: transparent; color: #667085; border: none;"
-        " padding: 2px 7px; font-size: 11px; }"
-        "QPushButton:hover { color: #0f766e; background: #e7f5f2; border-radius: 5px; }"));
+        "QPushButton {"
+        "  background: transparent; color: #94a3b8; border: none;"
+        "  padding: 2px 8px; font-size: 11px; border-radius: 5px;"
+        "}"
+        "QPushButton:hover {"
+        "  color: #0f766e; background: #e7f5f2;"
+        "}"));
     return button;
 }
 
@@ -103,10 +109,12 @@ QLabel *messageAvatar(bool user, QWidget *parent)
 
 ChatDialog::ChatDialog(ApiClient *apiClient,
                        SkillManager *skillManager,
+                       ProfileManager *profileManager,
                        QWidget *parent)
     : QDialog(parent)
     , m_apiClient(apiClient)
     , m_skillManager(skillManager)
+    , m_profileManager(profileManager)
 {
     setupUi();
     setWindowTitle(QStringLiteral("AI 对话"));
@@ -143,7 +151,17 @@ ChatDialog::ChatDialog(ApiClient *apiClient,
                 current.cbegin(), current.cend(),
                 [](const SkillInfo &skill) { return skill.enabled; });
             m_skillsLabel->setText(QStringLiteral("Skills 自动 · %1").arg(enabled));
+            if (!m_forcedSkillId.isEmpty()
+                    && !m_skillManager->skill(m_forcedSkillId).enabled) {
+                clearQuickSkill();
+            }
+            setGenerating(m_generating);
         });
+    }
+    if (m_profileManager) {
+        // 用户切换激活档案后，若对话仍开着则强制把 Key 指向新档案。
+        connect(m_profileManager, &ProfileManager::activeProfileChanged,
+                this, [this](int, int) { selectActiveProfileKey(true); });
     }
 
     loadHistory();
@@ -179,7 +197,7 @@ void ChatDialog::setupUi()
 
     m_newButton = new QPushButton(QStringLiteral("新对话"), sidebar);
     m_newButton->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
-    m_newButton->setMinimumHeight(38);
+    m_newButton->setMinimumHeight(36);
     m_newButton->setCursor(Qt::PointingHandCursor);
     m_newButton->setStyleSheet(AppTheme::primaryButtonStyle());
     sideLayout->addWidget(m_newButton);
@@ -203,6 +221,15 @@ void ChatDialog::setupUi()
     m_deleteButton->setMinimumHeight(34);
     m_deleteButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     sideLayout->addWidget(m_deleteButton);
+
+    m_sessionStatsLabel = new QLabel(sidebar);
+    m_sessionStatsLabel->setAlignment(Qt::AlignCenter);
+    m_sessionStatsLabel->setStyleSheet(QStringLiteral(
+        "font-size: 10px; color: #98a2b3; padding: 4px 6px;"
+        "background: #f2f4f7; border-radius: 6px;"));
+    m_sessionStatsLabel->setText(QStringLiteral("暂无用量数据"));
+    sideLayout->addWidget(m_sessionStatsLabel);
+
     root->addWidget(sidebar);
 
     auto *main = new QWidget(this);
@@ -229,12 +256,15 @@ void ChatDialog::setupUi()
     toolbar->addWidget(m_modelCombo);
     toolbar->addStretch();
     m_copyConversationButton = new QPushButton(QStringLiteral("复制对话"), main);
+    m_copyConversationButton->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
     m_copyConversationButton->setToolTip(QStringLiteral("按 Markdown 格式复制整个对话"));
+    m_copyConversationButton->setFixedHeight(32);
     m_copyConversationButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     toolbar->addWidget(m_copyConversationButton);
     m_stopButton = new QPushButton(QStringLiteral("停止"), main);
     m_stopButton->setIcon(style()->standardIcon(QStyle::SP_MediaStop));
     m_stopButton->setEnabled(false);
+    m_stopButton->setFixedHeight(32);
     m_stopButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     toolbar->addWidget(m_stopButton);
     mainLayout->addLayout(toolbar);
@@ -288,6 +318,31 @@ void ChatDialog::setupUi()
     m_editingLabel->hide();
     mainLayout->addWidget(m_editingLabel);
 
+    auto *quickSkills = new QHBoxLayout;
+    quickSkills->setSpacing(8);
+    const QString quickSkillStyle = QStringLiteral(
+        "QPushButton { min-height: 30px; background: white; color: #475467;"
+        " border: 1px solid #d0d5dd; border-radius: 6px; padding: 0 12px; font-size: 12px; }"
+        "QPushButton:hover { border-color: #75bdb2; color: #0f766e; background: #f5fbfa; }"
+        "QPushButton:checked { border-color: #0f766e; color: white; background: #0f766e; }"
+        "QPushButton:disabled { color: #98a2b3; background: #f2f4f7; border-color: #e4e7ec; }");
+    m_imageQuickButton = new QPushButton(QStringLiteral("生图"), main);
+    m_imageQuickButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogContentsView));
+    m_imageQuickButton->setCheckable(true);
+    m_imageQuickButton->setCursor(Qt::PointingHandCursor);
+    m_imageQuickButton->setStyleSheet(quickSkillStyle);
+    m_imageQuickButton->setToolTip(QStringLiteral("使用 Aegisy GPT Image Skill"));
+    quickSkills->addWidget(m_imageQuickButton);
+    m_presentationQuickButton = new QPushButton(QStringLiteral("PPT"), main);
+    m_presentationQuickButton->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
+    m_presentationQuickButton->setCheckable(true);
+    m_presentationQuickButton->setCursor(Qt::PointingHandCursor);
+    m_presentationQuickButton->setStyleSheet(quickSkillStyle);
+    m_presentationQuickButton->setToolTip(QStringLiteral("使用 PPT 制作 Skill"));
+    quickSkills->addWidget(m_presentationQuickButton);
+    quickSkills->addStretch();
+    mainLayout->addLayout(quickSkills);
+
     auto *composer = new QFrame(main);
     composer->setObjectName(QStringLiteral("chatComposer"));
     composer->setStyleSheet(QStringLiteral(
@@ -323,6 +378,14 @@ void ChatDialog::setupUi()
             this, &ChatDialog::onModelChanged);
     connect(m_sendButton, &QPushButton::clicked, this, &ChatDialog::onSendClicked);
     connect(m_stopButton, &QPushButton::clicked, this, &ChatDialog::onStopClicked);
+    connect(m_imageQuickButton, &QPushButton::clicked, this, [this]() {
+        selectQuickSkill(m_forcedSkillId == QStringLiteral("aegisy.image.generate")
+            ? QString() : QStringLiteral("aegisy.image.generate"));
+    });
+    connect(m_presentationQuickButton, &QPushButton::clicked, this, [this]() {
+        selectQuickSkill(m_forcedSkillId == QStringLiteral("aegisy.presentation.create")
+            ? QString() : QStringLiteral("aegisy.presentation.create"));
+    });
 }
 
 bool ChatDialog::eventFilter(QObject *watched, QEvent *event)
@@ -364,6 +427,8 @@ void ChatDialog::onApiKeysReceived(const QJsonArray &keys)
         return;
     }
     applyCurrentSessionSelection();
+    // 新会话（尚无历史 Key）默认跟随最近激活的档案。
+    selectActiveProfileKey(false);
     onKeyChanged(m_keyCombo->currentIndex());
 }
 
@@ -428,6 +493,42 @@ void ChatDialog::onModelChanged(int)
         }
     }
     updateContextInfo();
+}
+
+void ChatDialog::selectQuickSkill(const QString &skillId)
+{
+    if (!skillId.isEmpty() && m_skillManager) {
+        const SkillInfo selected = m_skillManager->skill(skillId);
+        if (selected.id.isEmpty() || !selected.enabled || !selected.compatible) {
+            m_statusLabel->setText(QStringLiteral("该 Skill 当前不可用，请先在 Skills 管理中启用。"));
+            return;
+        }
+    }
+    m_forcedSkillId = skillId;
+    m_imageQuickButton->setChecked(
+        skillId == QStringLiteral("aegisy.image.generate"));
+    m_presentationQuickButton->setChecked(
+        skillId == QStringLiteral("aegisy.presentation.create"));
+    if (skillId == QStringLiteral("aegisy.image.generate")) {
+        m_inputEdit->setPlaceholderText(QStringLiteral("描述要生成的图片"));
+        m_statusLabel->setText(QStringLiteral("已选择 GPT Image Skill。"));
+    } else if (skillId == QStringLiteral("aegisy.presentation.create")) {
+        m_inputEdit->setPlaceholderText(QStringLiteral("描述 PPT 的主题、受众、页数和风格"));
+        m_statusLabel->setText(QStringLiteral("已选择 PPT 制作 Skill。"));
+    } else {
+        m_inputEdit->setPlaceholderText(QStringLiteral("输入消息，Enter 发送，Shift+Enter 换行"));
+    }
+    m_inputEdit->setFocus();
+}
+
+void ChatDialog::clearQuickSkill()
+{
+    m_forcedSkillId.clear();
+    if (m_imageQuickButton) m_imageQuickButton->setChecked(false);
+    if (m_presentationQuickButton) m_presentationQuickButton->setChecked(false);
+    if (m_inputEdit) {
+        m_inputEdit->setPlaceholderText(QStringLiteral("输入消息，Enter 发送，Shift+Enter 换行"));
+    }
 }
 
 QString ChatDialog::selectedApiKey() const
@@ -513,15 +614,44 @@ void ChatDialog::startRequest()
     m_requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     setGenerating(true);
     updateContextInfo();
-    m_statusLabel->setText(QStringLiteral("正在生成回复..."));
-    m_apiClient->sendChatMessage(m_requestId, key, model, session.messages);
+    QJsonArray requestMessages = session.messages;
+    QString activeSkillName;
+    if (!m_instructionSkillId.isEmpty() && m_skillManager) {
+        const QString instructions = m_skillManager->skillInstructions(m_instructionSkillId);
+        const SkillInfo activeSkill = m_skillManager->skill(m_instructionSkillId);
+        if (!instructions.isEmpty()) {
+            activeSkillName = activeSkill.name;
+            requestMessages.insert(0, QJsonObject{
+                { QStringLiteral("role"), QStringLiteral("system") },
+                { QStringLiteral("content"), QStringLiteral(
+                    "你正在使用 Aegisy Skill「%1」。遵循下面的本地工作流，但不要声称已经执行"
+                    "尚未实际运行的命令或生成不存在的文件。\n\n%2")
+                    .arg(activeSkill.name, instructions) }
+            });
+        } else {
+            m_instructionSkillId.clear();
+        }
+    }
+    m_statusLabel->setText(activeSkillName.isEmpty()
+        ? QStringLiteral("正在生成回复...")
+        : QStringLiteral("正在使用 Skill：%1").arg(activeSkillName));
+    m_apiClient->sendChatMessage(m_requestId, key, model, requestMessages);
 }
 
 bool ChatDialog::startMatchedSkill(const QString &requestText)
 {
     if (!m_skillManager) return false;
-    const SkillInfo matched = m_skillManager->matchSkill(requestText);
+    const SkillInfo matched = m_forcedSkillId.isEmpty()
+        ? m_skillManager->matchSkill(requestText)
+        : m_skillManager->skill(m_forcedSkillId);
+    clearQuickSkill();
     if (matched.id.isEmpty()) return false;
+
+    if (matched.executor == QStringLiteral("instruction")) {
+        m_instructionSkillId = matched.id;
+        startRequest();
+        return true;
+    }
 
     m_pendingSkillId = matched.id;
     m_pendingSkillRequest = requestText;
@@ -608,6 +738,7 @@ void ChatDialog::finishSkillRun(const QString &content,
     m_pendingSkillId.clear();
     m_pendingSkillRequest.clear();
     m_skillRequestId.clear();
+    m_instructionSkillId.clear();
     m_streamBrowser = nullptr;
     setGenerating(false);
     m_statusLabel->setText(QStringLiteral("Skill 执行完成。"));
@@ -633,13 +764,18 @@ void ChatDialog::onStopClicked()
     if (m_streamBrowser) m_streamBrowser->setMarkdown(m_streamContent);
     if (m_currentSession >= 0 && !m_streamContent.isEmpty()) {
         ChatSession &session = m_sessions[m_currentSession];
-        session.messages.append(QJsonObject{
+        QJsonObject stoppedMessage{
             { QStringLiteral("role"), QStringLiteral("assistant") },
             { QStringLiteral("content"), m_streamContent }
-        });
+        };
+        if (!m_instructionSkillId.isEmpty()) {
+            stoppedMessage.insert(QStringLiteral("skill_id"), m_instructionSkillId);
+        }
+        session.messages.append(stoppedMessage);
         session.updatedAt = QDateTime::currentDateTime();
     }
     m_requestId.clear();
+    m_instructionSkillId.clear();
     setGenerating(false);
     m_statusLabel->setText(QStringLiteral("已停止生成。"));
     rebuildMessages();
@@ -649,6 +785,8 @@ void ChatDialog::onStopClicked()
 void ChatDialog::onNewSession()
 {
     if (m_generating) onStopClicked();
+    clearQuickSkill();
+    m_instructionSkillId.clear();
     ChatSession session;
     session.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
     session.title = QStringLiteral("新对话");
@@ -668,6 +806,8 @@ void ChatDialog::onSessionChanged(int row)
 {
     if (row < 0 || row >= m_sessions.size()) return;
     if (m_generating) onStopClicked();
+    clearQuickSkill();
+    m_instructionSkillId.clear();
     m_currentSession = row;
     m_editingMessageIndex = -1;
     m_editingLabel->hide();
@@ -717,7 +857,9 @@ void ChatDialog::resendUserMessage(int messageIndex)
     session.updatedAt = QDateTime::currentDateTime();
     rebuildMessages();
     saveHistory();
-    startRequest();
+    const QString text = session.messages.at(messageIndex).toObject()
+        .value(QStringLiteral("content")).toString();
+    if (!startMatchedSkill(text)) startRequest();
 }
 
 void ChatDialog::editUserMessage(int messageIndex)
@@ -739,7 +881,9 @@ void ChatDialog::regenerateAssistantMessage(int messageIndex)
     m_sessions[m_currentSession].updatedAt = QDateTime::currentDateTime();
     rebuildMessages();
     saveHistory();
-    startRequest();
+    const QString text = m_sessions[m_currentSession].messages.at(messageIndex - 1).toObject()
+        .value(QStringLiteral("content")).toString();
+    if (!startMatchedSkill(text)) startRequest();
 }
 
 void ChatDialog::copyMessage(const QString &content)
@@ -787,13 +931,18 @@ void ChatDialog::onChatCompleted(const QString &requestId, const QString &conten
     if (m_streamBrowser) m_streamBrowser->setMarkdown(finalContent);
     if (m_currentSession >= 0 && !finalContent.isEmpty()) {
         ChatSession &session = m_sessions[m_currentSession];
-        session.messages.append(QJsonObject{
+        QJsonObject assistantMessage{
             { QStringLiteral("role"), QStringLiteral("assistant") },
             { QStringLiteral("content"), finalContent }
-        });
+        };
+        if (!m_instructionSkillId.isEmpty()) {
+            assistantMessage.insert(QStringLiteral("skill_id"), m_instructionSkillId);
+        }
+        session.messages.append(assistantMessage);
         session.updatedAt = QDateTime::currentDateTime();
     }
     m_requestId.clear();
+    m_instructionSkillId.clear();
     setGenerating(false);
     m_statusLabel->setText(QStringLiteral("回复完成。"));
     rebuildMessages();
@@ -809,6 +958,7 @@ void ChatDialog::onChatFailed(const QString &requestId, const QString &error)
     if (requestId != m_requestId) return;
     if (m_streamBrowser) m_streamBrowser->setPlainText(QStringLiteral("请求失败：%1").arg(error));
     m_requestId.clear();
+    m_instructionSkillId.clear();
     setGenerating(false);
     m_statusLabel->setText(QStringLiteral("请求失败：%1").arg(error));
 }
@@ -881,7 +1031,16 @@ void ChatDialog::onPresentationPlanReceived(const QString &requestId, const QJso
 void ChatDialog::onPresentationPlanFailed(const QString &requestId, const QString &error)
 {
     if (requestId != m_skillRequestId) return;
-    finishSkillRun(QStringLiteral("PPT 大纲生成失败：%1").arg(error));
+    const QString normalized = error.toLower();
+    QString friendly = error;
+    if (normalized.contains(QStringLiteral("exhausted"))
+            || normalized.contains(QStringLiteral("no available"))
+            || normalized.contains(QStringLiteral("all available accounts"))) {
+        friendly = QStringLiteral(
+            "服务器账号池当前已全部占用或额度耗尽（已自动重试仍未成功）。"
+            "请稍后再试，或联系管理员补充账号额度。");
+    }
+    finishSkillRun(QStringLiteral("PPT 大纲生成失败：%1").arg(friendly));
 }
 
 void ChatDialog::setGenerating(bool generating)
@@ -894,6 +1053,17 @@ void ChatDialog::setGenerating(bool generating)
     m_deleteButton->setEnabled(!generating);
     m_sessionList->setEnabled(!generating);
     m_stopButton->setEnabled(generating);
+    if (m_imageQuickButton) {
+        const SkillInfo image = m_skillManager
+            ? m_skillManager->skill(QStringLiteral("aegisy.image.generate")) : SkillInfo();
+        m_imageQuickButton->setEnabled(!generating && image.enabled && image.compatible);
+    }
+    if (m_presentationQuickButton) {
+        const SkillInfo presentation = m_skillManager
+            ? m_skillManager->skill(QStringLiteral("aegisy.presentation.create")) : SkillInfo();
+        m_presentationQuickButton->setEnabled(
+            !generating && presentation.enabled && presentation.compatible);
+    }
 }
 
 void ChatDialog::rebuildSessionList()
@@ -1048,13 +1218,13 @@ void ChatDialog::addMessageWidget(const QString &role,
         actions->setContentsMargins(0, 0, 0, 0);
         actions->setSpacing(2);
         if (user) actions->addStretch();
-        auto *copyButton = messageAction(QStringLiteral("复制"), column);
+        auto *copyButton = messageAction(QString(), QStringLiteral("复制"), column);
         actions->addWidget(copyButton);
         connect(copyButton, &QPushButton::clicked, this,
                 [this, content]() { copyMessage(content); });
         if (user) {
-            auto *editButton = messageAction(QStringLiteral("编辑"), column);
-            auto *resendButton = messageAction(QStringLiteral("重新发送"), column);
+            auto *editButton = messageAction(QString(), QStringLiteral("编辑"), column);
+            auto *resendButton = messageAction(QString(), QStringLiteral("重新发送"), column);
             actions->addWidget(editButton);
             actions->addWidget(resendButton);
             connect(editButton, &QPushButton::clicked, this,
@@ -1062,7 +1232,7 @@ void ChatDialog::addMessageWidget(const QString &role,
             connect(resendButton, &QPushButton::clicked, this,
                     [this, messageIndex]() { resendUserMessage(messageIndex); });
         } else {
-            auto *regenerateButton = messageAction(QStringLiteral("重新生成"), column);
+            auto *regenerateButton = messageAction(QString(), QStringLiteral("重新生成"), column);
             actions->addWidget(regenerateButton);
             connect(regenerateButton, &QPushButton::clicked, this,
                     [this, messageIndex]() { regenerateAssistantMessage(messageIndex); });
@@ -1139,6 +1309,19 @@ void ChatDialog::updateContextInfo()
     m_contextLabel->setText(text);
     m_contextLabel->setToolTip(QStringLiteral(
         "每次请求会发送当前会话中该位置之前的全部消息。服务返回 usage 时显示实际 Token，否则显示本地估算值。"));
+
+    if (m_sessionStatsLabel) {
+        if (session.totalTokens > 0) {
+            m_sessionStatsLabel->setText(QStringLiteral("↑%1  ↓%2  共%3 tokens")
+                .arg(session.promptTokens)
+                .arg(session.completionTokens)
+                .arg(session.totalTokens));
+        } else if (inputTokens > 0) {
+            m_sessionStatsLabel->setText(QStringLiteral("估算 ~%1 tokens").arg(inputTokens));
+        } else {
+            m_sessionStatsLabel->setText(QStringLiteral("暂无用量数据"));
+        }
+    }
 }
 
 void ChatDialog::applyCurrentSessionSelection()
@@ -1164,6 +1347,47 @@ void ChatDialog::applyCurrentSessionSelection()
         if (modelIndex >= 0) m_modelCombo->setCurrentIndex(modelIndex);
     }
     m_applyingSessionSelection = false;
+}
+
+bool ChatDialog::selectActiveProfileKey(bool force)
+{
+    if (!m_profileManager || m_keyCombo->count() == 0) {
+        return false;
+    }
+    const int activeIndex = m_profileManager->lastActivatedIndex();
+    if (activeIndex < 0) {
+        return false;
+    }
+    const Profile profile = m_profileManager->profileWithCredential(activeIndex);
+    if (profile.key.isEmpty()) {
+        return false;
+    }
+
+    int row = -1;
+    for (int i = 0; i < m_keyCombo->count(); ++i) {
+        if (m_keyCombo->itemData(i).toString() == profile.key) {
+            row = i;
+            break;
+        }
+    }
+    if (row < 0) {
+        // 档案凭据与账号 API Key 是两套体系，对不上时保持当前选择，仅提示。
+        m_statusLabel->setText(
+            QStringLiteral("已激活档案「%1」，但其 Key 不在账号 API Key 列表中，对话沿用当前所选 Key。")
+                .arg(profile.name));
+        return false;
+    }
+
+    const bool sessionHasKey = m_currentSession >= 0
+        && m_currentSession < m_sessions.size()
+        && !m_sessions[m_currentSession].keyId.isEmpty();
+    if (!force && sessionHasKey) {
+        return true;   // 已有会话保留其历史 Key，不覆盖
+    }
+    if (row != m_keyCombo->currentIndex()) {
+        m_keyCombo->setCurrentIndex(row);
+    }
+    return true;
 }
 
 QString ChatDialog::historyPath() const

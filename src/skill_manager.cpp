@@ -45,6 +45,14 @@ bool safeRelativePath(const QString &path)
         && !cleaned.contains(QLatin1Char('\\'));
 }
 
+QString yamlDoubleQuoted(QString value)
+{
+    value.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+    value.replace(QLatin1Char('"'), QStringLiteral("\\\""));
+    value.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
+    return QStringLiteral("\"") + value + QStringLiteral("\"");
+}
+
 QJsonObject parseFrontmatter(const QByteArray &markdown)
 {
     const QString text = QString::fromUtf8(markdown);
@@ -86,6 +94,32 @@ QList<SkillInfo> SkillManager::skills() const
     return m_skills;
 }
 
+QList<SkillCatalogInfo> SkillManager::catalogSkills() const
+{
+    QFile file(QStringLiteral(":/skill-catalog/catalog.json"));
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    const QJsonArray entries = QJsonDocument::fromJson(file.readAll()).array();
+    QList<SkillCatalogInfo> result;
+    result.reserve(entries.size());
+    for (const QJsonValue &value : entries) {
+        const QJsonObject object = value.toObject();
+        SkillCatalogInfo entry;
+        entry.id = object.value(QStringLiteral("id")).toString();
+        entry.directory = object.value(QStringLiteral("directory")).toString();
+        entry.skillName = object.value(QStringLiteral("skill_name")).toString(entry.directory);
+        entry.name = object.value(QStringLiteral("name")).toString(entry.skillName);
+        entry.category = object.value(QStringLiteral("category")).toString();
+        entry.description = object.value(QStringLiteral("description")).toString();
+        entry.source = object.value(QStringLiteral("source")).toString(
+            QStringLiteral("Aegisy 精选"));
+        entry.requirements = jsonStringList(object.value(QStringLiteral("requirements")));
+        entry.triggers = jsonStringList(object.value(QStringLiteral("triggers")));
+        entry.instructions = object.value(QStringLiteral("instructions")).toString();
+        if (!entry.id.isEmpty() && !entry.directory.isEmpty()) result.append(entry);
+    }
+    return result;
+}
+
 SkillInfo SkillManager::skill(const QString &id) const
 {
     for (const SkillInfo &item : m_skills) {
@@ -94,13 +128,25 @@ SkillInfo SkillManager::skill(const QString &id) const
     return SkillInfo();
 }
 
+QString SkillManager::skillInstructions(const QString &id) const
+{
+    const SkillInfo current = skill(id);
+    if (current.id.isEmpty() || !current.enabled || !current.compatible || !current.trusted) {
+        return QString();
+    }
+    QFile file(current.path + QStringLiteral("/SKILL.md"));
+    if (!file.open(QIODevice::ReadOnly)) return QString();
+    return QString::fromUtf8(file.read(64 * 1024)).trimmed();
+}
+
 SkillInfo SkillManager::matchSkill(const QString &text) const
 {
     const QString normalized = text.trimmed().toLower();
     SkillInfo best;
     int bestLength = 0;
     for (const SkillInfo &item : m_skills) {
-        if (!item.enabled || !item.compatible || item.executor == QStringLiteral("instruction")) continue;
+        if (!item.enabled || !item.compatible) continue;
+        if (item.executor == QStringLiteral("instruction") && !item.trusted) continue;
         const bool createAction = normalized.contains(QStringLiteral("生成"))
             || normalized.contains(QStringLiteral("制作"))
             || normalized.contains(QStringLiteral("创建"))
@@ -467,19 +513,141 @@ bool SkillManager::installBuiltInSkill(const QString &directoryName,
                                        const QStringList &resourceFiles)
 {
     const QString destination = m_skillsRoot + QLatin1Char('/') + directoryName;
+    const QString manifestPath = destination + QStringLiteral("/aegisy-skill.json");
+    if (QFileInfo::exists(manifestPath)) {
+        bool enabled = true;
+        QFile existingManifest(manifestPath);
+        if (existingManifest.open(QIODevice::ReadOnly)) {
+            enabled = QJsonDocument::fromJson(existingManifest.readAll()).object()
+                .value(QStringLiteral("enabled")).toBool(true);
+        }
+        for (const QString &relative : resourceFiles) {
+            QFile source(QStringLiteral(":/builtin-skills/") + directoryName
+                         + QLatin1Char('/') + relative);
+            if (!source.open(QIODevice::ReadOnly)) return false;
+            const QByteArray data = source.readAll();
+            if (relative == QStringLiteral("aegisy-skill.json")) {
+                QJsonObject manifest = QJsonDocument::fromJson(data).object();
+                manifest.insert(QStringLiteral("enabled"), enabled);
+                if (!writeManifest(destination, manifest, nullptr)) return false;
+                continue;
+            }
+            const QString target = destination + QLatin1Char('/') + relative;
+            QDir().mkpath(QFileInfo(target).absolutePath());
+            QSaveFile output(target);
+            if (!output.open(QIODevice::WriteOnly)
+                    || output.write(data) != data.size() || !output.commit()) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return installResourceSkill(QStringLiteral(":/builtin-skills"), directoryName,
+                                resourceFiles, nullptr);
+}
+
+bool SkillManager::installResourceSkill(const QString &resourcePrefix,
+                                        const QString &directoryName,
+                                        const QStringList &resourceFiles,
+                                        QString *error)
+{
+    const QString destination = m_skillsRoot + QLatin1Char('/') + directoryName;
     if (QFileInfo::exists(destination + QStringLiteral("/aegisy-skill.json"))) return true;
-    QDir().mkpath(destination);
+    const QString temporary = m_skillsRoot + QStringLiteral("/.install-")
+        + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QDir().mkpath(temporary);
     for (const QString &relative : resourceFiles) {
-        QFile source(QStringLiteral(":/builtin-skills/") + directoryName
+        QFile source(resourcePrefix + QLatin1Char('/') + directoryName
                      + QLatin1Char('/') + relative);
-        if (!source.open(QIODevice::ReadOnly)) return false;
-        const QString target = destination + QLatin1Char('/') + relative;
+        if (!source.open(QIODevice::ReadOnly)) {
+            QDir(temporary).removeRecursively();
+            if (error) *error = QStringLiteral("安装包缺少文件：%1").arg(relative);
+            return false;
+        }
+        const QString target = temporary + QLatin1Char('/') + relative;
         QDir().mkpath(QFileInfo(target).absolutePath());
         QSaveFile output(target);
-        if (!output.open(QIODevice::WriteOnly)) return false;
+        if (!output.open(QIODevice::WriteOnly)) {
+            QDir(temporary).removeRecursively();
+            if (error) *error = QStringLiteral("无法写入 Skill 文件：%1").arg(relative);
+            return false;
+        }
         output.write(source.readAll());
-        if (!output.commit()) return false;
+        if (!output.commit()) {
+            QDir(temporary).removeRecursively();
+            if (error) *error = QStringLiteral("无法保存 Skill 文件：%1").arg(relative);
+            return false;
+        }
     }
+    if (!QDir().rename(temporary, destination)) {
+        QDir(temporary).removeRecursively();
+        if (error) *error = QStringLiteral("无法完成 Skill 安装。");
+        return false;
+    }
+    return true;
+}
+
+bool SkillManager::installCatalogSkill(const QString &id, QString *error)
+{
+    const QList<SkillCatalogInfo> catalog = catalogSkills();
+    const auto found = std::find_if(catalog.cbegin(), catalog.cend(), [&](const SkillCatalogInfo &item) {
+        return item.id == id;
+    });
+    if (found == catalog.cend()) {
+        if (error) *error = QStringLiteral("找不到可安装 Skill：%1").arg(id);
+        return false;
+    }
+    if (!skill(id).id.isEmpty()) {
+        if (error) *error = QStringLiteral("Skill 已安装。");
+        return false;
+    }
+    const QString resourceManifest = QStringLiteral(":/catalog-skills/")
+        + found->directory + QStringLiteral("/aegisy-skill.json");
+    if (QFileInfo::exists(resourceManifest)) {
+        if (!installResourceSkill(QStringLiteral(":/catalog-skills"), found->directory,
+                                  { QStringLiteral("aegisy-skill.json"), QStringLiteral("SKILL.md") },
+                                  error)) {
+            return false;
+        }
+    } else {
+        const QString temporary = m_skillsRoot + QStringLiteral("/.install-")
+            + QUuid::createUuid().toString(QUuid::WithoutBraces);
+        QDir().mkpath(temporary);
+        const QJsonArray triggers = QJsonArray::fromStringList(found->triggers);
+        const QJsonObject manifest{
+            { QStringLiteral("id"), found->id },
+            { QStringLiteral("name"), found->name },
+            { QStringLiteral("version"), QStringLiteral("1.0.0") },
+            { QStringLiteral("description"), found->description },
+            { QStringLiteral("executor"), QStringLiteral("instruction") },
+            { QStringLiteral("enabled"), true },
+            { QStringLiteral("trusted"), true },
+            { QStringLiteral("builtin"), false },
+            { QStringLiteral("source"), QStringLiteral("Aegisy Skills") },
+            { QStringLiteral("permissions"), QJsonArray{
+                QStringLiteral("conversation-context")
+            }},
+            { QStringLiteral("triggers"), triggers }
+        };
+        if (!writeManifest(temporary, manifest, error)) {
+            QDir(temporary).removeRecursively();
+            return false;
+        }
+        const QString markdown = QStringLiteral(
+            "---\nname: %1\ndescription: %2\n---\n\n# %3\n\n%4\n")
+            .arg(found->skillName, yamlDoubleQuoted(found->description),
+                 found->name, found->instructions);
+        QSaveFile skillFile(temporary + QStringLiteral("/SKILL.md"));
+        if (!skillFile.open(QIODevice::WriteOnly)
+                || skillFile.write(markdown.toUtf8()) != markdown.toUtf8().size()
+                || !skillFile.commit()
+                || !QDir().rename(temporary, m_skillsRoot + QLatin1Char('/') + found->directory)) {
+            QDir(temporary).removeRecursively();
+            if (error) *error = QStringLiteral("无法写入精选 Skill 文件。");
+            return false;
+        }
+    }
+    refresh();
     return true;
 }
 

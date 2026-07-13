@@ -27,6 +27,20 @@ struct SkillInfo
     bool compatible = true;
 };
 
+struct SkillCatalogInfo
+{
+    QString id;
+    QString directory;
+    QString skillName;
+    QString name;
+    QString category;
+    QString description;
+    QString source;
+    QStringList requirements;
+    QStringList triggers;
+    QString instructions;
+};
+
 class SkillManager : public QObject
 {
     Q_OBJECT
@@ -36,8 +50,10 @@ public:
                           const QString &skillsRoot = QString());
 
     QList<SkillInfo> skills() const;
+    QList<SkillCatalogInfo> catalogSkills() const;
     SkillInfo skill(const QString &id) const;
     SkillInfo matchSkill(const QString &text) const;
+    QString skillInstructions(const QString &id) const;
     QString skillsRoot() const;
 
     void refresh();
@@ -45,6 +61,7 @@ public:
     bool removeSkill(const QString &id, QString *error = nullptr);
     bool installFromDirectory(const QString &sourceDirectory, QString *error = nullptr);
     bool installFromUrl(const QString &url, QString *error = nullptr);
+    bool installCatalogSkill(const QString &id, QString *error = nullptr);
 
     bool presentationRuntimeReady() const;
     bool installPresentationRuntime(QString *error = nullptr);
@@ -59,6 +76,10 @@ private:
     void ensureBuiltInSkills();
     bool installBuiltInSkill(const QString &directoryName,
                              const QStringList &resourceFiles);
+    bool installResourceSkill(const QString &resourcePrefix,
+                              const QString &directoryName,
+                              const QStringList &resourceFiles,
+                              QString *error = nullptr);
     SkillInfo loadSkill(const QString &directory) const;
     bool writeManifest(const QString &directory,
                        const QJsonObject &manifest,

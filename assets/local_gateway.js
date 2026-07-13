@@ -89,12 +89,21 @@ const server = http.createServer((request, response) => {
     delete headers['x-api-key'];
     delete headers['x-goog-api-key'];
     delete headers['content-length'];
+    // Force an uncompressed upstream response. gzip/br buffer SSE events
+    // internally and only flush once a block fills, which starves Codex's
+    // SSE reader and triggers "idle timeout waiting for SSE".
+    delete headers['accept-encoding'];
+    headers['accept-encoding'] = 'identity';
     headers.authorization = `Bearer ${profile.apiKey}`;
     headers['x-api-key'] = profile.apiKey;
     headers['x-goog-api-key'] = profile.apiKey;
     if (body.length) headers['content-length'] = String(body.length);
 
     const startedAt = Date.now();
+    // Flush small SSE chunks immediately instead of coalescing them.
+    if (request.socket && typeof request.socket.setNoDelay === 'function') {
+      request.socket.setNoDelay(true);
+    }
     const upstreamRequest = https.request({
       protocol: upstream.protocol,
       hostname: upstream.hostname,
@@ -104,6 +113,9 @@ const server = http.createServer((request, response) => {
       headers,
       timeout: 20 * 60 * 1000
     }, upstreamResponse => {
+      if (upstreamRequest.socket && typeof upstreamRequest.socket.setNoDelay === 'function') {
+        upstreamRequest.socket.setNoDelay(true);
+      }
       response.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.headers);
       upstreamResponse.pipe(response);
       upstreamResponse.on('end', () => {

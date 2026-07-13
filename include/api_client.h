@@ -132,6 +132,16 @@ private slots:
 private:
     void requestApiKeysPage(int page, int generation);
     void requestUserInfo(const QString &endpoint);
+    void requestPresentationPlanAttempt(const QString &requestId,
+                                        const QString &apiKey,
+                                        const QString &model,
+                                        const QString &requestText,
+                                        const QString &invalidContent,
+                                        int attempt,
+                                        bool structuredOutput,
+                                        int exhaustedRetries = 0);
+    void processImageGenerationEvents(bool flushTrailingData);
+    void processImageGenerationPayload(const QByteArray &payload);
 
     QNetworkAccessManager *m_networkManager;
     QString m_baseUrl;
@@ -139,6 +149,12 @@ private:
     QJsonArray m_apiKeyAccumulator;
     int m_apiKeyGeneration = 0;
     QNetworkReply *m_imageGenerationReply = nullptr;
+    QByteArray m_imageGenerationBuffer;
+    QString m_imageGenerationBase64;
+    QString m_imageGenerationPartialBase64;
+    QString m_imageGenerationFormat;
+    QString m_imageGenerationRevisedPrompt;
+    QString m_imageGenerationError;
     QNetworkReply *m_chatReply = nullptr;
     QByteArray m_chatBuffer;
     QString m_chatContent;

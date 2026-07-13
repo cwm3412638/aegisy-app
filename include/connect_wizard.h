@@ -9,6 +9,8 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QStackedWidget>
+#include <QStringList>
+#include <QWidget>
 
 #include "api_client.h"
 #include "profile_manager.h"
@@ -50,6 +52,7 @@ private:
     void finishProfile();
 
     AiTool selectedTool() const;
+    static QStringList toolModelSuggestions(AiTool tool);
     QString currentKey() const;
     QString currentModel() const;
 
@@ -82,6 +85,7 @@ private:
     QPushButton *m_testButton = nullptr;
     QLabel      *m_loadingLabel = nullptr;
     QComboBox   *m_modelCombo = nullptr;
+    QWidget     *m_modelSuggestions = nullptr;
     bool         m_waitingConnectionTest = false;
 };
 

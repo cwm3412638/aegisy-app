@@ -11,6 +11,7 @@
 #include <QJsonArray>
 #include <QList>
 #include <QHash>
+#include <QPair>
 #include <QSet>
 #include <QButtonGroup>
 #include <QSystemTrayIcon>
@@ -24,7 +25,10 @@ class UpdateManager;
 class GatewayManager;
 class DesktopEnhancementManager;
 class SkillManager;
+class BalanceOrb;
 class QTimer;
+class QEvent;
+class QShowEvent;
 
 class MainWindow : public QMainWindow
 {
@@ -61,19 +65,31 @@ private slots:
     void onSystemDoctorClicked();
     void onGatewayClicked();
     void onDesktopEnhancementsClicked();
+    void onDesktopDownloadClicked();
     void onSkillsClicked();
+    void onMcpConfigClicked();
+    void onHelpClicked();
     void onGatewayRunningChanged(bool running);
     void onBackupsClicked();
     void onTransferClicked();
     void onLogoutClicked();
     void onNewConnectClicked();
+    void onBulkSwitchClicked();
     void onFilterChanged(int typeId);
+    void onCardConnectionTested(const QString &requestId, bool success,
+                                const QString &detail, int latencyMs);
 
 private:
     void closeEvent(QCloseEvent *event) override;
+    void changeEvent(QEvent *event) override;
+    void showEvent(QShowEvent *event) override;
     void setupUi();
     void setupTray();
+    void setupBalanceOrb();
     void rebuildTrayMenu();
+    void updateBalanceOrb();
+    void showBalanceOrb();
+    void hideBalanceOrb();
 
     // 档案卡片
     void rebuildCards();
@@ -88,6 +104,7 @@ private:
     void deleteProfile(int index);
     void launchProfile(int index, bool embedded = false);
     bool confirmConfigurationPreview(const Profile &profile);
+    void warnIfCliRunning(const Profile &profile);
 
     // 保存后环境检测弹窗
     void showEnvCheckDialog(int profileIndex);
@@ -110,6 +127,7 @@ private:
     QPushButton *m_logoutButton;
 
     // UI — 档案列表区
+    QPushButton  *m_bulkSwitchButton = nullptr;
     QPushButton  *m_newConnectButton;
     QScrollArea  *m_cardsScroll;
     QWidget      *m_cardsContainer;
@@ -129,19 +147,24 @@ private:
     QPushButton *m_doctorButton = nullptr;
     QPushButton *m_gatewayButton = nullptr;
     QPushButton *m_desktopEnhancementsButton = nullptr;
+    QPushButton *m_desktopDownloadButton = nullptr;
     QPushButton *m_chatButton = nullptr;
     QPushButton *m_skillsButton = nullptr;
+    QPushButton *m_mcpConfigButton = nullptr;
     QAction *m_checkUpdatesAction = nullptr;
     QAction *m_autoUpdateChecksAction = nullptr;
     QTextEdit   *m_logOutput;
     QSystemTrayIcon *m_trayIcon = nullptr;
     QMenu *m_trayMenu = nullptr;
+    BalanceOrb *m_balanceOrb = nullptr;
 
     // 状态
     QString    m_authToken;
     QJsonArray m_keys;
     QJsonObject m_userInfo;
     bool       m_keysLoaded = false;
+    double     m_balance = 0.0;
+    bool       m_balanceKnown = false;
     QHash<int, QLabel *> m_toolVersionLabels;
     QHash<int, QPushButton *> m_toolInstallButtons;
     QHash<int, QString> m_toolVersionTexts;
@@ -161,6 +184,9 @@ private:
     bool          m_quitting = false;
     bool          m_trayHintShown = false;
     bool          m_authExpiredHandled = false;
+
+    // 卡片测试：requestId -> {resultLabel, testButton}
+    QHash<QString, QPair<QLabel*, QPushButton*>> m_cardTestWidgets;
 };
 
 #endif // MAIN_WINDOW_H

@@ -10,29 +10,32 @@
 // ProfileType 只表示一个具体工具。筛选栏的“全部”使用独立的 UI id，
 // 不再作为可持久化的档案类型。
 enum class ProfileType {
-    Claude = 1,
-    Codex  = 2,
-    Gemini = 3,
+    Claude   = 1,
+    Codex    = 2,
+    Gemini   = 3,
+    OpenCode = 4,
 };
 
 inline QList<ProfileType> allProfileTypes()
 {
-    return { ProfileType::Claude, ProfileType::Codex, ProfileType::Gemini };
+    return { ProfileType::Claude, ProfileType::Codex, ProfileType::Gemini, ProfileType::OpenCode };
 }
 
 inline bool isValidProfileType(ProfileType type)
 {
     return type == ProfileType::Claude
         || type == ProfileType::Codex
-        || type == ProfileType::Gemini;
+        || type == ProfileType::Gemini
+        || type == ProfileType::OpenCode;
 }
 
 inline AiTool toolForType(ProfileType type)
 {
     switch (type) {
-    case ProfileType::Claude: return AiTool::ClaudeCode;
-    case ProfileType::Gemini: return AiTool::GeminiCli;
-    case ProfileType::Codex:  return AiTool::CodexCli;
+    case ProfileType::Claude:   return AiTool::ClaudeCode;
+    case ProfileType::Gemini:   return AiTool::GeminiCli;
+    case ProfileType::Codex:    return AiTool::CodexCli;
+    case ProfileType::OpenCode: return AiTool::OpenCode;
     }
     return AiTool::CodexCli;
 }
@@ -43,6 +46,7 @@ inline ProfileType profileTypeForTool(AiTool tool)
     case AiTool::ClaudeCode: return ProfileType::Claude;
     case AiTool::GeminiCli:  return ProfileType::Gemini;
     case AiTool::CodexCli:   return ProfileType::Codex;
+    case AiTool::OpenCode:   return ProfileType::OpenCode;
     }
     return ProfileType::Codex;
 }
@@ -50,9 +54,10 @@ inline ProfileType profileTypeForTool(AiTool tool)
 inline QString profileTypeName(ProfileType type)
 {
     switch (type) {
-    case ProfileType::Claude: return QStringLiteral("Claude");
-    case ProfileType::Codex:  return QStringLiteral("Codex");
-    case ProfileType::Gemini: return QStringLiteral("Gemini");
+    case ProfileType::Claude:   return QStringLiteral("Claude");
+    case ProfileType::Codex:    return QStringLiteral("Codex");
+    case ProfileType::Gemini:   return QStringLiteral("Gemini");
+    case ProfileType::OpenCode: return QStringLiteral("OpenCode");
     }
     return QStringLiteral("Codex");
 }
@@ -66,6 +71,7 @@ struct Profile {
     QString     key;
     QString     model;
     bool        hasCredential = false;
+    QString     keyHint;   // Key 末尾数位（非敏感），用于在卡片上区分同类型配置
 
     AiTool tool() const { return toolForType(type); }
 
@@ -105,9 +111,15 @@ public:
 
     QList<Profile> allProfiles() const;
     Profile profileWithCredential(int index);
+
+    // Key 末尾掩码（非敏感）。为缺失掩码的存量配置补齐一次，供卡片区分展示。
+    static QString maskedKeyHint(const QString &key);
+    void backfillKeyHints();
     int     activeIndex(ProfileType type) const;
     Profile activeProfile(ProfileType type) const;
     bool    isActive(int index) const;
+    // 最近一次被激活的档案索引（跨类型），无效时返回 -1。
+    int     lastActivatedIndex() const;
     int     count() const;
 
     int addProfile(const QString &name, ProfileType type,

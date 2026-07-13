@@ -1,0 +1,13 @@
+{
+  "id": "aegisy.video.video-use",
+  "name": "Video-Use",
+  "version": "1.0.0",
+  "description": "面向口播、访谈和教程素材的转写、粗剪、字幕与混剪流程。",
+  "executor": "instruction",
+  "enabled": true,
+  "trusted": true,
+  "builtin": false,
+  "source": "Aegisy Skills",
+  "permissions": ["files-read", "files-write", "local-process"],
+  "triggers": ["video-use", "口播剪辑", "访谈剪辑", "教程剪辑", "真人素材混剪", "自动粗剪"]
+}

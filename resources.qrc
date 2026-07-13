@@ -12,4 +12,21 @@
         <file alias="presentation/SKILL.md">assets/builtin-skills/presentation/SKILL.md</file>
         <file alias="presentation/scripts/create_ppt.py">assets/builtin-skills/presentation/scripts/create_ppt.py</file>
     </qresource>
+    <qresource prefix="/catalog-skills">
+        <file alias="hyperframes/aegisy-skill.json">assets/catalog-skills/hyperframes/aegisy-skill.json</file>
+        <file alias="hyperframes/SKILL.md">assets/catalog-skills/hyperframes/SKILL.md</file>
+        <file alias="ffmpeg/aegisy-skill.json">assets/catalog-skills/ffmpeg/aegisy-skill.json</file>
+        <file alias="ffmpeg/SKILL.md">assets/catalog-skills/ffmpeg/SKILL.md</file>
+        <file alias="openmontage/aegisy-skill.json">assets/catalog-skills/openmontage/aegisy-skill.json</file>
+        <file alias="openmontage/SKILL.md">assets/catalog-skills/openmontage/SKILL.md</file>
+        <file alias="remotion/aegisy-skill.json">assets/catalog-skills/remotion/aegisy-skill.json</file>
+        <file alias="remotion/SKILL.md">assets/catalog-skills/remotion/SKILL.md</file>
+        <file alias="video-use/aegisy-skill.json">assets/catalog-skills/video-use/aegisy-skill.json</file>
+        <file alias="video-use/SKILL.md">assets/catalog-skills/video-use/SKILL.md</file>
+        <file alias="manim/aegisy-skill.json">assets/catalog-skills/manim/aegisy-skill.json</file>
+        <file alias="manim/SKILL.md">assets/catalog-skills/manim/SKILL.md</file>
+    </qresource>
+    <qresource prefix="/skill-catalog">
+        <file alias="catalog.json">assets/skill-catalog.json</file>
+    </qresource>
 </RCC>

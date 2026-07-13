@@ -1,0 +1,13 @@
+{
+  "id": "aegisy.video.openmontage",
+  "name": "OpenMontage",
+  "version": "1.0.0",
+  "description": "从脚本、配音和素材整理到字幕、自动剪辑与质检的完整流程。",
+  "executor": "instruction",
+  "enabled": true,
+  "trusted": true,
+  "builtin": false,
+  "source": "Aegisy Skills",
+  "permissions": ["files-read", "files-write", "local-process"],
+  "triggers": ["openmontage", "自动剪辑", "视频生产流程", "脚本配音字幕剪辑", "批量视频制作"]
+}

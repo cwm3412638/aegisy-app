@@ -1,0 +1,13 @@
+{
+  "id": "aegisy.video.hyperframes",
+  "name": "HyperFrames",
+  "version": "1.0.0",
+  "description": "把网页、文章和图文素材转为动态图文视频的分镜与制作工作流。",
+  "executor": "instruction",
+  "enabled": true,
+  "trusted": true,
+  "builtin": false,
+  "source": "Aegisy Skills",
+  "permissions": ["files-read", "files-write", "local-process"],
+  "triggers": ["hyperframes", "图文转视频", "网页转视频", "文章转视频", "动态图文视频"]
+}

@@ -18,6 +18,7 @@ QString toolAccent(AiTool tool)
     case AiTool::ClaudeCode: return QStringLiteral("#c15f3c");
     case AiTool::CodexCli:   return QStringLiteral("#111827");
     case AiTool::GeminiCli:  return QStringLiteral("#1a73e8");
+    case AiTool::OpenCode:   return QStringLiteral("#059669");
     }
     return QStringLiteral("#0f766e");
 }
@@ -28,6 +29,7 @@ QString toolSoftColor(AiTool tool)
     case AiTool::ClaudeCode: return QStringLiteral("#fff4ef");
     case AiTool::CodexCli:   return QStringLiteral("#f3f4f6");
     case AiTool::GeminiCli:  return QStringLiteral("#eef5ff");
+    case AiTool::OpenCode:   return QStringLiteral("#ecfdf5");
     }
     return QStringLiteral("#ecfdf5");
 }
@@ -38,6 +40,7 @@ QString toolLetter(AiTool tool)
     case AiTool::ClaudeCode: return QStringLiteral("C");
     case AiTool::CodexCli:   return QStringLiteral("O");
     case AiTool::GeminiCli:  return QStringLiteral("G");
+    case AiTool::OpenCode:   return QStringLiteral("OC");
     }
     return QStringLiteral("A");
 }
@@ -53,6 +56,7 @@ QString toolSelectorText(AiTool tool)
     case AiTool::ClaudeCode: return QStringLiteral("Claude Code\nAnthropic");
     case AiTool::CodexCli:   return QStringLiteral("Codex CLI\nOpenAI");
     case AiTool::GeminiCli:  return QStringLiteral("Gemini CLI\nGoogle");
+    case AiTool::OpenCode:   return QStringLiteral("OpenCode\nAnthropic");
     }
     return QString();
 }
@@ -111,20 +115,12 @@ ConnectWizardDialog::ConnectWizardDialog(ApiClient *client,
 
 void ConnectWizardDialog::setupUi()
 {
+    // 直接继承全局 AppTheme 样式，无需重复定义；
+    // 仅追加 Header/Footer 布局框架所需的局部样式
     setStyleSheet(QStringLiteral(
-        "QDialog { background: #f4f7f9; }"
-        "QLabel { color: #182230; }"
-        "QLineEdit, QComboBox {"
-        "  background: white; color: #182230; border: 1px solid #d0d5dd;"
-        "  border-radius: 8px; padding: 0 12px; font-size: 13px;"
-        "}"
-        "QLineEdit:focus, QComboBox:focus { border: 1px solid #0f766e; }"
-        "QComboBox::drop-down { border: none; width: 28px; }"
-        "QComboBox QAbstractItemView {"
-        "  background: white; color: #182230; border: 1px solid #d0d5dd;"
-        "  selection-background-color: #e7f5f2; selection-color: #134e4a;"
-        "}"
-        "QToolTip { background: #182230; color: white; border: none; padding: 5px; }"));
+        "QFrame#wizardHeader, QFrame#wizardFooter { background: white; }"
+        "QFrame#wizardHeader { border-bottom: 1px solid #e4e7ec; }"
+        "QFrame#wizardFooter { border-top:    1px solid #e4e7ec; }"));
 
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -185,13 +181,13 @@ void ConnectWizardDialog::setupUi()
 
     m_backButton = new QPushButton(QStringLiteral("上一步"), footer);
     m_backButton->setIcon(style()->standardIcon(QStyle::SP_ArrowBack));
-    m_backButton->setFixedHeight(40);
+    m_backButton->setFixedHeight(36);
     m_backButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     footerLayout->addWidget(m_backButton);
     footerLayout->addStretch();
 
     m_nextButton = new QPushButton(footer);
-    m_nextButton->setFixedHeight(40);
+    m_nextButton->setFixedHeight(36);
     m_nextButton->setMinimumWidth(116);
     m_nextButton->setStyleSheet(AppTheme::primaryButtonStyle());
     footerLayout->addWidget(m_nextButton);
@@ -219,7 +215,7 @@ QWidget *ConnectWizardDialog::buildIdentityPage()
     layout->addWidget(nameLabel);
 
     m_nameEdit = new QLineEdit(page);
-    m_nameEdit->setFixedHeight(44);
+    m_nameEdit->setFixedHeight(36);
     m_nameEdit->setPlaceholderText(QStringLiteral("例如：工作账号 Codex"));
     layout->addWidget(m_nameEdit);
 
@@ -313,19 +309,19 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
     auto *keyRow = new QHBoxLayout;
     keyRow->setSpacing(8);
     m_keyCombo = new QComboBox(page);
-    m_keyCombo->setFixedHeight(42);
+    m_keyCombo->setFixedHeight(36);
     m_keyCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     keyRow->addWidget(m_keyCombo, 1);
 
     m_queryButton = new QPushButton(QStringLiteral("刷新模型"), page);
     m_queryButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
-    m_queryButton->setFixedHeight(42);
+    m_queryButton->setFixedHeight(36);
     m_queryButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     keyRow->addWidget(m_queryButton);
 
     m_testButton = new QPushButton(QStringLiteral("测试连接"), page);
     m_testButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
-    m_testButton->setFixedHeight(42);
+    m_testButton->setFixedHeight(36);
     m_testButton->setStyleSheet(AppTheme::primaryButtonStyle());
     keyRow->addWidget(m_testButton);
     layout->addLayout(keyRow);
@@ -343,7 +339,7 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
 
     m_modelCombo = new QComboBox(page);
     m_modelCombo->setEditable(false);
-    m_modelCombo->setFixedHeight(42);
+    m_modelCombo->setFixedHeight(36);
     m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
     layout->addWidget(m_modelCombo);
 
@@ -351,6 +347,17 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
         QStringLiteral("选择 API Key 后会自动加载可用模型，也可以使用工具默认模型。"), page);
     hint->setStyleSheet(QStringLiteral("font-size: 11px; color: #667085;"));
     layout->addWidget(hint);
+
+    auto *suggestLabel = new QLabel(QStringLiteral("常用模型"), page);
+    suggestLabel->setStyleSheet(QStringLiteral("font-size: 11px; color: #98a2b3;"));
+    layout->addWidget(suggestLabel);
+
+    m_modelSuggestions = new QWidget(page);
+    auto *suggestLayout = new QHBoxLayout(m_modelSuggestions);
+    suggestLayout->setContentsMargins(0, 0, 0, 0);
+    suggestLayout->setSpacing(6);
+    layout->addWidget(m_modelSuggestions);
+
     layout->addStretch();
 
     connect(m_queryButton, &QPushButton::clicked,
@@ -604,6 +611,67 @@ void ConnectWizardDialog::updateToolContext()
         "font-size: 17px; font-weight: 700;").arg(accent));
     m_toolTitle->setText(ToolManager::toolName(tool));
     m_toolPath->setText(QStringLiteral("激活时更新 %1").arg(toolConfigPath(tool)));
+
+    if (!m_modelSuggestions) {
+        return;
+    }
+    QHBoxLayout *suggestLayout = qobject_cast<QHBoxLayout *>(m_modelSuggestions->layout());
+    if (!suggestLayout) {
+        return;
+    }
+    while (suggestLayout->count() > 0) {
+        QLayoutItem *item = suggestLayout->takeAt(0);
+        if (item->widget()) item->widget()->deleteLater();
+        delete item;
+    }
+    const QStringList models = toolModelSuggestions(tool);
+    for (const QString &modelName : models) {
+        auto *chip = new QPushButton(modelName, m_modelSuggestions);
+        chip->setCursor(Qt::PointingHandCursor);
+        chip->setFixedHeight(26);
+        chip->setStyleSheet(QStringLiteral(
+            "QPushButton {"
+            " background:#f2f4f7; color:#475467; border:1px solid #e4e7ec;"
+            " border-radius:5px; padding:2px 8px; font-size:11px;"
+            "}"
+            "QPushButton:hover {"
+            " background:#e7f5f2; color:#0f5f59; border-color:#b7e4da;"
+            "}"));
+        connect(chip, &QPushButton::clicked, this, [this, modelName]() {
+            if (m_modelCombo->findText(modelName) < 0) {
+                m_modelCombo->addItem(modelName, modelName);
+            }
+            m_modelCombo->setCurrentIndex(m_modelCombo->findText(modelName));
+        });
+        suggestLayout->addWidget(chip);
+    }
+    suggestLayout->addStretch();
+}
+
+QStringList ConnectWizardDialog::toolModelSuggestions(AiTool tool)
+{
+    switch (tool) {
+    case AiTool::ClaudeCode:
+        return { QStringLiteral("claude-opus-4-8"),
+                 QStringLiteral("claude-sonnet-5"),
+                 QStringLiteral("claude-haiku-4-5"),
+                 QStringLiteral("claude-sonnet-4-5") };
+    case AiTool::CodexCli:
+        return { QStringLiteral("gpt-4o"),
+                 QStringLiteral("gpt-4.5"),
+                 QStringLiteral("o3"),
+                 QStringLiteral("o4-mini"),
+                 QStringLiteral("gpt-4o-mini") };
+    case AiTool::GeminiCli:
+        return { QStringLiteral("gemini-2.5-pro"),
+                 QStringLiteral("gemini-2.5-flash"),
+                 QStringLiteral("gemini-2.0-flash-001") };
+    case AiTool::OpenCode:
+        return { QStringLiteral("anthropic/claude-opus-4-5"),
+                 QStringLiteral("anthropic/claude-sonnet-4-5"),
+                 QStringLiteral("openai/gpt-4o") };
+    }
+    return {};
 }
 
 void ConnectWizardDialog::updateNavigation()

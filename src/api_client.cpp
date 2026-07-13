@@ -2,15 +2,191 @@
 #include <QNetworkRequest>
 #include <QJsonDocument>
 #include <QJsonArray>
+#include <QRegularExpression>
 #include <QSslConfiguration>
 #include <QUrl>
 #include <QElapsedTimer>
+#include <QTimer>
 #include <QDate>
 
 namespace {
 
 constexpr int kApiKeyPageSize = 100;
 constexpr int kMaxApiKeyPages = 100;
+
+struct ImageResponseData
+{
+    QString base64;
+    QString partialBase64;
+    QString format;
+    QString revisedPrompt;
+    QString error;
+};
+
+void collectImageResponse(const QJsonValue &value, ImageResponseData &result)
+{
+    if (value.isArray()) {
+        for (const QJsonValue &item : value.toArray()) collectImageResponse(item, result);
+        return;
+    }
+    if (!value.isObject()) return;
+
+    const QJsonObject object = value.toObject();
+    for (const QString &key : { QStringLiteral("b64_json"), QStringLiteral("base64"),
+                                QStringLiteral("image_base64") }) {
+        const QString encoded = object.value(key).toString().trimmed();
+        if (!encoded.isEmpty()) result.base64 = encoded;
+    }
+    const QString directResult = object.value(QStringLiteral("result")).toString().trimmed();
+    if (!directResult.isEmpty()) result.base64 = directResult;
+    const QString partial = object.value(QStringLiteral("partial_image_b64")).toString().trimmed();
+    if (!partial.isEmpty()) result.partialBase64 = partial;
+
+    const QString format = object.value(QStringLiteral("output_format")).toString(
+        object.value(QStringLiteral("format")).toString()).trimmed();
+    if (!format.isEmpty()) result.format = format;
+    const QString mimeType = object.value(QStringLiteral("mime_type")).toString().trimmed();
+    if (result.format.isEmpty() && mimeType.startsWith(QStringLiteral("image/"))) {
+        result.format = mimeType.mid(QStringLiteral("image/").size());
+    }
+    const QString revisedPrompt = object.value(QStringLiteral("revised_prompt")).toString().trimmed();
+    if (!revisedPrompt.isEmpty()) result.revisedPrompt = revisedPrompt;
+
+    const QJsonValue errorValue = object.value(QStringLiteral("error"));
+    if (errorValue.isObject()) {
+        result.error = errorValue.toObject().value(QStringLiteral("message")).toString(
+            errorValue.toObject().value(QStringLiteral("detail")).toString()).trimmed();
+    } else if (errorValue.isString()) {
+        result.error = errorValue.toString().trimmed();
+    }
+    const QString eventType = object.value(QStringLiteral("type")).toString().toLower();
+    if (result.error.isEmpty() && eventType.contains(QStringLiteral("error"))) {
+        result.error = object.value(QStringLiteral("message")).toString(
+            object.value(QStringLiteral("detail")).toString()).trimmed();
+    }
+
+    for (const QString &key : { QStringLiteral("data"), QStringLiteral("response"),
+                                QStringLiteral("output"), QStringLiteral("item"),
+                                QStringLiteral("image") }) {
+        const QJsonValue nested = object.value(key);
+        if (!nested.isUndefined() && !nested.isNull()) collectImageResponse(nested, result);
+    }
+}
+
+QString presentationContentText(const QJsonValue &value)
+{
+    if (value.isString()) return value.toString();
+    if (value.isObject()) {
+        const QJsonObject object = value.toObject();
+        if (object.contains(QStringLiteral("slides"))) {
+            return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
+        }
+        for (const QString &key : { QStringLiteral("text"), QStringLiteral("output_text"),
+                                    QStringLiteral("content") }) {
+            const QString nested = presentationContentText(object.value(key));
+            if (!nested.isEmpty()) return nested;
+        }
+        return QString();
+    }
+    if (value.isArray()) {
+        QString result;
+        for (const QJsonValue &part : value.toArray()) {
+            const QString text = presentationContentText(part);
+            if (!text.isEmpty()) {
+                if (!result.isEmpty()) result += QLatin1Char('\n');
+                result += text;
+            }
+        }
+        return result;
+    }
+    return QString();
+}
+
+QString firstBalancedJsonObject(const QString &text)
+{
+    bool inString = false;
+    bool escaped = false;
+    int depth = 0;
+    int start = -1;
+    for (int index = 0; index < text.size(); ++index) {
+        const QChar character = text.at(index);
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (character == QLatin1Char('\\')) {
+                escaped = true;
+            } else if (character == QLatin1Char('"')) {
+                inString = false;
+            }
+            continue;
+        }
+        if (character == QLatin1Char('"')) {
+            inString = true;
+        } else if (character == QLatin1Char('{')) {
+            if (depth == 0) start = index;
+            ++depth;
+        } else if (character == QLatin1Char('}') && depth > 0) {
+            --depth;
+            if (depth == 0 && start >= 0) return text.mid(start, index - start + 1);
+        }
+    }
+    return QString();
+}
+
+bool validPresentationObject(const QJsonObject &candidate, QJsonObject &plan)
+{
+    QJsonObject normalized = candidate;
+    for (const QString &key : { QStringLiteral("presentation"), QStringLiteral("plan"),
+                                QStringLiteral("data") }) {
+        const QJsonObject nested = normalized.value(key).toObject();
+        if (!nested.isEmpty() && nested.contains(QStringLiteral("slides"))) {
+            normalized = nested;
+            break;
+        }
+    }
+    const QJsonArray slides = normalized.value(QStringLiteral("slides")).toArray();
+    if (slides.isEmpty()) return false;
+    if (normalized.value(QStringLiteral("title")).toString().trimmed().isEmpty()) {
+        normalized.insert(QStringLiteral("title"), slides.first().toObject()
+            .value(QStringLiteral("title")).toString(QStringLiteral("演示文稿")));
+    }
+    plan = normalized;
+    return true;
+}
+
+bool parsePresentationContent(const QJsonValue &contentValue,
+                              QJsonObject &plan,
+                              QString &error)
+{
+    if (contentValue.isObject()
+            && validPresentationObject(contentValue.toObject(), plan)) {
+        return true;
+    }
+
+    QString content = presentationContentText(contentValue).trimmed();
+    content.remove(QChar::ByteOrderMark);
+    QStringList candidates{ content };
+    const QString balanced = firstBalancedJsonObject(content);
+    if (!balanced.isEmpty() && balanced != content) candidates.append(balanced);
+
+    QJsonParseError lastError;
+    for (QString candidate : candidates) {
+        for (int pass = 0; pass < 2; ++pass) {
+            if (pass == 1) {
+                candidate.replace(QRegularExpression(QStringLiteral(",\\s*([}\\]])")),
+                                  QStringLiteral("\\1"));
+            }
+            const QJsonDocument document = QJsonDocument::fromJson(candidate.toUtf8(), &lastError);
+            if (lastError.error == QJsonParseError::NoError && document.isObject()
+                    && validPresentationObject(document.object(), plan)) {
+                return true;
+            }
+        }
+    }
+    error = lastError.error == QJsonParseError::NoError
+        ? QStringLiteral("缺少 slides 数组") : lastError.errorString();
+    return false;
+}
 
 } // namespace
 
@@ -574,10 +750,17 @@ void ApiClient::generateImage(const QString &apiKey,
                               const QString &outputFormat)
 {
     cancelImageGeneration();
+    m_imageGenerationBuffer.clear();
+    m_imageGenerationBase64.clear();
+    m_imageGenerationPartialBase64.clear();
+    m_imageGenerationFormat.clear();
+    m_imageGenerationRevisedPrompt.clear();
+    m_imageGenerationError.clear();
 
     QNetworkRequest request(QUrl(m_baseUrl + QStringLiteral("/v1/images/generations")));
     request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     request.setRawHeader("Authorization", QStringLiteral("Bearer %1").arg(apiKey).toUtf8());
+    request.setRawHeader("Accept", "text/event-stream, application/json");
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     request.setTransferTimeout(20 * 60 * 1000);
 #endif
@@ -592,11 +775,23 @@ void ApiClient::generateImage(const QString &apiKey,
     data[QStringLiteral("size")] = size;
     data[QStringLiteral("quality")] = quality;
     data[QStringLiteral("output_format")] = outputFormat;
+    data[QStringLiteral("response_format")] = QStringLiteral("b64_json");
+    data[QStringLiteral("stream")] = true;
     data[QStringLiteral("n")] = 1;
 
     m_imageGenerationReply = m_networkManager->post(
         request, QJsonDocument(data).toJson(QJsonDocument::Compact));
     m_imageGenerationReply->setProperty("aegisyImageOutputFormat", outputFormat);
+    connect(m_imageGenerationReply, &QNetworkReply::readyRead, this, [this]() {
+        if (!m_imageGenerationReply) return;
+        m_imageGenerationBuffer.append(m_imageGenerationReply->readAll());
+        const QString contentType = m_imageGenerationReply->header(
+            QNetworkRequest::ContentTypeHeader).toString().toLower();
+        if (contentType.contains(QStringLiteral("text/event-stream"))
+                || m_imageGenerationBuffer.trimmed().startsWith("data:")) {
+            processImageGenerationEvents(false);
+        }
+    });
     connect(m_imageGenerationReply, &QNetworkReply::finished,
             this, &ApiClient::onImageGenerationFinished);
 }
@@ -610,6 +805,50 @@ void ApiClient::cancelImageGeneration()
     m_imageGenerationReply->abort();
     m_imageGenerationReply->deleteLater();
     m_imageGenerationReply = nullptr;
+    m_imageGenerationBuffer.clear();
+    m_imageGenerationBase64.clear();
+    m_imageGenerationPartialBase64.clear();
+    m_imageGenerationFormat.clear();
+    m_imageGenerationRevisedPrompt.clear();
+    m_imageGenerationError.clear();
+}
+
+void ApiClient::processImageGenerationPayload(const QByteArray &payload)
+{
+    const QByteArray trimmed = payload.trimmed();
+    if (trimmed.isEmpty() || trimmed == "[DONE]") return;
+    const QJsonDocument document = QJsonDocument::fromJson(trimmed);
+    if (document.isNull()) return;
+
+    ImageResponseData parsed;
+    collectImageResponse(document.isObject() ? QJsonValue(document.object())
+                                             : QJsonValue(document.array()), parsed);
+    if (!parsed.base64.isEmpty()) m_imageGenerationBase64 = parsed.base64;
+    if (!parsed.partialBase64.isEmpty()) m_imageGenerationPartialBase64 = parsed.partialBase64;
+    if (!parsed.format.isEmpty()) m_imageGenerationFormat = parsed.format;
+    if (!parsed.revisedPrompt.isEmpty()) m_imageGenerationRevisedPrompt = parsed.revisedPrompt;
+    if (!parsed.error.isEmpty()) m_imageGenerationError = parsed.error;
+}
+
+void ApiClient::processImageGenerationEvents(bool flushTrailingData)
+{
+    while (true) {
+        const int newline = m_imageGenerationBuffer.indexOf('\n');
+        if (newline < 0) break;
+        QByteArray line = m_imageGenerationBuffer.left(newline).trimmed();
+        m_imageGenerationBuffer.remove(0, newline + 1);
+        if (!line.startsWith("data:")) continue;
+        processImageGenerationPayload(line.mid(5).trimmed());
+    }
+    if (flushTrailingData) {
+        const QByteArray trailing = m_imageGenerationBuffer.trimmed();
+        m_imageGenerationBuffer.clear();
+        if (trailing.startsWith("data:")) {
+            processImageGenerationPayload(trailing.mid(5).trimmed());
+        } else if (!trailing.isEmpty()) {
+            processImageGenerationPayload(trailing);
+        }
+    }
 }
 
 void ApiClient::sendChatMessage(const QString &requestId,
@@ -748,6 +987,19 @@ void ApiClient::requestPresentationPlan(const QString &requestId,
                                         const QString &model,
                                         const QString &requestText)
 {
+    requestPresentationPlanAttempt(requestId, apiKey, model, requestText,
+                                   QString(), 0, true);
+}
+
+void ApiClient::requestPresentationPlanAttempt(const QString &requestId,
+                                               const QString &apiKey,
+                                               const QString &model,
+                                               const QString &requestText,
+                                               const QString &invalidContent,
+                                               int attempt,
+                                               bool structuredOutput,
+                                               int exhaustedRetries)
+{
     QNetworkRequest request(QUrl(m_baseUrl + QStringLiteral("/v1/chat/completions")));
     request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     request.setRawHeader("Authorization", QStringLiteral("Bearer %1").arg(apiKey).toUtf8());
@@ -758,25 +1010,41 @@ void ApiClient::requestPresentationPlan(const QString &requestId,
     sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
     request.setSslConfiguration(sslConfig);
 
-    const QString systemPrompt = QStringLiteral(
-        "你是演示文稿规划器。只输出一个 JSON 对象，不要 Markdown。结构必须是："
-        "{\"title\":\"标题\",\"subtitle\":\"副标题\",\"slides\":["
-        "{\"title\":\"页面标题\",\"bullets\":[\"要点1\",\"要点2\"]}]}。"
-        "生成 5 到 10 页，内容面向最终观众，每页最多 6 个简洁要点。"
-        "不要输出演讲过程说明、制作备注或代码。");
-    const QJsonObject body{
+    const QString systemPrompt = attempt == 0 ? QStringLiteral(
+        "你是 Aegisy 演示文稿规划器。只输出一个合法 JSON 对象，不要 Markdown、解释或代码围栏。"
+        "根字段必须包含 title、subtitle、theme、slides。theme 只能是 editorial 或 swiss。"
+        "每个 slide 包含 layout、title，并按布局使用 subtitle、kicker、bullets、columns、metrics、quote、notes。"
+        "layout 只能是 cover、section、statement、bullets、comparison、process、metrics、closing。"
+        "comparison 的 columns 是两个 {title, bullets}；metrics 是 2 到 4 个 {value,label,note}。"
+        "生成 6 到 12 页，形成钩子、背景、主体、转折、结论的叙事弧。"
+        "每页正文最多 5 个要点，每个要点不超过 32 个中文字符；不要编造数据。")
+        : QStringLiteral(
+        "你是 JSON 结构修复器。把用户提供的无效演示文稿内容修复为一个合法 JSON 对象。"
+        "保留原意，只修复引号、逗号、括号、字段类型和 slides 结构。"
+        "只输出 JSON，不要 Markdown 或解释。");
+    const QString userPrompt = attempt == 0 ? requestText : QStringLiteral(
+        "原始需求：\n%1\n\n无效输出：\n%2")
+        .arg(requestText, invalidContent.left(16000));
+    QJsonObject body{
         { QStringLiteral("model"), model },
         { QStringLiteral("stream"), false },
         { QStringLiteral("messages"), QJsonArray{
             QJsonObject{{QStringLiteral("role"), QStringLiteral("system")},
                         {QStringLiteral("content"), systemPrompt}},
             QJsonObject{{QStringLiteral("role"), QStringLiteral("user")},
-                        {QStringLiteral("content"), requestText}}
+                        {QStringLiteral("content"), userPrompt}}
         }}
     };
+    if (structuredOutput) {
+        body.insert(QStringLiteral("response_format"), QJsonObject{
+            { QStringLiteral("type"), QStringLiteral("json_object") }
+        });
+    }
     QNetworkReply *reply = m_networkManager->post(
         request, QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId]() {
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, requestId, apiKey, model, requestText, invalidContent,
+             attempt, structuredOutput, exhaustedRetries]() {
         const QByteArray data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             const QJsonObject root = QJsonDocument::fromJson(data).object();
@@ -784,33 +1052,64 @@ void ApiClient::requestPresentationPlan(const QString &requestId,
             if (message.isEmpty()) message = root.value(QStringLiteral("error")).toObject()
                 .value(QStringLiteral("message")).toString();
             if (message.isEmpty()) message = reply->errorString();
+            const QString normalized = message.toLower();
+            if (structuredOutput
+                    && (normalized.contains(QStringLiteral("response_format"))
+                        || normalized.contains(QStringLiteral("json_object"))
+                        || normalized.contains(QStringLiteral("structured output")))) {
+                reply->deleteLater();
+                requestPresentationPlanAttempt(requestId, apiKey, model, requestText,
+                                               invalidContent, attempt, false,
+                                               exhaustedRetries);
+                return;
+            }
+            // 账号池被占满/额度耗尽属于瞬时错误：退避后自动重试，最多 2 次。
+            const bool exhausted = normalized.contains(QStringLiteral("exhausted"))
+                || normalized.contains(QStringLiteral("no available"))
+                || normalized.contains(QStringLiteral("all available accounts"));
+            if (exhausted && exhaustedRetries < 2) {
+                reply->deleteLater();
+                const int delayMs = (exhaustedRetries + 1) * 2500;  // 2.5s、5s
+                QTimer::singleShot(delayMs, this,
+                    [this, requestId, apiKey, model, requestText, invalidContent,
+                     attempt, structuredOutput, exhaustedRetries]() {
+                    requestPresentationPlanAttempt(requestId, apiKey, model, requestText,
+                                                   invalidContent, attempt, structuredOutput,
+                                                   exhaustedRetries + 1);
+                });
+                return;
+            }
             emit presentationPlanFailed(requestId, message);
             reply->deleteLater();
             return;
         }
         const QJsonObject root = QJsonDocument::fromJson(data).object();
         const QJsonArray choices = root.value(QStringLiteral("choices")).toArray();
-        QString content;
+        QJsonValue contentValue;
         if (!choices.isEmpty()) {
-            content = choices.at(0).toObject().value(QStringLiteral("message")).toObject()
-                .value(QStringLiteral("content")).toString().trimmed();
+            contentValue = choices.at(0).toObject().value(QStringLiteral("message")).toObject()
+                .value(QStringLiteral("content"));
+        } else if (root.contains(QStringLiteral("slides"))) {
+            contentValue = root;
+        } else {
+            contentValue = root.value(QStringLiteral("output_text"));
         }
-        if (content.startsWith(QStringLiteral("```"))) {
-            const int firstNewline = content.indexOf(QLatin1Char('\n'));
-            const int lastFence = content.lastIndexOf(QStringLiteral("```"));
-            if (firstNewline >= 0 && lastFence > firstNewline) {
-                content = content.mid(firstNewline + 1, lastFence - firstNewline - 1).trimmed();
+        QJsonObject plan;
+        QString parseError;
+        if (!parsePresentationContent(contentValue, plan, parseError)) {
+            const QString rawContent = presentationContentText(contentValue).trimmed();
+            if (attempt == 0 && !rawContent.isEmpty()) {
+                reply->deleteLater();
+                requestPresentationPlanAttempt(requestId, apiKey, model, requestText,
+                                               rawContent, attempt + 1, structuredOutput,
+                                               exhaustedRetries);
+                return;
             }
-        }
-        QJsonParseError parseError;
-        const QJsonDocument plan = QJsonDocument::fromJson(content.toUtf8(), &parseError);
-        if (parseError.error != QJsonParseError::NoError || !plan.isObject()
-                || plan.object().value(QStringLiteral("slides")).toArray().isEmpty()) {
             emit presentationPlanFailed(
                 requestId, QStringLiteral("模型没有返回有效的 PPT 结构：%1")
-                    .arg(parseError.errorString()));
+                    .arg(parseError));
         } else {
-            emit presentationPlanReceived(requestId, plan.object());
+            emit presentationPlanReceived(requestId, plan);
         }
         reply->deleteLater();
     });
@@ -1001,24 +1300,25 @@ void ApiClient::onImageGenerationFinished()
 
     const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QString requestedFormat = reply->property("aegisyImageOutputFormat").toString();
-    const QByteArray body = reply->readAll();
+    m_imageGenerationBuffer.append(reply->readAll());
+    const QString contentType = reply->header(QNetworkRequest::ContentTypeHeader)
+        .toString().toLower();
+    const bool streamed = contentType.contains(QStringLiteral("text/event-stream"))
+        || m_imageGenerationBuffer.trimmed().startsWith("data:")
+        || !m_imageGenerationBase64.isEmpty()
+        || !m_imageGenerationPartialBase64.isEmpty();
+    if (streamed) {
+        processImageGenerationEvents(true);
+    } else if (!m_imageGenerationBuffer.trimmed().isEmpty()) {
+        processImageGenerationPayload(m_imageGenerationBuffer);
+        m_imageGenerationBuffer.clear();
+    }
     const QString networkError = reply->errorString();
     const QNetworkReply::NetworkError replyError = reply->error();
     reply->deleteLater();
 
-    const QJsonDocument doc = QJsonDocument::fromJson(body);
-    const QJsonObject response = doc.isObject() ? doc.object() : QJsonObject();
     if (replyError != QNetworkReply::NoError || httpStatus < 200 || httpStatus >= 300) {
-        QString message;
-        const QJsonValue errorValue = response.value(QStringLiteral("error"));
-        if (errorValue.isObject()) {
-            message = errorValue.toObject().value(QStringLiteral("message")).toString();
-        } else if (errorValue.isString()) {
-            message = errorValue.toString();
-        }
-        if (message.isEmpty()) {
-            message = response.value(QStringLiteral("message")).toString();
-        }
+        QString message = m_imageGenerationError;
         if (message.isEmpty()) {
             message = httpStatus > 0
                 ? QStringLiteral("HTTP %1").arg(httpStatus)
@@ -1028,24 +1328,26 @@ void ApiClient::onImageGenerationFinished()
         return;
     }
 
-    const QJsonArray images = response.value(QStringLiteral("data")).toArray();
-    if (images.isEmpty()) {
-        emit imageGenerationFailed(QStringLiteral("服务器未返回图片数据。"));
-        return;
+    QString encoded = m_imageGenerationBase64.isEmpty()
+        ? m_imageGenerationPartialBase64 : m_imageGenerationBase64;
+    QString format = m_imageGenerationFormat;
+    if (encoded.startsWith(QStringLiteral("data:image/"))) {
+        const int separator = encoded.indexOf(QStringLiteral(";base64,"));
+        if (separator > 11) {
+            if (format.isEmpty()) format = encoded.mid(11, separator - 11);
+            encoded = encoded.mid(separator + QStringLiteral(";base64,").size());
+        }
     }
-
-    const QJsonObject image = images.first().toObject();
-    const QByteArray imageData = QByteArray::fromBase64(
-        image.value(QStringLiteral("b64_json")).toString().toLatin1());
+    const QByteArray imageData = QByteArray::fromBase64(encoded.toLatin1());
     if (imageData.isEmpty()) {
-        emit imageGenerationFailed(QStringLiteral("服务器返回的图片数据为空或格式不受支持。"));
+        emit imageGenerationFailed(m_imageGenerationError.isEmpty()
+            ? QStringLiteral("服务器未返回可解码的图片数据。")
+            : m_imageGenerationError);
         return;
     }
 
-    QString format = image.value(QStringLiteral("output_format")).toString();
     if (format.isEmpty()) {
         format = requestedFormat.isEmpty() ? QStringLiteral("png") : requestedFormat;
     }
-    emit imageGenerated(imageData, format,
-                        image.value(QStringLiteral("revised_prompt")).toString());
+    emit imageGenerated(imageData, format, m_imageGenerationRevisedPrompt);
 }
