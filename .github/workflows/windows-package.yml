@@ -58,6 +58,32 @@ jobs:
           "OPENSSL_ROOT_DIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
           "OPENSSL_DIR=$bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Configure Qt paths for CMake
+        shell: pwsh
+        run: |
+          Write-Host "QT_ROOT_DIR  = $env:QT_ROOT_DIR"
+          Write-Host "Qt6_DIR      = $env:Qt6_DIR"
+          Write-Host "PATH entries containing Qt:"
+          $env:PATH -split ';' | Where-Object { $_ -match 'qt' -or $_ -match 'Qt' }
+
+          # install-qt-action sets Qt6_DIR; expose it so package-windows.bat can pass
+          # -DQt6_DIR directly and skip the unreliable CMAKE_PREFIX_PATH lookup.
+          if ($env:Qt6_DIR) {
+              "QT_CMAKE_DIR=$env:Qt6_DIR" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } elseif ($env:QT_ROOT_DIR) {
+              $guessed = Join-Path $env:QT_ROOT_DIR "lib\cmake\Qt6"
+              "QT_CMAKE_DIR=$guessed" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } else {
+              # Last resort: search Qt6Config.cmake under Program Files
+              $found = Get-ChildItem "C:\Qt" -Recurse -Filter "Qt6Config.cmake" -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
+              if ($found) {
+                  "QT_CMAKE_DIR=$($found.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+              } else {
+                  throw "Cannot locate Qt6Config.cmake; install-qt-action may have failed."
+              }
+          }
+
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --yes --no-progress
