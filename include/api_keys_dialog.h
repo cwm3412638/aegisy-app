@@ -14,8 +14,11 @@ struct ApiKeyInfo {
     QString name;
     QString key;
     QString status;
-    int quota;
-    int used;
+    qint64 quota;
+    qint64 used;
+    qint64 groupId = 0;
+    QString groupName;
+    QString platform;
     QString createdAt;
     QString expiresAt;
     bool isActive;
@@ -42,8 +45,16 @@ private slots:
     void onCopyKeyClicked();
     void onActivateKeyClicked();
     void onTestKeyClicked();
+    void onCreateKeyClicked();
+    void onEditKeyClicked();
+    void onChangeGroupClicked();
+    void onToggleStatusClicked();
+    void onDeleteKeyClicked();
     void onKeyTested(const QString &keyId, bool supported, const QString &detail);
     void onKeysReceived(const QJsonArray &keys);
+    void onGroupsReceived(const QJsonArray &groups);
+    void onKeyOperationCompleted(const QString &action, const QJsonObject &result);
+    void onKeyOperationFailed(const QString &action, const QString &error);
     void onRequestFailed(const QString &error);
     void onTableSelectionChanged();
 
@@ -52,6 +63,8 @@ private:
     void loadApiKeys();
     void updateKeysTable(const QList<ApiKeyInfo> &keys);
     ApiKeyInfo getSelectedKey() const;
+    void showKeyEditor(const ApiKeyInfo *existing = nullptr);
+    QString groupName(qint64 groupId) const;
 
     ApiClient *m_apiClient;
     QTableWidget *m_keysTable;
@@ -59,10 +72,16 @@ private:
     QPushButton *m_copyButton;
     QPushButton *m_activateButton;
     QPushButton *m_testButton;
+    QPushButton *m_createButton;
+    QPushButton *m_editButton;
+    QPushButton *m_groupButton;
+    QPushButton *m_toggleButton;
+    QPushButton *m_deleteButton;
     QLabel *m_statusLabel;
     QLabel *m_totalKeysLabel;
 
     QList<ApiKeyInfo> m_keys;
+    QJsonArray m_groups;
     QString m_activeKeyId;
 };
 

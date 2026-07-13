@@ -22,6 +22,8 @@
 - 全量模型列表以 Aegisy API 返回结果为准，不套用 Codex Desktop 内置模型白名单。
 - Windows 与 macOS 支持 Claude Desktop 运行时中文注入，不修改官方安装文件，关闭 Claude 后自动失效。
 - Windows 打包新增 Qt WebSockets 与 SQLite 驱动完整性检查，缺少运行库时停止生成安装包。
+- 顶栏账号状态升级为可点击头像，账号中心支持修改密码和密卡兑换，兑换后立即刷新余额。
+- API Keys 页面新增创建、编辑、切换分组、启用/禁用和删除，接口与 Aegisy Web 端保持一致。
 
 ## v2.4.0 - GPT Image 生图
 

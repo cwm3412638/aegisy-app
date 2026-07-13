@@ -30,6 +30,12 @@ public:
     void getUsageModels(int days);
     void getApiKeyUsage(const QJsonArray &apiKeyIds);
     void getChannels();        // 获取渠道列表
+    void getGroups();
+    void changePassword(const QString &oldPassword, const QString &newPassword);
+    void redeemCode(const QString &code);
+    void createApiKey(const QJsonObject &data);
+    void updateApiKey(const QString &keyId, const QJsonObject &data);
+    void deleteApiKey(const QString &keyId);
     // 获取账号支持的模型列表（调用 OpenAI 兼容的 /v1/models，需传入 sk- API Key）
     void getModels(const QString &apiKey);
 
@@ -67,6 +73,13 @@ signals:
 
     // 渠道列表获取成功
     void channelsReceived(const QJsonArray &channels);
+    void groupsReceived(const QJsonArray &groups);
+    void passwordChanged();
+    void passwordChangeFailed(const QString &errorMessage);
+    void redeemCompleted(const QJsonObject &result);
+    void redeemFailed(const QString &errorMessage);
+    void apiKeyOperationCompleted(const QString &action, const QJsonObject &result);
+    void apiKeyOperationFailed(const QString &action, const QString &errorMessage);
 
     // 模型列表获取成功
     void modelsReceived(const QJsonArray &models);
@@ -112,6 +125,8 @@ private:
 
     // 通用 POST 请求
     QNetworkReply* post(const QString &endpoint, const QJsonObject &data);
+    QNetworkReply* put(const QString &endpoint, const QJsonObject &data);
+    QNetworkReply* deleteRequest(const QString &endpoint);
 
     // 通用 GET 请求（bearerToken 为空时使用已设置的 m_authToken）
     QNetworkReply* get(const QString &endpoint, const QString &bearerToken = QString());

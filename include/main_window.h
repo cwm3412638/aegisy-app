@@ -52,6 +52,7 @@ private slots:
     void refreshToolVersions();
     void refreshBalance();
     void onUsageClicked();
+    void onAccountClicked();
     void onManageKeysClicked();
     void onViewModelsClicked();
     void onImageGenerationClicked();
@@ -100,7 +101,7 @@ private:
     DesktopEnhancementManager *m_desktopEnhancementManager;
 
     // UI — 顶栏
-    QLabel      *m_userLabel;
+    QPushButton *m_userLabel;
     QPushButton *m_balanceButton;
     QPushButton *m_logoutButton;
 
@@ -133,6 +134,7 @@ private:
     // 状态
     QString    m_authToken;
     QJsonArray m_keys;
+    QJsonObject m_userInfo;
     bool       m_keysLoaded = false;
     QHash<int, QLabel *> m_toolVersionLabels;
     QHash<int, QPushButton *> m_toolInstallButtons;

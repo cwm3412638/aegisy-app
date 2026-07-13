@@ -131,6 +131,39 @@ QNetworkReply* ApiClient::post(const QString &endpoint, const QJsonObject &data)
     return m_networkManager->post(request, doc.toJson());
 }
 
+QNetworkReply* ApiClient::put(const QString &endpoint, const QJsonObject &data)
+{
+    QUrl url(m_baseUrl + endpoint);
+    QNetworkRequest request(url);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(15000);
+#endif
+    if (!m_authToken.isEmpty()) {
+        request.setRawHeader("Authorization", QStringLiteral("Bearer %1").arg(m_authToken).toUtf8());
+    }
+    QSslConfiguration sslConfig = request.sslConfiguration();
+    sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+    request.setSslConfiguration(sslConfig);
+    return m_networkManager->put(request, QJsonDocument(data).toJson(QJsonDocument::Compact));
+}
+
+QNetworkReply* ApiClient::deleteRequest(const QString &endpoint)
+{
+    QUrl url(m_baseUrl + endpoint);
+    QNetworkRequest request(url);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(15000);
+#endif
+    if (!m_authToken.isEmpty()) {
+        request.setRawHeader("Authorization", QStringLiteral("Bearer %1").arg(m_authToken).toUtf8());
+    }
+    QSslConfiguration sslConfig = request.sslConfiguration();
+    sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+    request.setSslConfiguration(sslConfig);
+    return m_networkManager->deleteResource(request);
+}
+
 QNetworkReply* ApiClient::get(const QString &endpoint, const QString &bearerToken)
 {
     QUrl url(m_baseUrl + endpoint);
@@ -165,7 +198,8 @@ QJsonObject ApiClient::parseResponse(QNetworkReply *reply, bool &ok)
         if (doc.isObject()) {
             result = doc.object();
         }
-        QString message = result.value(QStringLiteral("message")).toString();
+        QString message = result.value(QStringLiteral("detail")).toString();
+        if (message.isEmpty()) message = result.value(QStringLiteral("message")).toString();
         if (message.isEmpty()) {
             message = reply->errorString();
         }
@@ -406,6 +440,123 @@ void ApiClient::getChannels()
     // 尝试 v1 API
     QNetworkReply *reply = get("/api/v1/channels?page=1&page_size=100");
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onChannelsFinished);
+}
+
+void ApiClient::getGroups()
+{
+    QNetworkReply *reply = get(QStringLiteral("/api/v1/groups/available"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        bool ok = false;
+        const QJsonObject response = parseResponse(reply, ok);
+        reply->deleteLater();
+        if (!ok) {
+            emit requestFailed(response.value(QStringLiteral("error")).toString());
+            return;
+        }
+        const QJsonValue data = response.value(QStringLiteral("data"));
+        QJsonArray groups;
+        if (data.isArray()) groups = data.toArray();
+        else if (data.isObject()) groups = data.toObject().value(QStringLiteral("items")).toArray();
+        emit groupsReceived(groups);
+    });
+}
+
+void ApiClient::changePassword(const QString &oldPassword, const QString &newPassword)
+{
+    QNetworkReply *reply = put(QStringLiteral("/api/v1/user/password"), QJsonObject{
+        { QStringLiteral("old_password"), oldPassword },
+        { QStringLiteral("new_password"), newPassword }
+    });
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        bool ok = false;
+        const QJsonObject response = parseResponse(reply, ok);
+        reply->deleteLater();
+        const int code = response.value(QStringLiteral("code")).toInt(0);
+        if (!ok || (code != 0 && code != 200)) {
+            const QString error = response.value(QStringLiteral("error")).toString(
+                response.value(QStringLiteral("message")).toString(QStringLiteral("修改密码失败")));
+            emit passwordChangeFailed(error);
+            return;
+        }
+        emit passwordChanged();
+    });
+}
+
+void ApiClient::redeemCode(const QString &code)
+{
+    QNetworkReply *reply = post(QStringLiteral("/api/v1/redeem"), QJsonObject{
+        { QStringLiteral("code"), code }
+    });
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        bool ok = false;
+        const QJsonObject response = parseResponse(reply, ok);
+        reply->deleteLater();
+        const int code = response.value(QStringLiteral("code")).toInt(0);
+        if (!ok || (code != 0 && code != 200)) {
+            emit redeemFailed(response.value(QStringLiteral("error")).toString(
+                response.value(QStringLiteral("message")).toString(QStringLiteral("兑换失败"))));
+            return;
+        }
+        const QJsonValue data = response.value(QStringLiteral("data"));
+        emit redeemCompleted(data.isObject() ? data.toObject() : response);
+    });
+}
+
+void ApiClient::createApiKey(const QJsonObject &data)
+{
+    QNetworkReply *reply = post(QStringLiteral("/api/v1/keys"), data);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        bool ok = false;
+        const QJsonObject response = parseResponse(reply, ok);
+        reply->deleteLater();
+        const int code = response.value(QStringLiteral("code")).toInt(0);
+        if (!ok || (code != 0 && code != 200)) {
+            emit apiKeyOperationFailed(QStringLiteral("create"),
+                response.value(QStringLiteral("error")).toString(
+                    response.value(QStringLiteral("message")).toString(QStringLiteral("创建 Key 失败"))));
+            return;
+        }
+        emit apiKeyOperationCompleted(QStringLiteral("create"),
+            response.value(QStringLiteral("data")).toObject());
+    });
+}
+
+void ApiClient::updateApiKey(const QString &keyId, const QJsonObject &data)
+{
+    QNetworkReply *reply = put(QStringLiteral("/api/v1/keys/%1").arg(keyId), data);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        bool ok = false;
+        const QJsonObject response = parseResponse(reply, ok);
+        const QString action = reply->property("aegisyKeyAction").toString();
+        reply->deleteLater();
+        const int code = response.value(QStringLiteral("code")).toInt(0);
+        if (!ok || (code != 0 && code != 200)) {
+            emit apiKeyOperationFailed(action,
+                response.value(QStringLiteral("error")).toString(
+                    response.value(QStringLiteral("message")).toString(QStringLiteral("更新 Key 失败"))));
+            return;
+        }
+        emit apiKeyOperationCompleted(action, response.value(QStringLiteral("data")).toObject());
+    });
+    reply->setProperty("aegisyKeyAction", QStringLiteral("update"));
+}
+
+void ApiClient::deleteApiKey(const QString &keyId)
+{
+    QNetworkReply *reply = deleteRequest(QStringLiteral("/api/v1/keys/%1").arg(keyId));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        bool ok = false;
+        const QJsonObject response = parseResponse(reply, ok);
+        reply->deleteLater();
+        const int code = response.value(QStringLiteral("code")).toInt(0);
+        if (!ok || (code != 0 && code != 200)) {
+            emit apiKeyOperationFailed(QStringLiteral("delete"),
+                response.value(QStringLiteral("error")).toString(
+                    response.value(QStringLiteral("message")).toString(QStringLiteral("删除 Key 失败"))));
+            return;
+        }
+        emit apiKeyOperationCompleted(QStringLiteral("delete"), QJsonObject());
+    });
 }
 
 void ApiClient::getModels(const QString &apiKey)

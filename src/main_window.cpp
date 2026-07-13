@@ -1,6 +1,7 @@
 #include "main_window.h"
 
 #include "api_keys_dialog.h"
+#include "account_dialog.h"
 #include "connect_wizard.h"
 #include "models_dialog.h"
 #include "image_generation_dialog.h"
@@ -462,11 +463,14 @@ void MainWindow::setupUi()
     topLayout->addLayout(brandColumn);
     topLayout->addStretch();
 
-    m_userLabel = new QLabel(QStringLiteral("● 账号已连接"), topBar);
-    m_userLabel->setMaximumWidth(150);
+    m_userLabel = new QPushButton(QStringLiteral("U"), topBar);
+    m_userLabel->setFixedSize(38, 38);
+    m_userLabel->setCursor(Qt::PointingHandCursor);
+    m_userLabel->setToolTip(QStringLiteral("账号中心：修改密码与密卡充值"));
     m_userLabel->setStyleSheet(QStringLiteral(
-        "color: #067647; background: #ecfdf3; border: 1px solid #abefc6;"
-        "border-radius: 7px; padding: 6px 10px; font-size: 11px; font-weight: 600;"));
+        "QPushButton { color: white; background: #0f766e; border: none;"
+        "border-radius: 19px; font-size: 14px; font-weight: 700; }"
+        "QPushButton:hover { background: #115e59; }"));
     topLayout->addWidget(m_userLabel);
 
     m_balanceButton = new QPushButton(QStringLiteral("余额  --"), topBar);
@@ -820,6 +824,8 @@ void MainWindow::setupUi()
             this, &MainWindow::onDesktopEnhancementsClicked);
     connect(m_balanceButton, &QPushButton::clicked,
             this, &MainWindow::onUsageClicked);
+    connect(m_userLabel, &QPushButton::clicked,
+            this, &MainWindow::onAccountClicked);
     m_balanceRefreshTimer = new QTimer(this);
     m_balanceRefreshTimer->setInterval(60 * 1000);
     connect(m_balanceRefreshTimer, &QTimer::timeout,
@@ -1341,6 +1347,7 @@ void MainWindow::onApiKeysReceived(const QJsonArray &keys)
 
 void MainWindow::onUserInfoReceived(const QJsonObject &userInfo)
 {
+    m_userInfo = userInfo;
     const double balance = userInfo.value(QStringLiteral("balance")).toDouble();
     const QString formatted = QLocale(QLocale::English).toString(balance, 'f', 2);
     m_balanceButton->setText(QStringLiteral("余额  $%1").arg(formatted));
@@ -1349,12 +1356,11 @@ void MainWindow::onUserInfoReceived(const QJsonObject &userInfo)
     if (displayName.isEmpty()) {
         displayName = userInfo.value(QStringLiteral("email")).toString().trimmed();
     }
-    const QString compactName = displayName.size() > 16
-        ? displayName.left(13) + QStringLiteral("...") : displayName;
     m_userLabel->setText(displayName.isEmpty()
-        ? QStringLiteral("● 账号已连接")
-        : QStringLiteral("● %1").arg(compactName));
-    m_userLabel->setToolTip(displayName);
+        ? QStringLiteral("U") : displayName.left(1).toUpper());
+    m_userLabel->setToolTip(displayName.isEmpty()
+        ? QStringLiteral("账号中心：修改密码与密卡充值")
+        : QStringLiteral("%1\n点击进入账号中心").arg(displayName));
     m_balanceButton->setToolTip(QStringLiteral("查看账号与 API Key 用量"));
 }
 
@@ -1364,6 +1370,18 @@ void MainWindow::onUsageClicked()
     dialog->exec();
     dialog->deleteLater();
     refreshBalance();
+}
+
+void MainWindow::onAccountClicked()
+{
+    auto *dialog = new AccountDialog(m_apiClient, m_userInfo, this);
+    connect(dialog, &AccountDialog::accountBalanceChanged,
+            this, [this]() {
+        refreshBalance();
+        m_apiClient->getUserInfo();
+    });
+    dialog->exec();
+    dialog->deleteLater();
 }
 
 void MainWindow::onRequestFailed(const QString &error)

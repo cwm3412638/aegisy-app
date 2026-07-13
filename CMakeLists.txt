@@ -42,6 +42,7 @@ set(SOURCES
     src/tool_manager.cpp
     src/secure_storage.cpp
     src/api_keys_dialog.cpp
+    src/account_dialog.cpp
     src/models_dialog.cpp
     src/image_generation_dialog.cpp
     src/system_doctor_dialog.cpp
@@ -72,6 +73,7 @@ set(HEADERS
     include/tool_manager.h
     include/secure_storage.h
     include/api_keys_dialog.h
+    include/account_dialog.h
     include/models_dialog.h
     include/image_generation_dialog.h
     include/system_doctor_dialog.h
@@ -295,4 +297,21 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME desktop_enhancement_history_sync
         COMMAND AegisyDesktopEnhancementTest)
+
+    add_executable(AegisyApiClientAccountTest
+        tests/api_client_account_test.cpp
+        src/api_client.cpp
+        include/api_client.h
+    )
+    target_include_directories(AegisyApiClientAccountTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyApiClientAccountTest PRIVATE
+            Qt6::Core Qt6::Network)
+    else()
+        target_link_libraries(AegisyApiClientAccountTest PRIVATE
+            Qt5::Core Qt5::Network)
+    endif()
+    add_test(NAME api_client_account_and_keys
+        COMMAND AegisyApiClientAccountTest)
 endif()
