@@ -16,6 +16,11 @@ enum class ProfileType {
     OpenCode = 4,
 };
 
+inline uint qHash(ProfileType key, uint seed = 0) noexcept
+{
+    return qHash(static_cast<int>(key), seed);
+}
+
 inline QList<ProfileType> allProfileTypes()
 {
     return { ProfileType::Claude, ProfileType::Codex, ProfileType::Gemini, ProfileType::OpenCode };

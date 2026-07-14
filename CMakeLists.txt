@@ -24,7 +24,7 @@ find_package(Qt6 COMPONENTS Core Widgets Network Sql WebSockets QUIET)
 
 if(NOT Qt6_FOUND)
     message(STATUS "Qt6 not found, trying Qt5...")
-    find_package(Qt5 5.15 REQUIRED COMPONENTS Core Widgets Network Sql WebSockets)
+    find_package(Qt5 5.14 REQUIRED COMPONENTS Core Widgets Network Sql WebSockets)
     set(QT_VERSION_MAJOR 5)
 else()
     set(QT_VERSION_MAJOR 6)
