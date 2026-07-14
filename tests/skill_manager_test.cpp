@@ -43,8 +43,59 @@ int main(int argc, char **argv)
     if (!manager.matchSkill(QStringLiteral("不要生成图片，只解释提示词")).id.isEmpty()) {
         return fail("negative image request should not trigger a skill");
     }
+    if (manager.catalogSkills().size() != 35) return fail("skill catalog entries missing");
 
     QString error;
+    if (!manager.installCatalogSkill(QStringLiteral("aegisy.video.ffmpeg"), &error)) {
+        return fail("catalog skill install failed");
+    }
+    const SkillInfo ffmpeg = manager.skill(QStringLiteral("aegisy.video.ffmpeg"));
+    if (ffmpeg.id.isEmpty() || !ffmpeg.enabled || !ffmpeg.trusted
+            || ffmpeg.executor != QStringLiteral("instruction")) {
+        return fail("catalog skill manifest mismatch");
+    }
+    if (manager.matchSkill(QStringLiteral("帮我压缩并裁剪这个视频")).id
+            != QStringLiteral("aegisy.video.ffmpeg")) {
+        return fail("instruction skill routing failed");
+    }
+    if (!manager.skillInstructions(ffmpeg.id).contains(QStringLiteral("ffprobe"))) {
+        return fail("instruction skill content missing");
+    }
+    if (!manager.installCatalogSkill(QStringLiteral("aegisy.design.ui-designer"), &error)) {
+        return fail("generated catalog skill install failed");
+    }
+    const SkillInfo uiDesigner = manager.skill(QStringLiteral("aegisy.design.ui-designer"));
+    if (uiDesigner.id.isEmpty() || !uiDesigner.enabled || !uiDesigner.trusted
+            || !manager.skillInstructions(uiDesigner.id).contains(QStringLiteral("信息层级"))) {
+        return fail("generated catalog skill content mismatch");
+    }
+    if (manager.matchSkill(QStringLiteral("帮我美化界面并建立设计系统")).id
+            != QStringLiteral("aegisy.design.ui-designer")) {
+        return fail("generated catalog skill routing failed");
+    }
+    if (manager.skill(QStringLiteral("aegisy.presentation.create")).version
+            != QStringLiteral("1.1.0")) {
+        return fail("built-in presentation skill was not upgraded");
+    }
+    if (!manager.setEnabled(QStringLiteral("aegisy.presentation.create"), false, &error)) {
+        return fail("failed to disable presentation skill");
+    }
+    const QString presentationScript = manager.skill(QStringLiteral("aegisy.presentation.create")).path
+        + QStringLiteral("/scripts/create_ppt.py");
+    if (!writeFile(presentationScript, QByteArray("stale presentation runtime\n"))) {
+        return fail("failed to create stale presentation fixture");
+    }
+    SkillManager upgradedManager(nullptr, manager.skillsRoot());
+    const SkillInfo upgradedPresentation = upgradedManager.skill(
+        QStringLiteral("aegisy.presentation.create"));
+    QFile upgradedScript(presentationScript);
+    if (!upgradedScript.open(QIODevice::ReadOnly)
+            || upgradedPresentation.version != QStringLiteral("1.1.0")
+            || upgradedPresentation.enabled
+            || !upgradedScript.readAll().contains("render_comparison")) {
+        return fail("built-in skill update did not preserve state or refresh files");
+    }
+
     if (!manager.setEnabled(QStringLiteral("aegisy.image.generate"), false, &error)) {
         return fail("failed to disable image skill");
     }

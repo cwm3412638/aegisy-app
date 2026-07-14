@@ -29,6 +29,7 @@ class BalanceOrb;
 class QTimer;
 class QEvent;
 class QShowEvent;
+class QFileSystemWatcher;
 
 class MainWindow : public QMainWindow
 {
@@ -85,6 +86,11 @@ private:
     void showEvent(QShowEvent *event) override;
     void setupUi();
     void setupTray();
+    void setupConfigurationWatcher();
+    void refreshConfigurationWatchers();
+    void scheduleConfigurationRefresh();
+    bool isProfileConfigurationReady(const Profile &profile,
+                                     QString *issue = nullptr) const;
     void setupBalanceOrb();
     void rebuildTrayMenu();
     void updateBalanceOrb();
@@ -93,7 +99,9 @@ private:
 
     // 档案卡片
     void rebuildCards();
-    QWidget* createProfileCard(const Profile &profile, bool isActive);
+    QWidget* createProfileCard(const Profile &profile, bool isActive,
+                               bool needsRepair = false,
+                               const QString &repairReason = QString());
     QWidget* createAddCard();
 
     // 档案操作
@@ -173,6 +181,8 @@ private:
     QSet<int> m_installingTools;
     int m_pendingToolVersionChecks = 0;
     QTimer *m_balanceRefreshTimer = nullptr;
+    QFileSystemWatcher *m_configurationWatcher = nullptr;
+    QTimer *m_configurationRefreshTimer = nullptr;
 
     // 当前筛选类型：0 = 全部，其余值对应 ProfileType
     int m_filterType = 0;

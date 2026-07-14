@@ -193,7 +193,11 @@ void SystemDoctorDialog::applyReport(const QList<RuntimeStatus> &runtimes,
         const ToolStatus status = tools.value(static_cast<int>(tool));
         QString state;
         QString tone;
-        if (!status.installed) {
+        if (status.repairRequired) {
+            state = QStringLiteral("需修复");
+            tone = QStringLiteral("error");
+            ++errorCount;
+        } else if (!status.installed) {
             state = QStringLiteral("未安装");
             tone = QStringLiteral("error");
             ++errorCount;
@@ -213,15 +217,22 @@ void SystemDoctorDialog::applyReport(const QList<RuntimeStatus> &runtimes,
             if (status.updateAvailable) ++warningCount;
         }
 
-        QString detail = status.installed
-            ? QStringLiteral("本地 %1%2  ·  %3")
+        QString detail;
+        if (status.repairRequired) {
+            detail = status.installationIssue;
+        } else if (!status.installed) {
+            detail = QStringLiteral("未检测到 %1 命令").arg(ToolManager::cliCommand(tool));
+        } else if (!status.configured && !status.configurationIssue.isEmpty()) {
+            detail = status.configurationIssue;
+        } else {
+            detail = QStringLiteral("本地 %1%2  ·  %3")
                 .arg(status.version.isEmpty() ? QStringLiteral("未知") : status.version,
                      status.latestVersion.isEmpty()
                          ? QString()
                          : QStringLiteral("  ·  最新 %1").arg(status.latestVersion),
                      status.configured ? QStringLiteral("已接入 Aegisy")
-                                       : QStringLiteral("尚未写入 Aegisy 配置"))
-            : QStringLiteral("未检测到 %1 命令").arg(ToolManager::cliCommand(tool));
+                                       : QStringLiteral("尚未写入 Aegisy 配置"));
+        }
         if (!status.conflictWarning.isEmpty()) {
             detail = status.conflictWarning;
         }
@@ -232,7 +243,8 @@ void SystemDoctorDialog::applyReport(const QList<RuntimeStatus> &runtimes,
                                               : QStringLiteral("已是最新"))
             : QString();
         addRow(QStringLiteral("AI 工具"), ToolManager::toolName(tool),
-               state, detail, tone, action, status.installed, passiveAction);
+               state, detail, tone, action, status.installed, passiveAction,
+               status.repairRequired);
     }
 
     if (!secureStorageAvailable) {
@@ -277,7 +289,8 @@ void SystemDoctorDialog::addRow(const QString &category,
                                 const QString &tone,
                                 AiTool *actionTool,
                                 bool installed,
-                                const QString &passiveAction)
+                                const QString &passiveAction,
+                                bool repair)
 {
     const int row = m_table->rowCount();
     m_table->insertRow(row);
@@ -301,13 +314,17 @@ void SystemDoctorDialog::addRow(const QString &category,
 
     if (actionTool) {
         const AiTool tool = *actionTool;
-        auto *button = new QPushButton(installed ? QStringLiteral("更新")
-                                                 : QStringLiteral("安装"), m_table);
+        auto *button = new QPushButton(
+            repair ? QStringLiteral("修复")
+                   : (installed ? QStringLiteral("更新")
+                                : QStringLiteral("安装")), m_table);
         button->setStyleSheet(installed ? AppTheme::secondaryButtonStyle()
                                         : AppTheme::primaryButtonStyle());
         button->setFixedSize(68, 30);
         connect(button, &QPushButton::clicked, this,
-                [this, tool, installed]() { installOrUpdate(tool, installed); });
+                [this, tool, installed, repair]() {
+                    installOrUpdate(tool, installed, repair);
+                });
         m_table->setCellWidget(row, 4, button);
     } else if (!passiveAction.isEmpty()) {
         auto *actionItem = new QTableWidgetItem(passiveAction);
@@ -317,10 +334,11 @@ void SystemDoctorDialog::addRow(const QString &category,
     m_table->setRowHeight(row, 42);
 }
 
-void SystemDoctorDialog::installOrUpdate(AiTool tool, bool installed)
+void SystemDoctorDialog::installOrUpdate(AiTool tool, bool installed, bool repair)
 {
-    const QString action = installed ? QStringLiteral("更新") : QStringLiteral("安装");
-    const QString command = QStringLiteral("npm install -g %1")
+    const QString action = repair ? QStringLiteral("修复")
+        : (installed ? QStringLiteral("更新") : QStringLiteral("安装"));
+    const QString command = QStringLiteral("npm install -g %1@latest")
         .arg(ToolManager::npmPackage(tool));
     if (QMessageBox::question(
             this,

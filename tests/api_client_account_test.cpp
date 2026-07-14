@@ -42,9 +42,16 @@ public:
 
                     if (path == QStringLiteral("/v1/chat/completions")) {
                         if (!body.value(QStringLiteral("stream")).toBool()) {
-                            const QString plan = QStringLiteral(
-                                "{\"title\":\"测试演示\",\"subtitle\":\"Aegisy\","
-                                "\"slides\":[{\"title\":\"概览\",\"bullets\":[\"第一点\"]}]}" );
+                            ++presentationRequestCount;
+                            const QString plan = presentationRequestCount == 1
+                                ? QStringLiteral(
+                                    "{\"title\":\"测试演示\" \"subtitle\":\"Aegisy\","
+                                    "\"slides\":[{\"layout\":\"bullets\",\"title\":\"概览\","
+                                    "\"bullets\":[\"第一点\"]}]}")
+                                : QStringLiteral(
+                                    "{\"title\":\"测试演示\",\"subtitle\":\"Aegisy\","
+                                    "\"theme\":\"swiss\",\"slides\":[{\"layout\":\"bullets\","
+                                    "\"title\":\"概览\",\"bullets\":[\"第一点\"]}]}" );
                             const QByteArray payload = QJsonDocument(QJsonObject{
                                 { QStringLiteral("choices"), QJsonArray{ QJsonObject{
                                     { QStringLiteral("message"), QJsonObject{
@@ -64,6 +71,21 @@ public:
                             "data: {\"choices\":[{\"delta\":{\"content\":\"！\"}}]}\n\n"
                             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n\n"
                             "data: [DONE]\n\n";
+                        socket->write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: "
+                                      + QByteArray::number(payload.size())
+                                      + "\r\nConnection: close\r\n\r\n" + payload);
+                        socket->disconnectFromHost();
+                        return;
+                    }
+
+                    if (path == QStringLiteral("/v1/images/generations")) {
+                        const QByteArray encoded = QByteArray("aegisy-image-bytes").toBase64();
+                        const QByteArray payload =
+                            "data: {\"type\":\"image_generation.partial\",\"partial_image_b64\":\"cGFydGlhbA==\"}\n\n"
+                            "data: {\"type\":\"image_generation.completed\",\"response\":{\"output\":[{\"result\":\""
+                            + encoded
+                            + "\",\"output_format\":\"png\",\"revised_prompt\":\"Aegisy test image\"}]}}\n\n"
+                              "data: [DONE]\n\n";
                         socket->write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: "
                                       + QByteArray::number(payload.size())
                                       + "\r\nConnection: close\r\n\r\n" + payload);
@@ -112,12 +134,14 @@ public:
         method.clear();
         path.clear();
         body = QJsonObject();
+        presentationRequestCount = 0;
     }
 
     QTcpServer server;
     QString method;
     QString path;
     QJsonObject body;
+    int presentationRequestCount = 0;
 };
 
 namespace {
@@ -281,6 +305,36 @@ int main(int argc, char **argv)
 
     server.clear();
     succeeded = false;
+    QByteArray generatedImage;
+    QString generatedFormat;
+    QString revisedPrompt;
+    if (!waitFor([&]() {
+            client.generateImage(QStringLiteral("sk-image-test"), QStringLiteral("gpt-image-2"),
+                                 QStringLiteral("生成测试图片"), QStringLiteral("1024x1024"),
+                                 QStringLiteral("auto"), QStringLiteral("png"));
+        }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::imageGenerated, &loop,
+                [&](const QByteArray &data, const QString &format, const QString &revised) {
+                    generatedImage = data;
+                    generatedFormat = format;
+                    revisedPrompt = revised;
+                    succeeded = true;
+                    loop.quit();
+                });
+            QObject::connect(&client, &ApiClient::imageGenerationFailed, &loop,
+                [&](const QString &) { loop.quit(); });
+        })
+        || !require(succeeded, "streaming image request failed")
+        || !require(generatedImage == QByteArray("aegisy-image-bytes"), "image data mismatch")
+        || !require(generatedFormat == QStringLiteral("png"), "image format mismatch")
+        || !require(revisedPrompt == QStringLiteral("Aegisy test image"), "revised prompt mismatch")
+        || !require(server.path == QStringLiteral("/v1/images/generations"), "image path mismatch")
+        || !require(server.body.value(QStringLiteral("stream")).toBool(), "image stream flag mismatch")
+        || !require(server.body.value(QStringLiteral("response_format")).toString()
+                        == QStringLiteral("b64_json"), "image response format mismatch")) return 1;
+
+    server.clear();
+    succeeded = false;
     if (!waitFor([&]() {
             client.requestPresentationPlan(QStringLiteral("ppt-test"),
                                            QStringLiteral("sk-ppt-test"),
@@ -302,6 +356,11 @@ int main(int argc, char **argv)
                     "presentation plan path mismatch")
         || !require(!server.body.value(QStringLiteral("stream")).toBool(),
                     "presentation plan must be non-streaming")
+        || !require(server.presentationRequestCount == 2,
+                    "presentation repair retry was not used")
+        || !require(server.body.value(QStringLiteral("response_format")).toObject()
+                        .value(QStringLiteral("type")).toString() == QStringLiteral("json_object"),
+                    "presentation response format mismatch")
         || !require(server.body.value(QStringLiteral("messages")).toArray().size() == 2,
                     "presentation plan messages mismatch")) return 1;
 

@@ -1,4 +1,5 @@
 #include "profile_manager.h"
+#include "secure_storage.h"
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -128,6 +129,82 @@ int main(int argc, char *argv[])
                            "Saved credential presence was not exposed")
                 || !expect(profiles[0].key.isEmpty(),
                            "Profile list unexpectedly loaded the credential plaintext")) {
+            return 1;
+        }
+    }
+
+    // maskedKeyHint 是纯函数，不依赖安全存储。
+    if (!expect(ProfileManager::maskedKeyHint(QStringLiteral("sk-abc1234"))
+                    == QStringLiteral("1234"),
+                "maskedKeyHint should return the last four characters")
+            || !expect(ProfileManager::maskedKeyHint(QStringLiteral("ab"))
+                           == QStringLiteral("ab"),
+                       "maskedKeyHint should return short keys whole")
+            || !expect(ProfileManager::maskedKeyHint(QString()).isEmpty(),
+                       "maskedKeyHint should map empty to empty")
+            || !expect(ProfileManager::maskedKeyHint(QStringLiteral("  key-WXYZ  "))
+                           == QStringLiteral("WXYZ"),
+                       "maskedKeyHint should trim before taking the tail")) {
+        return 1;
+    }
+
+    {
+        QSettings().clear();
+        ProfileManager manager;
+        // lastActivatedIndex 跨类型跟踪最近一次激活。
+        const int codex = 0;   // ensureDefaultProfile 生成的默认 Codex
+        const int claude = manager.addProfile(
+            QStringLiteral("Claude"), ProfileType::Claude);
+        if (!expect(manager.lastActivatedIndex() == -1,
+                    "lastActivatedIndex should start unset")) {
+            return 1;
+        }
+        manager.setActiveIndex(codex);
+        if (!expect(manager.lastActivatedIndex() == codex,
+                    "lastActivatedIndex should track the Codex activation")) {
+            return 1;
+        }
+        manager.setActiveIndex(claude);
+        if (!expect(manager.lastActivatedIndex() == claude,
+                    "lastActivatedIndex should follow the newest activation")) {
+            return 1;
+        }
+    }
+
+    // 掩码持久化与回填依赖系统安全存储，仅在可用时验证。
+    if (SecureStorage::isAvailable()) {
+        QSettings().clear();
+        ProfileManager manager;
+        const int plus = manager.addProfile(
+            QStringLiteral("Codex Plus"), ProfileType::Codex,
+            QStringLiteral("sk-plus-PLUS"));
+        const int pro = manager.addProfile(
+            QStringLiteral("Codex Pro"), ProfileType::Codex,
+            QStringLiteral("sk-pro-PROX"));
+        if (plus < 0 || pro < 0) {
+            qCritical() << "addProfile with key failed unexpectedly";
+            return 1;
+        }
+        QList<Profile> profiles = manager.allProfiles();
+        if (!expect(profiles[plus].keyHint == QStringLiteral("PLUS"),
+                    "addProfile should persist the Plus key hint")
+                || !expect(profiles[pro].keyHint == QStringLiteral("PROX"),
+                           "addProfile should persist the Pro key hint")
+                || !expect(profiles[plus].keyHint != profiles[pro].keyHint,
+                           "different keys should yield distinguishable hints")) {
+            return 1;
+        }
+
+        // 清掉掩码模拟存量配置，验证 backfillKeyHints 会补齐。
+        QSettings().remove(QStringLiteral("profiles/%1/key_hint").arg(plus));
+        QSettings().sync();
+        if (!expect(manager.allProfiles()[plus].keyHint.isEmpty(),
+                    "key hint should be cleared before backfill test")) {
+            return 1;
+        }
+        manager.backfillKeyHints();
+        if (!expect(manager.allProfiles()[plus].keyHint == QStringLiteral("PLUS"),
+                    "backfillKeyHints should restore a missing hint")) {
             return 1;
         }
     }

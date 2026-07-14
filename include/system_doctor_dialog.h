@@ -37,8 +37,9 @@ private:
                 const QString &tone,
                 AiTool *actionTool = nullptr,
                 bool installed = false,
-                const QString &passiveAction = QString());
-    void installOrUpdate(AiTool tool, bool installed);
+                const QString &passiveAction = QString(),
+                bool repair = false);
+    void installOrUpdate(AiTool tool, bool installed, bool repair = false);
 
     ToolManager *m_toolManager;
     QTableWidget *m_table = nullptr;

@@ -1,0 +1,74 @@
+{
+  "title": "Aegisy Skills 工作台",
+  "subtitle": "从配置切换到 AI 创作的一体化桌面体验",
+  "theme": "swiss",
+  "slides": [
+    {
+      "layout": "cover",
+      "kicker": "PRODUCT OVERVIEW",
+      "title": "Aegisy Skills 工作台",
+      "subtitle": "让终端配置、模型调用与内容生成保持在同一个工作流中"
+    },
+    {
+      "layout": "section",
+      "title": "为什么现在需要 Skills",
+      "subtitle": "用户需要的是可复用的工作流，而不是不断重复配置工具"
+    },
+    {
+      "layout": "statement",
+      "kicker": "KEY IDEA",
+      "title": "把能力变成可安装、可发现、可验证的工作流",
+      "quote": "Skill 的价值不在列表数量，而在能否稳定完成真实任务。"
+    },
+    {
+      "layout": "bullets",
+      "title": "核心能力",
+      "subtitle": "覆盖配置、创作与工程任务",
+      "bullets": [
+        "按终端类型管理并激活连接配置",
+        "在对话中自动匹配已启用的 Skill",
+        "通过 Aegisy API 生成图片和演示文稿",
+        "使用本地运行时保存可编辑交付文件"
+      ]
+    },
+    {
+      "layout": "comparison",
+      "title": "使用体验变化",
+      "columns": [
+        {
+          "title": "过去",
+          "bullets": ["手动复制配置", "重复选择工具", "结果散落在多个窗口"]
+        },
+        {
+          "title": "现在",
+          "bullets": ["按类型一键切换", "对话自动路由", "结果统一保存和复用"]
+        }
+      ]
+    },
+    {
+      "layout": "process",
+      "title": "Skill 执行流程",
+      "bullets": [
+        "选择：识别用户明确选择或自然语言意图",
+        "校验：检查 Key、模型、运行时和权限",
+        "执行：调用 Aegisy API 或本地工具",
+        "交付：保存文件并写入会话历史"
+      ]
+    },
+    {
+      "layout": "metrics",
+      "title": "当前覆盖",
+      "metrics": [
+        {"value": "35", "label": "精选 Skills", "note": "覆盖设计、开发、AI 和视频"},
+        {"value": "3", "label": "终端类型", "note": "Codex、Claude、Gemini"},
+        {"value": "2", "label": "内容执行器", "note": "GPT Image 与 PPTX"}
+      ]
+    },
+    {
+      "layout": "closing",
+      "title": "让复杂能力以简单入口交付",
+      "quote": "安装一次，在每次对话中持续复用。",
+      "notes": "收尾时回到用户价值，而不是继续罗列功能。"
+    }
+  ]
+}

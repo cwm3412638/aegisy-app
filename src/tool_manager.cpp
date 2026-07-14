@@ -5,6 +5,7 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -12,6 +13,7 @@
 #include <QDebug>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QUrl>
 #include <QUuid>
 #include <algorithm>
 
@@ -28,6 +30,67 @@ static QString toolSlug(AiTool tool)
     case AiTool::OpenCode:   return QStringLiteral("opencode");
     }
     return QStringLiteral("unknown");
+}
+
+static QString maskedCredentialHint(const QString &credential)
+{
+    const QString trimmed = credential.trimmed();
+    return trimmed.right(qMin(4, trimmed.size()));
+}
+
+static bool isAegisyBaseUrl(const QString &value,
+                            const QString &gatewayPath,
+                            bool *gatewayMode = nullptr)
+{
+    const QUrl url(value.trimmed());
+    const bool gateway = url.host() == QStringLiteral("127.0.0.1")
+        && url.path() == gatewayPath;
+    const bool direct = url.scheme() == QStringLiteral("https")
+        && url.host() == QStringLiteral("aegisy.cc");
+    if (gatewayMode) {
+        *gatewayMode = gateway;
+    }
+    return direct || gateway;
+}
+
+static QString configScalar(QString value, bool *ok = nullptr)
+{
+    value = value.trimmed();
+    bool valid = !value.isEmpty();
+    QString result;
+    if (valid && (value.startsWith(QLatin1Char('"'))
+                  || value.startsWith(QLatin1Char('\'')))) {
+        const QChar quote = value.front();
+        int closing = -1;
+        bool escaped = false;
+        for (int i = 1; i < value.size(); ++i) {
+            const QChar current = value.at(i);
+            if (quote == QLatin1Char('"') && current == QLatin1Char('\\') && !escaped) {
+                escaped = true;
+                continue;
+            }
+            if (current == quote && !escaped) {
+                closing = i;
+                break;
+            }
+            escaped = false;
+        }
+        const QString trailing = closing >= 0
+            ? value.mid(closing + 1).trimmed() : QString();
+        valid = closing >= 0
+            && (trailing.isEmpty() || trailing.startsWith(QLatin1Char('#')));
+        if (valid) {
+            result = value.mid(1, closing - 1);
+        }
+    } else if (valid) {
+        const int comment = value.indexOf(QLatin1Char('#'));
+        result = (comment >= 0 ? value.left(comment) : value).trimmed();
+        valid = !result.isEmpty();
+    }
+    if (ok) {
+        *ok = valid;
+    }
+    return valid ? result : QString();
 }
 
 static QString backupRootPath(AiTool tool)
@@ -187,6 +250,35 @@ static QString appleScriptQuote(QString value)
     return value;
 }
 
+static QString windowsCommandQuote(QString value)
+{
+    value.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+    return QLatin1Char('"') + value + QLatin1Char('"');
+}
+
+// CreateProcess cannot execute npm's .cmd/.bat shims directly. Route those
+// commands through cmd.exe while leaving native executables untouched.
+static void startCommand(QProcess *process,
+                         const QString &program,
+                         const QStringList &arguments)
+{
+#ifdef Q_OS_WIN
+    const QString suffix = QFileInfo(program).suffix();
+    if (suffix.compare(QStringLiteral("cmd"), Qt::CaseInsensitive) == 0
+            || suffix.compare(QStringLiteral("bat"), Qt::CaseInsensitive) == 0) {
+        QString commandLine = QStringLiteral("call %1").arg(windowsCommandQuote(program));
+        for (const QString &argument : arguments) {
+            commandLine += QLatin1Char(' ') + windowsCommandQuote(argument);
+        }
+        process->start(QStringLiteral("cmd.exe"),
+                       { QStringLiteral("/D"), QStringLiteral("/S"),
+                         QStringLiteral("/C"), commandLine });
+        return;
+    }
+#endif
+    process->start(program, arguments);
+}
+
 ToolManager::ToolManager(QObject *parent)
     : QObject(parent)
 {
@@ -289,7 +381,7 @@ QString ToolManager::commandVersion(const QString &executable, int timeoutMs) co
     QProcess process;
     process.setProcessEnvironment(commandEnvironment());
     process.setProcessChannelMode(QProcess::MergedChannels);
-    process.start(executable, QStringList() << QStringLiteral("--version"));
+    startCommand(&process, executable, { QStringLiteral("--version") });
     if (!process.waitForStarted(qMin(timeoutMs, 1000))) {
         return QString();
     }
@@ -310,10 +402,10 @@ QString ToolManager::npmPackageVersion(AiTool tool, int timeoutMs) const
 
     QProcess process;
     process.setProcessEnvironment(commandEnvironment());
-    process.start(npmExecutable,
-                  QStringList() << QStringLiteral("list") << QStringLiteral("-g")
-                                << npmPackage(tool) << QStringLiteral("--depth=0")
-                                << QStringLiteral("--json"));
+    startCommand(&process, npmExecutable,
+                 QStringList() << QStringLiteral("list") << QStringLiteral("-g")
+                               << npmPackage(tool) << QStringLiteral("--depth=0")
+                               << QStringLiteral("--json"));
     if (!process.waitForFinished(timeoutMs)) {
         process.kill();
         process.waitForFinished();
@@ -458,9 +550,15 @@ QList<RuntimeStatus> ToolManager::detectCompanionTools(int timeoutMs) const
 bool ToolManager::launch(AiTool tool, const QString &workingDirectory)
 {
     m_lastError.clear();
+    const LocalConfigurationStatus configuration = inspectConfiguration(tool);
+    if (!configuration.isReady()) {
+        m_lastError = configuration.detail;
+        return false;
+    }
     const QString executable = resolveCommand(cliCommand(tool), 1500);
-    if (executable.isEmpty()) {
-        m_lastError = QStringLiteral("未找到 %1 可执行程序，请先安装运行环境。")
+    if (executable.isEmpty() || commandVersion(executable, 2000).isEmpty()) {
+        m_lastError = QStringLiteral(
+            "%1 CLI 不完整或无法运行，请在系统体检中点击“安装/修复”。")
             .arg(toolName(tool));
         return false;
     }
@@ -673,6 +771,11 @@ QStringList ToolManager::managedConfigPaths(AiTool tool) const
         return { homeFilePath(QStringLiteral(".config/opencode/config.json")) };
     }
     return {};
+}
+
+QStringList ToolManager::configurationFiles(AiTool tool) const
+{
+    return managedConfigPaths(tool);
 }
 
 QString ToolManager::createBackup(AiTool tool)
@@ -934,21 +1037,298 @@ QString ToolManager::readConfiguredKey(AiTool tool) const
     return QString();
 }
 
+LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
+{
+    const auto failure = [](LocalConfigurationState state, const QString &detail) {
+        LocalConfigurationStatus status;
+        status.state = state;
+        status.detail = detail;
+        return status;
+    };
+    const auto ready = [](const QString &key, bool gatewayMode) {
+        LocalConfigurationStatus status;
+        status.state = LocalConfigurationState::Ready;
+        status.gatewayMode = gatewayMode;
+        status.keyHint = maskedCredentialHint(key);
+        return status;
+    };
+    const auto readJsonObject = [&](const QString &path,
+                                    const QString &displayPath,
+                                    QJsonObject *object) {
+        if (!QFileInfo::exists(path)) {
+            return failure(LocalConfigurationState::Missing,
+                           QStringLiteral("%1 已被删除或尚未创建").arg(displayPath));
+        }
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("无法读取 %1").arg(displayPath));
+        }
+        QJsonParseError error;
+        const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &error);
+        if (error.error != QJsonParseError::NoError || !document.isObject()) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("%1 不是有效的 JSON：%2")
+                               .arg(displayPath, error.errorString()));
+        }
+        *object = document.object();
+        return LocalConfigurationStatus { LocalConfigurationState::Ready };
+    };
+
+    switch (tool) {
+    case AiTool::ClaudeCode: {
+        QJsonObject root;
+        const LocalConfigurationStatus parsed = readJsonObject(
+            homeFilePath(QStringLiteral(".claude/settings.json")),
+            QStringLiteral("~/.claude/settings.json"), &root);
+        if (!parsed.isReady()) return parsed;
+        const QJsonObject env = root.value(QStringLiteral("env")).toObject();
+        const QString key = env.value(QStringLiteral("ANTHROPIC_AUTH_TOKEN")).toString();
+        const QString baseUrl = env.value(QStringLiteral("ANTHROPIC_BASE_URL")).toString();
+        bool gatewayMode = false;
+        if (key.isEmpty()) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("settings.json 缺少 ANTHROPIC_AUTH_TOKEN"));
+        }
+        if (!isAegisyBaseUrl(
+                baseUrl, QStringLiteral("/tools/claude"), &gatewayMode)) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("settings.json 中的 ANTHROPIC_BASE_URL 无效"));
+        }
+        return ready(key, gatewayMode);
+    }
+    case AiTool::CodexCli: {
+        QJsonObject auth;
+        LocalConfigurationStatus parsed = readJsonObject(
+            homeFilePath(QStringLiteral(".codex/auth.json")),
+            QStringLiteral("~/.codex/auth.json"), &auth);
+        if (!parsed.isReady()) return parsed;
+        const QString key = auth.value(QStringLiteral("OPENAI_API_KEY")).toString();
+        if (key.isEmpty()) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("auth.json 缺少 OPENAI_API_KEY"));
+        }
+
+        const QString configPath = homeFilePath(QStringLiteral(".codex/config.toml"));
+        if (!QFileInfo::exists(configPath)) {
+            return failure(LocalConfigurationState::Missing,
+                           QStringLiteral("~/.codex/config.toml 已被删除或尚未创建"));
+        }
+        QFile config(configPath);
+        if (!config.open(QIODevice::ReadOnly)) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("无法读取 ~/.codex/config.toml"));
+        }
+
+        static const QStringList managedRootKeys = {
+            QStringLiteral("model_provider"), QStringLiteral("model"),
+            QStringLiteral("review_model"), QStringLiteral("model_reasoning_effort"),
+            QStringLiteral("disable_response_storage"), QStringLiteral("network_access"),
+            QStringLiteral("windows_wsl_setup_acknowledged"),
+        };
+        static const QStringList managedStringKeys = {
+            QStringLiteral("model_provider"), QStringLiteral("model"),
+            QStringLiteral("review_model"), QStringLiteral("model_reasoning_effort"),
+            QStringLiteral("network_access"),
+        };
+        static const QStringList managedBooleanKeys = {
+            QStringLiteral("disable_response_storage"),
+            QStringLiteral("windows_wsl_setup_acknowledged"),
+        };
+        QHash<QString, QString> rootValues;
+        QHash<QString, QHash<QString, QString>> tableValues;
+        QString currentTable;
+        bool misplacedRootKey = false;
+        bool duplicateRootKey = false;
+        bool invalidManagedValue = false;
+        const QString content = QString::fromUtf8(config.readAll());
+        for (const QString &raw : content.split(QLatin1Char('\n'))) {
+            const QString trimmed = raw.trimmed();
+            if (trimmed.isEmpty() || trimmed.startsWith(QLatin1Char('#'))) continue;
+            if (trimmed.startsWith(QLatin1Char('['))) {
+                const int closing = trimmed.indexOf(QLatin1Char(']'));
+                currentTable = closing > 1
+                    ? trimmed.mid(1, closing - 1).trimmed() : QStringLiteral("__invalid__");
+                continue;
+            }
+            const int separator = trimmed.indexOf(QLatin1Char('='));
+            if (separator <= 0) continue;
+            const QString name = trimmed.left(separator).trimmed();
+            const QString rawValue = trimmed.mid(separator + 1).trimmed();
+            bool scalarOk = false;
+            const QString value = configScalar(rawValue, &scalarOk);
+            if (managedRootKeys.contains(name)) {
+                if (!currentTable.isEmpty()) {
+                    misplacedRootKey = true;
+                } else if (rootValues.contains(name)) {
+                    duplicateRootKey = true;
+                } else {
+                    rootValues.insert(name, value);
+                }
+                if (managedStringKeys.contains(name)
+                        && !(rawValue.startsWith(QLatin1Char('"'))
+                             || rawValue.startsWith(QLatin1Char('\'')))) {
+                    scalarOk = false;
+                }
+                if (managedBooleanKeys.contains(name)
+                        && value != QStringLiteral("true")
+                        && value != QStringLiteral("false")) {
+                    scalarOk = false;
+                }
+                if (!scalarOk) invalidManagedValue = true;
+            } else if (name == QStringLiteral("base_url")
+                       || name == QStringLiteral("wire_api")
+                       || name == QStringLiteral("requires_openai_auth")) {
+                tableValues[currentTable].insert(name, value);
+                if ((name == QStringLiteral("base_url")
+                     || name == QStringLiteral("wire_api"))
+                        && !(rawValue.startsWith(QLatin1Char('"'))
+                             || rawValue.startsWith(QLatin1Char('\'')))) {
+                    scalarOk = false;
+                }
+                if (name == QStringLiteral("requires_openai_auth")
+                        && value != QStringLiteral("true")
+                        && value != QStringLiteral("false")) {
+                    scalarOk = false;
+                }
+                if (!scalarOk) invalidManagedValue = true;
+            }
+        }
+
+        if (misplacedRootKey) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("config.toml 的顶层配置误写到了其他 TOML 表中"));
+        }
+        if (duplicateRootKey || invalidManagedValue) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("config.toml 包含重复或无效的托管字段"));
+        }
+        const QString provider = rootValues.value(QStringLiteral("model_provider"));
+        const QString model = rootValues.value(QStringLiteral("model"));
+        if (provider.isEmpty() || model.isEmpty()) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("config.toml 缺少 model_provider 或 model"));
+        }
+        const QString providerTable = QStringLiteral("model_providers.%1").arg(provider);
+        const QHash<QString, QString> providerValues = tableValues.value(providerTable);
+        const QString baseUrl = providerValues.value(QStringLiteral("base_url"));
+        bool gatewayMode = false;
+        if (!isAegisyBaseUrl(
+                baseUrl, QStringLiteral("/tools/codex/v1"), &gatewayMode)
+                || providerValues.value(QStringLiteral("wire_api"))
+                    != QStringLiteral("responses")
+                || providerValues.value(QStringLiteral("requires_openai_auth"))
+                    != QStringLiteral("true")) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("config.toml 的模型提供方或 base_url 无效"));
+        }
+        return ready(key, gatewayMode);
+    }
+    case AiTool::GeminiCli: {
+        const QString path = homeFilePath(QStringLiteral(".gemini/.env"));
+        if (!QFileInfo::exists(path)) {
+            return failure(LocalConfigurationState::Missing,
+                           QStringLiteral("~/.gemini/.env 已被删除或尚未创建"));
+        }
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("无法读取 ~/.gemini/.env"));
+        }
+        QHash<QString, QString> values;
+        const QStringList managed = {
+            QStringLiteral("GOOGLE_GEMINI_BASE_URL"),
+            QStringLiteral("GEMINI_API_KEY"), QStringLiteral("GEMINI_MODEL"),
+        };
+        for (const QString &raw : QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'))) {
+            const QString trimmed = raw.trimmed();
+            if (trimmed.isEmpty() || trimmed.startsWith(QLatin1Char('#'))) continue;
+            const int separator = trimmed.indexOf(QLatin1Char('='));
+            const QString name = separator > 0
+                ? trimmed.left(separator).trimmed() : trimmed;
+            if (!managed.contains(name)) continue;
+            if (separator <= 0) {
+                return failure(LocalConfigurationState::Invalid,
+                               QStringLiteral(".env 中的 %1 格式无效").arg(name));
+            }
+            bool scalarOk = false;
+            const QString value = configScalar(trimmed.mid(separator + 1), &scalarOk);
+            if (!scalarOk) {
+                return failure(LocalConfigurationState::Invalid,
+                               QStringLiteral(".env 中的 %1 值无效").arg(name));
+            }
+            values.insert(name, value);
+        }
+        const QString key = values.value(QStringLiteral("GEMINI_API_KEY"));
+        const QString model = values.value(QStringLiteral("GEMINI_MODEL"));
+        bool gatewayMode = false;
+        if (key.isEmpty() || model.isEmpty()) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral(".env 缺少 Gemini API Key 或模型"));
+        }
+        if (!isAegisyBaseUrl(
+                values.value(QStringLiteral("GOOGLE_GEMINI_BASE_URL")),
+                QStringLiteral("/tools/gemini"), &gatewayMode)) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral(".env 中的 GOOGLE_GEMINI_BASE_URL 无效"));
+        }
+        return ready(key, gatewayMode);
+    }
+    case AiTool::OpenCode: {
+        QJsonObject root;
+        const LocalConfigurationStatus parsed = readJsonObject(
+            homeFilePath(QStringLiteral(".config/opencode/config.json")),
+            QStringLiteral("~/.config/opencode/config.json"), &root);
+        if (!parsed.isReady()) return parsed;
+        const QJsonObject provider = root.value(QStringLiteral("provider")).toObject()
+            .value(QStringLiteral("anthropic")).toObject();
+        const QString key = provider.value(QStringLiteral("api_key")).toString();
+        const QString baseUrl = provider.value(QStringLiteral("base_url")).toString();
+        const QString model = root.value(QStringLiteral("model")).toString();
+        bool gatewayMode = false;
+        if (key.isEmpty() || model.isEmpty()) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("config.json 缺少 API Key 或模型"));
+        }
+        if (!isAegisyBaseUrl(
+                baseUrl, QStringLiteral("/tools/claude"), &gatewayMode)) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("config.json 中的 provider.anthropic.base_url 无效"));
+        }
+        return ready(key, gatewayMode);
+    }
+    }
+    return failure(LocalConfigurationState::Invalid, QStringLiteral("不支持的工具配置"));
+}
+
 // ── 核心检测（可指定超时）────────────────────────────────────────
 ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
 {
     ToolStatus status;
     status.nodeOk = commandExists(QStringLiteral("node"), timeoutMs);
     const QString executable = resolveCommand(cliCommand(tool), timeoutMs);
-    status.installed = !executable.isEmpty();
-    if (status.installed) {
+    if (!executable.isEmpty()) {
         status.version = commandVersion(executable, timeoutMs);
+        status.installed = !status.version.isEmpty();
+        if (!status.installed) {
+            status.repairRequired = true;
+            status.installationIssue = QStringLiteral(
+                "检测到 %1 命令入口，但该命令无法运行；上次安装或升级可能被中断。")
+                .arg(cliCommand(tool));
+        }
     }
 
-    // 兜底：PATH 里找不到时查 npm 全局包（有些环境 npm bin 不在 PATH）
+    // npm 元数据不能证明 CLI 可运行。升级被 Ctrl+C 中断后，包目录可能
+    // 仍在而 codex.cmd 等入口已经丢失，此时必须显示“修复”而非“已安装”。
     if (!status.installed && status.nodeOk) {
-        status.version = npmPackageVersion(tool, timeoutMs);
-        status.installed = !status.version.isEmpty();
+        const QString packageVersion = npmPackageVersion(tool, timeoutMs);
+        if (!packageVersion.isEmpty()) {
+            status.version = packageVersion;
+            status.repairRequired = true;
+            status.installationIssue = QStringLiteral(
+                "npm 中仍有 %1 %2，但未找到可运行的 %3 命令；安装可能已损坏。")
+                .arg(npmPackage(tool), packageVersion, cliCommand(tool));
+        }
     }
 
     switch (tool) {
@@ -1051,6 +1431,13 @@ ToolStatus ToolManager::detectWithTimeout(AiTool tool, int timeoutMs)
     }
     }
 
+    const LocalConfigurationStatus configuration = inspectConfiguration(tool);
+    status.configured = configuration.isReady();
+    status.configuredKey = configuration.keyHint;
+    if (!configuration.isReady()) {
+        status.configurationIssue = configuration.detail;
+    }
+
     return status;
 }
 
@@ -1084,15 +1471,30 @@ void ToolManager::detectVersion(AiTool tool)
         emit toolVersionDetected(tool, installed, version);
         process->deleteLater();
     };
+    const auto inspectPackageResidue = [this, process, tool]() {
+        if (process->property("aegisyVersionComplete").toBool()) {
+            return;
+        }
+        process->setProperty("aegisyVersionComplete", true);
+        process->deleteLater();
+        detectNpmVersion(tool);
+    };
 
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [process, complete](int, QProcess::ExitStatus) {
-        complete(true, extractVersion(QString::fromUtf8(process->readAll())));
+            this, [process, complete, inspectPackageResidue](
+                      int exitCode, QProcess::ExitStatus exitStatus) {
+        const QString version = extractVersion(QString::fromUtf8(process->readAll()));
+        if (exitStatus == QProcess::NormalExit && exitCode == 0
+                && !version.isEmpty()) {
+            complete(true, version);
+        } else {
+            inspectPackageResidue();
+        }
     });
     connect(process, &QProcess::errorOccurred, this,
-            [complete](QProcess::ProcessError error) {
+            [inspectPackageResidue](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
-            complete(false, QString());
+            inspectPackageResidue();
         }
     });
     QTimer::singleShot(4000, process, [process]() {
@@ -1100,7 +1502,7 @@ void ToolManager::detectVersion(AiTool tool)
             process->kill();
         }
     });
-    process->start(executable, QStringList() << QStringLiteral("--version"));
+    startCommand(process, executable, { QStringLiteral("--version") });
 }
 
 void ToolManager::checkLatestVersion(AiTool tool)
@@ -1156,9 +1558,9 @@ void ToolManager::checkLatestVersion(AiTool tool)
     });
 
     timeout->start(10000);
-    process->start(npmExecutable,
-                   { QStringLiteral("view"), npmPackage(tool),
-                     QStringLiteral("version"), QStringLiteral("--json") });
+    startCommand(process, npmExecutable,
+                 { QStringLiteral("view"), npmPackage(tool),
+                   QStringLiteral("version"), QStringLiteral("--json") });
 }
 
 QString ToolManager::latestVersion(AiTool tool, int timeoutMs) const
@@ -1169,9 +1571,9 @@ QString ToolManager::latestVersion(AiTool tool, int timeoutMs) const
     QProcess process;
     process.setProcessEnvironment(commandEnvironment());
     process.setProcessChannelMode(QProcess::MergedChannels);
-    process.start(npmExecutable,
-                  { QStringLiteral("view"), npmPackage(tool),
-                    QStringLiteral("version"), QStringLiteral("--json") });
+    startCommand(&process, npmExecutable,
+                 { QStringLiteral("view"), npmPackage(tool),
+                   QStringLiteral("version"), QStringLiteral("--json") });
     if (!process.waitForStarted(2000) || !process.waitForFinished(timeoutMs)) {
         process.kill();
         process.waitForFinished(500);
@@ -1201,7 +1603,8 @@ void ToolManager::detectNpmVersion(AiTool tool)
             return;
         }
         process->setProperty("aegisyVersionComplete", true);
-        emit toolVersionDetected(tool, !version.isEmpty(), version);
+        // 包元数据存在但命令入口缺失属于损坏安装，不能报告“已安装”。
+        emit toolVersionDetected(tool, false, version);
         process->deleteLater();
     };
 
@@ -1221,10 +1624,10 @@ void ToolManager::detectNpmVersion(AiTool tool)
             process->kill();
         }
     });
-    process->start(npmExecutable,
-                   QStringList() << QStringLiteral("list") << QStringLiteral("-g")
-                                 << npmPackage(tool) << QStringLiteral("--depth=0")
-                                 << QStringLiteral("--json"));
+    startCommand(process, npmExecutable,
+                 QStringList() << QStringLiteral("list") << QStringLiteral("-g")
+                               << npmPackage(tool) << QStringLiteral("--depth=0")
+                               << QStringLiteral("--json"));
 }
 
 // ── 桌面应用检测 ─────────────────────────────────────────────────
@@ -1383,6 +1786,58 @@ void ToolManager::install(AiTool tool, int requestId)
 
 void ToolManager::installCli(AiTool tool, int requestId)
 {
+    const QString npmExecutable = resolveCommand(kNpmCmd, 1000);
+    if (npmExecutable.isEmpty()) {
+        emit installOutput(
+            tool,
+            QStringLiteral("Node.js 已安装，但当前进程仍未找到 npm，请重启应用后重试。"));
+        emit installFinished(tool, requestId, false);
+        return;
+    }
+
+    const QString executable = resolveCommand(cliCommand(tool), 1000);
+    const bool runnable = !executable.isEmpty()
+        && !commandVersion(executable, 1500).isEmpty();
+    const bool hasPackageResidue = !npmPackageVersion(tool, 1500).isEmpty();
+    if (runnable || !hasPackageResidue) {
+        installCliPackage(tool, requestId, npmExecutable);
+        return;
+    }
+
+    emit installOutput(tool, QStringLiteral(
+        "检测到上次安装或升级留下的残缺包，正在清理后重新安装..."));
+    auto *cleanup = new QProcess(this);
+    cleanup->setProcessEnvironment(commandEnvironment());
+    cleanup->setProcessChannelMode(QProcess::MergedChannels);
+
+    const auto continueInstall = [this, cleanup, tool, requestId, npmExecutable]() {
+        if (cleanup->property("aegisyCleanupComplete").toBool()) return;
+        cleanup->setProperty("aegisyCleanupComplete", true);
+        cleanup->deleteLater();
+        installCliPackage(tool, requestId, npmExecutable, true);
+    };
+    connect(cleanup, &QProcess::readyReadStandardOutput, this, [this, cleanup, tool]() {
+        const QString text = QString::fromUtf8(cleanup->readAllStandardOutput()).trimmed();
+        if (!text.isEmpty()) emit installOutput(tool, text);
+    });
+    connect(cleanup, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [continueInstall](int, QProcess::ExitStatus) { continueInstall(); });
+    connect(cleanup, &QProcess::errorOccurred, this,
+            [this, cleanup, tool, continueInstall](QProcess::ProcessError) {
+        emit installOutput(tool, QStringLiteral("清理残缺包时出现问题：%1；将继续尝试覆盖安装。")
+            .arg(cleanup->errorString()));
+        continueInstall();
+    });
+    emit installOutput(tool, QStringLiteral("$ %1 uninstall -g %2")
+        .arg(kNpmCmd, npmPackage(tool)));
+    startCommand(cleanup, npmExecutable,
+                 { QStringLiteral("uninstall"), QStringLiteral("-g"), npmPackage(tool) });
+}
+
+void ToolManager::installCliPackage(AiTool tool, int requestId,
+                                    const QString &npmExecutable,
+                                    bool forceRepair)
+{
     QProcess *process = new QProcess(this);
     process->setProcessEnvironment(commandEnvironment());
     process->setProcessChannelMode(QProcess::MergedChannels);
@@ -1393,7 +1848,18 @@ void ToolManager::installCli(AiTool tool, int requestId)
         }
         process->setProperty("aegisyCompletionEmitted", true);
         process->deleteLater();
-        emit installFinished(tool, requestId, success);
+        bool verified = success;
+        if (verified) {
+            const QString executable = resolveCommand(cliCommand(tool), 2000);
+            verified = !executable.isEmpty()
+                && !commandVersion(executable, 3000).isEmpty();
+            if (!verified) {
+                emit installOutput(tool, QStringLiteral(
+                    "npm 已结束，但 %1 命令仍不可运行。请重启应用后再点“修复”。")
+                    .arg(cliCommand(tool)));
+            }
+        }
+        emit installFinished(tool, requestId, verified);
     };
 
     connect(process, &QProcess::readyReadStandardOutput, this, [this, process, tool]() {
@@ -1413,17 +1879,13 @@ void ToolManager::installCli(AiTool tool, int requestId)
         complete(false);
     });
 
-    const QString npmExecutable = resolveCommand(kNpmCmd, 1000);
-    if (npmExecutable.isEmpty()) {
-        emit installOutput(
-            tool,
-            QStringLiteral("Node.js 已安装，但当前进程仍未找到 npm，请重启应用后重试。"));
-        complete(false);
-        return;
-    }
-
-    emit installOutput(tool, QStringLiteral("$ %1 install -g %2").arg(kNpmCmd, npmPackage(tool)));
-    process->start(npmExecutable, QStringList() << "install" << "-g" << npmPackage(tool));
+    const QString packageSpec = npmPackage(tool) + QStringLiteral("@latest");
+    emit installOutput(tool, QStringLiteral("$ %1 install -g %2")
+        .arg(kNpmCmd, packageSpec));
+    QStringList arguments = { QStringLiteral("install"), QStringLiteral("-g"),
+                              packageSpec };
+    if (forceRepair) arguments.append(QStringLiteral("--force"));
+    startCommand(process, npmExecutable, arguments);
 }
 
 // ── 配置写入 ─────────────────────────────────────────────────────
@@ -1583,20 +2045,31 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
         "model_provider", "model", "review_model", "model_reasoning_effort",
         "disable_response_storage", "network_access", "windows_wsl_setup_acknowledged",
     };
-    static const QStringList managedSections = {
+    static const QStringList managedProviderSections = {
         "[model_providers.OpenAI]", "[model_providers.aegisy]",
-        "[model_providers.aegisy_local]", "[features]",
+        "[model_providers.aegisy_local]",
     };
 
     QStringList outLines;
+    QStringList featureLines;
     bool skippingSection = false;
+    bool readingFeatures = false;
     for (const QString &raw : existing.split('\n')) {
         const QString t = raw.trimmed();
         if (t.startsWith('[')) {
-            skippingSection = managedSections.contains(t);
-            if (skippingSection) continue;
+            readingFeatures = t == QStringLiteral("[features]");
+            skippingSection = managedProviderSections.contains(t);
+            if (skippingSection || readingFeatures) continue;
         }
         if (skippingSection) continue;
+        if (readingFeatures) {
+            const QString key = QStringLiteral("goals");
+            if (!(t.startsWith(key)
+                  && t.mid(key.length()).trimmed().startsWith('='))) {
+                featureLines.append(raw);
+            }
+            continue;
+        }
         bool managed = false;
         for (const QString &k : managedTopKeys) {
             if (t.startsWith(k) && t.mid(k.length()).trimmed().startsWith('=')) {
@@ -1610,11 +2083,17 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
     while (!outLines.isEmpty() && outLines.last().trimmed().isEmpty()) {
         outLines.removeLast();
     }
+    while (!featureLines.isEmpty() && featureLines.first().trimmed().isEmpty()) {
+        featureLines.removeFirst();
+    }
+    while (!featureLines.isEmpty() && featureLines.last().trimmed().isEmpty()) {
+        featureLines.removeLast();
+    }
 
-    QString result = outLines.join('\n');
-    if (!result.isEmpty()) result += "\n\n";
-
-    result += QStringLiteral(
+    // TOML table headers remain active until the next table header. Codex commonly
+    // leaves [projects.*] or [tui.model_availability_nux] at the end of this file,
+    // so appending root keys would accidentally place them inside that table.
+    QString result = QStringLiteral(
         "model_provider = \"%2\"\n"
         "model = \"%1\"\n"
         "review_model = \"%1\"\n").arg(effectiveModel, providerId);
@@ -1622,7 +2101,14 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
         "model_reasoning_effort = \"xhigh\"\n"
         "disable_response_storage = true\n"
         "network_access = \"enabled\"\n"
-        "windows_wsl_setup_acknowledged = true\n"
+        "windows_wsl_setup_acknowledged = true\n");
+
+    const QString preserved = outLines.join('\n');
+    if (!preserved.isEmpty()) {
+        result += QLatin1Char('\n') + preserved + QLatin1Char('\n');
+    }
+
+    result += QStringLiteral(
         "\n"
         "[model_providers.%2]\n"
         "name = \"%2\"\n"
@@ -1630,8 +2116,11 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
         "wire_api = \"responses\"\n"
         "requires_openai_auth = true\n"
         "\n"
-        "[features]\n"
-        "goals = true\n").arg(baseUrl, providerId);
+        "[features]\n").arg(baseUrl, providerId);
+    if (!featureLines.isEmpty()) {
+        result += featureLines.join(QLatin1Char('\n')) + QLatin1Char('\n');
+    }
+    result += QStringLiteral("goals = true\n");
 
     return writeTextFile(tomlPath, result.toUtf8());
 }

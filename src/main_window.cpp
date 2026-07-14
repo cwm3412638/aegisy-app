@@ -38,6 +38,7 @@
 #include <QComboBox>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFileSystemWatcher>
 #include <QInputDialog>
 #include <QMenu>
 #include <QSettings>
@@ -140,11 +141,15 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
         logMessage(QStringLiteral("本地网关错误：%1").arg(error), kLogError);
     });
     connect(m_profileManager, &ProfileManager::profilesChanged,
-            this, &MainWindow::rebuildTrayMenu);
+            this, [this]() {
+        refreshConfigurationWatchers();
+        rebuildTrayMenu();
+    });
     connect(m_profileManager, &ProfileManager::activeProfileChanged,
             this, [this](int, int) { rebuildTrayMenu(); });
 
     m_profileManager->backfillKeyHints();
+    setupConfigurationWatcher();
     refreshToolVersions();
     rebuildCards();
     setupTray();
@@ -240,6 +245,8 @@ void MainWindow::changeEvent(QEvent *event)
         } else if (isVisible()) {
             hideBalanceOrb();
         }
+    } else if (event->type() == QEvent::ActivationChange && isActiveWindow()) {
+        scheduleConfigurationRefresh();
     }
     QMainWindow::changeEvent(event);
 }
@@ -262,6 +269,11 @@ void MainWindow::rebuildTrayMenu()
     const QList<Profile> profiles = m_profileManager->allProfiles();
     for (ProfileType type : allProfileTypes()) {
         const int activeIndex = m_profileManager->activeIndex(type);
+        QString activeIssue;
+        const bool activeReady = activeIndex >= 0 && activeIndex < profiles.size()
+            && profiles[activeIndex].type == type
+            && profiles[activeIndex].hasAnyKey()
+            && isProfileConfigurationReady(profiles[activeIndex], &activeIssue);
         QAction *section = m_trayMenu->addAction(profileTypeName(type));
         section->setEnabled(false);
         bool hasProfile = false;
@@ -270,11 +282,16 @@ void MainWindow::rebuildTrayMenu()
                 continue;
             }
             hasProfile = true;
-            QAction *profileAction = m_trayMenu->addAction(profile.name);
+            const bool needsRepair = profile.index == activeIndex
+                && profile.hasAnyKey() && !activeReady;
+            QAction *profileAction = m_trayMenu->addAction(
+                needsRepair
+                    ? QStringLiteral("%1（需修复）").arg(profile.name)
+                    : profile.name);
             profileAction->setCheckable(true);
-            profileAction->setChecked(
-                profile.index == activeIndex && profile.hasAnyKey());
+            profileAction->setChecked(profile.index == activeIndex && activeReady);
             profileAction->setEnabled(profile.hasAnyKey());
+            if (needsRepair) profileAction->setToolTip(activeIssue);
             const int profileIndex = profile.index;
             connect(profileAction, &QAction::triggered, this,
                     [this, profileIndex]() { activateProfile(profileIndex); });
@@ -282,9 +299,7 @@ void MainWindow::rebuildTrayMenu()
         if (!hasProfile) {
             QAction *empty = m_trayMenu->addAction(QStringLiteral("  暂无档案"));
             empty->setEnabled(false);
-        } else if (activeIndex >= 0 && activeIndex < profiles.size()
-                   && profiles[activeIndex].type == type
-                   && profiles[activeIndex].hasAnyKey()) {
+        } else if (activeReady) {
             QAction *launchAction = m_trayMenu->addAction(
                 QStringLiteral("启动当前 %1").arg(profileTypeName(type)));
             connect(launchAction, &QAction::triggered, this,
@@ -342,7 +357,94 @@ void MainWindow::showEvent(QShowEvent *event)
 {
     // 主窗口重新可见（托盘/小球还原或最小化恢复）时收起小球。
     hideBalanceOrb();
+    scheduleConfigurationRefresh();
     QMainWindow::showEvent(event);
+}
+
+void MainWindow::setupConfigurationWatcher()
+{
+    m_configurationWatcher = new QFileSystemWatcher(this);
+    m_configurationRefreshTimer = new QTimer(this);
+    m_configurationRefreshTimer->setSingleShot(true);
+    m_configurationRefreshTimer->setInterval(150);
+
+    connect(m_configurationWatcher, &QFileSystemWatcher::fileChanged,
+            this, [this](const QString &) { scheduleConfigurationRefresh(); });
+    connect(m_configurationWatcher, &QFileSystemWatcher::directoryChanged,
+            this, [this](const QString &) { scheduleConfigurationRefresh(); });
+    connect(m_configurationRefreshTimer, &QTimer::timeout, this, [this]() {
+        refreshConfigurationWatchers();
+        rebuildCards();
+        rebuildTrayMenu();
+    });
+    refreshConfigurationWatchers();
+}
+
+void MainWindow::refreshConfigurationWatchers()
+{
+    if (!m_configurationWatcher) return;
+
+    QStringList desiredFiles;
+    QStringList desiredDirectories;
+    for (AiTool tool : { AiTool::ClaudeCode, AiTool::CodexCli,
+                         AiTool::GeminiCli, AiTool::OpenCode }) {
+        for (const QString &path : m_toolManager->configurationFiles(tool)) {
+            const QFileInfo info(path);
+            if (info.exists()) desiredFiles.append(info.absoluteFilePath());
+            const QString directory = info.absolutePath();
+            if (QDir(directory).exists()) desiredDirectories.append(directory);
+        }
+    }
+    desiredFiles.removeDuplicates();
+    desiredDirectories.removeDuplicates();
+
+    const QStringList watchedFiles = m_configurationWatcher->files();
+    for (const QString &path : desiredFiles) {
+        if (!watchedFiles.contains(path)) m_configurationWatcher->addPath(path);
+    }
+    const QStringList watchedDirectories = m_configurationWatcher->directories();
+    for (const QString &path : desiredDirectories) {
+        if (!watchedDirectories.contains(path)) m_configurationWatcher->addPath(path);
+    }
+}
+
+void MainWindow::scheduleConfigurationRefresh()
+{
+    if (m_configurationRefreshTimer) {
+        m_configurationRefreshTimer->start();
+    }
+}
+
+bool MainWindow::isProfileConfigurationReady(const Profile &profile,
+                                             QString *issue) const
+{
+    const LocalConfigurationStatus status =
+        m_toolManager->inspectConfiguration(profile.tool());
+    if (!status.isReady()) {
+        if (issue) *issue = status.detail;
+        return false;
+    }
+
+    const bool gatewayExpected = QSettings().value(
+        QStringLiteral("gateway/enabled"), false).toBool();
+    if (status.gatewayMode != gatewayExpected) {
+        if (issue) {
+            *issue = gatewayExpected
+                ? QStringLiteral("当前本地配置不是网关模式，请重新激活")
+                : QStringLiteral("当前本地配置仍指向本地网关，请重新激活");
+        }
+        return false;
+    }
+
+    const QString expectedHint = gatewayExpected
+        ? ProfileManager::maskedKeyHint(m_gatewayManager->localToken())
+        : profile.keyHint;
+    if (!expectedHint.isEmpty() && status.keyHint != expectedHint) {
+        if (issue) *issue = QStringLiteral("磁盘认证与当前档案不一致");
+        return false;
+    }
+    if (issue) issue->clear();
+    return true;
 }
 
 void MainWindow::setAuthToken(const QString &token)
@@ -361,6 +463,7 @@ void MainWindow::setAuthToken(const QString &token)
                 QSettings().setValue(QStringLiteral("gateway/enabled"), false);
                 logMessage(QStringLiteral("本地网关自动启动失败：%1")
                     .arg(m_gatewayManager->lastError()), kLogError);
+                scheduleConfigurationRefresh();
             }
         });
     }
@@ -411,8 +514,12 @@ void MainWindow::onToolVersionDetected(AiTool tool, bool installed, const QStrin
     if (!installed) {
         m_toolLocalVersions.remove(id);
         m_toolLatestVersions.remove(id);
-        displayText = QStringLiteral("未安装");
-        tooltip = QStringLiteral("未检测到 %1").arg(ToolManager::toolName(tool));
+        displayText = version.isEmpty() ? QStringLiteral("未安装")
+                                        : QStringLiteral("需修复");
+        tooltip = version.isEmpty()
+            ? QStringLiteral("未检测到 %1").arg(ToolManager::toolName(tool))
+            : QStringLiteral("检测到 npm 包 %1，但 CLI 命令缺失或无法运行")
+                  .arg(version);
         color = QStringLiteral("#b54708");
     } else if (version.isEmpty()) {
         displayText = QStringLiteral("已安装");
@@ -437,7 +544,9 @@ void MainWindow::onToolVersionDetected(AiTool tool, bool installed, const QStrin
         button->setVisible(!installed);
         button->setEnabled(!m_installingTools.contains(id));
         button->setText(m_installingTools.contains(id)
-            ? QStringLiteral("...") : QStringLiteral("安装"));
+            ? QStringLiteral("...")
+            : (version.isEmpty() ? QStringLiteral("安装")
+                                 : QStringLiteral("修复")));
     }
 
     if (installed) {
@@ -1030,6 +1139,7 @@ void MainWindow::setupUi()
 
 void MainWindow::rebuildCards()
 {
+    refreshConfigurationWatchers();
     QLayoutItem *item = nullptr;
     while ((item = m_cardsLayout->takeAt(0)) != nullptr) {
         if (item->widget()) {
@@ -1042,22 +1152,41 @@ void MainWindow::rebuildCards()
     const QList<Profile> profiles = m_profileManager->allProfiles();
     m_profileCountLabel->setText(QStringLiteral("配置总数  %1").arg(profiles.size()));
 
+    QSet<int> readyActiveProfiles;
+    QHash<int, QString> repairIssues;
     QStringList activeDescriptions;
+    QStringList repairDescriptions;
     for (ProfileType type : allProfileTypes()) {
         const int activeIndex = m_profileManager->activeIndex(type);
         if (activeIndex >= 0 && activeIndex < profiles.size()
                 && profiles[activeIndex].hasAnyKey()) {
-            activeDescriptions.append(
-                QStringLiteral("%1：%2").arg(profileTypeName(type), profiles[activeIndex].name));
+            QString issue;
+            if (isProfileConfigurationReady(profiles[activeIndex], &issue)) {
+                readyActiveProfiles.insert(activeIndex);
+                activeDescriptions.append(QStringLiteral("%1：%2")
+                    .arg(profileTypeName(type), profiles[activeIndex].name));
+            } else {
+                repairIssues.insert(activeIndex, issue);
+                repairDescriptions.append(QStringLiteral("%1：%2（%3）")
+                    .arg(profileTypeName(type), profiles[activeIndex].name, issue));
+            }
         }
     }
-    if (activeDescriptions.isEmpty()) {
+    if (activeDescriptions.isEmpty() && repairDescriptions.isEmpty()) {
         m_activeProfileLabel->setText(QStringLiteral("尚未激活有效配置"));
         m_activeProfileLabel->setToolTip(QString());
-    } else {
+    } else if (activeDescriptions.isEmpty()) {
         m_activeProfileLabel->setText(
-            QStringLiteral("已激活  %1 / 3 个终端").arg(activeDescriptions.size()));
-        m_activeProfileLabel->setToolTip(activeDescriptions.join(QLatin1Char('\n')));
+            QStringLiteral("需修复  %1 个终端配置").arg(repairDescriptions.size()));
+        m_activeProfileLabel->setToolTip(repairDescriptions.join(QLatin1Char('\n')));
+    } else {
+        const QString repairSuffix = repairDescriptions.isEmpty()
+            ? QString() : QStringLiteral("  ·  %1 个需修复").arg(repairDescriptions.size());
+        m_activeProfileLabel->setText(QStringLiteral("已激活  %1 / 3 个终端%2")
+            .arg(activeDescriptions.size()).arg(repairSuffix));
+        QStringList details = activeDescriptions;
+        details.append(repairDescriptions);
+        m_activeProfileLabel->setToolTip(details.join(QLatin1Char('\n')));
     }
 
     int visibleCount = 0;
@@ -1065,9 +1194,10 @@ void MainWindow::rebuildCards()
         if (m_filterType != 0 && static_cast<int>(profile.type) != m_filterType) {
             continue;
         }
-        const bool isActive = m_profileManager->isActive(profile.index)
-            && profile.hasAnyKey();
-        m_cardsLayout->addWidget(createProfileCard(profile, isActive));
+        const bool isActive = readyActiveProfiles.contains(profile.index);
+        const bool needsRepair = repairIssues.contains(profile.index);
+        m_cardsLayout->addWidget(createProfileCard(
+            profile, isActive, needsRepair, repairIssues.value(profile.index)));
         ++visibleCount;
     }
 
@@ -1093,11 +1223,16 @@ void MainWindow::rebuildCards()
     m_cardsLayout->addStretch();
 }
 
-QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive)
+QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
+                                       bool needsRepair,
+                                       const QString &repairReason)
 {
     const AiTool tool = profile.tool();
     const QString accent = toolAccent(tool);
-    const QString background = isActive ? toolSoftColor(tool) : QStringLiteral("#ffffff");
+    const QString background = needsRepair
+        ? QStringLiteral("#fff7ed")
+        : (isActive ? toolSoftColor(tool) : QStringLiteral("#ffffff"));
+    const QString cardAccent = needsRepair ? QStringLiteral("#d97706") : accent;
 
     auto *card = new QFrame(m_cardsContainer);
     card->setObjectName(QStringLiteral("profileCard"));
@@ -1107,7 +1242,7 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive)
         "QFrame#profileCard {"
         "  background: %1; border: 1px solid #e4e7ec; border-left: 4px solid %2;"
         "  border-radius: 8px;"
-        "}").arg(background, accent));
+        "}").arg(background, cardAccent));
 
     auto *layout = new QHBoxLayout(card);
     layout->setContentsMargins(16, 14, 14, 14);
@@ -1151,6 +1286,13 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive)
             "background: #dcfae6; color: #067647; border: 1px solid #abefc6;"
             "border-radius: 6px; padding: 2px 7px; font-size: 10px; font-weight: 700;"));
         badgeRow->addWidget(activeBadge);
+    } else if (needsRepair) {
+        auto *repairBadge = new QLabel(QStringLiteral("需修复"), card);
+        repairBadge->setToolTip(repairReason);
+        repairBadge->setStyleSheet(QStringLiteral(
+            "background: #fffaeb; color: #b54708; border: 1px solid #fedf89;"
+            "border-radius: 6px; padding: 2px 7px; font-size: 10px; font-weight: 700;"));
+        badgeRow->addWidget(repairBadge);
     }
     badgeRow->addStretch();
     details->addLayout(badgeRow);
@@ -1195,7 +1337,9 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive)
     launchButton->setFixedSize(90, 36);
     launchButton->setCursor(Qt::PointingHandCursor);
     launchButton->setEnabled(isActive && profile.hasAnyKey());
-    launchButton->setToolTip(isActive
+    launchButton->setToolTip(needsRepair
+        ? repairReason
+        : isActive
         ? QStringLiteral("自动检测系统终端并启动 %1")
             .arg(ToolManager::toolName(tool))
         : QStringLiteral("请先激活该配置"));
@@ -1206,12 +1350,15 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive)
     layout->addWidget(launchButton);
 
     auto *activateButton = new QPushButton(
-        isActive ? QStringLiteral("已激活") : QStringLiteral("激活"), card);
+        isActive ? QStringLiteral("已激活")
+                 : (needsRepair ? QStringLiteral("修复") : QStringLiteral("激活")), card);
     activateButton->setIcon(style()->standardIcon(
-        isActive ? QStyle::SP_DialogApplyButton : QStyle::SP_MediaPlay));
+        isActive ? QStyle::SP_DialogApplyButton
+                 : (needsRepair ? QStyle::SP_BrowserReload : QStyle::SP_MediaPlay)));
     activateButton->setFixedSize(100, 36);
     activateButton->setCursor(Qt::PointingHandCursor);
     activateButton->setEnabled(!isActive && profile.hasAnyKey());
+    if (needsRepair) activateButton->setToolTip(repairReason);
     activateButton->setStyleSheet(isActive
         ? QStringLiteral(
             "QPushButton { background: #dcfae6; color: #067647; border: 1px solid #abefc6;"
@@ -1294,8 +1441,39 @@ void MainWindow::launchProfile(int index, bool embedded)
                                  QStringLiteral("请先激活该配置，再启动对应终端。"));
         return;
     }
+    QString configurationIssue;
+    if (!isProfileConfigurationReady(profile, &configurationIssue)) {
+        rebuildCards();
+        rebuildTrayMenu();
+        const auto reply = QMessageBox::question(
+            this,
+            QStringLiteral("配置需要修复"),
+            QStringLiteral("%1\n\n是否立即重新写入「%2」的本地配置？")
+                .arg(configurationIssue, profile.name),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::Yes);
+        if (reply == QMessageBox::Yes) activateProfile(index);
+        return;
+    }
 
-    const QString directory = QDir::homePath();
+    const QString directorySetting = QStringLiteral("launch/directories/%1")
+        .arg(profile.id.isEmpty() ? QString::number(profile.index) : profile.id);
+    QSettings settings;
+    QString initialDirectory = settings.value(
+        directorySetting, QDir::homePath()).toString();
+    if (!QFileInfo(initialDirectory).isDir()) {
+        initialDirectory = QDir::homePath();
+    }
+    const QString directory = QFileDialog::getExistingDirectory(
+        this,
+        QStringLiteral("选择 %1 的工作目录").arg(ToolManager::toolName(profile.tool())),
+        initialDirectory,
+        QFileDialog::ShowDirsOnly);
+    if (directory.isEmpty()) {
+        logMessage(QStringLiteral("已取消启动「%1」").arg(profile.name), kLogMuted);
+        return;
+    }
+    settings.setValue(directorySetting, directory);
 
     if (!m_toolManager->launch(profile.tool(), directory)) {
         QMessageBox::warning(this, QStringLiteral("启动失败"),
@@ -1761,6 +1939,7 @@ bool MainWindow::configureFromProfile(int profileIndex, AiTool tool)
         success = m_toolManager->configure(tool, profile.key, profile.model);
     }
     if (success) {
+        refreshConfigurationWatchers();
         logMessage(
             QStringLiteral("%1 已写入 %2")
                 .arg(ToolManager::toolName(tool), toolConfigPath(tool)),
@@ -2011,7 +2190,9 @@ void MainWindow::showEnvCheckDialog(int profileIndex)
                     QStringLiteral("将先安装 Node.js LTS，再安装对应 CLI。"),
                     button);
     } else if (!status.installed) {
-        auto *button = new QPushButton(QStringLiteral("安装 CLI"), &dialog);
+        auto *button = new QPushButton(
+            status.repairRequired ? QStringLiteral("修复 CLI")
+                                  : QStringLiteral("安装 CLI"), &dialog);
         button->setFixedHeight(34);
         button->setStyleSheet(AppTheme::primaryButtonStyle());
         connect(button, &QPushButton::clicked, this, [this, tool, button]() {
@@ -2020,8 +2201,12 @@ void MainWindow::showEnvCheckDialog(int profileIndex)
             installToolEnvironment(tool);
         });
         addIssueRow(QStyle::SP_MessageBoxWarning,
-                    QStringLiteral("CLI 未安装"),
-                    QStringLiteral("认证文件仍会正常更新，安装后即可直接使用。"),
+                    status.repairRequired ? QStringLiteral("CLI 安装损坏")
+                                          : QStringLiteral("CLI 未安装"),
+                    status.repairRequired
+                        ? status.installationIssue
+                        : QStringLiteral(
+                            "认证文件仍会正常更新，安装后即可直接使用。"),
                     button);
     }
 
@@ -2048,7 +2233,8 @@ void MainWindow::showEnvCheckDialog(int profileIndex)
             });
             addIssueRow(QStyle::SP_DesktopIcon,
                         QStringLiteral("%1 未安装").arg(desktop.appName),
-                        QStringLiteral("通过 Aegisy 服务器下载，国内可直连；下载完成后自动打开安装包。"),
+                        QStringLiteral(
+                            "优先通过 Aegisy 下载并打开安装包；下载服务不可用时自动转到官网。"),
                         button);
         } else {
             auto *button = new QPushButton(QStringLiteral("打开下载页"), &dialog);
@@ -2257,7 +2443,8 @@ void MainWindow::onDesktopDownloadClicked()
                 dl->deleteLater();
             });
             addRow(desktop.appName,
-                   QStringLiteral("通过 Aegisy 服务器下载，国内可直连；下载完成后自动打开安装包。"),
+                   QStringLiteral(
+                       "优先通过 Aegisy 下载并打开安装包；下载服务不可用时自动转到官网。"),
                    button);
         } else {
             auto *button = new QPushButton(QStringLiteral("打开下载页"), &dialog);
@@ -2327,6 +2514,7 @@ void MainWindow::onGatewayRunningChanged(bool running)
         logMessage(QStringLiteral("已关闭本地网关并恢复直接连接配置"), kLogInfo);
     }
     rebuildCards();
+    rebuildTrayMenu();
 }
 
 void MainWindow::onBackupsClicked()

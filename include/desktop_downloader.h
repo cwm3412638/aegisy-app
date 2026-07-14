@@ -2,6 +2,7 @@
 #define DESKTOP_DOWNLOADER_H
 
 #include <QDialog>
+#include <QByteArray>
 #include <QString>
 
 class QNetworkAccessManager;
@@ -39,11 +40,15 @@ private slots:
     void startDownload();
     void onProgress(qint64 received, qint64 total);
     void onFinished();
+    void openDownloadedFile();
+    void openOfficialDownloadPage();
 
 private:
     static QString productSlug(Product product);
     static QString platformSlug();     // mac-arm64 / mac-x64 / win-x64 / 空
     static QString defaultFileName(Product product);
+    QString officialDownloadUrl() const;
+    bool validateInstallerPayload(const QByteArray &payload, QString *error) const;
     void fail(const QString &message);
     void cleanupReply();
 

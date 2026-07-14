@@ -19,12 +19,30 @@ enum class AiTool {
 struct ToolStatus {
     bool nodeOk = false;         // Node.js / npm 可用
     bool installed = false;      // CLI 已安装
+    bool repairRequired = false; // npm 包残留但 CLI 入口缺失或无法运行
     QString version;             // 本地安装版本，如 0.144.0
     QString latestVersion;       // npm registry 最新版本
     bool updateAvailable = false;
     bool configured = false;     // 已接入 aegisy（配置文件指向 aegisy.cc）
     QString configuredKey;       // 已配置的 key（掩码显示用）
     QString conflictWarning;     // 冲突警告（如 ANTHROPIC_API_KEY 环境变量）
+    QString installationIssue;   // 安装损坏等需要用户处理的说明
+    QString configurationIssue;  // 配置文件缺失或损坏的具体原因
+};
+
+enum class LocalConfigurationState {
+    Ready,
+    Missing,
+    Invalid,
+};
+
+struct LocalConfigurationStatus {
+    LocalConfigurationState state = LocalConfigurationState::Missing;
+    bool gatewayMode = false;
+    QString keyHint;
+    QString detail;
+
+    bool isReady() const { return state == LocalConfigurationState::Ready; }
 };
 
 // 桌面应用检测结果
@@ -99,6 +117,8 @@ public:
     ConfigurationPreview previewConfiguration(AiTool tool,
                                               const QString &model = QString(),
                                               bool gatewayMode = false);
+    LocalConfigurationStatus inspectConfiguration(AiTool tool) const;
+    QStringList configurationFiles(AiTool tool) const;
 
     QList<ConfigBackup> backupHistory(AiTool tool) const;
     bool restoreBackup(const QString &backupId, AiTool tool);
@@ -151,6 +171,8 @@ private:
     QString npmPackageVersion(AiTool tool, int timeoutMs) const;
     void detectNpmVersion(AiTool tool);
     void installCli(AiTool tool, int requestId);
+    void installCliPackage(AiTool tool, int requestId, const QString &npmExecutable,
+                           bool forceRepair = false);
     ToolStatus detectWithTimeout(AiTool tool, int timeoutMs);
 
     // 文件辅助
