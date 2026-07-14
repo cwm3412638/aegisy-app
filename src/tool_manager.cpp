@@ -1,4 +1,5 @@
 #include "tool_manager.h"
+#include "process_command.h"
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -251,35 +252,6 @@ static QString appleScriptQuote(QString value)
     return value;
 }
 
-static QString windowsCommandQuote(QString value)
-{
-    value.replace(QLatin1Char('"'), QStringLiteral("\"\""));
-    return QLatin1Char('"') + value + QLatin1Char('"');
-}
-
-// CreateProcess cannot execute npm's .cmd/.bat shims directly. Route those
-// commands through cmd.exe while leaving native executables untouched.
-static void startCommand(QProcess *process,
-                         const QString &program,
-                         const QStringList &arguments)
-{
-#ifdef Q_OS_WIN
-    const QString suffix = QFileInfo(program).suffix();
-    if (suffix.compare(QStringLiteral("cmd"), Qt::CaseInsensitive) == 0
-            || suffix.compare(QStringLiteral("bat"), Qt::CaseInsensitive) == 0) {
-        QString commandLine = QStringLiteral("call %1").arg(windowsCommandQuote(program));
-        for (const QString &argument : arguments) {
-            commandLine += QLatin1Char(' ') + windowsCommandQuote(argument);
-        }
-        process->start(QStringLiteral("cmd.exe"),
-                       { QStringLiteral("/D"), QStringLiteral("/S"),
-                         QStringLiteral("/C"), commandLine });
-        return;
-    }
-#endif
-    process->start(program, arguments);
-}
-
 ToolManager::ToolManager(QObject *parent)
     : QObject(parent)
 {
@@ -382,7 +354,7 @@ QString ToolManager::commandVersion(const QString &executable, int timeoutMs) co
     QProcess process;
     process.setProcessEnvironment(commandEnvironment());
     process.setProcessChannelMode(QProcess::MergedChannels);
-    startCommand(&process, executable, { QStringLiteral("--version") });
+    ProcessCommand::start(&process, executable, { QStringLiteral("--version") });
     if (!process.waitForStarted(qMin(timeoutMs, 1000))) {
         return QString();
     }
@@ -391,7 +363,7 @@ QString ToolManager::commandVersion(const QString &executable, int timeoutMs) co
         process.waitForFinished();
         return QString();
     }
-    return extractVersion(QString::fromUtf8(process.readAll()));
+    return extractVersion(ProcessCommand::decodeOutput(process.readAll()));
 }
 
 QString ToolManager::npmPackageVersion(AiTool tool, int timeoutMs) const
@@ -403,7 +375,7 @@ QString ToolManager::npmPackageVersion(AiTool tool, int timeoutMs) const
 
     QProcess process;
     process.setProcessEnvironment(commandEnvironment());
-    startCommand(&process, npmExecutable,
+    ProcessCommand::start(&process, npmExecutable,
                  QStringList() << QStringLiteral("list") << QStringLiteral("-g")
                                << npmPackage(tool) << QStringLiteral("--depth=0")
                                << QStringLiteral("--json"));
@@ -1507,7 +1479,8 @@ void ToolManager::detectVersion(AiTool tool)
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [process, complete, inspectPackageResidue](
                       int exitCode, QProcess::ExitStatus exitStatus) {
-        const QString version = extractVersion(QString::fromUtf8(process->readAll()));
+        const QString version = extractVersion(
+            ProcessCommand::decodeOutput(process->readAll()));
         if (exitStatus == QProcess::NormalExit && exitCode == 0
                 && !version.isEmpty()) {
             complete(true, version);
@@ -1526,7 +1499,7 @@ void ToolManager::detectVersion(AiTool tool)
             process->kill();
         }
     });
-    startCommand(process, executable, { QStringLiteral("--version") });
+    ProcessCommand::start(process, executable, { QStringLiteral("--version") });
 }
 
 void ToolManager::checkLatestVersion(AiTool tool)
@@ -1564,7 +1537,7 @@ void ToolManager::checkLatestVersion(AiTool tool)
     });
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [process, complete](int exitCode, QProcess::ExitStatus exitStatus) {
-        const QString output = QString::fromUtf8(process->readAll()).trimmed();
+        const QString output = ProcessCommand::decodeOutput(process->readAll()).trimmed();
         if (exitStatus != QProcess::NormalExit || exitCode != 0) {
             complete(false, QString(), output.isEmpty()
                 ? QStringLiteral("npm registry 查询失败") : output.left(200));
@@ -1582,7 +1555,7 @@ void ToolManager::checkLatestVersion(AiTool tool)
     });
 
     timeout->start(10000);
-    startCommand(process, npmExecutable,
+    ProcessCommand::start(process, npmExecutable,
                  { QStringLiteral("view"), npmPackage(tool),
                    QStringLiteral("version"), QStringLiteral("--json") });
 }
@@ -1595,7 +1568,7 @@ QString ToolManager::latestVersion(AiTool tool, int timeoutMs) const
     QProcess process;
     process.setProcessEnvironment(commandEnvironment());
     process.setProcessChannelMode(QProcess::MergedChannels);
-    startCommand(&process, npmExecutable,
+    ProcessCommand::start(&process, npmExecutable,
                  { QStringLiteral("view"), npmPackage(tool),
                    QStringLiteral("version"), QStringLiteral("--json") });
     if (!process.waitForStarted(2000) || !process.waitForFinished(timeoutMs)) {
@@ -1606,7 +1579,7 @@ QString ToolManager::latestVersion(AiTool tool, int timeoutMs) const
     if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
         return QString();
     }
-    return extractVersion(QString::fromUtf8(process.readAll()).trimmed());
+    return extractVersion(ProcessCommand::decodeOutput(process.readAll()).trimmed());
 }
 
 void ToolManager::detectNpmVersion(AiTool tool)
@@ -1648,7 +1621,7 @@ void ToolManager::detectNpmVersion(AiTool tool)
             process->kill();
         }
     });
-    startCommand(process, npmExecutable,
+    ProcessCommand::start(process, npmExecutable,
                  QStringList() << QStringLiteral("list") << QStringLiteral("-g")
                                << npmPackage(tool) << QStringLiteral("--depth=0")
                                << QStringLiteral("--json"));
@@ -1788,7 +1761,8 @@ void ToolManager::install(AiTool tool, int requestId)
     };
 
     connect(process, &QProcess::readyReadStandardOutput, this, [this, process, tool]() {
-        const QString text = QString::fromUtf8(process->readAllStandardOutput()).trimmed();
+        const QString text = ProcessCommand::decodeOutput(
+            process->readAllStandardOutput()).trimmed();
         if (!text.isEmpty()) {
             emit installOutput(tool, text);
         }
@@ -1841,7 +1815,8 @@ void ToolManager::installCli(AiTool tool, int requestId)
         installCliPackage(tool, requestId, npmExecutable, true);
     };
     connect(cleanup, &QProcess::readyReadStandardOutput, this, [this, cleanup, tool]() {
-        const QString text = QString::fromUtf8(cleanup->readAllStandardOutput()).trimmed();
+        const QString text = ProcessCommand::decodeOutput(
+            cleanup->readAllStandardOutput()).trimmed();
         if (!text.isEmpty()) emit installOutput(tool, text);
     });
     connect(cleanup, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -1854,7 +1829,7 @@ void ToolManager::installCli(AiTool tool, int requestId)
     });
     emit installOutput(tool, QStringLiteral("$ %1 uninstall -g %2")
         .arg(kNpmCmd, npmPackage(tool)));
-    startCommand(cleanup, npmExecutable,
+    ProcessCommand::start(cleanup, npmExecutable,
                  { QStringLiteral("uninstall"), QStringLiteral("-g"), npmPackage(tool) });
 }
 
@@ -1887,7 +1862,8 @@ void ToolManager::installCliPackage(AiTool tool, int requestId,
     };
 
     connect(process, &QProcess::readyReadStandardOutput, this, [this, process, tool]() {
-        const QString text = QString::fromUtf8(process->readAllStandardOutput()).trimmed();
+        const QString text = ProcessCommand::decodeOutput(
+            process->readAllStandardOutput()).trimmed();
         if (!text.isEmpty()) {
             emit installOutput(tool, text);
         }
@@ -1909,7 +1885,7 @@ void ToolManager::installCliPackage(AiTool tool, int requestId,
     QStringList arguments = { QStringLiteral("install"), QStringLiteral("-g"),
                               packageSpec };
     if (forceRepair) arguments.append(QStringLiteral("--force"));
-    startCommand(process, npmExecutable, arguments);
+    ProcessCommand::start(process, npmExecutable, arguments);
 }
 
 // ── 配置写入 ─────────────────────────────────────────────────────

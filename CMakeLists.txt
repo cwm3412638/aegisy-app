@@ -40,6 +40,7 @@ set(SOURCES
     src/login_dialog.cpp
     src/api_client.cpp
     src/tool_manager.cpp
+    src/process_command.cpp
     src/secure_storage.cpp
     src/api_keys_dialog.cpp
     src/account_dialog.cpp
@@ -79,6 +80,7 @@ set(HEADERS
     include/login_dialog.h
     include/api_client.h
     include/tool_manager.h
+    include/process_command.h
     include/secure_storage.h
     include/api_keys_dialog.h
     include/account_dialog.h
@@ -265,7 +267,9 @@ if(BUILD_TESTING)
     add_executable(AegisyToolManagerRuntimeTest
         tests/tool_manager_runtime_test.cpp
         src/tool_manager.cpp
+        src/process_command.cpp
         include/tool_manager.h
+        include/process_command.h
     )
     target_include_directories(AegisyToolManagerRuntimeTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -279,7 +283,9 @@ if(BUILD_TESTING)
     add_executable(AegisyToolManagerGatewayConfigTest
         tests/tool_manager_gateway_config_test.cpp
         src/tool_manager.cpp
+        src/process_command.cpp
         include/tool_manager.h
+        include/process_command.h
     )
     target_include_directories(AegisyToolManagerGatewayConfigTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)

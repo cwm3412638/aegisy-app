@@ -1,9 +1,11 @@
 #include "tool_manager.h"
+#include "process_command.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
+#include <QProcess>
 #include <QSet>
 #include <QString>
 #include <QTemporaryDir>
@@ -14,6 +16,45 @@
 int main(int argc, char *argv[])
 {
     QCoreApplication application(argc, argv);
+
+    const QString nativeArguments = ProcessCommand::windowsBatchNativeArguments(
+        QStringLiteral("C:/Program Files/nodejs/npm.cmd"),
+        { QStringLiteral("install"), QStringLiteral("-g"),
+          QStringLiteral("@openai/codex@latest") });
+    const QString expectedArguments = QStringLiteral(
+        "/D /V:OFF /S /C \"\"C:/Program Files/nodejs/npm.cmd\" "
+        "\"install\" \"-g\" \"@openai/codex@latest\"\"");
+    if (nativeArguments != expectedArguments
+            || nativeArguments.contains(QStringLiteral("\\\""))) {
+        std::cerr << "Windows batch command line escaped quotes incorrectly\n";
+        return 1;
+    }
+
+#ifdef Q_OS_WIN
+    QTemporaryDir batchFixture(
+        QDir::tempPath() + QStringLiteral("/aegisy command test XXXXXX"));
+    const QString batchPath = batchFixture.filePath(QStringLiteral("version.cmd"));
+    QFile batchFile(batchPath);
+    if (!batchFixture.isValid() || !batchFile.open(QIODevice::WriteOnly)
+            || batchFile.write("@echo off\r\necho 7.8.9\r\n") < 0) {
+        std::cerr << "failed to create Windows batch command fixture\n";
+        return 1;
+    }
+    batchFile.close();
+
+    QProcess batchProcess;
+    batchProcess.setProcessChannelMode(QProcess::MergedChannels);
+    ProcessCommand::start(&batchProcess, batchPath, {});
+    if (!batchProcess.waitForStarted(2000) || !batchProcess.waitForFinished(5000)
+            || batchProcess.exitStatus() != QProcess::NormalExit
+            || batchProcess.exitCode() != 0
+            || !ProcessCommand::decodeOutput(batchProcess.readAll())
+                    .contains(QStringLiteral("7.8.9"))) {
+        std::cerr << "failed to execute a batch command from a path with spaces\n";
+        return 1;
+    }
+#endif
+
     ToolManager manager;
     const QList<RuntimeStatus> runtimes = manager.detectRuntimes(300);
 
