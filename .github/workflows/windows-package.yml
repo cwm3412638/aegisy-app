@@ -10,7 +10,6 @@ on:
       - cmake/**
       - include/**
       - src/**
-      - tests/**
       - assets/**
       - installer.iss
       - package-windows.bat
