@@ -18,6 +18,7 @@ public:
 
     // 设置 API 基础 URL
     void setBaseUrl(const QString &url);
+    QString baseUrl() const { return m_baseUrl; }
 
     // 设置认证 Token
     void setAuthToken(const QString &token);

@@ -2,6 +2,7 @@
 
 #include "app_theme.h"
 #include "secure_storage.h"
+#include "status_badge.h"
 
 #include <QAbstractItemView>
 #include <QApplication>
@@ -52,10 +53,10 @@ void SystemDoctorDialog::setupUi()
         "font-size: 20px; font-weight: 700; color: #101828;"));
     header->addWidget(title);
     header->addStretch();
-    m_summaryLabel = new QLabel(QStringLiteral("等待检测"), this);
-    m_summaryLabel->setStyleSheet(QStringLiteral(
-        "color: #475467; background: #f2f4f7; border: 1px solid #e4e7ec;"
-        "border-radius: 7px; padding: 4px 10px; font-size: 11px; font-weight: 600;"));
+    m_summaryLabel = new StatusBadge(this);
+    m_summaryLabel->setState(
+        QStringLiteral("等待检测"), StatusBadge::Tone::Neutral,
+        style()->standardIcon(QStyle::SP_MessageBoxInformation));
     header->addWidget(m_summaryLabel);
     root->addLayout(header);
 
@@ -102,7 +103,9 @@ void SystemDoctorDialog::refreshReport()
     m_scanning = true;
     m_refreshButton->setEnabled(false);
     m_table->setRowCount(0);
-    m_summaryLabel->setText(QStringLiteral("检测中..."));
+    m_summaryLabel->setState(
+        QStringLiteral("检测中"), StatusBadge::Tone::Info,
+        style()->standardIcon(QStyle::SP_BrowserReload));
     m_statusLabel->setText(QStringLiteral("正在检查本地命令、配置文件和安全存储..."));
 
     QPointer<SystemDoctorDialog> guard(this);
@@ -268,16 +271,16 @@ void SystemDoctorDialog::applyReport(const QList<RuntimeStatus> &runtimes,
     m_scanning = false;
     m_refreshButton->setEnabled(true);
     if (errorCount == 0 && warningCount == 0) {
-        m_summaryLabel->setText(QStringLiteral("全部正常"));
-        m_summaryLabel->setStyleSheet(QStringLiteral(
-            "color: #067647; background: #ecfdf3; border: 1px solid #abefc6;"
-            "border-radius: 7px; padding: 4px 10px; font-size: 11px; font-weight: 600;"));
+        m_summaryLabel->setState(
+            QStringLiteral("全部正常"), StatusBadge::Tone::Success,
+            style()->standardIcon(QStyle::SP_DialogApplyButton));
     } else {
-        m_summaryLabel->setText(QStringLiteral("%1 个问题  ·  %2 个提醒")
-            .arg(errorCount).arg(warningCount));
-        m_summaryLabel->setStyleSheet(QStringLiteral(
-            "color: #b54708; background: #fffaeb; border: 1px solid #fedf89;"
-            "border-radius: 7px; padding: 4px 10px; font-size: 11px; font-weight: 600;"));
+        m_summaryLabel->setState(
+            QStringLiteral("%1 个问题 · %2 个提醒")
+                .arg(errorCount).arg(warningCount),
+            errorCount > 0 ? StatusBadge::Tone::Error : StatusBadge::Tone::Warning,
+            style()->standardIcon(errorCount > 0
+                ? QStyle::SP_MessageBoxCritical : QStyle::SP_MessageBoxWarning));
     }
     m_statusLabel->setText(QStringLiteral("检测完成。"));
 }
@@ -297,17 +300,27 @@ void SystemDoctorDialog::addRow(const QString &category,
     m_table->setItem(row, 0, new QTableWidgetItem(category));
     m_table->setItem(row, 1, new QTableWidgetItem(name));
 
-    auto *statusItem = new QTableWidgetItem(status);
+    auto *statusCell = new QWidget(m_table);
+    auto *statusLayout = new QHBoxLayout(statusCell);
+    statusLayout->setContentsMargins(4, 6, 4, 6);
+    statusLayout->setSpacing(0);
+    auto *statusBadge = new StatusBadge(statusCell);
+    StatusBadge::Tone badgeTone = StatusBadge::Tone::Neutral;
+    QStyle::StandardPixmap badgeIcon = QStyle::SP_MessageBoxInformation;
     if (tone == QStringLiteral("ok")) {
-        statusItem->setForeground(QColor(QStringLiteral("#067647")));
+        badgeTone = StatusBadge::Tone::Success;
+        badgeIcon = QStyle::SP_DialogApplyButton;
     } else if (tone == QStringLiteral("error")) {
-        statusItem->setForeground(QColor(QStringLiteral("#b42318")));
+        badgeTone = StatusBadge::Tone::Error;
+        badgeIcon = QStyle::SP_MessageBoxCritical;
     } else if (tone == QStringLiteral("warning")) {
-        statusItem->setForeground(QColor(QStringLiteral("#b54708")));
-    } else {
-        statusItem->setForeground(QColor(QStringLiteral("#667085")));
+        badgeTone = StatusBadge::Tone::Warning;
+        badgeIcon = QStyle::SP_MessageBoxWarning;
     }
-    m_table->setItem(row, 2, statusItem);
+    statusBadge->setState(status, badgeTone, style()->standardIcon(badgeIcon));
+    statusLayout->addWidget(statusBadge);
+    statusLayout->addStretch();
+    m_table->setCellWidget(row, 2, statusCell);
     auto *detailItem = new QTableWidgetItem(detail);
     detailItem->setToolTip(detail);
     m_table->setItem(row, 3, detailItem);
@@ -318,6 +331,9 @@ void SystemDoctorDialog::addRow(const QString &category,
             repair ? QStringLiteral("修复")
                    : (installed ? QStringLiteral("更新")
                                 : QStringLiteral("安装")), m_table);
+        button->setIcon(style()->standardIcon(
+            repair || installed ? QStyle::SP_BrowserReload
+                                : QStyle::SP_DialogApplyButton));
         button->setStyleSheet(installed ? AppTheme::secondaryButtonStyle()
                                         : AppTheme::primaryButtonStyle());
         button->setFixedSize(68, 30);

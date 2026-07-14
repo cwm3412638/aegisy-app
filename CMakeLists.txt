@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(AegisyClient VERSION 2.5.0 LANGUAGES CXX)
+project(AegisyClient VERSION 2.5.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,6 +57,7 @@ set(SOURCES
     src/profile_manager.cpp
     src/connect_wizard.cpp
     src/app_theme.cpp
+    src/status_badge.cpp
     src/profile_archive.cpp
     src/balance_orb.cpp
     src/desktop_downloader.cpp
@@ -95,6 +96,7 @@ set(HEADERS
     include/profile_manager.h
     include/connect_wizard.h
     include/app_theme.h
+    include/status_badge.h
     include/profile_archive.h
     include/update_manager.h
     include/balance_orb.h
@@ -328,6 +330,25 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME api_client_account_and_keys
         COMMAND AegisyApiClientAccountTest)
+
+    add_executable(AegisyDesktopDownloaderTest
+        tests/desktop_downloader_test.cpp
+        src/desktop_downloader.cpp
+        src/app_theme.cpp
+        include/desktop_downloader.h
+        include/app_theme.h
+    )
+    target_include_directories(AegisyDesktopDownloaderTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyDesktopDownloaderTest PRIVATE
+            Qt6::Core Qt6::Widgets Qt6::Network)
+    else()
+        target_link_libraries(AegisyDesktopDownloaderTest PRIVATE
+            Qt5::Core Qt5::Widgets Qt5::Network)
+    endif()
+    add_test(NAME desktop_download_proxy_contract
+        COMMAND AegisyDesktopDownloaderTest)
 
     add_executable(AegisySkillManagerTest
         tests/skill_manager_test.cpp

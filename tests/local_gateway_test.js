@@ -62,11 +62,13 @@ child.stdout.on('data', async chunk => {
       const noProfile = await request('/tools/codex/v1/models', `Bearer ${token}`);
       const claudeAuth = await requestWithHeaders('/tools/claude/v1/models', { 'x-api-key': token });
       const geminiAuth = await requestWithHeaders('/tools/gemini/v1beta/models?key=' + token, {});
+      const openCodeAuth = await requestWithHeaders('/tools/opencode/v1/messages', { 'x-api-key': token });
       if (health.status !== 200 || health.body.status !== 'ok') throw new Error('health check failed');
       if (unauthorized.status !== 401) throw new Error('unauthorized request was accepted');
       if (noProfile.status !== 503) throw new Error('missing profile did not fail safely');
       if (claudeAuth.status !== 503) throw new Error('x-api-key authentication failed');
       if (geminiAuth.status !== 503) throw new Error('Gemini key authentication failed');
+      if (openCodeAuth.status !== 503) throw new Error('OpenCode route authentication failed');
       child.stdin.write(`${JSON.stringify({ type: 'shutdown' })}\n`);
     } catch (error) {
       child.kill();

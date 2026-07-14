@@ -40,6 +40,7 @@ QString GatewayManager::toolSlug(AiTool tool)
     case AiTool::ClaudeCode: return QStringLiteral("claude");
     case AiTool::CodexCli: return QStringLiteral("codex");
     case AiTool::GeminiCli: return QStringLiteral("gemini");
+    case AiTool::OpenCode: return QStringLiteral("opencode");
     }
     return QStringLiteral("codex");
 }

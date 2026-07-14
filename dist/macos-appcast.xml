@@ -3,6 +3,37 @@
     <channel>
         <title>AegisyClient</title>
         <item>
+            <title>2.5.1</title>
+            <pubDate>Tue, 14 Jul 2026 17:37:22 +0800</pubDate>
+            <link>https://aegisy.cc</link>
+            <sparkle:version>2.5.1</sparkle:version>
+            <sparkle:shortVersionString>2.5.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <sparkle:releaseNotesLink>https://aegisy.cc/desktop/macos/AegisyClient-2.5.1-macOS-arm64.md</sparkle:releaseNotesLink>
+            <enclosure url="https://aegisy.cc/desktop/macos/AegisyClient-2.5.1-macOS-arm64.zip" length="33058332" type="application/octet-stream" sparkle:edSignature="q7rybnouib9TpCETS0TPCfKtngE5gWaDQfFGdbatKuHkQvXCLi8VU1HbpMxlHOwyv4PlxklfF/yEcYoNdNpwCw=="/>
+            <sparkle:deltas>
+                <enclosure url="https://aegisy.cc/desktop/macos/AegisyClient2.5.1-2.5.0.delta" sparkle:deltaFrom="2.5.0" length="147442" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977616" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="2sAsMCp/LLXbOt7dHLwFBggEoyHJXp6Qly3bLEdnyKW13lTwzUWgcob9we0Ux3i2cVz7pKgeF1HaI2M0CTELBw=="/>
+                <enclosure url="https://aegisy.cc/desktop/macos/AegisyClient2.5.1-2.3.1.delta" sparkle:deltaFrom="2.3.1" length="1567022" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977616" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="FzWMMIBy/FEv1Sn/PTFYDxIOjfxJjLUs1jhQagYBBWTqC1L/1mWfrFvBfmC2rwmK4vS3f5L/Qjn4SDSb2SaIAw=="/>
+                <enclosure url="https://aegisy.cc/desktop/macos/AegisyClient2.5.1-2.3.0.delta" sparkle:deltaFrom="2.3.0" length="1573334" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977616" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="aS5G7qmlcUhrqO885UWOwMVJhvbkhEyz/EUT3wJMr7++CoOoSuGMVLUkV6Hae2+dalID1oeiB3s7wQjt++LlCQ=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
+            <title>2.5.0</title>
+            <pubDate>Tue, 14 Jul 2026 00:32:45 +0800</pubDate>
+            <link>https://aegisy.cc</link>
+            <sparkle:version>2.5.0</sparkle:version>
+            <sparkle:shortVersionString>2.5.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <sparkle:releaseNotesLink>https://aegisy.cc/desktop/macos/AegisyClient-2.5.0-macOS-arm64.md</sparkle:releaseNotesLink>
+            <enclosure url="https://aegisy.cc/desktop/macos/AegisyClient-2.5.0-macOS-arm64.zip" length="33022551" type="application/octet-stream" sparkle:edSignature="lMEi7LAaGIpJoLPNbrKU/X5FpIq3m1WW9F0BoUgvchMaeAqpHZbXfTtfigJDaoriHOjrlzn4t+vW6p5HoNgdBg=="/>
+            <sparkle:deltas>
+                <enclosure url="https://aegisy.cc/desktop/macos/AegisyClient2.5.0-2.3.1.delta" sparkle:deltaFrom="2.3.1" length="1534726" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977616" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="4+d9xyGIHkXxhAaxqiZ9yfXGe3sP20KD0Z/9GHTHbSl24mMY+qPgfVVQ/Knhzg1A8s8CKTet2JpbioLeu1I4AQ=="/>
+                <enclosure url="https://aegisy.cc/desktop/macos/AegisyClient2.5.0-2.3.0.delta" sparkle:deltaFrom="2.3.0" length="1541262" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977616" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="ZqkuFQeUf9gbTH2s6LYJ/LJSegDsCaH6xFfiIwPJq8A39CfypV5tEmcr+qlTx2stqsIO2lNGdz1NniTXqow/BQ=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>2.3.1</title>
             <pubDate>Fri, 10 Jul 2026 15:34:42 +0800</pubDate>
             <link>https://aegisy.cc</link>

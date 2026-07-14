@@ -51,6 +51,8 @@ int main(int argc, char *argv[])
                 "model = \"stale-model\"\n"
                 "review_model = \"stale-model\"\n"
                 "model_reasoning_effort = \"xhigh\"\n"
+                "model_context_window = 372000\n"
+                "model_auto_compact_token_limit = 372000\n"
                 "disable_response_storage = true\n"
                 "network_access = \"enabled\"\n"
                 "windows_wsl_setup_acknowledged = true\n"
@@ -91,6 +93,17 @@ int main(int argc, char *argv[])
                  "Codex managed root keys were written inside a TOML table")
         || !require(codexConfig.count(QStringLiteral("model_provider =")) == 1,
                     "stale Codex model_provider key was not removed from a TOML table")
+        || !require(codexConfig.count(QStringLiteral("model_context_window = 272000")) == 1
+                        && codexConfig.count(QStringLiteral(
+                            "model_auto_compact_token_limit = 272000")) == 1,
+                    "Codex 272K context limits were not written exactly once")
+        || !require(!codexConfig.contains(QStringLiteral("372000")),
+                    "stale Codex context limits were preserved")
+        || !require(codexConfig.indexOf(QStringLiteral("model_context_window = 272000"))
+                        < firstTable
+                        && codexConfig.indexOf(QStringLiteral(
+                            "model_auto_compact_token_limit = 272000")) < firstTable,
+                    "Codex context limits were written inside a TOML table")
         || !require(codexConfig.contains(QStringLiteral("127.0.0.1:43112/tools/codex/v1")),
                  "Codex gateway endpoint is missing")
         || !require(codexConfig.contains(QStringLiteral(
@@ -127,6 +140,27 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    QFile wrongContextConfig(codexConfigPath);
+    QString wrongContext = codexConfig;
+    wrongContext.replace(QStringLiteral("model_context_window = 272000"),
+                         QStringLiteral("model_context_window = 372000"));
+    if (!wrongContextConfig.open(QIODevice::WriteOnly | QIODevice::Truncate)
+            || wrongContextConfig.write(wrongContext.toUtf8()) < 0) {
+        return 1;
+    }
+    wrongContextConfig.close();
+    const LocalConfigurationStatus wrongContextStatus =
+        manager.inspectConfiguration(AiTool::CodexCli);
+    if (!require(wrongContextStatus.state == LocalConfigurationState::Invalid,
+                 "stale Codex context limit was not classified as invalid")
+        || !require(wrongContextStatus.detail.contains(QStringLiteral("272000")),
+                    "stale Codex context limit did not include a repair reason")
+        || !require(manager.configureGateway(
+                        AiTool::CodexCli, localToken, QStringLiteral("gpt-test"), 43112),
+                    "failed to repair stale Codex context limits")) {
+        return 1;
+    }
+
     const QString codexAuthPath = home.path() + QStringLiteral("/.codex/auth.json");
     if (!QFile::remove(codexAuthPath)) return 1;
     const LocalConfigurationStatus missingAuth =
@@ -148,6 +182,8 @@ int main(int argc, char *argv[])
                 "\"gpt-existing\" = 1\n"
                 "model_provider = \"aegisy_local\"\n"
                 "model = \"gpt-test\"\n"
+                "model_context_window = 372000\n"
+                "model_auto_compact_token_limit = 372000\n"
                 "\n"
                 "[model_providers.aegisy_local]\n"
                 "base_url = \"http://127.0.0.1:43112/tools/codex/v1\"\n"
@@ -197,6 +233,20 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    if (!require(manager.configureGateway(
+                     AiTool::OpenCode, localToken,
+                     QStringLiteral("anthropic/claude-sonnet-4-5")),
+                 "failed to write OpenCode gateway configuration")
+        || !require(readFile(home.path()
+                        + QStringLiteral("/.config/opencode/config.json"))
+                        .contains(QStringLiteral("127.0.0.1:43112/tools/opencode")),
+                    "OpenCode gateway endpoint is missing")
+        || !require(manager.inspectConfiguration(AiTool::OpenCode).isReady()
+                        && manager.inspectConfiguration(AiTool::OpenCode).gatewayMode,
+                    "valid OpenCode gateway configuration was not recognized")) {
+        return 1;
+    }
+
     const QString directKey = QStringLiteral("sk-direct-test");
     if (!require(manager.configure(AiTool::CodexCli, directKey, QStringLiteral("gpt-test")),
                  "failed to restore direct Codex configuration")) {
@@ -215,6 +265,11 @@ int main(int argc, char *argv[])
                  "direct Aegisy endpoint was not restored")
         || !require(!restoredConfig.contains(QStringLiteral("127.0.0.1:43112")),
                     "gateway endpoint remained after direct restore")
+        || !require(restoredConfig.contains(QStringLiteral(
+                        "model_context_window = 272000"))
+                        && restoredConfig.contains(QStringLiteral(
+                            "model_auto_compact_token_limit = 272000")),
+                    "direct Codex configuration omitted the 272K context limits")
         || !require(restoredConfig.contains(QStringLiteral("[model_providers.ccswitch]"))
                         && restoredConfig.contains(QStringLiteral(
                             "experimental_bearer_token = \"sk-ccswitch-test\"")),

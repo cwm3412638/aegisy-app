@@ -30,6 +30,7 @@ class QTimer;
 class QEvent;
 class QShowEvent;
 class QFileSystemWatcher;
+class StatusBadge;
 
 class MainWindow : public QMainWindow
 {
@@ -141,8 +142,8 @@ private:
     QWidget      *m_cardsContainer;
     QVBoxLayout  *m_cardsLayout;
     QButtonGroup *m_filterGroup = nullptr;   // 类型筛选按钮组
-    QLabel       *m_profileCountLabel = nullptr;
-    QLabel       *m_activeProfileLabel = nullptr;
+    StatusBadge  *m_profileCountLabel = nullptr;
+    StatusBadge  *m_activeProfileLabel = nullptr;
 
     // UI — 高级区 + 日志
     QPushButton *m_manageKeysButton;
@@ -195,8 +196,8 @@ private:
     bool          m_trayHintShown = false;
     bool          m_authExpiredHandled = false;
 
-    // 卡片测试：requestId -> {resultLabel, testButton}
-    QHash<QString, QPair<QLabel*, QPushButton*>> m_cardTestWidgets;
+    // 卡片测试：requestId -> {resultBadge, testButton}
+    QHash<QString, QPair<StatusBadge*, QPushButton*>> m_cardTestWidgets;
 };
 
 #endif // MAIN_WINDOW_H

@@ -1,5 +1,6 @@
 #include "mcp_config_dialog.h"
 #include "app_theme.h"
+#include "status_badge.h"
 
 #include <QDir>
 #include <QDialogButtonBox>
@@ -14,6 +15,7 @@
 #include <QMessageBox>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QStyle>
 #include <QTableWidget>
 #include <QVBoxLayout>
 
@@ -75,24 +77,15 @@ void McpConfigDialog::setupUi()
 
     // 标题行
     auto *titleRow = new QHBoxLayout;
-    auto *title = new QLabel(QStringLiteral("⚙  MCP 服务器共享配置"), this);
+    auto *titleIcon = new QLabel(this);
+    titleIcon->setPixmap(style()->standardIcon(
+        QStyle::SP_FileDialogDetailedView).pixmap(20, 20));
+    titleRow->addWidget(titleIcon);
+    auto *title = new QLabel(QStringLiteral("MCP 服务器共享配置"), this);
     title->setStyleSheet(QStringLiteral("font-size: 17px; font-weight: 700; color: #101828;"));
     titleRow->addWidget(title);
     titleRow->addStretch();
     root->addLayout(titleRow);
-
-    // 说明
-    auto *hint = new QLabel(
-        QStringLiteral(
-            "此处管理 <b>~/.claude/settings.json</b> 中的 <code>mcpServers</code> 字段。"
-            "切换档案时 Aegisy 会自动保留这些配置，无需重新设置。"),
-        this);
-    hint->setWordWrap(true);
-    hint->setTextFormat(Qt::RichText);
-    hint->setStyleSheet(QStringLiteral(
-        "background: #eff8ff; color: #175cd3; border: 1px solid #b2ddff;"
-        "border-radius: 7px; padding: 10px 12px; font-size: 12px;"));
-    root->addWidget(hint);
 
     // 表格
     m_table = new QTableWidget(0, 3, this);
@@ -118,9 +111,12 @@ void McpConfigDialog::setupUi()
 
     // 按钮行
     auto *btnRow = new QHBoxLayout;
-    m_addButton    = new QPushButton(QStringLiteral("＋  添加"), this);
-    m_editButton   = new QPushButton(QStringLiteral("✎  编辑"), this);
-    m_removeButton = new QPushButton(QStringLiteral("✕  删除"), this);
+    m_addButton    = new QPushButton(QStringLiteral("添加"), this);
+    m_editButton   = new QPushButton(QStringLiteral("编辑"), this);
+    m_removeButton = new QPushButton(QStringLiteral("删除"), this);
+    m_addButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogNewFolder));
+    m_editButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+    m_removeButton->setIcon(style()->standardIcon(QStyle::SP_DialogDiscardButton));
     m_addButton->setFixedHeight(34);
     m_editButton->setFixedHeight(34);
     m_removeButton->setFixedHeight(34);
@@ -137,13 +133,14 @@ void McpConfigDialog::setupUi()
 
     // 状态 + 保存
     auto *footRow = new QHBoxLayout;
-    m_statusLabel = new QLabel(this);
-    m_statusLabel->setStyleSheet(QStringLiteral("font-size: 11px; color: #667085;"));
-    m_saveButton = new QPushButton(QStringLiteral("💾  保存"), this);
+    m_statusLabel = new StatusBadge(this);
+    m_saveButton = new QPushButton(QStringLiteral("保存"), this);
+    m_saveButton->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
     m_saveButton->setFixedHeight(36);
     m_saveButton->setMinimumWidth(100);
     m_saveButton->setStyleSheet(AppTheme::primaryButtonStyle());
     auto *cancelBtn = new QPushButton(QStringLiteral("关闭"), this);
+    cancelBtn->setIcon(style()->standardIcon(QStyle::SP_DialogCloseButton));
     cancelBtn->setFixedHeight(36);
     cancelBtn->setStyleSheet(AppTheme::secondaryButtonStyle());
     footRow->addWidget(m_statusLabel, 1);
@@ -171,9 +168,11 @@ void McpConfigDialog::loadFromSettings()
     rebuildTable();
 
     const int count = m_mcpServers.size();
-    m_statusLabel->setText(count > 0
-        ? QStringLiteral("已加载 %1 个 MCP 服务器").arg(count)
-        : QStringLiteral("~/.claude/settings.json 中暂无 MCP 配置"));
+    m_statusLabel->setState(
+        count > 0 ? QStringLiteral("%1 个服务器").arg(count)
+                  : QStringLiteral("暂无配置"),
+        StatusBadge::Tone::Neutral,
+        style()->standardIcon(QStyle::SP_FileDialogListView));
 }
 
 bool McpConfigDialog::saveToSettings()
@@ -265,7 +264,10 @@ void McpConfigDialog::onAddServer()
     }
     m_mcpServers[trimmedName] = server;
     rebuildTable();
-    m_statusLabel->setText(QStringLiteral("已添加「%1」（未保存）").arg(trimmedName));
+    m_statusLabel->setState(
+        QStringLiteral("已添加「%1」· 未保存").arg(trimmedName),
+        StatusBadge::Tone::Warning,
+        style()->standardIcon(QStyle::SP_MessageBoxWarning));
 }
 
 void McpConfigDialog::onEditServer()
@@ -311,7 +313,10 @@ void McpConfigDialog::onEditServer()
     }
     m_mcpServers[name] = updated;
     rebuildTable();
-    m_statusLabel->setText(QStringLiteral("已修改「%1」（未保存）").arg(name));
+    m_statusLabel->setState(
+        QStringLiteral("已修改「%1」· 未保存").arg(name),
+        StatusBadge::Tone::Warning,
+        style()->standardIcon(QStyle::SP_MessageBoxWarning));
 }
 
 void McpConfigDialog::onRemoveServer()
@@ -326,15 +331,22 @@ void McpConfigDialog::onRemoveServer()
     if (reply != QMessageBox::Yes) return;
     m_mcpServers.remove(name);
     rebuildTable();
-    m_statusLabel->setText(QStringLiteral("已删除「%1」（未保存）").arg(name));
+    m_statusLabel->setState(
+        QStringLiteral("已删除「%1」· 未保存").arg(name),
+        StatusBadge::Tone::Warning,
+        style()->standardIcon(QStyle::SP_MessageBoxWarning));
 }
 
 void McpConfigDialog::onSave()
 {
     if (saveToSettings()) {
-        m_statusLabel->setText(QStringLiteral("✓ 已保存到 ~/.claude/settings.json"));
-        m_statusLabel->setStyleSheet(QStringLiteral("font-size: 11px; color: #067647;"));
+        m_statusLabel->setState(
+            QStringLiteral("已保存"), StatusBadge::Tone::Success,
+            style()->standardIcon(QStyle::SP_DialogApplyButton));
     } else {
+        m_statusLabel->setState(
+            QStringLiteral("保存失败"), StatusBadge::Tone::Error,
+            style()->standardIcon(QStyle::SP_MessageBoxCritical));
         QMessageBox::critical(this, QStringLiteral("保存失败"),
             QStringLiteral("无法写入 ~/.claude/settings.json，请检查文件权限。"));
     }

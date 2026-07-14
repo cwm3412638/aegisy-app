@@ -20,6 +20,7 @@
 // 官方指南规定：BASE_URL 一律裸域名，不带 /v1
 static const QString kBaseUrl = "https://aegisy.cc";
 constexpr int kMaxBackupsPerTool = 10;
+constexpr qint64 kCodexContextWindow = 272000;
 
 static QString toolSlug(AiTool tool)
 {
@@ -471,7 +472,7 @@ ConfigurationPreview ToolManager::previewConfiguration(AiTool tool,
         preview.changes.append(QStringLiteral(
             "设置 provider.anthropic.base_url = %1")
             .arg(gatewayMode
-                ? QStringLiteral("http://127.0.0.1:43112/tools/claude")
+                ? QStringLiteral("http://127.0.0.1:43112/tools/opencode")
                 : QStringLiteral("https://aegisy.cc")));
         preview.changes.append(gatewayMode
             ? QStringLiteral("provider.anthropic.api_key 仅写入本地网关令牌")
@@ -1123,6 +1124,8 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
         static const QStringList managedRootKeys = {
             QStringLiteral("model_provider"), QStringLiteral("model"),
             QStringLiteral("review_model"), QStringLiteral("model_reasoning_effort"),
+            QStringLiteral("model_context_window"),
+            QStringLiteral("model_auto_compact_token_limit"),
             QStringLiteral("disable_response_storage"), QStringLiteral("network_access"),
             QStringLiteral("windows_wsl_setup_acknowledged"),
         };
@@ -1134,6 +1137,10 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
         static const QStringList managedBooleanKeys = {
             QStringLiteral("disable_response_storage"),
             QStringLiteral("windows_wsl_setup_acknowledged"),
+        };
+        static const QStringList managedIntegerKeys = {
+            QStringLiteral("model_context_window"),
+            QStringLiteral("model_auto_compact_token_limit"),
         };
         QHash<QString, QString> rootValues;
         QHash<QString, QHash<QString, QString>> tableValues;
@@ -1175,6 +1182,15 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
                         && value != QStringLiteral("false")) {
                     scalarOk = false;
                 }
+                if (managedIntegerKeys.contains(name)) {
+                    bool integerOk = false;
+                    value.toLongLong(&integerOk);
+                    if (!integerOk
+                            || rawValue.startsWith(QLatin1Char('"'))
+                            || rawValue.startsWith(QLatin1Char('\''))) {
+                        scalarOk = false;
+                    }
+                }
                 if (!scalarOk) invalidManagedValue = true;
             } else if (name == QStringLiteral("base_url")
                        || name == QStringLiteral("wire_api")
@@ -1208,6 +1224,14 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
         if (provider.isEmpty() || model.isEmpty()) {
             return failure(LocalConfigurationState::Invalid,
                            QStringLiteral("config.toml 缺少 model_provider 或 model"));
+        }
+        const QString expectedContextWindow = QString::number(kCodexContextWindow);
+        if (rootValues.value(QStringLiteral("model_context_window"))
+                    != expectedContextWindow
+                || rootValues.value(QStringLiteral("model_auto_compact_token_limit"))
+                    != expectedContextWindow) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("config.toml 的上下文窗口或自动压缩阈值不是 272000"));
         }
         const QString providerTable = QStringLiteral("model_providers.%1").arg(provider);
         const QHash<QString, QString> providerValues = tableValues.value(providerTable);
@@ -1291,7 +1315,7 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
                            QStringLiteral("config.json 缺少 API Key 或模型"));
         }
         if (!isAegisyBaseUrl(
-                baseUrl, QStringLiteral("/tools/claude"), &gatewayMode)) {
+                baseUrl, QStringLiteral("/tools/opencode"), &gatewayMode)) {
             return failure(LocalConfigurationState::Invalid,
                            QStringLiteral("config.json 中的 provider.anthropic.base_url 无效"));
         }
@@ -1960,7 +1984,7 @@ bool ToolManager::configureGateway(AiTool tool, const QString &localToken,
         break;
     case AiTool::OpenCode:
         success = configureOpenCodeEndpoint(localToken, model,
-            root + QStringLiteral("claude"));
+            root + QStringLiteral("opencode"));
         break;
     }
     if (!success || readConfiguredKey(tool) != localToken) {
@@ -2043,6 +2067,7 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
     }
     static const QStringList managedTopKeys = {
         "model_provider", "model", "review_model", "model_reasoning_effort",
+        "model_context_window", "model_auto_compact_token_limit",
         "disable_response_storage", "network_access", "windows_wsl_setup_acknowledged",
     };
     static const QStringList managedProviderSections = {
@@ -2099,9 +2124,11 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
         "review_model = \"%1\"\n").arg(effectiveModel, providerId);
     result += QStringLiteral(
         "model_reasoning_effort = \"xhigh\"\n"
+        "model_context_window = %1\n"
+        "model_auto_compact_token_limit = %1\n"
         "disable_response_storage = true\n"
         "network_access = \"enabled\"\n"
-        "windows_wsl_setup_acknowledged = true\n");
+        "windows_wsl_setup_acknowledged = true\n").arg(kCodexContextWindow);
 
     const QString preserved = outLines.join('\n');
     if (!preserved.isEmpty()) {

@@ -40,6 +40,7 @@ QString activeProfileKey(ProfileType type)
     case ProfileType::Claude: suffix = QStringLiteral("claude"); break;
     case ProfileType::Codex:  suffix = QStringLiteral("codex"); break;
     case ProfileType::Gemini: suffix = QStringLiteral("gemini"); break;
+    case ProfileType::OpenCode: suffix = QStringLiteral("opencode"); break;
     }
     return QStringLiteral("%1/active/%2").arg(kProfilesPrefix, suffix);
 }

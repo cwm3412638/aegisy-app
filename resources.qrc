@@ -5,6 +5,9 @@
     <qresource prefix="/icons">
         <file alias="aegisy-icon.png">assets/aegisy-icon.png</file>
     </qresource>
+    <qresource prefix="/docs">
+        <file alias="user-guide.md">USER-GUIDE.md</file>
+    </qresource>
     <qresource prefix="/builtin-skills">
         <file alias="image-generation/aegisy-skill.json">assets/builtin-skills/image-generation/aegisy-skill.json</file>
         <file alias="image-generation/SKILL.md">assets/builtin-skills/image-generation/SKILL.md</file>

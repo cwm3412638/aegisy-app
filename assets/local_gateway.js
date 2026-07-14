@@ -30,7 +30,7 @@ function authorized(request) {
 }
 
 function routeRequest(url, headers) {
-  const match = url.match(/^\/tools\/(claude|codex|gemini)(\/.*|$)/);
+  const match = url.match(/^\/tools\/(claude|codex|gemini|opencode)(\/.*|$)/);
   if (match) {
     return { tool: match[1], path: match[2] || '/' };
   }

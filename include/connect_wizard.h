@@ -15,6 +15,8 @@
 #include "api_client.h"
 #include "profile_manager.h"
 
+class StatusBadge;
+
 // 两步配置向导：先命名并选择唯一工具，再选择 Key 与模型。
 class ConnectWizardDialog : public QDialog
 {
@@ -83,7 +85,7 @@ private:
     QComboBox   *m_keyCombo = nullptr;
     QPushButton *m_queryButton = nullptr;
     QPushButton *m_testButton = nullptr;
-    QLabel      *m_loadingLabel = nullptr;
+    StatusBadge *m_loadingLabel = nullptr;
     QComboBox   *m_modelCombo = nullptr;
     QWidget     *m_modelSuggestions = nullptr;
     bool         m_waitingConnectionTest = false;

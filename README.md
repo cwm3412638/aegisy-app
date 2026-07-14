@@ -1,14 +1,16 @@
 # Aegisy Desktop Client
 
-Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账号中的 API Key 安全接入 Claude Code、Codex CLI 和 Gemini CLI。
+Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账号中的 API Key 安全接入 Claude Code、Codex CLI、Gemini CLI 和 OpenCode，并统一管理配置健康、桌面工具与账号能力。
 
 ## 当前功能
 
 - 使用 Aegisy 账号登录，支持密码显隐、余额展示，并分页同步 API Keys
 - 点击右上角头像进入账号中心，可修改登录密码或使用密卡兑换余额、并发额度和订阅权益
 - API Keys 管理与 Web 端保持一致，支持创建、编辑、切换分组、启用、禁用和删除
-- 每个档案只绑定一个终端：Claude Code、Codex CLI 或 Gemini CLI
-- 按终端筛选、编辑、删除和激活档案；三种终端分别保留一个当前配置
+- 每个档案只绑定一个终端：Claude Code、Codex CLI、Gemini CLI 或 OpenCode
+- 按终端筛选、编辑、删除和激活档案；四种终端分别保留一个当前配置
+- 监控当前认证文件；文件被删除、损坏或被其他配置工具改写时显示“需修复”，启动前阻止错误配置继续运行
+- 修复 Codex 根配置误入 `[tui.model_availability_nux]` 等 TOML 表导致的类型错误，并保留 CC Switch Provider、项目信任与其他功能设置
 - 系统托盘快速切换档案，关闭主窗口后可继续运行
 - 查询 API Key 可用模型并保存模型选择
 - 新建或编辑档案时测试 Key、模型和连接延迟，并分类显示连接错误
@@ -28,9 +30,10 @@ Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账�
 - 缺少环境时通过 Homebrew、WinGet 或 Linux 系统包管理器一键安装 Node.js 和对应 CLI
 - 支持确认后安装或更新三个 AI CLI，并从当前激活档案使用系统原生终端启动
 - 启动终端时清除可能覆盖档案的旧 Provider 环境变量，确保新进程使用当前激活 Key
-- 启动时自动适配 macOS Terminal/iTerm、Windows Terminal/PowerShell/cmd 和常见 Linux 终端，不要求选择目录
+- 启动时选择并记住每个档案的工作目录，自动适配 macOS Terminal/iTerm、Windows Terminal/PowerShell/cmd 和常见 Linux 终端
 - 可选本地网关模式支持快速切换档案和元数据级请求监控
 - “桌面增强”展示 Codex 官方市场中的已安装和可安装插件，读取插件清单并提供中文功能说明
+- Claude Desktop 与 ChatGPT Desktop 使用受认证的 Aegisy 服务端流式代理下载；客户端拒绝重定向、验证代理标识与安装包格式，失败后由用户选择重试或打开官网
 - 插件支持复选框多选、全选可安装项和批量安装，逐项展示进度与成功/失败结果
 - 支持一键安装 Codex Computer Use；电脑控制仍遵循 Codex 的授权、沙箱和确认策略
 - 支持把 Codex JSONL 历史会话与 SQLite 桌面索引同步到当前 Provider，写入前自动建立可恢复备份
@@ -49,6 +52,7 @@ Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账�
 | Claude Code | `~/.claude/settings.json` |
 | Codex CLI | `~/.codex/auth.json`、`~/.codex/config.toml` |
 | Gemini CLI | `~/.gemini/.env` |
+| OpenCode | `~/.config/opencode/config.json` |
 
 配置写入采用读、合并、原子提交，不会直接覆盖无关字段。每次激活前都会建立同批次备份。
 
@@ -115,7 +119,7 @@ package-windows.bat
 5. 需要回退时，点击顶部“备份”并恢复历史版本。
 6. macOS 和 Windows 可从顶部“更新”菜单检查新版本或调整自动检查开关。
 7. 点击顶部“生图”，选择 `gpt-image` 分组及其 Key，设置参数并生成、预览或保存图片。
-8. 点击侧栏“系统体检”检查依赖与配置；当前档案可用“启动”按钮进入对应项目目录运行 CLI。
+8. 点击侧栏“系统体检”检查依赖与配置；当前档案可用“启动”按钮选择并记住项目目录后运行 CLI。
 9. 点击右上角余额查看用量中心；点击侧栏“本地网关”可选择启用本机代理与请求监控。
 10. 点击侧栏“桌面增强”查看全量模型与 Codex 插件、同步历史会话、安装 Computer Use 或以运行时方式启动 Claude 中文界面。
 11. 点击右上角头像修改密码或兑换密卡；点击“API Keys”创建和维护账号 Key。
@@ -137,6 +141,7 @@ package-windows.bat
 - 插件安装调用 Codex 官方 `plugin add` 命令，不直接修改 Codex 插件缓存或绕过账号权限。
 - 修改密码、密卡兑换和 Key 增删改均使用登录 JWT 调用 Aegisy 官方接口，密码与兑换码不写入日志或本地配置。
 - AI 对话直接使用所选 API Key 调用兼容接口，提示词和回复不写入日志；历史记录只写入当前用户的本机应用数据目录，且不包含 API Key。
+- 桌面安装包下载 Token 只发送给 Aegisy HTTPS 地址；客户端不跟随重定向，并在保存前验证服务端代理标识和安装包格式。
 - 通过 URL 或目录安装的第三方 Skill 默认是“仅指令”模式，脚本不会被自动执行；安装器仅接受 HTTPS、限制包大小并拒绝目录穿越路径。
 - PPT 运行时安装在应用数据目录的独立 Python 虚拟环境，不修改系统 Python；生成文件保存在当前用户的 Skill 产物目录。
 
@@ -165,7 +170,8 @@ src/usage_dialog.cpp      账号、模型和 API Key 用量中心
 src/skill_manager.cpp     Skills 安装、扫描、权限、路由与本地执行器
 src/skills_dialog.cpp      Skills 管理页面与 PPT 运行环境安装
 src/gateway_manager.cpp   本地网关生命周期、凭据管道和请求元数据
-src/tool_manager.cpp      配置、版本检测与跨平台原生终端启动
+src/desktop_downloader.cpp 受认证的桌面安装包流式代理下载与校验
+src/status_badge.cpp       通用语义状态组件
 src/update_manager_mac.mm  macOS Sparkle 应用内更新桥接
 src/update_manager_win.cpp Windows WinSparkle 应用内更新桥接
 src/main_window.cpp      主界面与档案操作
@@ -174,12 +180,7 @@ tests/                   自动化测试
 
 macOS、Windows 发布流程和更新源说明见 `release/README.md`。
 
-## 后续方向
-
-- 导入已有本地 Aegisy 配置
-- 开机启动设置
-- 自定义服务地址与供应商预设
-- 用量统计和连接健康检测
-- MCP 与 Prompts 管理
+完整操作、配置修复、CC Switch 共存和故障排查见 [Aegisy Desktop 使用指南](USER-GUIDE.md)。
+生产端桌面安装包流式代理要求见 [桌面安装包代理接口契约](docs/DESKTOP-DOWNLOAD-PROXY.md)。
 
 网站：<https://www.aegisy.cc>

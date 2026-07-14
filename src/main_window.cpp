@@ -21,6 +21,7 @@
 #include "desktop_downloader.h"
 #include "mcp_config_dialog.h"
 #include "help_dialog.h"
+#include "status_badge.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -1005,15 +1006,15 @@ void MainWindow::setupUi()
 
     auto *summaryRow = new QHBoxLayout;
     summaryRow->setSpacing(8);
-    m_profileCountLabel = new QLabel(content);
-    m_profileCountLabel->setStyleSheet(QStringLiteral(
-        "background: white; color: #475467; border: 1px solid #e4e7ec;"
-        "border-radius: 7px; padding: 6px 10px; font-size: 11px;"));
+    m_profileCountLabel = new StatusBadge(content);
+    m_profileCountLabel->setState(
+        QStringLiteral("0 个配置"), StatusBadge::Tone::Neutral,
+        style()->standardIcon(QStyle::SP_FileDialogListView));
     summaryRow->addWidget(m_profileCountLabel);
-    m_activeProfileLabel = new QLabel(content);
-    m_activeProfileLabel->setStyleSheet(QStringLiteral(
-        "background: #ecfdf3; color: #067647; border: 1px solid #abefc6;"
-        "border-radius: 7px; padding: 6px 10px; font-size: 11px;"));
+    m_activeProfileLabel = new StatusBadge(content);
+    m_activeProfileLabel->setState(
+        QStringLiteral("未激活"), StatusBadge::Tone::Neutral,
+        style()->standardIcon(QStyle::SP_MessageBoxInformation));
     summaryRow->addWidget(m_activeProfileLabel);
     summaryRow->addStretch();
     contentLayout->addLayout(summaryRow);
@@ -1150,7 +1151,10 @@ void MainWindow::rebuildCards()
     m_cardTestWidgets.clear();
 
     const QList<Profile> profiles = m_profileManager->allProfiles();
-    m_profileCountLabel->setText(QStringLiteral("配置总数  %1").arg(profiles.size()));
+    m_profileCountLabel->setState(
+        QStringLiteral("%1 个配置").arg(profiles.size()),
+        StatusBadge::Tone::Neutral,
+        style()->standardIcon(QStyle::SP_FileDialogListView));
 
     QSet<int> readyActiveProfiles;
     QHash<int, QString> repairIssues;
@@ -1173,17 +1177,27 @@ void MainWindow::rebuildCards()
         }
     }
     if (activeDescriptions.isEmpty() && repairDescriptions.isEmpty()) {
-        m_activeProfileLabel->setText(QStringLiteral("尚未激活有效配置"));
+        m_activeProfileLabel->setState(
+            QStringLiteral("尚未激活"), StatusBadge::Tone::Neutral,
+            style()->standardIcon(QStyle::SP_MessageBoxInformation));
         m_activeProfileLabel->setToolTip(QString());
     } else if (activeDescriptions.isEmpty()) {
-        m_activeProfileLabel->setText(
-            QStringLiteral("需修复  %1 个终端配置").arg(repairDescriptions.size()));
+        m_activeProfileLabel->setState(
+            QStringLiteral("%1 个配置需修复").arg(repairDescriptions.size()),
+            StatusBadge::Tone::Error,
+            style()->standardIcon(QStyle::SP_MessageBoxCritical));
         m_activeProfileLabel->setToolTip(repairDescriptions.join(QLatin1Char('\n')));
     } else {
-        const QString repairSuffix = repairDescriptions.isEmpty()
-            ? QString() : QStringLiteral("  ·  %1 个需修复").arg(repairDescriptions.size());
-        m_activeProfileLabel->setText(QStringLiteral("已激活  %1 / 3 个终端%2")
-            .arg(activeDescriptions.size()).arg(repairSuffix));
+        const bool hasRepairs = !repairDescriptions.isEmpty();
+        const QString summary = hasRepairs
+            ? QStringLiteral("%1 个已激活 · %2 个需修复")
+                .arg(activeDescriptions.size()).arg(repairDescriptions.size())
+            : QStringLiteral("%1 个终端已激活").arg(activeDescriptions.size());
+        m_activeProfileLabel->setState(
+            summary,
+            hasRepairs ? StatusBadge::Tone::Warning : StatusBadge::Tone::Success,
+            style()->standardIcon(hasRepairs
+                ? QStyle::SP_MessageBoxWarning : QStyle::SP_DialogApplyButton));
         QStringList details = activeDescriptions;
         details.append(repairDescriptions);
         m_activeProfileLabel->setToolTip(details.join(QLatin1Char('\n')));
@@ -1390,7 +1404,8 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
     layout->addWidget(deleteButton);
 
     // 只有配置了 Key 才显示测试按钮
-    auto *testButton = new QPushButton(QStringLiteral("🔍"), card);
+    auto *testButton = new QPushButton(card);
+    testButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     testButton->setFixedSize(36, 36);
     testButton->setToolTip(QStringLiteral("测试 API Key 连通性和延迟"));
     testButton->setCursor(Qt::PointingHandCursor);
@@ -1398,9 +1413,8 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
     testButton->setEnabled(profile.hasAnyKey());
     layout->addWidget(testButton);
 
-    auto *testResultLabel = new QLabel(card);
-    testResultLabel->setFixedHeight(14);
-    testResultLabel->setStyleSheet(QStringLiteral("font-size: 10px; color: #667085;"));
+    auto *testResultLabel = new StatusBadge(card);
+    testResultLabel->setState(QStringLiteral("等待测试"), StatusBadge::Tone::Neutral);
     testResultLabel->hide();
     // 把测试结果 label 放到 details 布局的最后
     details->addWidget(testResultLabel);
@@ -1417,9 +1431,10 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
             if (p.key.isEmpty()) return;
 
             testButton->setEnabled(false);
-            testButton->setText(QStringLiteral("…"));
-            testResultLabel->setText(QStringLiteral("测试中..."));
-            testResultLabel->setStyleSheet(QStringLiteral("font-size: 10px; color: #175cd3;"));
+            testButton->setIcon(style()->standardIcon(QStyle::SP_BrowserStop));
+            testResultLabel->setState(
+                QStringLiteral("正在测试"), StatusBadge::Tone::Info,
+                style()->standardIcon(QStyle::SP_BrowserReload));
             testResultLabel->show();
             m_apiClient->testConnection(testRequestId, p.key,
                                         ps[profileIndex].model);
@@ -1528,16 +1543,20 @@ void MainWindow::onBulkSwitchClicked()
     root->setContentsMargins(24, 22, 24, 18);
     root->setSpacing(14);
 
-    auto *title = new QLabel(QStringLiteral("⚡  全工具一键切换"), &dialog);
+    auto *titleRow = new QHBoxLayout;
+    auto *titleIcon = new QLabel(&dialog);
+    titleIcon->setPixmap(style()->standardIcon(QStyle::SP_BrowserReload).pixmap(20, 20));
+    titleRow->addWidget(titleIcon);
+    auto *title = new QLabel(QStringLiteral("全工具一键切换"), &dialog);
     title->setStyleSheet(QStringLiteral("font-size: 17px; font-weight: 700; color: #101828;"));
-    root->addWidget(title);
-
-    auto *hint = new QLabel(
-        QStringLiteral("为三个工具分别选择 API Key，点击「全部激活」后将依次写入本地配置。未选择 Key 的工具将跳过。"),
-        &dialog);
-    hint->setWordWrap(true);
-    hint->setStyleSheet(QStringLiteral("font-size: 12px; color: #667085;"));
-    root->addWidget(hint);
+    titleRow->addWidget(title);
+    titleRow->addStretch();
+    auto *toolCount = new StatusBadge(&dialog);
+    toolCount->setState(
+        QStringLiteral("3 个工具"), StatusBadge::Tone::Info,
+        style()->standardIcon(QStyle::SP_ComputerIcon));
+    titleRow->addWidget(toolCount);
+    root->addLayout(titleRow);
 
     const struct { ProfileType type; const char *accent; const char *label; } rows[] = {
         { ProfileType::Claude, "#c15f3c", "Claude Code" },
@@ -1600,7 +1619,8 @@ void MainWindow::onBulkSwitchClicked()
     auto *buttonRow = new QHBoxLayout;
     auto *cancelButton = new QPushButton(QStringLiteral("取消"), &dialog);
     cancelButton->setStyleSheet(AppTheme::secondaryButtonStyle());
-    auto *applyButton = new QPushButton(QStringLiteral("⚡  全部激活"), &dialog);
+    auto *applyButton = new QPushButton(QStringLiteral("全部激活"), &dialog);
+    applyButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
     applyButton->setStyleSheet(AppTheme::primaryButtonStyle());
     buttonRow->addStretch();
     buttonRow->addWidget(cancelButton);
@@ -2212,29 +2232,28 @@ void MainWindow::showEnvCheckDialog(int profileIndex)
 
     if (!desktop.installed) {
         // Gemini 无官方桌面版：保持打开网页；Claude/ChatGPT 走服务器代理下载。
+        const DesktopDownloader::Product product =
+            tool == AiTool::ClaudeCode
+                ? DesktopDownloader::Product::Claude
+                : DesktopDownloader::Product::ChatGpt;
         const bool proxyDownloadable =
             (tool == AiTool::ClaudeCode || tool == AiTool::CodexCli)
-            && DesktopDownloader::platformSupported();
+            && DesktopDownloader::productSupported(product);
         if (proxyDownloadable) {
             auto *button = new QPushButton(QStringLiteral("下载并安装"), &dialog);
             button->setFixedHeight(34);
             button->setStyleSheet(AppTheme::primaryButtonStyle());
-            const DesktopDownloader::Product product =
-                tool == AiTool::ClaudeCode
-                    ? DesktopDownloader::Product::Claude
-                    : DesktopDownloader::Product::ChatGpt;
             const QString appName = desktop.appName;
             const QString token = m_authToken;
             connect(button, &QPushButton::clicked, &dialog, [this, product, appName, token]() {
                 auto *dl = new DesktopDownloader(
-                    product, appName, token, QStringLiteral("https://aegisy.cc"), this);
+                    product, appName, token, m_apiClient->baseUrl(), this);
                 dl->exec();
                 dl->deleteLater();
             });
             addIssueRow(QStyle::SP_DesktopIcon,
                         QStringLiteral("%1 未安装").arg(desktop.appName),
-                        QStringLiteral(
-                            "优先通过 Aegisy 下载并打开安装包；下载服务不可用时自动转到官网。"),
+                        QStringLiteral("Aegisy 美国节点 · 受认证流式代理"),
                         button);
         } else {
             auto *button = new QPushButton(QStringLiteral("打开下载页"), &dialog);
@@ -2281,21 +2300,20 @@ void MainWindow::onCardConnectionTested(const QString &requestId, bool success,
     auto it = m_cardTestWidgets.find(requestId);
     if (it == m_cardTestWidgets.end()) return;
 
-    QLabel      *label  = it.value().first;
+    StatusBadge *label  = it.value().first;
     QPushButton *button = it.value().second;
 
     if (label) {
-        label->setText(success
-            ? QStringLiteral("✓ %1  %2ms").arg(detail).arg(latencyMs)
-            : QStringLiteral("✗ %1").arg(detail));
-        label->setStyleSheet(success
-            ? QStringLiteral("font-size: 10px; color: #067647;")
-            : QStringLiteral("font-size: 10px; color: #b42318;"));
+        label->setState(
+            success ? QStringLiteral("%1 · %2 ms").arg(detail).arg(latencyMs) : detail,
+            success ? StatusBadge::Tone::Success : StatusBadge::Tone::Error,
+            style()->standardIcon(success
+                ? QStyle::SP_DialogApplyButton : QStyle::SP_MessageBoxCritical));
         label->show();
     }
     if (button) {
         button->setEnabled(true);
-        button->setText(QStringLiteral("🔍"));
+        button->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
     }
 }
 
@@ -2386,7 +2404,7 @@ void MainWindow::onDesktopDownloadClicked()
 
     auto addRow = [&dialog, root](const QString &titleText,
                                   const QString &detailText,
-                                  QPushButton *actionButton) {
+                                  QWidget *actionWidget) {
         auto *row = new QFrame(&dialog);
         row->setStyleSheet(QStringLiteral(
             "QFrame { background: white; border: 1px solid #e4e7ec; border-radius: 8px; }"));
@@ -2407,8 +2425,8 @@ void MainWindow::onDesktopDownloadClicked()
         textColumn->addWidget(rowTitle);
         textColumn->addWidget(detail);
         rowLayout->addLayout(textColumn, 1);
-        if (actionButton) {
-            rowLayout->addWidget(actionButton);
+        if (actionWidget) {
+            rowLayout->addWidget(actionWidget);
         }
         root->addWidget(row);
     };
@@ -2416,38 +2434,39 @@ void MainWindow::onDesktopDownloadClicked()
     for (const AiTool tool : { AiTool::ClaudeCode, AiTool::CodexCli }) {
         const DesktopAppStatus desktop = m_toolManager->detectDesktop(tool);
         if (desktop.installed) {
-            auto *badge = new QPushButton(QStringLiteral("已安装"), &dialog);
-            badge->setEnabled(false);
-            badge->setFixedHeight(34);
-            badge->setStyleSheet(AppTheme::secondaryButtonStyle());
+            auto *badge = new StatusBadge(&dialog);
+            badge->setState(
+                QStringLiteral("已安装"), StatusBadge::Tone::Success,
+                style()->standardIcon(QStyle::SP_DialogApplyButton));
             addRow(desktop.appName,
-                   QStringLiteral("已检测到本机安装，可直接使用。"), badge);
+                   QStringLiteral("已检测到本机安装"), badge);
             continue;
         }
 
-        const bool proxyDownloadable = DesktopDownloader::platformSupported();
+        const DesktopDownloader::Product product =
+            tool == AiTool::ClaudeCode
+                ? DesktopDownloader::Product::Claude
+                : DesktopDownloader::Product::ChatGpt;
+        const bool proxyDownloadable = DesktopDownloader::productSupported(product);
         if (proxyDownloadable) {
             auto *button = new QPushButton(QStringLiteral("下载并安装"), &dialog);
+            button->setIcon(style()->standardIcon(QStyle::SP_ArrowDown));
             button->setFixedHeight(34);
             button->setStyleSheet(AppTheme::primaryButtonStyle());
-            const DesktopDownloader::Product product =
-                tool == AiTool::ClaudeCode
-                    ? DesktopDownloader::Product::Claude
-                    : DesktopDownloader::Product::ChatGpt;
             const QString appName = desktop.appName;
             const QString token = m_authToken;
             connect(button, &QPushButton::clicked, &dialog, [this, product, appName, token]() {
                 auto *dl = new DesktopDownloader(
-                    product, appName, token, QStringLiteral("https://aegisy.cc"), this);
+                    product, appName, token, m_apiClient->baseUrl(), this);
                 dl->exec();
                 dl->deleteLater();
             });
             addRow(desktop.appName,
-                   QStringLiteral(
-                       "优先通过 Aegisy 下载并打开安装包；下载服务不可用时自动转到官网。"),
+                   QStringLiteral("Aegisy 美国节点 · 受认证流式代理"),
                    button);
         } else {
             auto *button = new QPushButton(QStringLiteral("打开下载页"), &dialog);
+            button->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
             button->setFixedHeight(34);
             button->setStyleSheet(AppTheme::secondaryButtonStyle());
             const QString url = desktop.downloadUrl;
@@ -2455,7 +2474,7 @@ void MainWindow::onDesktopDownloadClicked()
                 QDesktopServices::openUrl(QUrl(url));
             });
             addRow(desktop.appName,
-                   QStringLiteral("当前平台暂不支持代理下载，将打开官方下载页。"), button);
+                   QStringLiteral("当前平台仅提供官方下载页"), button);
         }
     }
 

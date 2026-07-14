@@ -7,6 +7,8 @@
 #include <QPushButton>
 #include <QLabel>
 
+class StatusBadge;
+
 // MCP 服务器共享配置面板
 // 读写 ~/.claude/settings.json 中的 mcpServers 字段
 // 切换档案时该字段会被 Aegisy 的 merge-write 逻辑自动保留
@@ -39,7 +41,7 @@ private:
     QPushButton  *m_editButton = nullptr;
     QPushButton  *m_removeButton = nullptr;
     QPushButton  *m_saveButton = nullptr;
-    QLabel       *m_statusLabel = nullptr;
+    StatusBadge  *m_statusLabel = nullptr;
 
     QJsonObject  m_mcpServers;   // 当前编辑中的 mcpServers 对象
 };

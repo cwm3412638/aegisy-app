@@ -10,6 +10,7 @@
 class QLabel;
 class QPushButton;
 class QTableWidget;
+class StatusBadge;
 
 class SystemDoctorDialog : public QDialog
 {
@@ -43,7 +44,7 @@ private:
 
     ToolManager *m_toolManager;
     QTableWidget *m_table = nullptr;
-    QLabel *m_summaryLabel = nullptr;
+    StatusBadge *m_summaryLabel = nullptr;
     QLabel *m_statusLabel = nullptr;
     QPushButton *m_refreshButton = nullptr;
     bool m_scanning = false;

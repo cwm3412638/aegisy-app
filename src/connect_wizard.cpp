@@ -1,5 +1,6 @@
 #include "connect_wizard.h"
 #include "app_theme.h"
+#include "status_badge.h"
 
 #include <QFrame>
 #include <QHBoxLayout>
@@ -150,7 +151,7 @@ void ConnectWizardDialog::setupUi()
         m_editIndex < 0 ? QStringLiteral("新建连接配置") : QStringLiteral("编辑连接配置"),
         header);
     title->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700; color: #101828;"));
-    auto *subtitle = new QLabel(QStringLiteral("一个配置只连接一个 AI 工具"), header);
+    auto *subtitle = new QLabel(QStringLiteral("本机 AI 工具接入"), header);
     subtitle->setStyleSheet(QStringLiteral("font-size: 12px; color: #667085;"));
     titleColumn->addWidget(title);
     titleColumn->addWidget(subtitle);
@@ -249,14 +250,6 @@ QWidget *ConnectWizardDialog::buildIdentityPage()
     }
     layout->addLayout(typeRow);
 
-    auto *note = new QLabel(
-        QStringLiteral("选择一个终端后，这个档案只保存该终端的 API Key 和模型；激活时也只更新对应的本地认证文件。"), page);
-    note->setWordWrap(true);
-    note->setStyleSheet(QStringLiteral(
-        "background: #f0fdf9; color: #0f5f59; border: 1px solid #b7e4da;"
-        "border-radius: 7px; padding: 10px 12px; font-size: 12px;"));
-    layout->addSpacing(10);
-    layout->addWidget(note);
     layout->addStretch();
 
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
@@ -326,10 +319,8 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
     keyRow->addWidget(m_testButton);
     layout->addLayout(keyRow);
 
-    m_loadingLabel = new QLabel(page);
-    m_loadingLabel->setWordWrap(true);
+    m_loadingLabel = new StatusBadge(page);
     m_loadingLabel->setVisible(false);
-    m_loadingLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #667085;"));
     layout->addWidget(m_loadingLabel);
 
     auto *modelLabel = new QLabel(QStringLiteral("模型"), page);
@@ -342,11 +333,6 @@ QWidget *ConnectWizardDialog::buildConnectionPage()
     m_modelCombo->setFixedHeight(36);
     m_modelCombo->addItem(QStringLiteral("使用工具默认模型"), QString());
     layout->addWidget(m_modelCombo);
-
-    auto *hint = new QLabel(
-        QStringLiteral("选择 API Key 后会自动加载可用模型，也可以使用工具默认模型。"), page);
-    hint->setStyleSheet(QStringLiteral("font-size: 11px; color: #667085;"));
-    layout->addWidget(hint);
 
     auto *suggestLabel = new QLabel(QStringLiteral("常用模型"), page);
     suggestLabel->setStyleSheet(QStringLiteral("font-size: 11px; color: #98a2b3;"));
@@ -380,8 +366,9 @@ void ConnectWizardDialog::onTestConnection()
     m_waitingConnectionTest = true;
     m_testButton->setEnabled(false);
     m_loadingLabel->setVisible(true);
-    m_loadingLabel->setText(QStringLiteral("正在验证 Key、模型和连接延迟..."));
-    m_loadingLabel->setStyleSheet(QStringLiteral("font-size: 12px; color: #175cd3;"));
+    m_loadingLabel->setState(
+        QStringLiteral("正在验证连接"), StatusBadge::Tone::Info,
+        style()->standardIcon(QStyle::SP_BrowserReload));
     m_apiClient->testConnection(QStringLiteral("connect-wizard"), key, currentModel());
 }
 
@@ -396,10 +383,11 @@ void ConnectWizardDialog::onConnectionTested(const QString &requestId,
     m_waitingConnectionTest = false;
     m_testButton->setEnabled(true);
     m_loadingLabel->setVisible(true);
-    m_loadingLabel->setText(QStringLiteral("%1  ·  %2 ms").arg(detail).arg(latencyMs));
-    m_loadingLabel->setStyleSheet(success
-        ? QStringLiteral("font-size: 12px; color: #067647;")
-        : QStringLiteral("font-size: 12px; color: #b42318;"));
+    m_loadingLabel->setState(
+        QStringLiteral("%1 · %2 ms").arg(detail).arg(latencyMs),
+        success ? StatusBadge::Tone::Success : StatusBadge::Tone::Error,
+        style()->standardIcon(success
+            ? QStyle::SP_DialogApplyButton : QStyle::SP_MessageBoxCritical));
 }
 
 void ConnectWizardDialog::onApiKeysReceived(const QJsonArray &keys)
@@ -576,10 +564,22 @@ void ConnectWizardDialog::setModelLoading(bool loading, const QString &message)
     m_keyCombo->setEnabled(!loading);
     m_modelCombo->setEnabled(!loading);
     m_loadingLabel->setVisible(loading || !message.isEmpty());
-    m_loadingLabel->setText(loading ? QStringLiteral("正在查询可用模型...") : message);
-    m_loadingLabel->setStyleSheet(loading || !message.startsWith(QStringLiteral("模型查询失败"))
-        ? QStringLiteral("font-size: 12px; color: #667085;")
-        : QStringLiteral("font-size: 12px; color: #b42318;"));
+    if (loading) {
+        m_loadingLabel->setState(
+            QStringLiteral("正在查询模型"), StatusBadge::Tone::Info,
+            style()->standardIcon(QStyle::SP_BrowserReload));
+    } else if (!message.isEmpty()) {
+        const bool failed = message.startsWith(QStringLiteral("模型查询失败"));
+        const bool empty = message.startsWith(QStringLiteral("当前 Key 未返回"));
+        m_loadingLabel->setState(
+            message,
+            failed ? StatusBadge::Tone::Error
+                   : (empty ? StatusBadge::Tone::Warning : StatusBadge::Tone::Success),
+            style()->standardIcon(failed
+                ? QStyle::SP_MessageBoxCritical
+                : (empty ? QStyle::SP_MessageBoxWarning
+                         : QStyle::SP_DialogApplyButton)));
+    }
 }
 
 void ConnectWizardDialog::onTypeChanged(int id)
