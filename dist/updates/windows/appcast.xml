@@ -3,14 +3,14 @@
     <channel>
         <title>AegisyClient Windows Updates</title>
         <item>
-            <title>2.3.2</title>
-            <pubDate>Fri, 10 Jul 2026 14:07:35 GMT</pubDate>
+            <title>2.5.1</title>
+            <pubDate>Wed, 15 Jul 2026 09:04:22 GMT</pubDate>
             <link>https://aegisy.cc</link>
-            <sparkle:version>2.3.2</sparkle:version>
-            <sparkle:shortVersionString>2.3.2</sparkle:shortVersionString>
+            <sparkle:version>2.5.1</sparkle:version>
+            <sparkle:shortVersionString>2.5.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>10.0</sparkle:minimumSystemVersion>
-            <sparkle:releaseNotesLink>https://aegisy.cc/desktop/windows/AegisyClient-2.3.2-Windows-x64.md</sparkle:releaseNotesLink>
-            <enclosure url='https://aegisy.cc/desktop/windows/AegisyClientSetup-2.3.2.exe' length='19382872' type='application/octet-stream' sparkle:os='windows-x64' sparkle:edSignature='8Cdi+OhcIfG2xFA/O8LgHWeO8EDjPrlgZ5g/28W2V4xE2u58KDWXvCuSeFBfHZqA3KcIDNWYvb16swmH5jFQBA==' sparkle:installerArguments='/CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS'/>
+            <sparkle:releaseNotesLink>https://aegisy.cc/desktop/windows/AegisyClient-2.5.1-Windows-x64.md</sparkle:releaseNotesLink>
+            <enclosure url='https://aegisy.cc/desktop/windows/AegisyClientSetup-2.5.1.exe' length='14061405' type='application/octet-stream' sparkle:os='windows-x64' sparkle:edSignature='+ixzcVrAvasZ6+yo/PtXSm01fW83OZSA0LgLCCXVgaeuY191LXsx14fCtsyXqMCp4E6czYnUNHBOJh3PnM/OCw==' sparkle:installerArguments='/CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS'/>
         </item>
     </channel>
 </rss>
