@@ -1,4 +1,5 @@
 #include "desktop_enhancement_manager.h"
+#include "process_command.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -13,6 +14,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSqlDatabase>
@@ -29,13 +31,35 @@ namespace {
 
 QString commandPath(const QString &name)
 {
-    QString path = QStandardPaths::findExecutable(name);
 #if defined(Q_OS_WIN)
-    if (path.isEmpty() && name.compare(QStringLiteral("codex"), Qt::CaseInsensitive) == 0) {
-        path = QStandardPaths::findExecutable(QStringLiteral("codex.cmd"));
+    QStringList searchPaths = QProcessEnvironment::systemEnvironment()
+        .value(QStringLiteral("PATH"))
+        .split(QDir::listSeparator(), Qt::SkipEmptyParts);
+    const QString appData = QString::fromLocal8Bit(qgetenv("APPDATA"));
+    const QString npmPrefix = QString::fromLocal8Bit(qgetenv("npm_config_prefix"));
+    for (const QString &preferred : {
+             npmPrefix,
+             appData.isEmpty() ? QString() : QDir(appData).filePath(QStringLiteral("npm")) }) {
+        if (!preferred.isEmpty() && QDir(preferred).exists()) {
+            searchPaths.removeAll(preferred);
+            searchPaths.prepend(preferred);
+        }
     }
+
+    // npm also creates an extensionless POSIX shim on Windows. QProcess cannot
+    // execute that file, so resolve only native executables and batch shims.
+    for (const QString &directory : searchPaths) {
+        for (const QString &extension : {
+                 QStringLiteral(".com"), QStringLiteral(".exe"),
+                 QStringLiteral(".cmd"), QStringLiteral(".bat") }) {
+            const QFileInfo candidate(QDir(directory).filePath(name + extension));
+            if (candidate.isFile()) return candidate.absoluteFilePath();
+        }
+    }
+    return QString();
+#else
+    return QStandardPaths::findExecutable(name);
 #endif
-    return path;
 }
 
 QString rootTomlString(const QString &text, const QString &key)
@@ -158,9 +182,15 @@ QList<CodexPluginInfo> DesktopEnhancementManager::listCodexPlugins(QString *erro
 
     QProcess process;
     process.setProcessChannelMode(QProcess::MergedChannels);
-    process.start(codex, { QStringLiteral("plugin"), QStringLiteral("list"),
-                           QStringLiteral("--available"), QStringLiteral("--json") });
-    if (!process.waitForStarted(3000) || !process.waitForFinished(15000)) {
+    ProcessCommand::start(&process, codex,
+        { QStringLiteral("plugin"), QStringLiteral("list"),
+          QStringLiteral("--available"), QStringLiteral("--json") });
+    if (!process.waitForStarted(3000)) {
+        if (error) *error = QStringLiteral("无法启动 Codex CLI：%1")
+            .arg(process.errorString());
+        return result;
+    }
+    if (!process.waitForFinished(15000)) {
         process.kill();
         if (error) *error = QStringLiteral("Codex 插件列表查询超时。");
         return result;
@@ -219,9 +249,15 @@ bool DesktopEnhancementManager::installCodexPlugin(const QString &pluginId,
 
     QProcess process;
     process.setProcessChannelMode(QProcess::MergedChannels);
-    process.start(codex, { QStringLiteral("plugin"), QStringLiteral("add"),
-                           pluginId, QStringLiteral("--json") });
-    if (!process.waitForStarted(3000) || !process.waitForFinished(120000)) {
+    ProcessCommand::start(&process, codex,
+        { QStringLiteral("plugin"), QStringLiteral("add"),
+          pluginId, QStringLiteral("--json") });
+    if (!process.waitForStarted(3000)) {
+        if (error) *error = QStringLiteral("无法启动 Codex CLI：%1")
+            .arg(process.errorString());
+        return false;
+    }
+    if (!process.waitForFinished(120000)) {
         process.kill();
         if (error) *error = QStringLiteral("安装插件超时。");
         return false;

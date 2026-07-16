@@ -115,9 +115,8 @@ bool DesktopDownloader::productSupported(Product product)
     return product != Product::ChatGpt
         || platformSlug() == QStringLiteral("mac-arm64");
 #elif defined(Q_OS_WIN)
-    // ChatGPT for Windows is distributed through Microsoft Store, not a
-    // directly verifiable installer payload.
-    return product == Product::Claude;
+    Q_UNUSED(product);
+    return true;
 #else
     Q_UNUSED(product);
     return true;

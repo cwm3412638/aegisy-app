@@ -19,8 +19,9 @@ X-Aegisy-Client: desktop
 | `claude` | `mac-x64` | Claude macOS universal PKG |
 | `claude` | `win-x64` | Claude Windows x64 MSIX |
 | `chatgpt` | `mac-arm64` | ChatGPT macOS DMG |
+| `chatgpt` | `win-x64` | ChatGPT Windows x64 signed EXE/MSIX |
 
-其他组合返回 `400 unsupported_download`。ChatGPT macOS 当前要求 Apple Silicon；Windows 当前由 Microsoft Store 分发，不作为可代理 EXE 提供。
+其他组合返回 `400 unsupported_download`。ChatGPT macOS 当前要求 Apple Silicon；Windows 安装包必须由服务端固定映射到经过验证的官方签名 EXE/MSIX，不允许把 Microsoft Store 页面或任意客户端 URL 当作上游。
 
 ## 官方上游
 
@@ -28,7 +29,7 @@ X-Aegisy-Client: desktop
 
 Claude macOS 与 Windows 使用 `downloads.claude.ai` 的版本化官方 CDN 地址。版本更新必须先在隔离环境验证文件大小、格式签名和平台，再更新服务端固定配置；不要在用户请求中访问容易触发挑战页的 `claude.ai/api/desktop/.../redirect`。
 
-ChatGPT macOS 使用 `https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg`。
+ChatGPT macOS 使用 `https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg`。ChatGPT Windows 上游由服务端固定配置维护；发布前必须验证 Authenticode/包签名、x64 架构和 EXE/MSIX 格式，再允许代理路由返回。
 
 如固定入口发生重定向，每一跳都必须重新校验 HTTPS 和主机白名单，最多 3 跳。白名单仅包含 `downloads.claude.ai` 与 `persistent.oaistatic.com`；不得把上游 `Location` 返回给客户端。
 

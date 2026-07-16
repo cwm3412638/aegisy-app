@@ -308,7 +308,9 @@ if(BUILD_TESTING)
     add_executable(AegisyDesktopEnhancementTest
         tests/desktop_enhancement_test.cpp
         src/desktop_enhancement_manager.cpp
+        src/process_command.cpp
         include/desktop_enhancement_manager.h
+        include/process_command.h
     )
     target_include_directories(AegisyDesktopEnhancementTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)

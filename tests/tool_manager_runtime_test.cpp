@@ -53,6 +53,53 @@ int main(int argc, char *argv[])
         std::cerr << "failed to execute a batch command from a path with spaces\n";
         return 1;
     }
+
+    // npm creates an extensionless POSIX shim next to the Windows .cmd shim.
+    // Detection must ignore the former because QProcess/CreateProcess cannot
+    // execute it directly.
+    QTemporaryDir npmFixture(
+        QDir::tempPath() + QStringLiteral("/aegisy npm shim test XXXXXX"));
+    const QString npmBin = npmFixture.filePath(QStringLiteral("npm"));
+    if (!npmFixture.isValid() || !QDir().mkpath(npmBin)) {
+        std::cerr << "failed to create npm shim fixture\n";
+        return 1;
+    }
+    QFile posixShim(npmBin + QStringLiteral("/codex"));
+    QFile cmdShim(npmBin + QStringLiteral("/codex.cmd"));
+    if (!posixShim.open(QIODevice::WriteOnly)
+            || posixShim.write("#!/bin/sh\necho wrong-shim\n") < 0
+            || !cmdShim.open(QIODevice::WriteOnly)
+            || cmdShim.write("@echo off\r\necho codex-cli 9.8.7\r\n") < 0) {
+        std::cerr << "failed to write npm shim fixture\n";
+        return 1;
+    }
+    posixShim.close();
+    cmdShim.close();
+
+    const bool hadAppData = qEnvironmentVariableIsSet("APPDATA");
+    const QByteArray previousAppData = qgetenv("APPDATA");
+    qputenv("APPDATA", npmFixture.path().toUtf8());
+    ToolManager shimManager;
+    const QString resolvedCodex = shimManager.resolvedExecutable(AiTool::CodexCli, 500);
+    if (hadAppData) qputenv("APPDATA", previousAppData);
+    else qunsetenv("APPDATA");
+
+    if (QFileInfo(resolvedCodex).absoluteFilePath()
+            != QFileInfo(cmdShim.fileName()).absoluteFilePath()) {
+        std::cerr << "Windows command detection did not prefer the npm .cmd shim\n";
+        return 1;
+    }
+    QProcess shimProcess;
+    shimProcess.setProcessChannelMode(QProcess::MergedChannels);
+    ProcessCommand::start(&shimProcess, resolvedCodex, { QStringLiteral("--version") });
+    if (!shimProcess.waitForStarted(2000) || !shimProcess.waitForFinished(5000)
+            || shimProcess.exitStatus() != QProcess::NormalExit
+            || shimProcess.exitCode() != 0
+            || !ProcessCommand::decodeOutput(shimProcess.readAll())
+                    .contains(QStringLiteral("9.8.7"))) {
+        std::cerr << "failed to execute the resolved npm .cmd shim\n";
+        return 1;
+    }
 #endif
 
     ToolManager manager;

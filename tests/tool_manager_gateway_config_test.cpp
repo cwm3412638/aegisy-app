@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFile>
 #include <QTemporaryDir>
+#include <QUuid>
 
 #include <iostream>
 
@@ -21,20 +22,55 @@ bool require(bool condition, const char *message)
     return condition;
 }
 
+class TemporaryHome
+{
+public:
+    TemporaryHome()
+    {
+        QByteArray temporaryRoot = qgetenv("TMPDIR");
+        if (temporaryRoot.isEmpty()) temporaryRoot = qgetenv("TEMP");
+        if (temporaryRoot.isEmpty()) temporaryRoot = qgetenv("TMP");
+        if (temporaryRoot.isEmpty()) temporaryRoot = QByteArrayLiteral(".");
+        m_path = QString::fromLocal8Bit(temporaryRoot)
+            + QStringLiteral("/aegisy-gateway-config-")
+            + QUuid::createUuid().toString(QUuid::WithoutBraces);
+        qputenv("HOME", m_path.toUtf8());
+        qputenv("USERPROFILE", m_path.toUtf8());
+        qputenv("AEGISY_CONFIG_HOME", m_path.toUtf8());
+        m_valid = QDir().mkpath(m_path);
+    }
+
+    ~TemporaryHome() { QDir(m_path).removeRecursively(); }
+
+    bool isValid() const { return m_valid; }
+    QString path() const { return m_path; }
+
+private:
+    QString m_path;
+    bool m_valid = false;
+};
+
 } // namespace
 
 int main(int argc, char *argv[])
 {
-    QTemporaryDir home;
+    // Set HOME before constructing QTemporaryDir or QCoreApplication. Qt 5 on
+    // Windows may otherwise cache the real user home while resolving TempLocation.
+    TemporaryHome home;
     if (!home.isValid()) return 1;
-    qputenv("HOME", home.path().toUtf8());
-    qputenv("USERPROFILE", home.path().toUtf8());
 
     QCoreApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("AegisyTest"));
     QCoreApplication::setApplicationName(QStringLiteral("GatewayConfig"));
 
     ToolManager manager;
+    const QStringList managedPaths = manager.configurationFiles(AiTool::CodexCli);
+    if (managedPaths.isEmpty()
+            || !QDir::cleanPath(managedPaths.first()).startsWith(
+                QDir::cleanPath(home.path()))) {
+        std::cerr << "temporary configuration home isolation was not applied\n";
+        return 1;
+    }
     const QString codexConfigPath =
         home.path() + QStringLiteral("/.codex/config.toml");
     if (!QDir().mkpath(home.path() + QStringLiteral("/.codex"))) return 1;
@@ -91,6 +127,10 @@ int main(int argc, char *argv[])
     const qsizetype rootProvider = codexConfig.indexOf(
         QStringLiteral("model_provider = \"aegisy_local\""));
     const qsizetype firstTable = codexConfig.indexOf(QLatin1Char('['));
+    if (rootProvider < 0 || rootProvider >= firstTable) {
+        std::cerr << "Generated Codex config:\n"
+                  << codexConfig.toStdString() << '\n';
+    }
     if (!require(rootProvider >= 0 && rootProvider < firstTable,
                  "Codex managed root keys were written inside a TOML table")
         || !require(codexConfig.count(QStringLiteral("model_provider =")) == 1,

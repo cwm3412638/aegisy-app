@@ -7,6 +7,7 @@
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QUuid>
+#include <QVariant>
 
 #include <iostream>
 
@@ -35,6 +36,32 @@ int main(int argc, char **argv)
     const QString codexHome = root + QStringLiteral("/.codex");
     QDir().mkpath(codexHome + QStringLiteral("/sessions/2026/07/13"));
     QDir().mkpath(codexHome + QStringLiteral("/sqlite"));
+
+#ifdef Q_OS_WIN
+    const QString fixtureBin = root + QStringLiteral("/npm");
+    if (!writeFile(fixtureBin + QStringLiteral("/codex"),
+                   QByteArray("#!/bin/sh\necho wrong shim\n"))
+            || !writeFile(fixtureBin + QStringLiteral("/codex.cmd"),
+                QByteArray("@echo off\r\n"
+                           "echo {\"installed\":[],\"available\":[{\"pluginId\":\"fixture\",\"name\":\"fixture\",\"version\":\"1.0.0\"}]}\r\n"))) {
+        return fail(QStringLiteral("failed to write Codex command fixture"));
+    }
+    const QByteArray previousPath = qgetenv("PATH");
+    const QByteArray previousAppData = qgetenv("APPDATA");
+    qputenv("APPDATA", root.toLocal8Bit());
+    qputenv("PATH", fixtureBin.toLocal8Bit()
+        + QByteArray(1, QDir::listSeparator().toLatin1()) + previousPath);
+    DesktopEnhancementManager pluginManager;
+    QString pluginError;
+    const QList<CodexPluginInfo> plugins = pluginManager.listCodexPlugins(&pluginError);
+    qputenv("PATH", previousPath);
+    qputenv("APPDATA", previousAppData);
+    if (!pluginError.isEmpty() || plugins.size() != 1
+            || plugins.first().id != QStringLiteral("fixture")) {
+        return fail(QStringLiteral("Windows Codex .cmd shim was not executed: %1")
+            .arg(pluginError));
+    }
+#endif
 
     if (!writeFile(codexHome + QStringLiteral("/config.toml"),
                    QByteArray("model_provider = \"aegisy\"\n\n[model_providers.aegisy]\n"))) {

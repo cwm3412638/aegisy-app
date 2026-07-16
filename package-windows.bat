@@ -32,9 +32,12 @@ echo Qt6_DIR  = %QT_CMAKE_DIR%
 echo OPENSSL  = %OPENSSL_ROOT_DIR%
 
 cmake -S . -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A %WINDOWS_ARCH% ^
-    -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF ^
+    -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON ^
     %QT_ARG% %OPENSSL_ARG% || exit /b 1
-cmake --build "%BUILD_DIR%" --config Release || exit /b 1
+cmake --build "%BUILD_DIR%" --config Release --target AegisyClient || exit /b 1
+cmake --build "%BUILD_DIR%" --config Release --target AegisyToolManagerRuntimeTest || exit /b 1
+ctest --test-dir "%BUILD_DIR%" -C Release -R tool_manager_runtime_registry ^
+    --output-on-failure || exit /b 1
 
 set "EXE=%BUILD_DIR%\Release\AegisyClient.exe"
 if not exist "%EXE%" (echo [错误] 未找到 %EXE% & exit /b 1)

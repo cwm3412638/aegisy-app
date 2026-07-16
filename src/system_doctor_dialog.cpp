@@ -355,6 +355,17 @@ void SystemDoctorDialog::installOrUpdate(AiTool tool, bool installed, bool repai
 {
     const QString action = repair ? QStringLiteral("修复")
         : (installed ? QStringLiteral("更新") : QStringLiteral("安装"));
+#ifdef Q_OS_WIN
+    if (tool == AiTool::CodexCli && m_toolManager->isCliRunning(tool)) {
+        QMessageBox::warning(
+            this,
+            QStringLiteral("请先关闭 %1").arg(ToolManager::toolName(tool)),
+            QStringLiteral("检测到 %1 仍在运行。Windows 会锁定其程序文件，无法就地%2。\n\n"
+                           "请关闭所有相关桌面窗口和终端后再试。")
+                .arg(ToolManager::toolName(tool), action));
+        return;
+    }
+#endif
     const QString command = QStringLiteral("npm install -g %1@latest")
         .arg(ToolManager::npmPackage(tool));
     if (QMessageBox::question(

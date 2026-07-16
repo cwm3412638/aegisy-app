@@ -1944,6 +1944,16 @@ void MainWindow::processActivationQueue()
     }
 
     if (!status.installed) {
+        if (m_toolManager->isCliRunning(tool)) {
+            logMessage(
+                QStringLiteral("认证已更新；%1 正在运行，已跳过修复。关闭所有相关窗口和终端后，"
+                               "可在“系统体检”中重新更新。")
+                    .arg(ToolManager::toolName(tool)),
+                kLogWarn);
+            m_activationQueue.removeFirst();
+            processActivationQueue();
+            return;
+        }
         logMessage(
             QStringLiteral("认证已更新，正在安装 %1...").arg(ToolManager::toolName(tool)),
             kLogInfo);

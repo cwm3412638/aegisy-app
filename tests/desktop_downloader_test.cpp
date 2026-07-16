@@ -4,6 +4,8 @@
 #include <QDebug>
 #include <QSysInfo>
 
+#include <iostream>
+
 namespace {
 
 int failures = 0;
@@ -11,7 +13,7 @@ int failures = 0;
 void expect(bool condition, const char *message)
 {
     if (!condition) {
-        qCritical() << message;
+        std::cerr << message << '\n';
         ++failures;
     }
 }
@@ -33,9 +35,13 @@ int main(int argc, char **argv)
                "unsupported platforms must not expose a download endpoint");
     }
 #if defined(Q_OS_WIN)
-    expect(!DesktopDownloader::productSupported(
+    expect(DesktopDownloader::productSupported(
                DesktopDownloader::Product::ChatGpt),
-           "ChatGPT Windows Store distribution must not be treated as an EXE download");
+           "ChatGPT for Windows must use the authenticated proxy download");
+    expect(DesktopDownloader::requestPath(
+               DesktopDownloader::Product::ChatGpt)
+               == QStringLiteral("/api/v1/desktop-downloads/chatgpt/win-x64"),
+           "ChatGPT for Windows must target the server proxy endpoint");
 #elif defined(Q_OS_MAC)
     if (QSysInfo::currentCpuArchitecture().contains(QStringLiteral("arm"))) {
         expect(DesktopDownloader::productSupported(
@@ -82,7 +88,7 @@ int main(int argc, char **argv)
            "an MZ header should pass validation on Windows");
     expect(DesktopDownloader::validateInstallerParts(
                QStringLiteral("application/msix"), QStringLiteral("msix"),
-               QByteArrayLiteral("PK\x03\x04binary"), QByteArray(), 1024, &error),
+               QByteArrayLiteral("PK\x03\x04" "binary"), QByteArray(), 1024, &error),
            "an MSIX ZIP header should pass validation on Windows");
     expect(!DesktopDownloader::validateInstallerParts(
                QStringLiteral("application/octet-stream"), QStringLiteral("exe"),

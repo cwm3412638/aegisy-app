@@ -1,6 +1,7 @@
 #include "runtime_status_store.h"
 
 #include <QtGlobal>
+#include <QVariant>
 
 RuntimeStatusStore::RuntimeStatusStore(QObject *parent)
     : QObject(parent)

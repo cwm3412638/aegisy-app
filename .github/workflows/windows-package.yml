@@ -35,6 +35,20 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Reject a reused release version
+        shell: pwsh
+        run: |
+          $cmake = Get-Content CMakeLists.txt -Raw
+          $match = [regex]::Match($cmake, 'project\s*\(\s*AegisyClient\s+VERSION\s+([0-9]+(?:\.[0-9]+)+)')
+          if (-not $match.Success) {
+              throw "Cannot read the AegisyClient version from CMakeLists.txt"
+          }
+          $version = $match.Groups[1].Value
+          $publishedInstaller = "dist/AegisyClientSetup-$version.exe"
+          if (Test-Path -LiteralPath $publishedInstaller) {
+              throw "Version $version is already published. Bump the project version before rebuilding Windows artifacts."
+          }
+
       - name: Mark build as running
         shell: pwsh
         run: git push --force origin HEAD:refs/heads/ci/windows-package-running

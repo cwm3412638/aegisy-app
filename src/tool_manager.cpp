@@ -16,6 +16,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QUuid>
+#include <QVersionNumber>
 #include <algorithm>
 
 // 官方指南规定：BASE_URL 一律裸域名，不带 /v1
@@ -138,23 +139,45 @@ static const QString kNpmCmd  = "npm";
 static const QString kWhichCmd = "which";
 #endif
 
+static QString normalizedSearchPath(QString path)
+{
+    path = path.trimmed();
+    if (path.size() >= 2 && path.front() == QLatin1Char('"')
+            && path.back() == QLatin1Char('"')) {
+        path = path.mid(1, path.size() - 2).trimmed();
+    }
+    return path.isEmpty() ? QString() : QDir::cleanPath(path);
+}
+
 static void addSearchPath(QStringList &paths, const QString &path, bool prepend = false)
 {
-    if (path.isEmpty() || !QDir(path).exists() || paths.contains(path)) {
-        return;
-    }
+    const QString normalized = normalizedSearchPath(path);
+    if (normalized.isEmpty() || !QDir(normalized).exists()) return;
+
+#ifdef Q_OS_WIN
+    const bool duplicate = std::any_of(
+        paths.cbegin(), paths.cend(), [&normalized](const QString &candidate) {
+            return candidate.compare(normalized, Qt::CaseInsensitive) == 0;
+        });
+#else
+    const bool duplicate = paths.contains(normalized);
+#endif
+    if (duplicate) return;
+
     if (prepend) {
-        paths.prepend(path);
+        paths.prepend(normalized);
     } else {
-        paths.append(path);
+        paths.append(normalized);
     }
 }
 
 static QStringList commandSearchPaths()
 {
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-    QStringList paths = environment.value(QStringLiteral("PATH"))
+    QStringList paths;
+    const QStringList inheritedPaths = environment.value(QStringLiteral("PATH"))
         .split(QDir::listSeparator(), Qt::SkipEmptyParts);
+    for (const QString &path : inheritedPaths) addSearchPath(paths, path);
     const QString home = QDir::homePath();
 
 #if defined(Q_OS_MAC)
@@ -181,21 +204,28 @@ static QStringList commandSearchPaths()
         addSearchPath(paths, it->filePath() + QStringLiteral("/bin"), true);
     }
 #elif defined(Q_OS_WIN)
-    addSearchPath(paths,
-                  QString::fromLocal8Bit(qgetenv("APPDATA")) + QStringLiteral("\\npm"),
-                  true);
-    addSearchPath(paths,
-                  QString::fromLocal8Bit(qgetenv("ProgramFiles"))
-                      + QStringLiteral("\\nodejs"),
-                  true);
-    addSearchPath(paths,
-                  QString::fromLocal8Bit(qgetenv("ProgramFiles(x86)"))
-                      + QStringLiteral("\\nodejs"),
-                  true);
-    addSearchPath(paths,
-                  QString::fromLocal8Bit(qgetenv("LOCALAPPDATA"))
-                      + QStringLiteral("\\Programs\\nodejs"),
-                  true);
+    const QString appData = QString::fromLocal8Bit(qgetenv("APPDATA"));
+    const QString localAppData = QString::fromLocal8Bit(qgetenv("LOCALAPPDATA"));
+    const QString programFiles = QString::fromLocal8Bit(qgetenv("ProgramFiles"));
+    const QString programFilesX86 =
+        QString::fromLocal8Bit(qgetenv("ProgramFiles(x86)"));
+    const QString npmPrefix = QString::fromLocal8Bit(qgetenv("npm_config_prefix"));
+    const QString nvmSymlink = QString::fromLocal8Bit(qgetenv("NVM_SYMLINK"));
+    const auto childPath = [](const QString &base, const QString &child) {
+        return base.isEmpty() ? QString() : QDir(base).filePath(child);
+    };
+    const QStringList preferredPaths = {
+        childPath(appData, QStringLiteral("npm")),
+        npmPrefix,
+        nvmSymlink,
+        childPath(programFiles, QStringLiteral("nodejs")),
+        childPath(programFilesX86, QStringLiteral("nodejs")),
+        childPath(localAppData, QStringLiteral("Programs/nodejs")),
+        childPath(localAppData, QStringLiteral("Microsoft/WinGet/Links")),
+    };
+    for (auto it = preferredPaths.crbegin(); it != preferredPaths.crend(); ++it) {
+        addSearchPath(paths, *it, true);
+    }
 #else
     addSearchPath(paths, home + QStringLiteral("/.local/bin"), true);
     addSearchPath(paths, home + QStringLiteral("/.volta/bin"), true);
@@ -204,6 +234,62 @@ static QStringList commandSearchPaths()
 #endif
     return paths;
 }
+
+static bool isNpmBusyError(const QString &output)
+{
+    return output.contains(QStringLiteral("EBUSY"), Qt::CaseInsensitive)
+        || output.contains(QStringLiteral("resource busy or locked"),
+                           Qt::CaseInsensitive);
+}
+
+#ifdef Q_OS_WIN
+static bool isWindowsCommandFile(const QFileInfo &file)
+{
+    if (!file.isFile()) return false;
+    const QString suffix = file.suffix();
+    return suffix.compare(QStringLiteral("com"), Qt::CaseInsensitive) == 0
+        || suffix.compare(QStringLiteral("exe"), Qt::CaseInsensitive) == 0
+        || suffix.compare(QStringLiteral("cmd"), Qt::CaseInsensitive) == 0
+        || suffix.compare(QStringLiteral("bat"), Qt::CaseInsensitive) == 0;
+}
+
+static QString findWindowsCommand(const QString &command,
+                                  const QStringList &searchPaths)
+{
+    const QFileInfo commandInfo(command);
+    QStringList names;
+    if (commandInfo.suffix().isEmpty()) {
+        // npm installs both an extensionless POSIX shim and a .cmd shim.
+        // CreateProcess cannot run the POSIX shim, so never select it on Windows.
+        for (const QString &extension : {
+                 QStringLiteral(".com"), QStringLiteral(".exe"),
+                 QStringLiteral(".cmd"), QStringLiteral(".bat") }) {
+            names.append(command + extension);
+        }
+    } else {
+        names.append(command);
+    }
+
+    const bool containsDirectory = commandInfo.isAbsolute()
+        || command.contains(QLatin1Char('/')) || command.contains(QLatin1Char('\\'));
+    if (containsDirectory) {
+        for (const QString &name : names) {
+            const QFileInfo candidate(name);
+            if (isWindowsCommandFile(candidate)) return candidate.absoluteFilePath();
+        }
+        return QString();
+    }
+
+    for (const QString &path : searchPaths) {
+        const QDir directory(path);
+        for (const QString &name : names) {
+            const QFileInfo candidate(directory.filePath(name));
+            if (isWindowsCommandFile(candidate)) return candidate.absoluteFilePath();
+        }
+    }
+    return QString();
+}
+#endif
 
 static QProcessEnvironment commandEnvironment()
 {
@@ -363,11 +449,20 @@ bool ToolManager::commandExists(const QString &command, int timeoutMs)
 QString ToolManager::resolveCommand(const QString &command, int timeoutMs) const
 {
     const QFileInfo directPath(command);
+#ifdef Q_OS_WIN
+    if (directPath.isAbsolute() && isWindowsCommandFile(directPath)) {
+#else
     if (directPath.isAbsolute() && directPath.exists() && directPath.isExecutable()) {
+#endif
         return directPath.absoluteFilePath();
     }
 
-    const QString executable = QStandardPaths::findExecutable(command, commandSearchPaths());
+    const QStringList searchPaths = commandSearchPaths();
+#ifdef Q_OS_WIN
+    const QString executable = findWindowsCommand(command, searchPaths);
+#else
+    const QString executable = QStandardPaths::findExecutable(command, searchPaths);
+#endif
     if (!executable.isEmpty()) {
         return executable;
     }
@@ -383,9 +478,17 @@ QString ToolManager::resolveCommand(const QString &command, int timeoutMs) const
     if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
         return QString();
     }
-    return QString::fromLocal8Bit(process.readAllStandardOutput())
-        .split(QLatin1Char('\n'), Qt::SkipEmptyParts)
-        .value(0).trimmed();
+    const QStringList matches = QString::fromLocal8Bit(process.readAllStandardOutput())
+        .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+#ifdef Q_OS_WIN
+    for (const QString &match : matches) {
+        const QFileInfo candidate(match.trimmed());
+        if (isWindowsCommandFile(candidate)) return candidate.absoluteFilePath();
+    }
+    return QString();
+#else
+    return matches.value(0).trimmed();
+#endif
 }
 
 QString ToolManager::commandVersion(const QString &executable, int timeoutMs) const
@@ -722,19 +825,24 @@ bool ToolManager::isCliRunning(AiTool tool) const
     process.setProcessChannelMode(QProcess::MergedChannels);
 
 #if defined(Q_OS_WIN)
-    // tasklist 按精确映像名过滤；命中会输出对应行，否则输出提示信息。
-    const QString imageName = command + QStringLiteral(".exe");
-    process.start(QStringLiteral("tasklist"),
-                  { QStringLiteral("/FI"),
-                    QStringLiteral("IMAGENAME eq %1").arg(imageName),
-                    QStringLiteral("/NH") });
-    if (!process.waitForFinished(2000)) {
-        process.kill();
-        process.waitForFinished();
-        return false;
+    QStringList imageNames = { command + QStringLiteral(".exe") };
+    if (tool == AiTool::CodexCli) {
+        imageNames.append(QStringLiteral("codex-code-mode-host.exe"));
     }
-    const QString output = QString::fromLocal8Bit(process.readAll());
-    return output.contains(imageName, Qt::CaseInsensitive);
+    for (const QString &imageName : imageNames) {
+        process.start(QStringLiteral("tasklist"),
+                      { QStringLiteral("/FI"),
+                        QStringLiteral("IMAGENAME eq %1").arg(imageName),
+                        QStringLiteral("/NH") });
+        if (!process.waitForFinished(2000)) {
+            process.kill();
+            process.waitForFinished();
+            continue;
+        }
+        const QString output = QString::fromLocal8Bit(process.readAll());
+        if (output.contains(imageName, Qt::CaseInsensitive)) return true;
+    }
+    return false;
 #else
     // pgrep -x 精确匹配进程名，避免匹配到启动器命令行里的 "codex" 等误报。
     process.start(QStringLiteral("pgrep"), { QStringLiteral("-x"), command });
@@ -778,7 +886,11 @@ QProcessEnvironment ToolManager::launchEnvironment(AiTool tool) const
 
 QString ToolManager::homeFilePath(const QString &relative)
 {
-    return QDir::homePath() + "/" + relative;
+    const QString configuredHome = QString::fromLocal8Bit(
+        qgetenv("AEGISY_CONFIG_HOME")).trimmed();
+    const QString home = configuredHome.isEmpty()
+        ? QDir::homePath() : QDir::cleanPath(configuredHome);
+    return QDir(home).filePath(relative);
 }
 
 QStringList ToolManager::managedConfigPaths(AiTool tool) const
@@ -1867,6 +1979,17 @@ void ToolManager::installCli(AiTool tool, int requestId)
         return;
     }
 
+#ifdef Q_OS_WIN
+    if (tool == AiTool::CodexCli && isCliRunning(tool)) {
+        emit installOutput(tool, QStringLiteral(
+            "检测到 %1 正在运行。Windows 会锁定其程序文件，当前无法安装或更新；"
+            "请关闭所有 %1 窗口和终端后重试。")
+            .arg(toolName(tool)));
+        emit installFinished(tool, requestId, false);
+        return;
+    }
+#endif
+
     const QString executable = resolveCommand(cliCommand(tool), 1000);
     const bool runnable = !executable.isEmpty()
         && !commandVersion(executable, 1500).isEmpty();
@@ -1890,11 +2013,30 @@ void ToolManager::installCli(AiTool tool, int requestId)
     };
     connect(cleanup, &QProcess::readyReadStandardOutput, this, [this, cleanup, tool]() {
         const QString text = ProcessCommand::decodeOutput(
-            cleanup->readAllStandardOutput()).trimmed();
-        if (!text.isEmpty()) emit installOutput(tool, text);
+            cleanup->readAllStandardOutput());
+        cleanup->setProperty("aegisyInstallOutput",
+            cleanup->property("aegisyInstallOutput").toString() + text);
+        const QString trimmed = text.trimmed();
+        if (!trimmed.isEmpty()) emit installOutput(tool, trimmed);
     });
     connect(cleanup, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [continueInstall](int, QProcess::ExitStatus) { continueInstall(); });
+            this, [this, cleanup, tool, requestId, continueInstall](
+                      int exitCode, QProcess::ExitStatus exitStatus) {
+        if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+            continueInstall();
+            return;
+        }
+        if (isNpmBusyError(cleanup->property("aegisyInstallOutput").toString())) {
+            cleanup->setProperty("aegisyCleanupComplete", true);
+            cleanup->deleteLater();
+            emit installOutput(tool, QStringLiteral(
+                "%1 程序文件仍被占用，已停止覆盖安装。请关闭所有相关窗口和终端后重试。")
+                .arg(toolName(tool)));
+            emit installFinished(tool, requestId, false);
+            return;
+        }
+        continueInstall();
+    });
     connect(cleanup, &QProcess::errorOccurred, this,
             [this, cleanup, tool, continueInstall](QProcess::ProcessError) {
         emit installOutput(tool, QStringLiteral("清理残缺包时出现问题：%1；将继续尝试覆盖安装。")
@@ -1921,15 +2063,36 @@ void ToolManager::installCliPackage(AiTool tool, int requestId,
         }
         process->setProperty("aegisyCompletionEmitted", true);
         process->deleteLater();
+        if (!success && isNpmBusyError(
+                process->property("aegisyInstallOutput").toString())) {
+            emit installOutput(tool, QStringLiteral(
+                "程序文件正被运行中的 %1 占用。请关闭所有相关窗口和终端后重试。")
+                .arg(toolName(tool)));
+        }
         bool verified = success;
         if (verified) {
             const QString executable = resolveCommand(cliCommand(tool), 2000);
-            verified = !executable.isEmpty()
-                && !commandVersion(executable, 3000).isEmpty();
+            const QString installedVersion = commandVersion(executable, 3000);
+            verified = !executable.isEmpty() && !installedVersion.isEmpty();
             if (!verified) {
                 emit installOutput(tool, QStringLiteral(
                     "npm 已结束，但 %1 命令仍不可运行。请重启应用后再点“修复”。")
                     .arg(cliCommand(tool)));
+            } else {
+                const QString packageVersion = npmPackageVersion(tool, 3000);
+                const QVersionNumber installed = QVersionNumber::fromString(
+                    installedVersion);
+                const QVersionNumber package = QVersionNumber::fromString(
+                    packageVersion);
+                if (!installed.isNull() && !package.isNull()
+                        && QVersionNumber::compare(installed, package) < 0) {
+                    verified = false;
+                    emit installOutput(tool, QStringLiteral(
+                        "npm 已更新到 %1，但当前命令 %2 仍指向 %3（版本 %4）。"
+                        "检测到多份安装，请关闭终端并在系统体检中重新检测。")
+                        .arg(packageVersion, cliCommand(tool), executable,
+                             installedVersion));
+                }
             }
         }
         emit installFinished(tool, requestId, verified);
@@ -1937,9 +2100,12 @@ void ToolManager::installCliPackage(AiTool tool, int requestId,
 
     connect(process, &QProcess::readyReadStandardOutput, this, [this, process, tool]() {
         const QString text = ProcessCommand::decodeOutput(
-            process->readAllStandardOutput()).trimmed();
-        if (!text.isEmpty()) {
-            emit installOutput(tool, text);
+            process->readAllStandardOutput());
+        process->setProperty("aegisyInstallOutput",
+            process->property("aegisyInstallOutput").toString() + text);
+        const QString trimmed = text.trimmed();
+        if (!trimmed.isEmpty()) {
+            emit installOutput(tool, trimmed);
         }
     });
 
