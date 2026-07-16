@@ -1,8 +1,5 @@
 #include "app_theme.h"
 
-#include <QFont>
-#include <QStyleFactory>
-
 namespace AppTheme {
 
 // ── 按钮样式 ─────────────────────────────────────────────────────
@@ -11,14 +8,15 @@ QString primaryButtonStyle()
 {
     return QStringLiteral(
         "QPushButton {"
-        "  background: #0f766e; color: #ffffff;"
-        "  border: 1px solid #0f766e; border-radius: 8px;"
+        "  background: %1; color: #ffffff;"
+        "  border: 1px solid %1; border-radius: 8px;"
         "  padding: 0 18px; font-size: 13px; font-weight: 600;"
         "  min-height: 34px;"
         "}"
         "QPushButton:hover  { background: #0b625c; border-color: #0b625c; }"
         "QPushButton:pressed{ background: #094f4a; border-color: #094f4a; }"
-        "QPushButton:disabled{ background: #d1d9e0; border-color: #d1d9e0; color: #8a96a3; }");
+        "QPushButton:disabled{ background: #d1d9e0; border-color: #d1d9e0; color: #8a96a3; }")
+        .arg(QString::fromLatin1(Tokens::AccentStrong));
 }
 
 QString secondaryButtonStyle()
@@ -109,34 +107,24 @@ QString sideNavButtonStyle()
 {
     return QStringLiteral(
         "QPushButton {"
-        "  background: transparent; color: #475467; border: none; border-radius: 7px;"
+        "  background: transparent; color: #a9b5c1; border: none; border-radius: 7px;"
         "  text-align: left; padding: 0 10px;"
         "  font-size: 13px; font-weight: 400; min-height: 36px;"
         "}"
-        "QPushButton:hover  { background: #f0f2f5; color: #182230; }"
-        "QPushButton:checked{ background: #e7f5f2; color: #0f5f59; font-weight: 600; }"
-        "QPushButton:pressed{ background: #d8f0eb; }");
+        "QPushButton:hover  { background: %1; color: #f4f7fa; }"
+        "QPushButton:checked{ background: #19312f; color: #7ff3df; font-weight: 600; }"
+        "QPushButton:pressed{ background: #263640; }")
+        .arg(QString::fromLatin1(Tokens::ShellRaised));
 }
 
 // ── 全局样式 ──────────────────────────────────────────────────────
 
 void apply(QApplication &application)
 {
-    if (QStyle *fusion = QStyleFactory::create(QStringLiteral("Fusion"))) {
-        application.setStyle(fusion);
-    }
-
-    // 使用系统字体，11pt 提升可读性
-    QFont font = application.font();
-    font.setPointSize(11);
-    application.setFont(font);
-
     application.setStyleSheet(QStringLiteral(
 
         // ── 窗口/对话框 ─────────────────────────────────────────
         "QMainWindow, QDialog { background: #f4f7f9; }"
-        "QWidget { font-size: 13px; }"
-
         // ── 标签 ────────────────────────────────────────────────
         "QLabel { color: #17212b; background: transparent; }"
 

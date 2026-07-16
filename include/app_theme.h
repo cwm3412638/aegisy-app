@@ -6,7 +6,21 @@
 
 namespace AppTheme {
 
-// 应用全局样式（Fusion 风格 + 全局 stylesheet）
+namespace Tokens {
+inline constexpr char Accent[] = "#14b8a6";
+inline constexpr char AccentStrong[] = "#0f766e";
+inline constexpr char Canvas[] = "#f4f7f9";
+inline constexpr char Surface[] = "#ffffff";
+inline constexpr char Shell[] = "#111820";
+inline constexpr char ShellRaised[] = "#18212b";
+inline constexpr char Border[] = "#dce3e8";
+inline constexpr char Text[] = "#17212b";
+inline constexpr char TextMuted[] = "#667585";
+inline constexpr char Warning[] = "#f59e0b";
+inline constexpr char Critical[] = "#ef4444";
+}
+
+// 应用全局样式。保留系统原生控件风格与字体，仅提供语义化外观层。
 void apply(QApplication &application);
 
 // ── 按钮样式 ──────────────────────────────────────────────────

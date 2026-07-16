@@ -21,7 +21,35 @@
 // 官方指南规定：BASE_URL 一律裸域名，不带 /v1
 static const QString kBaseUrl = "https://aegisy.cc";
 constexpr int kMaxBackupsPerTool = 10;
-constexpr qint64 kCodexContextWindow = 272000;
+static const QString kCodexCapabilityHeader = QStringLiteral("x-openai-actor-authorization");
+static const QString kCodexCapabilityHeaderValue = QStringLiteral("aegisy");
+
+static bool usesGpt56CompatibilityProfile(const QString &model)
+{
+    const QString normalized = model.trimmed().toLower();
+    return normalized == QStringLiteral("gpt-5.6")
+        || normalized.startsWith(QStringLiteral("gpt-5.6-sol"));
+}
+
+static QString tomlBasicString(QString value)
+{
+    value.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+    value.replace(QLatin1Char('"'), QStringLiteral("\\\""));
+    value.replace(QLatin1Char('\b'), QStringLiteral("\\b"));
+    value.replace(QLatin1Char('\t'), QStringLiteral("\\t"));
+    value.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
+    value.replace(QLatin1Char('\f'), QStringLiteral("\\f"));
+    value.replace(QLatin1Char('\r'), QStringLiteral("\\r"));
+    return QLatin1Char('"') + value + QLatin1Char('"');
+}
+
+static bool hasCodexCapabilityHeader(const QString &inlineTable)
+{
+    static const QRegularExpression headerPattern(QStringLiteral(
+        R"((?:^|[,{])\s*["']?x-openai-actor-authorization["']?\s*=\s*["']aegisy["'])"),
+        QRegularExpression::CaseInsensitiveOption);
+    return headerPattern.match(inlineTable).hasMatch();
+}
 
 static QString toolSlug(AiTool tool)
 {
@@ -48,7 +76,8 @@ static bool isAegisyBaseUrl(const QString &value,
     const bool gateway = url.host() == QStringLiteral("127.0.0.1")
         && url.path() == gatewayPath;
     const bool direct = url.scheme() == QStringLiteral("https")
-        && url.host() == QStringLiteral("aegisy.cc");
+        && (url.host() == QStringLiteral("aegisy.cc")
+            || url.host() == QStringLiteral("www.aegisy.cc"));
     if (gatewayMode) {
         *gatewayMode = gateway;
     }
@@ -312,6 +341,20 @@ QString ToolManager::configFilePath(AiTool tool)
     return QString();
 }
 
+qint64 ToolManager::configuredContextLimit(AiTool tool, const QString &model)
+{
+    if (tool != AiTool::CodexCli) return -1;
+    return usesGpt56CompatibilityProfile(model)
+        ? CodexGpt56ContextLimit : CodexConfiguredContextLimit;
+}
+
+QString ToolManager::configuredReasoning(AiTool tool, const QString &model)
+{
+    if (tool != AiTool::CodexCli) return QString();
+    return usesGpt56CompatibilityProfile(model)
+        ? QStringLiteral("high") : QStringLiteral("xhigh");
+}
+
 bool ToolManager::commandExists(const QString &command, int timeoutMs)
 {
     return !resolveCommand(command, timeoutMs).isEmpty();
@@ -428,6 +471,16 @@ ConfigurationPreview ToolManager::previewConfiguration(AiTool tool,
             ? QStringLiteral("OPENAI_API_KEY 仅写入本地网关令牌，真实 Key 保留在网关内存")
             : QStringLiteral("更新 OPENAI_API_KEY 安全认证字段"));
         preview.changes.append(QStringLiteral("模型：%1").arg(targetModel));
+        preview.changes.append(QStringLiteral(
+            "启用第三方 Provider 兼容：关闭官方账号鉴权并写入能力请求头"));
+        preview.changes.append(QStringLiteral("启用实时 Web Search（web_search = live）"));
+        preview.changes.append(QStringLiteral("上下文：%1 / 思考深度：%2")
+            .arg(configuredContextLimit(tool, model))
+            .arg(configuredReasoning(tool, model)));
+        if (!gatewayMode) {
+            preview.warnings.append(QStringLiteral(
+                "Codex 自定义 Provider 不读取 auth.json；直连 Key 将同步写入 config.toml"));
+        }
         break;
     case AiTool::GeminiCli:
         preview.changes.append(QStringLiteral(
@@ -1099,12 +1152,12 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
             QStringLiteral("model_context_window"),
             QStringLiteral("model_auto_compact_token_limit"),
             QStringLiteral("disable_response_storage"), QStringLiteral("network_access"),
-            QStringLiteral("windows_wsl_setup_acknowledged"),
+            QStringLiteral("windows_wsl_setup_acknowledged"), QStringLiteral("web_search"),
         };
         static const QStringList managedStringKeys = {
             QStringLiteral("model_provider"), QStringLiteral("model"),
             QStringLiteral("review_model"), QStringLiteral("model_reasoning_effort"),
-            QStringLiteral("network_access"),
+            QStringLiteral("network_access"), QStringLiteral("web_search"),
         };
         static const QStringList managedBooleanKeys = {
             QStringLiteral("disable_response_storage"),
@@ -1166,10 +1219,13 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
                 if (!scalarOk) invalidManagedValue = true;
             } else if (name == QStringLiteral("base_url")
                        || name == QStringLiteral("wire_api")
-                       || name == QStringLiteral("requires_openai_auth")) {
+                       || name == QStringLiteral("requires_openai_auth")
+                       || name == QStringLiteral("experimental_bearer_token")
+                       || name == QStringLiteral("http_headers")) {
                 tableValues[currentTable].insert(name, value);
                 if ((name == QStringLiteral("base_url")
-                     || name == QStringLiteral("wire_api"))
+                     || name == QStringLiteral("wire_api")
+                     || name == QStringLiteral("experimental_bearer_token"))
                         && !(rawValue.startsWith(QLatin1Char('"'))
                              || rawValue.startsWith(QLatin1Char('\'')))) {
                     scalarOk = false;
@@ -1177,6 +1233,11 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
                 if (name == QStringLiteral("requires_openai_auth")
                         && value != QStringLiteral("true")
                         && value != QStringLiteral("false")) {
+                    scalarOk = false;
+                }
+                if (name == QStringLiteral("http_headers")
+                        && (!rawValue.startsWith(QLatin1Char('{'))
+                            || !rawValue.endsWith(QLatin1Char('}')))) {
                     scalarOk = false;
                 }
                 if (!scalarOk) invalidManagedValue = true;
@@ -1197,13 +1258,23 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
             return failure(LocalConfigurationState::Invalid,
                            QStringLiteral("config.toml 缺少 model_provider 或 model"));
         }
-        const QString expectedContextWindow = QString::number(kCodexContextWindow);
+        const qint64 configuredLimit = configuredContextLimit(AiTool::CodexCli, model);
+        const QString expectedContextWindow = QString::number(configuredLimit);
         if (rootValues.value(QStringLiteral("model_context_window"))
                     != expectedContextWindow
                 || rootValues.value(QStringLiteral("model_auto_compact_token_limit"))
                     != expectedContextWindow) {
             return failure(LocalConfigurationState::Invalid,
-                           QStringLiteral("config.toml 的上下文窗口或自动压缩阈值不是 272000"));
+                           QStringLiteral("config.toml 的上下文窗口或自动压缩阈值不是 %1")
+                               .arg(configuredLimit));
+        }
+        if (rootValues.value(QStringLiteral("review_model")) != model
+                || rootValues.value(QStringLiteral("model_reasoning_effort"))
+                    != configuredReasoning(AiTool::CodexCli, model)
+                || rootValues.value(QStringLiteral("web_search"))
+                    != QStringLiteral("live")) {
+            return failure(LocalConfigurationState::Invalid,
+                           QStringLiteral("config.toml 的模型、思考深度或 Web Search 配置无效"));
         }
         const QString providerTable = QStringLiteral("model_providers.%1").arg(provider);
         const QHash<QString, QString> providerValues = tableValues.value(providerTable);
@@ -1214,9 +1285,12 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
                 || providerValues.value(QStringLiteral("wire_api"))
                     != QStringLiteral("responses")
                 || providerValues.value(QStringLiteral("requires_openai_auth"))
-                    != QStringLiteral("true")) {
+                    != QStringLiteral("false")
+                || providerValues.value(QStringLiteral("experimental_bearer_token")) != key
+                || !hasCodexCapabilityHeader(
+                    providerValues.value(QStringLiteral("http_headers")))) {
             return failure(LocalConfigurationState::Invalid,
-                           QStringLiteral("config.toml 的模型提供方或 base_url 无效"));
+                           QStringLiteral("config.toml 的第三方 Provider 兼容配置无效"));
         }
         return ready(key, gatewayMode);
     }
@@ -2007,7 +2081,7 @@ bool ToolManager::configureClaudeCodeEndpoint(const QString &apiKey, const QStri
 bool ToolManager::configureCodexCli(const QString &apiKey, const QString &model)
 {
     return configureCodexCliEndpoint(
-        apiKey, model, kBaseUrl, QStringLiteral("OpenAI"));
+        apiKey, model, kBaseUrl, QStringLiteral("aegisy"));
 }
 
 bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
@@ -2016,6 +2090,8 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
                                             const QString &providerId)
 {
     const QString effectiveModel = model.isEmpty() ? QStringLiteral("gpt-4o") : model;
+    const qint64 contextLimit = configuredContextLimit(AiTool::CodexCli, effectiveModel);
+    const QString reasoningEffort = configuredReasoning(AiTool::CodexCli, effectiveModel);
     // 1) ~/.codex/auth.json
     const QString authPath = homeFilePath(".codex/auth.json");
     QJsonObject auth;
@@ -2045,6 +2121,7 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
         "model_provider", "model", "review_model", "model_reasoning_effort",
         "model_context_window", "model_auto_compact_token_limit",
         "disable_response_storage", "network_access", "windows_wsl_setup_acknowledged",
+        "web_search",
     };
     static const QStringList managedProviderSections = {
         "[model_providers.OpenAI]", "[model_providers.aegisy]",
@@ -2064,9 +2141,20 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
         }
         if (skippingSection) continue;
         if (readingFeatures) {
-            const QString key = QStringLiteral("goals");
-            if (!(t.startsWith(key)
-                  && t.mid(key.length()).trimmed().startsWith('='))) {
+            static const QStringList managedFeatureKeys = {
+                QStringLiteral("goals"), QStringLiteral("web_search"),
+                QStringLiteral("web_search_cached"),
+                QStringLiteral("web_search_request"),
+            };
+            bool managedFeature = false;
+            for (const QString &key : managedFeatureKeys) {
+                if (t.startsWith(key)
+                        && t.mid(key.length()).trimmed().startsWith('=')) {
+                    managedFeature = true;
+                    break;
+                }
+            }
+            if (!managedFeature) {
                 featureLines.append(raw);
             }
             continue;
@@ -2095,16 +2183,16 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
     // leaves [projects.*] or [tui.model_availability_nux] at the end of this file,
     // so appending root keys would accidentally place them inside that table.
     QString result = QStringLiteral(
-        "model_provider = \"%2\"\n"
-        "model = \"%1\"\n"
-        "review_model = \"%1\"\n").arg(effectiveModel, providerId);
+        "model_provider = %1\n"
+        "model = %2\n"
+        "review_model = %2\n")
+        .arg(tomlBasicString(providerId), tomlBasicString(effectiveModel));
     result += QStringLiteral(
-        "model_reasoning_effort = \"xhigh\"\n"
-        "model_context_window = %1\n"
-        "model_auto_compact_token_limit = %1\n"
-        "disable_response_storage = true\n"
-        "network_access = \"enabled\"\n"
-        "windows_wsl_setup_acknowledged = true\n").arg(kCodexContextWindow);
+        "model_reasoning_effort = %1\n"
+        "model_context_window = %2\n"
+        "model_auto_compact_token_limit = %2\n"
+        "web_search = \"live\"\n")
+        .arg(tomlBasicString(reasoningEffort), QString::number(contextLimit));
 
     const QString preserved = outLines.join('\n');
     if (!preserved.isEmpty()) {
@@ -2113,13 +2201,21 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
 
     result += QStringLiteral(
         "\n"
-        "[model_providers.%2]\n"
-        "name = \"%2\"\n"
-        "base_url = \"%1\"\n"
+        "[model_providers.%1]\n"
+        "name = %2\n"
+        "base_url = %3\n"
         "wire_api = \"responses\"\n"
-        "requires_openai_auth = true\n"
+        "requires_openai_auth = false\n"
+        "experimental_bearer_token = %4\n"
+        "http_headers = { %5 = %6 }\n"
         "\n"
-        "[features]\n").arg(baseUrl, providerId);
+        "[features]\n")
+        .arg(providerId,
+             tomlBasicString(providerId),
+             tomlBasicString(baseUrl),
+             tomlBasicString(apiKey),
+             tomlBasicString(kCodexCapabilityHeader),
+             tomlBasicString(kCodexCapabilityHeaderValue));
     if (!featureLines.isEmpty()) {
         result += featureLines.join(QLatin1Char('\n')) + QLatin1Char('\n');
     }

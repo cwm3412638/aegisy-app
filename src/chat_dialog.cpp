@@ -3,6 +3,7 @@
 #include "api_client.h"
 #include "app_theme.h"
 #include "profile_manager.h"
+#include "runtime_status_store.h"
 #include "skill_manager.h"
 
 #include <QAbstractTextDocumentLayout>
@@ -23,6 +24,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPixmap>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -33,6 +35,7 @@
 #include <QStandardPaths>
 #include <QStyle>
 #include <QTextBrowser>
+#include <QThread>
 #include <QTimer>
 #include <QUrl>
 #include <QUuid>
@@ -110,11 +113,13 @@ QLabel *messageAvatar(bool user, QWidget *parent)
 ChatDialog::ChatDialog(ApiClient *apiClient,
                        SkillManager *skillManager,
                        ProfileManager *profileManager,
+                       RuntimeStatusStore *runtimeStatusStore,
                        QWidget *parent)
     : QDialog(parent)
     , m_apiClient(apiClient)
     , m_skillManager(skillManager)
     , m_profileManager(profileManager)
+    , m_runtimeStatusStore(runtimeStatusStore)
 {
     setupUi();
     setWindowTitle(QStringLiteral("AI 对话"));
@@ -613,6 +618,9 @@ void ChatDialog::startRequest()
                      -1, &m_streamBrowser);
     m_requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     setGenerating(true);
+    if (m_runtimeStatusStore) {
+        m_runtimeStatusStore->beginChat(model, QString(), selectedContextWindow());
+    }
     updateContextInfo();
     QJsonArray requestMessages = session.messages;
     QString activeSkillName;
@@ -722,6 +730,7 @@ void ChatDialog::finishSkillRun(const QString &content,
                                 const QString &attachmentPath,
                                 const QString &attachmentType)
 {
+    ++m_presentationJobGeneration;
     if (m_currentSession >= 0) {
         QJsonObject message{
             { QStringLiteral("role"), QStringLiteral("assistant") },
@@ -760,6 +769,7 @@ void ChatDialog::onStopClicked()
         return;
     }
     m_apiClient->cancelChatMessage();
+    if (m_runtimeStatusStore) m_runtimeStatusStore->finishChat();
     if (m_streamContent.isEmpty()) m_streamContent = QStringLiteral("已停止生成。");
     if (m_streamBrowser) m_streamBrowser->setMarkdown(m_streamContent);
     if (m_currentSession >= 0 && !m_streamContent.isEmpty()) {
@@ -921,12 +931,17 @@ void ChatDialog::onChatUsage(const QString &requestId,
     session.promptTokens = promptTokens;
     session.completionTokens = completionTokens;
     session.totalTokens = totalTokens;
+    if (m_runtimeStatusStore) {
+        m_runtimeStatusStore->updateChatUsage(
+            promptTokens, completionTokens, totalTokens);
+    }
     updateContextInfo();
 }
 
 void ChatDialog::onChatCompleted(const QString &requestId, const QString &content)
 {
     if (requestId != m_requestId) return;
+    if (m_runtimeStatusStore) m_runtimeStatusStore->finishChat();
     const QString finalContent = content.isEmpty() ? m_streamContent : content;
     if (m_streamBrowser) m_streamBrowser->setMarkdown(finalContent);
     if (m_currentSession >= 0 && !finalContent.isEmpty()) {
@@ -956,6 +971,7 @@ void ChatDialog::onChatCompleted(const QString &requestId, const QString &conten
 void ChatDialog::onChatFailed(const QString &requestId, const QString &error)
 {
     if (requestId != m_requestId) return;
+    if (m_runtimeStatusStore) m_runtimeStatusStore->finishChat();
     if (m_streamBrowser) m_streamBrowser->setPlainText(QStringLiteral("请求失败：%1").arg(error));
     m_requestId.clear();
     m_instructionSkillId.clear();
@@ -1019,13 +1035,34 @@ void ChatDialog::onPresentationPlanReceived(const QString &requestId, const QJso
     fileName = fileName.trimmed().left(60);
     if (fileName.isEmpty()) fileName = QStringLiteral("presentation");
     const QString path = directory + QLatin1Char('/') + fileName + QStringLiteral(".pptx");
-    QString error;
-    if (!m_skillManager->executePresentation(plan, path, &error)) {
-        finishSkillRun(QStringLiteral("PPT Skill 执行失败：%1").arg(error));
-        return;
+    const quint64 generation = ++m_presentationJobGeneration;
+    m_statusLabel->setText(QStringLiteral("正在后台生成 PPT 文件..."));
+    if (m_streamBrowser) {
+        m_streamBrowser->setPlainText(QStringLiteral("大纲已完成，正在生成 PPT 文件..."));
     }
-    finishSkillRun(QStringLiteral("已通过 **PPT 制作 Skill** 生成演示文稿。"),
-                   path, QStringLiteral("presentation"));
+
+    QPointer<ChatDialog> dialog(this);
+    const QString skillsRoot = m_skillManager->skillsRoot();
+    QThread *worker = QThread::create(
+        [dialog, skillsRoot, plan, path, generation]() {
+        SkillManager manager(nullptr, skillsRoot);
+        QString error;
+        const bool ok = manager.executePresentation(plan, path, &error);
+        if (!dialog) return;
+        QMetaObject::invokeMethod(dialog, [dialog, ok, error, path, generation]() {
+            if (!dialog || dialog->m_presentationJobGeneration != generation) return;
+            if (!ok) {
+                dialog->finishSkillRun(
+                    QStringLiteral("PPT Skill 执行失败：%1").arg(error));
+                return;
+            }
+            dialog->finishSkillRun(
+                QStringLiteral("已通过 **PPT 制作 Skill** 生成演示文稿。"),
+                path, QStringLiteral("presentation"));
+        }, Qt::QueuedConnection);
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
 }
 
 void ChatDialog::onPresentationPlanFailed(const QString &requestId, const QString &error)

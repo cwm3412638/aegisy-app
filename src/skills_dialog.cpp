@@ -14,10 +14,11 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
-#include <QProgressDialog>
+#include <QPointer>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QTabWidget>
+#include <QThread>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -344,19 +345,31 @@ void SkillsDialog::onInstallPresentationRuntime()
     if (QMessageBox::question(this, QStringLiteral("安装 PPT 运行环境"),
         QStringLiteral("将在 Aegisy 应用数据目录创建独立 Python 环境并从 PyPI 安装 python-pptx。是否继续？"),
         QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
-    QProgressDialog progress(QStringLiteral("正在安装 python-pptx，可能需要几分钟..."),
-                             QString(), 0, 0, this);
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setCancelButton(nullptr);
-    progress.show();
-    QApplication::processEvents();
-    QString error;
-    const bool ok = m_manager->installPresentationRuntime(&error);
-    progress.close();
-    if (!ok) QMessageBox::warning(this, QStringLiteral("安装失败"), error);
-    else QMessageBox::information(this, QStringLiteral("安装完成"),
-                                  QStringLiteral("PPT Skill 运行环境已准备完成。"));
-    rebuildTable();
+    m_runtimeButton->setEnabled(false);
+    m_runtimeButton->setText(QStringLiteral("正在安装..."));
+    m_status->setText(QStringLiteral("正在后台安装 python-pptx，可继续浏览其他 Skills。"));
+
+    QPointer<SkillsDialog> dialog(this);
+    const QString skillsRoot = m_manager->skillsRoot();
+    QThread *worker = QThread::create([dialog, skillsRoot]() {
+        SkillManager manager(nullptr, skillsRoot);
+        QString error;
+        const bool ok = manager.installPresentationRuntime(&error);
+        if (!dialog) return;
+        QMetaObject::invokeMethod(dialog, [dialog, ok, error]() {
+            if (!dialog) return;
+            if (!ok) {
+                QMessageBox::warning(dialog, QStringLiteral("安装失败"), error);
+            } else {
+                QMessageBox::information(
+                    dialog, QStringLiteral("安装完成"),
+                    QStringLiteral("PPT Skill 运行环境已准备完成。"));
+            }
+            dialog->rebuildTable();
+        }, Qt::QueuedConnection);
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
 }
 
 void SkillsDialog::updateSelection()

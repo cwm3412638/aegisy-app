@@ -56,6 +56,7 @@ int main(int argc, char *argv[])
                 "disable_response_storage = true\n"
                 "network_access = \"enabled\"\n"
                 "windows_wsl_setup_acknowledged = true\n"
+                "web_search = \"cached\"\n"
                 "\n"
                 "[model_providers.ccswitch]\n"
                 "name = \"CC Switch\"\n"
@@ -72,6 +73,7 @@ int main(int argc, char *argv[])
                 "\n"
                 "[features]\n"
                 "shell_snapshot = true\n"
+                "web_search_request = false\n"
                 "goals = false\n") < 0) {
         return 1;
     }
@@ -106,6 +108,19 @@ int main(int argc, char *argv[])
                     "Codex context limits were written inside a TOML table")
         || !require(codexConfig.contains(QStringLiteral("127.0.0.1:43112/tools/codex/v1")),
                  "Codex gateway endpoint is missing")
+        || !require(codexConfig.contains(QStringLiteral("web_search = \"live\""))
+                        && !codexConfig.contains(QStringLiteral("web_search_request")),
+                    "Codex live web search was not enabled cleanly")
+        || !require(!codexConfig.contains(QStringLiteral("disable_response_storage"))
+                        && !codexConfig.contains(QStringLiteral("network_access"))
+                        && !codexConfig.contains(QStringLiteral(
+                            "windows_wsl_setup_acknowledged")),
+                    "obsolete Codex configuration fields were not removed")
+        || !require(codexConfig.contains(QStringLiteral(
+                        "requires_openai_auth = false\n"
+                        "experimental_bearer_token = \"aegisy-local-test-token\"\n"
+                        "http_headers = { \"x-openai-actor-authorization\" = \"aegisy\" }")),
+                    "Codex third-party capability compatibility fields are missing")
         || !require(codexConfig.contains(QStringLiteral(
                         "[projects.\"/tmp/aegisy-project\"]\ntrust_level = \"trusted\"")),
                     "Codex project trust configuration was not preserved")
@@ -137,6 +152,25 @@ int main(int argc, char *argv[])
                     "Codex gateway configuration was classified as direct")
         || !require(gatewayStatus.keyHint == QStringLiteral("oken"),
                     "Codex configured credential hint is incorrect")) {
+        return 1;
+    }
+
+    QFile missingHeaderConfig(codexConfigPath);
+    QString missingHeader = codexConfig;
+    missingHeader.remove(QStringLiteral(
+        "http_headers = { \"x-openai-actor-authorization\" = \"aegisy\" }\n"));
+    if (!missingHeaderConfig.open(QIODevice::WriteOnly | QIODevice::Truncate)
+            || missingHeaderConfig.write(missingHeader.toUtf8()) < 0) {
+        return 1;
+    }
+    missingHeaderConfig.close();
+    const LocalConfigurationStatus missingHeaderStatus =
+        manager.inspectConfiguration(AiTool::CodexCli);
+    if (!require(missingHeaderStatus.state == LocalConfigurationState::Invalid,
+                 "missing Codex capability header was not classified as invalid")
+        || !require(manager.configureGateway(
+                        AiTool::CodexCli, localToken, QStringLiteral("gpt-test"), 43112),
+                    "failed to repair missing Codex capability header")) {
         return 1;
     }
 
@@ -255,7 +289,7 @@ int main(int argc, char *argv[])
     const QString restoredConfig = readFile(codexConfigPath);
     const QString restoredAuth = readFile(home.path() + QStringLiteral("/.codex/auth.json"));
     const qsizetype restoredRootProvider = restoredConfig.indexOf(
-        QStringLiteral("model_provider = \"OpenAI\""));
+        QStringLiteral("model_provider = \"aegisy\""));
     const qsizetype restoredFirstTable = restoredConfig.indexOf(QLatin1Char('['));
     const LocalConfigurationStatus restoredStatus =
         manager.inspectConfiguration(AiTool::CodexCli);
@@ -270,6 +304,11 @@ int main(int argc, char *argv[])
                         && restoredConfig.contains(QStringLiteral(
                             "model_auto_compact_token_limit = 272000")),
                     "direct Codex configuration omitted the 272K context limits")
+        || !require(restoredConfig.contains(QStringLiteral(
+                        "requires_openai_auth = false\n"
+                        "experimental_bearer_token = \"sk-direct-test\"\n"
+                        "http_headers = { \"x-openai-actor-authorization\" = \"aegisy\" }")),
+                    "direct Codex compatibility fields are missing")
         || !require(restoredConfig.contains(QStringLiteral("[model_providers.ccswitch]"))
                         && restoredConfig.contains(QStringLiteral(
                             "experimental_bearer_token = \"sk-ccswitch-test\"")),
@@ -281,6 +320,32 @@ int main(int argc, char *argv[])
         || !require(restoredStatus.keyHint == QStringLiteral("test"),
                     "repaired direct Codex credential hint is incorrect")
         || !require(restoredAuth.contains(directKey), "direct API key was not restored")) {
+        return 1;
+    }
+
+    if (!require(manager.configure(
+                     AiTool::CodexCli, directKey, QStringLiteral("gpt-5.6-sol")),
+                 "failed to configure GPT-5.6 Sol compatibility profile")) {
+        return 1;
+    }
+    const QString gpt56Config = readFile(codexConfigPath);
+    if (!require(gpt56Config.contains(QStringLiteral(
+                        "model_reasoning_effort = \"high\"")),
+                 "GPT-5.6 Sol reasoning effort was not set to high")
+        || !require(gpt56Config.contains(QStringLiteral(
+                        "model_context_window = 372000"))
+                        && gpt56Config.contains(QStringLiteral(
+                            "model_auto_compact_token_limit = 372000")),
+                    "GPT-5.6 Sol did not receive the 372K client context threshold")
+        || !require(manager.inspectConfiguration(AiTool::CodexCli).isReady(),
+                    "GPT-5.6 Sol compatibility configuration was not recognized")
+        || !require(ToolManager::configuredContextLimit(
+                        AiTool::CodexCli, QStringLiteral("gpt-5.6")) == 372000,
+                    "GPT-5.6 alias did not use the compatibility context threshold")
+        || !require(ToolManager::configuredReasoning(
+                        AiTool::CodexCli, QStringLiteral("gpt-5.6"))
+                        == QStringLiteral("high"),
+                    "GPT-5.6 alias did not use high reasoning")) {
         return 1;
     }
 

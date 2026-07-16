@@ -17,7 +17,8 @@
 #include "secure_storage.h"
 #include "app_theme.h"
 #include "update_manager.h"
-#include "balance_orb.h"
+#include "runtime_status_bar.h"
+#include "runtime_status_store.h"
 #include "desktop_downloader.h"
 #include "mcp_config_dialog.h"
 #include "help_dialog.h"
@@ -50,6 +51,7 @@
 #include <QShowEvent>
 #include <QStyle>
 #include <QTimer>
+#include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QVersionNumber>
@@ -111,6 +113,7 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
     , m_gatewayManager(new GatewayManager(this))
     , m_desktopEnhancementManager(new DesktopEnhancementManager(this))
     , m_skillManager(new SkillManager(this))
+    , m_runtimeStatusStore(new RuntimeStatusStore(this))
 {
     setupUi();
     setWindowTitle(QStringLiteral("Aegisy - AI 工具连接管理"));
@@ -137,6 +140,10 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
             this, &MainWindow::onToolLatestVersionDetected);
     connect(m_gatewayManager, &GatewayManager::runningChanged,
             this, &MainWindow::onGatewayRunningChanged);
+    connect(m_gatewayManager, &GatewayManager::runningChanged,
+            m_runtimeStatusStore, &RuntimeStatusStore::setGatewayRunning);
+    connect(m_gatewayManager, &GatewayManager::runtimeEvent,
+            m_runtimeStatusStore, &RuntimeStatusStore::observeGatewayEvent);
     connect(m_gatewayManager, &GatewayManager::gatewayError,
             this, [this](const QString &error) {
         logMessage(QStringLiteral("本地网关错误：%1").arg(error), kLogError);
@@ -145,16 +152,21 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
             this, [this]() {
         refreshConfigurationWatchers();
         rebuildTrayMenu();
+        updateRuntimeProfileStatus();
     });
     connect(m_profileManager, &ProfileManager::activeProfileChanged,
-            this, [this](int, int) { rebuildTrayMenu(); });
+            this, [this](int, int) {
+        rebuildTrayMenu();
+        updateRuntimeProfileStatus();
+    });
 
     m_profileManager->backfillKeyHints();
     setupConfigurationWatcher();
     refreshToolVersions();
     rebuildCards();
     setupTray();
-    setupBalanceOrb();
+    setupRuntimeStatusBar();
+    updateRuntimeProfileStatus();
     if (!m_profileManager->lastError().isEmpty()) {
         logMessage(m_profileManager->lastError(), kLogError);
     }
@@ -165,9 +177,9 @@ MainWindow::~MainWindow()
     if (m_gatewayManager && m_gatewayManager->isRunning()) {
         m_gatewayManager->stop();
     }
-    if (m_balanceOrb) {
-        delete m_balanceOrb;   // 无父对象的顶层窗口，需手动释放
-        m_balanceOrb = nullptr;
+    if (m_runtimeStatusBar) {
+        delete m_runtimeStatusBar;   // 无父对象的顶层窗口，需手动释放
+        m_runtimeStatusBar = nullptr;
     }
 }
 
@@ -199,42 +211,61 @@ void MainWindow::setupTray()
     m_trayIcon->show();
 }
 
-void MainWindow::setupBalanceOrb()
+void MainWindow::setupRuntimeStatusBar()
 {
-    m_balanceOrb = new BalanceOrb();  // 顶层窗口，不设父对象
-    connect(m_balanceOrb, &BalanceOrb::restoreRequested, this, [this]() {
+    m_runtimeStatusBar = new RuntimeStatusBar();  // 顶层窗口，不设父对象
+    connect(m_runtimeStatusBar, &RuntimeStatusBar::restoreRequested, this, [this]() {
         showNormal();
         raise();
         activateWindow();
     });
-    connect(m_balanceOrb, &BalanceOrb::quitRequested, this, [this]() {
+    connect(m_runtimeStatusBar, &RuntimeStatusBar::quitRequested, this, [this]() {
         m_quitting = true;
         if (m_trayIcon) m_trayIcon->hide();
         QApplication::quit();
     });
-    updateBalanceOrb();
+    connect(m_runtimeStatusStore, &RuntimeStatusStore::statusChanged,
+            m_runtimeStatusBar, &RuntimeStatusBar::setSnapshot);
+    m_runtimeStatusBar->setSnapshot(m_runtimeStatusStore->snapshot());
 }
 
-void MainWindow::updateBalanceOrb()
+void MainWindow::updateRuntimeProfileStatus()
 {
-    if (m_balanceOrb) {
-        m_balanceOrb->setBalance(m_balance, m_balanceKnown);
+    const QList<Profile> profiles = m_profileManager->allProfiles();
+    int index = m_profileManager->lastActivatedIndex();
+    if (index < 0 || index >= profiles.size()) {
+        for (ProfileType type : allProfileTypes()) {
+            const int activeIndex = m_profileManager->activeIndex(type);
+            if (activeIndex >= 0 && activeIndex < profiles.size()) {
+                index = activeIndex;
+                break;
+            }
+        }
+    }
+    if (index >= 0 && index < profiles.size()) {
+        const Profile &profile = profiles.at(index);
+        m_runtimeStatusStore->setConfiguredProfile(
+            profile.tool(), profile.model,
+            ToolManager::configuredReasoning(profile.tool(), profile.model),
+            ToolManager::configuredContextLimit(profile.tool(), profile.model));
+    } else {
+        m_runtimeStatusStore->clearConfiguredProfile();
     }
 }
 
-void MainWindow::showBalanceOrb()
+void MainWindow::showRuntimeStatusBar()
 {
-    if (m_balanceOrb) {
-        updateBalanceOrb();
-        m_balanceOrb->show();
-        m_balanceOrb->raise();
+    if (m_runtimeStatusBar) {
+        m_runtimeStatusBar->setSnapshot(m_runtimeStatusStore->snapshot());
+        m_runtimeStatusBar->show();
+        m_runtimeStatusBar->raise();
     }
 }
 
-void MainWindow::hideBalanceOrb()
+void MainWindow::hideRuntimeStatusBar()
 {
-    if (m_balanceOrb) {
-        m_balanceOrb->hide();
+    if (m_runtimeStatusBar) {
+        m_runtimeStatusBar->hide();
     }
 }
 
@@ -242,9 +273,9 @@ void MainWindow::changeEvent(QEvent *event)
 {
     if (event->type() == QEvent::WindowStateChange) {
         if (isMinimized()) {
-            showBalanceOrb();
+            showRuntimeStatusBar();
         } else if (isVisible()) {
-            hideBalanceOrb();
+            hideRuntimeStatusBar();
         }
     } else if (event->type() == QEvent::ActivationChange && isActiveWindow()) {
         scheduleConfigurationRefresh();
@@ -338,7 +369,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
 {
     if (!m_quitting && m_trayIcon && m_trayIcon->isVisible()) {
         hide();
-        showBalanceOrb();
+        showRuntimeStatusBar();
         event->ignore();
         if (!m_trayHintShown) {
             m_trayHintShown = true;
@@ -350,14 +381,14 @@ void MainWindow::closeEvent(QCloseEvent *event)
         }
         return;
     }
-    hideBalanceOrb();
+    hideRuntimeStatusBar();
     QMainWindow::closeEvent(event);
 }
 
 void MainWindow::showEvent(QShowEvent *event)
 {
     // 主窗口重新可见（托盘/小球还原或最小化恢复）时收起小球。
-    hideBalanceOrb();
+    hideRuntimeStatusBar();
     scheduleConfigurationRefresh();
     QMainWindow::showEvent(event);
 }
@@ -487,6 +518,7 @@ void MainWindow::refreshToolVersions()
         AiTool::ClaudeCode,
         AiTool::CodexCli,
         AiTool::GeminiCli,
+        AiTool::OpenCode,
     };
     m_pendingToolVersionChecks = tools.size();
     if (m_refreshToolVersionsButton) {
@@ -629,27 +661,27 @@ void MainWindow::setupUi()
 
     auto *topBar = new QFrame(central);
     topBar->setObjectName(QStringLiteral("topBar"));
-    topBar->setFixedHeight(68);
+    topBar->setFixedHeight(64);
     topBar->setStyleSheet(QStringLiteral(
-        "QFrame#topBar { background: white; border-bottom: 1px solid #e4e7ec; }"));
+        "QFrame#topBar { background: #111820; border-bottom: 1px solid #26313d; }"));
     auto *topLayout = new QHBoxLayout(topBar);
-    topLayout->setContentsMargins(22, 12, 22, 12);
+    topLayout->setContentsMargins(20, 10, 20, 10);
     topLayout->setSpacing(10);
 
     auto *brandMark = new QLabel(QStringLiteral("A"), topBar);
     brandMark->setFixedSize(38, 38);
     brandMark->setAlignment(Qt::AlignCenter);
     brandMark->setStyleSheet(QStringLiteral(
-        "background: #0f766e; color: white; border-radius: 8px;"
+        "background: #14b8a6; color: #071411; border-radius: 8px;"
         "font-size: 18px; font-weight: 700;"));
     topLayout->addWidget(brandMark);
 
     auto *brandColumn = new QVBoxLayout;
     brandColumn->setSpacing(0);
     auto *brandName = new QLabel(QStringLiteral("Aegisy"), topBar);
-    brandName->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 700; color: #101828;"));
+    brandName->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 700; color: #f4f7fa;"));
     auto *brandSection = new QLabel(QStringLiteral("连接管理"), topBar);
-    brandSection->setStyleSheet(QStringLiteral("font-size: 11px; color: #667085;"));
+    brandSection->setStyleSheet(QStringLiteral("font-size: 11px; color: #82909f;"));
     brandColumn->addWidget(brandName);
     brandColumn->addWidget(brandSection);
     topLayout->addLayout(brandColumn);
@@ -660,9 +692,9 @@ void MainWindow::setupUi()
     m_userLabel->setCursor(Qt::PointingHandCursor);
     m_userLabel->setToolTip(QStringLiteral("账号中心：修改密码与密卡充值"));
     m_userLabel->setStyleSheet(QStringLiteral(
-        "QPushButton { color: white; background: #0f766e; border: none;"
+        "QPushButton { color: #e7fffb; background: #193b3a; border: 1px solid #2a6c66;"
         "border-radius: 19px; font-size: 14px; font-weight: 700; }"
-        "QPushButton:hover { background: #115e59; }"));
+        "QPushButton:hover { background: #22504d; border-color: #14b8a6; }"));
     topLayout->addWidget(m_userLabel);
 
     m_balanceButton = new QPushButton(QStringLiteral("余额  --"), topBar);
@@ -672,9 +704,9 @@ void MainWindow::setupUi()
     m_balanceButton->setMaximumWidth(150);
     m_balanceButton->setCursor(Qt::PointingHandCursor);
     m_balanceButton->setStyleSheet(QStringLiteral(
-        "QPushButton { background: #eff8ff; color: #175cd3; border: 1px solid #b2ddff;"
+        "QPushButton { background: #18232d; color: #b8fff3; border: 1px solid #2f4654;"
         "border-radius: 7px; padding: 0 10px; font-size: 11px; font-weight: 700; }"
-        "QPushButton:hover { background: #dff0ff; border-color: #84caff; }"));
+        "QPushButton:hover { background: #1e3138; border-color: #14b8a6; }"));
     topLayout->addWidget(m_balanceButton);
 
     // ── 顶栏功能按钮（用 QStyle 系统图标 + 纯文字，Windows/macOS/Linux 全兼容）──
@@ -708,42 +740,26 @@ void MainWindow::setupUi()
     currentVersionAction->setEnabled(false);
     m_checkUpdatesButton->setMenu(updatesMenu);
 
-    // 分隔线（账号区与功能区之间）
-    auto *sep1 = new QFrame(topBar);
-    sep1->setFrameShape(QFrame::VLine);
-    sep1->setFixedSize(1, 24);
-    sep1->setStyleSheet(QStringLiteral("background: #e4e7ec;"));
-    topLayout->addWidget(sep1);
-
     for (QPushButton *button : {
              m_manageKeysButton, m_viewModelsButton, m_imageGenerationButton,
              m_backupsButton, m_transferButton, m_checkUpdatesButton }) {
-        button->setFixedHeight(32);
         button->setCursor(Qt::PointingHandCursor);
-        button->setStyleSheet(AppTheme::topbarButtonStyle());
         button->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-        topLayout->addWidget(button);
     }
 
-    // 分隔线（功能区与危险区之间）
-    auto *sep2 = new QFrame(topBar);
-    sep2->setFrameShape(QFrame::VLine);
-    sep2->setFixedSize(1, 24);
-    sep2->setStyleSheet(QStringLiteral("background: #e4e7ec;"));
-    topLayout->addWidget(sep2);
-
     m_logoutButton = new QPushButton(topBar);
-    m_logoutButton->setIcon(style()->standardIcon(QStyle::SP_DialogCloseButton));
+    m_logoutButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
+    m_logoutButton->setIconSize(QSize(16, 16));
     m_logoutButton->setToolTip(QStringLiteral("退出登录"));
     m_logoutButton->setFixedSize(32, 32);
     m_logoutButton->setCursor(Qt::PointingHandCursor);
     m_logoutButton->setStyleSheet(QStringLiteral(
         "QPushButton {"
-        "  background: white; color: #b42318; border: 1px solid #fecdca;"
+        "  background: transparent; color: #a9b5c1; border: 1px solid #34414e;"
         "  border-radius: 7px; font-size: 16px;"
         "}"
-        "QPushButton:hover { background: #fef3f2; border-color: #f97066; }"
-        "QPushButton:pressed { background: #fee4e2; }"));
+        "QPushButton:hover { background: #3a1f25; color: #fecaca; border-color: #7f3540; }"
+        "QPushButton:pressed { background: #4b2029; }"));
     topLayout->addWidget(m_logoutButton);
     root->addWidget(topBar);
 
@@ -754,16 +770,16 @@ void MainWindow::setupUi()
 
     auto *sidebar = new QFrame(body);
     sidebar->setObjectName(QStringLiteral("sidebar"));
-    sidebar->setFixedWidth(210);
+    sidebar->setMinimumWidth(214);
     sidebar->setStyleSheet(QStringLiteral(
-        "QFrame#sidebar { background: #fbfcfd; border-right: 1px solid #e4e7ec; }"));
+        "QFrame#sidebar { background: #141c24; border-right: 1px solid #26313d; }"));
     auto *sideLayout = new QVBoxLayout(sidebar);
-    sideLayout->setContentsMargins(16, 22, 16, 16);
+    sideLayout->setContentsMargins(14, 18, 14, 18);
     sideLayout->setSpacing(6);
 
     auto *filterLabel = new QLabel(QStringLiteral("配置筛选"), sidebar);
     filterLabel->setStyleSheet(QStringLiteral(
-        "font-size: 10px; font-weight: 700; color: #98a2b3; letter-spacing: 0.5px;"
+        "font-size: 10px; font-weight: 700; color: #768696; letter-spacing: 0px;"
         "padding: 0 10px 4px 10px; text-transform: uppercase;"));
     sideLayout->addWidget(filterLabel);
 
@@ -798,13 +814,13 @@ void MainWindow::setupUi()
         // 用 icon() 放彩色指示点：改用 padding-left 让文字左对齐，在前面手动加色块
         button->setStyleSheet(QStringLiteral(
             "QPushButton {"
-            "  background: transparent; color: #475467; border: none; border-radius: 7px;"
+            "  background: transparent; color: #a9b5c1; border: none; border-radius: 7px;"
             "  text-align: left; padding-left: 12px; padding-right: 8px;"
             "  font-size: 13px; font-weight: 400;"
             "}"
-            "QPushButton:hover { background: #f0f2f5; color: #182230; }"
+            "QPushButton:hover { background: #202c37; color: #f4f7fa; }"
             "QPushButton:checked {"
-            "  background: #e7f5f2; color: #0f5f59; font-weight: 600;"
+            "  background: #19312f; color: #7ff3df; font-weight: 600;"
             "  border-left: 3px solid %1;"
             "  padding-left: 9px;"
             "}").arg(QString::fromUtf8(filter.dotColor)));
@@ -817,7 +833,7 @@ void MainWindow::setupUi()
     terminalHeader->setContentsMargins(8, 0, 2, 0);
     auto *terminalTitle = new QLabel(QStringLiteral("本地终端"), sidebar);
     terminalTitle->setStyleSheet(QStringLiteral(
-        "font-size: 11px; font-weight: 700; color: #667085;"));
+        "font-size: 11px; font-weight: 700; color: #8d9baa;"));
     terminalHeader->addWidget(terminalTitle);
     terminalHeader->addStretch();
     m_refreshToolVersionsButton = new QPushButton(sidebar);
@@ -827,7 +843,7 @@ void MainWindow::setupUi()
     m_refreshToolVersionsButton->setCursor(Qt::PointingHandCursor);
     m_refreshToolVersionsButton->setStyleSheet(QStringLiteral(
         "QPushButton { background: transparent; border: none; border-radius: 6px; }"
-        "QPushButton:hover { background: #eaecf0; }"
+        "QPushButton:hover { background: #263440; }"
         "QPushButton:disabled { background: transparent; }"));
     terminalHeader->addWidget(m_refreshToolVersionsButton);
     sideLayout->addLayout(terminalHeader);
@@ -839,6 +855,7 @@ void MainWindow::setupUi()
         { AiTool::ClaudeCode, "Claude" },
         { AiTool::CodexCli, "Codex" },
         { AiTool::GeminiCli, "Gemini" },
+        { AiTool::OpenCode, "OpenCode" },
     };
     for (const auto &terminal : terminals) {
         auto *row = new QWidget(sidebar);
@@ -846,13 +863,13 @@ void MainWindow::setupUi()
         rowLayout->setContentsMargins(8, 2, 4, 2);
         rowLayout->setSpacing(6);
         auto *name = new QLabel(QString::fromUtf8(terminal.name), row);
-        name->setStyleSheet(QStringLiteral("font-size: 11px; color: #475467;"));
+        name->setStyleSheet(QStringLiteral("font-size: 11px; color: #a9b5c1;"));
         rowLayout->addWidget(name);
         rowLayout->addStretch();
         auto *version = new QLabel(QStringLiteral("检测中..."), row);
         version->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         version->setStyleSheet(QStringLiteral(
-            "font-family: monospace; font-size: 10px; color: #98a2b3;"));
+            "font-family: monospace; font-size: 10px; color: #718191;"));
         rowLayout->addWidget(version);
         m_toolVersionLabels.insert(static_cast<int>(terminal.tool), version);
         m_toolVersionTexts.insert(static_cast<int>(terminal.tool), QStringLiteral("检测中..."));
@@ -866,7 +883,7 @@ void MainWindow::setupUi()
             "QPushButton { background: #fff7ed; color: #b54708; border: 1px solid #fed7aa;"
             "border-radius: 6px; font-size: 10px; font-weight: 600; }"
             "QPushButton:hover { background: #ffedd5; border-color: #fdba74; }"
-            "QPushButton:disabled { color: #98a2b3; background: #f2f4f7; border-color: #e4e7ec; }"));
+            "QPushButton:disabled { color: #657382; background: #202933; border-color: #303b47; }"));
         installButton->hide();
         rowLayout->addWidget(installButton);
         m_toolInstallButtons.insert(static_cast<int>(terminal.tool), installButton);
@@ -876,9 +893,9 @@ void MainWindow::setupUi()
     }
 
     // ── 功能入口（QStyle 系统图标 + 文字，Windows/macOS/Linux 全兼容）──
-    auto *toolsHeader = new QLabel(QStringLiteral("工具"), sidebar);
+    auto *toolsHeader = new QLabel(QStringLiteral("工作区"), sidebar);
     toolsHeader->setStyleSheet(QStringLiteral(
-        "font-size: 10px; font-weight: 700; color: #98a2b3; letter-spacing: 0.5px;"
+        "font-size: 10px; font-weight: 700; color: #768696; letter-spacing: 0px;"
         "padding: 6px 10px 2px 10px;"));
     sideLayout->addWidget(toolsHeader);
 
@@ -891,6 +908,13 @@ void MainWindow::setupUi()
     m_chatButton->setCursor(Qt::PointingHandCursor);
     m_chatButton->setStyleSheet(sideNavStyle);
     sideLayout->addWidget(m_chatButton);
+
+    for (QPushButton *button : {
+             m_imageGenerationButton, m_viewModelsButton, m_manageKeysButton }) {
+        button->setFixedHeight(38);
+        button->setStyleSheet(sideNavStyle);
+        sideLayout->addWidget(button);
+    }
 
     m_skillsButton = new QPushButton(QStringLiteral("Skills"), sidebar);
     m_skillsButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
@@ -909,6 +933,15 @@ void MainWindow::setupUi()
     m_mcpConfigButton->setStyleSheet(sideNavStyle);
     sideLayout->addWidget(m_mcpConfigButton);
 
+    auto *dataHeader = new QLabel(QStringLiteral("配置与数据"), sidebar);
+    dataHeader->setStyleSheet(toolsHeader->styleSheet());
+    sideLayout->addWidget(dataHeader);
+    for (QPushButton *button : { m_backupsButton, m_transferButton }) {
+        button->setFixedHeight(38);
+        button->setStyleSheet(sideNavStyle);
+        sideLayout->addWidget(button);
+    }
+
     auto *helpButton = new QPushButton(QStringLiteral("使用文档"), sidebar);
     helpButton->setIcon(style()->standardIcon(QStyle::SP_DialogHelpButton));
     helpButton->setToolTip(QStringLiteral("查看 Aegisy 使用说明文档"));
@@ -916,8 +949,6 @@ void MainWindow::setupUi()
     helpButton->setCursor(Qt::PointingHandCursor);
     helpButton->setStyleSheet(sideNavStyle);
     connect(helpButton, &QPushButton::clicked, this, &MainWindow::onHelpClicked);
-    sideLayout->addWidget(helpButton);
-
     auto *systemHeader = new QLabel(QStringLiteral("系统"), sidebar);
     systemHeader->setStyleSheet(toolsHeader->styleSheet());
     sideLayout->addWidget(systemHeader);
@@ -956,19 +987,26 @@ void MainWindow::setupUi()
     m_desktopDownloadButton->setStyleSheet(sideNavStyle);
     sideLayout->addWidget(m_desktopDownloadButton);
 
+    m_checkUpdatesButton->setFixedHeight(38);
+    m_checkUpdatesButton->setStyleSheet(sideNavStyle);
+    sideLayout->addWidget(m_checkUpdatesButton);
+    sideLayout->addWidget(helpButton);
+
     sideLayout->addStretch();
 
-    auto *localTitle = new QLabel(QStringLiteral("认证文件"), sidebar);
-    localTitle->setStyleSheet(QStringLiteral(
-        "font-size: 11px; font-weight: 700; color: #667085; padding: 0 8px;"));
-    sideLayout->addWidget(localTitle);
-    auto *localPaths = new QLabel(
-        QStringLiteral("Claude  settings.json\nCodex    auth.json\nGemini   .env"), sidebar);
-    localPaths->setStyleSheet(QStringLiteral(
-        "font-family: monospace; font-size: 10px; color: #98a2b3;"
-        "background: #f2f4f7; border-radius: 7px; padding: 10px;"));
-    sideLayout->addWidget(localPaths);
-    bodyLayout->addWidget(sidebar);
+    auto *sidebarScroll = new QScrollArea(body);
+    sidebarScroll->setObjectName(QStringLiteral("sidebarScroll"));
+    sidebarScroll->setWidgetResizable(true);
+    sidebarScroll->setFixedWidth(230);
+    sidebarScroll->setFrameShape(QFrame::NoFrame);
+    sidebarScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    sidebarScroll->setStyleSheet(QStringLiteral(
+        "QScrollArea#sidebarScroll { background: #141c24; border: none; }"
+        "QScrollBar:vertical { background: #141c24; width: 7px; }"
+        "QScrollBar::handle:vertical { background: #3a4855; border-radius: 3px; min-height: 30px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"));
+    sidebarScroll->setWidget(sidebar);
+    bodyLayout->addWidget(sidebarScroll);
 
     auto *content = new QWidget(body);
     auto *contentLayout = new QVBoxLayout(content);
@@ -990,7 +1028,7 @@ void MainWindow::setupUi()
 
     m_bulkSwitchButton = new QPushButton(QStringLiteral("全部切换"), content);
     m_bulkSwitchButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
-    m_bulkSwitchButton->setToolTip(QStringLiteral("为三个工具各选一个 API Key，一次性全部激活"));
+    m_bulkSwitchButton->setToolTip(QStringLiteral("为四个工具分别选择已有档案，一次性激活"));
     m_bulkSwitchButton->setFixedHeight(40);
     m_bulkSwitchButton->setCursor(Qt::PointingHandCursor);
     m_bulkSwitchButton->setStyleSheet(AppTheme::secondaryButtonStyle());
@@ -1250,7 +1288,7 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
 
     auto *card = new QFrame(m_cardsContainer);
     card->setObjectName(QStringLiteral("profileCard"));
-    card->setMinimumHeight(124);
+    card->setMinimumHeight(112);
     card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     card->setStyleSheet(QStringLiteral(
         "QFrame#profileCard {"
@@ -1259,8 +1297,8 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
         "}").arg(background, cardAccent));
 
     auto *layout = new QHBoxLayout(card);
-    layout->setContentsMargins(16, 14, 14, 14);
-    layout->setSpacing(14);
+    layout->setContentsMargins(14, 12, 12, 12);
+    layout->setSpacing(12);
 
     // 徽标优先显示配置名称首字母，同类型多档案时可一眼区分
     const QString badgeText = profile.name.isEmpty()
@@ -1268,7 +1306,7 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
         : profile.name.left(1).toUpper();
     const int badgeFontSize = badgeText.length() > 1 ? 13 : 18;
     auto *badge = new QLabel(badgeText, card);
-    badge->setFixedSize(46, 46);
+    badge->setFixedSize(42, 42);
     badge->setAlignment(Qt::AlignCenter);
     badge->setStyleSheet(QStringLiteral(
         "background: %1; color: white; border: none; border-radius: 8px;"
@@ -1348,7 +1386,7 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
 
     auto *launchButton = new QPushButton(QStringLiteral("启动"), card);
     launchButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
-    launchButton->setFixedSize(90, 36);
+    launchButton->setFixedSize(78, 36);
     launchButton->setCursor(Qt::PointingHandCursor);
     launchButton->setEnabled(isActive && profile.hasAnyKey());
     launchButton->setToolTip(needsRepair
@@ -1369,7 +1407,7 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
     activateButton->setIcon(style()->standardIcon(
         isActive ? QStyle::SP_DialogApplyButton
                  : (needsRepair ? QStyle::SP_BrowserReload : QStyle::SP_MediaPlay)));
-    activateButton->setFixedSize(100, 36);
+    activateButton->setFixedSize(92, 36);
     activateButton->setCursor(Qt::PointingHandCursor);
     activateButton->setEnabled(!isActive && profile.hasAnyKey());
     if (needsRepair) activateButton->setToolTip(repairReason);
@@ -1382,36 +1420,33 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
             this, [this, profileIndex]() { activateProfile(profileIndex); });
     layout->addWidget(activateButton);
 
-    auto *editButton = new QPushButton(card);
-    editButton->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
-    editButton->setToolTip(QStringLiteral("编辑配置"));
-    editButton->setFixedSize(36, 36);
-    editButton->setCursor(Qt::PointingHandCursor);
-    editButton->setStyleSheet(AppTheme::secondaryButtonStyle());
-    connect(editButton, &QPushButton::clicked,
+    auto *moreButton = new QToolButton(card);
+    moreButton->setText(QStringLiteral("⋯"));
+    moreButton->setToolTip(QStringLiteral("更多配置操作"));
+    moreButton->setFixedSize(36, 36);
+    moreButton->setCursor(Qt::PointingHandCursor);
+    moreButton->setPopupMode(QToolButton::InstantPopup);
+    moreButton->setStyleSheet(QStringLiteral(
+        "QToolButton { background: #ffffff; color: #475467; border: 1px solid #d0d5dd;"
+        "border-radius: 7px; font-size: 18px; font-weight: 700; padding: 0; }"
+        "QToolButton:hover { background: #edf7f5; color: #0f766e; border-color: #7bb8b0; }"
+        "QToolButton::menu-indicator { image: none; width: 0; height: 0; }"));
+    auto *moreMenu = new QMenu(moreButton);
+    QAction *testAction = moreMenu->addAction(
+        style()->standardIcon(QStyle::SP_BrowserReload), QStringLiteral("测试连接"));
+    testAction->setEnabled(profile.hasAnyKey());
+    QAction *editAction = moreMenu->addAction(
+        style()->standardIcon(QStyle::SP_FileDialogDetailedView), QStringLiteral("编辑配置"));
+    moreMenu->addSeparator();
+    QAction *deleteAction = moreMenu->addAction(
+        style()->standardIcon(QStyle::SP_DialogDiscardButton), QStringLiteral("删除配置"));
+    deleteAction->setEnabled(m_profileManager->count() > 1);
+    moreButton->setMenu(moreMenu);
+    connect(editAction, &QAction::triggered,
             this, [this, profileIndex]() { editProfile(profileIndex); });
-    layout->addWidget(editButton);
-
-    auto *deleteButton = new QPushButton(card);
-    deleteButton->setIcon(style()->standardIcon(QStyle::SP_DialogDiscardButton));
-    deleteButton->setToolTip(QStringLiteral("删除配置"));
-    deleteButton->setFixedSize(36, 36);
-    deleteButton->setCursor(Qt::PointingHandCursor);
-    deleteButton->setEnabled(m_profileManager->count() > 1);
-    deleteButton->setStyleSheet(AppTheme::dangerButtonStyle());
-    connect(deleteButton, &QPushButton::clicked,
+    connect(deleteAction, &QAction::triggered,
             this, [this, profileIndex]() { deleteProfile(profileIndex); });
-    layout->addWidget(deleteButton);
-
-    // 只有配置了 Key 才显示测试按钮
-    auto *testButton = new QPushButton(card);
-    testButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
-    testButton->setFixedSize(36, 36);
-    testButton->setToolTip(QStringLiteral("测试 API Key 连通性和延迟"));
-    testButton->setCursor(Qt::PointingHandCursor);
-    testButton->setStyleSheet(AppTheme::secondaryButtonStyle());
-    testButton->setEnabled(profile.hasAnyKey());
-    layout->addWidget(testButton);
+    layout->addWidget(moreButton);
 
     auto *testResultLabel = new StatusBadge(card);
     testResultLabel->setState(QStringLiteral("等待测试"), StatusBadge::Tone::Neutral);
@@ -1421,17 +1456,17 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
 
     const QString testRequestId = QStringLiteral("card-test-%1").arg(profile.index);
     m_cardTestWidgets.insert(testRequestId,
-        qMakePair(testResultLabel, testButton));
+        qMakePair(testResultLabel, testAction));
 
-    connect(testButton, &QPushButton::clicked, this,
-        [this, testRequestId, testButton, testResultLabel, profileIndex]() {
+    connect(testAction, &QAction::triggered, this,
+        [this, testRequestId, testAction, testResultLabel, profileIndex]() {
             const QList<Profile> ps = m_profileManager->allProfiles();
             if (profileIndex < 0 || profileIndex >= ps.size()) return;
             const Profile p = m_profileManager->profileWithCredential(profileIndex);
             if (p.key.isEmpty()) return;
 
-            testButton->setEnabled(false);
-            testButton->setIcon(style()->standardIcon(QStyle::SP_BrowserStop));
+            testAction->setEnabled(false);
+            testAction->setIcon(style()->standardIcon(QStyle::SP_BrowserStop));
             testResultLabel->setState(
                 QStringLiteral("正在测试"), StatusBadge::Tone::Info,
                 style()->standardIcon(QStyle::SP_BrowserReload));
@@ -1527,12 +1562,6 @@ void MainWindow::onFilterChanged(int typeId)
 
 void MainWindow::onBulkSwitchClicked()
 {
-    if (m_keys.isEmpty()) {
-        QMessageBox::information(this, QStringLiteral("暂无 Key"),
-                                 QStringLiteral("账号中没有可用的 API Key，请先在 Key 管理中添加。"));
-        return;
-    }
-
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("全工具一键切换"));
     dialog.setMinimumWidth(520);
@@ -1553,7 +1582,7 @@ void MainWindow::onBulkSwitchClicked()
     titleRow->addStretch();
     auto *toolCount = new StatusBadge(&dialog);
     toolCount->setState(
-        QStringLiteral("3 个工具"), StatusBadge::Tone::Info,
+        QStringLiteral("4 个工具"), StatusBadge::Tone::Info,
         style()->standardIcon(QStyle::SP_ComputerIcon));
     titleRow->addWidget(toolCount);
     root->addLayout(titleRow);
@@ -1562,6 +1591,7 @@ void MainWindow::onBulkSwitchClicked()
         { ProfileType::Claude, "#c15f3c", "Claude Code" },
         { ProfileType::Codex,  "#6366f1", "Codex CLI" },
         { ProfileType::Gemini, "#1a73e8", "Gemini CLI" },
+        { ProfileType::OpenCode, "#059669", "OpenCode" },
     };
 
     QHash<ProfileType, QComboBox *> combos;
@@ -1586,30 +1616,27 @@ void MainWindow::onBulkSwitchClicked()
 
         auto *combo = new QComboBox(rowWidget);
         combo->setFixedHeight(34);
-        combo->addItem(QStringLiteral("— 不切换此工具 —"), QString());
+        combo->addItem(QStringLiteral("— 不切换此工具 —"), -1);
 
-        const QString platform = ToolManager::toolPlatform(toolForType(row.type));
         const int activeIndex = m_profileManager->activeIndex(row.type);
         const QList<Profile> profiles = m_profileManager->allProfiles();
-        QString activeKey;
-        if (activeIndex >= 0 && activeIndex < profiles.size()) {
-            activeKey = m_profileManager->profileWithCredential(activeIndex).key;
-        }
-
-        for (const QJsonValue &value : m_keys) {
-            const QJsonObject obj = value.toObject();
-            if (obj.value(QStringLiteral("group")).toObject()
-                    .value(QStringLiteral("platform")).toString() != platform) {
-                continue;
+        for (const Profile &profile : profiles) {
+            if (profile.type != row.type || !profile.hasAnyKey()) continue;
+            QString label = profile.name;
+            if (!profile.model.isEmpty()) {
+                label += QStringLiteral(" · %1").arg(profile.model);
             }
-            const QString key = obj.value(QStringLiteral("key")).toString();
-            if (key.isEmpty()) continue;
-            QString name = obj.value(QStringLiteral("name")).toString().trimmed();
-            if (name.isEmpty()) name = key.left(8) + QStringLiteral("...");
-            combo->addItem(name, key);
-            if (!activeKey.isEmpty() && key == activeKey) {
+            if (!profile.keyHint.isEmpty()) {
+                label += QStringLiteral(" · ⋯%1").arg(profile.keyHint);
+            }
+            combo->addItem(label, profile.index);
+            if (profile.index == activeIndex) {
                 combo->setCurrentIndex(combo->count() - 1);
             }
+        }
+        if (combo->count() == 1) {
+            combo->setItemText(0, QStringLiteral("— 暂无可用档案 —"));
+            combo->setEnabled(false);
         }
         rowLayout->addWidget(combo, 1);
         combos.insert(row.type, combo);
@@ -1633,35 +1660,33 @@ void MainWindow::onBulkSwitchClicked()
         for (const auto &row : rows) {
             QComboBox *combo = combos.value(row.type);
             if (!combo) continue;
-            const QString key = combo->currentData().toString();
-            if (key.isEmpty()) continue;
+            const int profileIndex = combo->currentData().toInt();
+            if (profileIndex < 0) continue;
             const QList<Profile> profiles = m_profileManager->allProfiles();
-            int matchIndex = -1;
-            for (const Profile &p : profiles) {
-                if (p.type == row.type) {
-                    matchIndex = p.index;
-                    break;
-                }
+            if (!ProfileManager::isActivationSelectionValid(
+                    profiles, profileIndex, row.type)) {
+                logMessage(
+                    QStringLiteral("%1 选择的档案已失效").arg(profileTypeName(row.type)),
+                    kLogError);
+                continue;
             }
-            if (matchIndex >= 0) {
-                ++scheduled;
-                const Profile p = m_profileManager->profileWithCredential(matchIndex);
-                if (!m_toolManager->configure(toolForType(row.type), key, p.model)) {
-                    logMessage(
-                        QStringLiteral("%1 配置写入失败：%2")
-                            .arg(profileTypeName(row.type), m_toolManager->lastError()),
-                        kLogError);
-                } else {
-                    m_profileManager->setActiveIndex(matchIndex);
-                    logMessage(
-                        QStringLiteral("✓ %1 已切换").arg(profileTypeName(row.type)),
-                        kLogSuccess);
-                }
+            ++scheduled;
+            if (!configureFromProfile(profileIndex, toolForType(row.type))) {
+                logMessage(
+                    QStringLiteral("%1 批量激活失败：%2")
+                        .arg(profileTypeName(row.type), m_toolManager->lastError()),
+                    kLogError);
+            } else {
+                m_profileManager->setActiveIndex(profileIndex);
+                logMessage(
+                    QStringLiteral("✓ %1 已切换到「%2」")
+                        .arg(profileTypeName(row.type), profiles[profileIndex].name),
+                    kLogSuccess);
             }
         }
         if (scheduled == 0) {
             QMessageBox::information(&dialog, QStringLiteral("未做任何更改"),
-                                     QStringLiteral("三个工具均选择了「不切换」，没有更改任何配置。"));
+                                     QStringLiteral("四个工具均选择了「不切换」，没有更改任何配置。"));
             return;
         }
         rebuildCards();
@@ -1988,7 +2013,7 @@ void MainWindow::onUserInfoReceived(const QJsonObject &userInfo)
     m_balanceButton->setText(QStringLiteral("余额  $%1").arg(formatted));
     m_balance = balance;
     m_balanceKnown = userInfo.contains(QStringLiteral("balance"));
-    updateBalanceOrb();
+    m_runtimeStatusStore->setBalance(m_balance, m_balanceKnown);
 
     QString displayName = userInfo.value(QStringLiteral("username")).toString().trimmed();
     if (displayName.isEmpty()) {
@@ -2301,7 +2326,7 @@ void MainWindow::onCardConnectionTested(const QString &requestId, bool success,
     if (it == m_cardTestWidgets.end()) return;
 
     StatusBadge *label  = it.value().first;
-    QPushButton *button = it.value().second;
+    QAction *button = it.value().second;
 
     if (label) {
         label->setState(
@@ -2333,7 +2358,8 @@ void MainWindow::onImageGenerationClicked()
 
 void MainWindow::onChatClicked()
 {
-    auto *dialog = new ChatDialog(m_apiClient, m_skillManager, m_profileManager, this);
+    auto *dialog = new ChatDialog(m_apiClient, m_skillManager, m_profileManager,
+                                  m_runtimeStatusStore, this);
     dialog->exec();
     dialog->deleteLater();
 }
@@ -2532,6 +2558,7 @@ void MainWindow::onGatewayRunningChanged(bool running)
         }
         logMessage(QStringLiteral("已关闭本地网关并恢复直接连接配置"), kLogInfo);
     }
+    updateRuntimeProfileStatus();
     rebuildCards();
     rebuildTrayMenu();
 }

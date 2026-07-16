@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(AegisyClient VERSION 2.5.1 LANGUAGES CXX)
+project(AegisyClient VERSION 2.5.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -60,7 +60,8 @@ set(SOURCES
     src/app_theme.cpp
     src/status_badge.cpp
     src/profile_archive.cpp
-    src/balance_orb.cpp
+    src/runtime_status_store.cpp
+    src/runtime_status_bar.cpp
     src/desktop_downloader.cpp
     src/mcp_config_dialog.cpp
     src/help_dialog.cpp
@@ -101,7 +102,8 @@ set(HEADERS
     include/status_badge.h
     include/profile_archive.h
     include/update_manager.h
-    include/balance_orb.h
+    include/runtime_status_store.h
+    include/runtime_status_bar.h
     include/desktop_downloader.h
     include/mcp_config_dialog.h
     include/help_dialog.h
@@ -370,4 +372,38 @@ if(BUILD_TESTING)
         target_link_libraries(AegisySkillManagerTest PRIVATE Qt5::Core Qt5::Network)
     endif()
     add_test(NAME skill_manager_install_and_routing COMMAND AegisySkillManagerTest)
+
+    add_executable(AegisyRuntimeStatusStoreTest
+        tests/runtime_status_store_test.cpp
+        src/runtime_status_store.cpp
+        include/runtime_status_store.h
+    )
+    target_include_directories(AegisyRuntimeStatusStoreTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyRuntimeStatusStoreTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyRuntimeStatusStoreTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME runtime_status_store COMMAND AegisyRuntimeStatusStoreTest)
+
+    add_executable(AegisyRuntimeStatusBarRenderTest
+        tests/runtime_status_bar_render_test.cpp
+        src/runtime_status_bar.cpp
+        src/runtime_status_store.cpp
+        include/runtime_status_bar.h
+        include/runtime_status_store.h
+    )
+    target_include_directories(AegisyRuntimeStatusBarRenderTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyRuntimeStatusBarRenderTest PRIVATE
+            Qt6::Core Qt6::Widgets)
+    else()
+        target_link_libraries(AegisyRuntimeStatusBarRenderTest PRIVATE
+            Qt5::Core Qt5::Widgets)
+    endif()
+    add_test(NAME runtime_status_bar_render COMMAND AegisyRuntimeStatusBarRenderTest)
+    set_tests_properties(runtime_status_bar_render PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()

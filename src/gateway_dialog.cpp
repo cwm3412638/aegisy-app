@@ -139,10 +139,11 @@ void GatewayDialog::refreshState()
     m_toggleButton->setStyleSheet(running ? AppTheme::dangerButtonStyle()
                                           : AppTheme::primaryButtonStyle());
     m_endpointLabel->setText(QStringLiteral(
-        "Codex:  %1/v1\nClaude: %2\nGemini: %3")
+        "Codex:   %1/v1\nClaude:  %2\nGemini:  %3\nOpenCode: %4")
         .arg(m_manager->endpoint(AiTool::CodexCli),
              m_manager->endpoint(AiTool::ClaudeCode),
-             m_manager->endpoint(AiTool::GeminiCli)));
+             m_manager->endpoint(AiTool::GeminiCli),
+             m_manager->endpoint(AiTool::OpenCode)));
     m_statusLabel->setText(running
         ? QStringLiteral("网关仅监听本机 127.0.0.1:43112")
         : QStringLiteral("直接连接模式"));

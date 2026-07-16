@@ -197,9 +197,12 @@ void GatewayManager::handleEvent(const QJsonObject &event)
             m_running = true;
             emit runningChanged(true);
         }
+    } else if (type == QStringLiteral("request_started")) {
+        emit runtimeEvent(event);
     } else if (type == QStringLiteral("request")) {
         m_requestLogs.prepend(event);
         while (m_requestLogs.size() > kMaxRequestLogs) m_requestLogs.removeLast();
+        emit runtimeEvent(event);
         emit requestLogged(event);
     } else if (type == QStringLiteral("fatal")) {
         m_lastError = event.value(QStringLiteral("error")).toString();

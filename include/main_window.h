@@ -25,7 +25,8 @@ class UpdateManager;
 class GatewayManager;
 class DesktopEnhancementManager;
 class SkillManager;
-class BalanceOrb;
+class RuntimeStatusBar;
+class RuntimeStatusStore;
 class QTimer;
 class QEvent;
 class QShowEvent;
@@ -92,11 +93,11 @@ private:
     void scheduleConfigurationRefresh();
     bool isProfileConfigurationReady(const Profile &profile,
                                      QString *issue = nullptr) const;
-    void setupBalanceOrb();
+    void setupRuntimeStatusBar();
     void rebuildTrayMenu();
-    void updateBalanceOrb();
-    void showBalanceOrb();
-    void hideBalanceOrb();
+    void updateRuntimeProfileStatus();
+    void showRuntimeStatusBar();
+    void hideRuntimeStatusBar();
 
     // 档案卡片
     void rebuildCards();
@@ -129,6 +130,7 @@ private:
     GatewayManager *m_gatewayManager;
     DesktopEnhancementManager *m_desktopEnhancementManager;
     SkillManager *m_skillManager;
+    RuntimeStatusStore *m_runtimeStatusStore;
 
     // UI — 顶栏
     QPushButton *m_userLabel;
@@ -165,7 +167,7 @@ private:
     QTextEdit   *m_logOutput;
     QSystemTrayIcon *m_trayIcon = nullptr;
     QMenu *m_trayMenu = nullptr;
-    BalanceOrb *m_balanceOrb = nullptr;
+    RuntimeStatusBar *m_runtimeStatusBar = nullptr;
 
     // 状态
     QString    m_authToken;
@@ -196,8 +198,8 @@ private:
     bool          m_trayHintShown = false;
     bool          m_authExpiredHandled = false;
 
-    // 卡片测试：requestId -> {resultBadge, testButton}
-    QHash<QString, QPair<StatusBadge*, QPushButton*>> m_cardTestWidgets;
+    // 卡片测试：requestId -> {resultBadge, testAction}
+    QHash<QString, QPair<StatusBadge*, QAction*>> m_cardTestWidgets;
 };
 
 #endif // MAIN_WINDOW_H

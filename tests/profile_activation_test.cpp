@@ -32,6 +32,39 @@ int main(int argc, char *argv[])
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsRoot.path());
 
     {
+        QList<Profile> profiles;
+        int index = 0;
+        for (ProfileType type : allProfileTypes()) {
+            Profile profile;
+            profile.index = index++;
+            profile.type = type;
+            profile.hasCredential = true;
+            profiles.append(profile);
+        }
+        for (int i = 0; i < profiles.size(); ++i) {
+            if (!expect(ProfileManager::isActivationSelectionValid(
+                            profiles, i, profiles.at(i).type),
+                        "four-tool activation selection was rejected")) {
+                return 1;
+            }
+        }
+        if (!expect(!ProfileManager::isActivationSelectionValid(
+                        profiles, 0, ProfileType::OpenCode),
+                    "mismatched activation type was accepted")
+                || !expect(!ProfileManager::isActivationSelectionValid(
+                               profiles, profiles.size(), ProfileType::Codex),
+                           "out-of-range activation index was accepted")) {
+            return 1;
+        }
+        profiles[0].hasCredential = false;
+        if (!expect(!ProfileManager::isActivationSelectionValid(
+                        profiles, 0, profiles[0].type),
+                    "credential-free activation selection was accepted")) {
+            return 1;
+        }
+    }
+
+    {
         QSettings().clear();
         ProfileManager manager;
         const int firstCodex = 0;
@@ -41,16 +74,21 @@ int main(int argc, char *argv[])
             QStringLiteral("Codex 2"), ProfileType::Codex);
         const int gemini = manager.addProfile(
             QStringLiteral("Gemini"), ProfileType::Gemini);
+        const int openCode = manager.addProfile(
+            QStringLiteral("OpenCode"), ProfileType::OpenCode);
 
         manager.setActiveIndex(firstCodex);
         manager.setActiveIndex(claude);
         manager.setActiveIndex(gemini);
+        manager.setActiveIndex(openCode);
         if (!expect(manager.activeIndex(ProfileType::Codex) == firstCodex,
                     "Codex active profile was not stored")
                 || !expect(manager.activeIndex(ProfileType::Claude) == claude,
                            "Claude active profile was not stored")
                 || !expect(manager.activeIndex(ProfileType::Gemini) == gemini,
-                           "Gemini active profile was not stored")) {
+                           "Gemini active profile was not stored")
+                || !expect(manager.activeIndex(ProfileType::OpenCode) == openCode,
+                           "OpenCode active profile was not stored")) {
             return 1;
         }
 
@@ -60,7 +98,9 @@ int main(int argc, char *argv[])
                 || !expect(manager.activeIndex(ProfileType::Claude) == claude,
                            "Activating Codex unexpectedly cleared Claude")
                 || !expect(manager.activeIndex(ProfileType::Gemini) == gemini,
-                           "Activating Codex unexpectedly cleared Gemini")) {
+                           "Activating Codex unexpectedly cleared Gemini")
+                || !expect(manager.activeIndex(ProfileType::OpenCode) == openCode,
+                           "Activating Codex unexpectedly cleared OpenCode")) {
             return 1;
         }
 
@@ -70,7 +110,9 @@ int main(int argc, char *argv[])
                 || !expect(manager.activeIndex(ProfileType::Codex) == secondCodex - 1,
                            "Codex active index was not shifted after removal")
                 || !expect(manager.activeIndex(ProfileType::Gemini) == gemini - 1,
-                           "Gemini active index was not shifted after removal")) {
+                           "Gemini active index was not shifted after removal")
+                || !expect(manager.activeIndex(ProfileType::OpenCode) == openCode - 1,
+                           "OpenCode active index was not shifted after removal")) {
             return 1;
         }
     }

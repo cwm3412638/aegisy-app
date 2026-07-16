@@ -10,6 +10,7 @@
 class ApiClient;
 class SkillManager;
 class ProfileManager;
+class RuntimeStatusStore;
 class QComboBox;
 class QLabel;
 class QListWidget;
@@ -27,6 +28,7 @@ public:
     explicit ChatDialog(ApiClient *apiClient,
                         SkillManager *skillManager,
                         ProfileManager *profileManager = nullptr,
+                        RuntimeStatusStore *runtimeStatusStore = nullptr,
                         QWidget *parent = nullptr);
 
 protected:
@@ -113,6 +115,7 @@ private:
     ApiClient *m_apiClient = nullptr;
     SkillManager *m_skillManager = nullptr;
     ProfileManager *m_profileManager = nullptr;
+    RuntimeStatusStore *m_runtimeStatusStore = nullptr;
     QListWidget *m_sessionList = nullptr;
     QComboBox *m_keyCombo = nullptr;
     QComboBox *m_modelCombo = nullptr;
@@ -146,6 +149,7 @@ private:
     QString m_forcedSkillId;
     QString m_instructionSkillId;
     QJsonArray m_allApiKeys;
+    quint64 m_presentationJobGeneration = 0;
     bool m_generating = false;
     bool m_applyingSessionSelection = false;
 };

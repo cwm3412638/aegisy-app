@@ -4,6 +4,9 @@
 #include <QDialog>
 #include <QSet>
 
+#include <atomic>
+#include <memory>
+
 #include "desktop_enhancement_manager.h"
 
 class QLabel;
@@ -37,6 +40,7 @@ private:
     QStringList selectedPluginIds() const;
     void updateInstallButton();
     void showPluginDetails(int row);
+    void startPluginInstallation(const QStringList &pluginIds);
 
     DesktopEnhancementManager *m_manager;
     QList<CodexPluginInfo> m_plugins;
@@ -45,11 +49,15 @@ private:
     QLabel *m_pluginStatus;
     QLabel *m_pluginDetails;
     QPushButton *m_installPluginButton;
+    QPushButton *m_refreshPluginButton;
     QPushButton *m_computerUseButton;
     QLabel *m_historyStatus;
     QLabel *m_claudeStatus;
     QPushButton *m_localizeClaudeButton;
     QSet<QString> m_checkedPluginIds;
+    std::shared_ptr<std::atomic_bool> m_pluginCancel;
+    bool m_pluginRefreshRunning = false;
+    bool m_pluginInstallRunning = false;
 };
 
 #endif // DESKTOP_ENHANCEMENT_DIALOG_H

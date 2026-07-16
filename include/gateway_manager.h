@@ -31,6 +31,7 @@ public:
 signals:
     void runningChanged(bool running);
     void requestLogged(const QJsonObject &entry);
+    void runtimeEvent(const QJsonObject &event);
     void gatewayError(const QString &error);
 
 private:

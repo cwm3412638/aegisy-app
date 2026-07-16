@@ -119,6 +119,8 @@ public:
 
     // Key 末尾掩码（非敏感）。为缺失掩码的存量配置补齐一次，供卡片区分展示。
     static QString maskedKeyHint(const QString &key);
+    static bool isActivationSelectionValid(const QList<Profile> &profiles,
+                                           int index, ProfileType type);
     void backfillKeyHints();
     int     activeIndex(ProfileType type) const;
     Profile activeProfile(ProfileType type) const;

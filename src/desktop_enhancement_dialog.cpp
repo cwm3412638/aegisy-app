@@ -3,7 +3,6 @@
 #include "app_theme.h"
 
 #include <QAbstractItemView>
-#include <QApplication>
 #include <QDialogButtonBox>
 #include <QFrame>
 #include <QHeaderView>
@@ -11,13 +10,14 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
-#include <QProgressDialog>
 #include <QScreen>
 #include <QStyle>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
+#include <QThread>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 
@@ -205,9 +205,9 @@ DesktopEnhancementDialog::DesktopEnhancementDialog(DesktopEnhancementManager *ma
     auto *clearSelectionButton = new QPushButton(QStringLiteral("清空选择"), catalogPage);
     clearSelectionButton->setStyleSheet(AppTheme::secondaryButtonStyle());
     pluginToolbar->addWidget(clearSelectionButton);
-    auto *refreshButton = new QPushButton(QStringLiteral("刷新列表"), catalogPage);
-    refreshButton->setStyleSheet(AppTheme::secondaryButtonStyle());
-    pluginToolbar->addWidget(refreshButton);
+    m_refreshPluginButton = new QPushButton(QStringLiteral("刷新列表"), catalogPage);
+    m_refreshPluginButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    pluginToolbar->addWidget(m_refreshPluginButton);
     catalogLayout->addLayout(pluginToolbar);
 
     m_pluginTable = new QTableWidget(catalogPage);
@@ -318,7 +318,8 @@ DesktopEnhancementDialog::DesktopEnhancementDialog(DesktopEnhancementManager *ma
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     layout->addWidget(buttons);
 
-    connect(refreshButton, &QPushButton::clicked, this, &DesktopEnhancementDialog::refreshPlugins);
+    connect(m_refreshPluginButton, &QPushButton::clicked,
+            this, &DesktopEnhancementDialog::refreshPlugins);
     connect(m_pluginSearch, &QLineEdit::textChanged, this, &DesktopEnhancementDialog::filterPlugins);
     connect(selectAllButton, &QPushButton::clicked, this, [this]() {
         for (const CodexPluginInfo &plugin : m_plugins) {
@@ -357,20 +358,45 @@ DesktopEnhancementDialog::DesktopEnhancementDialog(DesktopEnhancementManager *ma
 
 void DesktopEnhancementDialog::refreshPlugins()
 {
+    if (m_pluginRefreshRunning || m_pluginInstallRunning) return;
+    m_pluginRefreshRunning = true;
+    m_refreshPluginButton->setEnabled(false);
+    m_installPluginButton->setEnabled(false);
+    m_computerUseButton->setEnabled(false);
     m_pluginStatus->setText(QStringLiteral("正在读取 Codex 官方插件列表..."));
-    QString error;
-    m_plugins = m_manager->listCodexPlugins(&error);
-    if (!error.isEmpty()) {
-        m_pluginStatus->setText(error);
-        m_pluginStatus->setStyleSheet(QStringLiteral("color: #b42318; font-size: 12px;"));
-    } else {
-        const int installed = std::count_if(m_plugins.cbegin(), m_plugins.cend(),
-            [](const CodexPluginInfo &plugin) { return plugin.installed; });
-        m_pluginStatus->setText(QStringLiteral("共 %1 个插件，已安装 %2 个")
-            .arg(m_plugins.size()).arg(installed));
-        m_pluginStatus->setStyleSheet(QStringLiteral("color: #667085; font-size: 12px;"));
-    }
-    rebuildPluginTable();
+    m_pluginStatus->setStyleSheet(QStringLiteral("color: #667085; font-size: 12px;"));
+
+    QPointer<DesktopEnhancementDialog> dialog(this);
+    QThread *worker = QThread::create([dialog]() {
+        DesktopEnhancementManager manager;
+        QString error;
+        const QList<CodexPluginInfo> plugins = manager.listCodexPlugins(&error);
+        if (!dialog) return;
+        QMetaObject::invokeMethod(dialog, [dialog, plugins, error]() {
+            if (!dialog) return;
+            dialog->m_pluginRefreshRunning = false;
+            dialog->m_refreshPluginButton->setEnabled(true);
+            dialog->m_computerUseButton->setEnabled(true);
+            dialog->m_plugins = plugins;
+            if (!error.isEmpty()) {
+                dialog->m_pluginStatus->setText(error);
+                dialog->m_pluginStatus->setStyleSheet(
+                    QStringLiteral("color: #b42318; font-size: 12px;"));
+            } else {
+                const int installed = std::count_if(
+                    plugins.cbegin(), plugins.cend(),
+                    [](const CodexPluginInfo &plugin) { return plugin.installed; });
+                dialog->m_pluginStatus->setText(
+                    QStringLiteral("共 %1 个插件，已安装 %2 个")
+                        .arg(plugins.size()).arg(installed));
+                dialog->m_pluginStatus->setStyleSheet(
+                    QStringLiteral("color: #667085; font-size: 12px;"));
+            }
+            dialog->rebuildPluginTable();
+        }, Qt::QueuedConnection);
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
 }
 
 void DesktopEnhancementDialog::filterPlugins()
@@ -439,6 +465,11 @@ QStringList DesktopEnhancementDialog::selectedPluginIds() const
 
 void DesktopEnhancementDialog::updateInstallButton()
 {
+    if (m_pluginInstallRunning) {
+        m_installPluginButton->setEnabled(true);
+        m_installPluginButton->setText(QStringLiteral("停止后续安装"));
+        return;
+    }
     const int count = selectedPluginIds().size();
     m_installPluginButton->setEnabled(count > 0);
     m_installPluginButton->setText(count > 0
@@ -464,6 +495,12 @@ void DesktopEnhancementDialog::showPluginDetails(int row)
 
 void DesktopEnhancementDialog::installSelectedPlugin()
 {
+    if (m_pluginInstallRunning) {
+        if (m_pluginCancel) m_pluginCancel->store(true);
+        m_installPluginButton->setEnabled(false);
+        m_pluginStatus->setText(QStringLiteral("将在当前插件完成后停止。"));
+        return;
+    }
     const QStringList pluginIds = selectedPluginIds();
     if (pluginIds.isEmpty()) return;
     QList<CodexPluginInfo> selectedPlugins;
@@ -472,46 +509,83 @@ void DesktopEnhancementDialog::installSelectedPlugin()
     }
     if (!confirmPluginInstallation(this, selectedPlugins)) return;
 
-    m_installPluginButton->setEnabled(false);
-    QProgressDialog progress(QStringLiteral("正在安装 Codex 插件..."),
-                             QStringLiteral("停止后续安装"), 0, pluginIds.size(), this);
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(0);
-    progress.setValue(0);
-    QStringList succeeded;
-    QStringList failed;
-    for (int i = 0; i < pluginIds.size(); ++i) {
-        if (progress.wasCanceled()) break;
-        const QString pluginId = pluginIds[i];
-        progress.setLabelText(QStringLiteral("正在安装 %1 (%2/%3)...")
-            .arg(pluginId).arg(i + 1).arg(pluginIds.size()));
-        QApplication::processEvents();
-        m_pluginStatus->setText(progress.labelText());
-        QString output;
-        QString error;
-        if (m_manager->installCodexPlugin(pluginId, &output, &error)) {
-            succeeded.append(pluginId);
-            m_checkedPluginIds.remove(pluginId);
-        } else {
-            failed.append(QStringLiteral("%1：%2").arg(pluginId, error.left(180)));
+    startPluginInstallation(pluginIds);
+}
+
+void DesktopEnhancementDialog::startPluginInstallation(const QStringList &pluginIds)
+{
+    if (pluginIds.isEmpty() || m_pluginInstallRunning) return;
+    m_pluginInstallRunning = true;
+    m_pluginCancel = std::make_shared<std::atomic_bool>(false);
+    m_refreshPluginButton->setEnabled(false);
+    m_computerUseButton->setEnabled(true);
+    m_computerUseButton->setText(QStringLiteral("停止插件安装"));
+    updateInstallButton();
+
+    QPointer<DesktopEnhancementDialog> dialog(this);
+    const std::shared_ptr<std::atomic_bool> cancel = m_pluginCancel;
+    QThread *worker = QThread::create([dialog, pluginIds, cancel]() {
+        DesktopEnhancementManager manager;
+        QStringList succeeded;
+        QStringList failed;
+        for (int i = 0; i < pluginIds.size(); ++i) {
+            if (cancel->load()) break;
+            const QString pluginId = pluginIds.at(i);
+            if (dialog) {
+                QMetaObject::invokeMethod(dialog, [dialog, pluginId, i, pluginIds]() {
+                    if (!dialog) return;
+                    dialog->m_pluginStatus->setText(
+                        QStringLiteral("正在安装 %1 (%2/%3)...")
+                            .arg(pluginId).arg(i + 1).arg(pluginIds.size()));
+                }, Qt::QueuedConnection);
+            }
+            QString output;
+            QString error;
+            if (manager.installCodexPlugin(pluginId, &output, &error)) {
+                succeeded.append(pluginId);
+            } else {
+                failed.append(QStringLiteral("%1：%2").arg(pluginId, error.left(180)));
+            }
         }
-        progress.setValue(i + 1);
-    }
-    refreshPlugins();
-    QString result = succeeded.isEmpty()
-        ? QStringLiteral("没有插件安装成功。")
-        : QStringLiteral("已安装 %1 个插件：\n%2")
-            .arg(succeeded.size()).arg(succeeded.join(QLatin1Char('\n')));
-    if (!failed.isEmpty()) {
-        result += QStringLiteral("\n\n安装失败 %1 个：\n%2")
-            .arg(failed.size()).arg(failed.join(QLatin1Char('\n')));
-    }
-    result += QStringLiteral("\n\n重启 Codex 后生效。");
-    showBatchInstallResult(this, result);
+        const bool canceled = cancel->load();
+        if (!dialog) return;
+        QMetaObject::invokeMethod(dialog, [dialog, succeeded, failed, canceled]() {
+            if (!dialog) return;
+            dialog->m_pluginInstallRunning = false;
+            dialog->m_pluginCancel.reset();
+            dialog->m_computerUseButton->setEnabled(true);
+            dialog->m_computerUseButton->setText(QStringLiteral("安装 Computer Use"));
+            dialog->m_refreshPluginButton->setEnabled(true);
+            for (const QString &id : succeeded) dialog->m_checkedPluginIds.remove(id);
+
+            QString result = succeeded.isEmpty()
+                ? QStringLiteral("没有插件安装成功。")
+                : QStringLiteral("已安装 %1 个插件：\n%2")
+                    .arg(succeeded.size()).arg(succeeded.join(QLatin1Char('\n')));
+            if (!failed.isEmpty()) {
+                result += QStringLiteral("\n\n安装失败 %1 个：\n%2")
+                    .arg(failed.size()).arg(failed.join(QLatin1Char('\n')));
+            }
+            if (canceled) result += QStringLiteral("\n\n已停止后续安装。");
+            result += QStringLiteral("\n\n重启 Codex 后生效。");
+            dialog->refreshPlugins();
+            showBatchInstallResult(dialog, result);
+        }, Qt::QueuedConnection);
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
 }
 
 void DesktopEnhancementDialog::installComputerUse()
 {
+    if (m_pluginInstallRunning) {
+        if (m_pluginCancel) m_pluginCancel->store(true);
+        m_computerUseButton->setEnabled(false);
+        m_computerUseButton->setText(QStringLiteral("正在停止..."));
+        m_pluginStatus->setText(QStringLiteral("将在当前插件完成后停止。"));
+        return;
+    }
+    if (m_pluginRefreshRunning) return;
     for (const CodexPluginInfo &plugin : m_plugins) {
         if (plugin.id == QStringLiteral("computer-use@openai-bundled") && plugin.installed) {
             QMessageBox::information(this, QStringLiteral("Computer Use"),
@@ -525,18 +599,7 @@ void DesktopEnhancementDialog::installComputerUse()
                            "插件首次运行仍会按 Codex 策略请求电脑控制授权。是否继续？"),
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No) != QMessageBox::Yes) return;
-    m_computerUseButton->setEnabled(false);
-    m_pluginStatus->setText(QStringLiteral("正在安装 Computer Use..."));
-    QString output;
-    QString error;
-    if (!m_manager->installCodexPlugin(pluginId, &output, &error)) {
-        QMessageBox::critical(this, QStringLiteral("安装失败"), error);
-    } else {
-        QMessageBox::information(this, QStringLiteral("安装完成"),
-            QStringLiteral("Computer Use 已安装。重启 Codex 后即可使用。"));
-    }
-    m_computerUseButton->setEnabled(true);
-    refreshPlugins();
+    startPluginInstallation({ pluginId });
 }
 
 void DesktopEnhancementDialog::syncHistory()

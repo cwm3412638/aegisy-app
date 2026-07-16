@@ -124,7 +124,8 @@ void SystemDoctorDialog::refreshReport()
             runtimes.append(status);
         }
         QMap<int, ToolStatus> tools;
-        for (AiTool tool : { AiTool::ClaudeCode, AiTool::CodexCli, AiTool::GeminiCli }) {
+        for (AiTool tool : { AiTool::ClaudeCode, AiTool::CodexCli,
+                             AiTool::GeminiCli, AiTool::OpenCode }) {
             ToolStatus status = detector.detectFast(tool);
             if (status.installed) {
                 status.latestVersion = detector.latestVersion(tool, 10000);

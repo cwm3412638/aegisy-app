@@ -37,6 +37,76 @@ function routeRequest(url, headers) {
   return { tool: String(headers['x-aegisy-tool'] || 'codex'), path: url };
 }
 
+function routeModel(tool, routePath) {
+  if (tool !== 'gemini') return '';
+  const match = String(routePath).match(/\/models\/([^/:?]+)(?::[^?]+)?/);
+  if (!match) return '';
+  try { return decodeURIComponent(match[1]); } catch (_) { return match[1]; }
+}
+
+function finiteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : null;
+}
+
+function mergeUsage(target, value) {
+  if (!value || typeof value !== 'object') return;
+  const input = finiteNumber(value.input_tokens ?? value.prompt_tokens
+    ?? value.promptTokenCount ?? value.inputTokens);
+  const output = finiteNumber(value.output_tokens ?? value.completion_tokens
+    ?? value.candidatesTokenCount ?? value.outputTokens);
+  const total = finiteNumber(value.total_tokens ?? value.totalTokenCount
+    ?? value.totalTokens);
+  if (input !== null) target.inputTokens = Math.max(target.inputTokens ?? 0, input);
+  if (output !== null) target.outputTokens = Math.max(target.outputTokens ?? 0, output);
+  if (total !== null) target.totalTokens = Math.max(target.totalTokens ?? 0, total);
+}
+
+function inspectUsagePayload(value, target) {
+  if (!value || typeof value !== 'object') return;
+  mergeUsage(target, value.usage);
+  mergeUsage(target, value.usageMetadata);
+  mergeUsage(target, value.message && value.message.usage);
+  mergeUsage(target, value.response && value.response.usage);
+  if (value.type === 'message_start') mergeUsage(target, value.message && value.message.usage);
+  if (value.type === 'message_delta') mergeUsage(target, value.usage);
+}
+
+function requestMetadata(value) {
+  if (!value || typeof value !== 'object') {
+    return { model: '', reasoningEffort: '', contextLimit: null };
+  }
+  let reasoningEffort = typeof value.reasoning_effort === 'string'
+    ? value.reasoning_effort : '';
+  if (!reasoningEffort && value.reasoning && typeof value.reasoning.effort === 'string') {
+    reasoningEffort = value.reasoning.effort;
+  }
+  if (!reasoningEffort && value.thinking && typeof value.thinking === 'object') {
+    const budget = finiteNumber(value.thinking.budget_tokens);
+    reasoningEffort = budget !== null ? `budget ${budget}` : String(value.thinking.type || '');
+  }
+  const thinkingConfig = value.generationConfig && value.generationConfig.thinkingConfig;
+  if (!reasoningEffort && thinkingConfig && typeof thinkingConfig === 'object') {
+    const budget = finiteNumber(thinkingConfig.thinkingBudget);
+    reasoningEffort = budget !== null ? `budget ${budget}` : '';
+  }
+  return {
+    model: typeof value.model === 'string' ? value.model : '',
+    reasoningEffort,
+    contextLimit: finiteNumber(value.context_window ?? value.model_context_window)
+  };
+}
+
+function appendUsageFields(event, usage) {
+  if (usage.inputTokens !== null) event.input_tokens = usage.inputTokens;
+  if (usage.outputTokens !== null) event.output_tokens = usage.outputTokens;
+  if (usage.totalTokens !== null) event.total_tokens = usage.totalTokens;
+  else if (usage.inputTokens !== null && usage.outputTokens !== null) {
+    event.total_tokens = usage.inputTokens + usage.outputTokens;
+  }
+  return event;
+}
+
 const server = http.createServer((request, response) => {
   if (request.url === '/health') {
     sendJson(response, 200, {
@@ -71,14 +141,27 @@ const server = http.createServer((request, response) => {
     }
 
     const body = Buffer.concat(chunks);
-    let model = '';
+    let metadata = { model: '', reasoningEffort: '', contextLimit: null };
     if (body.length && String(request.headers['content-type'] || '').includes('application/json')) {
       try {
         const parsed = JSON.parse(body.toString('utf8'));
-        model = typeof parsed.model === 'string' ? parsed.model : '';
+        metadata = requestMetadata(parsed);
       } catch (_) {
       }
     }
+    if (!metadata.model) metadata.model = routeModel(route.tool, route.path);
+
+    const startedEvent = {
+      type: 'request_started',
+      timestamp: new Date().toISOString(),
+      tool: route.tool,
+      method: request.method || 'GET',
+      path: route.path.split('?')[0],
+      model: metadata.model,
+      reasoning_effort: metadata.reasoningEffort
+    };
+    if (metadata.contextLimit !== null) startedEvent.context_limit = metadata.contextLimit;
+    emit(startedEvent);
 
     const upstream = new URL(profile.upstream || 'https://aegisy.cc');
     const upstreamPath = new URL(route.path, `http://127.0.0.1:${port}`);
@@ -104,10 +187,12 @@ const server = http.createServer((request, response) => {
     if (request.socket && typeof request.socket.setNoDelay === 'function') {
       request.socket.setNoDelay(true);
     }
-    const upstreamRequest = https.request({
+    const transport = upstream.protocol === 'http:' ? http : https;
+    let terminalEventEmitted = false;
+    const upstreamRequest = transport.request({
       protocol: upstream.protocol,
       hostname: upstream.hostname,
-      port: upstream.port || 443,
+      port: upstream.port || (upstream.protocol === 'http:' ? 80 : 443),
       method: request.method,
       path: upstreamPath.pathname + upstreamPath.search,
       headers,
@@ -117,23 +202,70 @@ const server = http.createServer((request, response) => {
         upstreamRequest.socket.setNoDelay(true);
       }
       response.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.headers);
-      upstreamResponse.pipe(response);
-      upstreamResponse.on('end', () => {
-        emit({
+      const usage = { inputTokens: null, outputTokens: null, totalTokens: null };
+      const contentType = String(upstreamResponse.headers['content-type'] || '').toLowerCase();
+      const isEventStream = contentType.includes('text/event-stream');
+      let eventBuffer = '';
+      let jsonBuffer = Buffer.alloc(0);
+      const emitTerminalEvent = (status, error = '') => {
+        if (terminalEventEmitted) return;
+        terminalEventEmitted = true;
+        const event = appendUsageFields({
           type: 'request',
           timestamp: new Date().toISOString(),
           tool: route.tool,
           method: request.method || 'GET',
           path: route.path.split('?')[0],
-          model,
-          status: upstreamResponse.statusCode || 0,
+          model: metadata.model,
+          reasoning_effort: metadata.reasoningEffort,
+          status,
           latency_ms: Date.now() - startedAt
-        });
+        }, usage);
+        if (error) event.error = String(error).slice(0, 200);
+        emit(event);
+      };
+      const inspectEventLine = lineValue => {
+        const line = lineValue.trim();
+        if (!line.startsWith('data:')) return;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') return;
+        try { inspectUsagePayload(JSON.parse(data), usage); } catch (_) {}
+      };
+      upstreamResponse.on('data', chunk => {
+        response.write(chunk);
+        if (isEventStream) {
+          eventBuffer += chunk.toString('utf8');
+          if (eventBuffer.length > 1024 * 1024) eventBuffer = eventBuffer.slice(-1024 * 1024);
+          let newline = -1;
+          while ((newline = eventBuffer.indexOf('\n')) >= 0) {
+            const line = eventBuffer.slice(0, newline);
+            eventBuffer = eventBuffer.slice(newline + 1);
+            inspectEventLine(line);
+          }
+        } else if (jsonBuffer.length < 4 * 1024 * 1024) {
+          const remaining = 4 * 1024 * 1024 - jsonBuffer.length;
+          jsonBuffer = Buffer.concat([jsonBuffer, chunk.subarray(0, remaining)]);
+        }
+      });
+      upstreamResponse.on('end', () => {
+        response.end();
+        if (isEventStream && eventBuffer.trim()) {
+          inspectEventLine(eventBuffer);
+        } else if (!isEventStream && jsonBuffer.length) {
+          try { inspectUsagePayload(JSON.parse(jsonBuffer.toString('utf8')), usage); } catch (_) {}
+        }
+        emitTerminalEvent(upstreamResponse.statusCode || 0);
+      });
+      upstreamResponse.on('error', error => {
+        response.destroy();
+        emitTerminalEvent(502, error.message || error);
       });
     });
 
     upstreamRequest.on('timeout', () => upstreamRequest.destroy(new Error('Upstream timeout')));
     upstreamRequest.on('error', error => {
+      if (terminalEventEmitted) return;
+      terminalEventEmitted = true;
       if (!response.headersSent) {
         sendJson(response, 502, { error: { message: 'Aegisy upstream request failed' } });
       } else {
@@ -145,7 +277,8 @@ const server = http.createServer((request, response) => {
         tool: route.tool,
         method: request.method || 'GET',
         path: route.path.split('?')[0],
-        model,
+        model: metadata.model,
+        reasoning_effort: metadata.reasoningEffort,
         status: 502,
         latency_ms: Date.now() - startedAt,
         error: String(error.message || error).slice(0, 200)

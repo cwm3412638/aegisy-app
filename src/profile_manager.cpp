@@ -382,6 +382,15 @@ QString ProfileManager::maskedKeyHint(const QString &key)
     return maskedTail(key);
 }
 
+bool ProfileManager::isActivationSelectionValid(const QList<Profile> &profiles,
+                                                int index, ProfileType type)
+{
+    return index >= 0 && index < profiles.size()
+        && profiles.at(index).index == index
+        && profiles.at(index).type == type
+        && profiles.at(index).hasAnyKey();
+}
+
 void ProfileManager::backfillKeyHints()
 {
     QSettings settings;

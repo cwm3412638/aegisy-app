@@ -83,6 +83,9 @@ class ToolManager : public QObject
     Q_OBJECT
 
 public:
+    static constexpr qint64 CodexConfiguredContextLimit = 272000;
+    static constexpr qint64 CodexGpt56ContextLimit = 372000;
+
     explicit ToolManager(QObject *parent = nullptr);
 
     // 工具元信息
@@ -91,6 +94,8 @@ public:
     static QString npmPackage(AiTool tool);      // npm 全局包名
     static QString cliCommand(AiTool tool);      // 可执行名 claude / codex / gemini
     static QString configFilePath(AiTool tool);  // UI 展示用的主认证文件路径
+    static qint64 configuredContextLimit(AiTool tool, const QString &model = QString());
+    static QString configuredReasoning(AiTool tool, const QString &model = QString());
 
     // 同步检测（含 QProcess 探测，最长约 5s）
     ToolStatus detect(AiTool tool);
