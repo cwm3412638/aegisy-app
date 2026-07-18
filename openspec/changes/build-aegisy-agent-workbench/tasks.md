@@ -120,7 +120,7 @@
 - [ ] 7.1 Pin an initial compatible Codex App Server version and generate its stable protocol schemas
 - [ ] 7.2 Implement adapter process launch, initialize handshake, health, stderr tracing, shutdown, and version rejection
 - [ ] 7.3 Map Codex thread start/resume/fork/list/read/archive/delete/compact to AAP sessions
-  - Partial adapter mapping: pinned Codex App Server 0.144.5 `thread/start`, `thread/resume`, `thread/fork`, and failure cleanup via `thread/archive` are schema-driven and used by `session/start`, `session/resume`, and `session/fork`. Thread list/read/delete/compact and complete provider lifecycle recovery remain pending; Agent/Codex mutation permissions remain read-only.
+  - Partial adapter mapping: pinned Codex App Server 0.144.5 `thread/start`, `thread/resume`, `thread/fork`, `thread/list`, `thread/read`, `thread/archive`, `thread/unarchive`, `thread/delete`, and `thread/compact/start` are schema-driven at the adapter boundary. `session/start`, `session/resume`, and `session/fork` use the first three; list/read/delete/compact are not yet exposed through AAP, and complete provider lifecycle recovery plus user review/compensation remain pending. Agent/Codex mutation permissions remain read-only.
 - [ ] 7.4 Map turn start, completion, interruption, steering, plan, diff, token usage, and structured errors
 - [ ] 7.5 Map message, reasoning summary, command, file-change, tool, review, image, and artifact item lifecycles
 - [ ] 7.6 Map command, file, permission, MCP elicitation, and user-input server requests to AAP approvals/questions

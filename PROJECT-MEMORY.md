@@ -250,6 +250,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   SQLite Items in 200-item pages, capped at 2,000 Items, before the resumed runtime
   becomes active; this is runtime state reconstruction only and never adds history
   implicitly to model context.
+  The pinned Codex 0.144.5 schema also now has adapter-only, schema-driven mappings
+  for `thread/list`, `thread/read`, `thread/unarchive`, `thread/delete`, and
+  `thread/compact/start`, including thread-scoped metadata parsing. They remain
+  unreachable from AAP until user deletion/compaction review, recovery, and provider
+  failure compensation are implemented.
   Two-phase
   scoped deletion, retention policies, undo, purge, and Blob GC coordination are now
   implemented under task `5.8`.
@@ -391,7 +396,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 237 Rust sidecar unit tests, 28 Rust
+Current verified baseline: 16 desktop tests, 239 Rust sidecar unit tests, 28 Rust
 protocol tests, three macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied.
 

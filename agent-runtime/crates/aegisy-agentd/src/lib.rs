@@ -1,4 +1,4 @@
-mod codex_adapter;
+pub(crate) mod codex_adapter;
 mod command_action;
 mod command_artifact;
 mod command_diagnostics;

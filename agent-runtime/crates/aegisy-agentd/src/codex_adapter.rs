@@ -228,6 +228,46 @@ impl CodexAdapter {
         self.request("thread/archive", json!({ "threadId": thread_id }))?;
         Ok(())
     }
+
+    #[allow(dead_code)]
+    pub fn unarchive_session(&mut self, thread_id: &str) -> Result<CodexSession, String> {
+        let result = self.request("thread/unarchive", json!({ "threadId": thread_id }))?;
+        parse_codex_session(result, "thread/unarchive")
+    }
+
+    #[allow(dead_code)]
+    pub fn delete_session(&mut self, thread_id: &str) -> Result<(), String> {
+        self.request("thread/delete", json!({ "threadId": thread_id }))?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn list_threads(
+        &mut self,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+        cwd: Option<&Path>,
+        archived: Option<bool>,
+    ) -> Result<Value, String> {
+        self.request(
+            "thread/list",
+            thread_list_params(cursor, limit, cwd, archived),
+        )
+    }
+
+    #[allow(dead_code)]
+    pub fn read_thread(&mut self, thread_id: &str, include_turns: bool) -> Result<Value, String> {
+        self.request("thread/read", thread_read_params(thread_id, include_turns))
+    }
+
+    #[allow(dead_code)]
+    pub fn compact_thread(&mut self, thread_id: &str) -> Result<(), String> {
+        self.request(
+            "thread/compact/start",
+            thread_compact_start_params(thread_id),
+        )?;
+        Ok(())
+    }
 }
 
 fn parse_codex_session(result: Value, method: &str) -> Result<CodexSession, String> {
@@ -237,10 +277,12 @@ fn parse_codex_session(result: Value, method: &str) -> Result<CodexSession, Stri
         .ok_or_else(|| format!("Codex {method} response is missing thread.id"))?;
     let provider = result
         .get("modelProvider")
+        .or_else(|| result.pointer("/thread/modelProvider"))
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let model = result
         .get("model")
+        .or_else(|| result.pointer("/thread/model"))
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     Ok(CodexSession {
@@ -760,6 +802,43 @@ fn thread_fork_params(
     params
 }
 
+#[allow(dead_code)]
+fn thread_list_params(
+    cursor: Option<&str>,
+    limit: Option<u32>,
+    cwd: Option<&Path>,
+    archived: Option<bool>,
+) -> Value {
+    let mut params = json!({});
+    let object = params.as_object_mut().expect("thread list params object");
+    if let Some(cursor) = cursor {
+        object.insert("cursor".into(), cursor.into());
+    }
+    if let Some(limit) = limit {
+        object.insert("limit".into(), limit.into());
+    }
+    if let Some(cwd) = cwd {
+        object.insert("cwd".into(), cwd.to_string_lossy().into_owned().into());
+    }
+    if let Some(archived) = archived {
+        object.insert("archived".into(), archived.into());
+    }
+    params
+}
+
+#[allow(dead_code)]
+fn thread_read_params(thread_id: &str, include_turns: bool) -> Value {
+    json!({
+        "threadId": thread_id,
+        "includeTurns": include_turns
+    })
+}
+
+#[allow(dead_code)]
+fn thread_compact_start_params(thread_id: &str) -> Value {
+    json!({ "threadId": thread_id })
+}
+
 fn turn_start_params(thread_id: &str, input: &str, idempotency_key: &str) -> Value {
     json!({
         "threadId": thread_id,
@@ -851,6 +930,51 @@ mod tests {
             fork["developerInstructions"],
             resume["developerInstructions"]
         );
+    }
+
+    #[test]
+    fn thread_lifecycle_params_match_generated_pinned_schema() {
+        let list = thread_list_params(
+            Some("cursor-1"),
+            Some(50),
+            Some(Path::new("/tmp/project")),
+            Some(false),
+        );
+        assert_eq!(
+            list,
+            json!({
+                "cursor": "cursor-1",
+                "limit": 50,
+                "cwd": "/tmp/project",
+                "archived": false
+            })
+        );
+        assert_eq!(
+            thread_read_params("thread-1", true),
+            json!({ "threadId": "thread-1", "includeTurns": true })
+        );
+        assert_eq!(
+            thread_compact_start_params("thread-1"),
+            json!({ "threadId": "thread-1" })
+        );
+    }
+
+    #[test]
+    fn thread_lifecycle_session_parser_accepts_thread_scoped_metadata() {
+        let session = parse_codex_session(
+            json!({
+                "thread": {
+                    "id": "thread-1",
+                    "modelProvider": "aegisy",
+                    "model": "model-1"
+                }
+            }),
+            "thread/unarchive",
+        )
+        .unwrap();
+        assert_eq!(session.thread_id, "thread-1");
+        assert_eq!(session.provider, "aegisy");
+        assert_eq!(session.model, "model-1");
     }
 
     #[test]
