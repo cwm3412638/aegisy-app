@@ -30,6 +30,8 @@ public:
 
     void start();
     void stop();
+    QString runtimeHealth();
+    QString restartRuntime();
     QString listProjects(int limit = 50);
     QString updateProjectNavigation(const QString &projectId, bool pinned);
     QString openProject(const QString &root);
@@ -158,6 +160,8 @@ public:
 signals:
     void connectionStateChanged(bool ready, const QString &detail);
     void runtimeInitialized(const QJsonObject &result);
+    void runtimeHealthRead(const QJsonObject &health);
+    void runtimeRestarted(const QString &requestId, const QJsonObject &result);
     void projectsListed(const QString &requestId, const QJsonObject &result);
     void projectNavigationChanged(const QString &requestId, const QJsonObject &result);
     void projectOpened(const QString &requestId, const QJsonObject &project);

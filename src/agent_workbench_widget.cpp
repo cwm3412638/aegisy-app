@@ -275,12 +275,43 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     m_terminalPollTimer->setInterval(75);
     connect(m_terminalPollTimer, &QTimer::timeout,
             this, &AgentWorkbenchWidget::pollActiveTerminal);
+    m_runtimeHealthTimer = new QTimer(this);
+    m_runtimeHealthTimer->setInterval(5000);
+    connect(m_runtimeHealthTimer, &QTimer::timeout, this, [this]() {
+        if (m_runtime->isReady()) m_runtime->runtimeHealth();
+    });
+    m_runtimeHealthTimer->start();
 
     connect(m_runtime, &AgentRuntimeClient::runtimeInitialized,
             this, [this](const QJsonObject &result) {
         const QJsonObject backend = result.value(QStringLiteral("backend")).toObject();
         m_runtimeRecoveryMode = backend.value(QStringLiteral("status")).toString()
             == QStringLiteral("read-only-recovery");
+        m_runtimeRestartRequired = false;
+        updateRecoveryUi();
+    });
+    connect(m_runtime, &AgentRuntimeClient::runtimeHealthRead,
+            this, [this](const QJsonObject &health) {
+        const QString state = health.value(QStringLiteral("state")).toString();
+        m_runtimeRestartRequired = health.value(QStringLiteral("restart_required")).toBool();
+        if (state == QStringLiteral("exited") || state == QStringLiteral("unavailable")) {
+            m_runtimeStatus->setText(QStringLiteral("○ Codex 不可用"));
+            m_runtimeStatus->setToolTip(QStringLiteral("Codex 进程已退出，可点击重启"));
+        }
+        updateRecoveryUi();
+    });
+    connect(m_runtime, &AgentRuntimeClient::runtimeRestarted,
+            this, [this](const QString &, const QJsonObject &result) {
+        m_runtimeRestartRequired = false;
+        const QJsonObject health = result.value(QStringLiteral("health")).toObject();
+        m_runtimeStatus->setText(QStringLiteral("● Codex 已恢复"));
+        m_runtimeStatus->setToolTip(QStringLiteral("Codex 运行时已重新连接"));
+        if (m_runtimeRestartButton) {
+            m_runtimeRestartButton->setText(QStringLiteral("重启 Codex"));
+        }
+        if (health.value(QStringLiteral("state")).toString() != QStringLiteral("running")) {
+            m_runtimeRestartRequired = true;
+        }
         updateRecoveryUi();
     });
     connect(m_runtime, &AgentRuntimeClient::projectionRecoveryStatusRead,
@@ -351,6 +382,15 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         }
         else if (m_terminalPollTimer) m_terminalPollTimer->stop();
         if (!ready && !detail.contains(QStringLiteral("正在连接"))) addNotice(detail, true);
+        updateRecoveryUi();
+    });
+    connect(m_runtime, &AgentRuntimeClient::requestFailed,
+            this, [this](const QString &, const QString &method,
+                         const QString &message, int) {
+        if (method != QStringLiteral("runtime/restart")) return;
+        m_runtimeRestartRequired = true;
+        if (m_runtimeRestartButton) m_runtimeRestartButton->setText(QStringLiteral("重试 Codex"));
+        m_runtimeStatus->setToolTip(message);
         updateRecoveryUi();
     });
     connect(m_runtime, &AgentRuntimeClient::projectsListed,
@@ -1764,6 +1804,24 @@ void AgentWorkbenchWidget::buildUi()
     m_runtimeStatus->setObjectName(QStringLiteral("agentRuntimeStatus"));
     m_runtimeStatus->setStyleSheet(QStringLiteral("border:none; color:#b54708; font-size:11px; font-weight:600;"));
     toolbarLayout->addWidget(m_runtimeStatus);
+    m_runtimeRestartButton = new QPushButton(QStringLiteral("重启 Codex"), toolbar);
+    m_runtimeRestartButton->setObjectName(QStringLiteral("agentRuntimeRestartButton"));
+    m_runtimeRestartButton->setIcon(QIcon(QStringLiteral(":/icons/lucide/rotate-ccw.svg")));
+    m_runtimeRestartButton->setFixedHeight(30);
+    m_runtimeRestartButton->setEnabled(false);
+    m_runtimeRestartButton->setToolTip(QStringLiteral("Codex 进程退出后重新建立运行时连接"));
+    m_runtimeRestartButton->setStyleSheet(QStringLiteral(
+        "QPushButton { background:#ffffff; color:#475467; border:1px solid #d0d5dd;"
+        "border-radius:6px; padding:0 9px; font-size:10px; }"
+        "QPushButton:hover { background:#f2f4f7; color:#101828; }"
+        "QPushButton:disabled { color:#98a2b3; background:#f9fafb; }"));
+    connect(m_runtimeRestartButton, &QPushButton::clicked, this, [this]() {
+        if (!m_runtimeRestartRequired || m_runtimeRecoveryMode) return;
+        m_runtimeRestartButton->setEnabled(false);
+        m_runtimeRestartButton->setText(QStringLiteral("重启中…"));
+        m_runtime->restartRuntime();
+    });
+    toolbarLayout->addWidget(m_runtimeRestartButton);
     root->addWidget(toolbar);
 
     auto *splitter = new QSplitter(Qt::Horizontal, this);
@@ -5268,6 +5326,10 @@ void AgentWorkbenchWidget::updateRecoveryUi()
     }
     if (m_newSessionButton) m_newSessionButton->setEnabled(!m_runtimeRecoveryMode);
     if (m_openProjectButton) m_openProjectButton->setEnabled(!m_runtimeRecoveryMode);
+    if (m_runtimeRestartButton) {
+        m_runtimeRestartButton->setEnabled(
+            m_runtimeRestartRequired && !m_runtimeRecoveryMode);
+    }
     if (m_retentionSettingsButton) {
         m_retentionSettingsButton->setEnabled(
             !m_runtimeRecoveryMode && !m_projectId.isEmpty());

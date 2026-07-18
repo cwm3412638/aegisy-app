@@ -90,8 +90,11 @@ int main(int argc, char *argv[])
     workbench.show();
     application.processEvents();
 
-#ifdef AEGISY_EXPECT_AGENTD
+    QPushButton *runtimeRestart = workbench.findChild<QPushButton *>(
+        QStringLiteral("agentRuntimeRestartButton"));
     QLabel *runtimeStatus = workbench.findChild<QLabel *>(QStringLiteral("agentRuntimeStatus"));
+
+#ifdef AEGISY_EXPECT_AGENTD
     if (!expect(runtimeStatus
                     && waitUntil(application, [runtimeStatus]() {
                         return runtimeStatus->text().startsWith(QStringLiteral("●"));
@@ -348,7 +351,8 @@ int main(int argc, char *argv[])
                            && sessionHistoryMore->isHidden()
                            && !sessionHistoryMore->icon().isNull(),
                        "terminal lifecycle controls have an invalid empty state")
-            || !expect(recoveryBanner && recoveryBanner->isHidden(),
+            || !expect(recoveryBanner && recoveryBanner->isHidden()
+                           && runtimeRestart && !runtimeRestart->isEnabled(),
                        "recovery banner must exist and start hidden for a healthy runtime")
             || !expect(newSession && openFolder && sendButton
                            && !newSession->icon().isNull()
@@ -444,6 +448,25 @@ int main(int argc, char *argv[])
     application.processEvents();
     if (!expect(recoveryBanner->isHidden() && sendButton->isEnabled(),
                 "cleared recovery state did not restore the healthy composer")) {
+        return 1;
+    }
+    runtimeClient->runtimeHealthRead(QJsonObject{
+        {QStringLiteral("state"), QStringLiteral("exited")},
+        {QStringLiteral("restart_required"), true},
+    });
+    application.processEvents();
+    if (!expect(runtimeRestart && runtimeRestart->isEnabled()
+                    && runtimeStatus->text().contains(QStringLiteral("Codex 不可用")),
+                "exited Codex health did not enable the recovery action")) {
+        return 1;
+    }
+    runtimeClient->runtimeHealthRead(QJsonObject{
+        {QStringLiteral("state"), QStringLiteral("running")},
+        {QStringLiteral("restart_required"), false},
+    });
+    application.processEvents();
+    if (!expect(!runtimeRestart->isEnabled(),
+                "running Codex health did not clear the recovery action")) {
         return 1;
     }
 

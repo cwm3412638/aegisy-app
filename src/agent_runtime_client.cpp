@@ -186,6 +186,16 @@ void AgentRuntimeClient::stop()
     else m_process->terminate();
 }
 
+QString AgentRuntimeClient::runtimeHealth()
+{
+    return sendRequest(QStringLiteral("runtime/health"));
+}
+
+QString AgentRuntimeClient::restartRuntime()
+{
+    return sendRequest(QStringLiteral("runtime/restart"));
+}
+
 QString AgentRuntimeClient::listProjects(int limit)
 {
     return sendRequest(QStringLiteral("project/list"), {
@@ -1014,6 +1024,7 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
                  result.value(QStringLiteral("protocol_version")).toString());
         emit runtimeInitialized(result);
         emit connectionStateChanged(m_ready, detail);
+        runtimeHealth();
         if (m_recoveryMode) runtimeRecoveryStatus();
         else projectionRecoveryStatus();
     } else if (pendingMethod == QStringLiteral("project/list")) {
@@ -1079,6 +1090,10 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit sessionRead(id, result);
     } else if (pendingMethod == QStringLiteral("runtime/projection-recovery/status")) {
         emit projectionRecoveryStatusRead(result);
+    } else if (pendingMethod == QStringLiteral("runtime/health")) {
+        emit runtimeHealthRead(result);
+    } else if (pendingMethod == QStringLiteral("runtime/restart")) {
+        emit runtimeRestarted(id, result);
     } else if (pendingMethod == QStringLiteral("session/recovery/status")) {
         emit sessionRecoveryStatusRead(result);
     } else if (pendingMethod == QStringLiteral("runtime/recovery/status")) {

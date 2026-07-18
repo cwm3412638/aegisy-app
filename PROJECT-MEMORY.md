@@ -160,8 +160,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   three app-server attempts and an unavailable health state. A later child exit can
   be recovered through identity-preserving `runtime/restart`; active turns and user
   terminals block restart, and a stdio fixture verifies both recovery and the
-  running-adapter guard. Qt still needs the visible health/recovery action and UI
-  state projection under `7.2`.
+  running-adapter guard. Qt `AgentRuntimeClient` now polls `runtime/health`,
+  exposes content-free Codex exited/unavailable state in the workbench toolbar,
+  and enables a visible `重启 Codex` action only when `restart_required` is true.
+  Successful `runtime/restart` clears the action; failed attempts remain
+  retryable. The control is unavailable during read-only store recovery and never
+  changes the Agent read-only permission boundary. Full crash-loop recovery UI
+  and cross-platform evidence remain under `7.2`.
 - Large command output now has bounded head/tail and content-addressed artifact
   retrieval, pre-capture secret redaction, fixed-frame Codex transport, and Qt
   full-output inspection. With durable storage configured, completed command
@@ -1329,7 +1334,8 @@ Implemented visual baseline:
 
 1. Validate the hardened TLS installer on a clean Windows x64 VM.
 2. Reproduce and correlate any remaining streaming disconnect with redacted logs.
-3. Continue consolidating widget-local QSS and replace remaining Qt stock icons.
+3. Continue consolidating widget-local QSS and replace remaining Qt stock icons;
+   the Codex health/restart toolbar state is now covered by the render suite.
 4. Run the Windows packaging workflow or a clean Windows VM to validate ConPTY,
    Unicode, resize, Ctrl+C, exit status, and Job Object process-tree cleanup, then
    close `14.2` without exposing Agent execution permissions.

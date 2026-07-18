@@ -179,6 +179,7 @@ private:
     AgentRuntimeClient *m_runtime = nullptr;
     QButtonGroup *m_modeGroup = nullptr;
     QLabel *m_runtimeStatus = nullptr;
+    QPushButton *m_runtimeRestartButton = nullptr;
     QLabel *m_recoveryBanner = nullptr;
     QLabel *m_projectLabel = nullptr;
     QString m_workspaceRootId = QStringLiteral("root-1");
@@ -278,6 +279,7 @@ private:
     QTimer *m_workspaceWatchTimer = nullptr;
     QTimer *m_gitStatusTimer = nullptr;
     QTimer *m_terminalPollTimer = nullptr;
+    QTimer *m_runtimeHealthTimer = nullptr;
     QHash<QString, QLabel *> m_itemLabels;
     QHash<QString, QPushButton *> m_itemArtifactButtons;
     QHash<QString, QString> m_commandArtifactRequests;
@@ -417,6 +419,7 @@ private:
     bool m_terminalStopping = false;
     bool m_turnRunning = false;
     bool m_turnCancelling = false;
+    bool m_runtimeRestartRequired = false;
     bool m_terminalWebReady = false;
     int m_terminalRenderRestartAttempts = 0;
     bool m_editorSaveSupported = false;
