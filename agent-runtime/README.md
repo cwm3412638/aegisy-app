@@ -92,8 +92,10 @@ token-usage, plan, and diff notification inputs for adapter replay tests.
 
 `aap-schema/fixtures/codex-recovery.jsonl` records bounded partial output,
 transport failure, restart health, provider metadata, and compaction request
-shapes. A real stdio fixture verifies that an EOF is classified as retryable
-transport failure and that the same session binding can complete after restart.
+and approval-denial shapes. Real stdio fixtures verify that an EOF is classified
+as retryable transport failure, the same session binding can complete after
+restart, provider failures remain non-retryable, and approval requests are
+always declined without granting execution authority.
 
 Workspace browsing uses project-relative paths only. The sidecar rejects path
 traversal, absolute paths, symlinks, sensitive credential filenames, binary

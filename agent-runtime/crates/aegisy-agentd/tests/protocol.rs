@@ -243,6 +243,8 @@ fn codex_recovery_fixture_covers_partial_transport_failure_and_reconnect() {
     assert!(methods.contains(&"runtime/restart".into()));
     assert!(methods.contains(&"session/provider-read".into()));
     assert!(methods.contains(&"thread/compact/start".into()));
+    assert!(methods.contains(&"item/commandExecution/requestApproval".into()));
+    assert!(fixture.contains("\"decision\":\"decline\""));
     assert!(events.iter().any(|event| event == "item.delta"));
     assert!(events.iter().any(|event| event == "turn.failed"));
     let failed = fixture

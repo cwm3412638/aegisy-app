@@ -464,7 +464,7 @@ git diff --check
 ```
 
 Current verified baseline: 16 desktop tests, 246 Rust sidecar unit tests, 33 Rust
-protocol tests, ten macOS sidecar stdio/Codex contract tests, and Clippy with warnings
+protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
 ## Session History Boundary

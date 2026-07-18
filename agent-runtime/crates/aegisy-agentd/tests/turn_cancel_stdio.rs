@@ -279,6 +279,54 @@ done
     executable
 }
 
+fn approval_denial_codex() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("aegisy-approval-fixture-{nonce}"));
+    fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("codex-approval-fixture.sh");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.144.5"
+  exit 0
+fi
+decision_file="$0.decision"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"thread-approval"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-approval"}}}\n' "$id"
+      printf '{"id":99,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-approval","turnId":"turn-approval","itemId":"command-approval","command":"rm -rf project-data","risk":"high"}}\n'
+      ;;
+    *'"id":99,"result":{"decision":"decline"}'*)
+      printf '%s' "decline" > "$decision_file"
+      printf '{"method":"turn/completed","params":{"threadId":"thread-approval","turn":{"id":"turn-approval","status":"failed","error":{"message":"provider rejected after approval denial"}}}}\n'
+      ;;
+    *'"method":"shutdown"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    executable
+}
+
 #[test]
 fn stdio_turn_metadata_items_survive_durable_restart_replay() {
     let codex = fake_codex();
@@ -828,6 +876,92 @@ fn stdio_codex_provider_failure_is_redacted_and_not_retryable() {
     receive_until(&receiver, |message| {
         message["id"] == "provider-failure-shutdown"
     });
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_codex_approval_request_is_declined_without_execution_authority() {
+    let codex = approval_denial_codex();
+    let decision = codex.with_extension("sh.decision");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "approval-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| message["id"] == "approval-initialize");
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    send(
+        &mut stdin,
+        &request(
+            "approval-session",
+            "session/start",
+            json!({ "mode": "chat" }),
+        ),
+    );
+    let session = receive_until(&receiver, |message| message["id"] == "approval-session");
+    let session_id = session["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send(
+        &mut stdin,
+        &request(
+            "approval-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "request a destructive command",
+                "idempotency_key": "approval-turn"
+            }),
+        ),
+    );
+    let failed = receive_until(&receiver, |message| {
+        message["method"] == "event"
+            && message["params"]["event"] == "turn.failed"
+            && message["params"]["item"]["data"]["schema_version"] == "runtime-error/0.1"
+    });
+    assert_eq!(failed["params"]["item"]["data"]["class"], "provider");
+    assert_eq!(failed["params"]["item"]["data"]["retryable"], false);
+    assert_eq!(fs::read_to_string(&decision).unwrap(), "decline");
+    assert!(!failed.to_string().contains("rm -rf"));
+
+    send(
+        &mut stdin,
+        &request("approval-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| message["id"] == "approval-shutdown");
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
