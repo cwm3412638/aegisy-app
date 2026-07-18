@@ -60,6 +60,9 @@ The redacted request sequence in
 fixture used by protocol tests. It contains no provider credentials, rollout
 content, or real user identifiers.
 
+`aap-schema/fixtures/codex-turn-metadata.jsonl` provides schema-aligned
+token-usage, plan, and diff notification inputs for adapter replay tests.
+
 Workspace browsing uses project-relative paths only. The sidecar rejects path
 traversal, absolute paths, symlinks, sensitive credential filenames, binary
 content, and text files larger than the negotiated preview limit. Generated and

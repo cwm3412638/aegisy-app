@@ -193,6 +193,32 @@ fn codex_thread_lifecycle_fixture_is_redacted_and_well_formed() {
 }
 
 #[test]
+fn codex_turn_metadata_fixture_matches_schema_methods_without_secrets() {
+    let path = format!(
+        "{}/../../aap-schema/fixtures/codex-turn-metadata.jsonl",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let fixture = fs::read_to_string(path).unwrap();
+    let methods = fixture
+        .lines()
+        .map(|line| {
+            assert!(!line.contains("sk-"));
+            assert!(!line.contains("ghp_"));
+            let message: Value = serde_json::from_str(line).unwrap();
+            message["method"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        methods,
+        [
+            "thread/tokenUsage/updated",
+            "turn/plan/updated",
+            "turn/diff/updated"
+        ]
+    );
+}
+
+#[test]
 fn rejects_malformed_requests() {
     let mut runtime = Runtime::default();
     let messages = runtime.handle_line("{broken");
