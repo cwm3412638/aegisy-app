@@ -578,7 +578,7 @@ Current editor evidence:
   project-directory removal, case-insensitive credential masking, dangerous loader
   variable rejection, value/count limits, deterministic session identity, explicit
   terminal derivation, and value-free AAP metadata.
-- Two hundred and forty-six Rust sidecar unit tests, thirty-five AAP protocol tests,
+- Two hundred and forty-six Rust sidecar unit tests, thirty-six AAP protocol tests,
   eleven sidecar stdio/Codex contract tests, and sixteen desktop CTest tests pass;
   Clippy passes with warnings denied.
 

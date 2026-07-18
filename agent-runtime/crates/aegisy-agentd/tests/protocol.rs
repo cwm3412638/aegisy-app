@@ -326,6 +326,70 @@ fn codex_provider_lifecycle_failure_fixture_is_redacted_and_recoverable() {
     assert_eq!(health_states, ["exited", "unavailable", "running"]);
 }
 
+fn stable_envelope_valid(message: &Value) -> bool {
+    if message["jsonrpc"] != "2.0" {
+        return false;
+    }
+    let has_method = message.get("method").is_some();
+    let has_id = message.get("id").is_some();
+    let has_result = message.get("result").is_some();
+    let has_error = message.get("error").is_some();
+    if has_method {
+        return !has_result && !has_error && message.get("params").is_none_or(Value::is_object);
+    }
+    has_id
+        && has_result != has_error
+        && (!has_error
+            || (message["error"]["code"].is_i64() && message["error"]["message"].is_string()))
+}
+
+#[test]
+fn stable_aap_schema_accepts_checked_fixtures_and_rejects_envelope_drift() {
+    let schema_path = format!(
+        "{}/../../aap-schema/stable/v0.1/aap.schema.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let schema: Value = serde_json::from_str(&fs::read_to_string(schema_path).unwrap()).unwrap();
+    assert_eq!(
+        schema["$id"],
+        "https://aegisy.cc/schemas/aap/stable/v0.1/aap.schema.json"
+    );
+    assert_eq!(schema["properties"]["jsonrpc"]["const"], "2.0");
+    assert!(schema["properties"]["error"]["required"]
+        .as_array()
+        .is_some_and(|required| required.iter().any(|field| field == "code")));
+    assert_eq!(schema["oneOf"].as_array().map(Vec::len), Some(4));
+
+    let fixtures = [
+        "codex-thread-lifecycle.jsonl",
+        "codex-turn-metadata.jsonl",
+        "codex-recovery.jsonl",
+        "codex-provider-lifecycle-failures.jsonl",
+        "turn-lifecycle.jsonl",
+    ];
+    for fixture_name in fixtures {
+        let path = format!(
+            "{}/../../aap-schema/fixtures/{fixture_name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        for line in fs::read_to_string(path).unwrap().lines() {
+            let message: Value = serde_json::from_str(line).unwrap();
+            assert!(
+                stable_envelope_valid(&message),
+                "invalid fixture envelope: {line}"
+            );
+        }
+    }
+
+    let request_and_result = json!({
+        "jsonrpc": "2.0",
+        "id": "same-id",
+        "method": "fixture",
+        "result": {}
+    });
+    assert!(!stable_envelope_valid(&request_and_result));
+}
+
 #[test]
 fn rejects_malformed_requests() {
     let mut runtime = Runtime::default();
