@@ -50,6 +50,11 @@ Clients can query `runtime/degradations` to render disabled or metadata-only
 features explicitly. This is authoritative capability state, not a request to
 silently fall back to a mutating or provider-opaque implementation.
 
+Read-only Codex turns also translate schema-defined token usage, plan, and
+unified-diff notifications into bounded AAP timeline events. These projections
+do not authorize writes and are not yet durable replacements for full item or
+usage persistence.
+
 The redacted request sequence in
 `aap-schema/fixtures/codex-thread-lifecycle.jsonl` is the checked-in lifecycle
 fixture used by protocol tests. It contains no provider credentials, rollout

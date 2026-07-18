@@ -123,7 +123,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   terminal frontend are verified; Windows ConPTY is implemented but not yet
   runtime-verified. Read-only Codex command events now have a partial structured
   timeline mapping, and turn failure/cancellation Items now use bounded redacted
-  `runtime-error/0.1` class/retryable metadata. Native Agent command actions are not available. Agent
+  `runtime-error/0.1` class/retryable metadata; schema-driven token usage, plan, and
+  unified-diff notifications now map to bounded AAP timeline events. Native Agent command actions are not available. Agent
   writes/execution, structured patches,
   approvals, checkpoints, full Git
   workflows, complete durable session storage, and model control plane remain future

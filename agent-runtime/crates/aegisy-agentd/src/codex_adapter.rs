@@ -83,6 +83,19 @@ pub enum CodexEvent {
         command: Box<CommandItem>,
         lifecycle: String,
     },
+    TokenUsage {
+        turn_id: String,
+        usage: Value,
+    },
+    TurnDiff {
+        turn_id: String,
+        diff: String,
+    },
+    TurnPlan {
+        turn_id: String,
+        explanation: Option<String>,
+        steps: Vec<Value>,
+    },
     TurnCompleted {
         turn_id: String,
     },
@@ -418,6 +431,10 @@ impl CodexAdapter {
                     continue;
                 }
             }
+            if let Some(event) = translate_turn_notification(method, &params, &turn_id) {
+                emit(event);
+                continue;
+            }
             match method {
                 "item/agentMessage/delta" => {
                     let Some(item_id) = params.get("itemId").and_then(Value::as_str) else {
@@ -604,6 +621,74 @@ fn translate_command_notification(
         }
         _ => None,
     }
+}
+
+fn translate_turn_notification(method: &str, params: &Value, turn_id: &str) -> Option<CodexEvent> {
+    if params.get("turnId").and_then(Value::as_str) != Some(turn_id) {
+        return None;
+    }
+    match method {
+        "thread/tokenUsage/updated" => {
+            let usage = bounded_token_usage(params.get("tokenUsage")?)?;
+            Some(CodexEvent::TokenUsage {
+                turn_id: turn_id.into(),
+                usage,
+            })
+        }
+        "turn/diff/updated" => Some(CodexEvent::TurnDiff {
+            turn_id: turn_id.into(),
+            diff: bounded_string(
+                &redact_complete(params.get("diff").and_then(Value::as_str).unwrap_or("")),
+                64 * 1024,
+            ),
+        }),
+        "turn/plan/updated" => {
+            let steps = params
+                .get("plan")
+                .and_then(Value::as_array)?
+                .iter()
+                .take(64)
+                .filter_map(|step| {
+                    Some(json!({
+                        "status": bounded_string(step.get("status")?.as_str()?, 32),
+                        "step": bounded_string(
+                            &redact_complete(step.get("step")?.as_str()?),
+                            2 * 1024
+                        )
+                    }))
+                })
+                .collect::<Vec<_>>();
+            Some(CodexEvent::TurnPlan {
+                turn_id: turn_id.into(),
+                explanation: params
+                    .get("explanation")
+                    .and_then(Value::as_str)
+                    .map(|value| bounded_string(&redact_complete(value), 4 * 1024)),
+                steps,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn bounded_token_usage(value: &Value) -> Option<Value> {
+    let breakdown = |value: &Value| {
+        Some(json!({
+            "cached_input_tokens": value.get("cachedInputTokens")?.as_i64()?.max(0),
+            "input_tokens": value.get("inputTokens")?.as_i64()?.max(0),
+            "output_tokens": value.get("outputTokens")?.as_i64()?.max(0),
+            "reasoning_output_tokens": value.get("reasoningOutputTokens")?.as_i64()?.max(0),
+            "total_tokens": value.get("totalTokens")?.as_i64()?.max(0)
+        }))
+    };
+    Some(json!({
+        "last": breakdown(value.get("last")?)?,
+        "total": breakdown(value.get("total")?)?,
+        "model_context_window": value
+            .get("modelContextWindow")
+            .and_then(Value::as_i64)
+            .map(|value| value.max(0))
+    }))
 }
 
 fn command_item(item: &Value, previous: Option<&CommandItem>) -> Option<CommandItem> {
@@ -1022,6 +1107,74 @@ mod tests {
         assert_eq!(session.thread_id, "thread-1");
         assert_eq!(session.provider, "aegisy");
         assert_eq!(session.model, "model-1");
+    }
+
+    #[test]
+    fn turn_metadata_notifications_map_to_bounded_stable_events() {
+        let usage = translate_turn_notification(
+            "thread/tokenUsage/updated",
+            &json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "tokenUsage": {
+                    "last": {
+                        "cachedInputTokens": 1,
+                        "inputTokens": 2,
+                        "outputTokens": 3,
+                        "reasoningOutputTokens": 4,
+                        "totalTokens": 5
+                    },
+                    "total": {
+                        "cachedInputTokens": 6,
+                        "inputTokens": 7,
+                        "outputTokens": 8,
+                        "reasoningOutputTokens": 9,
+                        "totalTokens": 10
+                    },
+                    "modelContextWindow": 100
+                }
+            }),
+            "turn-1",
+        )
+        .unwrap();
+        match usage {
+            CodexEvent::TokenUsage { usage, .. } => {
+                assert_eq!(usage["last"]["total_tokens"], 5);
+                assert_eq!(usage["model_context_window"], 100);
+            }
+            _ => panic!("unexpected token usage event"),
+        }
+
+        let plan = translate_turn_notification(
+            "turn/plan/updated",
+            &json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "explanation": "inspect then test",
+                "plan": [{ "status": "inProgress", "step": "inspect" }]
+            }),
+            "turn-1",
+        )
+        .unwrap();
+        match plan {
+            CodexEvent::TurnPlan { steps, .. } => assert_eq!(steps[0]["step"], "inspect"),
+            _ => panic!("unexpected turn plan event"),
+        }
+
+        let diff = translate_turn_notification(
+            "turn/diff/updated",
+            &json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "diff": "Authorization: Bearer ghp_123456789012345678901234567890"
+            }),
+            "turn-1",
+        )
+        .unwrap();
+        match diff {
+            CodexEvent::TurnDiff { diff, .. } => assert!(!diff.contains("ghp_")),
+            _ => panic!("unexpected turn diff event"),
+        }
     }
 
     #[test]

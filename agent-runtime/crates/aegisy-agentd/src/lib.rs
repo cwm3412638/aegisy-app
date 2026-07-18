@@ -5322,6 +5322,58 @@ impl Runtime {
                             ));
                         }
                     }
+                    CodexEvent::TokenUsage { turn_id, usage } => {
+                        let item = TimelineItem {
+                            id: format!("usage-{turn_id}"),
+                            kind: "usage".into(),
+                            role: "system".into(),
+                            state: "updated".into(),
+                            content: "Token usage updated".into(),
+                            data: Some(usage),
+                        };
+                        emit(self.event(
+                            &params.session_id,
+                            Some(&turn_id),
+                            "usage.updated",
+                            Some(item),
+                        ));
+                    }
+                    CodexEvent::TurnDiff { turn_id, diff } => {
+                        let item = TimelineItem {
+                            id: format!("diff-{turn_id}"),
+                            kind: "diff".into(),
+                            role: "tool".into(),
+                            state: "updated".into(),
+                            content: diff,
+                            data: Some(json!({ "projection": "bounded-unified-diff" })),
+                        };
+                        emit(self.event(
+                            &params.session_id,
+                            Some(&turn_id),
+                            "turn.diff.updated",
+                            Some(item),
+                        ));
+                    }
+                    CodexEvent::TurnPlan {
+                        turn_id,
+                        explanation,
+                        steps,
+                    } => {
+                        let item = TimelineItem {
+                            id: format!("plan-{turn_id}"),
+                            kind: "plan".into(),
+                            role: "agent".into(),
+                            state: "updated".into(),
+                            content: explanation.unwrap_or_else(|| "Plan updated".into()),
+                            data: Some(json!({ "steps": steps })),
+                        };
+                        emit(self.event(
+                            &params.session_id,
+                            Some(&turn_id),
+                            "turn.plan.updated",
+                            Some(item),
+                        ));
+                    }
                     CodexEvent::TurnCompleted { turn_id } => {
                         if let Err(error) =
                             self.persist_turn_state(&params.session_id, &turn_id, "completed")
