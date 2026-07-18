@@ -83,6 +83,11 @@ fn ready_runtime() -> Runtime {
         .as_array()
         .unwrap()
         .iter()
+        .any(|capability| capability == "runtime.health"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|capability| capability == "session.deletion.two-phase"));
     assert!(messages[0]["result"]["capabilities"]
         .as_array()
@@ -117,6 +122,19 @@ fn requires_complete_handshake() {
     let mut runtime = Runtime::default();
     let messages = runtime.handle_line(&request("1", "session/start", json!({ "mode": "chat" })));
     assert_eq!(messages[0]["error"]["code"], -32002);
+}
+
+#[test]
+fn runtime_health_reports_preview_readiness() {
+    let mut runtime = ready_runtime();
+    let messages = runtime.handle_line(&request("health", "runtime/health", json!({})));
+    assert_eq!(
+        messages[0]["result"]["schema_version"],
+        "runtime-health/0.1"
+    );
+    assert_eq!(messages[0]["result"]["backend"], "preview");
+    assert_eq!(messages[0]["result"]["state"], "ready");
+    assert_eq!(messages[0]["result"]["restart_required"], false);
 }
 
 #[test]

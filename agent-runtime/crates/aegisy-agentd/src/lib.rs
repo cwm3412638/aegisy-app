@@ -1879,6 +1879,7 @@ impl Runtime {
             }
             "runtime/recovery/status" => self.recovery_diagnostic(request, false),
             "runtime/recovery/export" => self.recovery_diagnostic(request, true),
+            "runtime/health" => self.runtime_health(request),
             _ if self.is_recovery_mode() => {
                 self.error_for(&request, -32120, "workbench is in read-only recovery mode")
             }
@@ -1966,6 +1967,43 @@ impl Runtime {
         matches!(&self.backend, Backend::Recovery(_))
     }
 
+    fn runtime_health(&mut self, request: Request) -> Vec<Value> {
+        let result = match &mut self.backend {
+            Backend::Codex(adapter) => {
+                let health = adapter.health();
+                let state = health.state.clone();
+                let restart_required = matches!(state.as_str(), "exited" | "unknown");
+                json!({
+                    "schema_version": "runtime-health/0.1",
+                    "state": state,
+                    "backend": "codex-app-server",
+                    "process_id": health.process_id,
+                    "exit_code": health.exit_code,
+                    "restart_required": restart_required
+                })
+            }
+            Backend::Preview => json!({
+                "schema_version": "runtime-health/0.1",
+                "state": "ready",
+                "backend": "preview",
+                "restart_required": false
+            }),
+            Backend::Recovery(_) => json!({
+                "schema_version": "runtime-health/0.1",
+                "state": "read-only-recovery",
+                "backend": "workbench-store",
+                "restart_required": false
+            }),
+            Backend::Unavailable(_) => json!({
+                "schema_version": "runtime-health/0.1",
+                "state": "unavailable",
+                "backend": "codex-app-server",
+                "restart_required": true
+            }),
+        };
+        self.success_for(&request, result)
+    }
+
     fn recovery_diagnostic(&self, request: Request, export: bool) -> Vec<Value> {
         let Backend::Recovery(diagnostic) = &self.backend else {
             return self.error_for(&request, -32121, "workbench recovery mode is not active");
@@ -2041,6 +2079,7 @@ impl Runtime {
                 },
                 vec![
                     "runtime.recovery.read-only".into(),
+                    "runtime.health".into(),
                     "runtime.recovery.status".into(),
                     "runtime.recovery.diagnostic-export".into(),
                     "permission.read-only".into(),
@@ -2077,6 +2116,7 @@ impl Runtime {
                 "retention.maintenance.host-triggered".into(),
                 "session.recovery.status".into(),
                 "runtime.projection-recovery.status".into(),
+                "runtime.health".into(),
                 "session.work.preview".into(),
                 "timeline.streaming".into(),
                 "turn.context.structured".into(),

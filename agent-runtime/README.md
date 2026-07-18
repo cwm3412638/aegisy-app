@@ -28,6 +28,7 @@ or session methods are accepted.
 - `session/start`
 - `turn/start`
 - `session/read`
+- `runtime/health`
 - `workspace/list`
 - `workspace/read`
 - `shutdown`

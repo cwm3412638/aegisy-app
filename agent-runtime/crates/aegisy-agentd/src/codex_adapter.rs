@@ -32,6 +32,15 @@ pub struct BackendInfo {
     pub environment: Option<EnvironmentSummary>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AdapterHealth {
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexSession {
     pub thread_id: String,
@@ -198,6 +207,27 @@ impl CodexAdapter {
             model: None,
             permission_profile: "read-only".into(),
             environment: Some(self.environment.clone()),
+        }
+    }
+
+    pub fn health(&mut self) -> AdapterHealth {
+        let process_id = Some(self.child.id());
+        match self.child.try_wait() {
+            Ok(None) => AdapterHealth {
+                state: "running".into(),
+                process_id,
+                exit_code: None,
+            },
+            Ok(Some(status)) => AdapterHealth {
+                state: "exited".into(),
+                process_id,
+                exit_code: status.code(),
+            },
+            Err(_) => AdapterHealth {
+                state: "unknown".into(),
+                process_id,
+                exit_code: None,
+            },
         }
     }
 
