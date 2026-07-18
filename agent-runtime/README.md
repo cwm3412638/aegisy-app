@@ -29,6 +29,7 @@ or session methods are accepted.
 - `turn/start`
 - `session/read`
 - `runtime/health`
+- `runtime/degradations`
 - `workspace/list`
 - `workspace/read`
 - `shutdown`
@@ -44,6 +45,10 @@ cursor, and `session/provider-read` reads one thread's metadata plus bounded tur
 metadata when requested. Provider item contents, raw rollout fields, delete, and
 compact operations are intentionally omitted until their AAP review and recovery
 contracts are complete.
+
+Clients can query `runtime/degradations` to render disabled or metadata-only
+features explicitly. This is authoritative capability state, not a request to
+silently fall back to a mutating or provider-opaque implementation.
 
 Workspace browsing uses project-relative paths only. The sidecar rejects path
 traversal, absolute paths, symlinks, sensitive credential filenames, binary

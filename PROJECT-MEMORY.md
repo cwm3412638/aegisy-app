@@ -56,6 +56,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   restart recommendation without exposing stderr or environment values. Structured
   stderr diagnostics, startup timeout/restart supervision, and crash-loop protection
   remain open under task `7.2`.
+  AAP `runtime/degradations` provides explicit, content-free feature states for
+  read-only Agent mutation, metadata-only provider items, and blocked provider
+  delete/compact so clients do not simulate unavailable behavior.
 - Current Agent security boundary: Agent/Codex is read-only. User-initiated editor
   saves are separately allowed only inside the canonical opened project root.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies

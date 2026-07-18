@@ -88,6 +88,11 @@ fn ready_runtime() -> Runtime {
         .as_array()
         .unwrap()
         .iter()
+        .any(|capability| capability == "runtime.degradations"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|capability| capability == "session.deletion.two-phase"));
     assert!(messages[0]["result"]["capabilities"]
         .as_array()
@@ -135,6 +140,24 @@ fn runtime_health_reports_preview_readiness() {
     assert_eq!(messages[0]["result"]["backend"], "preview");
     assert_eq!(messages[0]["result"]["state"], "ready");
     assert_eq!(messages[0]["result"]["restart_required"], false);
+}
+
+#[test]
+fn runtime_degradations_are_explicit_for_preview() {
+    let mut runtime = ready_runtime();
+    let messages = runtime.handle_line(&request("degradations", "runtime/degradations", json!({})));
+    assert_eq!(
+        messages[0]["result"]["schema_version"],
+        "runtime-degradations/0.1"
+    );
+    assert_eq!(
+        messages[0]["result"]["degradations"][0]["feature"],
+        "codex-provider"
+    );
+    assert_eq!(
+        messages[0]["result"]["degradations"][0]["state"],
+        "unavailable"
+    );
 }
 
 #[test]

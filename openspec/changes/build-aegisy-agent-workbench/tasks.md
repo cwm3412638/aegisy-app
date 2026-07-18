@@ -132,6 +132,7 @@
 - [ ] 7.7 Map background terminals, filesystem read/write/watch, fuzzy search, Skills, hooks, plugins, and MCP capability state
 - [ ] 7.8 Configure Aegisy custom provider and short-lived token flow without writing the desktop login token into Codex config
 - [ ] 7.9 Implement adapter degradation flags for experimental or missing Codex methods
+  - Partial degradation contract: AAP `runtime/degradations` reports read-only Agent mutation, metadata-only provider thread items, and blocked provider delete/compact with stable reasons and scopes. Full capability negotiation for all experimental/missing Codex methods and Qt feature gating remain.
 - [ ] 7.10 Record and redact protocol fixtures for happy path, partial stream, approval, denial, cancel, reconnect, compaction, and provider failure
 - [ ] 7.11 Add contract tests against the pinned binary on macOS and Windows
 - [ ] 7.12 Document runtime upgrade procedure, compatibility matrix, emergency pin, and rollback

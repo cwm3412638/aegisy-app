@@ -1880,6 +1880,7 @@ impl Runtime {
             "runtime/recovery/status" => self.recovery_diagnostic(request, false),
             "runtime/recovery/export" => self.recovery_diagnostic(request, true),
             "runtime/health" => self.runtime_health(request),
+            "runtime/degradations" => self.runtime_degradations(request),
             _ if self.is_recovery_mode() => {
                 self.error_for(&request, -32120, "workbench is in read-only recovery mode")
             }
@@ -2004,6 +2005,62 @@ impl Runtime {
         self.success_for(&request, result)
     }
 
+    fn runtime_degradations(&self, request: Request) -> Vec<Value> {
+        let degradations = match &self.backend {
+            Backend::Codex(_) => vec![
+                json!({
+                    "feature": "agent-mutation",
+                    "state": "disabled",
+                    "reason": "Aegisy Codex sessions use read-only sandbox and never approve writes or mutating commands",
+                    "scope": "runtime"
+                }),
+                json!({
+                    "feature": "provider-thread-item-content",
+                    "state": "metadata-only",
+                    "reason": "provider thread list/read omit raw rollout items until stable AAP item mappings exist",
+                    "scope": "provider"
+                }),
+                json!({
+                    "feature": "provider-thread-delete",
+                    "state": "blocked",
+                    "reason": "requires scoped user review, recovery, retention, and compensation",
+                    "scope": "provider"
+                }),
+                json!({
+                    "feature": "provider-thread-compact",
+                    "state": "blocked",
+                    "reason": "requires a durable checkpoint, preservation review, and failure recovery",
+                    "scope": "provider"
+                }),
+            ],
+            Backend::Preview => vec![json!({
+                "feature": "codex-provider",
+                "state": "unavailable",
+                "reason": "preview runtime does not launch a provider adapter",
+                "scope": "runtime"
+            })],
+            Backend::Recovery(_) => vec![json!({
+                "feature": "workbench-mutation",
+                "state": "disabled",
+                "reason": "workbench is in read-only recovery",
+                "scope": "runtime"
+            })],
+            Backend::Unavailable(_) => vec![json!({
+                "feature": "codex-provider",
+                "state": "unavailable",
+                "reason": "provider adapter failed before becoming ready",
+                "scope": "runtime"
+            })],
+        };
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "runtime-degradations/0.1",
+                "degradations": degradations
+            }),
+        )
+    }
+
     fn recovery_diagnostic(&self, request: Request, export: bool) -> Vec<Value> {
         let Backend::Recovery(diagnostic) = &self.backend else {
             return self.error_for(&request, -32121, "workbench recovery mode is not active");
@@ -2080,6 +2137,7 @@ impl Runtime {
                 vec![
                     "runtime.recovery.read-only".into(),
                     "runtime.health".into(),
+                    "runtime.degradations".into(),
                     "runtime.recovery.status".into(),
                     "runtime.recovery.diagnostic-export".into(),
                     "permission.read-only".into(),
@@ -2117,6 +2175,7 @@ impl Runtime {
                 "session.recovery.status".into(),
                 "runtime.projection-recovery.status".into(),
                 "runtime.health".into(),
+                "runtime.degradations".into(),
                 "session.work.preview".into(),
                 "timeline.streaming".into(),
                 "turn.context.structured".into(),
