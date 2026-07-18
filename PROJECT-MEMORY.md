@@ -46,7 +46,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   and the Qt/xterm.js flow are runtime-verified; Windows compiles in isolation and
   awaits Windows runner execution before its milestone is complete.
 - Initial Agent adapter: installed Codex CLI launched as `codex app-server
-  --stdio`, translated into stable AAP sessions, turns, and timeline items.
+  --stdio`, translated into stable AAP sessions, turns, and timeline items. The
+  adapter requires pinned `codex-cli 0.144.5` and rejects other versions before
+  launch; its generated v2 schema is checked in under `agent-runtime/aap-schema`.
+  The pin and schema-driven lifecycle fixtures pass the full Rust workspace test
+  and Clippy gates; cross-platform binary contract and upgrade/rollback evidence
+  remain open under OpenSpec task `7.1`.
 - Current Agent security boundary: Agent/Codex is read-only. User-initiated editor
   saves are separately allowed only inside the canonical opened project root.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies

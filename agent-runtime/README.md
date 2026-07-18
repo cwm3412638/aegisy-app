@@ -5,6 +5,11 @@ the first Codex App Server adapter. The default runtime launches the installed
 Codex CLI and maps its thread, turn, and agent-message events into stable AAP
 events.
 
+The adapter is pinned to Codex CLI/App Server `0.144.5`. The generated v2
+protocol schema used by the adapter is checked in at
+`aap-schema/codex-app-server-0.144.5/v2.schemas.json`; a different installed
+version is rejected before the app-server process is launched.
+
 ## Run
 
 ```sh

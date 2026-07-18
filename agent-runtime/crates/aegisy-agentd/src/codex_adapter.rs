@@ -17,6 +17,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CODEX_MESSAGE_QUEUE_CAPACITY: usize = 16;
 const MAX_CODEX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+const PINNED_CODEX_VERSION: &str = "codex-cli 0.144.5";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BackendInfo {
@@ -106,6 +107,11 @@ impl CodexAdapter {
         let executable = locate_codex();
         let process_environment = codex_process_environment()?;
         let version = codex_version(&executable, &process_environment);
+        if !codex_version_is_pinned(&version) {
+            return Err(format!(
+                "unsupported Codex App Server version {version}; Aegisy requires {PINNED_CODEX_VERSION}"
+            ));
+        }
         let mut command = codex_command(&executable, &process_environment);
         command
             .args(["app-server", "--stdio"])
@@ -762,6 +768,10 @@ fn codex_version(executable: &Path, environment: &ProcessEnvironment) -> String 
         .unwrap_or_else(|| "unknown".into())
 }
 
+fn codex_version_is_pinned(version: &str) -> bool {
+    version.trim() == PINNED_CODEX_VERSION
+}
+
 fn thread_start_params(cwd: &Path, chat: bool) -> Value {
     let instructions = if chat {
         "You are running inside Aegisy Coding Chat. This mode is non-mutating. Do not modify files, execute mutating commands, or inspect paths outside explicitly provided context."
@@ -889,6 +899,13 @@ mod tests {
         };
         assert_eq!(info.permission_profile, "read-only");
         assert_eq!(serde_json::to_value(info).unwrap()["provider"], "aegisy");
+    }
+
+    #[test]
+    fn codex_adapter_rejects_unpinned_versions() {
+        assert!(codex_version_is_pinned(PINNED_CODEX_VERSION));
+        assert!(!codex_version_is_pinned("codex-cli 0.144.4"));
+        assert!(!codex_version_is_pinned("unknown"));
     }
 
     #[test]

@@ -52,7 +52,7 @@ fn fake_codex() -> PathBuf {
         &executable,
         r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
-  echo "codex-cli 0.144.5-fixture"
+  echo "codex-cli 0.144.5"
   exit 0
 fi
 while IFS= read -r line; do

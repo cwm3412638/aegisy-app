@@ -118,6 +118,10 @@
 ## 7. Codex App Server Runtime Adapter
 
 - [ ] 7.1 Pin an initial compatible Codex App Server version and generate its stable protocol schemas
+  - Partial pin: `codex-cli 0.144.5` is enforced before app-server launch, and the
+    generated v2 schema bundle is checked in at
+    `agent-runtime/aap-schema/codex-app-server-0.144.5/v2.schemas.json`. Cross-platform
+    binary contract tests, upgrade/rollback procedure, and compatibility matrix remain.
 - [ ] 7.2 Implement adapter process launch, initialize handshake, health, stderr tracing, shutdown, and version rejection
 - [ ] 7.3 Map Codex thread start/resume/fork/list/read/archive/delete/compact to AAP sessions
   - Partial adapter mapping: pinned Codex App Server 0.144.5 `thread/start`, `thread/resume`, `thread/fork`, `thread/list`, `thread/read`, `thread/archive`, `thread/unarchive`, `thread/delete`, and `thread/compact/start` are schema-driven at the adapter boundary. `session/start`, `session/resume`, and `session/fork` use the first three; list/read/delete/compact are not yet exposed through AAP, and complete provider lifecycle recovery plus user review/compensation remain pending. Agent/Codex mutation permissions remain read-only.
