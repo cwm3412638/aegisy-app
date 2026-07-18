@@ -93,6 +93,8 @@ int main(int argc, char *argv[])
     QPushButton *runtimeRestart = workbench.findChild<QPushButton *>(
         QStringLiteral("agentRuntimeRestartButton"));
     QLabel *runtimeStatus = workbench.findChild<QLabel *>(QStringLiteral("agentRuntimeStatus"));
+    QLabel *runtimeCapability = workbench.findChild<QLabel *>(
+        QStringLiteral("agentRuntimeCapabilityStatus"));
 
 #ifdef AEGISY_EXPECT_AGENTD
     if (!expect(runtimeStatus
@@ -354,6 +356,8 @@ int main(int argc, char *argv[])
             || !expect(recoveryBanner && recoveryBanner->isHidden()
                            && runtimeRestart && !runtimeRestart->isEnabled(),
                        "recovery banner must exist and start hidden for a healthy runtime")
+            || !expect(runtimeCapability && !runtimeCapability->text().isEmpty(),
+                       "runtime capability status must exist before negotiation")
             || !expect(newSession && openFolder && sendButton
                            && !newSession->icon().isNull()
                            && !openFolder->icon().isNull()
@@ -389,9 +393,25 @@ int main(int argc, char *argv[])
                 "whole-store recovery did not expose and enforce the blocking UI")) {
         return 1;
     }
+    if (!expect(runtimeCapability->text() == QStringLiteral("能力未知")
+                    && runtimeCapability->toolTip().contains(QStringLiteral("只读门控")),
+                "runtime capability status did not fail closed in recovery mode")) {
+        return 1;
+    }
     runtimeClient->runtimeInitialized(QJsonObject{
         {QStringLiteral("backend"), QJsonObject{
             {QStringLiteral("status"), QStringLiteral("ready")},
+        }},
+    });
+    runtimeClient->runtimeDegradationsRead(QStringLiteral("degradation-fixture"), QJsonObject{
+        {QStringLiteral("schema_version"), QStringLiteral("runtime-degradations/0.1")},
+        {QStringLiteral("degradations"), QJsonArray{
+            QJsonObject{{QStringLiteral("feature"), QStringLiteral("agent-mutation")},
+                         {QStringLiteral("state"), QStringLiteral("disabled")}},
+            QJsonObject{{QStringLiteral("feature"), QStringLiteral("provider-thread-compact")},
+                         {QStringLiteral("state"), QStringLiteral("blocked")}},
+            QJsonObject{{QStringLiteral("feature"), QStringLiteral("provider-thread-delete")},
+                         {QStringLiteral("state"), QStringLiteral("blocked")}},
         }},
     });
     runtimeClient->projectionRecoveryStatusRead(QJsonObject{
@@ -406,6 +426,22 @@ int main(int argc, char *argv[])
                     && sendButton->isEnabled() && newSession->isEnabled()
                     && openFolder->isEnabled() && importSession->isEnabled(),
                 "startup projection recovery did not render a non-blocking notice")) {
+        return 1;
+    }
+    if (!expect(runtimeCapability->text().contains(QStringLiteral("Agent 只读"))
+                    && runtimeCapability->text().contains(QStringLiteral("Compact 不可用"))
+                    && runtimeCapability->text().contains(QStringLiteral("删除不可用"))
+                    && runtimeCapability->toolTip().contains(QStringLiteral("不会显示为成功")),
+                "runtime degradations were not projected into a fail-closed capability state")) {
+        return 1;
+    }
+    runtimeClient->runtimeDegradationsRead(QStringLiteral("degradation-invalid"), QJsonObject{
+        {QStringLiteral("schema_version"), QStringLiteral("runtime-degradations/unknown")},
+    });
+    application.processEvents();
+    if (!expect(runtimeCapability->text() == QStringLiteral("能力未知")
+                    && runtimeCapability->toolTip().contains(QStringLiteral("只读门控")),
+                "invalid runtime degradation schema did not fail closed")) {
         return 1;
     }
     runtimeClient->sessionStarted(QStringLiteral("recovery-render-session"), QJsonObject{

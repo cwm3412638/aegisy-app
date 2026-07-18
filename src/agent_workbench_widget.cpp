@@ -312,7 +312,31 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_runtimeRecoveryMode = backend.value(QStringLiteral("status")).toString()
             == QStringLiteral("read-only-recovery");
         m_runtimeRestartRequired = false;
+        m_runtimeDegradationsAvailable = false;
+        m_runtimeDegradationStates.clear();
+        updateRuntimeCapabilityUi();
         updateRecoveryUi();
+    });
+    connect(m_runtime, &AgentRuntimeClient::runtimeDegradationsRead,
+            this, [this](const QString &, const QJsonObject &result) {
+        if (result.value(QStringLiteral("schema_version")).toString()
+                != QStringLiteral("runtime-degradations/0.1")) {
+            m_runtimeDegradationsAvailable = false;
+            m_runtimeDegradationStates.clear();
+            updateRuntimeCapabilityUi();
+            return;
+        }
+        m_runtimeDegradationStates.clear();
+        for (const QJsonValue &value : result.value(QStringLiteral("degradations")).toArray()) {
+            const QJsonObject degradation = value.toObject();
+            const QString feature = degradation.value(QStringLiteral("feature")).toString();
+            const QString state = degradation.value(QStringLiteral("state")).toString();
+            if (!feature.isEmpty() && !state.isEmpty()) {
+                m_runtimeDegradationStates.insert(feature, state);
+            }
+        }
+        m_runtimeDegradationsAvailable = true;
+        updateRuntimeCapabilityUi();
     });
     connect(m_runtime, &AgentRuntimeClient::runtimeHealthRead,
             this, [this](const QJsonObject &health) {
@@ -1551,6 +1575,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_turnCancelRequestId.clear();
             m_turnCancelling = false;
             updateTurnAction();
+        } else if (method == QStringLiteral("runtime/degradations")) {
+            m_runtimeDegradationsAvailable = false;
+            m_runtimeDegradationStates.clear();
+            updateRuntimeCapabilityUi();
         } else if (method == QStringLiteral("project/list")
                    && requestId == m_projectListRequestId) {
             m_projectListRequestId.clear();
@@ -1785,7 +1813,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 && method != QStringLiteral("workspace/diagnostics")
                 && method != QStringLiteral("workspace/observed-diagnostics")
                 && method != QStringLiteral("workspace/diagnostics/raw")
-                && method != QStringLiteral("workspace/save-user-text")) {
+                && method != QStringLiteral("workspace/save-user-text")
+                && method != QStringLiteral("runtime/degradations")) {
             const bool providerLifecycleMethod = method == QStringLiteral("session/resume")
                 || method == QStringLiteral("session/fork")
                 || method == QStringLiteral("session/archive")
@@ -1821,6 +1850,45 @@ AgentWorkbenchWidget::~AgentWorkbenchWidget()
     if (!m_runtime) return;
     QObject::disconnect(m_runtime, nullptr, this, nullptr);
     m_runtime->stop();
+}
+
+void AgentWorkbenchWidget::updateRuntimeCapabilityUi()
+{
+    if (!m_runtimeCapabilityStatus) return;
+    if (!m_runtimeDegradationsAvailable) {
+        m_runtimeCapabilityStatus->setText(QStringLiteral("能力未知"));
+        m_runtimeCapabilityStatus->setToolTip(
+            QStringLiteral("未收到版本化 runtime/degradations 声明；依赖能力保持只读门控"));
+        m_runtimeCapabilityStatus->setStyleSheet(
+            QStringLiteral("border:none; color:#b54708; font-size:10px; font-weight:600;"));
+        return;
+    }
+    const QString providerState = m_runtimeDegradationStates.value(
+        QStringLiteral("codex-provider"));
+    if (providerState == QStringLiteral("unavailable")) {
+        m_runtimeCapabilityStatus->setText(QStringLiteral("Provider 不可用"));
+        m_runtimeCapabilityStatus->setToolTip(
+            QStringLiteral("当前运行时未提供 Codex provider 能力；不会模拟可用状态"));
+        m_runtimeCapabilityStatus->setStyleSheet(
+            QStringLiteral("border:none; color:#b42318; font-size:10px; font-weight:600;"));
+        return;
+    }
+    const bool readOnly = m_runtimeDegradationStates.value(
+        QStringLiteral("agent-mutation")) == QStringLiteral("disabled");
+    const bool compactBlocked = m_runtimeDegradationStates.value(
+        QStringLiteral("provider-thread-compact")) == QStringLiteral("blocked");
+    const bool deleteBlocked = m_runtimeDegradationStates.value(
+        QStringLiteral("provider-thread-delete")) == QStringLiteral("blocked");
+    QStringList summary;
+    if (readOnly) summary.append(QStringLiteral("Agent 只读"));
+    if (compactBlocked) summary.append(QStringLiteral("Compact 不可用"));
+    if (deleteBlocked) summary.append(QStringLiteral("删除不可用"));
+    if (summary.isEmpty()) summary.append(QStringLiteral("能力已协商"));
+    m_runtimeCapabilityStatus->setText(summary.join(QStringLiteral(" · ")));
+    m_runtimeCapabilityStatus->setToolTip(
+        QStringLiteral("运行时能力声明已加载；不可用功能不会显示为成功"));
+    m_runtimeCapabilityStatus->setStyleSheet(
+        QStringLiteral("border:none; color:#475467; font-size:10px; font-weight:600;"));
 }
 
 bool AgentWorkbenchWidget::eventFilter(QObject *watched, QEvent *event)
@@ -1899,6 +1967,13 @@ void AgentWorkbenchWidget::buildUi()
     m_runtimeStatus->setObjectName(QStringLiteral("agentRuntimeStatus"));
     m_runtimeStatus->setStyleSheet(QStringLiteral("border:none; color:#b54708; font-size:11px; font-weight:600;"));
     toolbarLayout->addWidget(m_runtimeStatus);
+    m_runtimeCapabilityStatus = new QLabel(QStringLiteral("能力未知"), toolbar);
+    m_runtimeCapabilityStatus->setObjectName(QStringLiteral("agentRuntimeCapabilityStatus"));
+    m_runtimeCapabilityStatus->setToolTip(
+        QStringLiteral("等待版本化 runtime/degradations 能力声明"));
+    m_runtimeCapabilityStatus->setStyleSheet(
+        QStringLiteral("border:none; color:#b54708; font-size:10px; font-weight:600;"));
+    toolbarLayout->addWidget(m_runtimeCapabilityStatus);
     m_runtimeRestartButton = new QPushButton(QStringLiteral("重启 Codex"), toolbar);
     m_runtimeRestartButton->setObjectName(QStringLiteral("agentRuntimeRestartButton"));
     m_runtimeRestartButton->setIcon(QIcon(QStringLiteral(":/icons/lucide/rotate-ccw.svg")));

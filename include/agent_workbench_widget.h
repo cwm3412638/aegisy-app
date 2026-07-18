@@ -175,10 +175,12 @@ private:
     void updateEditorActions();
     void showEditorFallback(const QString &path, const QJsonObject &metadata,
                             const QString &message);
+    void updateRuntimeCapabilityUi();
 
     AgentRuntimeClient *m_runtime = nullptr;
     QButtonGroup *m_modeGroup = nullptr;
     QLabel *m_runtimeStatus = nullptr;
+    QLabel *m_runtimeCapabilityStatus = nullptr;
     QPushButton *m_runtimeRestartButton = nullptr;
     QLabel *m_recoveryBanner = nullptr;
     QLabel *m_projectLabel = nullptr;
@@ -393,6 +395,8 @@ private:
     bool m_sessionListRefreshPending = false;
     bool m_sessionHistoryAppending = false;
     bool m_runtimeRecoveryMode = false;
+    bool m_runtimeDegradationsAvailable = false;
+    QHash<QString, QString> m_runtimeDegradationStates;
     quint64 m_startupRebuiltSessionCount = 0;
     quint64 m_quarantinedSessionCount = 0;
     bool m_workspaceSearchAppending = false;

@@ -62,9 +62,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user terminal is active. Qt polls `runtime/health`, exposes exited/unavailable
   state, and provides a guarded `重启 Codex` action. Full crash-loop recovery UI and
   cross-platform recovery evidence remain under task `7.2`.
-  AAP `runtime/degradations` provides explicit, content-free feature states for
+AAP `runtime/degradations` provides explicit, content-free feature states for
   read-only Agent mutation, metadata-only provider items, and blocked provider
   delete/compact so clients do not simulate unavailable behavior.
+  Qt now requests this versioned response after initialization and renders a
+  compact capability status (`Agent 只读`, metadata/deletion/compact unavailable,
+  or provider unavailable). Invalid schemas or request failures return to an
+  explicit unknown/read-only gate; no provider delete/compact action is exposed.
   The checked-in `aap-schema/fixtures/codex-thread-lifecycle.jsonl` covers the
   current request sequence and `codex-turn-metadata.jsonl` covers usage/plan/diff
   notifications; both are tested for JSON validity and credential-shaped content
