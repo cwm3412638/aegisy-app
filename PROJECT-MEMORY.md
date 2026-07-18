@@ -130,6 +130,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   approvals, checkpoints, full Git
   workflows, complete durable session storage, and model control plane remain future
   gated work. Do not present the current preview as a complete coding Agent.
+- Codex same-turn steering is now reachable through the out-of-band AAP control
+  reader as `turn/steer`. It requires an exact active `session_id` and `turn_id`,
+  caps each input at 64 KiB and pending requests at eight, and returns only a
+  `steering-requested` queue acknowledgement. The adapter emits the pinned
+  schema request with `expectedTurnId`; provider acceptance or rejection is
+  reported separately as `turn.steering-acknowledged` or
+  `turn.steering-failed`, while the steering message is a bounded user timeline
+  Item. This remains read-only and does not grant Agent writes, commands, or
+  approvals. Durable usage/plan/diff projection and complete steering/reconnect
+  fixtures remain under task `7.4`/`7.10`.
 - Large command output now has bounded head/tail and content-addressed artifact
   retrieval, pre-capture secret redaction, fixed-frame Codex transport, and Qt
   full-output inspection. With durable storage configured, completed command

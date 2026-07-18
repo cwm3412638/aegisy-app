@@ -27,6 +27,7 @@ or session methods are accepted.
 - `project/open`
 - `session/start`
 - `turn/start`
+- `turn/steer` (Codex only; same-turn, identity-scoped)
 - `session/read`
 - `runtime/health`
 - `runtime/degradations`
@@ -54,6 +55,15 @@ Read-only Codex turns also translate schema-defined token usage, plan, and
 unified-diff notifications into bounded AAP timeline events. These projections
 do not authorize writes and are not yet durable replacements for full item or
 usage persistence.
+
+While a Codex turn is active, `turn/steer` accepts a bounded follow-up input
+only when its `session_id` and `turn_id` exactly match the active turn. The
+request crosses the same out-of-band control path as cancellation, so it stays
+reachable when the normal AAP request queue is saturated. Aegisy sends the
+schema-defined `turn/steer` request with `expectedTurnId`; the immediate AAP
+response means the input was queued, while `turn.steering-acknowledged` or
+`turn.steering-failed` is authoritative for the provider result. Steering is
+still read-only and cannot grant file, command, or permission mutation.
 
 The redacted request sequence in
 `aap-schema/fixtures/codex-thread-lifecycle.jsonl` is the checked-in lifecycle

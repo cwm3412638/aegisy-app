@@ -56,7 +56,7 @@ use repository_index::WorkspaceIndex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use session_environment::SessionEnvironment;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -146,6 +146,7 @@ struct ActiveTurnControl {
     session_id: String,
     turn_id: Option<String>,
     cancellation: TurnCancellationHandle,
+    steering: TurnSteeringHandle,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -159,10 +160,56 @@ impl TurnCancellationHandle {
     }
 }
 
+const TURN_STEER_QUEUE_CAPACITY: usize = 8;
+const MAX_TURN_STEER_INPUT_BYTES: usize = 64 * 1024;
+const MAX_CLIENT_USER_MESSAGE_ID_BYTES: usize = 256;
+
+#[derive(Debug, Clone)]
+pub(crate) struct TurnSteerRequest {
+    pub input: String,
+    pub client_user_message_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TurnSteeringHandle {
+    pending: Arc<Mutex<VecDeque<TurnSteerRequest>>>,
+}
+
+impl TurnSteeringHandle {
+    pub(crate) fn drain(&self) -> Vec<TurnSteerRequest> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pending.drain(..).collect()
+    }
+
+    fn enqueue(&self, request: TurnSteerRequest) -> Result<usize, ()> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.len() >= TURN_STEER_QUEUE_CAPACITY {
+            return Err(());
+        }
+        pending.push_back(request);
+        Ok(pending.len())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct TurnCancelParams {
     session_id: String,
     turn_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TurnSteerParams {
+    session_id: String,
+    turn_id: String,
+    input: String,
+    #[serde(default)]
+    client_user_message_id: Option<String>,
 }
 
 impl RuntimeControl {
@@ -195,8 +242,17 @@ impl RuntimeControl {
             session_id: session_id.into(),
             turn_id: None,
             cancellation: cancellation.clone(),
+            steering: TurnSteeringHandle::default(),
         });
         cancellation
+    }
+
+    fn steering_handle(&self, session_id: &str) -> Option<TurnSteeringHandle> {
+        self.lock()
+            .active_turn
+            .as_ref()
+            .filter(|active| active.session_id == session_id)
+            .map(|active| active.steering.clone())
     }
 
     fn identify_turn(&self, session_id: &str, turn_id: &str) {
@@ -305,6 +361,103 @@ impl RuntimeControl {
         .expect("cancel response serialization")]
     }
 
+    fn steer_claimed(&self, request: Request) -> Vec<Value> {
+        if !self.lock().protocol_ready {
+            return vec![serde_json::to_value(Response::error(
+                request.id.unwrap_or(Value::Null),
+                -32002,
+                "initialize handshake required",
+            ))
+            .expect("steer readiness response serialization")];
+        }
+        let params: TurnSteerParams = match serde_json::from_value(request.params) {
+            Ok(params) => params,
+            Err(error) => {
+                return vec![serde_json::to_value(Response::error(
+                    request.id.unwrap_or(Value::Null),
+                    -32602,
+                    format!("invalid params: {error}"),
+                ))
+                .expect("steer parameter response serialization")]
+            }
+        };
+        if params.session_id.is_empty()
+            || params.turn_id.is_empty()
+            || params.input.trim().is_empty()
+        {
+            return vec![serde_json::to_value(Response::error(
+                request.id.unwrap_or(Value::Null),
+                -32602,
+                "session_id, turn_id, and input must not be empty",
+            ))
+            .expect("steer validation response serialization")];
+        }
+        if params.input.len() > MAX_TURN_STEER_INPUT_BYTES {
+            return vec![serde_json::to_value(Response::error(
+                request.id.unwrap_or(Value::Null),
+                -32602,
+                "turn steering input exceeds the 64 KiB limit",
+            ))
+            .expect("steer input limit response serialization")];
+        }
+        if params.client_user_message_id.as_ref().is_some_and(|id| {
+            id.is_empty()
+                || id.len() > MAX_CLIENT_USER_MESSAGE_ID_BYTES
+                || id.chars().any(char::is_control)
+        }) {
+            return vec![serde_json::to_value(Response::error(
+                request.id.unwrap_or(Value::Null),
+                -32602,
+                "client_user_message_id is invalid",
+            ))
+            .expect("steer client message id response serialization")];
+        }
+
+        let mut state = self.lock();
+        let Some(active) = state.active_turn.as_mut() else {
+            return vec![serde_json::to_value(Response::error(
+                request.id.unwrap_or(Value::Null),
+                -32080,
+                "turn is not active",
+            ))
+            .expect("inactive steer response serialization")];
+        };
+        if active.session_id != params.session_id
+            || active.turn_id.as_deref() != Some(params.turn_id.as_str())
+        {
+            return vec![serde_json::to_value(Response::error(
+                request.id.unwrap_or(Value::Null),
+                -32081,
+                "turn identity does not match the active turn",
+            ))
+            .expect("steer identity response serialization")];
+        }
+        let queued = match active.steering.enqueue(TurnSteerRequest {
+            input: params.input,
+            client_user_message_id: params.client_user_message_id,
+        }) {
+            Ok(queued) => queued,
+            Err(()) => {
+                return vec![serde_json::to_value(Response::error(
+                    request.id.unwrap_or(Value::Null),
+                    -32004,
+                    "turn steering queue is full",
+                ))
+                .expect("steer queue response serialization")]
+            }
+        };
+        vec![serde_json::to_value(Response::success(
+            request.id.unwrap_or(Value::Null),
+            json!({
+                "session_id": params.session_id,
+                "turn_id": params.turn_id,
+                "state": "steering-requested",
+                "queued": queued
+            }),
+        ))
+        .expect("steer response serialization")]
+    }
+
     fn terminal_stop_claimed(&self, request: Request) -> Vec<Value> {
         if !self.lock().protocol_ready {
             return vec![serde_json::to_value(Response::error(
@@ -348,7 +501,7 @@ impl RuntimeControl {
         let request: Request = serde_json::from_str(line).ok()?;
         if !matches!(
             request.method.as_str(),
-            "turn/cancel" | "terminal/stop-user"
+            "turn/cancel" | "turn/steer" | "terminal/stop-user"
         ) {
             return None;
         }
@@ -365,6 +518,7 @@ impl RuntimeControl {
         }
         Some(match request.method.as_str() {
             "turn/cancel" => self.cancel_claimed(request),
+            "turn/steer" => self.steer_claimed(request),
             "terminal/stop-user" => self.terminal_stop_claimed(request),
             _ => unreachable!("out-of-band method was checked above"),
         })
@@ -1809,6 +1963,7 @@ impl Runtime {
                     | "session/recovery/status"
                     | "runtime/projection-recovery/status"
                     | "turn/cancel"
+                    | "turn/steer"
                     | "terminal/stop-user"
                     | "terminal/close-user"
                     | "terminal/remove-user"
@@ -1864,6 +2019,7 @@ impl Runtime {
                 | "session/export"
                 | "session/recovery/status"
                 | "turn/cancel"
+                | "turn/steer"
                 | "terminal/list"
                 | "terminal/read"
                 | "terminal/attach"
@@ -1954,6 +2110,7 @@ impl Runtime {
             "retention/policy/set" => self.retention_policy_set(request),
             "retention/maintenance/run" => self.retention_maintenance_run(request),
             "turn/cancel" => self.control.cancel_claimed(request),
+            "turn/steer" => self.control.steer_claimed(request),
             "workspace/list" => self.workspace_list(request),
             "workspace/read" => self.workspace_read(request),
             "workspace/save-user-text" => self.workspace_save_user_text(request),
@@ -2159,6 +2316,7 @@ impl Runtime {
                         "runtime.codex-app-server".into(),
                         "timeline.command.structured.read-only".into(),
                         "turn.cancel.interrupt".into(),
+                        "turn.steer.same-turn".into(),
                         "session.provider.lifecycle.archive".into(),
                         "session.provider.lifecycle.unarchive".into(),
                         "session.provider.lifecycle.list-read".into(),
@@ -5117,6 +5275,10 @@ impl Runtime {
             Backend::Unavailable("Codex turn is already running".into()),
         );
         let cancellation = self.control.begin_turn(&params.session_id);
+        let steering = self
+            .control
+            .steering_handle(&params.session_id)
+            .expect("active turn steering handle");
         let mut started = false;
         let mut persistence_error: Option<String> = None;
         let result = match &mut backend {
@@ -5125,6 +5287,7 @@ impl Runtime {
                 &backend_input,
                 &params.idempotency_key,
                 &cancellation,
+                &steering,
                 |event| match event {
                     CodexEvent::TurnStarted { turn_id } => {
                         if let Err(error) = self.persist_turn(
@@ -5383,6 +5546,58 @@ impl Runtime {
                             return;
                         }
                         emit(self.event(&params.session_id, Some(&turn_id), "turn.completed", None))
+                    }
+                    CodexEvent::TurnSteeringRequested { turn_id, input } => {
+                        let item = TimelineItem {
+                            id: self.allocate_id("item"),
+                            kind: "message".into(),
+                            role: "user".into(),
+                            state: "completed".into(),
+                            content: input,
+                            data: Some(json!({ "source": "turn-steer" })),
+                        };
+                        if let Err(error) =
+                            self.persist_item(&params.session_id, Some(&turn_id), &item)
+                        {
+                            persistence_error =
+                                Some(format!("cannot persist steering item: {error}"));
+                            return;
+                        }
+                        if let Some(state) = self.sessions.get_mut(&params.session_id) {
+                            state.items.push(item.clone());
+                        }
+                        emit(self.event(
+                            &params.session_id,
+                            Some(&turn_id),
+                            "turn.steering-requested",
+                            Some(item),
+                        ));
+                    }
+                    CodexEvent::TurnSteeringAcknowledged { turn_id } => emit(self.event(
+                        &params.session_id,
+                        Some(&turn_id),
+                        "turn.steering-acknowledged",
+                        None,
+                    )),
+                    CodexEvent::TurnSteeringFailed { turn_id, message } => {
+                        let item = TimelineItem {
+                            id: self.allocate_id("error"),
+                            kind: "error".into(),
+                            role: "system".into(),
+                            state: "completed".into(),
+                            content: runtime_error_content(&message),
+                            data: Some({
+                                let mut data = runtime_error_data(&message);
+                                data["operation"] = Value::String("turn.steer".into());
+                                data
+                            }),
+                        };
+                        emit(self.event(
+                            &params.session_id,
+                            Some(&turn_id),
+                            "turn.steering-failed",
+                            Some(item),
+                        ));
                     }
                     CodexEvent::TurnCancellationAcknowledged { turn_id } => emit(self.event(
                         &params.session_id,
@@ -8228,6 +8443,21 @@ mod turn_cancel_tests {
         .to_string()
     }
 
+    fn steer_request(id: &str, session_id: &str, turn_id: &str, input: &str) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "turn/steer",
+            "params": {
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "input": input,
+                "client_user_message_id": format!("message-{id}")
+            }
+        })
+        .to_string()
+    }
+
     #[test]
     fn out_of_band_turn_cancel_is_identity_scoped_idempotent_and_immediate() {
         let runtime = ready_runtime();
@@ -8258,6 +8488,76 @@ mod turn_cancel_tests {
         control.finish_turn("session-1");
         let completed = control
             .handle_out_of_band_line(&cancel_request("cancel-4", "session-1", "turn-1"))
+            .unwrap();
+        assert_eq!(completed[0]["error"]["code"], -32080);
+    }
+
+    #[test]
+    fn out_of_band_turn_steer_is_identity_scoped_bounded_and_queued() {
+        let runtime = ready_runtime();
+        let control = runtime.control();
+        control.begin_turn("session-1");
+        let steering = control.steering_handle("session-1").unwrap();
+        control.identify_turn("session-1", "turn-1");
+
+        let accepted = control
+            .handle_out_of_band_line(&steer_request(
+                "steer-1",
+                "session-1",
+                "turn-1",
+                "focus on the failing test",
+            ))
+            .unwrap();
+        assert_eq!(accepted[0]["result"]["state"], "steering-requested");
+        assert_eq!(accepted[0]["result"]["queued"], 1);
+
+        let wrong_turn = control
+            .handle_out_of_band_line(&steer_request(
+                "steer-wrong",
+                "session-1",
+                "turn-old",
+                "wrong turn",
+            ))
+            .unwrap();
+        assert_eq!(wrong_turn[0]["error"]["code"], -32081);
+
+        for index in 2..=TURN_STEER_QUEUE_CAPACITY {
+            let queued = control
+                .handle_out_of_band_line(&steer_request(
+                    &format!("steer-{index}"),
+                    "session-1",
+                    "turn-1",
+                    &format!("follow-up {index}"),
+                ))
+                .unwrap();
+            assert_eq!(queued[0]["result"]["queued"], index);
+        }
+        let full = control
+            .handle_out_of_band_line(&steer_request(
+                "steer-full",
+                "session-1",
+                "turn-1",
+                "one too many",
+            ))
+            .unwrap();
+        assert_eq!(full[0]["error"]["code"], -32004);
+
+        let pending = steering.drain();
+        assert_eq!(pending.len(), TURN_STEER_QUEUE_CAPACITY);
+        assert_eq!(pending[0].input, "focus on the failing test");
+        assert_eq!(
+            pending[0].client_user_message_id.as_deref(),
+            Some("message-steer-1")
+        );
+
+        control.finish_turn("session-1");
+        let completed = control
+            .handle_out_of_band_line(&steer_request(
+                "steer-completed",
+                "session-1",
+                "turn-1",
+                "too late",
+            ))
             .unwrap();
         assert_eq!(completed[0]["error"]["code"], -32080);
     }

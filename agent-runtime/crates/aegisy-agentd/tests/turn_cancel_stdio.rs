@@ -87,6 +87,9 @@ while IFS= read -r line; do
           ;;
       esac
       ;;
+    *'"method":"turn/steer"'*)
+      printf '{"id":%s,"result":{"turnId":"turn-fixture"}}\n' "$id"
+      ;;
     *'"method":"turn/interrupt"'*)
       printf '{"id":%s,"result":{}}\n' "$id"
       printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"interrupted"}}}\n'
@@ -263,7 +266,7 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
 }
 
 #[test]
-fn stdio_control_cancels_a_turn_while_normal_dispatch_is_blocked() {
+fn stdio_control_steers_and_cancels_a_turn_while_normal_dispatch_is_blocked() {
     let codex = fake_codex();
     let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
         .env("AEGISY_CODEX_PATH", &codex)
@@ -302,6 +305,11 @@ fn stdio_control_cancels_a_turn_while_normal_dispatch_is_blocked() {
         .unwrap()
         .iter()
         .any(|capability| capability == "turn.cancel.interrupt"));
+    assert!(initialized["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "turn.steer.same-turn"));
     assert!(initialized["result"]["capabilities"]
         .as_array()
         .unwrap()
@@ -357,11 +365,37 @@ fn stdio_control_cancels_a_turn_while_normal_dispatch_is_blocked() {
         &mut stdin,
         &request(
             "4",
+            "turn/steer",
+            json!({
+                "session_id": session_id,
+                "turn_id": "turn-fixture",
+                "input": "focus on the latest instruction",
+                "client_user_message_id": "steer-fixture-message"
+            }),
+        ),
+    );
+    let steer = receive_until(&receiver, |message| message["id"] == "4");
+    assert_eq!(steer["result"]["state"], "steering-requested");
+    let steering_item = receive_until(&receiver, |message| {
+        message["params"]["event"] == "turn.steering-requested"
+    });
+    assert_eq!(
+        steering_item["params"]["item"]["content"],
+        "focus on the latest instruction"
+    );
+    receive_until(&receiver, |message| {
+        message["params"]["event"] == "turn.steering-acknowledged"
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "5",
             "turn/cancel",
             json!({ "session_id": session_id, "turn_id": "turn-fixture" }),
         ),
     );
-    let accepted = receive_until(&receiver, |message| message["id"] == "4");
+    let accepted = receive_until(&receiver, |message| message["id"] == "5");
     assert_eq!(accepted["result"]["state"], "cancellation-requested");
     receive_until(&receiver, |message| {
         message["params"]["event"] == "turn.cancellation-acknowledged"
@@ -370,8 +404,8 @@ fn stdio_control_cancels_a_turn_while_normal_dispatch_is_blocked() {
         message["params"]["event"] == "turn.interrupted"
     });
 
-    send(&mut stdin, &request("5", "shutdown", json!({})));
-    receive_until(&receiver, |message| message["id"] == "5");
+    send(&mut stdin, &request("6", "shutdown", json!({})));
+    receive_until(&receiver, |message| message["id"] == "6");
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();

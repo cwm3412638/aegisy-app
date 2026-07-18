@@ -1,7 +1,7 @@
 use crate::command_output::CommandOutputCapture;
 use crate::output_redaction::{redact_complete, OutputRedactor};
 use crate::session_environment::{EnvironmentSummary, ProcessEnvironment, SessionEnvironment};
-use crate::TurnCancellationHandle;
+use crate::{TurnCancellationHandle, TurnSteerRequest, TurnSteeringHandle};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -98,6 +98,17 @@ pub enum CodexEvent {
     },
     TurnCompleted {
         turn_id: String,
+    },
+    TurnSteeringRequested {
+        turn_id: String,
+        input: String,
+    },
+    TurnSteeringAcknowledged {
+        turn_id: String,
+    },
+    TurnSteeringFailed {
+        turn_id: String,
+        message: String,
     },
     TurnCancellationAcknowledged {
         turn_id: String,
@@ -348,6 +359,7 @@ impl CodexAdapter {
         input: &str,
         idempotency_key: &str,
         cancellation: &TurnCancellationHandle,
+        steering: &TurnSteeringHandle,
         mut emit: F,
     ) -> Result<(), String>
     where
@@ -372,6 +384,7 @@ impl CodexAdapter {
         let deadline = Instant::now() + TURN_TIMEOUT;
         let mut interrupt_sent = false;
         let mut interrupt_request_id = None;
+        let mut pending_steers = HashMap::<i64, TurnSteerRequest>::new();
         loop {
             if cancellation.is_requested() && !interrupt_sent {
                 interrupt_request_id =
@@ -380,6 +393,15 @@ impl CodexAdapter {
                         turn_interrupt_params(thread_id, &turn_id),
                     )?);
                 interrupt_sent = true;
+            }
+            for steer in steering.drain() {
+                let request_id = self
+                    .write_request("turn/steer", turn_steer_params(thread_id, &turn_id, &steer))?;
+                emit(CodexEvent::TurnSteeringRequested {
+                    turn_id: turn_id.clone(),
+                    input: steer.input.clone(),
+                });
+                pending_steers.insert(request_id, steer);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -407,6 +429,35 @@ impl CodexAdapter {
                     });
                 } else {
                     emit(CodexEvent::TurnCancellationAcknowledged {
+                        turn_id: turn_id.clone(),
+                    });
+                }
+                continue;
+            }
+            if let Some(_steer) = message
+                .get("id")
+                .and_then(Value::as_i64)
+                .and_then(|id| pending_steers.remove(&id))
+            {
+                if let Some(error) = message.get("error") {
+                    emit(CodexEvent::TurnSteeringFailed {
+                        turn_id: turn_id.clone(),
+                        message: error
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Codex rejected turn steering")
+                            .to_owned(),
+                    });
+                } else if message.pointer("/result/turnId").and_then(Value::as_str)
+                    != Some(turn_id.as_str())
+                {
+                    emit(CodexEvent::TurnSteeringFailed {
+                        turn_id: turn_id.clone(),
+                        message: "Codex turn/steer response did not match the active turn"
+                            .to_owned(),
+                    });
+                } else {
+                    emit(CodexEvent::TurnSteeringAcknowledged {
                         turn_id: turn_id.clone(),
                     });
                 }
@@ -979,6 +1030,15 @@ fn turn_interrupt_params(thread_id: &str, turn_id: &str) -> Value {
     })
 }
 
+fn turn_steer_params(thread_id: &str, turn_id: &str, steer: &TurnSteerRequest) -> Value {
+    json!({
+        "threadId": thread_id,
+        "expectedTurnId": turn_id,
+        "input": [{ "type": "text", "text": steer.input }],
+        "clientUserMessageId": steer.client_user_message_id
+    })
+}
+
 fn turn_terminal_event(params: &Value, turn_id: &str) -> CodexEvent {
     match params.pointer("/turn/status").and_then(Value::as_str) {
         Some("completed") => CodexEvent::TurnCompleted {
@@ -1192,6 +1252,24 @@ mod tests {
             turn_interrupt_params("thread-1", "turn-1"),
             json!({ "threadId": "thread-1", "turnId": "turn-1" })
         );
+    }
+
+    #[test]
+    fn turn_steer_matches_pinned_app_server_schema() {
+        let params = turn_steer_params(
+            "thread-1",
+            "turn-1",
+            &TurnSteerRequest {
+                input: "focus on the failing test".into(),
+                client_user_message_id: Some("steer-1".into()),
+            },
+        );
+        assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(params["expectedTurnId"], "turn-1");
+        assert_eq!(params["input"][0]["type"], "text");
+        assert_eq!(params["input"][0]["text"], "focus on the failing test");
+        assert_eq!(params["clientUserMessageId"], "steer-1");
+        assert!(params.get("turnId").is_none());
     }
 
     #[test]
