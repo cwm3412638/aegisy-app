@@ -55,6 +55,7 @@ if [ "$1" = "--version" ]; then
   echo "codex-cli 0.144.5"
   exit 0
 fi
+printf 'warning: fixture stderr Authorization: Bearer ghp_123456789012345678901234567890\n' >&2
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
@@ -496,6 +497,33 @@ fn stdio_control_steers_and_cancels_a_turn_while_normal_dispatch_is_blocked() {
         &mut stdin,
         &json!({ "jsonrpc": "2.0", "method": "initialized" }),
     );
+    let mut health = Value::Null;
+    for index in 0..20 {
+        send(
+            &mut stdin,
+            &request(&format!("health-{index}"), "runtime/health", json!({})),
+        );
+        health = receive_until(&receiver, |message| {
+            message["id"] == format!("health-{index}")
+        });
+        if health["result"]["stderr"]["bytes"].as_u64().unwrap_or(0) > 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        health["result"]["stderr"]["bytes"].as_u64().unwrap_or(0) > 0,
+        "health response did not include stderr bytes: {health}"
+    );
+    assert!(health["result"]["stderr"]["lines"].as_u64().unwrap_or(0) > 0);
+    assert!(
+        health["result"]["stderr"]["redacted_lines"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    assert_eq!(health["result"]["stderr"]["last_class"], "warning");
+    assert!(!health.to_string().contains("ghp_"));
     send(
         &mut stdin,
         &request("2", "session/start", json!({ "mode": "chat" })),

@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-18
+Last updated: 2026-07-19
 
 ## Mandatory First Step
 
@@ -52,10 +52,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   The pin and schema-driven lifecycle fixtures pass the full Rust workspace test
   and Clippy gates; cross-platform binary contract and upgrade/rollback evidence
   remain open under OpenSpec task `7.1`.
-  AAP `runtime/health` reports the Codex child process state, PID, exit code, and
-  restart recommendation without exposing stderr or environment values. Structured
-  stderr diagnostics, startup timeout/restart supervision, and crash-loop protection
-  remain open under task `7.2`.
+  AAP `runtime/health` reports the Codex child process state, PID, exit code, restart
+  recommendation, and a content-free stderr summary (bytes, newline count, redacted
+  line count, and stable last class) without exposing stderr text or environment
+  values. Startup timeout/restart supervision and crash-loop protection remain open
+  under task `7.2`.
   AAP `runtime/degradations` provides explicit, content-free feature states for
   read-only Agent mutation, metadata-only provider items, and blocked provider
   delete/compact so clients do not simulate unavailable behavior.
@@ -438,9 +439,9 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 239 Rust sidecar unit tests, 28 Rust
-protocol tests, three macOS sidecar stdio/Codex contract tests, and Clippy with warnings
-denied.
+Current verified baseline: 16 desktop tests, 245 Rust sidecar unit tests, 32 Rust
+protocol tests, six macOS sidecar stdio/Codex contract tests, and Clippy with warnings
+denied. The latest unit count includes the structured stderr diagnostic invariant.
 
 ## Session History Boundary
 

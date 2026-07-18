@@ -10,6 +10,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,34 @@ pub struct AdapterHealth {
     pub process_id: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    pub stderr: StderrDiagnostics,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct StderrDiagnostics {
+    pub bytes: u64,
+    pub lines: u64,
+    pub redacted_lines: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_class: Option<String>,
+}
+
+impl StderrDiagnostics {
+    fn observe(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.bytes = self.bytes.saturating_add(bytes.len() as u64);
+        self.lines = self
+            .lines
+            .saturating_add(bytes.iter().filter(|byte| **byte == b'\n').count() as u64);
+        let text = String::from_utf8_lossy(bytes);
+        let redacted = redact_complete(&text);
+        if redacted != text {
+            self.redacted_lines = self.redacted_lines.saturating_add(1);
+        }
+        self.last_class = Some(classify_stderr(&redacted).into());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +162,7 @@ pub struct CodexAdapter {
     next_request_id: i64,
     version: String,
     environment: EnvironmentSummary,
+    stderr: Arc<Mutex<StderrDiagnostics>>,
 }
 
 impl CodexAdapter {
@@ -164,6 +194,7 @@ impl CodexAdapter {
             .ok_or_else(|| "Codex App Server stdout is unavailable".to_owned())?;
         let stderr = child.stderr.take();
         let (sender, messages) = codex_message_channel();
+        let stderr_diagnostics = Arc::new(Mutex::new(StderrDiagnostics::default()));
 
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
@@ -188,13 +219,19 @@ impl CodexAdapter {
             }
         });
         if let Some(stderr) = stderr {
+            let diagnostics = stderr_diagnostics.clone();
             thread::spawn(move || {
                 let mut stderr = stderr;
                 let mut buffer = [0_u8; 8 * 1024];
                 loop {
                     match stderr.read(&mut buffer) {
                         Ok(0) | Err(_) => break,
-                        Ok(_) => {}
+                        Ok(bytes_read) => {
+                            let mut diagnostics = diagnostics
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            diagnostics.observe(&buffer[..bytes_read]);
+                        }
                     }
                 }
             });
@@ -207,6 +244,7 @@ impl CodexAdapter {
             next_request_id: 0,
             version,
             environment: process_environment.summary().clone(),
+            stderr: stderr_diagnostics,
         };
         adapter.request(
             "initialize",
@@ -236,21 +274,29 @@ impl CodexAdapter {
 
     pub fn health(&mut self) -> AdapterHealth {
         let process_id = Some(self.child.id());
+        let stderr = self
+            .stderr
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         match self.child.try_wait() {
             Ok(None) => AdapterHealth {
                 state: "running".into(),
                 process_id,
                 exit_code: None,
+                stderr,
             },
             Ok(Some(status)) => AdapterHealth {
                 state: "exited".into(),
                 process_id,
                 exit_code: status.code(),
+                stderr,
             },
             Err(_) => AdapterHealth {
                 state: "unknown".into(),
                 process_id,
                 exit_code: None,
+                stderr,
             },
         }
     }
@@ -938,6 +984,21 @@ fn codex_version_is_pinned(version: &str) -> bool {
     version.trim() == PINNED_CODEX_VERSION
 }
 
+fn classify_stderr(value: &str) -> &'static str {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("panic") || lower.contains("fatal") {
+        "fatal"
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        "timeout"
+    } else if lower.contains("error") || lower.contains("failed") {
+        "error"
+    } else if lower.contains("warn") {
+        "warning"
+    } else {
+        "info"
+    }
+}
+
 fn thread_start_params(cwd: &Path, chat: bool) -> Value {
     let instructions = if chat {
         "You are running inside Aegisy Coding Chat. This mode is non-mutating. Do not modify files, execute mutating commands, or inspect paths outside explicitly provided context."
@@ -1081,6 +1142,23 @@ mod tests {
         assert!(codex_version_is_pinned(PINNED_CODEX_VERSION));
         assert!(!codex_version_is_pinned("codex-cli 0.144.4"));
         assert!(!codex_version_is_pinned("unknown"));
+    }
+
+    #[test]
+    fn stderr_diagnostics_are_bounded_redacted_and_content_free() {
+        let secret = b"warning: Authorization: Bearer ghp_123456789012345678901234567890\n";
+        let mut diagnostics = StderrDiagnostics::default();
+        diagnostics.observe(secret);
+        assert_eq!(diagnostics.bytes, secret.len() as u64);
+        assert_eq!(diagnostics.lines, 1);
+        assert_eq!(diagnostics.redacted_lines, 1);
+        assert_eq!(diagnostics.last_class.as_deref(), Some("warning"));
+        let encoded = serde_json::to_string(&diagnostics).unwrap();
+        assert!(!encoded.contains("ghp_"));
+
+        diagnostics.observe(b"fatal: Codex process panic\n");
+        assert_eq!(diagnostics.last_class.as_deref(), Some("fatal"));
+        assert_eq!(diagnostics.lines, 2);
     }
 
     #[test]

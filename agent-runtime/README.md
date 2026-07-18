@@ -51,6 +51,12 @@ Clients can query `runtime/degradations` to render disabled or metadata-only
 features explicitly. This is authoritative capability state, not a request to
 silently fall back to a mutating or provider-opaque implementation.
 
+Codex `runtime/health` includes only process state, PID/exit metadata, restart
+recommendation, and a content-free stderr summary: observed bytes, newline count,
+redacted-line count, and the last stable class (`fatal`, `error`, `warning`,
+`timeout`, or `info`). Stderr text is drained and discarded after classification;
+credentials, prompts, paths, and raw diagnostics never cross AAP.
+
 Read-only Codex turns also translate schema-defined token usage, plan, and
 unified-diff notifications into bounded AAP timeline events. These projections
 do not authorize writes. With the Workbench data root configured, each update is

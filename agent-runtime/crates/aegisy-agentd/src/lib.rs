@@ -2175,6 +2175,7 @@ impl Runtime {
                     "backend": "codex-app-server",
                     "process_id": health.process_id,
                     "exit_code": health.exit_code,
+                    "stderr": health.stderr,
                     "restart_required": restart_required
                 })
             }
