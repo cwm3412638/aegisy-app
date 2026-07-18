@@ -1060,12 +1060,18 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut command_output_ref = None;
     let mut diagnostic_data = None;
+    let mut command_started_data = None;
+    let mut command_completed_data = None;
     while diagnostic_data.is_none() {
         let message = receiver
             .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
             .expect("sidecar did not emit command diagnostics");
         let event = message["params"]["event"].as_str().unwrap_or("");
+        if event == "item.started" && message["params"]["item"]["id"] == "command-fixture" {
+            command_started_data = Some(message["params"]["item"]["data"].clone());
+        }
         if event == "item.completed" && message["params"]["item"]["id"] == "command-fixture" {
+            command_completed_data = Some(message["params"]["item"]["data"].clone());
             command_output_ref = message["params"]["item"]["data"]["output"]["artifact"]
                 ["reference"]
                 .as_str()
@@ -1076,6 +1082,20 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
         }
     }
     let diagnostic_data = diagnostic_data.unwrap();
+    let command_started_data =
+        command_started_data.expect("command start item needs structured data");
+    let command_completed_data =
+        command_completed_data.expect("command completion needs structured data");
+    assert!(command_started_data["cwd"].is_string());
+    assert_eq!(
+        command_started_data["environment"]["execution_binding"],
+        "verified-adapter-process-snapshot"
+    );
+    assert_eq!(command_started_data["environment"]["values_exposed"], false);
+    assert_eq!(command_started_data["risk"]["level"], "medium");
+    assert_eq!(command_completed_data["status"], "failed");
+    assert_eq!(command_completed_data["duration_ms"], 12);
+    assert_eq!(command_completed_data["exit_code"], 101);
     assert_eq!(diagnostic_data["diagnostics"][0]["path"], "src/main.rs");
     assert_eq!(diagnostic_data["diagnostics"][0]["source_kind"], "command");
     assert_eq!(

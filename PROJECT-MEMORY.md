@@ -1154,6 +1154,11 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   parent-process environment hash and counts. Command items label this authority as
   `codex-adapter-process-snapshot`; Codex does not report whether a specific child
   modified that parent snapshot, so do not present it as exact child-process proof.
+- The real macOS stdio command fixture now asserts structured Item cwd presence,
+  environment identity/binding, value-free metadata, conservative risk level,
+  duration, exit code, and diagnostic artifact linkage. This strengthens task
+  `14.5` evidence without claiming child-process mutation proof or native command
+  producers.
 - Codex remains configured with `sandbox=read-only` and `approvalPolicy=never`;
   approval requests are declined. No AAP/native Agent command-open or arbitrary
   execution method was added. User terminal input remains a separate explicit user
