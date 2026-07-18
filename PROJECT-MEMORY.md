@@ -161,8 +161,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   `codex-recovery.jsonl` fixture and real stdio fixture cover partial agent output,
   transport failure, health exit, identity-preserving restart, recovered Turn
   completion, provider metadata read, and compaction request shape. Qt now renders
-  content-free failure class/retry status for live turns; final reconnect and
-  provider lifecycle UI projection remain under task `7.10`.
+  content-free failure class/retry status for live turns and hides provider/Codex
+  lifecycle error text behind bounded operation/error-code status; final reconnect
+  and provider lifecycle UI projection remain under task `7.10`.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
   at most three retries for transient output-channel, transport, write, read, or
   timeout failures. Version mismatch and protocol rejection are not retried; the
@@ -1382,7 +1383,8 @@ Implemented visual baseline:
    add sandboxed hook output and secure signing as separate reviewed policies.
 8. Finish task `7.10` with provider reconnect/archive/compact failure projection
    fixtures and explicit lifecycle recovery states, without exposing raw provider
-   payloads or weakening the read-only Agent boundary.
+   payloads or weakening the read-only Agent boundary. Qt request failures now hide
+   provider/Codex/model detail while preserving safe local error text and codes.
 9. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
    permission policy and the production approval ledger. A trust acknowledgement must
    never become an implicit write, command, Hook, or network grant.

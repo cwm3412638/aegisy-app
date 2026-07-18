@@ -132,6 +132,23 @@ QString boundedUtf8Text(const QString &text, int byteLimit, bool *truncated = nu
     return text.left(low);
 }
 
+QString safeProviderLifecycleFailure(const QString &method, const QString &message, int code)
+{
+    const bool providerFailure = message.contains(QStringLiteral("provider"), Qt::CaseInsensitive)
+        || message.contains(QStringLiteral("codex"), Qt::CaseInsensitive)
+        || message.contains(QStringLiteral("model"), Qt::CaseInsensitive);
+    if (!providerFailure) return message;
+    const QString operation = method == QStringLiteral("session/archive")
+        ? QStringLiteral("归档会话")
+        : method == QStringLiteral("session/unarchive")
+            ? QStringLiteral("恢复会话")
+            : method == QStringLiteral("session/fork")
+                ? QStringLiteral("创建会话分支")
+                : QStringLiteral("恢复会话");
+    return QStringLiteral("%1失败（错误码 %2；provider 详细信息已隐藏）")
+        .arg(operation).arg(code);
+}
+
 QString boundedContextText(const QString &text, bool *truncated = nullptr)
 {
     return boundedUtf8Text(text, kMaxInlineContextBytes, truncated);
@@ -1546,11 +1563,13 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         } else if (method == QStringLiteral("session/resume")
                    && requestId == m_sessionResumeRequestId) {
             m_sessionResumeRequestId.clear();
-            addNotice(QStringLiteral("恢复会话失败：%1").arg(message), true);
+            addNotice(QStringLiteral("恢复会话失败：%1")
+                          .arg(safeProviderLifecycleFailure(method, message, code)), true);
         } else if (method == QStringLiteral("session/fork")
                    && requestId == m_sessionForkRequestId) {
             m_sessionForkRequestId.clear();
-            addNotice(QStringLiteral("创建会话分支失败：%1").arg(message), true);
+            addNotice(QStringLiteral("创建会话分支失败：%1")
+                          .arg(safeProviderLifecycleFailure(method, message, code)), true);
         } else if ((method == QStringLiteral("project/root-add")
                     || method == QStringLiteral("project/root-remove"))
                    && requestId == m_projectRootMutationRequestId) {
@@ -1565,7 +1584,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                     || method == QStringLiteral("session/unarchive"))
                    && requestId == m_sessionMutationRequestId) {
             m_sessionMutationRequestId.clear();
-            addNotice(QStringLiteral("会话操作失败：%1").arg(message), true);
+            addNotice(QStringLiteral("会话操作失败：%1")
+                          .arg(safeProviderLifecycleFailure(method, message, code)), true);
         } else if ((method == QStringLiteral("session/delete/preview")
                     || method == QStringLiteral("session/delete/schedule")
                     || method == QStringLiteral("session/delete/undo"))
