@@ -109,10 +109,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   activation requires an exact sequence plus source-context identity. Failed
   checkpoints preserve the original context and expose bounded model-change,
   portable-fork, and manual-cleanup recovery options. This does not count as task
-  completion: checkpoint persistence, event/replay integration, AAP/Qt review and
-  activation, model-generated summaries, editable preservation instructions, and
-  Codex `thread/compact/start` remain unavailable. Original event history remains
-  authoritative and must never be discarded by a future compaction implementation.
+  completion. An internal `session-compaction-checkpoint-store/0.1` now persists
+  the exact validated review under the Workbench data root using bounded content-
+  addressed objects, hashed pointers, no-clobber publication, private Unix
+  permissions, and restart/tamper validation. It is not connected to SQLite
+  session events, startup recovery, AAP/Qt review or activation, model-generated
+  summaries, editable preservation instructions, or Codex `thread/compact/start`.
+  Original event history remains authoritative and must never be discarded.
 - Task `6.9` now has an internal `operation-reconciliation/0.1` contract
   foundation. It accepts content-free event, process, workspace, and Git evidence
   and emits a bounded state/decision, blockers, observed domains, and a
@@ -515,7 +518,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 255 Rust sidecar unit tests, 36 Rust
+Current verified baseline: 16 desktop tests, 259 Rust sidecar unit tests, 36 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -543,11 +546,15 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
 - A compaction review never replaces or deletes the original event history. The
   complete event stream remains the authoritative source for replay, recovery, and
   later durable checkpoint creation.
-- No checkpoint or summary is persisted, no AAP method or Qt control is exposed,
-  and no model/provider is asked to generate or activate a summary. Codex
-  `thread/compact/start` remains unavailable until durable checkpoint storage,
-  preservation-instruction review, failure compensation/recovery, permission
-  gates, and provider lifecycle evidence are integrated.
+- `session-compaction-checkpoint-store/0.1` persists an exact validated review in
+  the Workbench data root. Content-addressed objects and hashed session/checkpoint
+  pointers are bounded, privately permissioned on Unix, published without clobber,
+  revalidated after restart, and preserved unchanged when tampering is detected.
+- The internal store is not part of the SQLite event stream or startup recovery,
+  and no AAP method, Qt control, or model/provider summary producer consumes it.
+  Codex `thread/compact/start` remains unavailable until preservation instructions
+  and summaries are event-backed and editable before activation, failure
+  compensation/recovery is complete, and permission/provider gates pass.
 
 ## Operation Reconciliation Boundary
 
