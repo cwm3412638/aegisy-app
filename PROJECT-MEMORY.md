@@ -62,18 +62,22 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user terminal is active. Qt polls `runtime/health`, exposes exited/unavailable
   state, and provides a guarded `重启 Codex` action. Full crash-loop recovery UI and
   cross-platform recovery evidence remain under task `7.2`.
-AAP `runtime/degradations` provides explicit, content-free feature states for
+  AAP `runtime/degradations` provides explicit, content-free feature states for
   read-only Agent mutation, metadata-only provider items, and blocked provider
   delete/compact so clients do not simulate unavailable behavior.
   Qt now requests this versioned response after initialization and renders a
   compact capability status (`Agent 只读`, metadata/deletion/compact unavailable,
   or provider unavailable). Invalid schemas or request failures return to an
   explicit unknown/read-only gate; no provider delete/compact action is exposed.
-  The checked-in `aap-schema/fixtures/codex-thread-lifecycle.jsonl` covers the
+  The internal `docs/AAP-PROTOCOL-GUIDE.md` records the stable AAP handshake,
+  lifecycle/error/cancel/degradation/replay examples and the current read-only
+  security boundary. It is intentionally an internal guide tied to checked-in
+  fixtures, not a public compatibility promise. The checked-in
+  `aap-schema/fixtures/codex-thread-lifecycle.jsonl` covers the
   current request sequence and `codex-turn-metadata.jsonl` covers usage/plan/diff
   notifications; both are tested for JSON validity and credential-shaped content
   absence. Partial-stream, approval/denial, reconnect, compaction, and provider-
-  failure fixtures are present; final Qt lifecycle projection fixtures remain under
+  failure fixtures are present; final Qt lifecycle projection is complete under
   task `7.10`.
 - Current Agent security boundary: Agent/Codex is read-only. User-initiated editor
   saves are separately allowed only inside the canonical opened project root.
@@ -95,10 +99,10 @@ AAP `runtime/degradations` provides explicit, content-free feature states for
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 38 of 235 checkbox tasks are complete and 197 remain
+- OpenSpec task baseline: 39 of 235 checkbox tasks are complete and 196 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
-- OpenSpec tasks `5.3` through `5.10`, `6.1`, `6.8`, `7.10`, `13.1` through `14.1`, tasks `14.3`, `14.4`, `14.6`,
+- OpenSpec tasks `3.12`, `5.3` through `5.10`, `6.1`, `6.8`, `7.10`, `13.1` through `14.1`, tasks `14.3`, `14.4`, `14.6`,
   `14.8`, `15.1` through `15.9`, `16.1`, `16.2`, and `7.12` are complete. Task `14.2`
   awaits Windows runtime evidence.
 - File tree, Git decorations, safe file opening, Monaco editing, dirty state,

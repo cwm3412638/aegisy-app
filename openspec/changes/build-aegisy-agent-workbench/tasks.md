@@ -34,7 +34,8 @@
 - [ ] 3.9 Define stable error classes for protocol, provider, adapter, sandbox, policy, tool, storage, workspace, Git, and budget failures
 - [ ] 3.10 Generate Rust, TypeScript, and C++ protocol types and verify byte-compatible fixture serialization
 - [ ] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
-- [ ] 3.12 Publish an internal AAP protocol guide with valid lifecycle and error/reconnect examples
+- [x] 3.12 Publish an internal AAP protocol guide with valid lifecycle and error/reconnect examples
+  - `docs/AAP-PROTOCOL-GUIDE.md` documents the JSONL handshake, session/turn/item lifecycle, idempotency, cancellation, structured errors, degradation gating, replay/reconnect, and current read-only/security boundaries with copyable redacted examples tied to checked-in fixtures.
 
 ## 4. Runtime Sidecar and Authenticated IPC
 
