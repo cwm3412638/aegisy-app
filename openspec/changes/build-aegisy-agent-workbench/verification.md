@@ -95,6 +95,15 @@ Current editor evidence:
   secret-scrubbed environment builder and exposes its value-free hash; individual
   child-process environment identity remains vendor-unreported, so task 14.5 is not
   complete and no new Agent execution permission is exposed.
+- Task `7.10` has deterministic redacted fixtures for initialization, session/provider
+  lifecycle, partial streaming, usage/plan/diff metadata, approval denial, cancellation,
+  reconnect, compaction degradation, provider failure, unloaded provider state, and
+  failed compensation. Protocol tests parse every JSONL message, reject credential-
+  shaped content, and assert stable error codes and recovery transitions. Real stdio
+  tests cover the corresponding adapter paths. The Qt render fixture injects opaque
+  provider failures for restart, archive, unarchive, and fork, then proves only the
+  operation, stable code, and recovery guidance reach labels/tooltips. This fixture
+  milestone does not expose provider delete/compact or weaken the read-only adapter.
 - Large command-output tests cover a Unicode-safe 64 KiB head/192 KiB tail,
   1 MiB artifact head/tail, exact omission metadata, 100,000 deltas, and
   content-addressed session isolation/eviction. Output is redacted before capture;
@@ -569,8 +578,8 @@ Current editor evidence:
   project-directory removal, case-insensitive credential masking, dangerous loader
   variable rejection, value/count limits, deterministic session identity, explicit
   terminal derivation, and value-free AAP metadata.
-- Two hundred and thirty-one Rust sidecar unit tests, twenty-two AAP protocol tests,
-  three sidecar stdio/Codex contract tests, and sixteen desktop CTest tests pass;
+- Two hundred and forty-six Rust sidecar unit tests, thirty-five AAP protocol tests,
+  eleven sidecar stdio/Codex contract tests, and sixteen desktop CTest tests pass;
   Clippy passes with warnings denied.
 
 Known limitations:

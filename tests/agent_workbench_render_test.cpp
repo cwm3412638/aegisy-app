@@ -469,6 +469,24 @@ int main(int argc, char *argv[])
                 "running Codex health did not clear the recovery action")) {
         return 1;
     }
+    runtimeClient->requestFailed({}, QStringLiteral("runtime/restart"),
+                                 QStringLiteral("Codex App Server restart failed: opaque provider payload"),
+                                 -32110);
+    application.processEvents();
+    bool rawRestartTextVisible = runtimeStatus->toolTip().contains(
+        QStringLiteral("opaque provider payload"));
+    for (QLabel *label : workbench.findChildren<QLabel *>()) {
+        rawRestartTextVisible = rawRestartTextVisible
+            || label->text().contains(QStringLiteral("opaque provider payload"));
+    }
+    if (!expect(runtimeRestart->isEnabled()
+                    && runtimeRestart->text() == QStringLiteral("重试 Codex")
+                    && runtimeStatus->toolTip().contains(QStringLiteral("错误码 -32110"))
+                    && runtimeStatus->toolTip().contains(QStringLiteral("详细信息已隐藏"))
+                    && !rawRestartTextVisible,
+                "Codex reconnect failure leaked raw provider detail or lost recovery state")) {
+        return 1;
+    }
 
     const QJsonObject commandBase{
         {QStringLiteral("id"), QStringLiteral("command-render-fixture")},
@@ -574,6 +592,40 @@ int main(int argc, char *argv[])
     }
     if (!expect(failureNoticeVisible,
                 "runtime-error category and retry state were not projected in Qt")) {
+        return 1;
+    }
+
+    // Provider lifecycle failures must expose only a bounded operation/code state.
+    const QString rawProviderFailure =
+        QStringLiteral("Codex provider request failed: response body contained [REDACTED]");
+    runtimeClient->requestFailed({}, QStringLiteral("session/archive"),
+                                 rawProviderFailure, -32143);
+    runtimeClient->requestFailed({}, QStringLiteral("session/unarchive"),
+                                 QStringLiteral("Codex provider state is not loaded; opaque detail"),
+                                 -32141);
+    runtimeClient->requestFailed({}, QStringLiteral("session/fork"),
+                                 QStringLiteral("Codex provider archive was acknowledged but local persistence failed and compensation also failed"),
+                                 -32145);
+    application.processEvents();
+    bool archiveFailureVisible = false;
+    bool restoreFailureVisible = false;
+    bool forkFailureVisible = false;
+    bool rawProviderTextVisible = false;
+    for (QLabel *label : workbench.findChildren<QLabel *>()) {
+        const QString text = label->text();
+        archiveFailureVisible = archiveFailureVisible
+            || text.contains(QStringLiteral("归档会话失败（错误码 -32143；provider 详细信息已隐藏）"));
+        restoreFailureVisible = restoreFailureVisible
+            || text.contains(QStringLiteral("恢复会话失败（错误码 -32141；provider 详细信息已隐藏）"));
+        forkFailureVisible = forkFailureVisible
+            || text.contains(QStringLiteral("创建会话分支失败（错误码 -32145；provider 详细信息已隐藏）"));
+        rawProviderTextVisible = rawProviderTextVisible
+            || text.contains(QStringLiteral("response body contained"))
+            || text.contains(QStringLiteral("opaque detail"));
+    }
+    if (!expect(archiveFailureVisible && restoreFailureVisible && forkFailureVisible
+                    && !rawProviderTextVisible,
+                "provider lifecycle failures leaked raw detail or lost recovery codes")) {
         return 1;
     }
     const QJsonObject commandDiagnostic{

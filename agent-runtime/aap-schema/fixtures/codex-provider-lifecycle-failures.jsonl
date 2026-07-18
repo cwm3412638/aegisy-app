@@ -1,0 +1,14 @@
+{"jsonrpc":"2.0","id":"health-exited","result":{"schema_version":"runtime-health/0.1","state":"exited","backend":"codex-app-server","restart_required":true}}
+{"jsonrpc":"2.0","id":"archive-request","method":"session/archive","params":{"session_id":"session-fixture"}}
+{"jsonrpc":"2.0","id":"archive-request","error":{"code":-32143,"message":"provider lifecycle operation failed: [REDACTED]"}}
+{"jsonrpc":"2.0","id":"archive-state-request","method":"session/archive","params":{"session_id":"session-unloaded"}}
+{"jsonrpc":"2.0","id":"archive-state-request","error":{"code":-32141,"message":"Codex provider state is not loaded; resume the session before changing its provider lifecycle"}}
+{"jsonrpc":"2.0","id":"archive-compensation-request","method":"session/archive","params":{"session_id":"session-recovery"}}
+{"jsonrpc":"2.0","id":"archive-compensation-request","error":{"code":-32145,"message":"Codex provider archive was acknowledged but local persistence failed and compensation also failed; session recovery is required"}}
+{"jsonrpc":"2.0","id":"compact-degradation","method":"runtime/degradations","params":{}}
+{"jsonrpc":"2.0","id":"compact-degradation","result":{"schema_version":"runtime-degradations/0.1","degradations":[{"feature":"provider-thread-compact","state":"blocked","reason":"requires a durable checkpoint, preservation review, and failure recovery","scope":"provider"}]}}
+{"jsonrpc":"2.0","id":"restart-request","method":"runtime/restart","params":{}}
+{"jsonrpc":"2.0","id":"restart-request","error":{"code":-32110,"message":"Codex App Server restart failed: [REDACTED]"}}
+{"jsonrpc":"2.0","id":"health-unavailable","result":{"schema_version":"runtime-health/0.1","state":"unavailable","backend":"codex-app-server","restart_required":true}}
+{"jsonrpc":"2.0","id":"restart-retry","method":"runtime/restart","params":{}}
+{"jsonrpc":"2.0","id":"restart-retry","result":{"schema_version":"runtime-health/0.1","state":"running","backend":"codex-app-server","restart_required":false}}

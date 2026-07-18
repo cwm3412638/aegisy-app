@@ -134,7 +134,8 @@ QString boundedUtf8Text(const QString &text, int byteLimit, bool *truncated = nu
 
 QString safeProviderLifecycleFailure(const QString &method, const QString &message, int code)
 {
-    const bool providerFailure = message.contains(QStringLiteral("provider"), Qt::CaseInsensitive)
+    const bool providerFailure = code == -32141 || code == -32143 || code == -32145
+        || message.contains(QStringLiteral("provider"), Qt::CaseInsensitive)
         || message.contains(QStringLiteral("codex"), Qt::CaseInsensitive)
         || message.contains(QStringLiteral("model"), Qt::CaseInsensitive);
     if (!providerFailure) return message;
@@ -147,6 +148,12 @@ QString safeProviderLifecycleFailure(const QString &method, const QString &messa
                 : QStringLiteral("恢复会话");
     return QStringLiteral("%1失败（错误码 %2；provider 详细信息已隐藏）")
         .arg(operation).arg(code);
+}
+
+QString safeRuntimeRestartFailure(int code)
+{
+    return QStringLiteral("Codex 重连失败（错误码 %1；运行时详细信息已隐藏，请检查安装与配置后重试）")
+        .arg(code);
 }
 
 QString boundedContextText(const QString &text, bool *truncated = nullptr)
@@ -403,11 +410,11 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::requestFailed,
             this, [this](const QString &, const QString &method,
-                         const QString &message, int) {
+                         const QString &, int code) {
         if (method != QStringLiteral("runtime/restart")) return;
         m_runtimeRestartRequired = true;
         if (m_runtimeRestartButton) m_runtimeRestartButton->setText(QStringLiteral("重试 Codex"));
-        m_runtimeStatus->setToolTip(message);
+        m_runtimeStatus->setToolTip(safeRuntimeRestartFailure(code));
         updateRecoveryUi();
     });
     connect(m_runtime, &AgentRuntimeClient::projectsListed,
@@ -1561,12 +1568,12 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_projectRootsRequestId.clear();
             addNotice(QStringLiteral("读取项目根失败：%1").arg(message), true);
         } else if (method == QStringLiteral("session/resume")
-                   && requestId == m_sessionResumeRequestId) {
+                   && (requestId.isEmpty() || requestId == m_sessionResumeRequestId)) {
             m_sessionResumeRequestId.clear();
             addNotice(QStringLiteral("恢复会话失败：%1")
                           .arg(safeProviderLifecycleFailure(method, message, code)), true);
         } else if (method == QStringLiteral("session/fork")
-                   && requestId == m_sessionForkRequestId) {
+                   && (requestId.isEmpty() || requestId == m_sessionForkRequestId)) {
             m_sessionForkRequestId.clear();
             addNotice(QStringLiteral("创建会话分支失败：%1")
                           .arg(safeProviderLifecycleFailure(method, message, code)), true);
@@ -1582,7 +1589,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         } else if ((method == QStringLiteral("session/title")
                     || method == QStringLiteral("session/archive")
                     || method == QStringLiteral("session/unarchive"))
-                   && requestId == m_sessionMutationRequestId) {
+                   && (requestId.isEmpty() || requestId == m_sessionMutationRequestId)) {
             m_sessionMutationRequestId.clear();
             addNotice(QStringLiteral("会话操作失败：%1")
                           .arg(safeProviderLifecycleFailure(method, message, code)), true);
@@ -1779,7 +1786,16 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 && method != QStringLiteral("workspace/observed-diagnostics")
                 && method != QStringLiteral("workspace/diagnostics/raw")
                 && method != QStringLiteral("workspace/save-user-text")) {
-            addNotice(message, true);
+            const bool providerLifecycleMethod = method == QStringLiteral("session/resume")
+                || method == QStringLiteral("session/fork")
+                || method == QStringLiteral("session/archive")
+                || method == QStringLiteral("session/unarchive");
+            addNotice(method == QStringLiteral("runtime/restart")
+                          ? safeRuntimeRestartFailure(code)
+                          : providerLifecycleMethod
+                              ? safeProviderLifecycleFailure(method, message, code)
+                              : message,
+                      true);
         }
     });
     connect(m_runtime, &AgentRuntimeClient::diagnosticMessage,

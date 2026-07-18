@@ -5,6 +5,10 @@
 {"jsonrpc":"2.0","method":"event","params":{"event":"turn.failed","session_id":"session-fixture","turn_id":"turn-provider-failure","item":{"kind":"error","role":"system","state":"completed","content":"provider request failed: [REDACTED]","data":{"schema_version":"runtime-error/0.1","class":"provider","retryable":false}}}}
 {"jsonrpc":"2.0","id":"health-restarted","result":{"schema_version":"runtime-health/0.1","state":"running","backend":"codex-app-server","restart_required":false}}
 {"jsonrpc":"2.0","id":"provider-read","method":"session/provider-read","params":{"thread_id":"thread-fixture","include_turns":false}}
+{"jsonrpc":"2.0","id":"cancel","method":"turn/cancel","params":{"session_id":"session-fixture","turn_id":"turn-fixture"}}
+{"jsonrpc":"2.0","id":"cancel","result":{"state":"cancellation-requested"}}
+{"jsonrpc":"2.0","method":"event","params":{"event":"turn.cancellation-acknowledged","session_id":"session-fixture","turn_id":"turn-fixture"}}
+{"jsonrpc":"2.0","method":"event","params":{"event":"turn.interrupted","session_id":"session-fixture","turn_id":"turn-fixture"}}
 {"jsonrpc":"2.0","id":"compact","method":"thread/compact/start","params":{"threadId":"thread-fixture"}}
 {"jsonrpc":"2.0","id":99,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-fixture","turnId":"turn-fixture","itemId":"command-fixture","command":"rm -rf project-data","risk":"high"}}
 {"jsonrpc":"2.0","id":99,"result":{"decision":"decline"}}

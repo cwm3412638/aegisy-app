@@ -247,11 +247,16 @@ fn codex_recovery_fixture_covers_partial_transport_failure_and_reconnect() {
     }
     assert!(methods.contains(&"runtime/restart".into()));
     assert!(methods.contains(&"session/provider-read".into()));
+    assert!(methods.contains(&"turn/cancel".into()));
     assert!(methods.contains(&"thread/compact/start".into()));
     assert!(methods.contains(&"item/commandExecution/requestApproval".into()));
     assert!(fixture.contains("\"decision\":\"decline\""));
     assert!(events.iter().any(|event| event == "item.delta"));
     assert!(events.iter().any(|event| event == "turn.failed"));
+    assert!(events
+        .iter()
+        .any(|event| event == "turn.cancellation-acknowledged"));
+    assert!(events.iter().any(|event| event == "turn.interrupted"));
     let failed = fixture
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
@@ -275,6 +280,50 @@ fn codex_recovery_fixture_covers_partial_transport_failure_and_reconnect() {
         provider_failed["params"]["item"]["data"]["retryable"],
         false
     );
+}
+
+#[test]
+fn codex_provider_lifecycle_failure_fixture_is_redacted_and_recoverable() {
+    let path = format!(
+        "{}/../../aap-schema/fixtures/codex-provider-lifecycle-failures.jsonl",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let fixture = fs::read_to_string(path).unwrap();
+    let messages = fixture
+        .lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            assert!(!lower.contains("sk-"));
+            assert!(!lower.contains("ghp_"));
+            assert!(!lower.contains("authorization"));
+            serde_json::from_str::<Value>(line).unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    let error_codes = messages
+        .iter()
+        .filter_map(|message| message["error"]["code"].as_i64())
+        .collect::<Vec<_>>();
+    assert!(error_codes.contains(&-32141));
+    assert!(error_codes.contains(&-32143));
+    assert!(error_codes.contains(&-32145));
+    assert!(error_codes.contains(&-32110));
+
+    let compact = messages
+        .iter()
+        .find(|message| message["result"]["degradations"].is_array())
+        .unwrap();
+    assert_eq!(
+        compact["result"]["degradations"][0]["feature"],
+        "provider-thread-compact"
+    );
+    assert_eq!(compact["result"]["degradations"][0]["state"], "blocked");
+
+    let health_states = messages
+        .iter()
+        .filter_map(|message| message["result"]["state"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(health_states, ["exited", "unavailable", "running"]);
 }
 
 #[test]

@@ -91,10 +91,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 37 of 235 checkbox tasks are complete and 198 remain
+- OpenSpec task baseline: 38 of 235 checkbox tasks are complete and 197 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
-- OpenSpec tasks `5.3` through `5.10`, `6.1`, `6.8`, `13.1` through `14.1`, tasks `14.3`, `14.4`, `14.6`,
+- OpenSpec tasks `5.3` through `5.10`, `6.1`, `6.8`, `7.10`, `13.1` through `14.1`, tasks `14.3`, `14.4`, `14.6`,
   `14.8`, `15.1` through `15.9`, `16.1`, `16.2`, and `7.12` are complete. Task `14.2`
   awaits Windows runtime evidence.
 - File tree, Git decorations, safe file opening, Monaco editing, dirty state,
@@ -144,8 +144,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   transaction. A stdio fixture proves usage/plan/diff Items survive sidecar
   restart and `session/read` replay. Standalone in-memory runtimes keep the same
   cap without durable writes. Qt projects `runtime-error/0.1` class and retryability
-  without raw provider text; final provider lifecycle/error/reconnect projection
-  fixtures remain under `7.4`/`7.10`.
+  without raw provider text. Task `7.10` is complete: deterministic fixtures cover
+  cancellation, reconnect, compact-blocked degradation, provider-state-unavailable,
+  lifecycle failure, and compensation failure, while the Qt render suite proves
+  restart, archive, unarchive, and fork errors retain only operation/code/recovery
+  guidance in labels and tooltips. Provider delete/compact product actions remain
+  gated by `6.10`/`7.3`, and full turn semantics remain under `7.4`.
 - Codex same-turn steering is now reachable through the out-of-band AAP control
   reader as `turn/steer`. It requires an exact active `session_id` and `turn_id`,
   caps each input at 64 KiB and pending requests at eight, and returns only a
@@ -162,8 +166,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   transport failure, health exit, identity-preserving restart, recovered Turn
   completion, provider metadata read, and compaction request shape. Qt now renders
   content-free failure class/retry status for live turns and hides provider/Codex
-  lifecycle error text behind bounded operation/error-code status; final reconnect
-  and provider lifecycle UI projection remain under task `7.10`.
+  lifecycle and restart error text behind bounded operation/error-code/recovery
+  status. Protocol and Qt projection coverage for this boundary is complete under
+  task `7.10`.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
   at most three retries for transient output-channel, transport, write, read, or
   timeout failures. Version mismatch and protocol rejection are not retried; the
@@ -480,7 +485,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 246 Rust sidecar unit tests, 34 Rust
+Current verified baseline: 16 desktop tests, 246 Rust sidecar unit tests, 35 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -1381,10 +1386,9 @@ Implemented visual baseline:
    consumption ledger, typed session events, and reviewed Qt conflict/recovery flow.
    Keep the internal executor unreachable from AAP/Qt until those gates are complete;
    add sandboxed hook output and secure signing as separate reviewed policies.
-8. Finish task `7.10` with provider reconnect/archive/compact failure projection
-   fixtures and explicit lifecycle recovery states, without exposing raw provider
-   payloads or weakening the read-only Agent boundary. Qt request failures now hide
-   provider/Codex/model detail while preserving safe local error text and codes.
+8. Continue task `7.3` only after `6.10` supplies a durable compaction checkpoint
+   and preservation review; provider delete/compact must remain unavailable until
+   their scoped review, compensation, and recovery contracts are complete.
 9. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
    permission policy and the production approval ledger. A trust acknowledgement must
    never become an implicit write, command, Hook, or network grant.
