@@ -141,7 +141,8 @@
 - [ ] 7.10 Record and redact protocol fixtures for happy path, partial stream, approval, denial, cancel, reconnect, compaction, and provider failure
   - Partial fixture coverage: `aap-schema/fixtures/codex-thread-lifecycle.jsonl` records the redacted initialize, health, degradation, provider list/read, session archive/unarchive, and shutdown request sequence; `aap-schema/fixtures/codex-turn-metadata.jsonl` covers schema-aligned token usage, plan, and diff notifications; `aap-schema/fixtures/codex-recovery.jsonl` covers partial output, transport/provider failure, restart health, provider metadata, compaction, and approval-denial request shapes. Real stdio coverage verifies redacted retryable transport failure, identity-preserving reconnect, recovered Turn completion, non-retryable provider failure, and fixed approval denial. Protocol tests reject credential-shaped content. Final Qt projection fixtures remain.
 - [ ] 7.11 Add contract tests against the pinned binary on macOS and Windows
-- [ ] 7.12 Document runtime upgrade procedure, compatibility matrix, emergency pin, and rollback
+- [x] 7.12 Document runtime upgrade procedure, compatibility matrix, emergency pin, and rollback
+  - `docs/CODEX-ADAPTER-UPGRADE.md` defines the pinned 0.144.5 compatibility matrix, candidate schema/fixture review, macOS/Windows contract gates, emergency pin, artifact rollback, provider-binding incompatibility handling, and content-free evidence requirements. The procedure keeps the adapter's exact-version rejection and read-only permission boundary intact.
 
 ## 8. ACP Runtime Adapter
 

@@ -89,11 +89,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 36 of 235 checkbox tasks are complete and 199 remain
+- OpenSpec task baseline: 37 of 235 checkbox tasks are complete and 198 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
 - OpenSpec tasks `5.3` through `5.10`, `6.1`, `6.8`, `13.1` through `14.1`, tasks `14.3`, `14.4`, `14.6`,
-  `14.8`, `15.1` through `15.9`, `16.1`, and `16.2` are complete. Task `14.2`
+  `14.8`, `15.1` through `15.9`, `16.1`, `16.2`, and `7.12` are complete. Task `14.2`
   awaits Windows runtime evidence.
 - File tree, Git decorations, safe file opening, Monaco editing, dirty state,
   conflict rejection, atomic save, recent files, view restoration, and native
@@ -173,6 +173,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   retryable. The control is unavailable during read-only store recovery and never
   changes the Agent read-only permission boundary. Full crash-loop recovery UI
   and cross-platform evidence remain under `7.2`.
+- OpenSpec task `7.12` is complete. The versioned
+  `docs/CODEX-ADAPTER-UPGRADE.md` runbook records the pinned compatibility
+  matrix, candidate schema/fixture review, macOS/Windows contract gates,
+  emergency pin, artifact rollback, incompatible provider-binding behavior, and
+  content-free evidence requirements. It does not weaken exact-version rejection
+  or the read-only permission boundary.
 - Large command output now has bounded head/tail and content-addressed artifact
   retrieval, pre-capture secret redaction, fixed-frame Codex transport, and Qt
   full-output inspection. With durable storage configured, completed command

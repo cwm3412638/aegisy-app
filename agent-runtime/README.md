@@ -10,6 +10,9 @@ protocol schema used by the adapter is checked in at
 `aap-schema/codex-app-server-0.144.5/v2.schemas.json`; a different installed
 version is rejected before the app-server process is launched.
 
+The version compatibility matrix, upgrade gates, emergency pin, and rollback
+procedure are documented in [`docs/CODEX-ADAPTER-UPGRADE.md`](../docs/CODEX-ADAPTER-UPGRADE.md).
+
 ## Run
 
 ```sh
