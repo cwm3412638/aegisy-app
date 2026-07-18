@@ -631,6 +631,51 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    const QList<QPair<QString, QString>> stableErrorClasses = {
+        {QStringLiteral("protocol"), QStringLiteral("协议")},
+        {QStringLiteral("sandbox"), QStringLiteral("沙箱")},
+        {QStringLiteral("policy"), QStringLiteral("策略")},
+        {QStringLiteral("tool"), QStringLiteral("工具")},
+        {QStringLiteral("storage"), QStringLiteral("本地存储")},
+        {QStringLiteral("workspace"), QStringLiteral("工作区")},
+        {QStringLiteral("git"), QStringLiteral("Git")},
+        {QStringLiteral("budget"), QStringLiteral("预算")},
+        {QStringLiteral("adapter"), QStringLiteral("适配器")},
+    };
+    for (int index = 0; index < stableErrorClasses.size(); ++index) {
+        const auto &errorClass = stableErrorClasses.at(index);
+        runtimeClient->timelineEvent(QJsonObject{
+            {QStringLiteral("session_id"), QStringLiteral("session-error-class-fixture")},
+            {QStringLiteral("turn_id"), QStringLiteral("turn-error-class-%1").arg(index)},
+            {QStringLiteral("event"), QStringLiteral("turn.failed")},
+            {QStringLiteral("item"), QJsonObject{
+                {QStringLiteral("id"), QStringLiteral("runtime-error-class-%1").arg(index)},
+                {QStringLiteral("kind"), QStringLiteral("error")},
+                {QStringLiteral("role"), QStringLiteral("system")},
+                {QStringLiteral("state"), QStringLiteral("completed")},
+                {QStringLiteral("content"), QStringLiteral("bounded failure")},
+                {QStringLiteral("data"), QJsonObject{
+                    {QStringLiteral("schema_version"), QStringLiteral("runtime-error/0.1")},
+                    {QStringLiteral("class"), errorClass.first},
+                    {QStringLiteral("retryable"), false},
+                }},
+            }},
+        });
+    }
+    application.processEvents();
+    for (const auto &errorClass : stableErrorClasses) {
+        bool visible = false;
+        const QString expected = QStringLiteral("任务失败 · 类型：%1 · 请检查配置或运行时状态")
+            .arg(errorClass.second);
+        for (QLabel *label : workbench.findChildren<QLabel *>()) {
+            if (label->text().contains(expected)) {
+                visible = true;
+                break;
+            }
+        }
+        if (!expect(visible, "Qt did not map a stable runtime error class")) return 1;
+    }
+
     // Provider lifecycle failures must expose only a bounded operation/code state.
     const QString rawProviderFailure =
         QStringLiteral("Codex provider request failed: response body contained [REDACTED]");

@@ -31,7 +31,8 @@
 - [ ] 3.6 Define idempotency semantics for turns, approvals, file writes, Git mutations, and job submission
 - [ ] 3.7 Define cancellation, steering, structured user input, credential refresh, and extension elicitation methods
 - [ ] 3.8 Define content references, hashes, MIME types, previews, pagination, and negotiated inline-size limits
-- [ ] 3.9 Define stable error classes for protocol, provider, adapter, sandbox, policy, tool, storage, workspace, Git, and budget failures
+- [x] 3.9 Define stable error classes for protocol, provider, adapter, sandbox, policy, tool, storage, workspace, Git, and budget failures
+  - `runtime-error/0.1` now classifies Turn failure items into `protocol`, `provider`, `adapter`, `transport`, `timeout`, `sandbox`, `policy`, `tool`, `storage`, `workspace`, `git`, and `budget`. Classification is content-free and conservative about retryability; Qt maps every class to a bounded local label. `persistence` remains a legacy display alias for `storage`. Ordinary JSON-RPC errors retain their existing numeric code/message contract.
 - [ ] 3.10 Generate Rust, TypeScript, and C++ protocol types and verify byte-compatible fixture serialization
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.

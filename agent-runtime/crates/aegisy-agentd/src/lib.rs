@@ -1320,9 +1320,9 @@ fn runtime_error_content(message: &str) -> String {
     bounded_provider_text(message, 8 * 1024)
 }
 
-fn runtime_error_data(message: &str) -> Value {
+fn runtime_error_classification(message: &str) -> (&'static str, bool) {
     let normalized = message.to_ascii_lowercase();
-    let (class, retryable) = if normalized.contains("timeout") || normalized.contains("timed out") {
+    if normalized.contains("timeout") || normalized.contains("timed out") {
         ("timeout", true)
     } else if normalized.contains("transport")
         || normalized.contains("network")
@@ -1333,6 +1333,52 @@ fn runtime_error_data(message: &str) -> Value {
         || normalized.contains("cannot write to codex app server")
     {
         ("transport", true)
+    } else if normalized.contains("budget")
+        || normalized.contains("context window")
+        || normalized.contains("token limit")
+        || normalized.contains("quota")
+    {
+        ("budget", false)
+    } else if normalized.contains("protocol")
+        || normalized.contains("json-rpc")
+        || normalized.contains("jsonrpc")
+        || normalized.contains("handshake")
+        || normalized.contains("invalid params")
+        || normalized.contains("unsupported aap")
+    {
+        ("protocol", false)
+    } else if normalized.contains("sandbox")
+        || normalized.contains("sandboxed")
+        || normalized.contains("outside sandbox")
+    {
+        ("sandbox", false)
+    } else if normalized.contains("policy")
+        || normalized.contains("not allowed")
+        || normalized.contains("permission denied")
+        || normalized.contains("approval required")
+        || normalized.contains("read-only")
+    {
+        ("policy", false)
+    } else if normalized.contains("git")
+        || normalized.contains("branch")
+        || normalized.contains("merge")
+        || normalized.contains("rebase")
+        || normalized.contains("index.lock")
+    {
+        ("git", false)
+    } else if normalized.contains("workspace")
+        || normalized.contains("file path")
+        || normalized.contains("root is")
+        || normalized.contains("symlink")
+        || normalized.contains("file revision")
+    {
+        ("workspace", false)
+    } else if normalized.contains("tool")
+        || normalized.contains("command execution")
+        || normalized.contains("command failed")
+        || normalized.contains("terminal")
+    {
+        ("tool", false)
     } else if normalized.contains("rate limit")
         || normalized.contains("429")
         || normalized.contains("503")
@@ -1344,11 +1390,17 @@ fn runtime_error_data(message: &str) -> Value {
     } else if normalized.contains("persist")
         || normalized.contains("database")
         || normalized.contains("sqlite")
+        || normalized.contains("storage")
+        || normalized.contains("blob")
     {
-        ("persistence", false)
+        ("storage", false)
     } else {
         ("adapter", false)
-    };
+    }
+}
+
+fn runtime_error_data(message: &str) -> Value {
+    let (class, retryable) = runtime_error_classification(message);
     json!({
         "schema_version": "runtime-error/0.1",
         "class": class,
@@ -6097,13 +6149,15 @@ impl Runtime {
         self.control.finish_turn(&params.session_id);
         if let Some(error) = persistence_error {
             if started {
+                let mut data = runtime_error_data(&error);
+                data["operation"] = Value::String("workbench.persistence".into());
                 let item = TimelineItem {
                     id: self.allocate_id("error"),
                     kind: "error".into(),
                     role: "system".into(),
                     state: "completed".into(),
                     content: error.clone(),
-                    data: Some(json!({ "operation": "workbench.persistence" })),
+                    data: Some(data),
                 };
                 emit(self.event(
                     &params.session_id,
@@ -8866,8 +8920,21 @@ mod turn_cancel_tests {
         );
         assert_eq!(
             runtime_error_data("sqlite persistence failed")["class"],
-            "persistence"
+            "storage"
         );
+        for (message, class) in [
+            ("invalid AAP protocol frame", "protocol"),
+            ("sandbox denied filesystem access", "sandbox"),
+            ("managed policy denied command", "policy"),
+            ("tool command execution failed", "tool"),
+            ("workspace file revision is stale", "workspace"),
+            ("Git branch operation failed", "git"),
+            ("context window token limit exceeded", "budget"),
+            ("adapter state is unavailable", "adapter"),
+        ] {
+            assert_eq!(runtime_error_data(message)["class"], class, "{message}");
+            assert_eq!(runtime_error_data(message)["retryable"], false, "{message}");
+        }
         assert_eq!(
             runtime_error_data("Codex App Server closed its output channel")["class"],
             "transport"

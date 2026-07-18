@@ -99,10 +99,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 40 of 235 checkbox tasks are complete and 195 remain
+- OpenSpec task baseline: 41 of 235 checkbox tasks are complete and 194 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
-- OpenSpec tasks `3.11`, `3.12`, `5.3` through `5.10`, `6.1`, `6.8`, `7.10`, `13.1` through `14.1`, tasks `14.3`, `14.4`, `14.6`,
+- OpenSpec tasks `3.9`, `3.11`, `3.12`, `5.3` through `5.10`, `6.1`, `6.8`, `7.10`, `13.1` through `14.1`, tasks `14.3`, `14.4`, `14.6`,
   `14.8`, `15.1` through `15.9`, `16.1`, `16.2`, and `7.12` are complete. Task `14.2`
   awaits Windows runtime evidence.
 - File tree, Git decorations, safe file opening, Monaco editing, dirty state,
@@ -139,7 +139,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   terminal frontend are verified; Windows ConPTY is implemented but not yet
   runtime-verified. Read-only Codex command events now have a partial structured
   timeline mapping, and turn failure/cancellation Items now use bounded redacted
-  `runtime-error/0.1` class/retryable metadata; schema-driven token usage, plan, and
+  `runtime-error/0.1` class/retryable metadata across protocol/provider/adapter/
+  transport/timeout/sandbox/policy/tool/storage/workspace/Git/budget classes;
+  schema-driven token usage, plan, and
   unified-diff notifications now map to bounded AAP timeline events. Native Agent command actions are not available. Agent
   writes/execution, structured patches,
   approvals, checkpoints, full Git

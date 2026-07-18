@@ -66,6 +66,14 @@ does not claim the turn is already terminal. Completion may win a cancellation
 race. Cancellation is identity-scoped and remains available through the bounded
 out-of-band control path when normal dispatch is saturated.
 
+The stable `runtime-error/0.1` class set is `protocol`, `provider`, `adapter`,
+`transport`, `timeout`, `sandbox`, `policy`, `tool`, `storage`, `workspace`,
+`git`, and `budget`. `retryable` is conservative: transport, timeout, and
+explicitly transient provider failures may be retryable; policy, sandbox,
+workspace, Git, storage, tool, budget, protocol, and adapter failures are not
+automatically retried. `persistence` remains accepted as a legacy display alias
+for `storage` in older clients.
+
 ## Capability Degradation
 
 `runtime/degradations` is a versioned, content-free explanation for features that
