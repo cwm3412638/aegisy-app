@@ -547,6 +547,35 @@ int main(int argc, char *argv[])
                 "interrupted turn did not restore the composer action")) {
         return 1;
     }
+    runtimeClient->timelineEvent(QJsonObject{
+        {QStringLiteral("session_id"), QStringLiteral("session-cancel-fixture")},
+        {QStringLiteral("turn_id"), QStringLiteral("turn-failed-fixture")},
+        {QStringLiteral("event"), QStringLiteral("turn.failed")},
+        {QStringLiteral("item"), QJsonObject{
+            {QStringLiteral("id"), QStringLiteral("runtime-error-fixture")},
+            {QStringLiteral("kind"), QStringLiteral("error")},
+            {QStringLiteral("role"), QStringLiteral("system")},
+            {QStringLiteral("state"), QStringLiteral("completed")},
+            {QStringLiteral("content"), QStringLiteral("运行时错误（详细内容已隐藏）")},
+            {QStringLiteral("data"), QJsonObject{
+                {QStringLiteral("schema_version"), QStringLiteral("runtime-error/0.1")},
+                {QStringLiteral("class"), QStringLiteral("transport")},
+                {QStringLiteral("retryable"), true},
+            }},
+        }},
+    });
+    application.processEvents();
+    bool failureNoticeVisible = false;
+    for (QLabel *label : workbench.findChildren<QLabel *>()) {
+        if (label->text().contains(QStringLiteral("任务失败 · 类型：传输 · 可以重试"))) {
+            failureNoticeVisible = true;
+            break;
+        }
+    }
+    if (!expect(failureNoticeVisible,
+                "runtime-error category and retry state were not projected in Qt")) {
+        return 1;
+    }
     const QJsonObject commandDiagnostic{
         {QStringLiteral("path"), QStringLiteral("src/main.rs")},
         {QStringLiteral("line"), 2},

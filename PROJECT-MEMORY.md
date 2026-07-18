@@ -143,8 +143,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   updates, and the item/event is committed through the existing Store append
   transaction. A stdio fixture proves usage/plan/diff Items survive sidecar
   restart and `session/read` replay. Standalone in-memory runtimes keep the same
-  cap without durable writes. Full provider lifecycle/error/reconnect fixtures
-  and complete Qt projection behavior remain under `7.4`/`7.10`.
+  cap without durable writes. Qt projects `runtime-error/0.1` class and retryability
+  without raw provider text; final provider lifecycle/error/reconnect projection
+  fixtures remain under `7.4`/`7.10`.
 - Codex same-turn steering is now reachable through the out-of-band AAP control
   reader as `turn/steer`. It requires an exact active `session_id` and `turn_id`,
   caps each input at 64 KiB and pending requests at eight, and returns only a
@@ -159,8 +160,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   retryable transport errors in `runtime-error/0.1`. A redacted
   `codex-recovery.jsonl` fixture and real stdio fixture cover partial agent output,
   transport failure, health exit, identity-preserving restart, recovered Turn
-  completion, provider metadata read, and compaction request shape. Final reconnect
-  and provider lifecycle UI projection remain under task `7.10`.
+  completion, provider metadata read, and compaction request shape. Qt now renders
+  content-free failure class/retry status for live turns; final reconnect and
+  provider lifecycle UI projection remain under task `7.10`.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
   at most three retries for transient output-channel, transport, write, read, or
   timeout failures. Version mismatch and protocol rejection are not retried; the
@@ -1378,9 +1380,12 @@ Implemented visual baseline:
    consumption ledger, typed session events, and reviewed Qt conflict/recovery flow.
    Keep the internal executor unreachable from AAP/Qt until those gates are complete;
    add sandboxed hook output and secure signing as separate reviewed policies.
-8. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
+8. Finish task `7.10` with provider reconnect/archive/compact failure projection
+   fixtures and explicit lifecycle recovery states, without exposing raw provider
+   payloads or weakening the read-only Agent boundary.
+9. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
    permission policy and the production approval ledger. A trust acknowledgement must
    never become an implicit write, command, Hook, or network grant.
-9. Continue with the next unchecked database/event, durable project/session, typed
+10. Continue with the next unchecked database/event, durable project/session, typed
    timeline, permission/approval, structured patch/
    checkpoint, terminal, and Git milestones in dependency order.

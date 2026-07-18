@@ -965,6 +965,31 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         const QString turnId = event.value(QStringLiteral("turn_id")).toString();
         const QJsonObject item = event.value(QStringLiteral("item")).toObject();
         if (!item.isEmpty()) addTimelineItem(item);
+        const auto showRuntimeFailure = [this](const QJsonObject &failureItem,
+                                                const QString &operation) {
+            const QJsonObject data = failureItem.value(QStringLiteral("data")).toObject();
+            if (data.value(QStringLiteral("schema_version")).toString()
+                    != QStringLiteral("runtime-error/0.1")) {
+                return;
+            }
+            const QString errorClass = data.value(QStringLiteral("class"))
+                .toString(QStringLiteral("adapter"));
+            const QString classLabel = errorClass == QStringLiteral("transport")
+                ? QStringLiteral("传输")
+                : errorClass == QStringLiteral("timeout")
+                    ? QStringLiteral("超时")
+                    : errorClass == QStringLiteral("provider")
+                        ? QStringLiteral("模型服务")
+                        : errorClass == QStringLiteral("persistence")
+                            ? QStringLiteral("本地存储")
+                            : QStringLiteral("适配器");
+            const bool retryable = data.value(QStringLiteral("retryable")).toBool();
+            addNotice(QStringLiteral("%1失败 · 类型：%2 · %3")
+                          .arg(operation, classLabel,
+                               retryable ? QStringLiteral("可以重试")
+                                         : QStringLiteral("请检查配置或运行时状态")),
+                      true);
+        };
         if (eventName == QStringLiteral("diagnostics.observed")) {
             const QJsonObject data = item.value(QStringLiteral("data")).toObject();
             const QString projectId = data.value(QStringLiteral("project_id")).toString();
@@ -985,6 +1010,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 updateTurnAction();
             }
         } else if (eventName == QStringLiteral("turn.cancellation-failed")) {
+            showRuntimeFailure(item, QStringLiteral("停止请求"));
             if (turnId == m_activeTurnId) {
                 m_turnCancelling = false;
                 m_turnCancelRequestId.clear();
@@ -995,6 +1021,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                     || eventName == QStringLiteral("turn.interrupted"))
                    && (m_activeTurnId.isEmpty() || turnId.isEmpty()
                        || turnId == m_activeTurnId)) {
+            if (eventName == QStringLiteral("turn.failed")) {
+                showRuntimeFailure(item, QStringLiteral("任务"));
+            }
             if (eventName == QStringLiteral("turn.interrupted")) {
                 addNotice(QStringLiteral("任务已停止。"));
             } else if (m_turnCancelling) {
@@ -1006,6 +1035,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_activeTurnId.clear();
             m_turnCancelRequestId.clear();
             updateTurnAction();
+        } else if (eventName == QStringLiteral("turn.steering-failed")) {
+            showRuntimeFailure(item, QStringLiteral("引导"));
         }
     });
     connect(m_runtime, &AgentRuntimeClient::turnCancellationRequested,
