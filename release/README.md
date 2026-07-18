@@ -45,13 +45,21 @@ export AEGISY_NOTARY_PROFILE="aegisy-notary"
 
 ```bat
 set OPENSSL_DIR=C:\path\to\openssl\bin
+set OPENSSL_ROOT_DIR=C:\path\to\openssl
 set AEGISY_SPARKLE_PRIVATE_KEY_FILE=%USERPROFILE%\.aegisy\sparkle-private-key
 package-windows.bat
 ```
 
-`OPENSSL_DIR` 必须指向 OpenSSL 的运行库目录，并包含同一发行版附带的依赖 DLL（例如 `zlib1_.dll`）。脚本会复制该目录中的全部 DLL，并在调用 Inno Setup 前实际启动一次分发目录中的程序；运行时依赖不完整时打包会失败。
+需要可用的 Rust stable 工具链。打包前应在 Windows 上执行
+`cargo test --workspace --manifest-path agent-runtime\Cargo.toml` 和严格 Clippy；
+GitHub `windows-package` 工作流已将其作为安装包生成前的硬门禁。
 
-脚本会构建 x64 Release、收集 Qt/WinSparkle/OpenSSL、调用 Inno Setup，并生成：
+`OPENSSL_ROOT_DIR` 是 CMake 链接和运行时 DLL 收集的唯一 OpenSSL 根目录。
+`OPENSSL_DIR` 默认使用 `%OPENSSL_ROOT_DIR%\bin`，只能指向该根目录内部，不能混用另一套 OpenSSL。
+脚本会拒绝重复或版本不一致的 SSL/Crypto DLL、非 x64 DLL 和 EXE 导入不匹配，随后在分发目录中对 `https://www.aegisy.cc/` 执行真实 Qt TLS 握手。可通过 `AEGISY_WINDOWS_TLS_PROBE_URL` 覆盖探针地址。只有 TLS 探针和 GUI 启动冒烟都成功，才会生成 Inno Setup 安装包。
+
+脚本会构建 x64 Release、将 `aegisy-agentd.exe` 连同 Qt/WinSparkle/OpenSSL
+一起收集、调用 Inno Setup，并生成：
 
 - `dist/AegisyClientSetup-<version>.exe`
 - `dist/updates/windows/AegisyClientSetup-<version>.exe`

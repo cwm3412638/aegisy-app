@@ -24,6 +24,8 @@ static const QString kBaseUrl = "https://aegisy.cc";
 constexpr int kMaxBackupsPerTool = 10;
 static const QString kCodexCapabilityHeader = QStringLiteral("x-openai-actor-authorization");
 static const QString kCodexCapabilityHeaderValue = QStringLiteral("aegisy");
+static const QString kCodexEncodingHeader = QStringLiteral("accept-encoding");
+static const QString kCodexEncodingHeaderValue = QStringLiteral("identity");
 
 static bool usesGpt56CompatibilityProfile(const QString &model)
 {
@@ -48,6 +50,14 @@ static bool hasCodexCapabilityHeader(const QString &inlineTable)
 {
     static const QRegularExpression headerPattern(QStringLiteral(
         R"((?:^|[,{])\s*["']?x-openai-actor-authorization["']?\s*=\s*["']aegisy["'])"),
+        QRegularExpression::CaseInsensitiveOption);
+    return headerPattern.match(inlineTable).hasMatch();
+}
+
+static bool hasCodexIdentityEncodingHeader(const QString &inlineTable)
+{
+    static const QRegularExpression headerPattern(QStringLiteral(
+        R"((?:^|[,{])\s*["']?accept-encoding["']?\s*=\s*["']identity["'])"),
         QRegularExpression::CaseInsensitiveOption);
     return headerPattern.match(inlineTable).hasMatch();
 }
@@ -1333,7 +1343,11 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
                        || name == QStringLiteral("wire_api")
                        || name == QStringLiteral("requires_openai_auth")
                        || name == QStringLiteral("experimental_bearer_token")
-                       || name == QStringLiteral("http_headers")) {
+                       || name == QStringLiteral("http_headers")
+                       || name == QStringLiteral("request_max_retries")
+                       || name == QStringLiteral("stream_max_retries")
+                       || name == QStringLiteral("stream_idle_timeout_ms")
+                       || name == QStringLiteral("supports_websockets")) {
                 tableValues[currentTable].insert(name, value);
                 if ((name == QStringLiteral("base_url")
                      || name == QStringLiteral("wire_api")
@@ -1343,9 +1357,21 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
                     scalarOk = false;
                 }
                 if (name == QStringLiteral("requires_openai_auth")
-                        && value != QStringLiteral("true")
-                        && value != QStringLiteral("false")) {
-                    scalarOk = false;
+                        || name == QStringLiteral("supports_websockets")) {
+                    if (value != QStringLiteral("true")
+                            && value != QStringLiteral("false")) {
+                        scalarOk = false;
+                    }
+                }
+                if (name == QStringLiteral("request_max_retries")
+                        || name == QStringLiteral("stream_max_retries")
+                        || name == QStringLiteral("stream_idle_timeout_ms")) {
+                    bool integerOk = false;
+                    value.toLongLong(&integerOk);
+                    if (!integerOk || rawValue.startsWith(QLatin1Char('"'))
+                            || rawValue.startsWith(QLatin1Char('\''))) {
+                        scalarOk = false;
+                    }
                 }
                 if (name == QStringLiteral("http_headers")
                         && (!rawValue.startsWith(QLatin1Char('{'))
@@ -1400,7 +1426,17 @@ LocalConfigurationStatus ToolManager::inspectConfiguration(AiTool tool) const
                     != QStringLiteral("false")
                 || providerValues.value(QStringLiteral("experimental_bearer_token")) != key
                 || !hasCodexCapabilityHeader(
-                    providerValues.value(QStringLiteral("http_headers")))) {
+                    providerValues.value(QStringLiteral("http_headers")))
+                || !hasCodexIdentityEncodingHeader(
+                    providerValues.value(QStringLiteral("http_headers")))
+                || providerValues.value(QStringLiteral("request_max_retries"))
+                    != QStringLiteral("4")
+                || providerValues.value(QStringLiteral("stream_max_retries"))
+                    != QStringLiteral("5")
+                || providerValues.value(QStringLiteral("stream_idle_timeout_ms"))
+                    != QStringLiteral("600000")
+                || providerValues.value(QStringLiteral("supports_websockets"))
+                    != QStringLiteral("false")) {
             return failure(LocalConfigurationState::Invalid,
                            QStringLiteral("config.toml 的第三方 Provider 兼容配置无效"));
         }
@@ -2372,8 +2408,12 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
         "base_url = %3\n"
         "wire_api = \"responses\"\n"
         "requires_openai_auth = false\n"
+        "request_max_retries = 4\n"
+        "stream_max_retries = 5\n"
+        "stream_idle_timeout_ms = 600000\n"
+        "supports_websockets = false\n"
         "experimental_bearer_token = %4\n"
-        "http_headers = { %5 = %6 }\n"
+        "http_headers = { %5 = %6, %7 = %8 }\n"
         "\n"
         "[features]\n")
         .arg(providerId,
@@ -2381,7 +2421,9 @@ bool ToolManager::configureCodexCliEndpoint(const QString &apiKey,
              tomlBasicString(baseUrl),
              tomlBasicString(apiKey),
              tomlBasicString(kCodexCapabilityHeader),
-             tomlBasicString(kCodexCapabilityHeaderValue));
+             tomlBasicString(kCodexCapabilityHeaderValue),
+             tomlBasicString(kCodexEncodingHeader),
+             tomlBasicString(kCodexEncodingHeaderValue));
     if (!featureLines.isEmpty()) {
         result += featureLines.join(QLatin1Char('\n')) + QLatin1Char('\n');
     }

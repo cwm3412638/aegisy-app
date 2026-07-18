@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' qrc:; script-src 'self' qrc:; style-src 'self' 'unsafe-inline'; font-src 'self'; worker-src 'self' blob:; connect-src 'none'; img-src 'self' data:">
+  <title>Aegisy Editor</title>
+  <link rel="stylesheet" href="./editor.css">
+</head>
+<body>
+  <main id="editor-workspace" aria-label="代码编辑器分栏">
+    <section class="editor-group is-active" id="editor-group-0" aria-label="主编辑器分栏">
+      <div class="editor-host" id="editor-0"></div>
+    </section>
+    <section class="editor-group" id="editor-group-1" aria-label="第二编辑器分栏" hidden>
+      <div class="editor-host" id="editor-1"></div>
+    </section>
+  </main>
+  <section id="loading" role="status">正在准备编辑器...</section>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script src="./editor.js"></script>
+</body>
+</html>

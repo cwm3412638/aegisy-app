@@ -1,0 +1,39 @@
+[package]
+name = "aegisy-agentd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aegisy-aap = { path = "../aegisy-aap" }
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+lsp-types.workspace = true
+sha2.workspace = true
+similar.workspace = true
+tree-sitter.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-typescript.workspace = true
+rusqlite.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+portable-pty.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+serde_json.workspace = true

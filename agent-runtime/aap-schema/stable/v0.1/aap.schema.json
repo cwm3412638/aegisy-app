@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aegisy.cc/schemas/aap/stable/v0.1/aap.schema.json",
+  "title": "Aegisy Agent Protocol 0.1",
+  "type": "object",
+  "required": ["jsonrpc"],
+  "properties": {
+    "jsonrpc": { "const": "2.0" },
+    "id": { "type": ["string", "integer", "null"] },
+    "method": { "type": "string" },
+    "params": { "type": "object" },
+    "result": {},
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "integer" },
+        "message": { "type": "string" },
+        "data": {}
+      }
+    }
+  },
+  "oneOf": [
+    { "required": ["id", "method"] },
+    { "required": ["method"], "not": { "required": ["id"] } },
+    { "required": ["id", "result"] },
+    { "required": ["id", "error"] }
+  ]
+}

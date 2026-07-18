@@ -4,6 +4,21 @@
     </qresource>
     <qresource prefix="/icons">
         <file alias="aegisy-icon.png">assets/aegisy-icon.png</file>
+        <file alias="lucide/check.svg">assets/icons/lucide/check.svg</file>
+        <file alias="lucide/chevron-down.svg">assets/icons/lucide/chevron-down.svg</file>
+        <file alias="lucide/columns-2.svg">assets/icons/lucide/columns-2.svg</file>
+        <file alias="lucide/folder-open.svg">assets/icons/lucide/folder-open.svg</file>
+        <file alias="lucide/paperclip.svg">assets/icons/lucide/paperclip.svg</file>
+        <file alias="lucide/plus.svg">assets/icons/lucide/plus.svg</file>
+        <file alias="lucide/rotate-ccw.svg">assets/icons/lucide/rotate-ccw.svg</file>
+        <file alias="lucide/save.svg">assets/icons/lucide/save.svg</file>
+        <file alias="lucide/search.svg">assets/icons/lucide/search.svg</file>
+        <file alias="lucide/send.svg">assets/icons/lucide/send.svg</file>
+        <file alias="lucide/settings.svg">assets/icons/lucide/settings.svg</file>
+        <file alias="lucide/x.svg">assets/icons/lucide/x.svg</file>
+    </qresource>
+    <qresource prefix="/licenses">
+        <file alias="lucide.txt">assets/icons/lucide/LICENSE</file>
     </qresource>
     <qresource prefix="/docs">
         <file alias="user-guide.md">USER-GUIDE.md</file>

@@ -16,6 +16,8 @@ set "WINDOWS_ARCH=x64"
 set "UPDATE_OS=windows-x64"
 set "UPDATE_BASE_URL=https://aegisy.cc/desktop/windows"
 if not "%AEGISY_WINDOWS_UPDATE_BASE_URL%"=="" set "UPDATE_BASE_URL=%AEGISY_WINDOWS_UPDATE_BASE_URL%"
+set "TLS_PROBE_URL=https://www.aegisy.cc/"
+if not "%AEGISY_WINDOWS_TLS_PROBE_URL%"=="" set "TLS_PROBE_URL=%AEGISY_WINDOWS_TLS_PROBE_URL%"
 
 echo.
 echo [1/6] 编译 Release (%WINDOWS_ARCH%)...
@@ -26,21 +28,28 @@ set "QT_ARG="
 if not "%QT_CMAKE_DIR%"=="" set "QT_ARG=-DQt6_DIR=%QT_CMAKE_DIR%"
 
 set "OPENSSL_ARG="
-if not "%OPENSSL_ROOT_DIR%"=="" set "OPENSSL_ARG=-DOPENSSL_ROOT_DIR=%OPENSSL_ROOT_DIR%"
+if "%OPENSSL_ROOT_DIR%"=="" (
+    echo [错误] OPENSSL_ROOT_DIR 未设置，无法保证链接库与运行库来自同一 OpenSSL 安装
+    exit /b 1
+)
+if "%OPENSSL_DIR%"=="" set "OPENSSL_DIR=%OPENSSL_ROOT_DIR%\bin"
 
 echo Qt6_DIR  = %QT_CMAKE_DIR%
 echo OPENSSL  = %OPENSSL_ROOT_DIR%
 
 cmake -S . -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A %WINDOWS_ARCH% ^
     -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON ^
-    %QT_ARG% %OPENSSL_ARG% || exit /b 1
+    %QT_ARG% "-DOPENSSL_ROOT_DIR=%OPENSSL_ROOT_DIR%" || exit /b 1
 cmake --build "%BUILD_DIR%" --config Release --target AegisyClient || exit /b 1
+cmake --build "%BUILD_DIR%" --config Release --target AegisyTlsProbe || exit /b 1
 cmake --build "%BUILD_DIR%" --config Release --target AegisyToolManagerRuntimeTest || exit /b 1
 ctest --test-dir "%BUILD_DIR%" -C Release -R tool_manager_runtime_registry ^
     --output-on-failure || exit /b 1
 
 set "EXE=%BUILD_DIR%\Release\AegisyClient.exe"
 if not exist "%EXE%" (echo [错误] 未找到 %EXE% & exit /b 1)
+set "AGENTD=%BUILD_DIR%\Release\aegisy-agentd.exe"
+if not exist "%AGENTD%" (echo [错误] 未找到 Agent Runtime：%AGENTD% & exit /b 1)
 if not exist "%BUILD_DIR%\aegisy-version.txt" (echo [错误] 缺少版本文件 & exit /b 1)
 set /p VERSION=<"%BUILD_DIR%\aegisy-version.txt"
 
@@ -49,7 +58,14 @@ echo [2/6] 组装分发目录...
 if exist "%DIST_DIR%" rmdir /s /q "%DIST_DIR%"
 mkdir "%DIST_DIR%"
 copy /y "%EXE%" "%DIST_DIR%\AegisyClient.exe" >nul || exit /b 1
+copy /y "%AGENTD%" "%DIST_DIR%\aegisy-agentd.exe" >nul || exit /b 1
+copy /y "%BUILD_DIR%\Release\AegisyTlsProbe.exe" "%DIST_DIR%\AegisyTlsProbe.exe" >nul || exit /b 1
 copy /y "%BUILD_DIR%\Release\WinSparkle.dll" "%DIST_DIR%\WinSparkle.dll" >nul || exit /b 1
+if not exist "%BUILD_DIR%\Release\workbench\index.html" (
+    echo [错误] 缺少 Monaco 本地 bundle：%BUILD_DIR%\Release\workbench
+    exit /b 1
+)
+xcopy /e /i /y "%BUILD_DIR%\Release\workbench" "%DIST_DIR%\workbench" >nul || exit /b 1
 windeployqt --release --no-translations --dir "%DIST_DIR%" "%DIST_DIR%\AegisyClient.exe" || exit /b 1
 if not exist "%DIST_DIR%\Qt6WebSockets.dll" if not exist "%DIST_DIR%\Qt5WebSockets.dll" (
     echo [错误] windeployqt 未收集 Qt WebSockets 运行库
@@ -57,6 +73,18 @@ if not exist "%DIST_DIR%\Qt6WebSockets.dll" if not exist "%DIST_DIR%\Qt5WebSocke
 )
 if not exist "%DIST_DIR%\sqldrivers\qsqlite.dll" (
     echo [错误] windeployqt 未收集 SQLite 驱动 sqldrivers\qsqlite.dll
+    exit /b 1
+)
+if not exist "%DIST_DIR%\Qt6WebEngineCore.dll" (
+    echo [错误] windeployqt 未收集 Qt WebEngine Core
+    exit /b 1
+)
+if not exist "%DIST_DIR%\QtWebEngineProcess.exe" (
+    echo [错误] windeployqt 未收集 QtWebEngineProcess.exe
+    exit /b 1
+)
+if not exist "%DIST_DIR%\resources\qtwebengine_resources.pak" (
+    echo [错误] windeployqt 未收集 WebEngine resources
     exit /b 1
 )
 
@@ -71,6 +99,17 @@ if not exist "%OPENSSL_DIR%\*.dll" (
     exit /b 1
 )
 copy /y "%OPENSSL_DIR%\*.dll" "%DIST_DIR%\" >nul || exit /b 1
+
+echo 正在验证 OpenSSL 版本、架构和导入表...
+powershell -NoProfile -ExecutionPolicy Bypass -File release\verify-windows-tls-runtime.ps1 ^
+    -Executable "%CD%\%DIST_DIR%\AegisyClient.exe" ^
+    -OpenSslRoot "%OPENSSL_ROOT_DIR%" ^
+    -OpenSslDllDir "%OPENSSL_DIR%" ^
+    -DistributionDir "%CD%\%DIST_DIR%" || exit /b 1
+
+echo 正在执行真实 HTTPS/TLS 握手探针：%TLS_PROBE_URL%
+"%CD%\%DIST_DIR%\AegisyTlsProbe.exe" "%TLS_PROBE_URL%" || exit /b 1
+del /q "%DIST_DIR%\AegisyTlsProbe.exe" >nul 2>nul
 
 echo 正在验证分发目录可启动...
 powershell -NoProfile -ExecutionPolicy Bypass -File release\smoke-test-windows-runtime.ps1 ^

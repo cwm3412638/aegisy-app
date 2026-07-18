@@ -32,6 +32,8 @@ class QEvent;
 class QShowEvent;
 class QFileSystemWatcher;
 class StatusBadge;
+class QStackedWidget;
+class QTableWidget;
 
 class MainWindow : public QMainWindow
 {
@@ -98,6 +100,10 @@ private:
     void updateRuntimeProfileStatus();
     void showRuntimeStatusBar();
     void hideRuntimeStatusBar();
+    void switchWorkspacePage(int pageIndex);
+    void refreshDesktopPage();
+    void refreshGatewayPage();
+    void refreshGatewayLogs();
 
     // 档案卡片
     void rebuildCards();
@@ -136,6 +142,8 @@ private:
     QPushButton *m_userLabel;
     QPushButton *m_balanceButton;
     QPushButton *m_logoutButton;
+    QStackedWidget *m_workspaceStack = nullptr;
+    QButtonGroup *m_navGroup = nullptr;
 
     // UI — 档案列表区
     QPushButton  *m_bulkSwitchButton = nullptr;
@@ -178,6 +186,19 @@ private:
     bool       m_balanceKnown = false;
     QHash<int, QLabel *> m_toolVersionLabels;
     QHash<int, QPushButton *> m_toolInstallButtons;
+    QHash<int, QPushButton *> m_toolLaunchButtons;
+    QLabel *m_chatGptDesktopStatus = nullptr;
+    QLabel *m_claudeDesktopStatus = nullptr;
+    QPushButton *m_chatGptDesktopAction = nullptr;
+    QPushButton *m_claudeDesktopAction = nullptr;
+    QLabel *m_gatewayStateLabel = nullptr;
+    QLabel *m_gatewayEndpointLabel = nullptr;
+    QLabel *m_gatewayModeLabel = nullptr;
+    QLabel *m_gatewayMessageLabel = nullptr;
+    QPushButton *m_gatewayStartButton = nullptr;
+    QPushButton *m_gatewayRestartButton = nullptr;
+    QPushButton *m_gatewayStopButton = nullptr;
+    QTableWidget *m_gatewayLogTable = nullptr;
     QHash<int, QString> m_toolVersionTexts;
     QHash<int, QString> m_toolLocalVersions;
     QHash<int, QString> m_toolLatestVersions;

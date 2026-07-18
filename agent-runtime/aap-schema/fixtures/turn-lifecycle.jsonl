@@ -1,0 +1,4 @@
+{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocol_version":"0.1","client":{"name":"aegisy-client","version":"2.5.2"}}}
+{"jsonrpc":"2.0","method":"initialized"}
+{"jsonrpc":"2.0","id":"2","method":"session/start","params":{"mode":"chat","title":"AAP fixture"}}
+{"jsonrpc":"2.0","id":"3","method":"turn/start","params":{"session_id":"session-1","input":"hello","idempotency_key":"fixture-turn-1"}}

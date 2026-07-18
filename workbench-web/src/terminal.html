@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' qrc:; script-src 'self' qrc:; style-src 'self' 'unsafe-inline'; font-src 'self'; worker-src 'none'; connect-src 'none'; img-src 'self' data:">
+  <title>Aegisy Terminal</title>
+  <link rel="stylesheet" href="./terminal.css">
+</head>
+<body>
+  <main id="terminal" aria-label="项目终端"></main>
+  <section id="loading" role="status">正在准备终端...</section>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script src="./terminal.js"></script>
+</body>
+</html>

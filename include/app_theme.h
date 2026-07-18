@@ -7,15 +7,16 @@
 namespace AppTheme {
 
 namespace Tokens {
-inline constexpr char Accent[] = "#14b8a6";
-inline constexpr char AccentStrong[] = "#0f766e";
-inline constexpr char Canvas[] = "#f4f7f9";
+inline constexpr char Accent[] = "#165DFF";
+inline constexpr char AccentStrong[] = "#0F46C6";
+inline constexpr char Canvas[] = "#F5F7FB";
 inline constexpr char Surface[] = "#ffffff";
-inline constexpr char Shell[] = "#111820";
-inline constexpr char ShellRaised[] = "#18212b";
-inline constexpr char Border[] = "#dce3e8";
-inline constexpr char Text[] = "#17212b";
-inline constexpr char TextMuted[] = "#667585";
+inline constexpr char Shell[] = "#101828";
+inline constexpr char ShellRaised[] = "#1D2939";
+inline constexpr char Border[] = "#E2E8F0";
+inline constexpr char Text[] = "#182230";
+inline constexpr char TextMuted[] = "#667085";
+inline constexpr char Focus[] = "#84A8FF";
 inline constexpr char Warning[] = "#f59e0b";
 inline constexpr char Critical[] = "#ef4444";
 }

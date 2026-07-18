@@ -28,6 +28,7 @@ if(NOT Qt6_FOUND)
     set(QT_VERSION_MAJOR 5)
 else()
     set(QT_VERSION_MAJOR 6)
+    find_package(Qt6 QUIET COMPONENTS WebChannel WebEngineWidgets)
 endif()
 
 # 查找 OpenSSL
@@ -65,6 +66,8 @@ set(SOURCES
     src/desktop_downloader.cpp
     src/mcp_config_dialog.cpp
     src/help_dialog.cpp
+    src/agent_runtime_client.cpp
+    src/agent_workbench_widget.cpp
     resources.qrc
 )
 
@@ -107,6 +110,8 @@ set(HEADERS
     include/desktop_downloader.h
     include/mcp_config_dialog.h
     include/help_dialog.h
+    include/agent_runtime_client.h
+    include/agent_workbench_widget.h
 )
 
 # 可执行文件
@@ -116,6 +121,123 @@ file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/aegisy-version.txt"
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     AEGISY_APP_VERSION="${PROJECT_VERSION}"
 )
+
+# Build the trusted local Monaco bundle only when the complete host toolchain is
+# available. Other developer and target environments keep the Qt editor fallback.
+find_program(NPM_EXECUTABLE npm)
+find_program(NODE_EXECUTABLE node)
+set(AEGISY_MONACO_ENABLED FALSE)
+if(QT_VERSION_MAJOR EQUAL 6
+        AND TARGET Qt6::WebChannel
+        AND TARGET Qt6::WebEngineWidgets
+        AND NPM_EXECUTABLE)
+    set(AEGISY_MONACO_ENABLED TRUE)
+    set(AEGISY_WORKBENCH_WEB_SOURCE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/workbench-web")
+    set(AEGISY_WORKBENCH_WEB_BUILD_DIR
+        "${CMAKE_CURRENT_BINARY_DIR}/workbench-web")
+    set(AEGISY_WORKBENCH_WEB_STAMP
+        "${CMAKE_CURRENT_BINARY_DIR}/workbench-web-built.stamp")
+    add_custom_command(
+        OUTPUT "${AEGISY_WORKBENCH_WEB_STAMP}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${AEGISY_WORKBENCH_WEB_BUILD_DIR}"
+        COMMAND "${NPM_EXECUTABLE}" ci --no-audit --no-fund
+        COMMAND ${CMAKE_COMMAND} -E env
+            "AEGISY_WEB_OUT_DIR=${AEGISY_WORKBENCH_WEB_BUILD_DIR}"
+            "${NPM_EXECUTABLE}" run build
+        COMMAND ${CMAKE_COMMAND} -E touch "${AEGISY_WORKBENCH_WEB_STAMP}"
+        DEPENDS
+            "${AEGISY_WORKBENCH_WEB_SOURCE_DIR}/package.json"
+            "${AEGISY_WORKBENCH_WEB_SOURCE_DIR}/package-lock.json"
+            "${AEGISY_WORKBENCH_WEB_SOURCE_DIR}/build.mjs"
+            "${AEGISY_WORKBENCH_WEB_SOURCE_DIR}/src/index.html"
+            "${AEGISY_WORKBENCH_WEB_SOURCE_DIR}/src/editor.js"
+            "${AEGISY_WORKBENCH_WEB_SOURCE_DIR}/src/style.css"
+            "${AEGISY_WORKBENCH_WEB_SOURCE_DIR}/src/terminal.html"
+            "${AEGISY_WORKBENCH_WEB_SOURCE_DIR}/src/terminal.js"
+            "${AEGISY_WORKBENCH_WEB_SOURCE_DIR}/src/terminal.css"
+        WORKING_DIRECTORY "${AEGISY_WORKBENCH_WEB_SOURCE_DIR}"
+        COMMENT "Building trusted local Monaco workbench bundle"
+        VERBATIM
+    )
+    if(APPLE)
+        set(AEGISY_WORKBENCH_WEB_BUNDLE_DIR
+            "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.app/Contents/Resources/workbench")
+    elseif(CMAKE_CONFIGURATION_TYPES)
+        set(AEGISY_WORKBENCH_WEB_BUNDLE_DIR
+            "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/workbench")
+    else()
+        set(AEGISY_WORKBENCH_WEB_BUNDLE_DIR
+            "${CMAKE_CURRENT_BINARY_DIR}/workbench")
+    endif()
+    add_custom_target(aegisy_workbench_web ALL
+        COMMAND ${CMAKE_COMMAND} -E remove_directory
+            "${AEGISY_WORKBENCH_WEB_BUNDLE_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${AEGISY_WORKBENCH_WEB_BUNDLE_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${AEGISY_WORKBENCH_WEB_BUILD_DIR}"
+            "${AEGISY_WORKBENCH_WEB_BUNDLE_DIR}"
+        DEPENDS "${AEGISY_WORKBENCH_WEB_STAMP}"
+        COMMENT "Bundling trusted local Monaco workbench"
+        VERBATIM
+    )
+    add_dependencies(${PROJECT_NAME} aegisy_workbench_web)
+    target_sources(${PROJECT_NAME} PRIVATE
+        src/monaco_editor_bridge.cpp
+        include/monaco_editor_bridge.h
+        src/terminal_web_bridge.cpp
+        include/terminal_web_bridge.h
+    )
+    target_compile_definitions(${PROJECT_NAME} PRIVATE AEGISY_HAS_MONACO=1)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        Qt6::WebChannel
+        Qt6::WebEngineWidgets
+    )
+else()
+    message(STATUS "Monaco workbench disabled: Qt WebEngine/WebChannel or npm unavailable")
+endif()
+
+# The Agent Workbench remains usable when Rust is unavailable, but a complete
+# developer build also compiles and places the local AAP runtime beside the app.
+find_program(CARGO_EXECUTABLE cargo HINTS "$ENV{HOME}/.cargo/bin")
+set(AEGISY_AGENT_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime")
+set(AEGISY_AGENTD_BINARY
+    "${AEGISY_AGENT_RUNTIME_DIR}/target/debug/aegisy-agentd${CMAKE_EXECUTABLE_SUFFIX}")
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    AEGISY_AGENTD_DEV_PATH="${AEGISY_AGENTD_BINARY}"
+)
+if(CARGO_EXECUTABLE)
+    if(APPLE)
+        set(AEGISY_AGENTD_BUNDLE_DIR
+            "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.app/Contents/MacOS")
+    elseif(CMAKE_CONFIGURATION_TYPES)
+        set(AEGISY_AGENTD_BUNDLE_DIR "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>")
+    else()
+        set(AEGISY_AGENTD_BUNDLE_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
+    add_custom_target(aegisy_agentd ALL
+        COMMAND "${CARGO_EXECUTABLE}" build -p aegisy-agentd
+        WORKING_DIRECTORY "${AEGISY_AGENT_RUNTIME_DIR}"
+        BYPRODUCTS "${AEGISY_AGENTD_BINARY}"
+        COMMENT "Building aegisy-agentd"
+        VERBATIM
+    )
+    add_custom_target(aegisy_agentd_bundle ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${AEGISY_AGENTD_BUNDLE_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${AEGISY_AGENTD_BINARY}"
+            "${AEGISY_AGENTD_BUNDLE_DIR}"
+        COMMENT "Bundling aegisy-agentd"
+        VERBATIM
+    )
+    add_dependencies(aegisy_agentd_bundle aegisy_agentd)
+    add_dependencies(${PROJECT_NAME} aegisy_agentd_bundle)
+else()
+    message(WARNING "cargo not found: Agent Workbench runtime will be unavailable")
+endif()
 
 # 包含目录
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -149,6 +271,12 @@ endif()
 # Windows 特定
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE crypt32)
+    add_executable(AegisyTlsProbe tests/windows_tls_probe.cpp)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyTlsProbe PRIVATE Qt6::Core Qt6::Network)
+    else()
+        target_link_libraries(AegisyTlsProbe PRIVATE Qt5::Core Qt5::Network)
+    endif()
     set(AEGISY_WINDOWS_UPDATE_FEED_URL
         "https://aegisy.cc/desktop/windows/appcast.xml"
         CACHE STRING "WinSparkle appcast URL")
@@ -220,6 +348,16 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    if(NODE_EXECUTABLE)
+        add_test(NAME local_gateway_stream
+            COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/local_gateway_stream_test.js")
+    endif()
+    if(CARGO_EXECUTABLE)
+        add_test(NAME agent_runtime_protocol
+            COMMAND "${CARGO_EXECUTABLE}" test --workspace)
+        set_tests_properties(agent_runtime_protocol PROPERTIES
+            WORKING_DIRECTORY "${AEGISY_AGENT_RUNTIME_DIR}")
+    endif()
     add_executable(AegisyProfileArchiveTest
         tests/profile_archive_test.cpp
         src/profile_archive.cpp
@@ -408,4 +546,93 @@ if(BUILD_TESTING)
     add_test(NAME runtime_status_bar_render COMMAND AegisyRuntimeStatusBarRenderTest)
     set_tests_properties(runtime_status_bar_render PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(AegisyAgentWorkbenchRenderTest
+        tests/agent_workbench_render_test.cpp
+        src/agent_workbench_widget.cpp
+        src/agent_runtime_client.cpp
+        src/app_theme.cpp
+        include/agent_workbench_widget.h
+        include/agent_runtime_client.h
+        include/app_theme.h
+        resources.qrc
+    )
+    target_compile_definitions(AegisyAgentWorkbenchRenderTest PRIVATE
+        AEGISY_APP_VERSION="${PROJECT_VERSION}"
+        AEGISY_AGENTD_DEV_PATH="${AEGISY_AGENTD_BINARY}"
+    )
+    if(CARGO_EXECUTABLE)
+        target_compile_definitions(AegisyAgentWorkbenchRenderTest PRIVATE
+            AEGISY_EXPECT_AGENTD=1)
+        add_dependencies(AegisyAgentWorkbenchRenderTest aegisy_agentd)
+    endif()
+    target_include_directories(AegisyAgentWorkbenchRenderTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyAgentWorkbenchRenderTest PRIVATE
+            Qt6::Core Qt6::Widgets)
+    else()
+        target_link_libraries(AegisyAgentWorkbenchRenderTest PRIVATE
+            Qt5::Core Qt5::Widgets)
+    endif()
+    add_test(NAME agent_workbench_render COMMAND AegisyAgentWorkbenchRenderTest)
+    set_tests_properties(agent_workbench_render PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;AEGISY_AGENT_BACKEND=preview")
+
+    add_executable(AegisyAgentRuntimeEnvironmentTest
+        tests/agent_runtime_environment_test.cpp
+        src/agent_runtime_client.cpp
+        include/agent_runtime_client.h
+    )
+    target_compile_definitions(AegisyAgentRuntimeEnvironmentTest PRIVATE
+        AEGISY_APP_VERSION="${PROJECT_VERSION}"
+        AEGISY_AGENTD_DEV_PATH="${AEGISY_AGENTD_BINARY}"
+    )
+    target_include_directories(AegisyAgentRuntimeEnvironmentTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyAgentRuntimeEnvironmentTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyAgentRuntimeEnvironmentTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME agent_runtime_environment
+        COMMAND AegisyAgentRuntimeEnvironmentTest)
+
+    if(AEGISY_MONACO_ENABLED)
+        add_executable(AegisyMonacoEditorRenderTest
+            tests/monaco_editor_render_test.cpp
+            src/agent_workbench_widget.cpp
+            src/agent_runtime_client.cpp
+            src/monaco_editor_bridge.cpp
+            src/terminal_web_bridge.cpp
+            src/app_theme.cpp
+            include/agent_workbench_widget.h
+            include/agent_runtime_client.h
+            include/monaco_editor_bridge.h
+            include/terminal_web_bridge.h
+            include/app_theme.h
+            resources.qrc
+        )
+        target_compile_definitions(AegisyMonacoEditorRenderTest PRIVATE
+            AEGISY_APP_VERSION="${PROJECT_VERSION}"
+            AEGISY_AGENTD_DEV_PATH="${AEGISY_AGENTD_BINARY}"
+            AEGISY_EXPECT_AGENTD=1
+            AEGISY_HAS_MONACO=1
+        )
+        target_include_directories(AegisyMonacoEditorRenderTest PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_link_libraries(AegisyMonacoEditorRenderTest PRIVATE
+            Qt6::Core
+            Qt6::Widgets
+            Qt6::WebChannel
+            Qt6::WebEngineWidgets
+        )
+        add_dependencies(AegisyMonacoEditorRenderTest
+            aegisy_agentd
+            aegisy_workbench_web)
+        add_test(NAME monaco_editor_render COMMAND AegisyMonacoEditorRenderTest)
+        set_tests_properties(monaco_editor_render PROPERTIES
+            ENVIRONMENT
+                "QT_QPA_PLATFORM=offscreen;AEGISY_AGENT_BACKEND=preview;AEGISY_WORKBENCH_WEB_ROOT=${AEGISY_WORKBENCH_WEB_BUILD_DIR};QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu")
+    endif()
 endif()

@@ -23,6 +23,7 @@
 #include "mcp_config_dialog.h"
 #include "help_dialog.h"
 #include "status_badge.h"
+#include "agent_workbench_widget.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -32,6 +33,8 @@
 #include <QDir>
 #include <QFont>
 #include <QFrame>
+#include <QGridLayout>
+#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QJsonObject>
 #include <QListWidget>
@@ -49,7 +52,11 @@
 #include <QCloseEvent>
 #include <QEvent>
 #include <QShowEvent>
+#include <QScrollBar>
+#include <QShortcut>
 #include <QStyle>
+#include <QStackedWidget>
+#include <QTableWidget>
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
@@ -63,10 +70,10 @@ QString toolAccent(AiTool tool)
     switch (tool) {
     case AiTool::ClaudeCode: return QStringLiteral("#c15f3c");
     case AiTool::CodexCli:   return QStringLiteral("#111827");
-    case AiTool::GeminiCli:  return QStringLiteral("#1a73e8");
+    case AiTool::GeminiCli:  return QStringLiteral("#165DFF");
     case AiTool::OpenCode:   return QStringLiteral("#059669");
     }
-    return QStringLiteral("#0f766e");
+    return QStringLiteral("#165DFF");
 }
 
 QString toolSoftColor(AiTool tool)
@@ -98,7 +105,7 @@ QString toolConfigPath(AiTool tool)
 
 const QString kLogSuccess = QStringLiteral("#067647");
 const QString kLogError   = QStringLiteral("#b42318");
-const QString kLogInfo    = QStringLiteral("#175cd3");
+const QString kLogInfo    = QStringLiteral("#165DFF");
 const QString kLogWarn    = QStringLiteral("#b54708");
 const QString kLogMuted   = QStringLiteral("#667085");
 
@@ -117,8 +124,8 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
 {
     setupUi();
     setWindowTitle(QStringLiteral("Aegisy - AI 工具连接管理"));
-    resize(1080, 720);
-    setMinimumSize(1024, 620);
+    resize(1280, 820);
+    setMinimumSize(1040, 680);
 
     connect(m_apiClient, &ApiClient::apiKeysReceived,
             this, &MainWindow::onApiKeysReceived);
@@ -140,6 +147,8 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
             this, &MainWindow::onToolLatestVersionDetected);
     connect(m_gatewayManager, &GatewayManager::runningChanged,
             this, &MainWindow::onGatewayRunningChanged);
+    connect(m_gatewayManager, &GatewayManager::requestLogged,
+            this, [this](const QJsonObject &) { refreshGatewayLogs(); });
     connect(m_gatewayManager, &GatewayManager::runningChanged,
             m_runtimeStatusStore, &RuntimeStatusStore::setGatewayRunning);
     connect(m_gatewayManager, &GatewayManager::runtimeEvent,
@@ -147,6 +156,9 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
     connect(m_gatewayManager, &GatewayManager::gatewayError,
             this, [this](const QString &error) {
         logMessage(QStringLiteral("本地网关错误：%1").arg(error), kLogError);
+        if (m_gatewayMessageLabel) {
+            m_gatewayMessageLabel->setText(QStringLiteral("网关错误：%1").arg(error));
+        }
     });
     connect(m_profileManager, &ProfileManager::profilesChanged,
             this, [this]() {
@@ -581,6 +593,12 @@ void MainWindow::onToolVersionDetected(AiTool tool, bool installed, const QStrin
             : (version.isEmpty() ? QStringLiteral("安装")
                                  : QStringLiteral("修复")));
     }
+    if (QPushButton *button = m_toolLaunchButtons.value(id, nullptr)) {
+        button->setEnabled(installed);
+        button->setToolTip(installed
+            ? QStringLiteral("使用当前已激活档案启动 %1").arg(ToolManager::toolName(tool))
+            : QStringLiteral("请先安装 %1").arg(ToolManager::toolName(tool)));
+    }
 
     if (installed) {
         m_toolManager->checkLatestVersion(tool);
@@ -663,7 +681,7 @@ void MainWindow::setupUi()
     topBar->setObjectName(QStringLiteral("topBar"));
     topBar->setFixedHeight(64);
     topBar->setStyleSheet(QStringLiteral(
-        "QFrame#topBar { background: #111820; border-bottom: 1px solid #26313d; }"));
+        "QFrame#topBar { background: #ffffff; border-bottom: 1px solid #e4e7ec; }"));
     auto *topLayout = new QHBoxLayout(topBar);
     topLayout->setContentsMargins(20, 10, 20, 10);
     topLayout->setSpacing(10);
@@ -672,16 +690,16 @@ void MainWindow::setupUi()
     brandMark->setFixedSize(38, 38);
     brandMark->setAlignment(Qt::AlignCenter);
     brandMark->setStyleSheet(QStringLiteral(
-        "background: #14b8a6; color: #071411; border-radius: 8px;"
+        "background: #101828; color: #ffffff; border-radius: 8px;"
         "font-size: 18px; font-weight: 700;"));
     topLayout->addWidget(brandMark);
 
     auto *brandColumn = new QVBoxLayout;
     brandColumn->setSpacing(0);
     auto *brandName = new QLabel(QStringLiteral("Aegisy"), topBar);
-    brandName->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 700; color: #f4f7fa;"));
+    brandName->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 700; color: #101828;"));
     auto *brandSection = new QLabel(QStringLiteral("连接管理"), topBar);
-    brandSection->setStyleSheet(QStringLiteral("font-size: 11px; color: #82909f;"));
+    brandSection->setStyleSheet(QStringLiteral("font-size: 11px; color: #667085;"));
     brandColumn->addWidget(brandName);
     brandColumn->addWidget(brandSection);
     topLayout->addLayout(brandColumn);
@@ -692,9 +710,9 @@ void MainWindow::setupUi()
     m_userLabel->setCursor(Qt::PointingHandCursor);
     m_userLabel->setToolTip(QStringLiteral("账号中心：修改密码与密卡充值"));
     m_userLabel->setStyleSheet(QStringLiteral(
-        "QPushButton { color: #e7fffb; background: #193b3a; border: 1px solid #2a6c66;"
+        "QPushButton { color: #165DFF; background: #EEF4FF; border: 1px solid #C8D8FF;"
         "border-radius: 19px; font-size: 14px; font-weight: 700; }"
-        "QPushButton:hover { background: #22504d; border-color: #14b8a6; }"));
+        "QPushButton:hover { background: #dbeeff; border-color: #84caff; }"));
     topLayout->addWidget(m_userLabel);
 
     m_balanceButton = new QPushButton(QStringLiteral("余额  --"), topBar);
@@ -704,9 +722,9 @@ void MainWindow::setupUi()
     m_balanceButton->setMaximumWidth(150);
     m_balanceButton->setCursor(Qt::PointingHandCursor);
     m_balanceButton->setStyleSheet(QStringLiteral(
-        "QPushButton { background: #18232d; color: #b8fff3; border: 1px solid #2f4654;"
+        "QPushButton { background: #ffffff; color: #344054; border: 1px solid #d0d5dd;"
         "border-radius: 7px; padding: 0 10px; font-size: 11px; font-weight: 700; }"
-        "QPushButton:hover { background: #1e3138; border-color: #14b8a6; }"));
+        "QPushButton:hover { background: #f8fafc; border-color: #98a2b3; }"));
     topLayout->addWidget(m_balanceButton);
 
     // ── 顶栏功能按钮（用 QStyle 系统图标 + 纯文字，Windows/macOS/Linux 全兼容）──
@@ -755,7 +773,7 @@ void MainWindow::setupUi()
     m_logoutButton->setCursor(Qt::PointingHandCursor);
     m_logoutButton->setStyleSheet(QStringLiteral(
         "QPushButton {"
-        "  background: transparent; color: #a9b5c1; border: 1px solid #34414e;"
+        "  background: transparent; color: #667085; border: 1px solid #d0d5dd;"
         "  border-radius: 7px; font-size: 16px;"
         "}"
         "QPushButton:hover { background: #3a1f25; color: #fecaca; border-color: #7f3540; }"
@@ -772,16 +790,58 @@ void MainWindow::setupUi()
     sidebar->setObjectName(QStringLiteral("sidebar"));
     sidebar->setMinimumWidth(214);
     sidebar->setStyleSheet(QStringLiteral(
-        "QFrame#sidebar { background: #141c24; border-right: 1px solid #26313d; }"));
+        "QFrame#sidebar { background: #ffffff; border-right: 1px solid #e4e7ec; }"));
     auto *sideLayout = new QVBoxLayout(sidebar);
     sideLayout->setContentsMargins(14, 18, 14, 18);
     sideLayout->setSpacing(6);
 
+    auto *navLabel = new QLabel(QStringLiteral("工作区"), sidebar);
+    navLabel->setStyleSheet(QStringLiteral(
+        "font-size: 10px; font-weight: 700; color: #98a2b3; padding: 0 10px 4px 10px;"));
+    sideLayout->addWidget(navLabel);
+
+    m_navGroup = new QButtonGroup(this);
+    m_navGroup->setExclusive(true);
+    const struct {
+        int page;
+        const char *label;
+        QStyle::StandardPixmap icon;
+    } navItems[] = {
+        { 0, "启动台", QStyle::SP_ComputerIcon },
+        { 1, "桌面客户端", QStyle::SP_DesktopIcon },
+        { 2, "接入配置", QStyle::SP_DirLinkIcon },
+        { 3, "本地网关", QStyle::SP_DriveNetIcon },
+        { 4, "系统与扩展", QStyle::SP_FileDialogDetailedView },
+        { 5, "Agent 工作台", QStyle::SP_CommandLink },
+    };
+    for (const auto &item : navItems) {
+        auto *button = new QPushButton(QString::fromUtf8(item.label), sidebar);
+        button->setIcon(style()->standardIcon(item.icon));
+        button->setCheckable(true);
+        button->setChecked(item.page == 0);
+        button->setFixedHeight(42);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setStyleSheet(QStringLiteral(
+            "QPushButton { background: transparent; color: #344054; border: none;"
+            "border-radius: 7px; text-align: left; padding: 0 12px; font-size: 13px; }"
+            "QPushButton:hover { background: #f2f4f7; color: #101828; }"
+            "QPushButton:checked { background: #EEF4FF; color: #165DFF;"
+            "font-weight: 700; border-right: 3px solid #4B7DFF; }"));
+        m_navGroup->addButton(button, item.page);
+        sideLayout->addWidget(button);
+    }
+    sideLayout->addSpacing(12);
+
     auto *filterLabel = new QLabel(QStringLiteral("配置筛选"), sidebar);
     filterLabel->setStyleSheet(QStringLiteral(
-        "font-size: 10px; font-weight: 700; color: #768696; letter-spacing: 0px;"
+        "font-size: 10px; font-weight: 700; color: #98a2b3; letter-spacing: 0px;"
         "padding: 0 10px 4px 10px; text-transform: uppercase;"));
-    sideLayout->addWidget(filterLabel);
+    filterLabel->hide();
+
+    auto *filterStrip = new QWidget(body);
+    auto *filterStripLayout = new QHBoxLayout(filterStrip);
+    filterStripLayout->setContentsMargins(0, 0, 0, 0);
+    filterStripLayout->setSpacing(6);
 
     m_filterGroup = new QButtonGroup(this);
     m_filterGroup->setExclusive(true);
@@ -792,10 +852,10 @@ void MainWindow::setupUi()
         const char *label;
         const char *dotColor;   // 工具品牌色
     } filters[] = {
-        { 0,                                    "全部配置",   "#0f766e" },
+        { 0,                                    "全部配置",   "#165DFF" },
         { static_cast<int>(ProfileType::Claude),   "Claude Code", "#c15f3c" },
         { static_cast<int>(ProfileType::Codex),    "Codex CLI",   "#6366f1" },
-        { static_cast<int>(ProfileType::Gemini),   "Gemini CLI",  "#1a73e8" },
+        { static_cast<int>(ProfileType::Gemini),   "Gemini CLI",  "#165DFF" },
         { static_cast<int>(ProfileType::OpenCode), "OpenCode",    "#059669" },
     };
 
@@ -809,31 +869,38 @@ void MainWindow::setupUi()
         button->setText(QString::fromUtf8(filter.label));
         button->setCheckable(true);
         button->setChecked(filter.id == 0);
-        button->setFixedHeight(38);
+        button->setFixedHeight(34);
         button->setCursor(Qt::PointingHandCursor);
         // 用 icon() 放彩色指示点：改用 padding-left 让文字左对齐，在前面手动加色块
         button->setStyleSheet(QStringLiteral(
             "QPushButton {"
-            "  background: transparent; color: #a9b5c1; border: none; border-radius: 7px;"
-            "  text-align: left; padding-left: 12px; padding-right: 8px;"
-            "  font-size: 13px; font-weight: 400;"
+            "  background: #ffffff; color: #475467; border: 1px solid #d0d5dd; border-radius: 7px;"
+            "  text-align: center; padding: 0 12px; font-size: 12px; font-weight: 500;"
             "}"
-            "QPushButton:hover { background: #202c37; color: #f4f7fa; }"
+            "QPushButton:hover { background: #f8fafc; color: #101828; }"
             "QPushButton:checked {"
-            "  background: #19312f; color: #7ff3df; font-weight: 600;"
-            "  border-left: 3px solid %1;"
-            "  padding-left: 9px;"
-            "}").arg(QString::fromUtf8(filter.dotColor)));
+            "  background: #EEF4FF; color: #165DFF; font-weight: 700;"
+            "  border: 1px solid #84caff;"
+            "}"));
         m_filterGroup->addButton(button, filter.id);
-        sideLayout->addWidget(button);
+        filterStripLayout->addWidget(button);
     }
-    sideLayout->addSpacing(14);
+    filterStripLayout->addStretch();
+
+    auto *terminalPanel = new QFrame(body);
+    terminalPanel->setObjectName(QStringLiteral("runtimePanel"));
+    terminalPanel->setStyleSheet(QStringLiteral(
+        "QFrame#runtimePanel { background: #ffffff; border: 1px solid #e4e7ec; border-radius: 8px; }"));
+    auto *terminalPanelLayout = new QVBoxLayout(terminalPanel);
+    terminalPanelLayout->setContentsMargins(16, 14, 16, 14);
+    terminalPanelLayout->setSpacing(8);
 
     auto *terminalHeader = new QHBoxLayout;
     terminalHeader->setContentsMargins(8, 0, 2, 0);
     auto *terminalTitle = new QLabel(QStringLiteral("本地终端"), sidebar);
+    terminalTitle->setText(QStringLiteral("CLI 运行环境"));
     terminalTitle->setStyleSheet(QStringLiteral(
-        "font-size: 11px; font-weight: 700; color: #8d9baa;"));
+        "font-size: 13px; font-weight: 700; color: #344054;"));
     terminalHeader->addWidget(terminalTitle);
     terminalHeader->addStretch();
     m_refreshToolVersionsButton = new QPushButton(sidebar);
@@ -841,12 +908,9 @@ void MainWindow::setupUi()
     m_refreshToolVersionsButton->setToolTip(QStringLiteral("刷新本地终端版本"));
     m_refreshToolVersionsButton->setFixedSize(26, 26);
     m_refreshToolVersionsButton->setCursor(Qt::PointingHandCursor);
-    m_refreshToolVersionsButton->setStyleSheet(QStringLiteral(
-        "QPushButton { background: transparent; border: none; border-radius: 6px; }"
-        "QPushButton:hover { background: #263440; }"
-        "QPushButton:disabled { background: transparent; }"));
+    m_refreshToolVersionsButton->setStyleSheet(AppTheme::iconButtonStyle());
     terminalHeader->addWidget(m_refreshToolVersionsButton);
-    sideLayout->addLayout(terminalHeader);
+    terminalPanelLayout->addLayout(terminalHeader);
 
     const struct {
         AiTool tool;
@@ -858,18 +922,20 @@ void MainWindow::setupUi()
         { AiTool::OpenCode, "OpenCode" },
     };
     for (const auto &terminal : terminals) {
-        auto *row = new QWidget(sidebar);
+        auto *row = new QFrame(terminalPanel);
+        row->setStyleSheet(QStringLiteral(
+            "QFrame { background: #f8fafc; border: 1px solid #eaecf0; border-radius: 7px; }"));
         auto *rowLayout = new QHBoxLayout(row);
         rowLayout->setContentsMargins(8, 2, 4, 2);
         rowLayout->setSpacing(6);
         auto *name = new QLabel(QString::fromUtf8(terminal.name), row);
-        name->setStyleSheet(QStringLiteral("font-size: 11px; color: #a9b5c1;"));
+        name->setStyleSheet(QStringLiteral("font-size: 12px; color: #344054; font-weight: 600; border: none;"));
         rowLayout->addWidget(name);
         rowLayout->addStretch();
         auto *version = new QLabel(QStringLiteral("检测中..."), row);
         version->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         version->setStyleSheet(QStringLiteral(
-            "font-family: monospace; font-size: 10px; color: #718191;"));
+            "font-family: monospace; font-size: 10px; color: #667085; border: none;"));
         rowLayout->addWidget(version);
         m_toolVersionLabels.insert(static_cast<int>(terminal.tool), version);
         m_toolVersionTexts.insert(static_cast<int>(terminal.tool), QStringLiteral("检测中..."));
@@ -889,7 +955,7 @@ void MainWindow::setupUi()
         m_toolInstallButtons.insert(static_cast<int>(terminal.tool), installButton);
         connect(installButton, &QPushButton::clicked, this,
                 [this, tool = terminal.tool]() { installToolEnvironment(tool); });
-        sideLayout->addWidget(row);
+        terminalPanelLayout->addWidget(row);
     }
 
     // ── 功能入口（QStyle 系统图标 + 文字，Windows/macOS/Linux 全兼容）──
@@ -1041,6 +1107,7 @@ void MainWindow::setupUi()
     m_newConnectButton->setStyleSheet(AppTheme::primaryButtonStyle());
     headingRow->addWidget(m_newConnectButton);
     contentLayout->addLayout(headingRow);
+    contentLayout->addWidget(filterStrip);
 
     auto *summaryRow = new QHBoxLayout;
     summaryRow->setSpacing(8);
@@ -1089,7 +1156,6 @@ void MainWindow::setupUi()
         "QPushButton { background: transparent; border: none; border-radius: 6px; }"
         "QPushButton:hover { background: #eaecf0; }"));
     activityHeader->addWidget(clearLogButton);
-    contentLayout->addLayout(activityHeader);
 
     m_logOutput = new QTextEdit(content);
     m_logOutput->setReadOnly(true);
@@ -1102,10 +1168,445 @@ void MainWindow::setupUi()
         "}"
         "QScrollBar:vertical { background: transparent; width: 7px; }"
         "QScrollBar::handle:vertical { background: #d0d5dd; border-radius: 3px; }"));
-    contentLayout->addWidget(m_logOutput);
 
-    bodyLayout->addWidget(content, 1);
+    m_workspaceStack = new QStackedWidget(body);
+    m_workspaceStack->setObjectName(QStringLiteral("workspaceStack"));
+    m_workspaceStack->setStyleSheet(QStringLiteral(
+        "QStackedWidget#workspaceStack { background: #f5f7fb; border: none; }"));
+
+    auto makePage = [body](const QString &objectName) {
+        auto *scroll = new QScrollArea(body);
+        scroll->setObjectName(objectName);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setStyleSheet(QStringLiteral("QScrollArea { background: #f5f7fb; border: none; }"));
+        auto *page = new QWidget(scroll);
+        page->setObjectName(objectName + QStringLiteral("Content"));
+        page->setStyleSheet(QStringLiteral(
+            "QWidget#%1 { background: #f5f7fb; }"
+            "QWidget#%1 QLabel { background: transparent; }").arg(page->objectName()));
+        auto *layout = new QVBoxLayout(page);
+        layout->setContentsMargins(26, 22, 26, 24);
+        layout->setSpacing(14);
+        layout->setAlignment(Qt::AlignTop);
+        scroll->setWidget(page);
+        return qMakePair(scroll, layout);
+    };
+
+    auto makeHeader = [this](QWidget *parent, const QString &titleText,
+                             const QString &subtitleText) {
+        auto *frame = new QFrame(parent);
+        frame->setObjectName(QStringLiteral("pageHeader"));
+        frame->setStyleSheet(QStringLiteral(
+            "QFrame#pageHeader { background: #ffffff; border: 1px solid #e4e7ec; border-radius: 8px; }"));
+        auto *layout = new QHBoxLayout(frame);
+        layout->setContentsMargins(20, 16, 20, 16);
+        layout->setSpacing(12);
+        auto *column = new QVBoxLayout;
+        column->setSpacing(3);
+        auto *title = new QLabel(titleText, frame);
+        title->setStyleSheet(QStringLiteral("font-size: 24px; font-weight: 700; color: #101828;"));
+        auto *subtitle = new QLabel(subtitleText, frame);
+        subtitle->setStyleSheet(QStringLiteral("font-size: 12px; color: #667085;"));
+        subtitle->setWordWrap(true);
+        column->addWidget(title);
+        column->addWidget(subtitle);
+        layout->addLayout(column, 1);
+        return qMakePair(frame, layout);
+    };
+
+    // 启动台：高频状态与操作集中在首屏。
+    const auto dashboardPage = makePage(QStringLiteral("launchpadPage"));
+    const auto dashboardHeader = makeHeader(
+        dashboardPage.first->widget(), QStringLiteral("工具启动台"),
+        QStringLiteral("管理 CLI 状态、桌面客户端和常用启动入口"));
+    auto *dashboardRefresh = new QPushButton(QStringLiteral("刷新"), dashboardHeader.first);
+    dashboardRefresh->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+    dashboardRefresh->setStyleSheet(AppTheme::secondaryButtonStyle());
+    m_refreshToolVersionsButton = dashboardRefresh;
+    dashboardHeader.second->addWidget(dashboardRefresh);
+    dashboardPage.second->addWidget(dashboardHeader.first);
+
+    auto *toolGrid = new QGridLayout;
+    toolGrid->setHorizontalSpacing(12);
+    toolGrid->setVerticalSpacing(12);
+    const struct { AiTool tool; const char *accent; const char *letter; } toolCards[] = {
+        { AiTool::CodexCli, "#111827", "O" },
+        { AiTool::ClaudeCode, "#c15f3c", "C" },
+        { AiTool::GeminiCli, "#165DFF", "G" },
+        { AiTool::OpenCode, "#059669", "OC" },
+    };
+    for (int index = 0; index < 4; ++index) {
+        const auto item = toolCards[index];
+        auto *card = new QFrame(dashboardPage.first->widget());
+        card->setObjectName(QStringLiteral("toolLaunchCard"));
+        card->setMinimumHeight(142);
+        card->setStyleSheet(QStringLiteral(
+            "QFrame#toolLaunchCard { background: #ffffff; border: 1px solid #e4e7ec; border-radius: 8px; }"));
+        auto *cardLayout = new QVBoxLayout(card);
+        cardLayout->setContentsMargins(16, 14, 16, 14);
+        cardLayout->setSpacing(9);
+        auto *top = new QHBoxLayout;
+        auto *badge = new QLabel(QString::fromLatin1(item.letter), card);
+        badge->setFixedSize(40, 40);
+        badge->setAlignment(Qt::AlignCenter);
+        badge->setStyleSheet(QStringLiteral(
+            "background:%1; color:white; border-radius:8px; font-size:15px; font-weight:700;")
+            .arg(QString::fromLatin1(item.accent)));
+        top->addWidget(badge);
+        auto *copy = new QVBoxLayout;
+        copy->setSpacing(2);
+        auto *name = new QLabel(ToolManager::toolName(item.tool), card);
+        name->setStyleSheet(QStringLiteral("font-size:14px; font-weight:700; color:#101828;"));
+        auto *detail = new QLabel(QStringLiteral("检测中..."), card);
+        detail->setStyleSheet(QStringLiteral("font-family:monospace; font-size:11px; color:#667085;"));
+        copy->addWidget(name);
+        copy->addWidget(detail);
+        top->addLayout(copy, 1);
+        cardLayout->addLayout(top);
+        m_toolVersionLabels.insert(static_cast<int>(item.tool), detail);
+
+        auto *actions = new QHBoxLayout;
+        actions->setSpacing(7);
+        auto *install = new QPushButton(QStringLiteral("安装"), card);
+        install->setIcon(style()->standardIcon(QStyle::SP_ArrowDown));
+        install->setStyleSheet(AppTheme::primaryButtonStyle());
+        install->hide();
+        m_toolInstallButtons.insert(static_cast<int>(item.tool), install);
+        auto *launch = new QPushButton(QStringLiteral("启动"), card);
+        launch->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
+        launch->setStyleSheet(AppTheme::secondaryButtonStyle());
+        launch->setEnabled(false);
+        m_toolLaunchButtons.insert(static_cast<int>(item.tool), launch);
+        auto *configure = new QPushButton(QStringLiteral("配置"), card);
+        configure->setStyleSheet(AppTheme::secondaryButtonStyle());
+        actions->addStretch();
+        actions->addWidget(install);
+        actions->addWidget(launch);
+        actions->addWidget(configure);
+        cardLayout->addLayout(actions);
+        connect(install, &QPushButton::clicked, this,
+                [this, tool = item.tool]() { installToolEnvironment(tool); });
+        connect(launch, &QPushButton::clicked, this, [this, tool = item.tool]() {
+            const QList<Profile> profiles = m_profileManager->allProfiles();
+            const ProfileType type = profileTypeForTool(tool);
+            const int profileIndex = m_profileManager->activeIndex(type);
+            if (profileIndex >= 0 && profileIndex < profiles.size()) {
+                launchProfile(profileIndex);
+            } else {
+                switchWorkspacePage(2);
+                if (QAbstractButton *filter = m_filterGroup->button(static_cast<int>(type))) {
+                    filter->setChecked(true);
+                    onFilterChanged(static_cast<int>(type));
+                }
+            }
+        });
+        connect(configure, &QPushButton::clicked, this, [this, tool = item.tool]() {
+            const ProfileType type = profileTypeForTool(tool);
+            switchWorkspacePage(2);
+            if (QAbstractButton *filter = m_filterGroup->button(static_cast<int>(type))) {
+                filter->setChecked(true);
+                onFilterChanged(static_cast<int>(type));
+            }
+        });
+        toolGrid->addWidget(card, index / 2, index % 2);
+    }
+    dashboardPage.second->addLayout(toolGrid);
+
+    auto *dashboardLower = new QHBoxLayout;
+    dashboardLower->setSpacing(12);
+    terminalPanel->deleteLater();
+    auto *desktopSummary = new QFrame(dashboardPage.first->widget());
+    desktopSummary->setObjectName(QStringLiteral("desktopSummary"));
+    desktopSummary->setStyleSheet(QStringLiteral(
+        "QFrame#desktopSummary { background:#ffffff; border:1px solid #e4e7ec; border-radius:8px; }"));
+    auto *desktopSummaryLayout = new QVBoxLayout(desktopSummary);
+    desktopSummaryLayout->setContentsMargins(16, 14, 16, 14);
+    desktopSummaryLayout->setSpacing(10);
+    auto *desktopTitle = new QLabel(QStringLiteral("桌面客户端"), desktopSummary);
+    desktopTitle->setStyleSheet(QStringLiteral("font-size:13px; font-weight:700; color:#344054;"));
+    desktopSummaryLayout->addWidget(desktopTitle);
+    for (const auto &desktop : { qMakePair(AiTool::CodexCli, QStringLiteral("ChatGPT / Codex")),
+                                 qMakePair(AiTool::ClaudeCode, QStringLiteral("Claude Desktop")) }) {
+        auto *row = new QHBoxLayout;
+        auto *name = new QLabel(desktop.second, desktopSummary);
+        name->setStyleSheet(QStringLiteral("font-size:12px; color:#344054;"));
+        row->addWidget(name);
+        row->addStretch();
+        const DesktopAppStatus state = m_toolManager->detectDesktop(desktop.first);
+        auto *status = new QLabel(state.installed ? QStringLiteral("已安装") : QStringLiteral("缺失"), desktopSummary);
+        status->setStyleSheet(state.installed
+            ? QStringLiteral("color:#067647; font-size:11px; font-weight:700;")
+            : QStringLiteral("color:#b54708; font-size:11px; font-weight:700;"));
+        row->addWidget(status);
+        desktopSummaryLayout->addLayout(row);
+    }
+    auto *manageDesktop = new QPushButton(QStringLiteral("管理桌面客户端"), desktopSummary);
+    manageDesktop->setStyleSheet(AppTheme::secondaryButtonStyle());
+    connect(manageDesktop, &QPushButton::clicked, this, [this]() { switchWorkspacePage(1); });
+    desktopSummaryLayout->addWidget(manageDesktop);
+    dashboardLower->addWidget(desktopSummary, 1);
+    dashboardPage.second->addLayout(dashboardLower);
+
+    auto *activityPanel = new QFrame(dashboardPage.first->widget());
+    activityPanel->setObjectName(QStringLiteral("activityPanel"));
+    activityPanel->setStyleSheet(QStringLiteral(
+        "QFrame#activityPanel { background:#ffffff; border:1px solid #e4e7ec; border-radius:8px; }"));
+    auto *activityPanelLayout = new QVBoxLayout(activityPanel);
+    activityPanelLayout->setContentsMargins(16, 12, 16, 14);
+    activityPanelLayout->addLayout(activityHeader);
+    activityPanelLayout->addWidget(m_logOutput);
+    dashboardPage.second->addWidget(activityPanel);
+
+    // 桌面客户端页。
+    const auto desktopPage = makePage(QStringLiteral("desktopClientsPage"));
+    const auto desktopHeader = makeHeader(
+        desktopPage.first->widget(), QStringLiteral("桌面客户端"),
+        QStringLiteral("检测、下载并管理 ChatGPT / Codex 与 Claude Desktop"));
+    m_desktopEnhancementsButton->setText(QStringLiteral("桌面增强"));
+    m_desktopEnhancementsButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    desktopHeader.second->addWidget(m_desktopEnhancementsButton);
+    auto *desktopRefresh = new QPushButton(QStringLiteral("刷新"), desktopHeader.first);
+    desktopRefresh->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+    desktopRefresh->setStyleSheet(AppTheme::secondaryButtonStyle());
+    desktopHeader.second->addWidget(desktopRefresh);
+    desktopPage.second->addWidget(desktopHeader.first);
+
+    auto addDesktopCard = [this, &desktopPage](AiTool tool, const QString &titleText,
+                                               const QString &detailText) {
+        auto *card = new QFrame(desktopPage.first->widget());
+        card->setObjectName(QStringLiteral("desktopClientCard"));
+        card->setStyleSheet(QStringLiteral(
+            "QFrame#desktopClientCard { background:#ffffff; border:1px solid #e4e7ec; border-radius:8px; }"));
+        auto *layout = new QHBoxLayout(card);
+        layout->setContentsMargins(18, 16, 18, 16);
+        layout->setSpacing(14);
+        auto *icon = new QLabel(tool == AiTool::CodexCli ? QStringLiteral("O") : QStringLiteral("C"), card);
+        icon->setFixedSize(46, 46);
+        icon->setAlignment(Qt::AlignCenter);
+        icon->setStyleSheet(tool == AiTool::CodexCli
+            ? QStringLiteral("background:#101828; color:white; border-radius:8px; font-size:18px; font-weight:700;")
+            : QStringLiteral("background:#fff4ef; color:#c15f3c; border:1px solid #fed7c3; border-radius:8px; font-size:18px; font-weight:700;"));
+        layout->addWidget(icon);
+        auto *copy = new QVBoxLayout;
+        copy->setSpacing(4);
+        auto *title = new QLabel(titleText, card);
+        title->setStyleSheet(QStringLiteral("font-size:16px; font-weight:700; color:#101828;"));
+        auto *detail = new QLabel(detailText, card);
+        detail->setWordWrap(true);
+        detail->setStyleSheet(QStringLiteral("font-size:12px; color:#667085;"));
+        auto *status = new QLabel(QStringLiteral("正在检测..."), card);
+        status->setStyleSheet(QStringLiteral("font-size:12px; color:#667085;"));
+        copy->addWidget(title);
+        copy->addWidget(detail);
+        copy->addWidget(status);
+        layout->addLayout(copy, 1);
+        auto *action = new QPushButton(QStringLiteral("下载并安装"), card);
+        action->setIcon(style()->standardIcon(QStyle::SP_ArrowDown));
+        action->setStyleSheet(AppTheme::primaryButtonStyle());
+        layout->addWidget(action);
+        if (tool == AiTool::CodexCli) {
+            m_chatGptDesktopStatus = status;
+            m_chatGptDesktopAction = action;
+        } else {
+            m_claudeDesktopStatus = status;
+            m_claudeDesktopAction = action;
+        }
+        connect(action, &QPushButton::clicked, this, [this, tool]() {
+            const DesktopAppStatus state = m_toolManager->detectDesktop(tool);
+            const DesktopDownloader::Product product = tool == AiTool::ClaudeCode
+                ? DesktopDownloader::Product::Claude : DesktopDownloader::Product::ChatGpt;
+            if (!DesktopDownloader::productSupported(product)) {
+                QDesktopServices::openUrl(QUrl(state.downloadUrl));
+                return;
+            }
+            auto *downloader = new DesktopDownloader(
+                product, state.appName, m_authToken, m_apiClient->baseUrl(), this);
+            downloader->exec();
+            downloader->deleteLater();
+            refreshDesktopPage();
+        });
+        desktopPage.second->addWidget(card);
+    };
+    addDesktopCard(AiTool::CodexCli, QStringLiteral("ChatGPT 桌面版（含 Codex）"),
+                   QStringLiteral("通过 Aegisy 认证代理获取官方桌面安装程序。"));
+    addDesktopCard(AiTool::ClaudeCode, QStringLiteral("Claude Desktop"),
+                   QStringLiteral("支持官方安装包代理下载与运行时中文界面增强。"));
+    auto *desktopNote = new QLabel(
+        QStringLiteral("安装包完成平台签名与格式校验后才会保存到下载目录。"), desktopPage.first->widget());
+    desktopNote->setWordWrap(true);
+    desktopNote->setStyleSheet(QStringLiteral(
+        "background:#EEF4FF; color:#165DFF; border:1px solid #C8D8FF; border-radius:8px; padding:11px 13px; font-size:12px;"));
+    desktopPage.second->addWidget(desktopNote);
+
+    // 本地网关页。
+    const auto gatewayPage = makePage(QStringLiteral("gatewayPage"));
+    const auto gatewayHeader = makeHeader(
+        gatewayPage.first->widget(), QStringLiteral("本地网关"),
+        QStringLiteral("管理本机转发状态、端点和不含提示词内容的请求记录"));
+    m_gatewayStartButton = new QPushButton(QStringLiteral("启动"), gatewayHeader.first);
+    m_gatewayStartButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
+    m_gatewayStartButton->setStyleSheet(AppTheme::primaryButtonStyle());
+    m_gatewayRestartButton = new QPushButton(QStringLiteral("重启"), gatewayHeader.first);
+    m_gatewayRestartButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+    m_gatewayRestartButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    m_gatewayStopButton = new QPushButton(QStringLiteral("停止"), gatewayHeader.first);
+    m_gatewayStopButton->setIcon(style()->standardIcon(QStyle::SP_MediaStop));
+    m_gatewayStopButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    m_gatewayButton->setText(QStringLiteral("详细监控"));
+    m_gatewayButton->setStyleSheet(AppTheme::secondaryButtonStyle());
+    gatewayHeader.second->addWidget(m_gatewayStartButton);
+    gatewayHeader.second->addWidget(m_gatewayRestartButton);
+    gatewayHeader.second->addWidget(m_gatewayStopButton);
+    gatewayHeader.second->addWidget(m_gatewayButton);
+    gatewayPage.second->addWidget(gatewayHeader.first);
+
+    auto *gatewayMetrics = new QFrame(gatewayPage.first->widget());
+    gatewayMetrics->setObjectName(QStringLiteral("gatewayMetrics"));
+    gatewayMetrics->setStyleSheet(QStringLiteral(
+        "QFrame#gatewayMetrics { background:#ffffff; border:1px solid #e4e7ec; border-radius:8px; }"));
+    auto *gatewayMetricsLayout = new QGridLayout(gatewayMetrics);
+    gatewayMetricsLayout->setContentsMargins(18, 16, 18, 16);
+    gatewayMetricsLayout->setSpacing(12);
+    auto addMetric = [gatewayMetrics, gatewayMetricsLayout](int column, const QString &labelText) {
+        auto *cell = new QFrame(gatewayMetrics);
+        cell->setStyleSheet(QStringLiteral("QFrame { background:#f8fafc; border:1px solid #eaecf0; border-radius:7px; }"));
+        auto *layout = new QVBoxLayout(cell);
+        layout->setContentsMargins(12, 10, 12, 10);
+        auto *label = new QLabel(labelText, cell);
+        label->setStyleSheet(QStringLiteral("font-size:11px; color:#667085; border:none;"));
+        auto *value = new QLabel(cell);
+        value->setWordWrap(true);
+        value->setStyleSheet(QStringLiteral("font-size:13px; font-weight:700; color:#101828; border:none;"));
+        layout->addWidget(label);
+        layout->addWidget(value);
+        gatewayMetricsLayout->addWidget(cell, 0, column);
+        return value;
+    };
+    m_gatewayStateLabel = addMetric(0, QStringLiteral("状态"));
+    m_gatewayEndpointLabel = addMetric(1, QStringLiteral("URL"));
+    m_gatewayModeLabel = addMetric(2, QStringLiteral("连接模式"));
+    auto *privacyLabel = addMetric(3, QStringLiteral("隐私"));
+    privacyLabel->setText(QStringLiteral("仅元数据"));
+    gatewayPage.second->addWidget(gatewayMetrics);
+    m_gatewayMessageLabel = new QLabel(gatewayPage.first->widget());
+    m_gatewayMessageLabel->setWordWrap(true);
+    m_gatewayMessageLabel->setStyleSheet(QStringLiteral(
+        "background:#f8fafc; color:#475467; border:1px solid #e4e7ec; border-radius:8px; padding:10px 12px; font-size:12px;"));
+    gatewayPage.second->addWidget(m_gatewayMessageLabel);
+    auto *logPanel = new QFrame(gatewayPage.first->widget());
+    logPanel->setObjectName(QStringLiteral("gatewayLogPanel"));
+    logPanel->setStyleSheet(QStringLiteral(
+        "QFrame#gatewayLogPanel { background:#ffffff; border:1px solid #e4e7ec; border-radius:8px; }"));
+    auto *logPanelLayout = new QVBoxLayout(logPanel);
+    logPanelLayout->setContentsMargins(16, 14, 16, 16);
+    auto *logHeader = new QHBoxLayout;
+    auto *logTitle = new QLabel(QStringLiteral("请求记录"), logPanel);
+    logTitle->setStyleSheet(QStringLiteral("font-size:14px; font-weight:700; color:#101828;"));
+    logHeader->addWidget(logTitle);
+    logHeader->addStretch();
+    auto *clearGatewayLogs = new QPushButton(QStringLiteral("清空"), logPanel);
+    clearGatewayLogs->setStyleSheet(AppTheme::secondaryButtonStyle());
+    logHeader->addWidget(clearGatewayLogs);
+    logPanelLayout->addLayout(logHeader);
+    m_gatewayLogTable = new QTableWidget(logPanel);
+    m_gatewayLogTable->setColumnCount(6);
+    m_gatewayLogTable->setHorizontalHeaderLabels({
+        QStringLiteral("时间"), QStringLiteral("工具"), QStringLiteral("请求"),
+        QStringLiteral("模型"), QStringLiteral("状态"), QStringLiteral("耗时") });
+    m_gatewayLogTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_gatewayLogTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_gatewayLogTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    m_gatewayLogTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_gatewayLogTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    m_gatewayLogTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+    m_gatewayLogTable->verticalHeader()->hide();
+    m_gatewayLogTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_gatewayLogTable->setMinimumHeight(250);
+    logPanelLayout->addWidget(m_gatewayLogTable);
+    gatewayPage.second->addWidget(logPanel);
+
+    // 系统与扩展页：把次级操作收敛为安静的操作网格。
+    const auto settingsPage = makePage(QStringLiteral("settingsPage"));
+    const auto settingsHeader = makeHeader(
+        settingsPage.first->widget(), QStringLiteral("系统与扩展"),
+        QStringLiteral("账号资源、扩展能力、配置数据与应用维护"));
+    settingsPage.second->addWidget(settingsHeader.first);
+    auto *settingsGrid = new QGridLayout;
+    settingsGrid->setHorizontalSpacing(10);
+    settingsGrid->setVerticalSpacing(10);
+    const QList<QPushButton *> settingsButtons = {
+        m_manageKeysButton, m_viewModelsButton, m_imageGenerationButton,
+        m_chatButton, m_skillsButton, m_mcpConfigButton,
+        m_backupsButton, m_transferButton, m_doctorButton,
+        m_desktopDownloadButton, m_checkUpdatesButton, helpButton,
+    };
+    int settingsIndex = 0;
+    for (QPushButton *button : settingsButtons) {
+        button->show();
+        button->setMinimumHeight(52);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        button->setStyleSheet(QStringLiteral(
+            "QPushButton { background:#ffffff; color:#344054; border:1px solid #e4e7ec;"
+            "border-radius:8px; text-align:left; padding:0 16px; font-size:13px; font-weight:600; }"
+            "QPushButton:hover { background:#f8fafc; border-color:#98a2b3; color:#101828; }"));
+        settingsGrid->addWidget(button, settingsIndex / 3, settingsIndex % 3);
+        ++settingsIndex;
+    }
+    settingsPage.second->addLayout(settingsGrid);
+
+    toolsHeader->hide();
+    dataHeader->hide();
+    systemHeader->hide();
+
+    m_workspaceStack->addWidget(dashboardPage.first);
+    m_workspaceStack->addWidget(desktopPage.first);
+    m_workspaceStack->addWidget(content);
+    m_workspaceStack->addWidget(gatewayPage.first);
+    m_workspaceStack->addWidget(settingsPage.first);
+    m_workspaceStack->addWidget(new AgentWorkbenchWidget(m_workspaceStack));
+    bodyLayout->addWidget(m_workspaceStack, 1);
     root->addWidget(body, 1);
+
+    connect(dashboardRefresh, &QPushButton::clicked,
+            this, &MainWindow::refreshToolVersions);
+    connect(desktopRefresh, &QPushButton::clicked,
+            this, &MainWindow::refreshDesktopPage);
+    connect(m_gatewayStartButton, &QPushButton::clicked, this, [this]() {
+        QSettings().setValue(QStringLiteral("gateway/enabled"), true);
+        if (!m_gatewayManager->start()) {
+            QSettings().setValue(QStringLiteral("gateway/enabled"), false);
+            m_gatewayMessageLabel->setText(
+                QStringLiteral("启动失败：%1").arg(m_gatewayManager->lastError()));
+        }
+        refreshGatewayPage();
+    });
+    connect(m_gatewayStopButton, &QPushButton::clicked, this, [this]() {
+        if (QMessageBox::question(
+                this, QStringLiteral("停止本地网关"),
+                QStringLiteral("停止后会恢复当前档案的直接连接配置。确定继续吗？"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+            return;
+        }
+        QSettings().setValue(QStringLiteral("gateway/enabled"), false);
+        m_gatewayManager->stop();
+        refreshGatewayPage();
+    });
+    connect(m_gatewayRestartButton, &QPushButton::clicked, this, [this]() {
+        QSettings().setValue(QStringLiteral("gateway/enabled"), true);
+        if (m_gatewayManager->isRunning()) m_gatewayManager->stop();
+        if (!m_gatewayManager->start()) {
+            QSettings().setValue(QStringLiteral("gateway/enabled"), false);
+            m_gatewayMessageLabel->setText(
+                QStringLiteral("重启失败：%1").arg(m_gatewayManager->lastError()));
+        }
+        refreshGatewayPage();
+    });
+    connect(clearGatewayLogs, &QPushButton::clicked, this, [this]() {
+        m_gatewayManager->clearRequestLogs();
+        refreshGatewayLogs();
+    });
 
     connect(m_logoutButton, &QPushButton::clicked,
             this, &MainWindow::onLogoutClicked);
@@ -1167,13 +1668,138 @@ void MainWindow::setupUi()
     connect(m_balanceRefreshTimer, &QTimer::timeout,
             this, &MainWindow::refreshBalance);
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    connect(m_navGroup, QOverload<int>::of(&QButtonGroup::idClicked),
+            this, &MainWindow::switchWorkspacePage);
     connect(m_filterGroup, QOverload<int>::of(&QButtonGroup::idClicked),
             this, &MainWindow::onFilterChanged);
 #else
+    connect(m_navGroup, QOverload<int>::of(&QButtonGroup::buttonClicked),
+            this, &MainWindow::switchWorkspacePage);
     connect(m_filterGroup, QOverload<int>::of(&QButtonGroup::buttonClicked),
             this, &MainWindow::onFilterChanged);
 #endif
     connect(clearLogButton, &QPushButton::clicked, m_logOutput, &QTextEdit::clear);
+    for (int pageIndex = 0; pageIndex < 6; ++pageIndex) {
+        auto *shortcut = new QShortcut(
+            QKeySequence(QStringLiteral("Alt+%1").arg(pageIndex + 1)), this);
+        connect(shortcut, &QShortcut::activated, this,
+                [this, pageIndex]() { switchWorkspacePage(pageIndex); });
+    }
+    refreshDesktopPage();
+    refreshGatewayPage();
+    refreshGatewayLogs();
+    if (QAbstractButton *launchpadButton = m_navGroup->button(0)) {
+        launchpadButton->setFocus(Qt::OtherFocusReason);
+    }
+    QTimer::singleShot(0, dashboardPage.first, [scroll = dashboardPage.first]() {
+        scroll->verticalScrollBar()->setValue(0);
+    });
+}
+
+void MainWindow::switchWorkspacePage(int pageIndex)
+{
+    if (!m_workspaceStack || pageIndex < 0 || pageIndex >= m_workspaceStack->count()) {
+        return;
+    }
+    m_workspaceStack->setCurrentIndex(pageIndex);
+    if (m_navGroup) {
+        if (QAbstractButton *button = m_navGroup->button(pageIndex)) {
+            button->setChecked(true);
+        }
+    }
+    if (pageIndex == 1) {
+        refreshDesktopPage();
+    } else if (pageIndex == 3) {
+        refreshGatewayPage();
+        refreshGatewayLogs();
+    }
+}
+
+void MainWindow::refreshDesktopPage()
+{
+    const auto refreshProduct = [this](AiTool tool, QLabel *statusLabel,
+                                       QPushButton *actionButton) {
+        if (!statusLabel || !actionButton) return;
+        const DesktopAppStatus state = m_toolManager->detectDesktop(tool);
+        const DesktopDownloader::Product product = tool == AiTool::ClaudeCode
+            ? DesktopDownloader::Product::Claude : DesktopDownloader::Product::ChatGpt;
+        if (state.installed) {
+            statusLabel->setText(QStringLiteral("已检测到本机安装"));
+            statusLabel->setStyleSheet(QStringLiteral(
+                "font-size:12px; color:#067647; font-weight:700;"));
+            actionButton->setText(QStringLiteral("已安装"));
+            actionButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
+            actionButton->setEnabled(false);
+        } else {
+            statusLabel->setText(DesktopDownloader::productSupported(product)
+                ? QStringLiteral("未安装 · 可通过 Aegisy 代理下载")
+                : QStringLiteral("当前平台仅支持官方下载页"));
+            statusLabel->setStyleSheet(QStringLiteral(
+                "font-size:12px; color:#b54708; font-weight:700;"));
+            actionButton->setText(DesktopDownloader::productSupported(product)
+                ? QStringLiteral("下载并安装") : QStringLiteral("打开下载页"));
+            actionButton->setIcon(style()->standardIcon(
+                DesktopDownloader::productSupported(product)
+                    ? QStyle::SP_ArrowDown : QStyle::SP_BrowserReload));
+            actionButton->setEnabled(true);
+        }
+    };
+    refreshProduct(AiTool::CodexCli, m_chatGptDesktopStatus, m_chatGptDesktopAction);
+    refreshProduct(AiTool::ClaudeCode, m_claudeDesktopStatus, m_claudeDesktopAction);
+}
+
+void MainWindow::refreshGatewayPage()
+{
+    if (!m_gatewayStateLabel) return;
+    const bool running = m_gatewayManager->isRunning();
+    m_gatewayStateLabel->setText(running ? QStringLiteral("运行中") : QStringLiteral("已停止"));
+    m_gatewayStateLabel->setStyleSheet(running
+        ? QStringLiteral("font-size:13px; font-weight:700; color:#067647; border:none;")
+        : QStringLiteral("font-size:13px; font-weight:700; color:#b54708; border:none;"));
+    m_gatewayEndpointLabel->setText(m_gatewayManager->endpoint(AiTool::CodexCli));
+    m_gatewayEndpointLabel->setToolTip(QStringLiteral(
+        "Codex: %1\nClaude: %2\nGemini: %3\nOpenCode: %4")
+        .arg(m_gatewayManager->endpoint(AiTool::CodexCli),
+             m_gatewayManager->endpoint(AiTool::ClaudeCode),
+             m_gatewayManager->endpoint(AiTool::GeminiCli),
+             m_gatewayManager->endpoint(AiTool::OpenCode)));
+    const bool configured = QSettings().value(
+        QStringLiteral("gateway/enabled"), false).toBool();
+    m_gatewayModeLabel->setText(configured
+        ? QStringLiteral("网关配置") : QStringLiteral("直接连接"));
+    m_gatewayMessageLabel->setText(running
+        ? QStringLiteral("网关仅监听 127.0.0.1，真实 API Key 只驻留在本机进程内存中。")
+        : QStringLiteral("当前未运行本地网关，已激活档案直接连接 Aegisy 服务。"));
+    m_gatewayStartButton->setEnabled(!running);
+    m_gatewayRestartButton->setEnabled(running);
+    m_gatewayStopButton->setEnabled(running);
+}
+
+void MainWindow::refreshGatewayLogs()
+{
+    if (!m_gatewayLogTable) return;
+    const QList<QJsonObject> logs = m_gatewayManager->requestLogs();
+    m_gatewayLogTable->setRowCount(0);
+    const int first = qMax(0, logs.size() - 50);
+    for (int index = logs.size() - 1; index >= first; --index) {
+        const QJsonObject entry = logs.at(index);
+        const int row = m_gatewayLogTable->rowCount();
+        m_gatewayLogTable->insertRow(row);
+        const QString timestamp = entry.value(QStringLiteral("timestamp")).toString();
+        const QString method = entry.value(QStringLiteral("method")).toString();
+        const QString path = entry.value(QStringLiteral("path")).toString();
+        m_gatewayLogTable->setItem(row, 0, new QTableWidgetItem(timestamp.mid(11, 8)));
+        m_gatewayLogTable->setItem(row, 1, new QTableWidgetItem(
+            entry.value(QStringLiteral("tool")).toString()));
+        m_gatewayLogTable->setItem(row, 2, new QTableWidgetItem(
+            QStringLiteral("%1 %2").arg(method, path)));
+        m_gatewayLogTable->setItem(row, 3, new QTableWidgetItem(
+            entry.value(QStringLiteral("model")).toString()));
+        m_gatewayLogTable->setItem(row, 4, new QTableWidgetItem(QString::number(
+            entry.value(QStringLiteral("status")).toInt())));
+        m_gatewayLogTable->setItem(row, 5, new QTableWidgetItem(QStringLiteral("%1 ms").arg(
+            entry.value(QStringLiteral("latency_ms")).toInt())));
+    }
 }
 
 void MainWindow::rebuildCards()
@@ -1429,7 +2055,7 @@ QWidget *MainWindow::createProfileCard(const Profile &profile, bool isActive,
     moreButton->setStyleSheet(QStringLiteral(
         "QToolButton { background: #ffffff; color: #475467; border: 1px solid #d0d5dd;"
         "border-radius: 7px; font-size: 18px; font-weight: 700; padding: 0; }"
-        "QToolButton:hover { background: #edf7f5; color: #0f766e; border-color: #7bb8b0; }"
+        "QToolButton:hover { background: #F5F8FF; color: #165DFF; border-color: #98B3F6; }"
         "QToolButton::menu-indicator { image: none; width: 0; height: 0; }"));
     auto *moreMenu = new QMenu(moreButton);
     QAction *testAction = moreMenu->addAction(
@@ -1548,7 +2174,7 @@ QWidget *MainWindow::createAddCard()
         "  background: transparent; color: #667085; border: 1px dashed #b9c0ca;"
         "  border-radius: 8px; font-size: 12px;"
         "}"
-        "QPushButton:hover { background: #f0fdf9; color: #0f5f59; border-color: #0f766e; }"));
+        "QPushButton:hover { background: #F5F8FF; color: #174EA6; border-color: #165DFF; }"));
     connect(button, &QPushButton::clicked,
             this, &MainWindow::onNewConnectClicked);
     return button;
@@ -1590,7 +2216,7 @@ void MainWindow::onBulkSwitchClicked()
     const struct { ProfileType type; const char *accent; const char *label; } rows[] = {
         { ProfileType::Claude, "#c15f3c", "Claude Code" },
         { ProfileType::Codex,  "#6366f1", "Codex CLI" },
-        { ProfileType::Gemini, "#1a73e8", "Gemini CLI" },
+        { ProfileType::Gemini, "#165DFF", "Gemini CLI" },
         { ProfileType::OpenCode, "#059669", "OpenCode" },
     };
 
@@ -2569,6 +3195,8 @@ void MainWindow::onGatewayRunningChanged(bool running)
         logMessage(QStringLiteral("已关闭本地网关并恢复直接连接配置"), kLogInfo);
     }
     updateRuntimeProfileStatus();
+    refreshGatewayPage();
+    refreshGatewayLogs();
     rebuildCards();
     rebuildTrayMenu();
 }

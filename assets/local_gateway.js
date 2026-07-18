@@ -2,6 +2,7 @@
 
 const http = require('http');
 const https = require('https');
+const crypto = require('crypto');
 const readline = require('readline');
 
 const port = Number(process.env.AEGISY_GATEWAY_PORT || '43112');
@@ -27,6 +28,21 @@ function authorized(request) {
     || request.headers['x-api-key'] === localToken
     || request.headers['x-goog-api-key'] === localToken
     || requestUrl.searchParams.get('key') === localToken;
+}
+
+function safeHeader(value) {
+  return String(value || '').replace(/[\r\n]/g, '').slice(0, 160);
+}
+
+function responseHeaders(headers) {
+  const result = { ...headers };
+  for (const name of [
+    'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+    'te', 'trailer', 'transfer-encoding', 'upgrade'
+  ]) {
+    delete result[name];
+  }
+  return result;
 }
 
 function routeRequest(url, headers) {
@@ -153,6 +169,8 @@ const server = http.createServer((request, response) => {
 
     const startedEvent = {
       type: 'request_started',
+      request_id: typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex'),
       timestamp: new Date().toISOString(),
       tool: route.tool,
       method: request.method || 'GET',
@@ -183,13 +201,24 @@ const server = http.createServer((request, response) => {
     if (body.length) headers['content-length'] = String(body.length);
 
     const startedAt = Date.now();
+    const requestId = startedEvent.request_id;
     // Flush small SSE chunks immediately instead of coalescing them.
     if (request.socket && typeof request.socket.setNoDelay === 'function') {
       request.socket.setNoDelay(true);
     }
     const transport = upstream.protocol === 'http:' ? http : https;
     let terminalEventEmitted = false;
-    const upstreamRequest = transport.request({
+    let clientClosed = false;
+    let upstreamTerminating = false;
+    let upstreamRequest = null;
+    response.on('close', () => {
+      if (response.writableEnded || upstreamTerminating) return;
+      clientClosed = true;
+      if (upstreamRequest && !upstreamRequest.destroyed) {
+        upstreamRequest.destroy(new Error('Client connection closed'));
+      }
+    });
+    upstreamRequest = transport.request({
       protocol: upstream.protocol,
       hostname: upstream.hostname,
       port: upstream.port || (upstream.protocol === 'http:' ? 80 : 443),
@@ -201,17 +230,24 @@ const server = http.createServer((request, response) => {
       if (upstreamRequest.socket && typeof upstreamRequest.socket.setNoDelay === 'function') {
         upstreamRequest.socket.setNoDelay(true);
       }
-      response.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.headers);
+      response.writeHead(upstreamResponse.statusCode || 502,
+                         responseHeaders(upstreamResponse.headers));
       const usage = { inputTokens: null, outputTokens: null, totalTokens: null };
       const contentType = String(upstreamResponse.headers['content-type'] || '').toLowerCase();
+      const contentEncoding = safeHeader(upstreamResponse.headers['content-encoding']);
+      const transferEncoding = safeHeader(upstreamResponse.headers['transfer-encoding']);
+      const upstreamRequestId = safeHeader(
+        upstreamResponse.headers['x-request-id'] || upstreamResponse.headers['request-id']);
       const isEventStream = contentType.includes('text/event-stream');
       let eventBuffer = '';
       let jsonBuffer = Buffer.alloc(0);
-      const emitTerminalEvent = (status, error = '') => {
+      let bytesReceived = 0;
+      const emitTerminalEvent = (status, termination, error = '') => {
         if (terminalEventEmitted) return;
         terminalEventEmitted = true;
         const event = appendUsageFields({
           type: 'request',
+          request_id: requestId,
           timestamp: new Date().toISOString(),
           tool: route.tool,
           method: request.method || 'GET',
@@ -219,7 +255,13 @@ const server = http.createServer((request, response) => {
           model: metadata.model,
           reasoning_effort: metadata.reasoningEffort,
           status,
-          latency_ms: Date.now() - startedAt
+          latency_ms: Date.now() - startedAt,
+          termination,
+          bytes_received: bytesReceived,
+          content_type: safeHeader(contentType),
+          content_encoding: contentEncoding,
+          transfer_encoding: transferEncoding,
+          upstream_request_id: upstreamRequestId
         }, usage);
         if (error) event.error = String(error).slice(0, 200);
         emit(event);
@@ -232,7 +274,11 @@ const server = http.createServer((request, response) => {
         try { inspectUsagePayload(JSON.parse(data), usage); } catch (_) {}
       };
       upstreamResponse.on('data', chunk => {
-        response.write(chunk);
+        bytesReceived += chunk.length;
+        if (!response.write(chunk)) {
+          upstreamResponse.pause();
+          response.once('drain', () => upstreamResponse.resume());
+        }
         if (isEventStream) {
           eventBuffer += chunk.toString('utf8');
           if (eventBuffer.length > 1024 * 1024) eventBuffer = eventBuffer.slice(-1024 * 1024);
@@ -254,11 +300,17 @@ const server = http.createServer((request, response) => {
         } else if (!isEventStream && jsonBuffer.length) {
           try { inspectUsagePayload(JSON.parse(jsonBuffer.toString('utf8')), usage); } catch (_) {}
         }
-        emitTerminalEvent(upstreamResponse.statusCode || 0);
+        emitTerminalEvent(upstreamResponse.statusCode || 0, 'end');
+      });
+      upstreamResponse.on('aborted', () => {
+        upstreamTerminating = true;
+        if (!response.destroyed) response.destroy();
+        emitTerminalEvent(502, 'aborted', 'Upstream response aborted before completion');
       });
       upstreamResponse.on('error', error => {
-        response.destroy();
-        emitTerminalEvent(502, error.message || error);
+        upstreamTerminating = true;
+        if (!response.destroyed) response.destroy();
+        emitTerminalEvent(502, 'error', error.message || error);
       });
     });
 
@@ -273,6 +325,7 @@ const server = http.createServer((request, response) => {
       }
       emit({
         type: 'request',
+        request_id: requestId,
         timestamp: new Date().toISOString(),
         tool: route.tool,
         method: request.method || 'GET',
@@ -281,6 +334,8 @@ const server = http.createServer((request, response) => {
         reasoning_effort: metadata.reasoningEffort,
         status: 502,
         latency_ms: Date.now() - startedAt,
+        termination: clientClosed ? 'client_closed' : 'request_error',
+        bytes_received: 0,
         error: String(error.message || error).slice(0, 200)
       });
     });

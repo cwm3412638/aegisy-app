@@ -13,6 +13,8 @@ on:
       - assets/**
       - installer.iss
       - package-windows.bat
+      - agent-runtime/**
+      - .github/workflows/windows-package.yml
       - release/generate-windows-appcast.ps1
       - release/smoke-test-windows-runtime.ps1
       - release/notes/*-windows.md
@@ -48,6 +50,17 @@ jobs:
           if (Test-Path -LiteralPath $publishedInstaller) {
               throw "Version $version is already published. Bump the project version before rebuilding Windows artifacts."
           }
+
+      - name: Verify Windows agent runtime
+        shell: pwsh
+        run: |
+          if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+              throw "Rust cargo is required for the bundled Aegisy Agent runtime"
+          }
+          rustup component add rustfmt clippy
+          cargo fmt --all --manifest-path agent-runtime\Cargo.toml -- --check
+          cargo test --workspace --manifest-path agent-runtime\Cargo.toml
+          cargo clippy --workspace --all-targets --manifest-path agent-runtime\Cargo.toml -- -D warnings
 
       - name: Mark build as running
         shell: pwsh
@@ -119,6 +132,9 @@ jobs:
           }
           if (-not (Get-ChildItem dist\AegisyClient -Filter "libcrypto*.dll" -File)) {
               throw "OpenSSL crypto runtime DLL is missing from the package directory"
+          }
+          if (-not (Test-Path -LiteralPath "dist\AegisyClient\aegisy-agentd.exe")) {
+              throw "The Aegisy Agent runtime is missing from the package directory"
           }
           Get-ChildItem dist\AegisyClient -Filter "*.dll" -File |
               Sort-Object Name |

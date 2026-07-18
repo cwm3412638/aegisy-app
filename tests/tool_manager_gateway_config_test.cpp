@@ -158,8 +158,13 @@ int main(int argc, char *argv[])
                     "obsolete Codex configuration fields were not removed")
         || !require(codexConfig.contains(QStringLiteral(
                         "requires_openai_auth = false\n"
+                        "request_max_retries = 4\n"
+                        "stream_max_retries = 5\n"
+                        "stream_idle_timeout_ms = 600000\n"
+                        "supports_websockets = false\n"
                         "experimental_bearer_token = \"aegisy-local-test-token\"\n"
-                        "http_headers = { \"x-openai-actor-authorization\" = \"aegisy\" }")),
+                        "http_headers = { \"x-openai-actor-authorization\" = \"aegisy\", "
+                        "\"accept-encoding\" = \"identity\" }")),
                     "Codex third-party capability compatibility fields are missing")
         || !require(codexConfig.contains(QStringLiteral(
                         "[projects.\"/tmp/aegisy-project\"]\ntrust_level = \"trusted\"")),
@@ -198,7 +203,8 @@ int main(int argc, char *argv[])
     QFile missingHeaderConfig(codexConfigPath);
     QString missingHeader = codexConfig;
     missingHeader.remove(QStringLiteral(
-        "http_headers = { \"x-openai-actor-authorization\" = \"aegisy\" }\n"));
+        "http_headers = { \"x-openai-actor-authorization\" = \"aegisy\", "
+        "\"accept-encoding\" = \"identity\" }\n"));
     if (!missingHeaderConfig.open(QIODevice::WriteOnly | QIODevice::Truncate)
             || missingHeaderConfig.write(missingHeader.toUtf8()) < 0) {
         return 1;
@@ -346,8 +352,13 @@ int main(int argc, char *argv[])
                     "direct Codex configuration omitted the 272K context limits")
         || !require(restoredConfig.contains(QStringLiteral(
                         "requires_openai_auth = false\n"
+                        "request_max_retries = 4\n"
+                        "stream_max_retries = 5\n"
+                        "stream_idle_timeout_ms = 600000\n"
+                        "supports_websockets = false\n"
                         "experimental_bearer_token = \"sk-direct-test\"\n"
-                        "http_headers = { \"x-openai-actor-authorization\" = \"aegisy\" }")),
+                        "http_headers = { \"x-openai-actor-authorization\" = \"aegisy\", "
+                        "\"accept-encoding\" = \"identity\" }")),
                     "direct Codex compatibility fields are missing")
         || !require(restoredConfig.contains(QStringLiteral("[model_providers.ccswitch]"))
                         && restoredConfig.contains(QStringLiteral(
