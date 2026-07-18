@@ -64,6 +64,12 @@ while IFS= read -r line; do
     *'"method":"thread/start"'*)
       printf '{"id":%s,"result":{"thread":{"id":"thread-fixture"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
       ;;
+    *'"method":"thread/archive"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"thread/unarchive"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"thread-fixture"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
+      ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-fixture"}}}\n' "$id"
       case "$line" in
@@ -290,6 +296,11 @@ fn stdio_control_cancels_a_turn_while_normal_dispatch_is_blocked() {
         .unwrap()
         .iter()
         .any(|capability| capability == "turn.cancel.interrupt"));
+    assert!(initialized["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "session.provider.lifecycle.archive"));
     send(
         &mut stdin,
         &json!({ "jsonrpc": "2.0", "method": "initialized" }),
@@ -355,6 +366,94 @@ fn stdio_control_cancels_a_turn_while_normal_dispatch_is_blocked() {
 
     send(&mut stdin, &request("5", "shutdown", json!({})));
     receive_until(&receiver, |message| message["id"] == "5");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_provider_archive_and_unarchive_follow_session_lifecycle() {
+    let codex = fake_codex();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "lifecycle-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| message["id"] == "lifecycle-initialize");
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    send(
+        &mut stdin,
+        &request(
+            "lifecycle-session",
+            "session/start",
+            json!({ "mode": "chat" }),
+        ),
+    );
+    let session = receive_until(&receiver, |message| message["id"] == "lifecycle-session");
+    let session_id = session["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    send(
+        &mut stdin,
+        &request(
+            "lifecycle-archive",
+            "session/archive",
+            json!({ "session_id": session_id }),
+        ),
+    );
+    let archived = receive_until(&receiver, |message| message["id"] == "lifecycle-archive");
+    assert_eq!(archived["result"]["status"], "archived");
+    assert_eq!(archived["result"]["provider_state_updated"], true);
+
+    send(
+        &mut stdin,
+        &request(
+            "lifecycle-unarchive",
+            "session/unarchive",
+            json!({ "session_id": session_id }),
+        ),
+    );
+    let unarchived = receive_until(&receiver, |message| message["id"] == "lifecycle-unarchive");
+    assert_eq!(unarchived["result"]["status"], "active");
+    assert_eq!(unarchived["result"]["provider_state_updated"], true);
+
+    send(
+        &mut stdin,
+        &request("lifecycle-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| message["id"] == "lifecycle-shutdown");
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();

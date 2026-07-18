@@ -47,7 +47,7 @@ use aegisy_aap::stable::v0_1::{
 use aegisy_aap::{Notification, Request, Response, JSONRPC_VERSION, PROTOCOL_VERSION};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use codex_adapter::{BackendInfo, CodexAdapter, CodexEvent, CommandItem};
+use codex_adapter::{BackendInfo, CodexAdapter, CodexEvent, CodexSession, CommandItem};
 use diagnostic_store::DiagnosticStore;
 use git_query::{commit as git_commit, diff as git_diff, log as git_log, overview as git_overview};
 use git_status::{ignored_paths, status as git_status};
@@ -1867,6 +1867,8 @@ impl Runtime {
                         "runtime.codex-app-server".into(),
                         "timeline.command.structured.read-only".into(),
                         "turn.cancel.interrupt".into(),
+                        "session.provider.lifecycle.archive".into(),
+                        "session.provider.lifecycle.unarchive".into(),
                     ],
                 )
             }
@@ -2820,6 +2822,43 @@ impl Runtime {
         )
     }
 
+    fn provider_thread_for_lifecycle(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, (i64, String)> {
+        if let Some(state) = self.sessions.get(session_id) {
+            return Ok(state.backend_session_id.clone());
+        }
+        let binding = self
+            .workbench_store
+            .as_ref()
+            .and_then(|store| store.load_session_runtime_binding(session_id).ok());
+        if binding.as_ref().is_some_and(|binding| {
+            binding.adapter == "codex-app-server" && binding.backend_session_id.is_some()
+        }) {
+            return Err((
+                -32141,
+                "Codex provider state is not loaded; resume the session before changing its provider lifecycle"
+                    .into(),
+            ));
+        }
+        Ok(None)
+    }
+
+    fn archive_provider_thread(&mut self, thread_id: &str) -> Result<(), String> {
+        match &mut self.backend {
+            Backend::Codex(adapter) => adapter.archive_session(thread_id),
+            _ => Err("Codex provider adapter is unavailable".into()),
+        }
+    }
+
+    fn unarchive_provider_thread(&mut self, thread_id: &str) -> Result<CodexSession, String> {
+        match &mut self.backend {
+            Backend::Codex(adapter) => adapter.unarchive_session(thread_id),
+            _ => Err("Codex provider adapter is unavailable".into()),
+        }
+    }
+
     fn session_archive(&mut self, request: Request) -> Vec<Value> {
         let params: SessionIdentityParams = match serde_json::from_value(request.params.clone()) {
             Ok(params) => params,
@@ -2849,29 +2888,70 @@ impl Runtime {
             );
         }
         let exists_in_memory = self.sessions.contains_key(&params.session_id);
-        let stored = if let Some(store) = self.workbench_store.as_mut() {
+        let stored_status = self
+            .workbench_store
+            .as_ref()
+            .and_then(|store| store.load_session(&params.session_id).ok())
+            .map(|session| session.status);
+        if !exists_in_memory && stored_status.is_none() {
+            return self.error_for(&request, -32023, "session not found");
+        }
+        if self.archived_sessions.contains(&params.session_id)
+            || stored_status.as_deref() == Some("archived")
+        {
+            return self.error_for(&request, -32026, "session is already archived");
+        }
+        let provider_thread = match self.provider_thread_for_lifecycle(&params.session_id) {
+            Ok(thread_id) => thread_id,
+            Err((code, message)) => return self.error_for(&request, code, message),
+        };
+        let provider_archived = if let Some(thread_id) = provider_thread.as_deref() {
+            if let Err(error) = self.archive_provider_thread(thread_id) {
+                return self.error_for(
+                    &request,
+                    -32143,
+                    format!("cannot archive Codex provider thread: {error}"),
+                );
+            }
+            true
+        } else {
+            false
+        };
+        if let Some(store) = self.workbench_store.as_mut() {
             match store.archive_session(&params.session_id, now_ms()) {
-                Ok(session) => Some(session),
+                Ok(_) => {}
                 Err(error) => {
+                    if provider_archived {
+                        let compensation_failed =
+                            provider_thread.as_deref().is_some_and(|thread_id| {
+                                self.unarchive_provider_thread(thread_id).is_err()
+                            });
+                        if compensation_failed {
+                            return self.error_for(
+                                &request,
+                                -32145,
+                                "Codex provider archive was acknowledged but local persistence failed and compensation also failed; session recovery is required",
+                            );
+                        }
+                    }
                     return self.error_for(
                         &request,
                         -32114,
                         format!("cannot archive durable session: {}", error.message),
-                    )
+                    );
                 }
             }
-        } else {
-            None
-        };
-        if !exists_in_memory && stored.is_none() {
-            return self.error_for(&request, -32023, "session not found");
         }
         if !self.archived_sessions.insert(params.session_id.clone()) {
             return self.error_for(&request, -32026, "session is already archived");
         }
         self.success_for(
             &request,
-            json!({ "session_id": params.session_id, "status": "archived" }),
+            json!({
+                "session_id": params.session_id,
+                "status": "archived",
+                "provider_state_updated": provider_archived
+            }),
         )
     }
 
@@ -2883,29 +2963,94 @@ impl Runtime {
             }
         };
         let exists_in_memory = self.sessions.contains_key(&params.session_id);
-        let stored = if let Some(store) = self.workbench_store.as_mut() {
-            match store.unarchive_session(&params.session_id, now_ms()) {
-                Ok(session) => Some(session),
+        let stored_status = self
+            .workbench_store
+            .as_ref()
+            .and_then(|store| store.load_session(&params.session_id).ok())
+            .map(|session| session.status);
+        if !exists_in_memory && stored_status.is_none() {
+            return self.error_for(&request, -32023, "session not found");
+        }
+        if !self.archived_sessions.contains(&params.session_id)
+            && stored_status.as_deref() != Some("archived")
+        {
+            return self.error_for(&request, -32026, "session is not archived");
+        }
+        let provider_thread = match self.provider_thread_for_lifecycle(&params.session_id) {
+            Ok(thread_id) => thread_id,
+            Err((code, message)) => return self.error_for(&request, code, message),
+        };
+        let provider_session = if let Some(thread_id) = provider_thread.as_deref() {
+            let restored = match self.unarchive_provider_thread(thread_id) {
+                Ok(session) => session,
                 Err(error) => {
+                    return self.error_for(
+                        &request,
+                        -32143,
+                        format!("cannot restore Codex provider thread: {error}"),
+                    )
+                }
+            };
+            if restored.thread_id != thread_id {
+                let compensation_failed =
+                    self.archive_provider_thread(&restored.thread_id).is_err();
+                if compensation_failed {
+                    return self.error_for(
+                        &request,
+                        -32145,
+                        "Codex provider unarchive returned a different thread and compensation failed; session recovery is required",
+                    );
+                }
+                return self.error_for(
+                    &request,
+                    -32143,
+                    "Codex provider unarchive returned a different thread identity",
+                );
+            }
+            Some(restored)
+        } else {
+            None
+        };
+        if let Some(store) = self.workbench_store.as_mut() {
+            match store.unarchive_session(&params.session_id, now_ms()) {
+                Ok(_) => {}
+                Err(error) => {
+                    if provider_session.is_some() {
+                        let compensation_failed =
+                            provider_thread.as_deref().is_some_and(|thread_id| {
+                                self.archive_provider_thread(thread_id).is_err()
+                            });
+                        if compensation_failed {
+                            return self.error_for(
+                                &request,
+                                -32145,
+                                "Codex provider unarchive was acknowledged but local persistence failed and compensation also failed; session recovery is required",
+                            );
+                        }
+                    }
                     return self.error_for(
                         &request,
                         -32114,
                         format!("cannot restore durable session: {}", error.message),
-                    )
+                    );
                 }
             }
-        } else {
-            None
-        };
-        if !exists_in_memory && stored.is_none() {
-            return self.error_for(&request, -32023, "session not found");
         }
-        if !self.archived_sessions.remove(&params.session_id) && stored.is_none() {
-            return self.error_for(&request, -32026, "session is not archived");
+        if let Some(provider_session) = provider_session {
+            if let Some(state) = self.sessions.get_mut(&params.session_id) {
+                state.backend_session_id = Some(provider_session.thread_id);
+                state.backend_info.provider = Some(provider_session.provider);
+                state.backend_info.model = Some(provider_session.model);
+            }
         }
+        self.archived_sessions.remove(&params.session_id);
         self.success_for(
             &request,
-            json!({ "session_id": params.session_id, "status": "active" }),
+            json!({
+                "session_id": params.session_id,
+                "status": "active",
+                "provider_state_updated": provider_thread.is_some()
+            }),
         )
     }
 

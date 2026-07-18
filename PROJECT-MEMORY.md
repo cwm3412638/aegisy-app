@@ -257,9 +257,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   implicitly to model context.
   The pinned Codex 0.144.5 schema also now has adapter-only, schema-driven mappings
   for `thread/list`, `thread/read`, `thread/unarchive`, `thread/delete`, and
-  `thread/compact/start`, including thread-scoped metadata parsing. They remain
-  unreachable from AAP until user deletion/compaction review, recovery, and provider
-  failure compensation are implemented.
+  `thread/compact/start`, including thread-scoped metadata parsing. AAP archive and
+  unarchive now update a loaded bound Codex thread, reject an unloaded provider
+  continuation, and compensate provider state when local persistence fails. Provider
+  list/read/delete/compact remain unreachable from AAP until read scoping, user
+  deletion/compaction review, recovery, and provider failure compensation are complete.
   Two-phase
   scoped deletion, retention policies, undo, purge, and Blob GC coordination are now
   implemented under task `5.8`.
