@@ -471,6 +471,25 @@ struct SessionIdentityParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProviderThreadListParams {
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default = "default_provider_thread_list_limit")]
+    limit: usize,
+    #[serde(default)]
+    archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProviderThreadReadParams {
+    thread_id: String,
+    #[serde(default)]
+    include_turns: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct SessionForkParams {
     session_id: String,
     #[serde(default)]
@@ -951,6 +970,10 @@ const fn default_session_list_limit() -> usize {
     50
 }
 
+const fn default_provider_thread_list_limit() -> usize {
+    50
+}
+
 const fn default_session_history_limit() -> usize {
     100
 }
@@ -977,6 +1000,141 @@ const fn default_terminal_cols() -> u16 {
 
 const fn default_workspace_edit_page_limit() -> usize {
     workspace_edit_preview::MAX_PAGE_BYTES
+}
+
+fn bounded_provider_text(value: &str, byte_limit: usize) -> String {
+    let redacted = output_redaction::redact_complete(value);
+    if redacted.len() <= byte_limit {
+        return redacted;
+    }
+    let mut end = byte_limit;
+    while end > 0 && !redacted.is_char_boundary(end) {
+        end -= 1;
+    }
+    redacted[..end].to_owned()
+}
+
+fn provider_optional_text(value: Option<&Value>, byte_limit: usize) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(|value| bounded_provider_text(value, byte_limit))
+}
+
+fn provider_thread_source(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(source)) => bounded_provider_text(source, 64),
+        Some(Value::Object(source)) => source
+            .get("custom")
+            .and_then(Value::as_str)
+            .map(|custom| bounded_provider_text(custom, 64))
+            .unwrap_or_else(|| "sub-agent".into()),
+        _ => "unknown".into(),
+    }
+}
+
+fn provider_thread_status(value: Option<&Value>) -> Value {
+    let state = value
+        .and_then(|status| status.get("type"))
+        .and_then(Value::as_str)
+        .map(|state| bounded_provider_text(state, 32))
+        .unwrap_or_else(|| "unknown".into());
+    let active_flags = value
+        .and_then(|status| status.get("activeFlags"))
+        .and_then(Value::as_array)
+        .map(|flags| {
+            flags
+                .iter()
+                .filter_map(Value::as_str)
+                .take(16)
+                .map(|flag| bounded_provider_text(flag, 64))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({ "state": state, "active_flags": active_flags })
+}
+
+fn provider_thread_summary(thread: &Value) -> Result<Value, String> {
+    let id = thread
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(|id| bounded_provider_text(id, 256))
+        .ok_or_else(|| "Codex thread metadata is missing id".to_owned())?;
+    let session_id = thread
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(|id| bounded_provider_text(id, 256))
+        .ok_or_else(|| "Codex thread metadata is missing sessionId".to_owned())?;
+    let cwd = thread
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+        .map(|cwd| bounded_provider_text(cwd, 4 * 1024))
+        .ok_or_else(|| "Codex thread metadata is missing cwd".to_owned())?;
+    let model_provider = thread
+        .get("modelProvider")
+        .and_then(Value::as_str)
+        .filter(|provider| !provider.is_empty())
+        .map(|provider| bounded_provider_text(provider, 256))
+        .ok_or_else(|| "Codex thread metadata is missing modelProvider".to_owned())?;
+    let turns = thread
+        .get("turns")
+        .and_then(Value::as_array)
+        .map_or(0, |turns| turns.len().min(2_000));
+    Ok(json!({
+        "thread_id": id,
+        "provider_session_id": session_id,
+        "title": provider_optional_text(thread.get("name"), 512),
+        "preview": provider_optional_text(thread.get("preview"), 8 * 1024).unwrap_or_default(),
+        "cwd": cwd,
+        "model_provider": model_provider,
+        "source": provider_thread_source(thread.get("source")),
+        "status": provider_thread_status(thread.get("status")),
+        "created_at_s": thread.get("createdAt").and_then(Value::as_i64),
+        "updated_at_s": thread.get("updatedAt").and_then(Value::as_i64),
+        "recency_at_s": thread.get("recencyAt").and_then(Value::as_i64),
+        "ephemeral": thread.get("ephemeral").and_then(Value::as_bool).unwrap_or(false),
+        "forked_from_thread_id": provider_optional_text(thread.get("forkedFromId"), 256),
+        "turn_count": turns
+    }))
+}
+
+fn provider_turn_summaries(thread: &Value) -> Result<Vec<Value>, String> {
+    let turns = thread
+        .get("turns")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Codex thread read response is missing turns".to_owned())?;
+    turns
+        .iter()
+        .take(2_000)
+        .map(|turn| {
+            let id = turn
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(|id| bounded_provider_text(id, 256))
+                .ok_or_else(|| "Codex turn metadata is missing id".to_owned())?;
+            let status = turn
+                .get("status")
+                .and_then(Value::as_str)
+                .map(|status| bounded_provider_text(status, 32))
+                .unwrap_or_else(|| "unknown".into());
+            let item_count = turn
+                .get("items")
+                .and_then(Value::as_array)
+                .map_or(0, |items| items.len().min(10_000));
+            Ok(json!({
+                "turn_id": id,
+                "status": status,
+                "started_at_s": turn.get("startedAt").and_then(Value::as_i64),
+                "completed_at_s": turn.get("completedAt").and_then(Value::as_i64),
+                "duration_ms": turn.get("durationMs").and_then(Value::as_i64),
+                "item_count": item_count,
+                "error_present": turn.get("error").is_some_and(|error| !error.is_null())
+            }))
+        })
+        .collect()
 }
 
 fn default_terminal_kind() -> String {
@@ -1750,6 +1908,8 @@ impl Runtime {
             "session/read" => self.session_read(request),
             "session/title" => self.session_title(request),
             "session/unarchive" => self.session_unarchive(request),
+            "session/provider-list" => self.provider_thread_list(request),
+            "session/provider-read" => self.provider_thread_read(request),
             "retention/policy/read" => self.retention_policy_read(request),
             "retention/policy/remove" => self.retention_policy_remove(request),
             "retention/policy/set" => self.retention_policy_set(request),
@@ -1869,6 +2029,7 @@ impl Runtime {
                         "turn.cancel.interrupt".into(),
                         "session.provider.lifecycle.archive".into(),
                         "session.provider.lifecycle.unarchive".into(),
+                        "session.provider.lifecycle.list-read".into(),
                     ],
                 )
             }
@@ -2707,6 +2868,168 @@ impl Runtime {
         });
         sessions.truncate(params.limit);
         self.success_for(&request, json!({ "sessions": sessions, "durable": false }))
+    }
+
+    fn provider_project_cwd(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Option<PathBuf>, (i64, String)> {
+        let Some(project_id) = project_id else {
+            return Ok(None);
+        };
+        let root = self
+            .projects
+            .get(project_id)
+            .map(|project| PathBuf::from(&project.root))
+            .or_else(|| {
+                self.workbench_store.as_ref().and_then(|store| {
+                    store
+                        .load_project(project_id)
+                        .ok()
+                        .map(|project| PathBuf::from(project.canonical_root))
+                })
+            })
+            .ok_or_else(|| (-32022, "project not found".to_owned()))?;
+        if !root.is_dir() {
+            return Err((-32020, "project workspace is unavailable".into()));
+        }
+        Ok(Some(root))
+    }
+
+    fn provider_thread_list(&mut self, request: Request) -> Vec<Value> {
+        let params: ProviderThreadListParams = match serde_json::from_value(request.params.clone())
+        {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        if !(1..=100).contains(&params.limit) {
+            return self.error_for(
+                &request,
+                -32602,
+                "provider thread list limit must be between 1 and 100",
+            );
+        }
+        if params
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| cursor.len() > 4 * 1024 || cursor.chars().any(char::is_control))
+        {
+            return self.error_for(&request, -32602, "provider thread cursor is invalid");
+        }
+        let cwd = match self.provider_project_cwd(params.project_id.as_deref()) {
+            Ok(cwd) => cwd,
+            Err((code, message)) => return self.error_for(&request, code, message),
+        };
+        let result = match &mut self.backend {
+            Backend::Codex(adapter) => adapter.list_threads(
+                params.cursor.as_deref(),
+                Some(params.limit as u32),
+                cwd.as_deref(),
+                params.archived,
+            ),
+            Backend::Preview => {
+                Err("provider thread listing is unavailable in preview runtime".into())
+            }
+            Backend::Recovery(_) => Err("workbench is in read-only recovery mode".into()),
+            Backend::Unavailable(error) => Err(error.clone()),
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => return self.error_for(&request, -32110, error),
+        };
+        let data = match result.get("data").and_then(Value::as_array) {
+            Some(data) => data,
+            None => {
+                return self.error_for(
+                    &request,
+                    -32143,
+                    "Codex thread/list response is missing data",
+                )
+            }
+        };
+        let mut threads = Vec::with_capacity(data.len().min(params.limit));
+        for thread in data.iter().take(params.limit) {
+            match provider_thread_summary(thread) {
+                Ok(summary) => threads.push(summary),
+                Err(error) => return self.error_for(&request, -32143, error),
+            }
+        }
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "provider-thread-list/0.1",
+                "adapter": "codex-app-server",
+                "project_id": params.project_id,
+                "threads": threads,
+                "next_cursor": provider_optional_text(result.get("nextCursor"), 4 * 1024),
+                "backwards_cursor": provider_optional_text(result.get("backwardsCursor"), 4 * 1024),
+                "provider_state_only": true,
+                "content_projection": "metadata-only"
+            }),
+        )
+    }
+
+    fn provider_thread_read(&mut self, request: Request) -> Vec<Value> {
+        let params: ProviderThreadReadParams = match serde_json::from_value(request.params.clone())
+        {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        let thread_id = params.thread_id.trim();
+        if thread_id.is_empty() || thread_id.len() > 256 || thread_id.chars().any(char::is_control)
+        {
+            return self.error_for(&request, -32602, "provider thread ID is invalid");
+        }
+        let result = match &mut self.backend {
+            Backend::Codex(adapter) => adapter.read_thread(thread_id, params.include_turns),
+            Backend::Preview => {
+                Err("provider thread reading is unavailable in preview runtime".into())
+            }
+            Backend::Recovery(_) => Err("workbench is in read-only recovery mode".into()),
+            Backend::Unavailable(error) => Err(error.clone()),
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => return self.error_for(&request, -32110, error),
+        };
+        let thread = match result.get("thread") {
+            Some(thread) => thread,
+            None => {
+                return self.error_for(
+                    &request,
+                    -32143,
+                    "Codex thread/read response is missing thread",
+                )
+            }
+        };
+        let summary = match provider_thread_summary(thread) {
+            Ok(summary) => summary,
+            Err(error) => return self.error_for(&request, -32143, error),
+        };
+        let turns = if params.include_turns {
+            match provider_turn_summaries(thread) {
+                Ok(turns) => turns,
+                Err(error) => return self.error_for(&request, -32143, error),
+            }
+        } else {
+            Vec::new()
+        };
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "provider-thread-read/0.1",
+                "thread": summary,
+                "turns": turns,
+                "include_turns": params.include_turns,
+                "provider_state_only": true,
+                "content_projection": "metadata-only",
+                "provider_items_omitted": true
+            }),
+        )
     }
 
     fn projection_recovery_status(&self, request: Request) -> Vec<Value> {

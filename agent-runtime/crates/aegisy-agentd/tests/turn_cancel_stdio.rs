@@ -70,6 +70,12 @@ while IFS= read -r line; do
     *'"method":"thread/unarchive"'*)
       printf '{"id":%s,"result":{"thread":{"id":"thread-fixture"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
       ;;
+    *'"method":"thread/list"'*)
+      printf '{"id":%s,"result":{"data":[{"id":"thread-fixture","sessionId":"session-fixture","name":"Fixture session","preview":"Read-only fixture preview","cwd":"/tmp/provider-fixture","modelProvider":"fixture","source":"appServer","status":{"type":"idle"},"createdAt":10,"updatedAt":20,"recencyAt":20,"ephemeral":false,"forkedFromId":null,"turns":[]}],"nextCursor":null,"backwardsCursor":null}}\n' "$id"
+      ;;
+    *'"method":"thread/read"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"thread-fixture","sessionId":"session-fixture","name":"Fixture session","preview":"Read-only fixture preview","cwd":"/tmp/provider-fixture","modelProvider":"fixture","source":"appServer","status":{"type":"idle"},"createdAt":10,"updatedAt":20,"recencyAt":20,"ephemeral":false,"forkedFromId":null,"turns":[{"id":"turn-fixture","items":[],"status":"completed","startedAt":10,"completedAt":20,"durationMs":10}]}}}\n' "$id"
+      ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-fixture"}}}\n' "$id"
       case "$line" in
@@ -454,6 +460,96 @@ fn stdio_provider_archive_and_unarchive_follow_session_lifecycle() {
         &request("lifecycle-shutdown", "shutdown", json!({})),
     );
     receive_until(&receiver, |message| message["id"] == "lifecycle-shutdown");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_provider_thread_list_and_read_are_bounded_metadata_projections() {
+    let codex = fake_codex();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "provider-read-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    let initialized = receive_until(&receiver, |message| {
+        message["id"] == "provider-read-initialize"
+    });
+    assert!(initialized["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "session.provider.lifecycle.list-read"));
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+
+    send(
+        &mut stdin,
+        &request(
+            "provider-list",
+            "session/provider-list",
+            json!({ "limit": 10 }),
+        ),
+    );
+    let listed = receive_until(&receiver, |message| message["id"] == "provider-list");
+    assert_eq!(
+        listed["result"]["threads"][0]["thread_id"],
+        "thread-fixture"
+    );
+    assert_eq!(listed["result"]["content_projection"], "metadata-only");
+    assert_eq!(listed["result"]["provider_state_only"], true);
+    assert!(listed["result"]["threads"][0].get("path").is_none());
+
+    send(
+        &mut stdin,
+        &request(
+            "provider-read",
+            "session/provider-read",
+            json!({ "thread_id": "thread-fixture", "include_turns": true }),
+        ),
+    );
+    let read = receive_until(&receiver, |message| message["id"] == "provider-read");
+    assert_eq!(read["result"]["thread"]["thread_id"], "thread-fixture");
+    assert_eq!(read["result"]["turns"][0]["turn_id"], "turn-fixture");
+    assert_eq!(read["result"]["provider_items_omitted"], true);
+
+    send(
+        &mut stdin,
+        &request("provider-read-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| {
+        message["id"] == "provider-read-shutdown"
+    });
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();

@@ -37,6 +37,13 @@ approval policy of `never`. Chat uses an isolated empty temporary workspace;
 Work binds the selected project root so the Agent can inspect project context.
 Neither mode can approve file writes or mutating commands in this milestone.
 
+Codex provider state is exposed only through bounded read-only projections:
+`session/provider-list` lists thread metadata with an optional project root and
+cursor, and `session/provider-read` reads one thread's metadata plus bounded turn
+metadata when requested. Provider item contents, raw rollout fields, delete, and
+compact operations are intentionally omitted until their AAP review and recovery
+contracts are complete.
+
 Workspace browsing uses project-relative paths only. The sidecar rejects path
 traversal, absolute paths, symlinks, sensitive credential filenames, binary
 content, and text files larger than the negotiated preview limit. Generated and

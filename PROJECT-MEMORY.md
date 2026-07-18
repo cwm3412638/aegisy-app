@@ -243,9 +243,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   restart and maps the pinned Codex 0.144.5 `thread/resume` contract when the exact
   binding is present; `session/fork` copies redacted history through the latest or a
   completed turn boundary and maps `thread/fork`. Missing/incompatible provider
-  bindings fail explicitly and require a portable fork. Thread list/read/delete/compact,
-  complete provider lifecycle recovery, and full runtime reconstruction remain future
-  work. Resume now updates the durable session environment identity and the
+  bindings fail explicitly and require a portable fork. Provider thread list/read now
+  have bounded AAP metadata projections (`session/provider-list` and
+  `session/provider-read`) with raw provider items omitted; provider delete/compact,
+  complete lifecycle recovery, and full runtime reconstruction remain future work.
+  Resume now updates the durable session environment identity and the
   `session.resumed` projection replay applies the same identity, so a resume cannot
   leave SQLite rows and the event-derived candidate with different environment state.
   A protocol isolation fixture now verifies that two Work sessions receive distinct
@@ -260,7 +262,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   `thread/compact/start`, including thread-scoped metadata parsing. AAP archive and
   unarchive now update a loaded bound Codex thread, reject an unloaded provider
   continuation, and compensate provider state when local persistence fails. Provider
-  list/read/delete/compact remain unreachable from AAP until read scoping, user
+  list/read are now reachable only through those metadata projections; provider
+  delete/compact remain unreachable from AAP until read scoping, user
   deletion/compaction review, recovery, and provider failure compensation are complete.
   Two-phase
   scoped deletion, retention policies, undo, purge, and Blob GC coordination are now
