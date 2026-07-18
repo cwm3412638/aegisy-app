@@ -86,6 +86,7 @@ const MAX_TRUST_REVIEW_DEPTH: usize = 5;
 const MAX_TRUST_REVIEW_HOOK_BYTES: usize = 256 * 1024;
 const MAX_RUNTIME_REPLAY_ITEMS: usize = 2_000;
 const RUNTIME_REPLAY_PAGE_SIZE: usize = 200;
+const MAX_TURN_METADATA_UPDATES_PER_KIND: usize = 32;
 
 const TRUST_INSTRUCTION_NAMES: &[&str] = &[
     "AGENTS.md",
@@ -5281,6 +5282,8 @@ impl Runtime {
             .expect("active turn steering handle");
         let mut started = false;
         let mut persistence_error: Option<String> = None;
+        let mut metadata_update_counts = HashMap::<String, usize>::new();
+        let mut metadata_truncation_notified = HashSet::<String>::new();
         let result = match &mut backend {
             Backend::Codex(adapter) => adapter.run_turn(
                 &codex_thread_id,
@@ -5486,56 +5489,152 @@ impl Runtime {
                         }
                     }
                     CodexEvent::TokenUsage { turn_id, usage } => {
-                        let item = TimelineItem {
-                            id: format!("usage-{turn_id}"),
-                            kind: "usage".into(),
-                            role: "system".into(),
-                            state: "updated".into(),
-                            content: "Token usage updated".into(),
-                            data: Some(usage),
-                        };
-                        emit(self.event(
-                            &params.session_id,
-                            Some(&turn_id),
-                            "usage.updated",
-                            Some(item),
-                        ));
+                        let key = format!("usage:{turn_id}");
+                        let count = metadata_update_counts.entry(key.clone()).or_default();
+                        if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
+                            *count += 1;
+                            let item = TimelineItem {
+                                id: self.allocate_id("usage"),
+                                kind: "usage".into(),
+                                role: "system".into(),
+                                state: "updated".into(),
+                                content: "Token usage updated".into(),
+                                data: Some(usage),
+                            };
+                            if let Err(error) =
+                                self.persist_item(&params.session_id, Some(&turn_id), &item)
+                            {
+                                persistence_error =
+                                    Some(format!("cannot persist usage item: {error}"));
+                                return;
+                            }
+                            if let Some(state) = self.sessions.get_mut(&params.session_id) {
+                                state.items.push(item.clone());
+                            }
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&turn_id),
+                                "usage.updated",
+                                Some(item),
+                            ));
+                        } else if metadata_truncation_notified.insert(key) {
+                            let item = TimelineItem {
+                                id: self.allocate_id("usage-truncated"),
+                                kind: "usage".into(),
+                                role: "system".into(),
+                                state: "truncated".into(),
+                                content: "Token usage updates truncated".into(),
+                                data: Some(json!({
+                                    "max_updates": MAX_TURN_METADATA_UPDATES_PER_KIND
+                                })),
+                            };
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&turn_id),
+                                "usage.truncated",
+                                Some(item),
+                            ));
+                        }
                     }
                     CodexEvent::TurnDiff { turn_id, diff } => {
-                        let item = TimelineItem {
-                            id: format!("diff-{turn_id}"),
-                            kind: "diff".into(),
-                            role: "tool".into(),
-                            state: "updated".into(),
-                            content: diff,
-                            data: Some(json!({ "projection": "bounded-unified-diff" })),
-                        };
-                        emit(self.event(
-                            &params.session_id,
-                            Some(&turn_id),
-                            "turn.diff.updated",
-                            Some(item),
-                        ));
+                        let key = format!("diff:{turn_id}");
+                        let count = metadata_update_counts.entry(key.clone()).or_default();
+                        if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
+                            *count += 1;
+                            let item = TimelineItem {
+                                id: self.allocate_id("diff"),
+                                kind: "diff".into(),
+                                role: "tool".into(),
+                                state: "updated".into(),
+                                content: diff,
+                                data: Some(json!({ "projection": "bounded-unified-diff" })),
+                            };
+                            if let Err(error) =
+                                self.persist_item(&params.session_id, Some(&turn_id), &item)
+                            {
+                                persistence_error =
+                                    Some(format!("cannot persist diff item: {error}"));
+                                return;
+                            }
+                            if let Some(state) = self.sessions.get_mut(&params.session_id) {
+                                state.items.push(item.clone());
+                            }
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&turn_id),
+                                "turn.diff.updated",
+                                Some(item),
+                            ));
+                        } else if metadata_truncation_notified.insert(key) {
+                            let item = TimelineItem {
+                                id: self.allocate_id("diff-truncated"),
+                                kind: "diff".into(),
+                                role: "tool".into(),
+                                state: "truncated".into(),
+                                content: "Diff updates truncated".into(),
+                                data: Some(json!({
+                                    "max_updates": MAX_TURN_METADATA_UPDATES_PER_KIND
+                                })),
+                            };
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&turn_id),
+                                "turn.diff.truncated",
+                                Some(item),
+                            ));
+                        }
                     }
                     CodexEvent::TurnPlan {
                         turn_id,
                         explanation,
                         steps,
                     } => {
-                        let item = TimelineItem {
-                            id: format!("plan-{turn_id}"),
-                            kind: "plan".into(),
-                            role: "agent".into(),
-                            state: "updated".into(),
-                            content: explanation.unwrap_or_else(|| "Plan updated".into()),
-                            data: Some(json!({ "steps": steps })),
-                        };
-                        emit(self.event(
-                            &params.session_id,
-                            Some(&turn_id),
-                            "turn.plan.updated",
-                            Some(item),
-                        ));
+                        let key = format!("plan:{turn_id}");
+                        let count = metadata_update_counts.entry(key.clone()).or_default();
+                        if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
+                            *count += 1;
+                            let item = TimelineItem {
+                                id: self.allocate_id("plan"),
+                                kind: "plan".into(),
+                                role: "agent".into(),
+                                state: "updated".into(),
+                                content: explanation.unwrap_or_else(|| "Plan updated".into()),
+                                data: Some(json!({ "steps": steps })),
+                            };
+                            if let Err(error) =
+                                self.persist_item(&params.session_id, Some(&turn_id), &item)
+                            {
+                                persistence_error =
+                                    Some(format!("cannot persist plan item: {error}"));
+                                return;
+                            }
+                            if let Some(state) = self.sessions.get_mut(&params.session_id) {
+                                state.items.push(item.clone());
+                            }
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&turn_id),
+                                "turn.plan.updated",
+                                Some(item),
+                            ));
+                        } else if metadata_truncation_notified.insert(key) {
+                            let item = TimelineItem {
+                                id: self.allocate_id("plan-truncated"),
+                                kind: "plan".into(),
+                                role: "agent".into(),
+                                state: "truncated".into(),
+                                content: "Plan updates truncated".into(),
+                                data: Some(json!({
+                                    "max_updates": MAX_TURN_METADATA_UPDATES_PER_KIND
+                                })),
+                            };
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&turn_id),
+                                "turn.plan.truncated",
+                                Some(item),
+                            ));
+                        }
                     }
                     CodexEvent::TurnCompleted { turn_id } => {
                         if let Err(error) =

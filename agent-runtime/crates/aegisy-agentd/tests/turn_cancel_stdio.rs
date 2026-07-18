@@ -79,6 +79,12 @@ while IFS= read -r line; do
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-fixture"}}}\n' "$id"
       case "$line" in
+        *'emit metadata'*)
+          printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","tokenUsage":{"last":{"cachedInputTokens":1,"inputTokens":2,"outputTokens":3,"reasoningOutputTokens":0,"totalTokens":5},"total":{"cachedInputTokens":1,"inputTokens":2,"outputTokens":3,"reasoningOutputTokens":0,"totalTokens":5},"modelContextWindow":128000}}}\n'
+          printf '{"method":"turn/plan/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","explanation":"Inspect then verify","plan":[{"status":"inProgress","step":"Inspect"},{"status":"pending","step":"Verify"}]}}\n'
+          printf '{"method":"turn/diff/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","diff":"@@ -1 +1 @@\\n-old\\n+new\\n"}}\n'
+          printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
+          ;;
         *'emit diagnostics'*)
           printf '{"method":"item/started","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"id":"command-fixture","type":"commandExecution","command":"cargo check","commandActions":[{"type":"unknown"}],"cwd":"%s","status":"inProgress","source":"agent"}}}\n' "$AEGISY_FIXTURE_ROOT"
           printf '{"method":"item/commandExecution/outputDelta","params":{"threadId":"thread-fixture","turnId":"turn-fixture","itemId":"command-fixture","delta":"error[E0425]: cannot find function missing\\n --> src/main.rs:2:5\\n"}}\n'
@@ -103,6 +109,177 @@ done
     permissions.set_mode(0o755);
     fs::set_permissions(&executable, permissions).unwrap();
     executable
+}
+
+#[test]
+fn stdio_turn_metadata_items_survive_durable_restart_replay() {
+    let codex = fake_codex();
+    let data_root = codex.parent().unwrap().join("workbench-data");
+    fs::create_dir_all(&data_root).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "metadata-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| message["id"] == "metadata-initialize");
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    send(
+        &mut stdin,
+        &request(
+            "metadata-session",
+            "session/start",
+            json!({ "mode": "chat" }),
+        ),
+    );
+    let session = receive_until(&receiver, |message| message["id"] == "metadata-session");
+    let session_id = session["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send(
+        &mut stdin,
+        &request(
+            "metadata-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "emit metadata",
+                "idempotency_key": "metadata-fixture-turn"
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| message["id"] == "metadata-turn");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut events = Vec::new();
+    while !events
+        .iter()
+        .any(|event: &Value| event["params"]["event"] == "turn.completed")
+    {
+        let message = receiver
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("sidecar did not complete metadata fixture turn");
+        if message["params"]["event"].is_string() {
+            events.push(message);
+        }
+    }
+    assert!(events
+        .iter()
+        .any(|event| event["params"]["event"] == "usage.updated"));
+    assert!(events
+        .iter()
+        .any(|event| event["params"]["event"] == "turn.plan.updated"));
+    assert!(events
+        .iter()
+        .any(|event| event["params"]["event"] == "turn.diff.updated"));
+
+    send(
+        &mut stdin,
+        &request("metadata-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| message["id"] == "metadata-shutdown");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+
+    let mut restarted = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut restarted_stdin = restarted.stdin.take().unwrap();
+    let restarted_stdout = restarted.stdout.take().unwrap();
+    let (restarted_sender, restarted_receiver) = mpsc::channel();
+    let restarted_reader = thread::spawn(move || {
+        for line in BufReader::new(restarted_stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if restarted_sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    send(
+        &mut restarted_stdin,
+        &request(
+            "metadata-reinitialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    receive_until(&restarted_receiver, |message| {
+        message["id"] == "metadata-reinitialize"
+    });
+    send(
+        &mut restarted_stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    send(
+        &mut restarted_stdin,
+        &request(
+            "metadata-read",
+            "session/read",
+            json!({ "session_id": session_id }),
+        ),
+    );
+    let replay = receive_until(&restarted_receiver, |message| {
+        message["id"] == "metadata-read"
+    });
+    assert_eq!(replay["result"]["runtime"]["replayed"], true);
+    let items = replay["result"]["items"].as_array().unwrap();
+    assert!(items.iter().any(|item| item["kind"] == "usage"));
+    assert!(items.iter().any(|item| item["kind"] == "plan"));
+    assert!(items.iter().any(|item| item["kind"] == "diff"));
+
+    send(
+        &mut restarted_stdin,
+        &request("metadata-final-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&restarted_receiver, |message| {
+        message["id"] == "metadata-final-shutdown"
+    });
+    drop(restarted_stdin);
+    assert!(restarted.wait().unwrap().success());
+    restarted_reader.join().unwrap();
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
 }
 
 #[test]

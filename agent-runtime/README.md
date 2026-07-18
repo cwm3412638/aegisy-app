@@ -53,8 +53,10 @@ silently fall back to a mutating or provider-opaque implementation.
 
 Read-only Codex turns also translate schema-defined token usage, plan, and
 unified-diff notifications into bounded AAP timeline events. These projections
-do not authorize writes and are not yet durable replacements for full item or
-usage persistence.
+do not authorize writes. With the Workbench data root configured, each update is
+also appended as a unique durable timeline Item (at most 32 updates per kind per
+turn); after the cap, one content-free truncation marker is emitted. Standalone
+runtimes without durable storage retain the bounded in-memory projection.
 
 While a Codex turn is active, `turn/steer` accepts a bounded follow-up input
 only when its `session_id` and `turn_id` exactly match the active turn. The

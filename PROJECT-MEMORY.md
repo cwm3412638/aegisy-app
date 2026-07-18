@@ -130,6 +130,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   approvals, checkpoints, full Git
   workflows, complete durable session storage, and model control plane remain future
   gated work. Do not present the current preview as a complete coding Agent.
+- Codex usage, plan, and unified-diff notifications now append unique AAP
+  timeline Items when the Workbench data root is configured. Each metadata kind
+  is capped at 32 updates per turn; one bounded truncation marker replaces later
+  updates, and the item/event is committed through the existing Store append
+  transaction. A stdio fixture proves usage/plan/diff Items survive sidecar
+  restart and `session/read` replay. Standalone in-memory runtimes keep the same
+  cap without durable writes. Full provider lifecycle/error/reconnect fixtures
+  and complete Qt projection behavior remain under `7.4`/`7.10`.
 - Codex same-turn steering is now reachable through the out-of-band AAP control
   reader as `turn/steer`. It requires an exact active `session_id` and `turn_id`,
   caps each input at 64 KiB and pending requests at eight, and returns only a
