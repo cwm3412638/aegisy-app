@@ -122,7 +122,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 - User-initiated macOS PTY execution, the named lifecycle, and the Qt/xterm.js
   terminal frontend are verified; Windows ConPTY is implemented but not yet
   runtime-verified. Read-only Codex command events now have a partial structured
-  timeline mapping, but native Agent command actions are not available. Agent
+  timeline mapping, and turn failure/cancellation Items now use bounded redacted
+  `runtime-error/0.1` class/retryable metadata. Native Agent command actions are not available. Agent
   writes/execution, structured patches,
   approvals, checkpoints, full Git
   workflows, complete durable session storage, and model control plane remain future

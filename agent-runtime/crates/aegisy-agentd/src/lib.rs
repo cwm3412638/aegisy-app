@@ -1137,6 +1137,43 @@ fn provider_turn_summaries(thread: &Value) -> Result<Vec<Value>, String> {
         .collect()
 }
 
+fn runtime_error_content(message: &str) -> String {
+    bounded_provider_text(message, 8 * 1024)
+}
+
+fn runtime_error_data(message: &str) -> Value {
+    let normalized = message.to_ascii_lowercase();
+    let (class, retryable) = if normalized.contains("timeout") || normalized.contains("timed out") {
+        ("timeout", true)
+    } else if normalized.contains("transport")
+        || normalized.contains("network")
+        || normalized.contains("connection")
+        || normalized.contains("stream")
+    {
+        ("transport", true)
+    } else if normalized.contains("rate limit")
+        || normalized.contains("429")
+        || normalized.contains("503")
+        || normalized.contains("temporarily")
+    {
+        ("provider", true)
+    } else if normalized.contains("provider") || normalized.contains("model") {
+        ("provider", false)
+    } else if normalized.contains("persist")
+        || normalized.contains("database")
+        || normalized.contains("sqlite")
+    {
+        ("persistence", false)
+    } else {
+        ("adapter", false)
+    };
+    json!({
+        "schema_version": "runtime-error/0.1",
+        "class": class,
+        "retryable": retryable
+    })
+}
+
 fn default_terminal_kind() -> String {
     "foreground".into()
 }
@@ -5307,8 +5344,12 @@ impl Runtime {
                             kind: "error".into(),
                             role: "system".into(),
                             state: "completed".into(),
-                            content: message,
-                            data: Some(json!({ "operation": "turn.cancel" })),
+                            content: runtime_error_content(&message),
+                            data: Some({
+                                let mut data = runtime_error_data(&message);
+                                data["operation"] = Value::String("turn.cancel".into());
+                                data
+                            }),
                         };
                         emit(self.event(
                             &params.session_id,
@@ -5345,8 +5386,8 @@ impl Runtime {
                             kind: "error".into(),
                             role: "system".into(),
                             state: "completed".into(),
-                            content: message,
-                            data: None,
+                            content: runtime_error_content(&message),
+                            data: Some(runtime_error_data(&message)),
                         };
                         emit(self.event(
                             &params.session_id,
@@ -5391,12 +5432,15 @@ impl Runtime {
                     kind: "error".into(),
                     role: "system".into(),
                     state: "completed".into(),
-                    content: error,
-                    data: None,
+                    content: runtime_error_content(&error),
+                    data: Some(runtime_error_data(&error)),
                 };
                 emit(self.event(&params.session_id, None, "turn.failed", Some(item)));
             } else {
-                self.emit_all(self.error_for(&request, -32112, error), emit);
+                self.emit_all(
+                    self.error_for(&request, -32112, runtime_error_content(&error)),
+                    emit,
+                );
             }
         }
     }
@@ -8082,6 +8126,24 @@ fn capture_watch_snapshot(
 #[cfg(test)]
 mod turn_cancel_tests {
     use super::*;
+
+    #[test]
+    fn runtime_error_classification_is_bounded_redacted_and_retry_aware() {
+        let secret = "ghp_123456789012345678901234567890";
+        let message = format!("network transport failed with token {secret}");
+        assert_eq!(runtime_error_data(&message)["class"], "transport");
+        assert_eq!(runtime_error_data(&message)["retryable"], true);
+        assert!(!runtime_error_content(&message).contains(secret));
+        assert!(runtime_error_content(&message).len() <= 8 * 1024);
+        assert_eq!(
+            runtime_error_data("provider rejected model")["class"],
+            "provider"
+        );
+        assert_eq!(
+            runtime_error_data("sqlite persistence failed")["class"],
+            "persistence"
+        );
+    }
 
     fn ready_runtime() -> Runtime {
         let mut runtime = Runtime::default();
