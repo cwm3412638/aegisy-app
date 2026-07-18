@@ -112,6 +112,32 @@ done
     executable
 }
 
+fn crashing_codex() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("aegisy-startup-crash-fixture-{nonce}"));
+    fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("codex-crash-fixture.sh");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.144.5"
+  exit 0
+fi
+printf 'x' >> "$0.attempts"
+exit 17
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    executable
+}
+
 #[test]
 fn stdio_turn_metadata_items_survive_durable_restart_replay() {
     let codex = fake_codex();
@@ -280,6 +306,74 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
     drop(restarted_stdin);
     assert!(restarted.wait().unwrap().success());
     restarted_reader.join().unwrap();
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_codex_startup_crash_loop_is_bounded_and_unavailable() {
+    let codex = crashing_codex();
+    let attempts = codex.with_extension("sh.attempts");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "startup-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    let initialized = receive_until(&receiver, |message| message["id"] == "startup-initialize");
+    assert_eq!(initialized["result"]["backend"]["status"], "unavailable");
+    assert_eq!(
+        initialized["result"]["capabilities"][0],
+        "runtime.unavailable"
+    );
+    let attempts_text = fs::read_to_string(&attempts).unwrap();
+    assert_eq!(attempts_text.len(), 3);
+
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    send(
+        &mut stdin,
+        &request("startup-health", "runtime/health", json!({})),
+    );
+    let health = receive_until(&receiver, |message| message["id"] == "startup-health");
+    assert_eq!(health["result"]["state"], "unavailable");
+    assert_eq!(health["result"]["restart_required"], true);
+    assert!(!health.to_string().contains("attempts"));
+
+    send(
+        &mut stdin,
+        &request("startup-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| message["id"] == "startup-shutdown");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
     let _ = fs::remove_dir_all(codex.parent().unwrap());
 }
 

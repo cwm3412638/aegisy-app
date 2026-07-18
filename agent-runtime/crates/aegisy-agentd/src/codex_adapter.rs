@@ -15,6 +15,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const STARTUP_MAX_ATTEMPTS: usize = 3;
+const STARTUP_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 const TURN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CODEX_MESSAGE_QUEUE_CAPACITY: usize = 16;
 const MAX_CODEX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
@@ -167,6 +170,27 @@ pub struct CodexAdapter {
 
 impl CodexAdapter {
     pub fn start() -> Result<Self, String> {
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            match Self::start_once() {
+                Ok(adapter) => return Ok(adapter),
+                Err(error)
+                    if attempts < STARTUP_MAX_ATTEMPTS && is_retryable_startup_error(&error) =>
+                {
+                    thread::sleep(STARTUP_RETRY_BACKOFF);
+                }
+                Err(error) => {
+                    let safe_error = bounded_string(&redact_complete(&error), 512);
+                    return Err(format!(
+                        "Codex App Server startup failed after {attempts} bounded attempt(s): {safe_error}"
+                    ));
+                }
+            }
+        }
+    }
+
+    fn start_once() -> Result<Self, String> {
         let executable = locate_codex();
         let process_environment = codex_process_environment()?;
         let version = codex_version(&executable, &process_environment);
@@ -246,7 +270,7 @@ impl CodexAdapter {
             environment: process_environment.summary().clone(),
             stderr: stderr_diagnostics,
         };
-        adapter.request(
+        adapter.request_with_timeout(
             "initialize",
             json!({
                 "clientInfo": {
@@ -256,6 +280,7 @@ impl CodexAdapter {
                 },
                 "capabilities": { "experimentalApi": false }
             }),
+            STARTUP_TIMEOUT,
         )?;
         adapter.write_message(&json!({ "method": "initialized" }))?;
         Ok(adapter)
@@ -584,8 +609,17 @@ impl CodexAdapter {
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        self.request_with_timeout(method, params, REQUEST_TIMEOUT)
+    }
+
+    fn request_with_timeout(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         let id = self.write_request(method, params)?;
-        self.wait_for_response(id, REQUEST_TIMEOUT)
+        self.wait_for_response(id, timeout)
     }
 
     fn write_request(&mut self, method: &str, params: Value) -> Result<i64, String> {
@@ -596,8 +630,13 @@ impl CodexAdapter {
     }
 
     fn wait_for_response(&mut self, request_id: i64, timeout: Duration) -> Result<Value, String> {
+        let deadline = Instant::now() + timeout;
         loop {
-            let message = self.receive(timeout)?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("Codex App Server timed out".into());
+            }
+            let message = self.receive(remaining)?;
             if self.handle_server_request(&message)? {
                 continue;
             }
@@ -999,6 +1038,19 @@ fn classify_stderr(value: &str) -> &'static str {
     }
 }
 
+fn is_retryable_startup_error(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "timed out",
+        "closed its output channel",
+        "transport",
+        "cannot read codex app server output",
+        "cannot write to codex app server",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 fn thread_start_params(cwd: &Path, chat: bool) -> Value {
     let instructions = if chat {
         "You are running inside Aegisy Coding Chat. This mode is non-mutating. Do not modify files, execute mutating commands, or inspect paths outside explicitly provided context."
@@ -1142,6 +1194,25 @@ mod tests {
         assert!(codex_version_is_pinned(PINNED_CODEX_VERSION));
         assert!(!codex_version_is_pinned("codex-cli 0.144.4"));
         assert!(!codex_version_is_pinned("unknown"));
+    }
+
+    #[test]
+    fn startup_supervision_retries_only_transient_transport_failures() {
+        assert!(is_retryable_startup_error("Codex App Server timed out"));
+        assert!(is_retryable_startup_error(
+            "Codex App Server closed its output channel"
+        ));
+        assert!(is_retryable_startup_error(
+            "cannot write to Codex App Server"
+        ));
+        assert!(!is_retryable_startup_error(
+            "unsupported Codex App Server version codex-cli 0.144.4"
+        ));
+        assert!(!is_retryable_startup_error(
+            "Codex rejected initialize because the request is invalid"
+        ));
+        assert_eq!(STARTUP_MAX_ATTEMPTS, 3);
+        assert_eq!(STARTUP_TIMEOUT, Duration::from_secs(15));
     }
 
     #[test]

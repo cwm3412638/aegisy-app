@@ -55,8 +55,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   AAP `runtime/health` reports the Codex child process state, PID, exit code, restart
   recommendation, and a content-free stderr summary (bytes, newline count, redacted
   line count, and stable last class) without exposing stderr text or environment
-  values. Startup timeout/restart supervision and crash-loop protection remain open
-  under task `7.2`.
+  values. Adapter startup now uses a 15-second initialize timeout, retries only
+  transient EOF/transport/timeout failures, and caps startup attempts at three with
+  a bounded backoff. Restarting an already-running adapter after a later exit and
+  full crash-loop health/recovery UI remain open under task `7.2`.
   AAP `runtime/degradations` provides explicit, content-free feature states for
   read-only Agent mutation, metadata-only provider items, and blocked provider
   delete/compact so clients do not simulate unavailable behavior.
@@ -149,6 +151,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Item. This remains read-only and does not grant Agent writes, commands, or
   approvals. Durable usage/plan/diff projection and complete steering/reconnect
   fixtures remain under task `7.4`/`7.10`.
+- Codex startup supervision now has a bounded 15-second initialize deadline and
+  at most three retries for transient output-channel, transport, write, read, or
+  timeout failures. Version mismatch and protocol rejection are not retried; the
+  final unavailable error is redacted and bounded. A crash fixture proves exactly
+  three app-server attempts and an unavailable health state. Later runtime exits
+  still require explicit adapter restart/recovery state and UI under `7.2`.
 - Large command output now has bounded head/tail and content-addressed artifact
   retrieval, pre-capture secret redaction, fixed-frame Codex transport, and Qt
   full-output inspection. With durable storage configured, completed command
@@ -439,8 +447,8 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 245 Rust sidecar unit tests, 32 Rust
-protocol tests, six macOS sidecar stdio/Codex contract tests, and Clippy with warnings
+Current verified baseline: 16 desktop tests, 246 Rust sidecar unit tests, 32 Rust
+protocol tests, seven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
 ## Session History Boundary

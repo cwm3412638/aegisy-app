@@ -57,6 +57,12 @@ redacted-line count, and the last stable class (`fatal`, `error`, `warning`,
 `timeout`, or `info`). Stderr text is drained and discarded after classification;
 credentials, prompts, paths, and raw diagnostics never cross AAP.
 
+Codex startup waits at most 15 seconds for the initialize response. Only transient
+transport, EOF, read/write, or timeout failures are retried, with a maximum of
+three bounded attempts and a short fixed backoff. Version mismatches and protocol
+rejections fail immediately. A later exit of an already-running adapter is still
+reported through `runtime/health` and remains a future restart/recovery workflow.
+
 Read-only Codex turns also translate schema-defined token usage, plan, and
 unified-diff notifications into bounded AAP timeline events. These projections
 do not authorize writes. With the Workbench data root configured, each update is
