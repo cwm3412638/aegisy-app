@@ -21,6 +21,7 @@ mod output_redaction;
 pub mod permission_issuer;
 pub mod permission_profile;
 mod repository_index;
+pub mod session_compaction;
 mod session_environment;
 #[cfg(target_os = "macos")]
 mod terminal;

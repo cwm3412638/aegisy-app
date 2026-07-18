@@ -102,6 +102,17 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 - OpenSpec task baseline: 41 of 235 checkbox tasks are complete and 194 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
+- Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
+  Bounded summaries cover decisions, unresolved tasks, changed files, commands,
+  tests, failures, and next actions; secret-shaped/control-character content is
+  rejected, item and byte limits are enforced, review IDs are content-hashed, and
+  activation requires an exact sequence plus source-context identity. Failed
+  checkpoints preserve the original context and expose bounded model-change,
+  portable-fork, and manual-cleanup recovery options. This does not count as task
+  completion: checkpoint persistence, event/replay integration, AAP/Qt review and
+  activation, model-generated summaries, editable preservation instructions, and
+  Codex `thread/compact/start` remain unavailable. Original event history remains
+  authoritative and must never be discarded by a future compaction implementation.
 - OpenSpec tasks `3.9`, `3.11`, `3.12`, `5.3` through `5.10`, `6.1`, `6.8`, `7.10`, `13.1` through `14.1`, tasks `14.3`, `14.4`, `14.6`,
   `14.8`, `15.1` through `15.9`, `16.1`, `16.2`, and `7.12` are complete. Task `14.2`
   awaits Windows runtime evidence.
@@ -495,7 +506,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 246 Rust sidecar unit tests, 36 Rust
+Current verified baseline: 16 desktop tests, 249 Rust sidecar unit tests, 36 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -514,6 +525,20 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   anchor. This completes OpenSpec `6.8`, not project relink, event-projection rebuild,
   resume/fork, compaction, or complete runtime reconstruction. Scoped deletion is
   implemented separately under `5.8`.
+
+## Session Compaction Boundary
+
+- The internal `session-compaction/0.1` library contract is limited to bounded,
+  redaction-gated summary validation, content-hashed review identity, exact
+  sequence/context activation checks, and content-free failure recovery options.
+- A compaction review never replaces or deletes the original event history. The
+  complete event stream remains the authoritative source for replay, recovery, and
+  later durable checkpoint creation.
+- No checkpoint or summary is persisted, no AAP method or Qt control is exposed,
+  and no model/provider is asked to generate or activate a summary. Codex
+  `thread/compact/start` remains unavailable until durable checkpoint storage,
+  preservation-instruction review, failure compensation/recovery, permission
+  gates, and provider lifecycle evidence are integrated.
 
 ## Project And Session Projection Consistency And Rebuild Boundary
 
