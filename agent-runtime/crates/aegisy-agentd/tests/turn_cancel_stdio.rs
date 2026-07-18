@@ -1089,9 +1089,21 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
     assert!(command_started_data["cwd"].is_string());
     assert_eq!(
         command_started_data["environment"]["execution_binding"],
-        "verified-adapter-process-snapshot"
+        "codex-adapter-launch-contract"
     );
     assert_eq!(command_started_data["environment"]["values_exposed"], false);
+    assert_eq!(
+        command_started_data["environment"]["contract"]["schema_version"],
+        "codex-child-environment/0.1"
+    );
+    assert_eq!(
+        command_started_data["environment"]["contract"]["launch"]["env_clear"],
+        true
+    );
+    assert_eq!(
+        command_started_data["environment"]["contract"]["child_observation"],
+        "vendor-command-item-does-not-report-child-environment"
+    );
     assert_eq!(command_started_data["risk"]["level"], "medium");
     assert_eq!(command_completed_data["status"], "failed");
     assert_eq!(command_completed_data["duration_ms"], 12);

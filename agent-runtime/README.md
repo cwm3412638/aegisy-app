@@ -79,6 +79,13 @@ that the user reviewed the snapshot; Agent writes, commands, Hooks, and network
 remain unavailable until their separate policy, approval, sandbox, and recovery
 gates are complete.
 
+Structured Codex command Items include the value-free parent environment identity
+and a hashed `codex-child-environment/0.1` launch contract. The contract binds
+`env_clear`, allowlisted platform inheritance, credential/proxy redaction, loader
+injection denial, and execution-control denial. Codex command metadata does not
+report mutations made by an individual child process, so the runtime exposes that
+limitation explicitly instead of claiming child-level observation.
+
 Read-only Codex turns also translate schema-defined token usage, plan, and
 unified-diff notifications into bounded AAP timeline events. These projections
 do not authorize writes. With the Workbench data root configured, each update is

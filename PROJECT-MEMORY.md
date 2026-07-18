@@ -1159,9 +1159,13 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
 - Codex App Server now starts with `env_clear` from the shared allowlisted environment
   builder. API keys, authenticated proxies, cloud credentials, loader injection,
   askpass, and execution-control variables are scrubbed; AAP exposes only the
-  parent-process environment hash and counts. Command items label this authority as
-  `codex-adapter-process-snapshot`; Codex does not report whether a specific child
-  modified that parent snapshot, so do not present it as exact child-process proof.
+  parent-process environment hash and counts plus the hashed, versioned
+  `codex-child-environment/0.1` launch contract. The contract binds allowlisted
+  platform inheritance, credential/proxy redaction, loader injection denial, and
+  execution-control denial. Codex does not report whether a specific child modified
+  that parent snapshot, so the item explicitly records
+  `vendor-command-item-does-not-report-child-environment` rather than claiming
+  exact child-process proof.
 - The real macOS stdio command fixture now asserts structured Item cwd presence,
   environment identity/binding, value-free metadata, conservative risk level,
   duration, exit code, and diagnostic artifact linkage. This strengthens task
@@ -1364,8 +1368,8 @@ Implemented visual baseline:
 4. Run the Windows packaging workflow or a clean Windows VM to validate ConPTY,
    Unicode, resize, Ctrl+C, exit status, and Job Object process-tree cleanup, then
    close `14.2` without exposing Agent execution permissions.
-5. Finish `14.5` with an exact child environment contract and a pinned live command
-   fixture, without exposing native Agent execution before sandbox,
+5. Finish `14.5` with a pinned live command fixture and child-process observation
+   evidence, without exposing native Agent execution before sandbox,
    permission, approval, and recovery gates exist.
 6. Finish `14.7` by adding gated foreground/daemon producers only after permission,
    sandbox, and approval controls, then prove their process-tree cancellation on

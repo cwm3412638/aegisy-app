@@ -5514,7 +5514,7 @@ impl Runtime {
         let backend_session_id = state.backend_session_id.clone();
         let (command_environment, command_environment_binding) =
             if let Some(environment) = state.backend_info.environment.clone() {
-                (environment, "verified-adapter-process-snapshot")
+                (environment, "codex-adapter-launch-contract")
             } else {
                 (
                     state.environment.summary().clone(),
@@ -8626,6 +8626,11 @@ fn command_timeline_item(
         String::new()
     };
     let output_display = command_output_display(&output, 32 * 1024);
+    let environment_contract = if environment_binding == "codex-adapter-launch-contract" {
+        Some(codex_child_environment_contract())
+    } else {
+        None
+    };
     let content = format!(
         "$ {}\ncwd: {}\n{} · risk {}{}{}\n{}{}{}",
         command.command,
@@ -8657,13 +8662,14 @@ fn command_timeline_item(
             "cwd": command.cwd,
             "environment": {
                 "environment_id": environment.environment_id,
-                "authority": if environment_binding == "verified-adapter-process-snapshot" {
+                "authority": if environment_binding == "codex-adapter-launch-contract" {
                     "codex-adapter-process-snapshot"
                 } else {
                     "aegisy-session-snapshot"
                 },
                 "execution_binding": environment_binding,
-                "values_exposed": false
+                "values_exposed": false,
+                "contract": environment_contract
             },
             "risk": risk,
             "status": command.status,
@@ -8698,6 +8704,34 @@ fn command_timeline_item(
             }
         })),
     }
+}
+
+fn codex_child_environment_contract() -> Value {
+    const DESCRIPTOR: &str = concat!(
+        "codex-child-environment/0.1\0",
+        "env_clear\0allowlisted-platform-inheritance\0",
+        "secret-redaction\0loader-injection-denied\0",
+        "execution-control-denied"
+    );
+    let contract_hash = ContentHash::for_bytes(DESCRIPTOR.as_bytes());
+    json!({
+        "schema_version": "codex-child-environment/0.1",
+        "contract_id": format!("codex-child-environment:sha256:{}", contract_hash.sha256),
+        "launch": {
+            "env_clear": true,
+            "inheritance": "allowlisted-platform-system",
+            "session_identity": "codex-adapter",
+            "tool_identity": "codex-app-server"
+        },
+        "denied": {
+            "credential_names": true,
+            "authenticated_proxies": true,
+            "loader_injection": true,
+            "execution_control": true
+        },
+        "child_observation": "vendor-command-item-does-not-report-child-environment",
+        "values_exposed": false
+    })
 }
 
 fn command_output_display(
@@ -9195,7 +9229,7 @@ mod command_timeline_tests {
             &command,
             "completed",
             &environment,
-            "verified-adapter-process-snapshot",
+            "codex-adapter-launch-contract",
             Some(&artifact),
             "session-secret",
         );
