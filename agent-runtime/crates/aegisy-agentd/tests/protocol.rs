@@ -256,6 +256,18 @@ fn codex_recovery_fixture_covers_partial_transport_failure_and_reconnect() {
     );
     assert_eq!(failed["params"]["item"]["data"]["class"], "transport");
     assert_eq!(failed["params"]["item"]["data"]["retryable"], true);
+    let provider_failed = fixture
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|message| {
+            message["params"]["event"] == "turn.failed"
+                && message["params"]["item"]["data"]["class"] == "provider"
+        })
+        .unwrap();
+    assert_eq!(
+        provider_failed["params"]["item"]["data"]["retryable"],
+        false
+    );
 }
 
 #[test]

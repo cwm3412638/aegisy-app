@@ -158,8 +158,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   `codex-recovery.jsonl` fixture and real stdio fixture cover partial agent output,
   transport failure, health exit, identity-preserving restart, recovered Turn
   completion, provider metadata read, and compaction request shape. Approval,
-  denial, provider response failure, and reconnect UI projection remain under
-  task `7.10`.
+  denial, and final reconnect UI projection remain under task `7.10`.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
   at most three retries for transient output-channel, transport, write, read, or
   timeout failures. Version mismatch and protocol rejection are not retried; the
@@ -465,7 +464,7 @@ git diff --check
 ```
 
 Current verified baseline: 16 desktop tests, 246 Rust sidecar unit tests, 33 Rust
-protocol tests, nine macOS sidecar stdio/Codex contract tests, and Clippy with warnings
+protocol tests, ten macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
 ## Session History Boundary

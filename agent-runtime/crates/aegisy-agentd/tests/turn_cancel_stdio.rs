@@ -236,6 +236,49 @@ done
     executable
 }
 
+fn provider_failure_codex() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("aegisy-provider-failure-fixture-{nonce}"));
+    fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("codex-provider-failure-fixture.sh");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.144.5"
+  exit 0
+fi
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"thread-provider-failure"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-provider-failure"}}}\n' "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"thread-provider-failure","turn":{"id":"turn-provider-failure","status":"failed","error":{"message":"provider request failed after authorization Bearer ghp_123456789012345678901234567890"}}}}\n'
+      ;;
+    *'"method":"shutdown"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    executable
+}
+
 #[test]
 fn stdio_turn_metadata_items_survive_durable_restart_replay() {
     let codex = fake_codex();
@@ -690,6 +733,101 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
         &request("reconnect-shutdown", "shutdown", json!({})),
     );
     receive_until(&receiver, |message| message["id"] == "reconnect-shutdown");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_codex_provider_failure_is_redacted_and_not_retryable() {
+    let codex = provider_failure_codex();
+    let secret = "ghp_123456789012345678901234567890";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "provider-failure-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| {
+        message["id"] == "provider-failure-initialize"
+    });
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    send(
+        &mut stdin,
+        &request(
+            "provider-failure-session",
+            "session/start",
+            json!({ "mode": "chat" }),
+        ),
+    );
+    let session = receive_until(&receiver, |message| {
+        message["id"] == "provider-failure-session"
+    });
+    let session_id = session["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send(
+        &mut stdin,
+        &request(
+            "provider-failure-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "provider failure",
+                "idempotency_key": "provider-failure-turn"
+            }),
+        ),
+    );
+    let failed = receive_until(&receiver, |message| {
+        message["method"] == "event"
+            && message["params"]["event"] == "turn.failed"
+            && message["params"]["item"]["data"]["schema_version"] == "runtime-error/0.1"
+    });
+    assert_eq!(failed["params"]["item"]["data"]["class"], "provider");
+    assert_eq!(failed["params"]["item"]["data"]["retryable"], false);
+    assert!(!failed.to_string().contains(secret));
+    assert!(failed["params"]["item"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("[REDACTED]"));
+
+    send(
+        &mut stdin,
+        &request("provider-failure-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| {
+        message["id"] == "provider-failure-shutdown"
+    });
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
