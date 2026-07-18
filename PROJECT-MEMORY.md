@@ -59,6 +59,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   AAP `runtime/degradations` provides explicit, content-free feature states for
   read-only Agent mutation, metadata-only provider items, and blocked provider
   delete/compact so clients do not simulate unavailable behavior.
+  The checked-in `aap-schema/fixtures/codex-thread-lifecycle.jsonl` covers the
+  current request sequence and is tested for JSON validity and credential-shaped
+  content absence; broader partial-stream, approval, reconnect, compaction, and
+  provider-failure fixtures remain under task `7.10`.
 - Current Agent security boundary: Agent/Codex is read-only. User-initiated editor
   saves are separately allowed only inside the canonical opened project root.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies

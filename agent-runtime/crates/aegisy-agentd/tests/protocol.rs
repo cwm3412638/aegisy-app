@@ -161,6 +161,38 @@ fn runtime_degradations_are_explicit_for_preview() {
 }
 
 #[test]
+fn codex_thread_lifecycle_fixture_is_redacted_and_well_formed() {
+    let path = format!(
+        "{}/../../aap-schema/fixtures/codex-thread-lifecycle.jsonl",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let fixture = fs::read_to_string(path).unwrap();
+    let mut methods = Vec::new();
+    for line in fixture.lines() {
+        assert!(!line.contains("sk-"));
+        assert!(!line.contains("ghp_"));
+        assert!(!line.to_ascii_lowercase().contains("authorization"));
+        let message: Value = serde_json::from_str(line).unwrap();
+        methods.push(message["method"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(
+        methods,
+        [
+            "initialize",
+            "initialized",
+            "runtime/health",
+            "runtime/degradations",
+            "session/provider-list",
+            "session/provider-read",
+            "session/start",
+            "session/archive",
+            "session/unarchive",
+            "shutdown"
+        ]
+    );
+}
+
+#[test]
 fn rejects_malformed_requests() {
     let mut runtime = Runtime::default();
     let messages = runtime.handle_line("{broken");

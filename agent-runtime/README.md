@@ -50,6 +50,11 @@ Clients can query `runtime/degradations` to render disabled or metadata-only
 features explicitly. This is authoritative capability state, not a request to
 silently fall back to a mutating or provider-opaque implementation.
 
+The redacted request sequence in
+`aap-schema/fixtures/codex-thread-lifecycle.jsonl` is the checked-in lifecycle
+fixture used by protocol tests. It contains no provider credentials, rollout
+content, or real user identifiers.
+
 Workspace browsing uses project-relative paths only. The sidecar rejects path
 traversal, absolute paths, symlinks, sensitive credential filenames, binary
 content, and text files larger than the negotiated preview limit. Generated and

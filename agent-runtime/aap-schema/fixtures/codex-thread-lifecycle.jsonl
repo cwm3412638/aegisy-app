@@ -1,0 +1,10 @@
+{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocol_version":"0.1","client":{"name":"aegisy-client","version":"fixture"}}}
+{"jsonrpc":"2.0","method":"initialized"}
+{"jsonrpc":"2.0","id":"2","method":"runtime/health","params":{}}
+{"jsonrpc":"2.0","id":"3","method":"runtime/degradations","params":{}}
+{"jsonrpc":"2.0","id":"4","method":"session/provider-list","params":{"limit":50,"project_id":"project-fixture","archived":false}}
+{"jsonrpc":"2.0","id":"5","method":"session/provider-read","params":{"thread_id":"thread-fixture","include_turns":true}}
+{"jsonrpc":"2.0","id":"6","method":"session/start","params":{"mode":"chat","title":"Fixture session"}}
+{"jsonrpc":"2.0","id":"7","method":"session/archive","params":{"session_id":"session-fixture"}}
+{"jsonrpc":"2.0","id":"8","method":"session/unarchive","params":{"session_id":"session-fixture"}}
+{"jsonrpc":"2.0","id":"9","method":"shutdown","params":{}}

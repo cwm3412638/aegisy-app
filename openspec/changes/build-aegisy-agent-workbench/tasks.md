@@ -134,6 +134,7 @@
 - [ ] 7.9 Implement adapter degradation flags for experimental or missing Codex methods
   - Partial degradation contract: AAP `runtime/degradations` reports read-only Agent mutation, metadata-only provider thread items, and blocked provider delete/compact with stable reasons and scopes. Full capability negotiation for all experimental/missing Codex methods and Qt feature gating remain.
 - [ ] 7.10 Record and redact protocol fixtures for happy path, partial stream, approval, denial, cancel, reconnect, compaction, and provider failure
+  - Partial fixture coverage: `aap-schema/fixtures/codex-thread-lifecycle.jsonl` records the redacted initialize, health, degradation, provider list/read, session archive/unarchive, and shutdown request sequence; protocol tests reject credential-shaped content. Partial streams, approvals/denials, reconnect, compaction, and provider-failure fixtures remain.
 - [ ] 7.11 Add contract tests against the pinned binary on macOS and Windows
 - [ ] 7.12 Document runtime upgrade procedure, compatibility matrix, emergency pin, and rollback
 
