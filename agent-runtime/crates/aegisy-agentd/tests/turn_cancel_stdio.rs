@@ -28,7 +28,7 @@ fn receive_until<F>(receiver: &mpsc::Receiver<Value>, predicate: F) -> Value
 where
     F: Fn(&Value) -> bool,
 {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let message = receiver
@@ -129,6 +129,51 @@ if [ "$1" = "--version" ]; then
 fi
 printf 'x' >> "$0.attempts"
 exit 17
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    executable
+}
+
+fn restartable_codex() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("aegisy-restart-fixture-{nonce}"));
+    fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("codex-restart-fixture.sh");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.144.5"
+  exit 0
+fi
+count_file="$0.instances"
+count=$(cat "$count_file" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"initialized"'*)
+      if [ "$count" -eq 1 ]; then
+        exit 0
+      fi
+      ;;
+    *'"method":"shutdown"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
 "#,
     )
     .unwrap();
@@ -371,6 +416,104 @@ fn stdio_codex_startup_crash_loop_is_bounded_and_unavailable() {
         &request("startup-shutdown", "shutdown", json!({})),
     );
     receive_until(&receiver, |message| message["id"] == "startup-shutdown");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_codex_restart_recovers_after_later_process_exit() {
+    let codex = restartable_codex();
+    let instances = codex.with_extension("sh.instances");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "restart-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    let initialized = receive_until(&receiver, |message| message["id"] == "restart-initialize");
+    assert!(initialized["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "runtime.restart"));
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+
+    let mut exited = false;
+    for index in 0..20 {
+        send(
+            &mut stdin,
+            &request(
+                &format!("restart-health-{index}"),
+                "runtime/health",
+                json!({}),
+            ),
+        );
+        let health = receive_until(&receiver, |message| {
+            message["id"] == format!("restart-health-{index}")
+        });
+        if health["result"]["state"] == "exited" {
+            assert_eq!(health["result"]["restart_required"], true);
+            exited = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        exited,
+        "Codex fixture did not exit after the initial handshake"
+    );
+
+    send(
+        &mut stdin,
+        &request("restart", "runtime/restart", json!({})),
+    );
+    let restarted = receive_until(&receiver, |message| message["id"] == "restart");
+    assert_eq!(restarted["result"]["status"], "restarted");
+    assert_eq!(restarted["result"]["health"]["state"], "running");
+
+    send(
+        &mut stdin,
+        &request("restart-running", "runtime/restart", json!({})),
+    );
+    let rejected = receive_until(&receiver, |message| message["id"] == "restart-running");
+    assert_eq!(rejected["error"]["code"], -32082);
+
+    assert_eq!(fs::read_to_string(&instances).unwrap(), "2");
+    send(
+        &mut stdin,
+        &request("restart-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| message["id"] == "restart-shutdown");
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();

@@ -60,8 +60,11 @@ credentials, prompts, paths, and raw diagnostics never cross AAP.
 Codex startup waits at most 15 seconds for the initialize response. Only transient
 transport, EOF, read/write, or timeout failures are retried, with a maximum of
 three bounded attempts and a short fixed backoff. Version mismatches and protocol
-rejections fail immediately. A later exit of an already-running adapter is still
-reported through `runtime/health` and remains a future restart/recovery workflow.
+rejections fail immediately. `runtime/restart` replaces an exited or unavailable
+adapter while preserving session bindings; it refuses to run during an active turn
+or user terminal. A later exit is therefore recoverable through an explicit,
+reviewable runtime action rather than an implicit process loop. The Qt health and
+recovery action remains a follow-up surface.
 
 Read-only Codex turns also translate schema-defined token usage, plan, and
 unified-diff notifications into bounded AAP timeline events. These projections

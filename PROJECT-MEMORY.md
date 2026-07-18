@@ -57,8 +57,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   line count, and stable last class) without exposing stderr text or environment
   values. Adapter startup now uses a 15-second initialize timeout, retries only
   transient EOF/transport/timeout failures, and caps startup attempts at three with
-  a bounded backoff. Restarting an already-running adapter after a later exit and
-  full crash-loop health/recovery UI remain open under task `7.2`.
+  a bounded backoff. AAP `runtime/restart` can replace an exited/unavailable
+  adapter, preserves session bindings, and refuses to restart while a model turn or
+  user terminal is active. Qt still needs the visible health/recovery action and
+  full crash-loop recovery UI under task `7.2`.
   AAP `runtime/degradations` provides explicit, content-free feature states for
   read-only Agent mutation, metadata-only provider items, and blocked provider
   delete/compact so clients do not simulate unavailable behavior.
@@ -155,8 +157,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   at most three retries for transient output-channel, transport, write, read, or
   timeout failures. Version mismatch and protocol rejection are not retried; the
   final unavailable error is redacted and bounded. A crash fixture proves exactly
-  three app-server attempts and an unavailable health state. Later runtime exits
-  still require explicit adapter restart/recovery state and UI under `7.2`.
+  three app-server attempts and an unavailable health state. A later child exit can
+  be recovered through identity-preserving `runtime/restart`; active turns and user
+  terminals block restart, and a stdio fixture verifies both recovery and the
+  running-adapter guard. Qt still needs the visible health/recovery action and UI
+  state projection under `7.2`.
 - Large command output now has bounded head/tail and content-addressed artifact
   retrieval, pre-capture secret redaction, fixed-frame Codex transport, and Qt
   full-output inspection. With durable storage configured, completed command
@@ -448,7 +453,7 @@ git diff --check
 ```
 
 Current verified baseline: 16 desktop tests, 246 Rust sidecar unit tests, 32 Rust
-protocol tests, seven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
+protocol tests, eight macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
 ## Session History Boundary

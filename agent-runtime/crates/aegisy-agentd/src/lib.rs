@@ -291,6 +291,20 @@ impl RuntimeControl {
         protected
     }
 
+    fn has_active_work(&self) -> bool {
+        let state = self.lock();
+        if state.active_turn.is_some() {
+            return true;
+        }
+        drop(state);
+        self.terminals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .records
+            .values()
+            .any(|terminal| matches!(terminal.state.as_str(), "running" | "stopping"))
+    }
+
     fn finish_turn(&self, session_id: &str) {
         let mut state = self.lock();
         if state
@@ -2073,6 +2087,7 @@ impl Runtime {
             }
             "runtime/recovery/status" => self.recovery_diagnostic(request, false),
             "runtime/recovery/export" => self.recovery_diagnostic(request, true),
+            "runtime/restart" => self.runtime_restart(request),
             "runtime/health" => self.runtime_health(request),
             "runtime/degradations" => self.runtime_degradations(request),
             _ if self.is_recovery_mode() => {
@@ -2201,6 +2216,83 @@ impl Runtime {
         self.success_for(&request, result)
     }
 
+    fn runtime_restart(&mut self, request: Request) -> Vec<Value> {
+        if self.is_recovery_mode() {
+            return self.error_for(&request, -32120, "workbench is in read-only recovery mode");
+        }
+        if self.control.has_active_work() {
+            return self.error_for(
+                &request,
+                -32081,
+                "runtime restart is blocked while a turn or user terminal is active",
+            );
+        }
+
+        let backend = std::mem::replace(
+            &mut self.backend,
+            Backend::Unavailable("Codex runtime restart in progress".into()),
+        );
+        match backend {
+            Backend::Codex(mut adapter) => {
+                if adapter.health().state == "running" {
+                    self.backend = Backend::Codex(adapter);
+                    return self.error_for(
+                        &request,
+                        -32082,
+                        "Codex App Server is still running; restart is not required",
+                    );
+                }
+                drop(adapter);
+            }
+            Backend::Unavailable(_) => {}
+            Backend::Preview => {
+                self.backend = Backend::Preview;
+                return self.error_for(
+                    &request,
+                    -32083,
+                    "preview runtime has no adapter to restart",
+                );
+            }
+            Backend::Recovery(diagnostic) => {
+                self.backend = Backend::Recovery(diagnostic);
+                return self.error_for(&request, -32120, "workbench is in read-only recovery mode");
+            }
+        }
+
+        match CodexAdapter::start() {
+            Ok(adapter) => {
+                let info = adapter.info();
+                self.backend = Backend::Codex(adapter);
+                let health = match &mut self.backend {
+                    Backend::Codex(adapter) => adapter.health(),
+                    _ => unreachable!("restart installed a non-Codex backend"),
+                };
+                self.success_for(
+                    &request,
+                    json!({
+                        "schema_version": "runtime-restart/0.1",
+                        "status": "restarted",
+                        "backend": {
+                            "adapter": info.adapter,
+                            "version": info.version,
+                            "permission_profile": info.permission_profile
+                        },
+                        "health": health
+                    }),
+                )
+            }
+            Err(error) => {
+                let safe_error = bounded_provider_text(&error, 512);
+                self.backend = Backend::Unavailable(safe_error.clone());
+                self.error_for(
+                    &request,
+                    -32110,
+                    format!("Codex App Server restart failed: {safe_error}"),
+                )
+            }
+        }
+    }
+
     fn runtime_degradations(&self, request: Request) -> Vec<Value> {
         let degradations = match &self.backend {
             Backend::Codex(_) => vec![
@@ -2316,6 +2408,7 @@ impl Runtime {
                     },
                     vec![
                         "runtime.codex-app-server".into(),
+                        "runtime.restart".into(),
                         "timeline.command.structured.read-only".into(),
                         "turn.cancel.interrupt".into(),
                         "turn.steer.same-turn".into(),
@@ -2346,7 +2439,7 @@ impl Runtime {
                     status: "unavailable".into(),
                     version: error.clone(),
                 },
-                vec!["runtime.unavailable".into()],
+                vec!["runtime.unavailable".into(), "runtime.restart".into()],
             ),
         };
         if !recovery_mode {
