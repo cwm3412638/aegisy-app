@@ -17,6 +17,7 @@ pub mod git_workflow_state;
 pub mod git_worktree_lifecycle;
 mod language_server;
 pub mod non_git_checkpoint;
+pub mod operation_reconciliation;
 mod output_redaction;
 pub mod permission_issuer;
 pub mod permission_profile;

@@ -113,6 +113,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   activation, model-generated summaries, editable preservation instructions, and
   Codex `thread/compact/start` remain unavailable. Original event history remains
   authoritative and must never be discarded by a future compaction implementation.
+- Task `6.9` now has an internal `operation-reconciliation/0.1` contract
+  foundation. It accepts content-free event, process, workspace, and Git evidence
+  and emits a bounded state/decision, blockers, observed domains, and a
+  content-hashed review ID. Missing terminal events remain `unknown`; live
+  processes remain `running`; changed or unavailable workspace/Git state, Git
+  operations in progress, and missing required evidence block subsequent writes.
+  It never infers mutation success, probes the host, executes recovery, or exposes
+  AAP/Qt mutation controls. Durable records, restart probes, user review, and
+  recovery actions remain required before task completion.
 - OpenSpec tasks `3.9`, `3.11`, `3.12`, `5.3` through `5.10`, `6.1`, `6.8`, `7.10`, `13.1` through `14.1`, tasks `14.3`, `14.4`, `14.6`,
   `14.8`, `15.1` through `15.9`, `16.1`, `16.2`, and `7.12` are complete. Task `14.2`
   awaits Windows runtime evidence.
@@ -506,7 +515,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 249 Rust sidecar unit tests, 36 Rust
+Current verified baseline: 16 desktop tests, 255 Rust sidecar unit tests, 36 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -539,6 +548,20 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   `thread/compact/start` remains unavailable until durable checkpoint storage,
   preservation-instruction review, failure compensation/recovery, permission
   gates, and provider lifecycle evidence are integrated.
+
+## Operation Reconciliation Boundary
+
+- The internal `operation-reconciliation/0.1` contract combines content-free event,
+  process, workspace, and Git evidence into a bounded state, decision, blocker
+  list, observed-domain list, and review ID. It does not read the host or execute
+  a recovery action.
+- No authoritative terminal event means `unknown`; a live process means `running`.
+  Required evidence that is missing, changed, unavailable, or reports an in-progress
+  Git operation blocks later writes. A completed/failed/interrupted event is only
+  considered authoritative when no conflicting evidence remains.
+- The contract has no persistence, AAP method, Qt control, or automatic mutation
+  recovery. Durable operation records, restart-time probes, explicit user review,
+  and recovery actions remain necessary for OpenSpec `6.9` completion.
 
 ## Project And Session Projection Consistency And Rebuild Boundary
 
