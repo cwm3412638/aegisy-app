@@ -59,16 +59,18 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   transient EOF/transport/timeout failures, and caps startup attempts at three with
   a bounded backoff. AAP `runtime/restart` can replace an exited/unavailable
   adapter, preserves session bindings, and refuses to restart while a model turn or
-  user terminal is active. Qt still needs the visible health/recovery action and
-  full crash-loop recovery UI under task `7.2`.
+  user terminal is active. Qt polls `runtime/health`, exposes exited/unavailable
+  state, and provides a guarded `重启 Codex` action. Full crash-loop recovery UI and
+  cross-platform recovery evidence remain under task `7.2`.
   AAP `runtime/degradations` provides explicit, content-free feature states for
   read-only Agent mutation, metadata-only provider items, and blocked provider
   delete/compact so clients do not simulate unavailable behavior.
   The checked-in `aap-schema/fixtures/codex-thread-lifecycle.jsonl` covers the
   current request sequence and `codex-turn-metadata.jsonl` covers usage/plan/diff
   notifications; both are tested for JSON validity and credential-shaped content
-  absence. Broader partial-stream, approval, reconnect, compaction, and
-  provider-failure fixtures remain under task `7.10`.
+  absence. Partial-stream, approval/denial, reconnect, compaction, and provider-
+  failure fixtures are present; final Qt lifecycle projection fixtures remain under
+  task `7.10`.
 - Current Agent security boundary: Agent/Codex is read-only. User-initiated editor
   saves are separately allowed only inside the canonical opened project root.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies
@@ -157,8 +159,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   retryable transport errors in `runtime-error/0.1`. A redacted
   `codex-recovery.jsonl` fixture and real stdio fixture cover partial agent output,
   transport failure, health exit, identity-preserving restart, recovered Turn
-  completion, provider metadata read, and compaction request shape. Approval,
-  denial, and final reconnect UI projection remain under task `7.10`.
+  completion, provider metadata read, and compaction request shape. Final reconnect
+  and provider lifecycle UI projection remain under task `7.10`.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
   at most three retries for transient output-channel, transport, write, read, or
   timeout failures. Version mismatch and protocol rejection are not retried; the
@@ -369,10 +371,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   symlink policy, repository metadata, instruction paths without instruction bodies,
   executable Hook paths with bounded size/hash metadata, scan truncation, and explicit
   policy impact. Qt renders the discovered paths and read-only/write/network/Hook
-  consequences in the Agent timeline. The review never executes project content and
-  does not grant permissions. Durable acknowledgement, trust invalidation on content
-  changes, policy intersection, and an AAP/Qt approval bridge remain incomplete; keep
-  task `6.2` unchecked until those gates exist.
+  consequences in the Agent timeline. `project/trust-acknowledge` re-scans the exact
+  registered root, requires the reviewed root identity/hash, and appends a content-
+  free `project.trust-acknowledged/0.1` event. Instruction and Hook content identities
+  participate in the review hash without returning bodies; root or content changes
+  invalidate the acknowledgement across restart. Duplicate acknowledgement is
+  idempotent. Qt exposes explicit confirmation from the active project context menu
+  and states that it grants no write, command, Hook, or network authority. Managed-
+  policy intersection, the complete permission/approval bridge, and executable-
+  content authorization remain incomplete; keep task `6.2` unchecked until those
+  gates exist.
 - Task `6.3` now has a scoped-root Runtime foundation. AAP exposes
   `project/root-list`, `project/root-add`, and `project/root-remove`; add validates
   read/write scope, canonicalizes existing directories, rejects a symlink final root,
@@ -469,7 +477,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 246 Rust sidecar unit tests, 33 Rust
+Current verified baseline: 16 desktop tests, 246 Rust sidecar unit tests, 34 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -1366,6 +1374,9 @@ Implemented visual baseline:
    consumption ledger, typed session events, and reviewed Qt conflict/recovery flow.
    Keep the internal executor unreachable from AAP/Qt until those gates are complete;
    add sandboxed hook output and secure signing as separate reviewed policies.
-8. Continue with the next unchecked database/event, durable project/session, typed
+8. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
+   permission policy and the production approval ledger. A trust acknowledgement must
+   never become an implicit write, command, Hook, or network grant.
+9. Continue with the next unchecked database/event, durable project/session, typed
    timeline, permission/approval, structured patch/
    checkpoint, terminal, and Git milestones in dependency order.

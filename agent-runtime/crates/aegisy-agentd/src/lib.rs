@@ -68,9 +68,9 @@ use workbench_store::{
     durable_blob_reference_id, DurableBlobKind, DurableBlobWrite, PortableSessionImportCommand,
     PortableSessionPackage, RetentionPolicy, SessionDeletionScope, SessionProjectionConsistency,
     StoredItem, StoredItemAppend, StoredProjectCreate, StoredProjectNavigationEntry,
-    StoredSessionCreate, StoredSessionLineage, StoredSessionMode,
-    StoredSessionRuntimeBindingCreate, StoredTurnCreate, WorkbenchRecoveryDiagnostic,
-    WorkbenchStore, WorkbenchStoreOpen,
+    StoredProjectTrustAcknowledge, StoredProjectTrustAcknowledgement, StoredSessionCreate,
+    StoredSessionLineage, StoredSessionMode, StoredSessionRuntimeBindingCreate, StoredTurnCreate,
+    WorkbenchRecoveryDiagnostic, WorkbenchStore, WorkbenchStoreOpen,
 };
 use workspace::{
     collect_search_candidates, list_directory, path_metadata, read_text_file, search_workspace,
@@ -107,6 +107,7 @@ pub struct Runtime {
     projects: HashMap<String, Project>,
     project_roots: HashMap<String, Vec<workbench_store::StoredProjectRoot>>,
     project_navigation: HashMap<String, workbench_store::StoredProjectNavigation>,
+    project_trust_acknowledgements: HashMap<String, StoredProjectTrustAcknowledgement>,
     sessions: HashMap<String, SessionState>,
     workspace_watches: HashMap<String, WorkspaceWatch>,
     // Indexes and language/diagnostic state are scoped to one registered root.
@@ -584,6 +585,15 @@ struct ProjectNavigationParams {
 #[derive(Debug, Deserialize)]
 struct ProjectTrustReviewParams {
     root: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectTrustAcknowledgeParams {
+    project_id: String,
+    #[serde(default = "default_primary_root_id")]
+    root_id: String,
+    root_identity: String,
+    review_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1595,12 +1605,19 @@ fn trust_scan_directory(root: &Path, directory: &Path, depth: usize, scan: &mut 
             });
             if is_instruction {
                 if scan.instructions.len() < MAX_TRUST_REVIEW_ENTRIES {
-                    scan.instructions.push(json!({
+                    let mut instruction = json!({
                         "relative_path": relative,
                         "bytes": metadata.len(),
                         "trust_state": "untrusted",
                         "content": "not-read"
-                    }));
+                    });
+                    if let Some(identity) = trust_file_hash(&path, &metadata) {
+                        instruction
+                            .as_object_mut()
+                            .expect("trust instruction object")
+                            .insert("content_identity".into(), identity);
+                    }
+                    scan.instructions.push(instruction);
                 } else {
                     scan.truncated = true;
                 }
@@ -1652,6 +1669,9 @@ fn project_trust_review(root: &Path, root_identity: &str) -> Result<Value, Strin
             "sensitive_paths": "filtered",
             "network": "not-granted"
         },
+        "trust_state": "unreviewed",
+        "invalidation_reason": null,
+        "acknowledgement": null,
         "required": true
     });
     let hash_input = serde_json::to_vec(&review).map_err(|error| error.to_string())?;
@@ -1916,6 +1936,7 @@ impl Runtime {
             projects,
             project_roots,
             project_navigation,
+            project_trust_acknowledgements: HashMap::new(),
             sessions: HashMap::new(),
             workspace_watches: HashMap::new(),
             workspace_indexes: HashMap::new(),
@@ -2097,6 +2118,7 @@ impl Runtime {
                 self.error_for(&request, -32120, "workbench is in read-only recovery mode")
             }
             "project/trust-review" => self.project_trust_review(request),
+            "project/trust-acknowledge" => self.project_trust_acknowledge(request),
             "project/root-list" => self.project_root_list(request),
             "project/root-add" => self.project_root_add(request),
             "project/root-remove" => self.project_root_remove(request),
@@ -2451,6 +2473,7 @@ impl Runtime {
                 "project.list".into(),
                 "project.navigation.persistent".into(),
                 "project.trust-review".into(),
+                "project.trust-acknowledge".into(),
                 "project.roots.scoped".into(),
                 "project.relink.explicit".into(),
                 "session.chat".into(),
@@ -2900,6 +2923,67 @@ impl Runtime {
         )
     }
 
+    fn annotate_project_trust_review(
+        &self,
+        project_id: &str,
+        root_id: &str,
+        current_root_identity: &str,
+        mut review: Value,
+    ) -> Result<Value, String> {
+        let key = format!("{project_id}\0{root_id}");
+        let acknowledgement = if let Some(store) = self.workbench_store.as_ref() {
+            store
+                .load_project_trust_acknowledgement(project_id, root_id)
+                .map_err(|error| error.message)?
+        } else {
+            self.project_trust_acknowledgements.get(&key).cloned()
+        };
+        let review_id = review
+            .get("review_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "project trust review identity is missing".to_owned())?;
+        let (trust_state, required, invalidation_reason) = match acknowledgement.as_ref() {
+            Some(acknowledgement)
+                if acknowledgement.review_id == review_id
+                    && acknowledgement.root_identity == current_root_identity =>
+            {
+                ("acknowledged", false, Value::Null)
+            }
+            Some(acknowledgement) if acknowledgement.root_identity != current_root_identity => (
+                "invalidated",
+                true,
+                Value::String("root-identity-changed".into()),
+            ),
+            Some(_) => (
+                "invalidated",
+                true,
+                Value::String("review-content-changed".into()),
+            ),
+            None => ("unreviewed", true, Value::Null),
+        };
+        let object = review
+            .as_object_mut()
+            .ok_or_else(|| "project trust review is invalid".to_owned())?;
+        object.insert("trust_state".into(), trust_state.into());
+        object.insert("required".into(), required.into());
+        object.insert("invalidation_reason".into(), invalidation_reason);
+        object.insert(
+            "acknowledgement".into(),
+            acknowledgement
+                .map(|acknowledgement| {
+                    json!({
+                        "schema_version": "project-trust-acknowledgement/0.1",
+                        "review_id": acknowledgement.review_id,
+                        "root_identity": acknowledgement.root_identity,
+                        "acknowledged_at_ms": acknowledgement.acknowledged_at_ms,
+                        "permission_effect": "none-read-only-boundary-unchanged"
+                    })
+                })
+                .unwrap_or(Value::Null),
+        );
+        Ok(review)
+    }
+
     fn project_open(&mut self, request: Request) -> Vec<Value> {
         let params: ProjectOpenParams = match serde_json::from_value(request.params.clone()) {
             Ok(params) => params,
@@ -3012,6 +3096,15 @@ impl Runtime {
                         created_at_ms: now_ms(),
                     }]
                 });
+            let trust_review = match self.annotate_project_trust_review(
+                &existing.id,
+                "root-1",
+                &root_identity,
+                trust_review,
+            ) {
+                Ok(review) => review,
+                Err(error) => return self.error_for(&request, -32113, error),
+            };
             return self.success_for(
                 &request,
                 json!({
@@ -3031,6 +3124,7 @@ impl Runtime {
                     .into_iter()
                     .find(|project| project.root_identity == root_identity)
                 {
+                    let project_id = stored.project_id.clone();
                     let stored_root_identity = stored.root_identity.clone();
                     let roots = store
                         .load_project_roots(&stored.project_id)
@@ -3039,6 +3133,15 @@ impl Runtime {
                         id: stored.project_id,
                         root: stored.canonical_root,
                         name: stored.display_name,
+                    };
+                    let trust_review = match self.annotate_project_trust_review(
+                        &project_id,
+                        "root-1",
+                        &root_identity,
+                        trust_review,
+                    ) {
+                        Ok(review) => review,
+                        Err(error) => return self.error_for(&request, -32113, error),
                     };
                     return self.success_for(
                         &request,
@@ -3084,7 +3187,12 @@ impl Runtime {
                 created_at_ms: now_ms(),
             }],
         );
-        self.projects.insert(id, project.clone());
+        self.projects.insert(id.clone(), project.clone());
+        let trust_review =
+            match self.annotate_project_trust_review(&id, "root-1", &root_identity, trust_review) {
+                Ok(review) => review,
+                Err(error) => return self.error_for(&request, -32113, error),
+            };
         self.success_for(
             &request,
             json!({
@@ -3128,13 +3236,133 @@ impl Runtime {
             }
         };
         match project_trust_review(&canonical, &root_identity) {
-            Ok(review) => self.success_for(&request, json!({"review": review})),
+            Ok(review) => {
+                let canonical_text = canonical.to_string_lossy();
+                let binding = self.project_roots.iter().find_map(|(project_id, roots)| {
+                    roots
+                        .iter()
+                        .find(|root| {
+                            root.canonical_root == canonical_text
+                                || root.root_identity == root_identity
+                        })
+                        .map(|root| (project_id.clone(), root.root_id.clone()))
+                });
+                let review = if let Some((project_id, root_id)) = binding {
+                    match self.annotate_project_trust_review(
+                        &project_id,
+                        &root_id,
+                        &root_identity,
+                        review,
+                    ) {
+                        Ok(review) => review,
+                        Err(error) => return self.error_for(&request, -32113, error),
+                    }
+                } else {
+                    review
+                };
+                self.success_for(&request, json!({"review": review}))
+            }
             Err(error) => self.error_for(
                 &request,
                 -32020,
                 format!("cannot inspect project trust boundary: {error}"),
             ),
         }
+    }
+
+    fn project_trust_acknowledge(&mut self, request: Request) -> Vec<Value> {
+        let params: ProjectTrustAcknowledgeParams =
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => params,
+                Err(error) => {
+                    return self.error_for(&request, -32602, format!("invalid params: {error}"))
+                }
+            };
+        let Some(root) = self
+            .project_roots
+            .get(&params.project_id)
+            .and_then(|roots| roots.iter().find(|root| root.root_id == params.root_id))
+            .cloned()
+        else {
+            return self.error_for(&request, -32023, "project root not found");
+        };
+        if root.root_identity != params.root_identity {
+            return self.error_for(&request, -32042, "project trust review root is stale");
+        }
+        let canonical = match canonical_project_root(Path::new(&root.canonical_root)) {
+            Ok(path) => path,
+            Err(error) => return self.error_for(&request, -32042, error),
+        };
+        let current_root_identity = match filesystem_root_identity(&canonical) {
+            Ok(identity) => identity,
+            Err(error) => return self.error_for(&request, -32042, error),
+        };
+        if current_root_identity != params.root_identity {
+            return self.error_for(
+                &request,
+                -32042,
+                "project trust review root identity changed",
+            );
+        }
+        let current_review = match project_trust_review(&canonical, &current_root_identity) {
+            Ok(review) => review,
+            Err(error) => return self.error_for(&request, -32020, error),
+        };
+        if current_review.get("review_id").and_then(Value::as_str)
+            != Some(params.review_id.as_str())
+        {
+            return self.error_for(
+                &request,
+                -32042,
+                "project trust review content changed; review again",
+            );
+        }
+        let acknowledgement = StoredProjectTrustAcknowledgement {
+            project_id: params.project_id.clone(),
+            root_id: params.root_id.clone(),
+            root_identity: params.root_identity.clone(),
+            review_id: params.review_id.clone(),
+            acknowledged_at_ms: now_ms(),
+        };
+        let acknowledgement = if let Some(store) = self.workbench_store.as_mut() {
+            match store.acknowledge_project_trust_review(StoredProjectTrustAcknowledge {
+                project_id: acknowledgement.project_id.clone(),
+                root_id: acknowledgement.root_id.clone(),
+                root_identity: acknowledgement.root_identity.clone(),
+                review_id: acknowledgement.review_id.clone(),
+                acknowledged_at_ms: acknowledgement.acknowledged_at_ms,
+            }) {
+                Ok(acknowledgement) => acknowledgement,
+                Err(error) => return self.error_for(&request, -32113, error.message),
+            }
+        } else {
+            acknowledgement
+        };
+        self.project_trust_acknowledgements.insert(
+            format!("{}\0{}", params.project_id, params.root_id),
+            acknowledgement.clone(),
+        );
+        let review = match self.annotate_project_trust_review(
+            &params.project_id,
+            &params.root_id,
+            &current_root_identity,
+            current_review,
+        ) {
+            Ok(review) => review,
+            Err(error) => return self.error_for(&request, -32113, error),
+        };
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "project-trust-acknowledgement/0.1",
+                "project_id": params.project_id,
+                "root_id": params.root_id,
+                "trust_state": "acknowledged",
+                "permission_effect": "none-read-only-boundary-unchanged",
+                "acknowledgement": acknowledgement,
+                "review": review
+            }),
+        )
     }
 
     fn session_list(&self, request: Request) -> Vec<Value> {

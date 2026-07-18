@@ -28,6 +28,8 @@ or session methods are accepted.
 - `initialize`
 - `initialized`
 - `project/open`
+- `project/trust-review`
+- `project/trust-acknowledge` (user review record only; grants no execution authority)
 - `session/start`
 - `turn/start`
 - `turn/steer` (Codex only; same-turn, identity-scoped)
@@ -66,8 +68,16 @@ three bounded attempts and a short fixed backoff. Version mismatches and protoco
 rejections fail immediately. `runtime/restart` replaces an exited or unavailable
 adapter while preserving session bindings; it refuses to run during an active turn
 or user terminal. A later exit is therefore recoverable through an explicit,
-reviewable runtime action rather than an implicit process loop. The Qt health and
-recovery action remains a follow-up surface.
+reviewable runtime action rather than an implicit process loop. Qt polls this
+health state and exposes the guarded restart action when recovery is required.
+
+Project trust review returns instruction and Hook paths plus bounded content
+identities, never their bodies. `project/trust-acknowledge` re-scans the registered
+root and persists the exact reviewed hash in the project event stream. A root,
+instruction, or Hook change invalidates the acknowledgement. This is only evidence
+that the user reviewed the snapshot; Agent writes, commands, Hooks, and network
+remain unavailable until their separate policy, approval, sandbox, and recovery
+gates are complete.
 
 Read-only Codex turns also translate schema-defined token usage, plan, and
 unified-diff notifications into bounded AAP timeline events. These projections

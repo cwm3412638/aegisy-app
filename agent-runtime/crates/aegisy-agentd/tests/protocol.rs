@@ -38,6 +38,11 @@ fn ready_runtime() -> Runtime {
         .as_array()
         .unwrap()
         .iter()
+        .any(|capability| capability == "project.trust-acknowledge"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|capability| capability == "project.relink.explicit"));
     assert!(messages[0]["result"]["capabilities"]
         .as_array()
@@ -360,6 +365,123 @@ fn project_trust_review_is_read_only_and_content_free() {
     assert!(!serialized.contains("do not persist this instruction body"));
     assert!(!serialized.contains("echo hook-body"));
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn project_trust_acknowledgement_survives_restart_and_invalidates_on_content_change() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-trust-state-{unique}"));
+    let data = root.join("data");
+    let project = root.join("project");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("AGENTS.md"), "review version one\n").unwrap();
+
+    let mut runtime = Runtime::with_store(&data).unwrap();
+    runtime.handle_line(&request(
+        "1",
+        "initialize",
+        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
+    ));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    let opened = runtime.handle_line(&request("2", "project/open", json!({ "root": project })));
+    let project_id = opened[0]["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let root_identity = opened[0]["result"]["identity"]["root_identity"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first_review_id = opened[0]["result"]["trust_review"]["review_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        opened[0]["result"]["trust_review"]["trust_state"],
+        "unreviewed"
+    );
+    assert_eq!(opened[0]["result"]["trust_review"]["required"], true);
+
+    let acknowledged = runtime.handle_line(&request(
+        "3",
+        "project/trust-acknowledge",
+        json!({
+            "project_id": project_id,
+            "root_id": "root-1",
+            "root_identity": root_identity,
+            "review_id": first_review_id
+        }),
+    ));
+    assert_eq!(acknowledged[0]["result"]["trust_state"], "acknowledged");
+    assert_eq!(
+        acknowledged[0]["result"]["permission_effect"],
+        "none-read-only-boundary-unchanged"
+    );
+    assert_eq!(acknowledged[0]["result"]["review"]["required"], false);
+    let acknowledged_at = acknowledged[0]["result"]["acknowledgement"]["acknowledged_at_ms"]
+        .as_u64()
+        .unwrap();
+    let duplicate = runtime.handle_line(&request(
+        "4",
+        "project/trust-acknowledge",
+        json!({
+            "project_id": project_id,
+            "root_id": "root-1",
+            "root_identity": root_identity,
+            "review_id": first_review_id
+        }),
+    ));
+    assert_eq!(
+        duplicate[0]["result"]["acknowledgement"]["acknowledged_at_ms"],
+        acknowledged_at
+    );
+    drop(runtime);
+
+    let mut restarted = Runtime::with_store(&data).unwrap();
+    restarted.handle_line(&request(
+        "5",
+        "initialize",
+        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
+    ));
+    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    let reopened = restarted.handle_line(&request("6", "project/open", json!({ "root": project })));
+    assert_eq!(
+        reopened[0]["result"]["trust_review"]["trust_state"],
+        "acknowledged"
+    );
+    assert_eq!(reopened[0]["result"]["trust_review"]["required"], false);
+
+    fs::write(project.join("AGENTS.md"), "review version two\n").unwrap();
+    let changed = restarted.handle_line(&request("7", "project/open", json!({ "root": project })));
+    assert_eq!(
+        changed[0]["result"]["trust_review"]["trust_state"],
+        "invalidated"
+    );
+    assert_eq!(
+        changed[0]["result"]["trust_review"]["invalidation_reason"],
+        "review-content-changed"
+    );
+    assert_eq!(changed[0]["result"]["trust_review"]["required"], true);
+    let stale = restarted.handle_line(&request(
+        "8",
+        "project/trust-acknowledge",
+        json!({
+            "project_id": project_id,
+            "root_id": "root-1",
+            "root_identity": root_identity,
+            "review_id": first_review_id
+        }),
+    ));
+    assert_eq!(stale[0]["error"]["code"], -32042);
+
+    let serialized = serde_json::to_string(&changed).unwrap();
+    assert!(!serialized.contains("review version one"));
+    assert!(!serialized.contains("review version two"));
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

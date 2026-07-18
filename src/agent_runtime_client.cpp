@@ -235,6 +235,18 @@ QString AgentRuntimeClient::previewProjectTrustReview(const QString &root)
                        {{QStringLiteral("root"), root}});
 }
 
+QString AgentRuntimeClient::acknowledgeProjectTrustReview(
+    const QString &projectId, const QString &rootId, const QString &rootIdentity,
+    const QString &reviewId)
+{
+    return sendRequest(QStringLiteral("project/trust-acknowledge"), {
+        {QStringLiteral("project_id"), projectId},
+        {QStringLiteral("root_id"), rootId},
+        {QStringLiteral("root_identity"), rootIdentity},
+        {QStringLiteral("review_id"), reviewId},
+    });
+}
+
 QString AgentRuntimeClient::listProjectRoots(const QString &projectId)
 {
     return sendRequest(QStringLiteral("project/root-list"),
@@ -1045,6 +1057,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         }
     } else if (pendingMethod == QStringLiteral("project/relink")) {
         emit projectOpened(id, result.value(QStringLiteral("project")).toObject());
+    } else if (pendingMethod == QStringLiteral("project/trust-acknowledge")) {
+        emit projectTrustAcknowledged(id, result);
     } else if (pendingMethod == QStringLiteral("project/root-list")) {
         emit projectRootsListed(id, result);
     } else if (pendingMethod == QStringLiteral("project/root-add")

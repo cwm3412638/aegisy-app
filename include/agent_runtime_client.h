@@ -38,6 +38,9 @@ public:
     QString relinkProject(const QString &projectId, const QString &rootId,
                           const QString &root, const QString &expectedRootIdentity);
     QString previewProjectTrustReview(const QString &root);
+    QString acknowledgeProjectTrustReview(const QString &projectId, const QString &rootId,
+                                           const QString &rootIdentity,
+                                           const QString &reviewId);
     QString listProjectRoots(const QString &projectId);
     QString addProjectRoot(const QString &projectId, const QString &root,
                            const QString &access);
@@ -170,6 +173,7 @@ signals:
     void projectTrustReviewRequired(const QString &requestId,
                                     const QJsonObject &project,
                                     const QJsonObject &review);
+    void projectTrustAcknowledged(const QString &requestId, const QJsonObject &result);
     void projectRootsListed(const QString &requestId, const QJsonObject &result);
     void projectRootChanged(const QString &requestId, const QString &method,
                             const QJsonObject &result);

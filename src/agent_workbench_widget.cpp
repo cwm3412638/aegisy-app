@@ -413,6 +413,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_workspaceRootPath = m_projectRoot;
         m_projectRootsRequestId.clear();
         m_projectRootMutationRequestId.clear();
+        m_projectTrustRequestId.clear();
+        m_projectTrustReview = {};
         const QString name = project.value(QStringLiteral("name")).toString();
         m_projectLabel->setText(name);
         m_projectLabel->setToolTip(m_projectRoot);
@@ -577,9 +579,17 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         const QJsonArray instructions = review.value(QStringLiteral("instructions")).toArray();
         const QJsonArray hooks = review.value(QStringLiteral("executable_hooks")).toArray();
         const QJsonObject policy = review.value(QStringLiteral("policy_impact")).toObject();
+        m_projectTrustReview = review;
+        const QString trustState = review.value(QStringLiteral("trust_state"))
+                                       .toString(QStringLiteral("unreviewed"));
+        const QString stateLabel = trustState == QStringLiteral("acknowledged")
+            ? QStringLiteral("已确认")
+            : (trustState == QStringLiteral("invalidated")
+                   ? QStringLiteral("内容变化，需重新确认")
+                   : QStringLiteral("待确认"));
         const QString message = QStringLiteral(
-            "首次打开信任审查（仅发现，不执行） · 根：%1 · 仓库：%2（%3） · 指令：%4（%5） · 可执行 Hook：%6（%7） · Agent：%8 · 写入：%9 · Hook：%10")
-            .arg(m_projectRoot,
+            "项目信任审查：%1（仅发现，不执行） · 根：%2 · 仓库：%3（%4） · 指令：%5（%6） · 可执行 Hook：%7（%8） · Agent：%9 · 写入：%10 · Hook：%11")
+            .arg(stateLabel, m_projectRoot,
                  QString::number(repositories.size()), summarize(repositories),
                  QString::number(instructions.size()), summarize(instructions),
                  QString::number(hooks.size()), summarize(hooks),
@@ -590,6 +600,20 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_projectLabel->setToolTip(QStringLiteral("%1\n信任审查：%2")
                                        .arg(m_projectRoot,
                                             review.value(QStringLiteral("review_id")).toString()));
+    });
+    connect(m_runtime, &AgentRuntimeClient::projectTrustAcknowledged,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        if (requestId != m_projectTrustRequestId) return;
+        m_projectTrustRequestId.clear();
+        if (result.value(QStringLiteral("project_id")).toString() != m_projectId) return;
+        m_projectTrustReview = result.value(QStringLiteral("review")).toObject();
+        addNotice(QStringLiteral(
+            "已记录当前项目信任审核；Agent 仍为只读，Hook、网络和可执行项目内容仍未获得权限。"));
+        if (m_projectLabel) {
+            m_projectLabel->setToolTip(QStringLiteral("%1\n信任审查：已确认\n%2")
+                .arg(m_projectRoot,
+                     m_projectTrustReview.value(QStringLiteral("review_id")).toString()));
+        }
     });
     connect(m_runtime, &AgentRuntimeClient::projectRootsListed,
             this, [this](const QString &requestId, const QJsonObject &result) {
@@ -1480,6 +1504,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                    && requestId == m_projectNavigationRequestId) {
             m_projectNavigationRequestId.clear();
             addNotice(QStringLiteral("更新项目导航失败：%1").arg(message), true);
+        } else if (method == QStringLiteral("project/trust-acknowledge")
+                   && requestId == m_projectTrustRequestId) {
+            m_projectTrustRequestId.clear();
+            addNotice(QStringLiteral("确认项目信任审核失败：%1").arg(message), true);
         } else if (method == QStringLiteral("project/root-list")
                    && requestId == m_projectRootsRequestId) {
             m_projectRootsRequestId.clear();
@@ -1926,6 +1954,12 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
             pinned ? QStringLiteral("取消固定") : QStringLiteral("固定到项目栏"));
         QAction *manage = menu.addAction(QIcon(QStringLiteral(":/icons/lucide/folder-open.svg")),
                                          QStringLiteral("管理项目根…"));
+        QAction *trust = nullptr;
+        if (projectId == m_projectId && !m_projectTrustReview.isEmpty()
+                && m_projectTrustReview.value(QStringLiteral("trust_state")).toString()
+                    != QStringLiteral("acknowledged")) {
+            trust = menu.addAction(QStringLiteral("确认项目信任审核…"));
+        }
         QAction *selected = menu.exec(m_projectList->viewport()->mapToGlobal(position));
         if (selected == open) {
             m_runtime->openProject(root);
@@ -1934,6 +1968,25 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
                 projectId, !pinned);
         } else if (selected == manage && projectId == m_projectId) {
             beginProjectRootManagement();
+        } else if (selected == trust && trust) {
+            const QJsonArray instructions = m_projectTrustReview
+                .value(QStringLiteral("instructions")).toArray();
+            const QJsonArray hooks = m_projectTrustReview
+                .value(QStringLiteral("executable_hooks")).toArray();
+            const auto answer = QMessageBox::question(
+                this, QStringLiteral("确认项目信任审核"),
+                QStringLiteral(
+                    "确认当前审核快照？\n\n发现 %1 个指令文件、%2 个 Hook。"
+                    "确认只会记录你已查看当前内容摘要，不会授予 Agent 写入、命令、Hook 或网络权限。"
+                    "指令或 Hook 内容变化后，确认会自动失效。")
+                    .arg(instructions.size()).arg(hooks.size()),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (answer != QMessageBox::Yes) return;
+            m_projectTrustRequestId = m_runtime->acknowledgeProjectTrustReview(
+                m_projectId, QStringLiteral("root-1"),
+                m_projectTrustReview.value(QStringLiteral("root_identity")).toString(),
+                m_projectTrustReview.value(QStringLiteral("review_id")).toString());
+            addNotice(QStringLiteral("正在重新验证并记录项目信任审核…"));
         }
     });
     layout->addWidget(m_projectList);

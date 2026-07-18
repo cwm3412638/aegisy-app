@@ -434,6 +434,24 @@ pub struct StoredProjectRoot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredProjectTrustAcknowledgement {
+    pub project_id: String,
+    pub root_id: String,
+    pub root_identity: String,
+    pub review_id: String,
+    pub acknowledged_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredProjectTrustAcknowledge {
+    pub project_id: String,
+    pub root_id: String,
+    pub root_identity: String,
+    pub review_id: String,
+    pub acknowledged_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredSession {
     pub session_id: String,
     pub project_id: Option<String>,
@@ -2305,6 +2323,131 @@ impl WorkbenchStore {
             .optional()
             .map_err(|_| error("cannot read project"))?
             .ok_or_else(|| error("project does not exist"))
+    }
+
+    pub fn acknowledge_project_trust_review(
+        &mut self,
+        request: StoredProjectTrustAcknowledge,
+    ) -> Result<StoredProjectTrustAcknowledgement, WorkbenchStoreError> {
+        validate_identifier(&request.project_id, "project ID")?;
+        validate_identifier(&request.root_id, "project root ID")?;
+        validate_identity_text(&request.root_identity, "project root identity")?;
+        validate_trust_review_id(&request.review_id)?;
+        self.ensure_project_writable(&request.project_id)?;
+        let current_root = self.load_project_root(&request.project_id, &request.root_id)?;
+        if current_root.root_identity != request.root_identity {
+            return Err(error(
+                "project trust review is stale after root identity changed",
+            ));
+        }
+        if let Some(existing) =
+            self.load_project_trust_acknowledgement(&request.project_id, &request.root_id)?
+        {
+            if existing.review_id == request.review_id
+                && existing.root_identity == request.root_identity
+            {
+                return Ok(existing);
+            }
+        }
+
+        let timestamp = to_i64(request.acknowledged_at_ms, "trust acknowledgement time")?;
+        let transaction =
+            self.begin_database_write("cannot start project trust acknowledgement")?;
+        let root_identity: Option<String> = transaction
+            .query_row(
+                "SELECT root_identity FROM project_roots
+                 WHERE project_id = ?1 AND root_id = ?2",
+                params![request.project_id, request.root_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot read project trust root binding"))?;
+        let Some(root_identity) = root_identity else {
+            return Err(error("project trust root does not exist"));
+        };
+        if root_identity != request.root_identity {
+            return Err(error(
+                "project trust review is stale after root identity changed",
+            ));
+        }
+        let stream_id = project_event_stream_id(&request.project_id);
+        let event_id = derived_event_id(
+            "project-trust-acknowledged",
+            format!(
+                "{}\0{}\0{}\0{}",
+                request.project_id, request.root_id, request.root_identity, request.review_id
+            )
+            .as_bytes(),
+        );
+        append_event_tx(
+            &transaction,
+            EventInput {
+                session_id: &stream_id,
+                event_id: &event_id,
+                timestamp_ms: request.acknowledged_at_ms,
+                correlation_id: &request.project_id,
+                event_kind: "project.trust-acknowledged",
+                project_id: Some(&request.project_id),
+                operation_id: "trust-review",
+                generation: 0,
+                payload: json!({
+                    "schema_version": "project.trust-acknowledged/0.1",
+                    "project_id": request.project_id,
+                    "root_id": request.root_id,
+                    "root_identity": request.root_identity,
+                    "review_id": request.review_id,
+                    "acknowledged_at_ms": request.acknowledged_at_ms,
+                    "permission_effect": "none-read-only-boundary-unchanged"
+                }),
+            },
+        )?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit project trust acknowledgement"))?;
+        Ok(StoredProjectTrustAcknowledgement {
+            project_id: request.project_id,
+            root_id: request.root_id,
+            root_identity: request.root_identity,
+            review_id: request.review_id,
+            acknowledged_at_ms: u64::try_from(timestamp)
+                .map_err(|_| error("trust acknowledgement time is invalid"))?,
+        })
+    }
+
+    pub fn load_project_trust_acknowledgement(
+        &self,
+        project_id: &str,
+        root_id: &str,
+    ) -> Result<Option<StoredProjectTrustAcknowledgement>, WorkbenchStoreError> {
+        validate_identifier(project_id, "project ID")?;
+        validate_identifier(root_id, "project root ID")?;
+        let stream_id = project_event_stream_id(project_id);
+        let events = load_projection_source_events(&self.connection, &stream_id)?;
+        for event in events.iter().rev() {
+            if event.event_kind != "project.trust-acknowledged"
+                || event.project_id.as_deref() != Some(project_id)
+            {
+                continue;
+            }
+            let acknowledgement =
+                serde_json::from_value::<StoredProjectTrustAcknowledgement>(json!({
+                    "project_id": event.payload.get("project_id"),
+                    "root_id": event.payload.get("root_id"),
+                    "root_identity": event.payload.get("root_identity"),
+                    "review_id": event.payload.get("review_id"),
+                    "acknowledged_at_ms": event.payload.get("acknowledged_at_ms")
+                }))
+                .map_err(|_| error("project trust acknowledgement event is invalid"))?;
+            validate_identity_text(&acknowledgement.root_identity, "project root identity")?;
+            validate_trust_review_id(&acknowledgement.review_id)?;
+            if acknowledgement.project_id != project_id {
+                return Err(error("project trust acknowledgement binding is invalid"));
+            }
+            if acknowledgement.root_id == root_id {
+                return Ok(Some(acknowledgement));
+            }
+        }
+        Ok(None)
     }
 
     pub fn list_projects(&self) -> Result<Vec<StoredProject>, WorkbenchStoreError> {
@@ -5477,6 +5620,52 @@ impl WorkbenchStore {
                             .is_none()
                     {
                         push_projection_issue(&mut issues, "project-navigation-event-invalid");
+                    }
+                }
+                "project.trust-acknowledged" => {
+                    let review_id = event
+                        .payload
+                        .get("review_id")
+                        .and_then(serde_json::Value::as_str);
+                    let root_id = event
+                        .payload
+                        .get("root_id")
+                        .and_then(serde_json::Value::as_str);
+                    let root_identity = event
+                        .payload
+                        .get("root_identity")
+                        .and_then(serde_json::Value::as_str);
+                    let valid = projection_event_schema(event)
+                        == Some("project.trust-acknowledged/0.1")
+                        && event
+                            .payload
+                            .get("project_id")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(project_id)
+                        && event
+                            .payload
+                            .get("acknowledged_at_ms")
+                            .and_then(serde_json::Value::as_u64)
+                            .is_some()
+                        && event
+                            .payload
+                            .get("permission_effect")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("none-read-only-boundary-unchanged")
+                        && root_id.is_some_and(|value| roots.contains_key(value))
+                        && root_identity.is_some_and(|value| {
+                            validate_identity_text(value, "project root identity").is_ok()
+                        })
+                        && root_id
+                            .zip(root_identity)
+                            .is_some_and(|(root_id, identity)| {
+                                roots
+                                    .get(root_id)
+                                    .is_some_and(|root| root.root_identity == identity)
+                            })
+                        && review_id.is_some_and(|value| validate_trust_review_id(value).is_ok());
+                    if !valid {
+                        push_projection_issue(&mut issues, "project-trust-event-invalid");
                     }
                 }
                 "project.projection-rebuilt" => {
@@ -9347,6 +9536,20 @@ fn validate_event_kind(value: &str) -> Result<(), WorkbenchStoreError> {
         })
     {
         return Err(error("event kind is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_trust_review_id(value: &str) -> Result<(), WorkbenchStoreError> {
+    let Some(hash) = value.strip_prefix("project-trust-review:sha256:") else {
+        return Err(error("project trust review ID is invalid"));
+    };
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(error("project trust review ID is invalid"));
     }
     Ok(())
 }

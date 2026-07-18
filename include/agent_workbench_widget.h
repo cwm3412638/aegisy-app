@@ -193,6 +193,8 @@ private:
     QPushButton *m_importSessionButton = nullptr;
     QString m_projectRootsRequestId;
     QString m_projectRootMutationRequestId;
+    QString m_projectTrustRequestId;
+    QJsonObject m_projectTrustReview;
     QString m_projectListRequestId;
     QString m_projectNavigationRequestId;
     QString m_sessionResumeRequestId;
