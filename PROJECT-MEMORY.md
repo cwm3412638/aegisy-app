@@ -153,6 +153,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Item. This remains read-only and does not grant Agent writes, commands, or
   approvals. Durable usage/plan/diff projection and complete steering/reconnect
   fixtures remain under task `7.4`/`7.10`.
+- The adapter now classifies Codex output-channel EOF/read/write failures as
+  retryable transport errors in `runtime-error/0.1`. A redacted
+  `codex-recovery.jsonl` fixture and real stdio fixture cover partial agent output,
+  transport failure, health exit, identity-preserving restart, recovered Turn
+  completion, provider metadata read, and compaction request shape. Approval,
+  denial, provider response failure, and reconnect UI projection remain under
+  task `7.10`.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
   at most three retries for transient output-channel, transport, write, read, or
   timeout failures. Version mismatch and protocol rejection are not retried; the
@@ -457,8 +464,8 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 246 Rust sidecar unit tests, 32 Rust
-protocol tests, eight macOS sidecar stdio/Codex contract tests, and Clippy with warnings
+Current verified baseline: 16 desktop tests, 246 Rust sidecar unit tests, 33 Rust
+protocol tests, nine macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
 ## Session History Boundary

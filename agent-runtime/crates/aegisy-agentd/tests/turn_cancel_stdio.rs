@@ -183,6 +183,59 @@ done
     executable
 }
 
+fn reconnectable_codex() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("aegisy-reconnect-fixture-{nonce}"));
+    fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("codex-reconnect-fixture.sh");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.144.5"
+  exit 0
+fi
+count_file="$0.instances"
+count=$(cat "$count_file" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"thread-reconnect"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-reconnect-%s"}}}\n' "$id" "$count"
+      if [ "$count" -eq 1 ]; then
+        printf '{"method":"item/agentMessage/delta","params":{"threadId":"thread-reconnect","turnId":"turn-reconnect-1","itemId":"item-reconnect","delta":"partial\\n"}}\n'
+        exit 23
+      fi
+      printf '{"method":"item/agentMessage/delta","params":{"threadId":"thread-reconnect","turnId":"turn-reconnect-2","itemId":"item-reconnect","delta":"recovered"}}\n'
+      printf '{"method":"item/completed","params":{"threadId":"thread-reconnect","turnId":"turn-reconnect-2","item":{"id":"item-reconnect","type":"agentMessage","text":"recovered"}}}\n'
+      printf '{"method":"turn/completed","params":{"threadId":"thread-reconnect","turn":{"id":"turn-reconnect-2","status":"completed"}}}\n'
+      ;;
+    *'"method":"shutdown"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    executable
+}
+
 #[test]
 fn stdio_turn_metadata_items_survive_durable_restart_replay() {
     let codex = fake_codex();
@@ -514,6 +567,129 @@ fn stdio_codex_restart_recovers_after_later_process_exit() {
         &request("restart-shutdown", "shutdown", json!({})),
     );
     receive_until(&receiver, |message| message["id"] == "restart-shutdown");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
+    let codex = reconnectable_codex();
+    let instances = codex.with_extension("sh.instances");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "reconnect-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| message["id"] == "reconnect-initialize");
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    send(
+        &mut stdin,
+        &request(
+            "reconnect-session",
+            "session/start",
+            json!({ "mode": "chat" }),
+        ),
+    );
+    let session = receive_until(&receiver, |message| message["id"] == "reconnect-session");
+    let session_id = session["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    send(
+        &mut stdin,
+        &request(
+            "reconnect-turn-fails",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "first attempt",
+                "idempotency_key": "reconnect-first"
+            }),
+        ),
+    );
+    let failed = receive_until(&receiver, |message| {
+        message["method"] == "event"
+            && message["params"]["event"] == "turn.failed"
+            && message["params"]["item"]["data"]["schema_version"] == "runtime-error/0.1"
+    });
+    assert_eq!(
+        failed["params"]["item"]["data"]["class"], "transport",
+        "failed={failed}"
+    );
+    assert_eq!(failed["params"]["item"]["data"]["retryable"], true);
+    assert!(!failed.to_string().contains("Bearer"));
+
+    send(
+        &mut stdin,
+        &request("reconnect-health", "runtime/health", json!({})),
+    );
+    let health = receive_until(&receiver, |message| message["id"] == "reconnect-health");
+    assert_eq!(health["result"]["state"], "exited");
+    assert_eq!(health["result"]["restart_required"], true);
+    send(
+        &mut stdin,
+        &request("reconnect-restart", "runtime/restart", json!({})),
+    );
+    let restarted = receive_until(&receiver, |message| message["id"] == "reconnect-restart");
+    assert_eq!(restarted["result"]["status"], "restarted");
+
+    send(
+        &mut stdin,
+        &request(
+            "reconnect-turn-recovers",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "retry after reconnect",
+                "idempotency_key": "reconnect-second"
+            }),
+        ),
+    );
+    let completed = receive_until(&receiver, |message| {
+        message["method"] == "event"
+            && message["params"]["event"] == "turn.completed"
+            && message["params"]["turn_id"] == "turn-reconnect-2"
+    });
+    assert_eq!(completed["params"]["turn_id"], "turn-reconnect-2");
+    assert_eq!(fs::read_to_string(&instances).unwrap(), "2");
+
+    send(
+        &mut stdin,
+        &request("reconnect-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| message["id"] == "reconnect-shutdown");
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();

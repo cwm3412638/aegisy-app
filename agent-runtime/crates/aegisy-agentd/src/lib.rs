@@ -1318,6 +1318,9 @@ fn runtime_error_data(message: &str) -> Value {
         || normalized.contains("network")
         || normalized.contains("connection")
         || normalized.contains("stream")
+        || normalized.contains("closed its output channel")
+        || normalized.contains("cannot read codex app server output")
+        || normalized.contains("cannot write to codex app server")
     {
         ("transport", true)
     } else if normalized.contains("rate limit")
@@ -8602,6 +8605,14 @@ mod turn_cancel_tests {
         assert_eq!(
             runtime_error_data("sqlite persistence failed")["class"],
             "persistence"
+        );
+        assert_eq!(
+            runtime_error_data("Codex App Server closed its output channel")["class"],
+            "transport"
+        );
+        assert_eq!(
+            runtime_error_data("cannot read Codex App Server output")["retryable"],
+            true
         );
     }
 

@@ -1,0 +1,7 @@
+{"jsonrpc":"2.0","id":"health-exited","result":{"schema_version":"runtime-health/0.1","state":"exited","backend":"codex-app-server","restart_required":true}}
+{"jsonrpc":"2.0","id":"restart","method":"runtime/restart","params":{}}
+{"jsonrpc":"2.0","method":"event","params":{"event":"item.delta","session_id":"session-fixture","turn_id":"turn-fixture","item":{"kind":"message","role":"agent","state":"delta","content":"partial"}}}
+{"jsonrpc":"2.0","method":"event","params":{"event":"turn.failed","session_id":"session-fixture","turn_id":"turn-fixture","item":{"kind":"error","role":"system","state":"completed","content":"Codex App Server closed its output channel","data":{"schema_version":"runtime-error/0.1","class":"transport","retryable":true}}}}
+{"jsonrpc":"2.0","id":"health-restarted","result":{"schema_version":"runtime-health/0.1","state":"running","backend":"codex-app-server","restart_required":false}}
+{"jsonrpc":"2.0","id":"provider-read","method":"session/provider-read","params":{"thread_id":"thread-fixture","include_turns":false}}
+{"jsonrpc":"2.0","id":"compact","method":"thread/compact/start","params":{"threadId":"thread-fixture"}}

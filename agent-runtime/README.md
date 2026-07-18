@@ -90,6 +90,11 @@ content, or real user identifiers.
 `aap-schema/fixtures/codex-turn-metadata.jsonl` provides schema-aligned
 token-usage, plan, and diff notification inputs for adapter replay tests.
 
+`aap-schema/fixtures/codex-recovery.jsonl` records bounded partial output,
+transport failure, restart health, provider metadata, and compaction request
+shapes. A real stdio fixture verifies that an EOF is classified as retryable
+transport failure and that the same session binding can complete after restart.
+
 Workspace browsing uses project-relative paths only. The sidecar rejects path
 traversal, absolute paths, symlinks, sensitive credential filenames, binary
 content, and text files larger than the negotiated preview limit. Generated and

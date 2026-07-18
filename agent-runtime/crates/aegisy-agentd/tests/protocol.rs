@@ -219,6 +219,46 @@ fn codex_turn_metadata_fixture_matches_schema_methods_without_secrets() {
 }
 
 #[test]
+fn codex_recovery_fixture_covers_partial_transport_failure_and_reconnect() {
+    let path = format!(
+        "{}/../../aap-schema/fixtures/codex-recovery.jsonl",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let fixture = fs::read_to_string(path).unwrap();
+    let mut methods = Vec::new();
+    let mut events = Vec::new();
+    for line in fixture.lines() {
+        let lower = line.to_ascii_lowercase();
+        assert!(!lower.contains("sk-"));
+        assert!(!lower.contains("ghp_"));
+        assert!(!lower.contains("authorization"));
+        let message: Value = serde_json::from_str(line).unwrap();
+        if let Some(method) = message["method"].as_str() {
+            methods.push(method.to_owned());
+        }
+        if let Some(event) = message["params"]["event"].as_str() {
+            events.push(event.to_owned());
+        }
+    }
+    assert!(methods.contains(&"runtime/restart".into()));
+    assert!(methods.contains(&"session/provider-read".into()));
+    assert!(methods.contains(&"thread/compact/start".into()));
+    assert!(events.iter().any(|event| event == "item.delta"));
+    assert!(events.iter().any(|event| event == "turn.failed"));
+    let failed = fixture
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|message| message["params"]["event"] == "turn.failed")
+        .unwrap();
+    assert_eq!(
+        failed["params"]["item"]["data"]["schema_version"],
+        "runtime-error/0.1"
+    );
+    assert_eq!(failed["params"]["item"]["data"]["class"], "transport");
+    assert_eq!(failed["params"]["item"]["data"]["retryable"], true);
+}
+
+#[test]
 fn rejects_malformed_requests() {
     let mut runtime = Runtime::default();
     let messages = runtime.handle_line("{broken");
