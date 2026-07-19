@@ -3038,3 +3038,159 @@ fn language_server_bridge_reports_availability_and_maps_clangd_results() {
     assert_eq!(stopped[0]["result"]["stopped"], true);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn session_compaction_checkpoint_is_durable_review_only_and_idempotent() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-compaction-{unique}"));
+    let data = root.join("data");
+    fs::create_dir_all(&data).unwrap();
+
+    let mut runtime = Runtime::with_store(&data).unwrap();
+    let initialized = runtime.handle_line(&request(
+        "1",
+        "initialize",
+        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
+    ));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "session.compaction.checkpoint-review"));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    let session = runtime.handle_line(&request("2", "session/start", json!({ "mode": "chat" })));
+    let session_id = session[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let params = json!({
+        "session_id": session_id,
+        "checkpoint_id": "checkpoint-1",
+        "preservation_instructions": "Preserve all unresolved work",
+        "summary": {
+            "decisions": ["Keep original event history authoritative"],
+            "unresolved_tasks": ["Add editable Qt review"],
+            "changed_files": [],
+            "commands": [],
+            "tests": ["protocol"],
+            "failures": [],
+            "next_actions": ["Integrate model summary generation"]
+        }
+    });
+    let created = runtime.handle_line(&request(
+        "3",
+        "session/compaction/checkpoint/create",
+        params.clone(),
+    ));
+    assert_eq!(
+        created[0]["result"]["schema_version"],
+        "session-compaction-checkpoint-create-result/0.1"
+    );
+    assert_eq!(created[0]["result"]["idempotent_replay"], false);
+    assert_eq!(created[0]["result"]["activation_available"], false);
+    assert_eq!(created[0]["result"]["provider_compact_invoked"], false);
+    assert_eq!(
+        created[0]["result"]["original_event_history_authoritative"],
+        true
+    );
+    let review_id = created[0]["result"]["review"]["review_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let event_sequence = created[0]["result"]["event_sequence"].as_u64().unwrap();
+
+    let duplicate = runtime.handle_line(&request(
+        "4",
+        "session/compaction/checkpoint/create",
+        params.clone(),
+    ));
+    assert_eq!(duplicate[0]["result"]["idempotent_replay"], true);
+    assert_eq!(duplicate[0]["result"]["review"]["review_id"], review_id);
+    assert_eq!(duplicate[0]["result"]["event_sequence"], event_sequence);
+    let mut conflicting = params.clone();
+    conflicting["summary"]["next_actions"] = json!(["Different content"]);
+    let conflict = runtime.handle_line(&request(
+        "5",
+        "session/compaction/checkpoint/create",
+        conflicting,
+    ));
+    assert_eq!(conflict[0]["error"]["code"], -32009);
+
+    let read = runtime.handle_line(&request(
+        "6",
+        "session/compaction/checkpoint/read",
+        json!({ "session_id": session_id, "checkpoint_id": "checkpoint-1" }),
+    ));
+    assert_eq!(read[0]["result"]["review"]["review_id"], review_id);
+    assert_eq!(read[0]["result"]["provider_compact_invoked"], false);
+    drop(runtime);
+
+    let mut restarted = Runtime::with_store(&data).unwrap();
+    restarted.handle_line(&request(
+        "7",
+        "initialize",
+        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
+    ));
+    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    let replayed = restarted.handle_line(&request(
+        "8",
+        "session/compaction/checkpoint/read",
+        json!({ "session_id": session_id, "checkpoint_id": "checkpoint-1" }),
+    ));
+    assert_eq!(replayed[0]["result"]["review"]["review_id"], review_id);
+    assert_eq!(replayed[0]["result"]["event_sequence"], event_sequence);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unavailable_compaction_store_degrades_without_blocking_runtime() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-compaction-degraded-{unique}"));
+    let data = root.join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(
+        data.join("session-compaction-checkpoints-v1"),
+        "unsafe-store-path",
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::with_store(&data).unwrap();
+    let initialized = runtime.handle_line(&request(
+        "1",
+        "initialize",
+        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
+    ));
+    assert!(!initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "session.compaction.checkpoint-review"));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    let session = runtime.handle_line(&request("2", "session/start", json!({ "mode": "chat" })));
+    let session_id = session[0]["result"]["session"]["id"].as_str().unwrap();
+    let unavailable = runtime.handle_line(&request(
+        "3",
+        "session/compaction/checkpoint/create",
+        json!({
+            "session_id": session_id,
+            "checkpoint_id": "checkpoint-1",
+            "summary": {
+                "decisions": [],
+                "unresolved_tasks": [],
+                "changed_files": [],
+                "commands": [],
+                "tests": [],
+                "failures": [],
+                "next_actions": []
+            }
+        }),
+    ));
+    assert_eq!(unavailable[0]["error"]["code"], -32024);
+    fs::remove_dir_all(root).unwrap();
+}

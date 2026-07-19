@@ -116,7 +116,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   idempotent metadata-only `session.compaction-checkpointed/0.1` event and validates
   it during projection replay; the event never copies summary/instruction content.
   The filesystem object and SQLite event are not one cross-resource transaction.
-  Startup compaction recovery, AAP/Qt review or activation, model-generated
+  AAP capability `session.compaction.checkpoint-review` exposes manual create/read
+  methods only when both durable stores are healthy. Create derives its sequence
+  and context hash from the complete verified event stream, blocks active turns,
+  and is content-idempotent; read requires a matching object and event after
+  restart. Both responses state that activation and provider compact are
+  unavailable. Startup compensation, Qt review/activation, model-generated
   summaries, editable preservation instructions, and Codex `thread/compact/start`
   remain unavailable. Original event history remains authoritative and must never
   be discarded.
@@ -522,7 +527,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 261 Rust sidecar unit tests, 36 Rust
+Current verified baseline: 16 desktop tests, 261 Rust sidecar unit tests, 38 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -558,8 +563,14 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   `session.compaction-checkpointed/0.1` event and rejects malformed/tampered event
   metadata during projection replay. The external object and event are not one
   cross-resource transaction, and startup does not activate or recover compaction.
-- No AAP method, Qt control, or model/provider summary producer consumes this
-  internal store. Codex `thread/compact/start` remains unavailable until
+- AAP advertises `session.compaction.checkpoint-review` only when both durable
+  stores opened successfully. Manual `session/compaction/checkpoint/create` derives
+  its source identity from the complete verified session event stream, blocks
+  active turns, persists before event registration, and treats an identical retry
+  as the same review/event. `read` requires the exact validated object and matching
+  event after restart. Neither method activates the review or calls a provider.
+- No Qt control or model/provider summary producer consumes this review yet. Codex
+  `thread/compact/start` remains unavailable until
   preservation instructions and summaries are editable and event-backed before
   activation, failure compensation/recovery is complete, and permission/provider
   gates pass.

@@ -110,6 +110,32 @@ binding is valid only when its pinned adapter version and opaque provider thread
 identity still match; otherwise the user must fork a portable, provider-neutral
 session.
 
+## Compaction Checkpoint Review
+
+Capability `session.compaction.checkpoint-review` is advertised only when the
+Workbench event store and compaction checkpoint store both opened successfully.
+The current AAP surface creates and reads a manual review checkpoint; it does not
+activate compacted context, delete history, or call a provider compact method.
+
+```jsonl
+{"jsonrpc":"2.0","id":"8","method":"session/compaction/checkpoint/create","params":{"session_id":"session-1","checkpoint_id":"checkpoint-1","preservation_instructions":"Preserve unresolved work","summary":{"decisions":["Keep history authoritative"],"unresolved_tasks":["Review the UI"],"changed_files":[],"commands":[],"tests":[],"failures":[],"next_actions":["Continue implementation"]}}}
+{"jsonrpc":"2.0","id":"8","result":{"schema_version":"session-compaction-checkpoint-create-result/0.1","review":{"schema_version":"session-compaction/0.1","checkpoint_id":"checkpoint-1","session_id":"session-1","through_sequence":7,"source_context_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","review_id":"compaction-review:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"review-required"},"descriptor":{"schema_version":"session-compaction-checkpoint-store/0.1","state":"review-persisted","original_event_history_authoritative":true},"event_sequence":8,"idempotent_replay":false,"activation_available":false,"provider_compact_invoked":false,"original_event_history_authoritative":true}}
+{"jsonrpc":"2.0","id":"9","method":"session/compaction/checkpoint/read","params":{"session_id":"session-1","checkpoint_id":"checkpoint-1"}}
+```
+
+Create derives `through_sequence` and `source_context_hash` from the complete,
+verified session event stream; clients do not supply either value. It is blocked
+while the session has an active turn. An identical retry returns the original
+review and event, while reusing a checkpoint ID with different preservation or
+summary content is a conflict. Read succeeds only when the content-addressed
+object and matching metadata-only session event both validate after restart.
+
+The summary and preservation instructions are bounded and secret-shape checked,
+but remain user-provided manual review data at this milestone. They are not added
+to model context automatically. Provider `thread/compact/start`, editable Qt
+review, activation, automatic thresholds, model-generated summaries, and
+cross-resource failure compensation remain unavailable.
+
 ## Security Boundary
 
 - AAP never carries desktop login tokens, API keys, authenticated proxy values,
@@ -118,9 +144,12 @@ session.
 - The current Agent/Codex profile is read-only. User editor saves and user
   terminals are separate, explicit operations scoped to the opened project.
 - The Qt UI consumes AAP state and does not parse vendor Codex events directly.
-- New methods require a schema version, capability/degradation entry, redacted
-  fixture, failure/reconnect behavior, persistence implications, and matching
-  Qt/sidecar tests before they can be exposed.
+- New mutation/provider methods require a schema version, capability/degradation
+  entry, redacted fixture, failure/reconnect behavior, persistence implications,
+  and matching Qt/sidecar tests before they can be exposed. The current manual
+  compaction review methods are an explicitly gated read-only exception: they
+  have sidecar/persistence protocol coverage, advertise a capability only when
+  both stores are healthy, and expose no activation or provider mutation.
 
 ## Verification
 

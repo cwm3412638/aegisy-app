@@ -105,6 +105,18 @@ impl CompactionCheckpointStore {
         session_id: &str,
         checkpoint_id: &str,
     ) -> Result<StoredCompactionCheckpoint, CompactionCheckpointStoreError> {
+        self.load_with_descriptor(session_id, checkpoint_id)
+            .map(|(stored, _)| stored)
+    }
+
+    pub fn load_with_descriptor(
+        &self,
+        session_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<
+        (StoredCompactionCheckpoint, CompactionCheckpointDescriptor),
+        CompactionCheckpointStoreError,
+    > {
         validate_lookup_id(session_id, "compaction session ID")?;
         validate_lookup_id(checkpoint_id, "compaction checkpoint ID")?;
         self.validate_layout()?;
@@ -123,7 +135,32 @@ impl CompactionCheckpointStore {
             return Err(error("compaction checkpoint identity is invalid"));
         }
         validate_review(&stored.review)?;
-        Ok(stored)
+        let descriptor = descriptor(&stored.review, &object_hash);
+        Ok((stored, descriptor))
+    }
+
+    pub fn load_optional_with_descriptor(
+        &self,
+        session_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<
+        Option<(StoredCompactionCheckpoint, CompactionCheckpointDescriptor)>,
+        CompactionCheckpointStoreError,
+    > {
+        validate_lookup_id(session_id, "compaction session ID")?;
+        validate_lookup_id(checkpoint_id, "compaction checkpoint ID")?;
+        self.validate_layout()?;
+        let pointer = self
+            .root
+            .join("pointers")
+            .join(pointer_name(session_id, checkpoint_id));
+        match fs::symlink_metadata(pointer) {
+            Ok(_) => self
+                .load_with_descriptor(session_id, checkpoint_id)
+                .map(Some),
+            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(error("compaction checkpoint pointer is unavailable")),
+        }
     }
 
     fn validate_layout(&self) -> Result<(), CompactionCheckpointStoreError> {
