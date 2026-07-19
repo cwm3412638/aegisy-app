@@ -506,21 +506,25 @@ Current editor evidence:
   hashes bounded visible workspace metadata, reads the existing structured Git
   status query, and observes runtime-owned turn/terminal state. Probe responses
   contain state labels and snapshot hashes but no content, arbitrary paths, or
-  caller-selected PIDs. Event state remains explicitly caller-supplied and the
-  probe does not persist, approve, mutate, or recover an operation. Task `6.9`
-  remains unchecked until startup discovery, authoritative event sourcing, Qt
-  review, and recovery actions are integrated.
+  caller-selected PIDs. Event state may be caller-supplied or derived from the
+  bounded durable turn/Git mappings described below; the probe does not persist,
+  approve, mutate, or recover an operation. Task `6.9` remains unchecked until
+  complete startup discovery, authoritative event sourcing, Qt review, and
+  recovery actions are integrated.
 - Durable Runtime startup now scans and validates the latest
   `operation.reconciled/0.1` event per session/operation pair into a bounded
   cache; the SQLite event stream remains authoritative for request-time gating.
   A malformed, missing, or over-limit scan cannot be interpreted as a safe
   operation result. This is partial startup discovery and does not complete task
   `6.9` without automatic operation source registration, Qt review, or recovery.
-- When `operation/probe` omits `event`, durable Runtime now derives only the latest
-  registered `turn.created`, `turn.completed`, `turn.failed`, or
-  `turn.interrupted/cancelled` state from the session event stream; explicit event
-  values remain caller-labelled. A protocol fixture proves a completed durable
-  Turn is reported as `durable-event-stream` without exposing the prompt. Other
+- When `operation/probe` omits `event`, durable Runtime derives the latest
+  validated registered `turn.created`, `turn.completed`, `turn.failed`, or
+  `turn.interrupted/cancelled` state and the existing `git.workflow.*` lifecycle
+  state from the session event stream; prepared/dispatching/in-progress Git
+  events are only running evidence, completed/failed/aborted are terminal
+  evidence, and conflicted/recovered remain unknown. Explicit event values
+  remain caller-labelled. Fixtures prove durable Turn and Git lifecycle mapping,
+  while malformed Git payloads remain rejected without inferring success. Other
   operation event families remain unknown until their authoritative sources are
   registered.
 - Capability `operation.reconciliation.status` exposes a read-only

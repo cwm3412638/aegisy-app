@@ -363,6 +363,23 @@ pub struct StoredOperationReconciliation {
     pub updated_at_ms: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct GitWorkflowLifecyclePayload {
+    schema_version: String,
+    action: String,
+    state: String,
+    operation_kind: String,
+    authorization_id: String,
+    requirement_hash: ContentHash,
+    record_hash: ContentHash,
+    observed_head: String,
+    observed_operation: Option<String>,
+    visible_conflict_count: usize,
+    redacted_conflict_count: usize,
+    command_exit_code: Option<i32>,
+    outcome: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkbenchStoreError {
     pub code: String,
@@ -7749,8 +7766,61 @@ impl WorkbenchStore {
             "turn.failed" => Some(EventState::Failed),
             "turn.interrupted" | "turn.cancelled" => Some(EventState::Interrupted),
             "turn.created" => Some(EventState::Running),
+            "git.workflow.prepared" | "git.workflow.dispatching" | "git.workflow.in-progress" => {
+                Self::validate_git_workflow_lifecycle_event(&event)?;
+                Some(EventState::Running)
+            }
+            "git.workflow.completed" => {
+                Self::validate_git_workflow_lifecycle_event(&event)?;
+                Some(EventState::Completed)
+            }
+            "git.workflow.failed" => {
+                Self::validate_git_workflow_lifecycle_event(&event)?;
+                Some(EventState::Failed)
+            }
+            "git.workflow.aborted" => {
+                Self::validate_git_workflow_lifecycle_event(&event)?;
+                Some(EventState::Interrupted)
+            }
+            "git.workflow.conflicted" | "git.workflow.recovered" => {
+                Self::validate_git_workflow_lifecycle_event(&event)?;
+                None
+            }
             _ => None,
         })
+    }
+
+    fn validate_git_workflow_lifecycle_event(
+        event: &WorkbenchEvent,
+    ) -> Result<(), WorkbenchStoreError> {
+        let payload: GitWorkflowLifecyclePayload = serde_json::from_value(event.payload.clone())
+            .map_err(|_| error("Git workflow lifecycle event payload is invalid"))?;
+        if payload.schema_version != "git.workflow.lifecycle/0.1"
+            || payload.action.is_empty()
+            || payload.operation_kind.is_empty()
+            || payload.authorization_id.is_empty()
+            || payload.observed_head.is_empty()
+            || payload.state.is_empty()
+            || payload.visible_conflict_count > 5_000
+            || payload.redacted_conflict_count > 5_000
+        {
+            return Err(error("Git workflow lifecycle event identity is invalid"));
+        }
+        validate_identity_text(&payload.action, "Git workflow action")?;
+        validate_identity_text(&payload.state, "Git workflow state")?;
+        validate_identity_text(&payload.operation_kind, "Git workflow operation kind")?;
+        validate_identity_text(&payload.authorization_id, "Git workflow authorization ID")?;
+        validate_identity_text(&payload.observed_head, "Git workflow observed HEAD")?;
+        if let Some(observed_operation) = payload.observed_operation.as_deref() {
+            validate_identity_text(observed_operation, "Git workflow observed operation")?;
+        }
+        if let Some(outcome) = payload.outcome.as_deref() {
+            validate_identity_text(outcome, "Git workflow outcome")?;
+        }
+        let _ = payload.command_exit_code;
+        validate_content_hash(&payload.requirement_hash, "Git workflow requirement hash")?;
+        validate_content_hash(&payload.record_hash, "Git workflow record hash")?;
+        Ok(())
     }
 
     pub fn session_blocked_operation(
@@ -15041,6 +15111,83 @@ mod tests {
             store.read_session_events("session-1", 0, 20).unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn operation_event_state_uses_validated_git_lifecycle_terminals() {
+        let root = Root::new("operation-git-events");
+        let (mut record, plan) = record_and_plan();
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        record.state = "execution-prepared".into();
+        record.allowed_actions.clear();
+        record.generation = 1;
+        record.updated_at_ms = 20;
+        record.execution = Some(GitWorkflowExecutionAttempt {
+            schema_version: "git-workflow-execution-attempt/0.1".into(),
+            authorization_id: "authorization-git-events".into(),
+            requirement_hash: plan.expected_index_state.clone(),
+            action: "start".into(),
+            phase: "prepared".into(),
+            source_generation: 0,
+            started_at_ms: 10,
+            updated_at_ms: 20,
+            command_exit_code: None,
+            outcome: None,
+        });
+        store
+            .append_git_workflow_event(&record, "git.workflow.prepared")
+            .unwrap();
+        assert_eq!(
+            store
+                .latest_operation_event_state("session-1", "operation-1")
+                .unwrap(),
+            Some(EventState::Running)
+        );
+
+        record.state = "completed".into();
+        record.generation = 2;
+        record.updated_at_ms = 30;
+        record.execution = Some(GitWorkflowExecutionAttempt {
+            schema_version: "git-workflow-execution-attempt/0.1".into(),
+            authorization_id: "authorization-git-events".into(),
+            requirement_hash: plan.expected_index_state,
+            action: "start".into(),
+            phase: "observed".into(),
+            source_generation: 1,
+            started_at_ms: 10,
+            updated_at_ms: 30,
+            command_exit_code: Some(0),
+            outcome: Some("completed".into()),
+        });
+        store
+            .append_git_workflow_event(&record, "git.workflow.completed")
+            .unwrap();
+        assert_eq!(
+            store
+                .latest_operation_event_state("session-1", "operation-1")
+                .unwrap(),
+            Some(EventState::Completed)
+        );
+        let malformed = serde_json::json!({
+            "schema_version": "git.workflow.lifecycle/0.1"
+        });
+        let malformed_bytes = serde_json::to_vec(&malformed).unwrap();
+        let malformed_hash = ContentHash::for_bytes(&malformed_bytes);
+        store
+            .connection
+            .execute(
+                "UPDATE events SET payload_json = ?1, payload_sha256 = ?2, payload_bytes = ?3
+                 WHERE event_kind = 'git.workflow.completed'",
+                rusqlite::params![
+                    String::from_utf8(malformed_bytes).unwrap(),
+                    malformed_hash.sha256,
+                    i64::try_from(malformed_hash.bytes).unwrap(),
+                ],
+            )
+            .unwrap();
+        assert!(store
+            .latest_operation_event_state("session-1", "operation-1")
+            .is_err());
     }
 
     #[test]

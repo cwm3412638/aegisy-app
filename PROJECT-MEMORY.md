@@ -150,8 +150,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Work session, hashes bounded visible workspace metadata, reads the structured
   Git status query, and observes runtime-owned turn or terminal state. The response
   contains state labels and snapshot hashes but no source content, arbitrary host
-  paths, or caller-selected PIDs. Event state remains caller-supplied and the probe
-  does not persist, approve, mutate, or recover an operation; startup discovery,
+  paths, or caller-selected PIDs. Event state is caller-supplied except for the
+  bounded durable turn/Git lifecycle mappings described below; the probe does not
+  persist, approve, mutate, or recover an operation. Startup discovery, complete
   authoritative event sourcing, Qt review, and recovery actions remain open.
 - Durable Runtime startup now preloads the latest validated reconciliation event
   for each session/operation pair into a bounded cache. The SQLite event stream
@@ -159,11 +160,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   over-limit startup scan never implies that an operation is safe. This is only
   partial startup discovery; automatic operation source registration, Qt review,
   and recovery actions remain incomplete.
-- If `operation/probe` omits `event`, durable Runtime derives only the latest
-  registered `turn.*` state from the session event stream. Explicit event values
-  remain caller-labelled; workspace-edit, terminal, background-job, and Git event
-  sources are not inferred. The probe still requires a later `operation/reconcile`
-  review and never exposes prompt/content data.
+- If `operation/probe` omits `event`, durable Runtime derives the latest validated
+  registered `turn.*` state and existing `git.workflow.*` lifecycle state from the
+  session event stream. Git prepared/dispatching/in-progress evidence maps only to
+  running; completed/failed/aborted maps to terminal evidence; conflicted/recovered
+  remains unknown. Explicit event values remain caller-labelled; workspace-edit,
+  terminal, and background-job event sources are not inferred. The probe still
+  requires a later `operation/reconcile` review and never exposes prompt/content
+  data.
 - Capability `operation.reconciliation.status` exposes read-only
   `operation/status` for the current session gate. It returns a bounded review
   summary and `recovery_action_available:false` while blocked, never clears the
@@ -686,9 +690,11 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   evidence and identity, and hydrates the Runtime cache with a 10,000-record
   bound. Per-request store checks remain authoritative when the cache is absent.
 - `WorkbenchStore::latest_operation_event_state` maps only validated session
-  `turn.created`, `turn.completed`, `turn.failed`, and `turn.interrupted/cancelled`
-  events to reconciliation evidence. Unknown operation event kinds return no
-  authority rather than being treated as success.
+  `turn.created`, `turn.completed`, `turn.failed`, `turn.interrupted/cancelled`,
+  and existing `git.workflow.*` lifecycle events to reconciliation evidence.
+  Git conflicted/recovered and unknown operation event kinds return no authority
+  rather than being treated as success; malformed Git lifecycle payloads fail
+  closed even when their stored payload hash is internally consistent.
 - `operation/status` is a content-free status projection for the latest blocked
   reconciliation in a session. It is intentionally available during the block
   and during pending deletion so Qt can explain the gate without adding a
