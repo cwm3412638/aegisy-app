@@ -114,6 +114,7 @@ const MAX_TERMINAL_EXCERPT_BYTES: usize = 16 * 1024;
 const TERMINAL_EXCERPT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 const MAX_PINNED_GIT_CONTEXT_BYTES: usize = 16 * 1024;
 const GIT_CONTEXT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
+const PINNED_CONTEXT_INVALIDATION_SCHEMA: &str = "pinned-context-source-invalidation/0.1";
 const IMAGE_CONTEXT_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const MAX_IMAGE_BASE64_CHARS: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 
@@ -9806,11 +9807,31 @@ impl Runtime {
                     record.state = "running".into();
                     record.updated_at_ms = timestamp;
                 }
-                let value = terminal_state.decorate_snapshot(&params.terminal_id, snapshot);
+                let mut value = terminal_state.decorate_snapshot(&params.terminal_id, snapshot);
+                drop(terminal_state);
+                let pinned_context_invalidation = self.invalidate_pinned_context_items(
+                    &project_id,
+                    None,
+                    &[],
+                    Some(&params.terminal_id),
+                );
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "pinned_context_invalidation".into(),
+                        pinned_context_invalidation,
+                    );
+                }
                 self.success_for(&request, value)
             }
             Err(error) => {
                 terminal_state.records.remove(&params.terminal_id);
+                drop(terminal_state);
+                let _ = self.invalidate_pinned_context_items(
+                    &project_id,
+                    None,
+                    &[],
+                    Some(&params.terminal_id),
+                );
                 self.error_for(&request, error.code, error.message)
             }
         }
@@ -9826,6 +9847,14 @@ impl Runtime {
         if let Err((code, message)) = self.terminal_session_binding(&params.session_id) {
             return self.error_for(&request, code, message);
         }
+        let project_id = match self
+            .sessions
+            .get(&params.session_id)
+            .and_then(|state| state.session.project_id.clone())
+        {
+            Some(project_id) => project_id,
+            None => return self.error_for(&request, -32095, "terminal requires a project session"),
+        };
         let snapshot =
             match self.terminal_snapshot_value(&params.terminal_id, &params.session_id, u64::MAX) {
                 Ok(snapshot) => snapshot,
@@ -9846,12 +9875,16 @@ impl Runtime {
             return self.error_for(&request, error.code, error.message);
         }
         let removed = terminal_state.records.remove(&params.terminal_id);
+        drop(terminal_state);
+        let pinned_context_invalidation =
+            self.invalidate_pinned_context_items(&project_id, None, &[], Some(&params.terminal_id));
         self.success_for(
             &request,
             json!({
                 "terminal_id": params.terminal_id,
                 "session_id": params.session_id,
-                "removed": removed.is_some()
+                "removed": removed.is_some(),
+                "pinned_context_invalidation": pinned_context_invalidation
             }),
         )
     }
@@ -10508,6 +10541,135 @@ impl Runtime {
         )
     }
 
+    /// Persist source invalidation as a normal immutable pinned-context
+    /// publication. The durable freshness marker is advisory metadata; the
+    /// authoritative source reread during context assembly remains required.
+    fn invalidate_pinned_context_items(
+        &mut self,
+        project_id: &str,
+        root_id: Option<&str>,
+        paths: &[String],
+        terminal_id: Option<&str>,
+    ) -> Value {
+        if paths.is_empty() && terminal_id.is_none() {
+            return json!({
+                "schema_version": PINNED_CONTEXT_INVALIDATION_SCHEMA,
+                "state": "unchanged",
+                "stale_count": 0,
+                "durable": self.pinned_context_store.is_some()
+            });
+        }
+        let Some(store) = self.pinned_context_store.as_ref() else {
+            return json!({
+                "schema_version": PINNED_CONTEXT_INVALIDATION_SCHEMA,
+                "state": "unavailable",
+                "stale_count": 0,
+                "durable": false,
+                "error_code": -32122
+            });
+        };
+        let current = match store.load_optional(project_id) {
+            Ok(current) => current,
+            Err(error) => {
+                return json!({
+                    "schema_version": PINNED_CONTEXT_INVALIDATION_SCHEMA,
+                    "state": "failed",
+                    "stale_count": 0,
+                    "durable": true,
+                    "error_code": -32123,
+                    "error_class": error.code
+                })
+            }
+        };
+        let Some((mut set, descriptor)) = current else {
+            return json!({
+                "schema_version": PINNED_CONTEXT_INVALIDATION_SCHEMA,
+                "state": "unchanged",
+                "stale_count": 0,
+                "durable": true
+            });
+        };
+        let path_matches = |item: &pinned_context::PinnedContextItem| {
+            let root_matches = item.root_id.as_deref().is_none_or(|item_root| {
+                root_id.is_some_and(|current_root| item_root == current_root)
+            });
+            if !root_matches {
+                return false;
+            }
+            let diagnostic_path = item.metadata.get("path").map(String::as_str);
+            (matches!(item.kind.as_str(), "file" | "selection")
+                && paths.iter().any(|path| path == &item.reference))
+                || (item.kind == "diagnostic"
+                    && diagnostic_path
+                        .is_some_and(|path| paths.iter().any(|changed| changed == path)))
+        };
+        let terminal_matches = |item: &pinned_context::PinnedContextItem| {
+            item.kind == "terminal_excerpt"
+                && terminal_id.is_some_and(|id| {
+                    item.metadata.get("terminal_id").map(String::as_str) == Some(id)
+                })
+        };
+        let mut stale_count = 0_u64;
+        for item in &mut set.items {
+            if item.freshness == "stale" || (!path_matches(item) && !terminal_matches(item)) {
+                continue;
+            }
+            item.freshness = "stale".into();
+            stale_count = stale_count.saturating_add(1);
+        }
+        if stale_count == 0 {
+            return json!({
+                "schema_version": PINNED_CONTEXT_INVALIDATION_SCHEMA,
+                "state": "unchanged",
+                "stale_count": 0,
+                "durable": true,
+                "set_identity": descriptor.set_identity
+            });
+        }
+        let next_identity = match set.identity() {
+            Ok(identity) => identity,
+            Err(error) => {
+                return json!({
+                    "schema_version": PINNED_CONTEXT_INVALIDATION_SCHEMA,
+                    "state": "failed",
+                    "stale_count": stale_count,
+                    "durable": true,
+                    "error_code": -32123,
+                    "error_class": error.code
+                })
+            }
+        };
+        let request = Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: None,
+            method: "workspace/pinned-context/invalidate".into(),
+            params: Value::Null,
+        };
+        let response = self.persist_pinned_context_set(
+            &request,
+            project_id,
+            &set,
+            Some(&descriptor.set_identity),
+        );
+        if let Some(error) = response.first().and_then(|value| value.get("error")) {
+            return json!({
+                "schema_version": PINNED_CONTEXT_INVALIDATION_SCHEMA,
+                "state": "failed",
+                "stale_count": stale_count,
+                "durable": true,
+                "error_code": error.get("code").cloned().unwrap_or(Value::Null)
+            });
+        }
+        json!({
+            "schema_version": PINNED_CONTEXT_INVALIDATION_SCHEMA,
+            "state": "persisted",
+            "stale_count": stale_count,
+            "durable": true,
+            "previous_set_identity": descriptor.set_identity,
+            "set_identity": next_identity
+        })
+    }
+
     fn pinned_image_release_reference_ids(
         workbench_store: Option<&WorkbenchStore>,
         project_id: &str,
@@ -10812,6 +10974,12 @@ impl Runtime {
                     self.diagnostic_store
                         .invalidate_path(&params.project_id, &params.path);
                 }
+                let pinned_context_invalidation = self.invalidate_pinned_context_items(
+                    &params.project_id,
+                    Some(&root_binding.root_id),
+                    std::slice::from_ref(&params.path),
+                    None,
+                );
                 refresh_watch_after_user_save(
                     &mut self.workspace_watches,
                     &params.project_id,
@@ -10824,6 +10992,10 @@ impl Runtime {
                     object.insert("project_id".into(), params.project_id.into());
                     object.insert("root_id".into(), root_binding.root_id.into());
                     object.insert("root_access".into(), root_binding.access.into());
+                    object.insert(
+                        "pinned_context_invalidation".into(),
+                        pinned_context_invalidation,
+                    );
                 }
                 self.success_for(&request, value)
             }
@@ -11376,6 +11548,12 @@ impl Runtime {
                 let observation =
                     self.diagnostic_store
                         .record_language_server(&scope_key, &params.path, &result);
+                let pinned_context_invalidation = self.invalidate_pinned_context_items(
+                    &params.project_id,
+                    Some(&root_binding.root_id),
+                    std::slice::from_ref(&params.path),
+                    None,
+                );
                 let mut value =
                     serde_json::to_value(result).expect("language diagnostic serialization");
                 if let Some(object) = value.as_object_mut() {
@@ -11400,6 +11578,10 @@ impl Runtime {
                     object.insert(
                         "observed_at_ms".into(),
                         Value::from(observation.observed_at_ms),
+                    );
+                    object.insert(
+                        "pinned_context_invalidation".into(),
+                        pinned_context_invalidation,
                     );
                     if observation.truncated {
                         object.insert("truncated".into(), Value::Bool(true));
@@ -12099,18 +12281,33 @@ impl Runtime {
         if let Some(active) = self.workspace_watches.get_mut(&params.watch_id) {
             active.snapshots = snapshots;
         }
+        let mut pinned_context_invalidation = json!({
+            "schema_version": PINNED_CONTEXT_INVALIDATION_SCHEMA,
+            "state": "unchanged",
+            "stale_count": 0,
+            "durable": self.pinned_context_store.is_some()
+        });
         if !changes.is_empty() {
             let scope_key = Self::workspace_scope_key(&watch.project_id, &watch.root_id);
             if let Some(index) = self.workspace_indexes.get_mut(&scope_key) {
                 index.mark_stale();
             }
+            let mut changed_paths = BTreeSet::new();
             for change in &changes {
                 if let Some(path) = change.get("path").and_then(Value::as_str) {
+                    changed_paths.insert(path.to_owned());
                     let scope_key = Self::workspace_scope_key(&watch.project_id, &watch.root_id);
                     self.language_servers.invalidate_document(&scope_key, path);
                     self.diagnostic_store.invalidate_path(&scope_key, path);
                 }
             }
+            let changed_paths = changed_paths.into_iter().collect::<Vec<_>>();
+            pinned_context_invalidation = self.invalidate_pinned_context_items(
+                &watch.project_id,
+                Some(&watch.root_id),
+                &changed_paths,
+                None,
+            );
         }
         self.success_for(
             &request,
@@ -12120,6 +12317,7 @@ impl Runtime {
                 "root_id": root_binding.root_id,
                 "root_access": root_binding.access,
                 "changes": changes,
+                "pinned_context_invalidation": pinned_context_invalidation,
                 "checked_at_ms": now_ms()
             }),
         )
@@ -12542,6 +12740,194 @@ mod pinned_context_assembly_tests {
         let mut output = Cursor::new(Vec::new());
         image.write_to(&mut output, ImageFormat::Png).unwrap();
         output.into_inner()
+    }
+
+    #[test]
+    fn sidecar_source_invalidation_persists_stale_metadata_across_restart() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("aegisy-pinned-invalidation-{unique}"));
+        let data_root = root.join("data");
+        let project_root = root.join("project");
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::create_dir_all(&data_root).unwrap();
+        fs::write(project_root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let mut runtime = Runtime::with_store(&data_root).unwrap();
+        runtime.handle_line(&request(
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": {"name": "source-invalidation", "version": "1"}
+            }),
+        ));
+        runtime.handle_line(&request("initialized", json!({})));
+        let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
+        let project_id = opened[0]["result"]["project"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = runtime.handle_line(&request(
+            "session/start",
+            json!({"mode": "work", "project_id": project_id}),
+        ));
+        let session_id = session[0]["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let hash = format!("sha256:{}", "a".repeat(64));
+        let set = json!({
+            "schema_version": pinned_context::SCHEMA_VERSION,
+            "project_id": project_id,
+            "items": [
+                {
+                    "id": "pin-file",
+                    "project_id": project_id,
+                    "session_id": session_id,
+                    "root_id": "root-1",
+                    "kind": "file",
+                    "source": "file-tree",
+                    "label": "src/main.rs",
+                    "reference": "src/main.rs",
+                    "content_hash": hash,
+                    "bytes": 14,
+                    "revision": "revision-1",
+                    "freshness": "fresh",
+                    "priority": 800,
+                    "metadata": {}
+                },
+                {
+                    "id": "pin-selection",
+                    "project_id": project_id,
+                    "session_id": session_id,
+                    "root_id": "root-1",
+                    "kind": "selection",
+                    "source": "editor-selection",
+                    "label": "src/main.rs:1",
+                    "reference": "src/main.rs",
+                    "content_hash": hash,
+                    "bytes": 14,
+                    "revision": "revision-1",
+                    "freshness": "fresh",
+                    "priority": 810,
+                    "metadata": {"line": "1", "column": "1", "end_line": "1", "end_column": "13"}
+                },
+                {
+                    "id": "pin-diagnostic",
+                    "project_id": project_id,
+                    "session_id": session_id,
+                    "root_id": "root-1",
+                    "kind": "diagnostic",
+                    "source": "language-server",
+                    "label": "src/main.rs:1",
+                    "reference": "diagnostic-raw:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "content_hash": hash,
+                    "bytes": 14,
+                    "revision": "diagnostic-revision-1",
+                    "freshness": "fresh",
+                    "priority": 820,
+                    "metadata": {"path": "src/main.rs", "line": "1", "column": "1", "end_line": "1", "end_column": "2"}
+                },
+                {
+                    "id": "pin-terminal",
+                    "project_id": project_id,
+                    "session_id": session_id,
+                    "root_id": "root-1",
+                    "kind": "terminal_excerpt",
+                    "source": "terminal-output",
+                    "label": "terminal excerpt",
+                    "reference": "terminal-excerpt:terminal-1:1:0:12",
+                    "content_hash": hash,
+                    "bytes": 12,
+                    "revision": "terminal-generation:1",
+                    "freshness": "fresh",
+                    "priority": 700,
+                    "metadata": {"terminal_id": "terminal-1", "generation": "1", "output_start": "0", "output_end": "12"}
+                }
+            ]
+        });
+        let saved = runtime.handle_line(&request_with_id(
+            "save-pins",
+            "workspace/pinned-context/save",
+            json!({"project_id": project_id, "set": set}),
+        ));
+        assert!(saved[0]["result"].is_object(), "pin save failed: {saved:?}");
+        let initial_identity = saved[0]["result"]["set_identity"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let watched = runtime.handle_line(&request(
+            "workspace/watch",
+            json!({"project_id": project_id, "root_id": "root-1", "paths": ["src"]}),
+        ));
+        let watch_id = watched[0]["result"]["watch_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        fs::write(
+            project_root.join("src/main.rs"),
+            "fn main() { println!(\"changed\"); }\n",
+        )
+        .unwrap();
+        let polled = runtime.handle_line(&request(
+            "workspace/watch/poll",
+            json!({"watch_id": watch_id}),
+        ));
+        assert_eq!(
+            polled[0]["result"]["pinned_context_invalidation"]["state"],
+            "persisted"
+        );
+        assert_eq!(
+            polled[0]["result"]["pinned_context_invalidation"]["stale_count"],
+            3
+        );
+        assert_eq!(
+            polled[0]["result"]["pinned_context_invalidation"]["previous_set_identity"],
+            initial_identity
+        );
+        assert_ne!(
+            polled[0]["result"]["pinned_context_invalidation"]["set_identity"],
+            initial_identity
+        );
+
+        let terminal_stale =
+            runtime.invalidate_pinned_context_items(&project_id, None, &[], Some("terminal-1"));
+        assert_eq!(terminal_stale["state"], "persisted");
+        assert_eq!(terminal_stale["stale_count"], 1);
+
+        let listed = runtime.handle_line(&request(
+            "workspace/pinned-context/list",
+            json!({"project_id": project_id}),
+        ));
+        assert!(listed[0]["result"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["freshness"] == "stale"));
+
+        drop(runtime);
+        let mut reopened = Runtime::with_store(&data_root).unwrap();
+        reopened.handle_line(&request(
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": {"name": "source-invalidation-reopen", "version": "1"}
+            }),
+        ));
+        reopened.handle_line(&request("initialized", json!({})));
+        let reopened_list = reopened.handle_line(&request(
+            "workspace/pinned-context/list",
+            json!({"project_id": project_id}),
+        ));
+        assert!(reopened_list[0]["result"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["freshness"] == "stale"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -13152,10 +13538,22 @@ mod pinned_context_assembly_tests {
             json!({"session_id": session_id, "terminal_id": terminal_id}),
         ));
         assert_eq!(removed[0]["result"]["removed"], true);
+        assert_eq!(
+            removed[0]["result"]["pinned_context_invalidation"]["state"],
+            "persisted"
+        );
+        let (stale_set, stale_descriptor) = runtime
+            .pinned_context_store
+            .as_ref()
+            .unwrap()
+            .load(&project_id)
+            .unwrap();
+        assert_eq!(stale_set.items[0].freshness, "stale");
+        assert_ne!(stale_descriptor.set_identity, identity);
         let error = runtime
             .append_pinned_context(
                 &session_id,
-                Some(&identity),
+                Some(&stale_descriptor.set_identity),
                 &["pin-terminal".into()],
                 &mut Vec::new(),
                 &mut HashMap::new(),

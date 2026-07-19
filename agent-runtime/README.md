@@ -135,8 +135,9 @@ event, and disables pinned-context capabilities on tamper or ambiguity while
 preserving data. For
 standard `*:sha256:` Blob references, save performs a read-only SQLite metadata
 check for active project/session ownership plus exact hash/byte identity; it
-does not read Blob bytes or update access timestamps. It does not reread or
-invalidate source references. After startup publication compensation, the store
+does not read Blob bytes or update access timestamps. Source invalidation is
+handled by Runtime authority events rather than by the metadata store itself.
+After startup publication compensation, the store
 runs `pinned-context-object-gc/0.1` with a 24-hour orphan grace period; current
 pointers and pending journals are protected, object hash/schema integrity is
 rechecked before deletion, and unknown, corrupt, recent, future-dated, or changed
@@ -151,12 +152,15 @@ write with the exact same content, owner, reference, and metadata reactivates th
 released reference transactionally; any identity difference remains an error. Release
 events carry only a hashed batch identity and count, allowing repeated transitions to
 the same empty set without persisting reference IDs or content. The external
-pin pointer is still published first, so cross-resource atomicity and durable
-sidecar-driven source invalidation remain open. The Qt Workbench marks matching
-file/selection/diagnostic pins stale after workspace saves or watcher changes and
-marks terminal-excerpt pins stale after terminal restart/removal; these local
-indicators never rewrite durable metadata, and Runtime inspect/start remains the
-final authority.
+pin pointer is still published first, so cross-resource atomicity remains open.
+Runtime publishes `pinned-context-source-invalidation/0.1` metadata when a
+workspace watch/save, diagnostic re-observation, or terminal restart/removal
+invalidates matching file/selection/diagnostic/terminal descriptors. It reuses
+the immutable object, pointer journal, and SQLite event path; bounded failure
+states never replace the authoritative reread during Runtime inspect/start. The
+Qt Workbench also marks matching rows stale immediately for responsive UI and
+accepts the new CAS identity only when its previous identity matches; otherwise
+it reloads the complete authoritative set.
 
 Capabilities `workspace.image.import-user` and `workspace.image.preview` add the
 session/project-scoped image authority used by pinned context. Import accepts
@@ -171,8 +175,8 @@ temporary hard links. Normal turn completion removes the links; runtime startup
 removes only safely named crash leftovers and preserves unknown entries. Image
 paths and bodies are not stored in turn history or returned by context inspection.
 Final unpin releases the active reference through the event transaction. Cross-resource
-atomicity, durable sidecar-driven source invalidation, and pin/Blob GC lifecycle remain open under
-OpenSpec task 17.3.
+atomicity, child-handoff assembly, and the remaining pin/Blob GC lifecycle remain
+open under OpenSpec task 17.3.
 
 `operation/probe` is a read-only evidence collector for the reconciliation
 workflow. It resolves only registered project roots through the Work session,

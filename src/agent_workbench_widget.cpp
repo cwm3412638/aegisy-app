@@ -1553,6 +1553,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::terminalRestarted,
             this, [this](const QString &, const QJsonObject &terminal) {
+        applyPinnedContextInvalidation(terminal);
         markPinnedTerminalStale(terminal.value(QStringLiteral("terminal_id")).toString());
         m_activeTerminalId = terminal.value(QStringLiteral("terminal_id")).toString();
         applyTerminalSnapshot(terminal, true);
@@ -1560,6 +1561,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::terminalRemoved,
             this, [this](const QString &, const QJsonObject &result) {
+        applyPinnedContextInvalidation(result);
         markPinnedTerminalStale(result.value(QStringLiteral("terminal_id")).toString());
         if (result.value(QStringLiteral("terminal_id")).toString() == m_activeTerminalId) {
             activateTerminal(QString());
@@ -1631,6 +1633,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             this, [this](const QString &requestId, const QJsonObject &file) {
         if (requestId != m_editorSaveRequestId) return;
         m_editorSaveRequestId.clear();
+        applyPinnedContextInvalidation(file);
         m_editorRevision = file.value(QStringLiteral("revision")).toString();
         m_editorConflict = false;
         m_editor->document()->setModified(false);
@@ -1835,6 +1838,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         if (requestId != m_languageRequestId
                 || result.value(QStringLiteral("root_id")).toString() != m_workspaceRootId) return;
         m_languageRequestId.clear();
+        applyPinnedContextInvalidation(result);
+        markPinnedContextStale(QSet<QString>{result.value(QStringLiteral("path")).toString()});
         populateLanguageDiagnostics(result);
         updateEditorActions();
     });
@@ -1949,6 +1954,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::workspaceChanged,
             this, [this](const QString &, const QJsonObject &result) {
+        applyPinnedContextInvalidation(result);
         const QJsonArray changes = result.value(QStringLiteral("changes")).toArray();
         QSet<QString> directories;
         QSet<QString> changedPaths;
@@ -8237,6 +8243,47 @@ void AgentWorkbenchWidget::applyPinnedContextResult(const QJsonObject &result)
     }
     m_pinnedContextSetIdentity = result.value(QStringLiteral("set_identity")).toString();
     rebuildContextPanel();
+    updateEditorActions();
+    updateTerminalControls();
+    updateGitPinControls();
+}
+
+void AgentWorkbenchWidget::applyPinnedContextInvalidation(const QJsonObject &result)
+{
+    const QJsonObject invalidation = result
+        .value(QStringLiteral("pinned_context_invalidation")).toObject();
+    if (invalidation.isEmpty()) return;
+    if (invalidation.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("pinned-context-source-invalidation/0.1")) {
+        addNotice(QStringLiteral("固定上下文失效状态版本无效，正在重新读取。"), true);
+        requestPinnedContext();
+        return;
+    }
+    const QString state = invalidation.value(QStringLiteral("state")).toString();
+    if (state == QStringLiteral("unchanged")) return;
+    if (state != QStringLiteral("persisted")) {
+        addNotice(QStringLiteral("固定上下文失效状态未能持久化，正在重新读取。"), true);
+        requestPinnedContext();
+        return;
+    }
+    const QString prefix = QStringLiteral("pinned-context:sha256:");
+    const QString previous = invalidation
+        .value(QStringLiteral("previous_set_identity")).toString();
+    const QString next = invalidation.value(QStringLiteral("set_identity")).toString();
+    const auto validIdentity = [](const QString &value, const QString &prefix) {
+        return value.startsWith(prefix) && isLowerHex(value.mid(prefix.size()), 64);
+    };
+    if (!validIdentity(previous, prefix) || !validIdentity(next, prefix)
+            || m_pinnedContextSetIdentity.isEmpty()
+            || previous != m_pinnedContextSetIdentity) {
+        addNotice(QStringLiteral("固定上下文集合已由其他操作更新，正在重新读取。"));
+        requestPinnedContext();
+        return;
+    }
+    m_pinnedContextSetIdentity = next;
+    updateEditorActions();
+    updateTerminalControls();
+    updateGitPinControls();
 }
 
 QJsonArray AgentWorkbenchWidget::persistedPinnedContextItems() const

@@ -794,10 +794,15 @@ Known limitations:
   descriptor. The Git surface exposes explicit `固定差异` and `固定提交`; a real Git
   render fixture validates both authority reads, CAS persistence, labels, and unpin.
   Real Runtime and render fixtures cover assembly, metadata-only inspection,
-  pin/unpin, mutable Git drift, and failure after source removal. Remaining image/
-  child-handoff assembly, cross-resource atomicity, durable sidecar-driven
-  invalidation, and complete cross-platform pin evidence remain incomplete; task
-  17.3 remains unchecked. Qt workspace-watch and user-save callbacks mark loaded
+  pin/unpin, mutable Git drift, and failure after source removal. The focused
+  sidecar invalidation fixture persists `fresh` to `stale` transitions for
+  root-scoped file/selection/diagnostic descriptors after workspace changes and
+  terminal-excerpt descriptors after terminal lifecycle changes, then reopens the
+  Runtime and verifies every stale marker remains durable. The Qt render flow
+  consumes the sidecar-advanced identity and proves a stale terminal/selection pin
+  can still be explicitly unpinned without weakening stale-CAS rejection. Remaining image/
+  child-handoff assembly, cross-resource atomicity, and complete cross-platform
+  pin evidence remain incomplete; task 17.3 remains unchecked. Qt workspace-watch and user-save callbacks mark loaded
   matching file, selection, and diagnostic pins stale locally; terminal
   restart/removal marks matching terminal-excerpt pins stale. None of these local
   indicators rewrite durable metadata; the sidecar reread remains authoritative.
@@ -818,8 +823,8 @@ Known limitations:
   cover reopen/update, idempotency, absence of a content body field, retained old
   objects, object/pointer tampering, update refusal on damaged current authority,
   and symlinked-layout denial. Cross-resource event/object/Blob atomicity, Blob
-  release/lifecycle binding, durable source invalidation, Windows
-  execution, remaining image/child-handoff assembly, complete Git lifecycle, and their Qt
+  release/lifecycle binding, Windows execution, remaining image/child-handoff
+  assembly, complete Git lifecycle, and their Qt
   surfaces remain open.
 - Windows packaging, TLS runtime, scaling, IME, and accessibility evidence remain
   required before a Windows release claim.

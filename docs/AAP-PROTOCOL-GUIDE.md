@@ -221,6 +221,22 @@ newer set. Removing the final item writes a valid empty set with a new identity;
 the next list therefore distinguishes an intentional empty set from a project
 that has never stored pins.
 
+Runtime-owned source changes use the additive
+`pinned-context-source-invalidation/0.1` result embedded in successful
+`workspace/watch/poll`, `workspace/save-user-text`, workspace diagnostic,
+`terminal/restart-user`, and `terminal/remove-user` responses. Matching
+file/selection references, diagnostic `metadata.path`, or terminal
+`metadata.terminal_id` entries are changed from `fresh` to `stale` by publishing
+a new immutable set through the existing pointer journal and metadata-only
+project event. The result reports only `state`, `stale_count`, durability, old/new
+set identities, or a bounded error code; it never returns paths or source bodies.
+`failed` and `unavailable` are not interpreted as freshness. Context inspection
+and turn start still reread the authoritative source and fail closed on identity
+or authority loss. Qt accepts the returned `set_identity` only when the schema,
+both hash formats, and `previous_set_identity` match its current view; any
+ambiguity triggers a full `workspace/pinned-context/list` reload before another
+CAS mutation.
+
 Every save/remove compares the previous and next complete image-reference set.
 If the final descriptor for a session-owned image is removed, the response event
 reports additive `released_blob_reference_count`; the project event and release
@@ -362,14 +378,15 @@ source identity, bytes, and truncation. Worktree/staged changes therefore invali
 their pins; commit and commit-diff pins survive unrelated worktree changes but fail
 if the exact Git object is no longer available. No Git mutation is added.
 
-Child-handoff assembly, durable automatic invalidation, full cross-resource atomicity,
-and Windows runtime evidence remain open. Startup also runs the bounded
+Child-handoff assembly, full cross-resource atomicity, and Windows runtime evidence
+remain open. Startup also runs the bounded
 `pinned-context-object-gc/0.1` sweep after publication compensation: it protects
 pointer/journal objects, applies a 24-hour grace period, rechecks hash/schema and
 file metadata, and preserves uncertain entries.
-Qt watch/save callbacks may mark loaded file, selection, and diagnostic pins stale
-locally, while terminal restart/removal marks matching terminal-excerpt pins stale;
-these callbacks never rewrite the durable descriptor. Runtime inspect/start remains
+Qt watch/save callbacks mark loaded file, selection, and diagnostic pins stale
+locally, while terminal restart/removal marks matching terminal-excerpt pins stale.
+The sidecar independently persists the same source invalidation, so a later list or
+Runtime restart retains the stale descriptor. Runtime inspect/start remains
 authoritative and fail-closed. Agent/Codex remains read-only.
 
 ## Operation Reconciliation

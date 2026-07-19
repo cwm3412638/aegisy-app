@@ -111,6 +111,7 @@ private:
     void showPinnedImagePreview(const QJsonObject &preview);
     void requestPinnedContext();
     void applyPinnedContextResult(const QJsonObject &result);
+    void applyPinnedContextInvalidation(const QJsonObject &result);
     void savePinnedContextOrder();
     QJsonArray persistedPinnedContextItems() const;
     QStringList includedPinnedContextIds() const;

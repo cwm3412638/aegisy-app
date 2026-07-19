@@ -405,10 +405,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   the existing bounded inline path; only selection items without inline content
   are resolved from the authoritative file range.
   This foundation still has no atomic boundary across the external pin object/pointer
-  and SQLite event/release transaction, durable diagnostic/
-  terminal authority and invalidation, durable sidecar-driven source invalidation, or
-  child-handoff assembly; complete image/Git lifecycle and cross-platform evidence
-  also remain open, so keep `17.3` unchecked.
+  and SQLite event/release transaction, or child-handoff assembly. Runtime now
+  propagates workspace watch/save changes, diagnostic re-observation, and terminal
+  restart/removal into a durable `pinned-context-source-invalidation/0.1` metadata
+  publication. The sidecar marks matching file/selection/diagnostic/terminal
+  descriptors stale through the existing immutable object, pointer journal, and
+  SQLite event path; a failure reports a bounded state and never substitutes for
+  authoritative source reread. Qt advances its local CAS identity only when the
+  schema, old/new hashes, and previous identity match; otherwise it reloads the
+  complete durable set before another mutation. Complete image/Git lifecycle, cross-platform
+  evidence, and child-handoff assembly remain open, so keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
   auto-discovered instructions. Instruction precedence ranks and pinned priority
@@ -1257,15 +1263,15 @@ fail-closed invariants.
   session scope, revalidate PNG/JPEG/WebP hash, bytes, media, dimensions, and decode
   limits, and enter the manifest/budget without entering prompt text. Included images
   become temporary verified `localImage` paths only for the Codex turn. Child-handoff
-  kinds, cross-resource external-object/SQLite compensation, automatic invalidation,
-  and orphan GC remain unavailable; the
+  kinds, cross-resource external-object/SQLite compensation, and orphan GC remain
+  unavailable; the
   composer queue is otherwise transient. Qt render evidence covers file and
   editor-selection pin persistence, range labels, inclusion, order boundaries,
   and unpin. The diagnostic, terminal, and Git surfaces provide explicit authority-read,
   validate, CAS pin, include, and unpin behavior without persisting their bodies.
-  Watch/save changes also project stale state locally without mutating durable pin metadata;
-  child-handoff production and complete cross-platform pin behavior remain
-  open.
+  Watch/save changes, diagnostic re-observation, and terminal lifecycle changes now
+  project stale state both locally and through the sidecar's durable pin metadata;
+  child-handoff production and complete cross-platform pin behavior remain open.
 
 ## Workspace Edit Boundary
 
