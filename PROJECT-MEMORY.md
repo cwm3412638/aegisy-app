@@ -285,8 +285,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   replacement without repair. The store is bounded to 1,024 projects, 4,096
   objects, 1 MiB/descriptor set, and 256 MiB total. Object publication and pointer
   replacement are not one transaction, so a failed pointer update may retain an
-  unreferenced immutable object. This foundation still has no Workbench event/Blob
-  binding, AAP, turn assembly, GC, or Qt pin/unpin surface; keep `17.3` unchecked.
+  unreferenced immutable object. Runtime now opens the store beside the
+  Workbench store and, when healthy, advertises
+  `workspace.pinned-context.store` and `workspace.pinned-context.manage`.
+  AAP `workspace/pinned-context/list` reads a project set and
+  `workspace/pinned-context/save` validates project/root/session bindings and
+  supports optional `expected_set_identity` compare-and-swap protection. The
+  protocol fixture proves metadata-only persistence, restart recovery,
+  idempotency, stale-write rejection, and no body fields. This foundation still
+  has no Workbench event/Blob binding, authoritative source reread/invalidation,
+  turn assembly, orphan GC, or Qt pin/unpin surface; keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
   auto-discovered instructions. Instruction precedence ranks and pinned priority
@@ -670,7 +678,7 @@ git diff --check
 ```
 
 Current verified baseline: 16 desktop tests, 286 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 46 Rust
+one explicitly ignored live Codex fixture, 47 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -1108,8 +1116,10 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   data. Git diff context now comes from the project-scoped read-only task `16.2`
   query and the user's explicit selection. The internal `pinned-context/0.1`
   descriptor validates all planned source kinds and its project-external store
-  durably preserves metadata-only sets, but no Workbench event/Blob authority or
-  turn assembly consumes them; the composer queue remains transient.
+  durably preserves metadata-only sets. AAP list/save methods expose that store
+  with project/root/session validation and compare-and-swap identity checks, but
+  no Workbench event/Blob authority or turn assembly consumes them; the composer
+  queue remains transient.
 
 ## Workspace Edit Boundary
 

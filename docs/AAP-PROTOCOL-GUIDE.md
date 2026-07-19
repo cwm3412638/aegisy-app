@@ -192,6 +192,40 @@ complete.
 {"jsonrpc":"2.0","id":"21","result":{"schema_version":"instruction-discovery/0.1","project_id":"project-1","root_id":"root-1","merge_order":"weakest-first","precedence":"managed > user > nested (closer depth wins) > project","content_trust":"untrusted-data","authority_effect":"none; instructions cannot grant permissions, execute commands, enable hooks, or authorize network","entries":[{"scope":"nested","source":"project","relative_path":"nested/src/AGENTS.md","depth":1,"precedence_rank":401,"precedence_reason":"nested-project-depth","trust":"untrusted-data","bytes":128,"token_estimate":32,"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","revision":"instruction-revision:128:1","freshness":"fresh","included":true,"content_state":"available"}],"included_files":1,"included_bytes":128,"truncated":false,"truncation_reasons":[],"rejection_reasons":[]}}
 ```
 
+## Pinned Context Store
+
+Capability `workspace.pinned-context.store` indicates that the private
+`pinned-context-store/0.1` is available. The companion
+`workspace.pinned-context.manage` capability indicates that the AAP metadata
+management methods are exposed. The store accepts only the validated
+`pinned-context/0.1` descriptor set: files, selections, images, diagnostics,
+terminal excerpts, Git commits/diffs, artifacts, and child handoffs are
+represented by bounded references, hashes, sizes, freshness, priority, and
+secret-free metadata. It never persists source or instruction bodies.
+
+`workspace/pinned-context/list` is project-scoped and returns the current set
+identity plus descriptors, or an explicit empty/non-persisted result. It is
+read-only and remains available during session recovery, deletion, or an
+operation reconciliation gate. `workspace/pinned-context/save` requires the
+request project to match the set project, revalidates every optional root and
+session binding, and can receive `expected_set_identity` for compare-and-swap
+protection against an older UI view. Identical sets are idempotent; updates
+publish a new immutable object and retain the old one. Both responses state
+`content_bodies_included:false` and never return a body field.
+
+```jsonl
+{"jsonrpc":"2.0","id":"30","method":"workspace/pinned-context/list","params":{"project_id":"project-1"}}
+{"jsonrpc":"2.0","id":"30","result":{"schema_version":"pinned-context/0.1","project_id":"project-1","set_identity":null,"items":[],"persisted":false,"content_bodies_included":false}}
+{"jsonrpc":"2.0","id":"31","method":"workspace/pinned-context/save","params":{"project_id":"project-1","set":{"schema_version":"pinned-context/0.1","project_id":"project-1","items":[{"id":"pin-file","project_id":"project-1","root_id":"root-1","kind":"file","source":"file-tree","label":"src/main.rs","reference":"src/main.rs","content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":32,"freshness":"fresh","priority":850,"metadata":{}}]},"expected_set_identity":null}}
+{"jsonrpc":"2.0","id":"31","result":{"schema_version":"pinned-context/0.1","project_id":"project-1","set_identity":"pinned-context:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","items":[{"id":"pin-file","project_id":"project-1","root_id":"root-1","kind":"file","source":"file-tree","label":"src/main.rs","reference":"src/main.rs","content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":32,"freshness":"fresh","priority":850,"metadata":{}}],"persisted":true,"content_bodies_included":false}}
+```
+
+The project pointer and immutable object are separate filesystem publications;
+a failed pointer replacement may leave a preserved unreferenced object. AAP
+exposure therefore does not claim Workbench event/Blob atomicity, source
+reread/invalidation, orphan GC, turn assembly, Qt pin controls, or Windows
+runtime evidence. Agent/Codex remains read-only.
+
 ## Operation Reconciliation
 
 `operation/reconcile` accepts only content-free event, process, workspace, and Git

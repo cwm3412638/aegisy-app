@@ -1320,6 +1320,106 @@ fn project_roots_keep_independent_access_and_remove_only_secondary_roots() {
 }
 
 #[test]
+fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-pinned-context-{unique}"));
+    let data_root = root.join("data");
+    let project_root = root.join("project");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    let initialized = runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "pinned-context", "version": "1"}
+        }),
+    ));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "workspace.pinned-context.store"));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    let opened = runtime.handle_line(&request(
+        "project-open",
+        "project/open",
+        json!({"root": project_root}),
+    ));
+    let project_id = opened[0]["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let listed = runtime.handle_line(&request(
+        "pins-empty",
+        "workspace/pinned-context/list",
+        json!({"project_id": project_id}),
+    ));
+    assert_eq!(listed[0]["result"]["persisted"], false);
+    let set = json!({
+        "schema_version": "pinned-context/0.1",
+        "project_id": project_id.clone(),
+        "items": [{
+            "id": "pin-file",
+            "project_id": project_id.clone(),
+            "root_id": "root-1",
+            "kind": "file",
+            "source": "file-tree",
+            "label": "src/main.rs",
+            "reference": "src/main.rs",
+            "content_hash": format!("sha256:{}", "a".repeat(64)),
+            "bytes": 32,
+            "freshness": "fresh",
+            "priority": 850,
+            "metadata": {}
+        }]
+    });
+    let saved = runtime.handle_line(&request(
+        "pins-save",
+        "workspace/pinned-context/save",
+        json!({"project_id": project_id.clone(), "set": set.clone()}),
+    ));
+    assert_eq!(saved[0]["result"]["persisted"], true);
+    assert_eq!(saved[0]["result"]["content_bodies_included"], false);
+    assert!(saved[0]["result"].get("content").is_none());
+    let identity = saved[0]["result"]["set_identity"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let stale = runtime.handle_line(&request(
+        "pins-stale",
+        "workspace/pinned-context/save",
+        json!({"project_id": project_id.clone(), "set": set, "expected_set_identity": "stale"}),
+    ));
+    assert_eq!(stale[0]["error"]["code"], -32041);
+    drop(runtime);
+
+    let mut restarted = Runtime::with_store(&data_root).unwrap();
+    restarted.handle_line(&request(
+        "initialize-2",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "pinned-context", "version": "1"}
+        }),
+    ));
+    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    let reopened = restarted.handle_line(&request(
+        "pins-reopen",
+        "workspace/pinned-context/list",
+        json!({"project_id": project_id}),
+    ));
+    assert_eq!(reopened[0]["result"]["persisted"], true);
+    assert_eq!(reopened[0]["result"]["set_identity"], identity);
+    assert_eq!(reopened[0]["result"]["items"].as_array().unwrap().len(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn project_relink_requires_reviewed_identity_and_survives_restart() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

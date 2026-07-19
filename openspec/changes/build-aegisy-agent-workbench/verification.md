@@ -747,9 +747,13 @@ Known limitations:
 - The internal `pinned-context/0.1` contract validates content-free descriptors for
   every 17.3 source kind. Unit fixtures cover kind support, project/duplicate
   binding, deterministic identity, unsafe absolute/parent/network references,
-  secret-shaped metadata, item size, and aggregate size bounds. It has no AAP,
-  durable event/Blob storage, source reread, turn assembly, or Qt pin/unpin surface;
-  task 17.3 remains unchecked.
+  secret-shaped metadata, item size, and aggregate size bounds. The runtime now
+  opens `pinned-context-store/0.1` beside the Workbench store and exposes
+  metadata-only AAP list/save methods when it is healthy. Protocol coverage
+  verifies project/root/session scope, restart recovery, idempotent persistence,
+  compare-and-swap stale-write rejection, and that responses contain no body.
+  Workbench event/Blob atomicity, source reread, turn assembly, and Qt pin/unpin
+  surface remain incomplete; task 17.3 remains unchecked.
 - `pinned-context-store/0.1` persists metadata-only sets using private immutable
   content-addressed objects and atomic project-pointer replacement. Store fixtures
   cover reopen/update, idempotency, absence of a content body field, retained old

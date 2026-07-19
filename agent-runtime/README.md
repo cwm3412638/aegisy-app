@@ -45,6 +45,8 @@ or session methods are accepted.
 - `workspace/list`
 - `workspace/read`
 - `workspace/instructions` (deterministic, bounded, untrusted instruction discovery)
+- `workspace/pinned-context/list` and `workspace/pinned-context/save` (durable,
+  metadata-only pinned-context descriptors with project/root/session validation)
 - `turn/context/inspect` (read-only preflight; no model call or persistence)
 - `shutdown`
 
@@ -106,13 +108,22 @@ The internal `pinned-context/0.1` contract validates content-free descriptors fo
 files, selections, images, diagnostics, terminal excerpts, Git commits/diffs,
 artifacts, and child handoffs. It binds project/session/root identity, source,
 reference, hash, size, freshness, priority, and bounded secret-free metadata. The
-descriptor contract alone does not expose AAP methods or add pins to model context.
+descriptor contract alone does not add pins to model context; the separate store
+and AAP methods provide metadata persistence only.
 
 `pinned-context-store/0.1` adds private project-external persistence for exact
 descriptor sets. Immutable content-addressed objects and atomically replaced
 project pointers are hash/schema/project revalidated after reopen; tampered
-current authority blocks updates. The store never contains source bodies and is
-not yet registered in Workbench events, durable Blob references, AAP, or Qt.
+current authority blocks updates. AAP advertises
+`workspace.pinned-context.store` and `workspace.pinned-context.manage` when this
+store opens successfully. `workspace/pinned-context/list` reads the current
+project set and `workspace/pinned-context/save` validates project/root/session
+bindings and supports optional `expected_set_identity` compare-and-swap
+protection. Responses contain only descriptors and
+`content_bodies_included:false`; the store never contains source bodies. It is
+not yet bound atomically to Workbench events or durable Blob references, does
+not reread or invalidate source references, and has no orphan GC, turn
+assembly, or Qt pin/unpin/order surface.
 
 `operation/probe` is a read-only evidence collector for the reconciliation
 workflow. It resolves only registered project roots through the Work session,

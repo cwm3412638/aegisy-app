@@ -140,6 +140,7 @@ pub struct Runtime {
     operation_reconciliations: HashMap<String, operation_reconciliation::ReconciliationResult>,
     workbench_store: Option<WorkbenchStore>,
     compaction_store: Option<session_compaction_store::CompactionCheckpointStore>,
+    pinned_context_store: Option<pinned_context_store::PinnedContextStore>,
     backend: Backend,
 }
 
@@ -581,6 +582,19 @@ struct WorkspaceWatch {
     root_id: String,
     paths: Vec<String>,
     snapshots: HashMap<String, BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PinnedContextListParams {
+    project_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PinnedContextSaveParams {
+    project_id: String,
+    set: pinned_context::PinnedContextSet,
+    #[serde(default)]
+    expected_set_identity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2084,10 +2098,13 @@ impl Runtime {
             WorkbenchStoreOpen::Writable(store) => {
                 let compaction_store =
                     session_compaction_store::CompactionCheckpointStore::open(data_root).ok();
+                let pinned_context_store =
+                    pinned_context_store::PinnedContextStore::open(data_root).ok();
                 Ok(Self::with_backend_and_store(
                     Backend::Preview,
                     Some(store),
                     compaction_store,
+                    pinned_context_store,
                 ))
             }
             WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => {
@@ -2102,10 +2119,13 @@ impl Runtime {
                 let adapter = CodexAdapter::start()?;
                 let compaction_store =
                     session_compaction_store::CompactionCheckpointStore::open(data_root).ok();
+                let pinned_context_store =
+                    pinned_context_store::PinnedContextStore::open(data_root).ok();
                 Ok(Self::with_backend_and_store(
                     Backend::Codex(adapter),
                     Some(store),
                     compaction_store,
+                    pinned_context_store,
                 ))
             }
             WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => {
@@ -2119,13 +2139,14 @@ impl Runtime {
     }
 
     fn with_backend(backend: Backend) -> Self {
-        Self::with_backend_and_store(backend, None, None)
+        Self::with_backend_and_store(backend, None, None, None)
     }
 
     fn with_backend_and_store(
         backend: Backend,
         workbench_store: Option<WorkbenchStore>,
         compaction_store: Option<session_compaction_store::CompactionCheckpointStore>,
+        pinned_context_store: Option<pinned_context_store::PinnedContextStore>,
     ) -> Self {
         let projects = workbench_store
             .as_ref()
@@ -2201,6 +2222,7 @@ impl Runtime {
             operation_reconciliations,
             workbench_store,
             compaction_store,
+            pinned_context_store,
             backend,
         }
     }
@@ -2259,6 +2281,7 @@ impl Runtime {
                     | "turn/cancel"
                     | "turn/steer"
                     | "turn/context/inspect"
+                    | "workspace/pinned-context/list"
                     | "terminal/stop-user"
                     | "terminal/close-user"
                     | "terminal/remove-user"
@@ -2347,6 +2370,7 @@ impl Runtime {
                     | "turn/cancel"
                     | "turn/steer"
                     | "turn/context/inspect"
+                    | "workspace/pinned-context/list"
                     | "terminal/list"
                     | "terminal/read"
                     | "terminal/attach"
@@ -2380,6 +2404,7 @@ impl Runtime {
                 | "turn/cancel"
                 | "turn/steer"
                 | "turn/context/inspect"
+                | "workspace/pinned-context/list"
                 | "terminal/list"
                 | "terminal/read"
                 | "terminal/attach"
@@ -2490,6 +2515,8 @@ impl Runtime {
             "workspace/list" => self.workspace_list(request),
             "workspace/read" => self.workspace_read(request),
             "workspace/instructions" => self.workspace_instructions(request),
+            "workspace/pinned-context/list" => self.pinned_context_list(request),
+            "workspace/pinned-context/save" => self.pinned_context_save(request),
             "workspace/save-user-text" => self.workspace_save_user_text(request),
             "workspace/metadata" => self.workspace_metadata(request),
             "workspace/watch" => self.workspace_watch(request),
@@ -2866,6 +2893,12 @@ impl Runtime {
             ]);
             if self.workbench_store.is_some() && self.compaction_store.is_some() {
                 capabilities.push("session.compaction.checkpoint-review".into());
+            }
+            if self.pinned_context_store.is_some() {
+                capabilities.extend([
+                    "workspace.pinned-context.store".into(),
+                    "workspace.pinned-context.manage".into(),
+                ]);
             }
         }
         let result = InitializeResult {
@@ -8557,6 +8590,118 @@ impl Runtime {
 
     fn workspace_scope_key(project_id: &str, root_id: &str) -> String {
         format!("{project_id}\0{root_id}")
+    }
+
+    fn validate_pinned_context_scope(
+        &self,
+        set: &pinned_context::PinnedContextSet,
+    ) -> Result<(), (i64, String)> {
+        if !self.projects.contains_key(&set.project_id) {
+            return Err((-32022, "project not found".into()));
+        }
+        for item in &set.items {
+            if let Some(root_id) = item.root_id.as_deref() {
+                self.workspace_root_binding(&set.project_id, Some(root_id), false)?;
+            }
+            if let Some(session_id) = item.session_id.as_deref() {
+                let Some(session) = self.sessions.get(session_id) else {
+                    return Err((-32023, "pinned context session not found".into()));
+                };
+                if session.session.project_id.as_deref() != Some(set.project_id.as_str()) {
+                    return Err((-32022, "pinned context session project mismatch".into()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn pinned_context_list(&self, request: Request) -> Vec<Value> {
+        let params: PinnedContextListParams = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(cause) => {
+                return self.error_for(&request, -32602, format!("invalid params: {cause}"))
+            }
+        };
+        if !self.projects.contains_key(&params.project_id) {
+            return self.error_for(&request, -32022, "project not found");
+        }
+        let Some(store) = self.pinned_context_store.as_ref() else {
+            return self.error_for(&request, -32122, "pinned context store unavailable");
+        };
+        let loaded = match store.load_optional(&params.project_id) {
+            Ok(loaded) => loaded,
+            Err(error) => return self.error_for(&request, -32123, error.code),
+        };
+        let value = if let Some((set, descriptor)) = loaded {
+            json!({
+                "schema_version": pinned_context::SCHEMA_VERSION,
+                "project_id": params.project_id,
+                "set_identity": descriptor.set_identity,
+                "items": set.items,
+                "persisted": true,
+                "content_bodies_included": false
+            })
+        } else {
+            json!({
+                "schema_version": pinned_context::SCHEMA_VERSION,
+                "project_id": params.project_id,
+                "set_identity": Value::Null,
+                "items": [],
+                "persisted": false,
+                "content_bodies_included": false
+            })
+        };
+        self.success_for(&request, value)
+    }
+
+    fn pinned_context_save(&mut self, request: Request) -> Vec<Value> {
+        let params: PinnedContextSaveParams = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(cause) => {
+                return self.error_for(&request, -32602, format!("invalid params: {cause}"))
+            }
+        };
+        if params.project_id != params.set.project_id {
+            return self.error_for(&request, -32602, "pinned context project mismatch");
+        }
+        if let Err((code, message)) = self.validate_pinned_context_scope(&params.set) {
+            return self.error_for(&request, code, message);
+        }
+        let Some(store) = self.pinned_context_store.as_ref() else {
+            return self.error_for(&request, -32122, "pinned context store unavailable");
+        };
+        let current = match store.load_optional(&params.project_id) {
+            Ok(current) => current,
+            Err(error) => return self.error_for(&request, -32123, error.code),
+        };
+        let current_identity = current
+            .as_ref()
+            .map(|(_, descriptor)| descriptor.set_identity.as_str());
+        if params.expected_set_identity.as_deref() != current_identity
+            && params.expected_set_identity.is_some()
+        {
+            return self.error_for(
+                &request,
+                -32041,
+                "pinned context changed since the reviewed identity",
+            );
+        }
+        let descriptor = match store.persist(&params.set) {
+            Ok(descriptor) => descriptor,
+            Err(error) => return self.error_for(&request, -32123, error.code),
+        };
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": pinned_context::SCHEMA_VERSION,
+                "project_id": params.project_id,
+                "set_identity": descriptor.set_identity,
+                "items": params.set.items,
+                "persisted": true,
+                "content_bodies_included": false,
+                "descriptor": descriptor
+            }),
+        )
     }
 
     fn workspace_instructions(&self, request: Request) -> Vec<Value> {
