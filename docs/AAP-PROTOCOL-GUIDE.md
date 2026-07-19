@@ -110,6 +110,22 @@ binding is valid only when its pinned adapter version and opaque provider thread
 identity still match; otherwise the user must fork a portable, provider-neutral
 session.
 
+## Operation Reconciliation
+
+`operation/reconcile` accepts only content-free event, process, workspace, and Git
+evidence. The runtime derives a content-hashed review result and appends it as an
+`operation.reconciled/0.1` event in the session stream when durable storage is
+available. An unknown or blocked result prevents later session-bound mutations
+until a newer reconciliation for the same operation proves a stable terminal
+state. Reconciliation retries with identical evidence are idempotent; different
+evidence receives a new review event. The runtime never infers success, probes the
+host on behalf of the caller, or executes recovery actions through this method.
+
+```jsonl
+{"jsonrpc":"2.0","id":"10","method":"operation/reconcile","params":{"operation_id":"operation-1","session_id":"session-1","kind":"turn","evidence":{"event":"none","process":"not-observed","workspace":{"state":"not-required"},"git":{"state":"not-required"}}}}
+{"jsonrpc":"2.0","id":"10","result":{"schema_version":"operation-reconciliation-result/0.1","reconciliation":{"state":"unknown","writes_blocked":true,"decision":"explicit-review-required"},"durable":true,"event_sequence":8}}
+```
+
 ## Compaction Checkpoint Review
 
 Capability `session.compaction.checkpoint-review` is advertised only when the

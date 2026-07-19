@@ -8,6 +8,9 @@ use crate::git_workflow_authorization::{
     GitWorkflowDecisionReference,
 };
 use crate::git_workflow_state::{validate_record, GitWorkflowRecord};
+use crate::operation_reconciliation::{
+    reconcile as reconcile_operation, ReconciliationInput, ReconciliationResult,
+};
 use crate::session_compaction::{activate_review, CompactionCheckpointReview};
 use crate::session_compaction_store::{
     CompactionCheckpointDescriptor, STORE_SCHEMA_VERSION as COMPACTION_STORE_SCHEMA_VERSION,
@@ -349,6 +352,14 @@ pub struct WorkbenchEvent {
     pub generation: u64,
     pub payload: serde_json::Value,
     pub payload_hash: ContentHash,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredOperationReconciliation {
+    pub input: ReconciliationInput,
+    pub result: ReconciliationResult,
+    pub event_sequence: u64,
+    pub updated_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7605,6 +7616,153 @@ impl WorkbenchStore {
         Ok(event)
     }
 
+    pub fn append_operation_reconciliation(
+        &mut self,
+        input: &ReconciliationInput,
+        result: &ReconciliationResult,
+        updated_at_ms: u64,
+    ) -> Result<StoredOperationReconciliation, WorkbenchStoreError> {
+        let expected = reconcile_operation(input).map_err(|cause| {
+            error(format!(
+                "operation reconciliation is invalid: {}",
+                cause.message
+            ))
+        })?;
+        if expected != *result {
+            return Err(error(
+                "operation reconciliation result does not match its evidence",
+            ));
+        }
+        self.ensure_session_writable(&input.session_id)?;
+        let session = self.load_session(&input.session_id)?;
+        if updated_at_ms < session.created_at_ms {
+            return Err(error("operation reconciliation timestamp is stale"));
+        }
+        if let Some(existing) =
+            self.latest_operation_reconciliation(&input.session_id, &input.operation_id)?
+        {
+            if existing.input == *input && existing.result == *result {
+                return Ok(existing);
+            }
+        }
+        let event_id = derived_event_id(
+            "operation-reconciled",
+            format!("{}:{}", input.operation_id, result.review_id).as_bytes(),
+        );
+        let payload = json!({
+            "schema_version": "operation.reconciled/0.1",
+            "input": input,
+            "result": result,
+            "updated_at_ms": updated_at_ms,
+        });
+        let transaction =
+            self.begin_database_write("cannot start operation reconciliation transaction")?;
+        let event = append_event_tx(
+            &transaction,
+            EventInput {
+                session_id: &input.session_id,
+                event_id: &event_id,
+                timestamp_ms: updated_at_ms,
+                correlation_id: &result.review_id,
+                event_kind: "operation.reconciled",
+                project_id: session.project_id.as_deref(),
+                operation_id: &input.operation_id,
+                generation: 0,
+                payload,
+            },
+        )?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit operation reconciliation event"))?;
+        Ok(StoredOperationReconciliation {
+            input: input.clone(),
+            result: result.clone(),
+            event_sequence: event.sequence,
+            updated_at_ms,
+        })
+    }
+
+    pub fn latest_operation_reconciliation(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<StoredOperationReconciliation>, WorkbenchStoreError> {
+        validate_identifier(session_id, "operation reconciliation session ID")?;
+        validate_identifier(operation_id, "operation reconciliation ID")?;
+        let sequence = self
+            .connection
+            .query_row(
+                "SELECT sequence FROM events
+                 WHERE session_id = ?1 AND event_kind = 'operation.reconciled'
+                   AND operation_id = ?2
+                 ORDER BY sequence DESC LIMIT 1",
+                params![session_id, operation_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot inspect operation reconciliation event"))?;
+        let Some(sequence) = sequence else {
+            return Ok(None);
+        };
+        let sequence = to_u64(sequence, "operation reconciliation event sequence")?;
+        let event = self
+            .read_session_events(session_id, sequence.saturating_sub(1), 1)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| error("operation reconciliation event is unavailable"))?;
+        Ok(Some(parse_operation_reconciliation_event(&event)?))
+    }
+
+    pub fn session_blocked_operation(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<StoredOperationReconciliation>, WorkbenchStoreError> {
+        validate_identifier(session_id, "blocked operation session ID")?;
+        let mut sequences = self
+            .connection
+            .prepare(
+                "SELECT event.sequence
+                 FROM events AS event
+                 WHERE event.session_id = ?1
+                   AND event.event_kind = 'operation.reconciled'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM events AS newer
+                       WHERE newer.session_id = event.session_id
+                         AND newer.event_kind = 'operation.reconciled'
+                         AND newer.operation_id = event.operation_id
+                         AND newer.sequence > event.sequence
+                   )
+                 ORDER BY event.sequence DESC
+                 LIMIT 257",
+            )
+            .map_err(|_| error("cannot prepare blocked operation scan"))?;
+        let rows = sequences
+            .query_map([session_id], |row| row.get::<_, i64>(0))
+            .map_err(|_| error("cannot read blocked operation scan"))?;
+        let mut event_sequences = Vec::new();
+        for row in rows {
+            event_sequences.push(to_u64(
+                row.map_err(|_| error("blocked operation sequence is invalid"))?,
+                "blocked operation sequence",
+            )?);
+        }
+        if event_sequences.len() > 256 {
+            return Err(error("blocked operation scan limit exceeded"));
+        }
+        for sequence in event_sequences {
+            let event = self
+                .read_session_events(session_id, sequence.saturating_sub(1), 1)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| error("blocked operation event is unavailable"))?;
+            let reconciliation = parse_operation_reconciliation_event(&event)?;
+            if reconciliation.result.writes_blocked {
+                return Ok(Some(reconciliation));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn read_session_events(
         &self,
         session_id: &str,
@@ -8737,6 +8895,60 @@ fn load_projection_source_events(
         return Err(error("projection source count is inconsistent"));
     }
     Ok(events)
+}
+
+fn parse_operation_reconciliation_event(
+    event: &WorkbenchEvent,
+) -> Result<StoredOperationReconciliation, WorkbenchStoreError> {
+    if event.event_kind != "operation.reconciled"
+        || event.payload.get("schema_version").and_then(Value::as_str)
+            != Some("operation.reconciled/0.1")
+    {
+        return Err(error("operation reconciliation event schema is invalid"));
+    }
+    let input = event
+        .payload
+        .get("input")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ReconciliationInput>(value).ok())
+        .ok_or_else(|| error("operation reconciliation event input is invalid"))?;
+    let result = event
+        .payload
+        .get("result")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ReconciliationResult>(value).ok())
+        .ok_or_else(|| error("operation reconciliation event result is invalid"))?;
+    let expected = reconcile_operation(&input).map_err(|cause| {
+        error(format!(
+            "operation reconciliation event evidence is invalid: {}",
+            cause.message
+        ))
+    })?;
+    let updated_at_ms = event
+        .payload
+        .get("updated_at_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| error("operation reconciliation event timestamp is invalid"))?;
+    if expected != result
+        || input.session_id != event.session_id
+        || input.operation_id != event.operation_id
+        || event.correlation_id != result.review_id
+        || event.generation != 0
+        || updated_at_ms != event.timestamp_ms
+        || event.event_id
+            != derived_event_id(
+                "operation-reconciled",
+                format!("{}:{}", input.operation_id, result.review_id).as_bytes(),
+            )
+    {
+        return Err(error("operation reconciliation event identity is invalid"));
+    }
+    Ok(StoredOperationReconciliation {
+        input,
+        result,
+        event_sequence: event.sequence,
+        updated_at_ms,
+    })
 }
 
 fn validate_session_runtime_binding_create(
@@ -11786,6 +11998,83 @@ mod tests {
                 .unwrap(),
             "ok"
         );
+    }
+
+    #[test]
+    fn operation_reconciliation_event_is_durable_idempotent_and_clears_block() {
+        let root = Root::new("operation-reconciliation-store");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "reconcile-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Reconciliation".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 10,
+            })
+            .unwrap();
+        let unknown = ReconciliationInput {
+            operation_id: "operation-unknown".into(),
+            session_id: "reconcile-session".into(),
+            kind: crate::operation_reconciliation::OperationKind::Turn,
+            evidence: crate::operation_reconciliation::ReconciliationEvidence {
+                event: crate::operation_reconciliation::EventState::None,
+                process: crate::operation_reconciliation::ProcessState::NotObserved,
+                workspace: crate::operation_reconciliation::WorkspaceState::NotRequired,
+                git: crate::operation_reconciliation::GitState::NotRequired,
+            },
+        };
+        let unknown_result = reconcile_operation(&unknown).unwrap();
+        assert!(unknown_result.writes_blocked);
+        let stored = store
+            .append_operation_reconciliation(&unknown, &unknown_result, 20)
+            .unwrap();
+        assert_eq!(stored.event_sequence, 2);
+        assert_eq!(
+            store
+                .append_operation_reconciliation(&unknown, &unknown_result, 21)
+                .unwrap()
+                .event_sequence,
+            stored.event_sequence
+        );
+        assert_eq!(
+            store
+                .session_blocked_operation("reconcile-session")
+                .unwrap()
+                .unwrap()
+                .result
+                .review_id,
+            unknown_result.review_id
+        );
+        drop(store);
+
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        let loaded = reopened
+            .latest_operation_reconciliation("reconcile-session", "operation-unknown")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.result, unknown_result);
+        let completed = ReconciliationInput {
+            evidence: crate::operation_reconciliation::ReconciliationEvidence {
+                event: crate::operation_reconciliation::EventState::Completed,
+                process: crate::operation_reconciliation::ProcessState::NotRunning,
+                workspace: crate::operation_reconciliation::WorkspaceState::NotRequired,
+                git: crate::operation_reconciliation::GitState::NotRequired,
+            },
+            ..unknown
+        };
+        let completed_result = reconcile_operation(&completed).unwrap();
+        assert!(!completed_result.writes_blocked);
+        reopened
+            .append_operation_reconciliation(&completed, &completed_result, 30)
+            .unwrap();
+        assert!(reopened
+            .session_blocked_operation("reconcile-session")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

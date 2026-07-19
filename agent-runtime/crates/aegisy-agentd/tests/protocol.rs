@@ -88,6 +88,11 @@ fn ready_runtime() -> Runtime {
         .as_array()
         .unwrap()
         .iter()
+        .any(|capability| capability == "operation.reconciliation"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|capability| capability == "runtime.health"));
     assert!(messages[0]["result"]["capabilities"]
         .as_array()
@@ -519,6 +524,155 @@ fn searches_sessions_by_title_runtime_model_and_approved_transcript_text() {
         json!({ "limit": 101 }),
     ));
     assert_eq!(invalid[0]["error"]["code"], -32602);
+}
+
+#[test]
+fn operation_reconcile_persists_state_and_blocks_then_unblocks_session_writes() {
+    let mut runtime = ready_runtime();
+    let started = runtime.handle_line(&request(
+        "reconcile-session",
+        "session/start",
+        json!({ "mode": "chat", "title": "Operation recovery" }),
+    ));
+    let session_id = started[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let unknown = runtime.handle_line(&request(
+        "reconcile-unknown",
+        "operation/reconcile",
+        json!({
+            "operation_id": "operation-unknown",
+            "session_id": session_id,
+            "kind": "turn",
+            "evidence": {
+                "event": "none",
+                "process": "not-observed",
+                "workspace": {"state": "not-required"},
+                "git": {"state": "not-required"}
+            }
+        }),
+    ));
+    assert_eq!(
+        unknown[0]["result"]["schema_version"],
+        "operation-reconciliation-result/0.1"
+    );
+    assert_eq!(unknown[0]["result"]["durable"], false);
+    assert_eq!(unknown[0]["result"]["reconciliation"]["state"], "unknown");
+    assert_eq!(
+        unknown[0]["result"]["reconciliation"]["writes_blocked"],
+        true
+    );
+
+    let blocked = runtime.handle_line(&request(
+        "blocked-turn",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "must wait for reconciliation",
+            "idempotency_key": "blocked-turn"
+        }),
+    ));
+    assert_eq!(blocked[0]["error"]["code"], -32132);
+
+    let completed = runtime.handle_line(&request(
+        "reconcile-completed",
+        "operation/reconcile",
+        json!({
+            "operation_id": "operation-unknown",
+            "session_id": session_id,
+            "kind": "turn",
+            "evidence": {
+                "event": "completed",
+                "process": "not-running",
+                "workspace": {"state": "not-required"},
+                "git": {"state": "not-required"}
+            }
+        }),
+    ));
+    assert_eq!(
+        completed[0]["result"]["reconciliation"]["writes_blocked"],
+        false
+    );
+    let allowed = runtime.handle_line(&request(
+        "allowed-turn",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "continue after review",
+            "idempotency_key": "allowed-turn"
+        }),
+    ));
+    assert_eq!(allowed[0]["result"]["turn"]["state"], "started");
+}
+
+#[test]
+fn durable_operation_reconciliation_survives_runtime_restart() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-operation-reconcile-{unique}"));
+    let data_root = root.join("data");
+    fs::create_dir_all(&data_root).unwrap();
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "operation-reconcile", "version": "1"}
+        }),
+    ));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    let started = runtime.handle_line(&request(
+        "session-start",
+        "session/start",
+        json!({"mode": "chat", "title": "Durable operation"}),
+    ));
+    let session_id = started[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let reconciled = runtime.handle_line(&request(
+        "operation",
+        "operation/reconcile",
+        json!({
+            "operation_id": "operation-restart",
+            "session_id": session_id,
+            "kind": "turn",
+            "evidence": {
+                "event": "none",
+                "process": "not-observed",
+                "workspace": {"state": "not-required"},
+                "git": {"state": "not-required"}
+            }
+        }),
+    ));
+    assert_eq!(reconciled[0]["result"]["durable"], true);
+    drop(runtime);
+
+    let mut restarted = Runtime::with_store(&data_root).unwrap();
+    restarted.handle_line(&request(
+        "initialize-2",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "operation-reconcile", "version": "1"}
+        }),
+    ));
+    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    let blocked = restarted.handle_line(&request(
+        "blocked-after-restart",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "must remain blocked",
+            "idempotency_key": "blocked-after-restart"
+        }),
+    ));
+    assert_eq!(blocked[0]["error"]["code"], -32132);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

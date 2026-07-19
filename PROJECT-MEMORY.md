@@ -134,6 +134,17 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   It never infers mutation success, probes the host, executes recovery, or exposes
   AAP/Qt mutation controls. Durable records, restart probes, user review, and
   recovery actions remain required before task completion.
+- Task `6.9` now also has a durable event-backed reconciliation step. AAP
+  `operation/reconcile` validates the content-free evidence contract and appends
+  `operation.reconciled/0.1` to the session event stream. Identical evidence is
+  idempotent; the latest per-operation result is hash-validated from the event and
+  survives Runtime restart. Unknown, running, or blocked results gate subsequent
+  session-bound mutations with stable error `-32132`; a newer authoritative
+  completed/failed/interrupted review clears the gate. Capability
+  `operation.reconciliation` is advertised and store/protocol fixtures cover
+  persistence, restart blocking, idempotency, and unblocking. This remains partial:
+  the method consumes caller-supplied evidence only and has no authoritative host
+  probes, Qt review/recovery surface, or recovery action.
 - Task `6.6` now has a bounded read-only Session search foundation. AAP
   `session/search` filters durable Session projections by project, exact model,
   runtime, status, title, or a combined title/approved-transcript query. Transcript
@@ -542,8 +553,8 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 263 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 39 Rust
+Current verified baseline: 16 desktop tests, 264 passed Rust sidecar unit tests plus
+one explicitly ignored live Codex fixture, 41 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -625,9 +636,15 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   Required evidence that is missing, changed, unavailable, or reports an in-progress
   Git operation blocks later writes. A completed/failed/interrupted event is only
   considered authoritative when no conflicting evidence remains.
-- The contract has no persistence, AAP method, Qt control, or automatic mutation
-  recovery. Durable operation records, restart-time probes, explicit user review,
-  and recovery actions remain necessary for OpenSpec `6.9` completion.
+- AAP `operation/reconcile` now persists a validated metadata-only
+  `operation.reconciled/0.1` event in the bound session stream. Identical retries
+  return the original event; a newer result creates a new review event. Startup and
+  every session-bound request consult the latest event per operation, so unknown,
+  running, or blocked results fail closed with `-32132` until an authoritative
+  terminal review clears the gate. Event replay validates the evidence/result hash
+  and identity without adding operation content to the projection. The current
+  implementation still has no host probes, Qt review/recovery control, or automatic
+  recovery action; those remain necessary for OpenSpec `6.9` completion.
 
 ## Project And Session Projection Consistency And Rebuild Boundary
 

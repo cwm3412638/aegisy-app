@@ -3,7 +3,7 @@ use serde_json::to_vec;
 use sha2::{Digest, Sha256};
 
 pub const SCHEMA_VERSION: &str = "operation-reconciliation/0.1";
-const MAX_IDENTIFIER_BYTES: usize = 256;
+const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_BLOCKERS: usize = 16;
 const MAX_DOMAINS: usize = 8;
 

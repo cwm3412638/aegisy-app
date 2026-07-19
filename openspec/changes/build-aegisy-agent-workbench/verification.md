@@ -490,6 +490,17 @@ Current editor evidence:
   Task `6.6` remains unchecked because branch/worktree identity is not yet persisted,
   branch requests are explicitly unavailable, and complete indexed-text scale and
   cross-platform evidence remain open.
+- AAP `operation/reconcile` now validates content-free event/process/workspace/Git
+  evidence through `operation-reconciliation/0.1` and appends a metadata-only
+  `operation.reconciled/0.1` event to the session stream when durable storage is
+  configured. Identical evidence is idempotent; the latest result per operation is
+  validated from the event hash and survives Runtime restart. Unknown, running, or
+  blocked results reject later session-bound mutations with `-32132`, while a newer
+  authoritative terminal review clears the gate. Capability negotiation advertises
+  `operation.reconciliation`; store and protocol fixtures cover persistence,
+  restart blocking, idempotency, and unblocking. Task `6.9` remains unchecked because
+  the current method does not perform authoritative host probes or expose Qt review,
+  recovery, or recovery-action controls.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or

@@ -55,6 +55,7 @@ use diagnostic_store::DiagnosticStore;
 use git_query::{commit as git_commit, diff as git_diff, log as git_log, overview as git_overview};
 use git_status::{ignored_paths, status as git_status};
 use language_server::LanguageServerManager;
+use operation_reconciliation::{reconcile as reconcile_operation, ReconciliationInput};
 use repository_index::WorkspaceIndex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -125,6 +126,7 @@ pub struct Runtime {
     cancelled_workspace_searches: HashSet<String>,
     cancelled_workspace_indexes: HashSet<(String, String)>,
     archived_sessions: HashSet<String>,
+    operation_reconciliations: HashMap<String, operation_reconciliation::ReconciliationResult>,
     workbench_store: Option<WorkbenchStore>,
     compaction_store: Option<session_compaction_store::CompactionCheckpointStore>,
     backend: Backend,
@@ -2106,6 +2108,7 @@ impl Runtime {
             cancelled_workspace_searches: HashSet::new(),
             cancelled_workspace_indexes: HashSet::new(),
             archived_sessions: HashSet::new(),
+            operation_reconciliations: HashMap::new(),
             workbench_store,
             compaction_store,
             backend,
@@ -2209,6 +2212,64 @@ impl Runtime {
             );
             return;
         }
+        let blocked_operation = if request.method == "operation/reconcile" {
+            None
+        } else if let Some(session_id) = request.params.get("session_id").and_then(Value::as_str) {
+            if let Some(store) = self.workbench_store.as_ref() {
+                match store.session_blocked_operation(session_id) {
+                    Ok(operation) => operation.map(|operation| operation.result),
+                    Err(error) => {
+                        self.emit_all(
+                            self.error_for(
+                                &request,
+                                -32114,
+                                format!(
+                                    "cannot inspect operation reconciliation: {}",
+                                    error.message
+                                ),
+                            ),
+                            &mut emit,
+                        );
+                        return;
+                    }
+                }
+            } else {
+                self.operation_reconciliations
+                    .values()
+                    .find(|result| result.session_id == session_id && result.writes_blocked)
+                    .cloned()
+            }
+        } else {
+            None
+        };
+        if blocked_operation.is_some()
+            && !matches!(
+                request.method.as_str(),
+                "session/read"
+                    | "session/recovery/status"
+                    | "session/deletion/status"
+                    | "turn/cancel"
+                    | "turn/steer"
+                    | "terminal/list"
+                    | "terminal/read"
+                    | "terminal/attach"
+                    | "terminal/stop-user"
+                    | "terminal/close-user"
+                    | "terminal/remove-user"
+                    | "artifact/read-command-output"
+                    | "workspace/edit/artifact/read"
+            )
+        {
+            self.emit_all(
+                self.error_for(
+                    &request,
+                    -32132,
+                    "session has an unknown or unreconciled operation; mutation is blocked",
+                ),
+                &mut emit,
+            );
+            return;
+        }
         let pending_deletion_read = matches!(
             request.method.as_str(),
             "session/read"
@@ -2304,6 +2365,7 @@ impl Runtime {
             "session/import" => self.session_import(request),
             "session/list" => self.session_list(request),
             "session/search" => self.session_search(request),
+            "operation/reconcile" => self.operation_reconcile(request),
             "session/recovery/status" => self.session_recovery_status(request),
             "runtime/projection-recovery/status" => self.projection_recovery_status(request),
             "session/start" => self.session_start(request),
@@ -2657,6 +2719,7 @@ impl Runtime {
                 "retention.policy.manage".into(),
                 "retention.maintenance.host-triggered".into(),
                 "session.recovery.status".into(),
+                "operation.reconciliation".into(),
                 "runtime.projection-recovery.status".into(),
                 "runtime.health".into(),
                 "runtime.degradations".into(),
@@ -3941,6 +4004,62 @@ impl Runtime {
                 "truncated": truncated,
                 "cursor_supported": false,
                 "unavailable_filters": []
+            }),
+        )
+    }
+
+    fn operation_reconcile(&mut self, request: Request) -> Vec<Value> {
+        let input: ReconciliationInput = match serde_json::from_value(request.params.clone()) {
+            Ok(input) => input,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        let result = match reconcile_operation(&input) {
+            Ok(result) => result,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32602,
+                    format!("invalid reconciliation evidence: {}", error.message),
+                )
+            }
+        };
+        if let Some(store) = self.workbench_store.as_mut() {
+            let record = match store.append_operation_reconciliation(&input, &result, now_ms()) {
+                Ok(record) => record,
+                Err(error) => {
+                    return self.error_for(
+                        &request,
+                        -32114,
+                        format!("cannot persist operation reconciliation: {}", error.message),
+                    )
+                }
+            };
+            return self.success_for(
+                &request,
+                json!({
+                    "schema_version": "operation-reconciliation-result/0.1",
+                    "reconciliation": record.result,
+                    "durable": true,
+                    "event_sequence": record.event_sequence,
+                    "updated_at_ms": record.updated_at_ms
+                }),
+            );
+        }
+        if !self.sessions.contains_key(&input.session_id) {
+            return self.error_for(&request, -32023, "session does not exist");
+        }
+        self.operation_reconciliations
+            .insert(input.operation_id.clone(), result.clone());
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "operation-reconciliation-result/0.1",
+                "reconciliation": result,
+                "durable": false,
+                "event_sequence": Value::Null,
+                "updated_at_ms": now_ms()
             }),
         )
     }

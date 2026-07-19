@@ -34,6 +34,7 @@ or session methods are accepted.
 - `turn/start`
 - `turn/steer` (Codex only; same-turn, identity-scoped)
 - `session/search` (bounded local Session metadata and approved transcript fields)
+- `operation/reconcile` (content-free evidence review with durable session event)
 - `session/read`
 - `runtime/health`
 - `runtime/degradations`
