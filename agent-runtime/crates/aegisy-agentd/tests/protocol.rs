@@ -1408,6 +1408,22 @@ fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
         json!({"project_id": project_id.clone(), "set": set, "expected_set_identity": "stale"}),
     ));
     assert_eq!(stale[0]["error"]["code"], -32041);
+    let removed = runtime.handle_line(&request(
+        "pins-remove",
+        "workspace/pinned-context/remove",
+        json!({
+            "project_id": project_id.clone(),
+            "item_id": "pin-file",
+            "expected_set_identity": identity
+        }),
+    ));
+    assert_eq!(removed[0]["result"]["persisted"], true);
+    assert_eq!(removed[0]["result"]["items"].as_array().unwrap().len(), 0);
+    assert!(removed[0]["result"]["event"]["sequence"].as_u64().unwrap() > event_sequence);
+    let removed_identity = removed[0]["result"]["set_identity"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     drop(runtime);
 
     let store = WorkbenchStore::open(&data_root).unwrap();
@@ -1444,8 +1460,8 @@ fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
         json!({"project_id": project_id}),
     ));
     assert_eq!(reopened[0]["result"]["persisted"], true);
-    assert_eq!(reopened[0]["result"]["set_identity"], identity);
-    assert_eq!(reopened[0]["result"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(reopened[0]["result"]["set_identity"], removed_identity);
+    assert_eq!(reopened[0]["result"]["items"].as_array().unwrap().len(), 0);
     fs::remove_dir_all(root).unwrap();
 }
 

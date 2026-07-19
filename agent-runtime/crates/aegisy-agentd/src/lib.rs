@@ -598,6 +598,14 @@ struct PinnedContextSaveParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct PinnedContextRemoveParams {
+    project_id: String,
+    item_id: String,
+    #[serde(default)]
+    expected_set_identity: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ProjectOpenParams {
     root: String,
 }
@@ -2517,6 +2525,7 @@ impl Runtime {
             "workspace/instructions" => self.workspace_instructions(request),
             "workspace/pinned-context/list" => self.pinned_context_list(request),
             "workspace/pinned-context/save" => self.pinned_context_save(request),
+            "workspace/pinned-context/remove" => self.pinned_context_remove(request),
             "workspace/save-user-text" => self.workspace_save_user_text(request),
             "workspace/metadata" => self.workspace_metadata(request),
             "workspace/watch" => self.workspace_watch(request),
@@ -8708,34 +8717,87 @@ impl Runtime {
         if let Err((code, message)) = self.validate_pinned_context_scope(&params.set) {
             return self.error_for(&request, code, message);
         }
+        self.persist_pinned_context_set(
+            &request,
+            &params.project_id,
+            &params.set,
+            params.expected_set_identity.as_deref(),
+        )
+    }
+
+    fn pinned_context_remove(&mut self, request: Request) -> Vec<Value> {
+        let params: PinnedContextRemoveParams = match serde_json::from_value(request.params.clone())
+        {
+            Ok(params) => params,
+            Err(cause) => {
+                return self.error_for(&request, -32602, format!("invalid params: {cause}"))
+            }
+        };
+        if params.item_id.is_empty()
+            || params.item_id.len() > 128
+            || !params
+                .item_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return self.error_for(&request, -32602, "pinned context item ID is invalid");
+        }
+        let Some(store) = self.pinned_context_store.as_ref() else {
+            return self.error_for(&request, -32122, "pinned context store unavailable");
+        };
+        let Some((mut set, _descriptor)) = (match store.load_optional(&params.project_id) {
+            Ok(current) => current,
+            Err(error) => return self.error_for(&request, -32123, error.code),
+        }) else {
+            return self.error_for(&request, -32046, "pinned context set not found");
+        };
+        if !set.remove(&params.item_id) {
+            return self.error_for(&request, -32046, "pinned context item not found");
+        }
+        if let Err((code, message)) = self.validate_pinned_context_scope(&set) {
+            return self.error_for(&request, code, message);
+        }
+        self.persist_pinned_context_set(
+            &request,
+            &params.project_id,
+            &set,
+            params.expected_set_identity.as_deref(),
+        )
+    }
+
+    fn persist_pinned_context_set(
+        &mut self,
+        request: &Request,
+        project_id: &str,
+        set: &pinned_context::PinnedContextSet,
+        expected_set_identity: Option<&str>,
+    ) -> Vec<Value> {
         let descriptor = {
             let Some(store) = self.pinned_context_store.as_ref() else {
-                return self.error_for(&request, -32122, "pinned context store unavailable");
+                return self.error_for(request, -32122, "pinned context store unavailable");
             };
-            let current = match store.load_optional(&params.project_id) {
+            let current = match store.load_optional(project_id) {
                 Ok(current) => current,
-                Err(error) => return self.error_for(&request, -32123, error.code),
+                Err(error) => return self.error_for(request, -32123, error.code),
             };
             let current_identity = current
                 .as_ref()
                 .map(|(_, descriptor)| descriptor.set_identity.as_str());
-            if params.expected_set_identity.as_deref() != current_identity
-                && params.expected_set_identity.is_some()
-            {
+            if expected_set_identity != current_identity && expected_set_identity.is_some() {
                 return self.error_for(
-                    &request,
+                    request,
                     -32041,
                     "pinned context changed since the reviewed identity",
                 );
             }
-            match store.persist(&params.set) {
+            match store.persist(set) {
                 Ok(descriptor) => descriptor,
-                Err(error) => return self.error_for(&request, -32123, error.code),
+                Err(error) => return self.error_for(request, -32123, error.code),
             }
         };
         let event = if let Some(workbench_store) = self.workbench_store.as_mut() {
             match workbench_store.append_pinned_context_event(
-                &params.project_id,
+                project_id,
                 &descriptor.set_identity,
                 &descriptor.object_reference,
                 descriptor.item_count,
@@ -8748,7 +8810,7 @@ impl Runtime {
                 }),
                 Err(_error) => {
                     return self.error_for(
-                        &request,
+                        request,
                         -32124,
                         "pinned context metadata persisted but event binding failed",
                     )
@@ -8761,12 +8823,12 @@ impl Runtime {
             })
         };
         self.success_for(
-            &request,
+            request,
             json!({
                 "schema_version": pinned_context::SCHEMA_VERSION,
-                "project_id": params.project_id,
+                "project_id": project_id,
                 "set_identity": descriptor.set_identity,
-                "items": params.set.items,
+                "items": set.items,
                 "persisted": true,
                 "content_bodies_included": false,
                 "descriptor": descriptor,

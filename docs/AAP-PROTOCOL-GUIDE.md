@@ -213,6 +213,13 @@ protection against an older UI view. Identical sets are idempotent; updates
 publish a new immutable object and retain the old one. Both responses state
 `content_bodies_included:false` and never return a body field.
 
+`workspace/pinned-context/remove` accepts `project_id`, `item_id`, and the same
+optional `expected_set_identity`. It is an explicit unpin operation and uses
+the exact set persistence path, so a stale UI cannot remove an item from a
+newer set. Removing the final item writes a valid empty set with a new identity;
+the next list therefore distinguishes an intentional empty set from a project
+that has never stored pins.
+
 ```jsonl
 {"jsonrpc":"2.0","id":"30","method":"workspace/pinned-context/list","params":{"project_id":"project-1"}}
 {"jsonrpc":"2.0","id":"30","result":{"schema_version":"pinned-context/0.1","project_id":"project-1","set_identity":null,"items":[],"persisted":false,"content_bodies_included":false}}

@@ -45,7 +45,7 @@ or session methods are accepted.
 - `workspace/list`
 - `workspace/read`
 - `workspace/instructions` (deterministic, bounded, untrusted instruction discovery)
-- `workspace/pinned-context/list` and `workspace/pinned-context/save` (durable,
+- `workspace/pinned-context/list`, `save`, and `remove` (durable,
   metadata-only pinned-context descriptors with project/root/session validation)
 - `turn/context/inspect` (read-only preflight; no model call or persistence)
 - `shutdown`
@@ -119,7 +119,9 @@ current authority blocks updates. AAP advertises
 store opens successfully. `workspace/pinned-context/list` reads the current
 project set and `workspace/pinned-context/save` validates project/root/session
 bindings and supports optional `expected_set_identity` compare-and-swap
-protection. Responses contain only descriptors and
+protection; `workspace/pinned-context/remove` removes one item through the same
+CAS path. Removing the last item persists an explicit empty set identity.
+Responses contain only descriptors and
 `content_bodies_included:false`; the store never contains source bodies. It is
 not atomically bound to Workbench events or durable Blob references: a
 successful AAP save appends a separate metadata-only project event after object

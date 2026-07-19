@@ -288,13 +288,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   unreferenced immutable object. Runtime now opens the store beside the
   Workbench store and, when healthy, advertises
   `workspace.pinned-context.store` and `workspace.pinned-context.manage`.
-  AAP `workspace/pinned-context/list` reads a project set and
-  `workspace/pinned-context/save` validates project/root/session bindings and
-  supports optional `expected_set_identity` compare-and-swap protection. The
-  protocol fixtures prove metadata-only persistence, restart recovery, project
-  event replay, Blob scope/hash validation, idempotency, stale-write rejection,
-  and no body fields. A
-  successful save appends `project.pinned-context-updated/0.1` after immutable
+  AAP `workspace/pinned-context/list` reads a project set,
+  `save` validates project/root/session bindings and supports optional
+  `expected_set_identity` compare-and-swap protection, and `remove` performs an
+  explicit unpin through the same path. Removing the final item persists an
+  empty set identity. Protocol fixtures prove metadata-only persistence,
+  restart recovery, project event replay, Blob scope/hash validation,
+  idempotency, stale-write rejection, and no body fields. A successful save or
+  remove appends `project.pinned-context-updated/0.1` after immutable
   object publication; the two resources are deliberately not one transaction,
   and event failure is reported as an incomplete save. This foundation still
   has no cross-resource atomicity, Blob body/reference lifecycle binding,

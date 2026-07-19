@@ -749,8 +749,8 @@ Known limitations:
   binding, deterministic identity, unsafe absolute/parent/network references,
   secret-shaped metadata, item size, and aggregate size bounds. The runtime now
   opens `pinned-context-store/0.1` beside the Workbench store and exposes
-  metadata-only AAP list/save methods when it is healthy. A successful save
-  appends a separate content-free `project.pinned-context-updated/0.1` event
+  metadata-only AAP list/save/remove methods when it is healthy. A successful
+  mutation appends a separate content-free `project.pinned-context-updated/0.1` event
   after object publication; project projection replay validates its set/object
   identities, bounds, and `content_bodies_persisted:false` invariant. Protocol
   coverage verifies project/root/session scope, restart recovery, event replay,
@@ -759,7 +759,7 @@ Known limitations:
   incomplete. Standard `*:sha256:` Blob references are checked through a
   read-only metadata query for active project/session ownership and exact
   hash/byte identity; no Blob body is read and no access timestamp is updated.
-  Source reread, turn assembly, and Qt pin/unpin surface remain incomplete; task
+  Source reread, turn assembly, and Qt pin/unpin/order surface remain incomplete; task
   17.3 remains unchecked.
 - `pinned-context-store/0.1` persists metadata-only sets using private immutable
   content-addressed objects and atomic project-pointer replacement. Store fixtures
