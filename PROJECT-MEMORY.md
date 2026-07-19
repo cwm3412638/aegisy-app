@@ -276,8 +276,17 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   priority, and secret-free bounded metadata. Sets reject duplicate IDs, project
   mismatch, unsupported schemas/kinds, unsafe paths/references, secret-shaped
   metadata, and 128-item/16 MiB-item/64 MiB-total overflow, and expose a
-  deterministic content identity. This contract has no AAP, persistence, Blob,
-  turn assembly, or Qt pin/unpin surface yet; keep `17.3` unchecked.
+  deterministic content identity. A project-external `pinned-context-store/0.1`
+  now persists exact descriptor sets as private immutable content-addressed
+  objects behind atomically replaced project pointers. Reopen revalidates object
+  hash, schema, project/set identity, bounds, and the explicit
+  `content_bodies_persisted:false` invariant; identical writes are idempotent,
+  updates retain old objects, and missing/tampered current authority blocks pointer
+  replacement without repair. The store is bounded to 1,024 projects, 4,096
+  objects, 1 MiB/descriptor set, and 256 MiB total. Object publication and pointer
+  replacement are not one transaction, so a failed pointer update may retain an
+  unreferenced immutable object. This foundation still has no Workbench event/Blob
+  binding, AAP, turn assembly, GC, or Qt pin/unpin surface; keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
   auto-discovered instructions. Instruction precedence ranks and pinned priority
@@ -660,7 +669,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 282 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 286 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 46 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
@@ -1098,8 +1107,9 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   view still provides only the shared excerpt-action contract without fabricated
   data. Git diff context now comes from the project-scoped read-only task `16.2`
   query and the user's explicit selection. The internal `pinned-context/0.1`
-  descriptor validates all planned source kinds but is not durable or connected to
-  turn assembly; the composer queue remains transient.
+  descriptor validates all planned source kinds and its project-external store
+  durably preserves metadata-only sets, but no Workbench event/Blob authority or
+  turn assembly consumes them; the composer queue remains transient.
 
 ## Workspace Edit Boundary
 

@@ -750,5 +750,11 @@ Known limitations:
   secret-shaped metadata, item size, and aggregate size bounds. It has no AAP,
   durable event/Blob storage, source reread, turn assembly, or Qt pin/unpin surface;
   task 17.3 remains unchecked.
+- `pinned-context-store/0.1` persists metadata-only sets using private immutable
+  content-addressed objects and atomic project-pointer replacement. Store fixtures
+  cover reopen/update, idempotency, absence of a content body field, retained old
+  objects, object/pointer tampering, update refusal on damaged current authority,
+  and symlinked-layout denial. Workbench event/Blob atomicity, orphan GC, AAP/Qt,
+  authoritative source rereads, Windows execution, and turn assembly remain open.
 - Windows packaging, TLS runtime, scaling, IME, and accessibility evidence remain
   required before a Windows release claim.

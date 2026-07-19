@@ -105,8 +105,14 @@ a partial foundation rather than a complete managed-policy integration.
 The internal `pinned-context/0.1` contract validates content-free descriptors for
 files, selections, images, diagnostics, terminal excerpts, Git commits/diffs,
 artifacts, and child handoffs. It binds project/session/root identity, source,
-reference, hash, size, freshness, priority, and bounded secret-free metadata. It
-does not persist pins, expose AAP methods, or add them to model context yet.
+reference, hash, size, freshness, priority, and bounded secret-free metadata. The
+descriptor contract alone does not expose AAP methods or add pins to model context.
+
+`pinned-context-store/0.1` adds private project-external persistence for exact
+descriptor sets. Immutable content-addressed objects and atomically replaced
+project pointers are hash/schema/project revalidated after reopen; tampered
+current authority blocks updates. The store never contains source bodies and is
+not yet registered in Workbench events, durable Blob references, AAP, or Qt.
 
 `operation/probe` is a read-only evidence collector for the reconciliation
 workflow. It resolves only registered project roots through the Work session,
