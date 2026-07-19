@@ -7014,6 +7014,51 @@ impl Runtime {
         Ok(content)
     }
 
+    fn read_pinned_diagnostic_text(
+        &self,
+        project_id: &str,
+        root_id: &str,
+        item: &pinned_context::PinnedContextItem,
+    ) -> Result<String, (i64, String)> {
+        if !item.reference.starts_with("diagnostic-raw:sha256:")
+            || item.reference.len() != "diagnostic-raw:sha256:".len() + 64
+        {
+            return Err((-32077, "invalid diagnostic pinned context reference".into()));
+        }
+        let scope_key = Self::workspace_scope_key(project_id, root_id);
+        let artifact = self
+            .diagnostic_store
+            .raw(&scope_key, &item.reference)
+            .or_else(|| {
+                (root_id == "root-1")
+                    .then(|| self.diagnostic_store.raw(project_id, &item.reference))
+                    .flatten()
+            })
+            .ok_or_else(|| (-32077, "diagnostic raw reference not found".into()))?;
+        if artifact.content_type != "application/vnd.aegisy.diagnostics+json" {
+            return Err((
+                -32077,
+                "diagnostic raw artifact media type is invalid".into(),
+            ));
+        }
+        let Some(expected_hash) = item.content_hash.strip_prefix("sha256:") else {
+            return Err((-32048, "diagnostic pinned context hash is invalid".into()));
+        };
+        let actual_hash = ContentHash::for_bytes(artifact.content.as_bytes()).sha256;
+        if artifact.reference != item.reference
+            || artifact.sha256 != expected_hash
+            || artifact.sha256 != actual_hash
+            || artifact.size != artifact.content.len()
+            || item.bytes != artifact.size as u64
+        {
+            return Err((
+                -32048,
+                "diagnostic pinned context content identity changed".into(),
+            ));
+        }
+        Ok(artifact.content)
+    }
+
     /// Resolve only the explicitly selected persisted pins. The descriptor is
     /// metadata-only; file contents are reread by the normal turn-context
     /// resolver after root, ignore, symlink, and stale checks.
@@ -7051,7 +7096,7 @@ impl Runtime {
         let Some(state) = self.sessions.get(session_id) else {
             return Err((-32023, "session not found".into()));
         };
-        let Some(project_id) = state.session.project_id.as_deref() else {
+        let Some(project_id) = state.session.project_id.clone() else {
             return Err((
                 -32095,
                 "pinned context requires a project-bound session".into(),
@@ -7085,7 +7130,7 @@ impl Runtime {
             return Err((-32122, "pinned context store unavailable".into()));
         };
         let loaded = store
-            .load_optional(project_id)
+            .load_optional(&project_id)
             .map_err(|error| (-32123, error.code.to_owned()))?;
         let Some((set, descriptor)) = loaded else {
             return Err((-32046, "pinned context set not found".into()));
@@ -7111,10 +7156,14 @@ impl Runtime {
                     "pinned context item is bound to another session".into(),
                 ));
             }
-            if item.kind != "file" && item.kind != "selection" && item.kind != "artifact" {
+            if item.kind != "file"
+                && item.kind != "selection"
+                && item.kind != "diagnostic"
+                && item.kind != "artifact"
+            {
                 return Err((
                     -32048,
-                    "only file, selection, and artifact pinned context are available in turn assembly"
+                    "only file, selection, diagnostic, and artifact pinned context are available in turn assembly"
                         .into(),
                 ));
             }
@@ -7125,7 +7174,7 @@ impl Runtime {
                 ));
             }
             let root_id = item.root_id.clone().unwrap_or_else(|| "root-1".into());
-            self.workspace_root_binding(project_id, Some(&root_id), false)?;
+            self.workspace_root_binding(&project_id, Some(&root_id), false)?;
             let selection = if item.kind == "selection" {
                 let parse_position = |key: &str| {
                     item.metadata
@@ -7160,6 +7209,42 @@ impl Runtime {
             selected.push((item, root_id));
         }
         for (item, root_id) in selected {
+            if item.kind == "diagnostic" {
+                let content = self.read_pinned_diagnostic_text(&project_id, &root_id, &item)?;
+                context_items.push(TurnContextItem {
+                    id: item.id,
+                    kind: item.kind,
+                    label: item.label,
+                    origin: "pinned-context".into(),
+                    root_id: Some(root_id),
+                    path: item.metadata.get("path").cloned(),
+                    content: Some(content),
+                    revision: item.revision,
+                    expected_content_hash: None,
+                    line: item
+                        .metadata
+                        .get("line")
+                        .and_then(|value| value.parse().ok()),
+                    column: item
+                        .metadata
+                        .get("column")
+                        .and_then(|value| value.parse().ok()),
+                    end_line: item
+                        .metadata
+                        .get("end_line")
+                        .and_then(|value| value.parse().ok()),
+                    end_column: item
+                        .metadata
+                        .get("end_column")
+                        .and_then(|value| value.parse().ok()),
+                    freshness: Some(item.freshness),
+                    raw_output_ref: Some(item.reference),
+                    priority: Some(format!("pinned-priority-{}", item.priority)),
+                    inclusion_reason: Some("pinned-context".into()),
+                    exclusion_reason: None,
+                });
+                continue;
+            }
             if item.kind == "artifact" {
                 let content = self.read_pinned_artifact_text(session_id, &item)?;
                 context_items.push(TurnContextItem {
@@ -10988,9 +11073,13 @@ mod pinned_context_assembly_tests {
     use super::*;
 
     fn request(method: &str, params: Value) -> String {
+        request_with_id(method, method, params)
+    }
+
+    fn request_with_id(id: &str, method: &str, params: Value) -> String {
         json!({
             "jsonrpc": "2.0",
-            "id": method,
+            "id": id,
             "method": method,
             "params": params
         })
@@ -11083,6 +11172,152 @@ mod pinned_context_assembly_tests {
         );
         let serialized = serde_json::to_string(&inspected).unwrap();
         assert!(!serialized.contains("artifact body must stay behind"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn assembles_project_root_diagnostic_pin_and_rejects_missing_raw_content() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("aegisy-pinned-diagnostic-{unique}"));
+        let data_root = root.join("data");
+        let project_root = root.join("project");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+        fs::create_dir_all(project_root.join("src")).unwrap();
+        fs::write(project_root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let mut runtime = Runtime::with_store(&data_root).unwrap();
+        runtime.handle_line(&request(
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": {"name": "diagnostic-pin", "version": "1"}
+            }),
+        ));
+        runtime.handle_line(&request("initialized", json!({})));
+        let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
+        let project_id = opened[0]["result"]["project"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = runtime.handle_line(&request(
+            "session/start",
+            json!({"mode": "work", "project_id": project_id}),
+        ));
+        let session_id = session[0]["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let scope_key = Runtime::workspace_scope_key(&project_id, "root-1");
+        let observation = runtime.diagnostic_store.record_language_server(
+            &scope_key,
+            "src/main.rs",
+            &language_server::LanguageDiagnosticsResult {
+                language: "Rust".into(),
+                server_id: "rust-analyzer".into(),
+                revision: "content:sha256:file".into(),
+                stale: false,
+                pending: false,
+                truncated: false,
+                diagnostics: vec![language_server::LanguageDiagnostic {
+                    path: "src/main.rs".into(),
+                    line: 2,
+                    column: 3,
+                    end_line: 2,
+                    end_column: 9,
+                    severity: "error".into(),
+                    code: Some("E0425".into()),
+                    message: "cannot find value `missing` in this scope".into(),
+                    source: "rustc".into(),
+                    provenance: "language-server:rust-analyzer".into(),
+                }],
+            },
+        );
+        let raw = runtime
+            .diagnostic_store
+            .raw(&scope_key, &observation.raw_output_ref)
+            .unwrap();
+        let set: pinned_context::PinnedContextSet = serde_json::from_value(json!({
+            "schema_version": pinned_context::SCHEMA_VERSION,
+            "project_id": project_id,
+            "items": [{
+                "id": "pin-diagnostic",
+                "project_id": project_id,
+                "root_id": "root-1",
+                "kind": "diagnostic",
+                "source": "language-server:rust-analyzer",
+                "label": "src/main.rs · error",
+                "reference": raw.reference,
+                "content_hash": format!("sha256:{}", raw.sha256),
+                "bytes": raw.size,
+                "freshness": "fresh",
+                "priority": 760,
+                "metadata": {
+                    "path": "src/main.rs",
+                    "line": "2",
+                    "column": "3",
+                    "end_line": "2",
+                    "end_column": "9",
+                    "severity": "error",
+                    "source_identity": "language-server:rust-analyzer"
+                }
+            }]
+        }))
+        .unwrap();
+        let identity = runtime
+            .pinned_context_store
+            .as_ref()
+            .unwrap()
+            .persist(&set)
+            .unwrap()
+            .set_identity;
+        let mut context = Vec::new();
+        runtime
+            .append_pinned_context(
+                &session_id,
+                Some(&identity),
+                &["pin-diagnostic".into()],
+                &mut context,
+            )
+            .unwrap();
+        assert_eq!(context[0].kind, "diagnostic");
+        assert_eq!(context[0].path.as_deref(), Some("src/main.rs"));
+        assert!(context[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("cannot find value"));
+        let inspected = runtime.handle_line(&request(
+            "turn/context/inspect",
+            json!({
+                "session_id": session_id.clone(),
+                "pinned_context_set_identity": identity.clone(),
+                "pinned_context_ids": ["pin-diagnostic"]
+            }),
+        ));
+        let serialized = serde_json::to_string(&inspected).unwrap();
+        assert_eq!(
+            inspected[0]["result"]["context"]["manifest"]["entries"][0]["kind"],
+            "diagnostic"
+        );
+        assert!(!serialized.contains("cannot find value"));
+
+        runtime.diagnostic_store = diagnostic_store::DiagnosticStore::default();
+        let unavailable = runtime.handle_line(&request_with_id(
+            "inspect-diagnostic-missing",
+            "turn/context/inspect",
+            json!({
+                "session_id": session_id,
+                "pinned_context_set_identity": identity,
+                "pinned_context_ids": ["pin-diagnostic"]
+            }),
+        ));
+        assert_eq!(unavailable[0]["error"]["code"], -32077);
+        assert!(!serde_json::to_string(&unavailable)
+            .unwrap()
+            .contains("cannot find value"));
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -238,14 +238,19 @@ Capability `turn.context.pinned-selected` indicates that `turn/start` and
 explicit `pinned_context_ids` list. The runtime never sends all persisted pins
 implicitly. A non-empty selection requires the exact current set identity,
 contains at most 16 unique IDs, and is revalidated against the current project,
-session, and registered root. The first assembly phase accepts `file` and
-`selection` and session-owned `artifact` pins; image, diagnostic, terminal, Git,
-and child-handoff descriptors fail explicitly instead of becoming unverified
+session, and registered root. The first assembly phase accepts `file`, `selection`,
+project/root-bound `diagnostic`, and session-owned `artifact` pins; image, terminal,
+Git, and child-handoff descriptors fail explicitly instead of becoming unverified
 inline content. Artifact assembly accepts only validated `command-output:sha256:`
 text references and rechecks UTF-8, byte count, and SHA-256 before adding content.
 The durable command-output path is reloaded through session-scoped Blob ownership
 after Runtime restart; inspection remains metadata-only while turn assembly may
-include the verified text. The metadata-only descriptor supplies a root-relative
+include the verified text. Diagnostic assembly accepts only normalized
+`diagnostic-raw:sha256:` content from the authoritative DiagnosticStore under the
+bound project/root and rechecks media type, reference, SHA-256, and byte count.
+That store is memory-only: Runtime restart or eviction makes the pin unavailable,
+and the persisted descriptor never substitutes for the missing body. Inspection
+still returns metadata only. The metadata-only descriptor supplies a root-relative
 path, expected raw-byte
 SHA-256/revision, freshness, and priority. A selection additionally carries
 bounded 1-based Unicode scalar `line`, `column`, `end_line`, and `end_column`
@@ -272,12 +277,15 @@ may leave a preserved unreferenced object. This does not claim cross-resource
 atomicity. When a descriptor uses a standard `*:sha256:` Blob reference, save
 checks active SQLite metadata for exact project/session ownership, hash, and
 byte count without reading Blob bytes or updating access time. File, selection,
-and validated artifact pins now have explicit selected turn assembly and
+validated artifact and diagnostic pins now have explicit selected turn assembly and
 authoritative reread/stale detection.
 Qt loads project pins into the composer and exposes CAS-protected file and
 clean, conflict-free editor-selection pin creation, per-turn inclusion, deterministic
-order changes, and unpin without turning persisted pins into implicit model context. Image/diagnostic/
-terminal/Git/child-handoff assembly, durable automatic invalidation,
+order changes, and unpin without turning persisted pins into implicit model context.
+The Structure diagnostics surface exposes explicit diagnostic pin/unpin after a
+fresh `workspace/diagnostics/raw` read validates project/root, media type,
+reference, SHA-256, and UTF-8 byte count. Image/terminal/Git/child-handoff
+assembly, durable automatic invalidation,
 orphan GC, cross-resource atomicity, and Windows runtime evidence remain open.
 Qt watch/save callbacks may mark loaded file and selection pins stale locally, but never rewrite
 the durable descriptor; inspect/start remains authoritative. Agent/Codex remains

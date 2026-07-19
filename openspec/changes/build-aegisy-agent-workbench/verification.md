@@ -768,12 +768,21 @@ Known limitations:
   Session-owned artifact pins additionally resolve only validated command-output
   text references with matching UTF-8, byte count, and SHA-256; the protocol
   fixture verifies durable Blob reload after Runtime restart and turn assembly.
+  Project/root-bound diagnostic pins resolve only normalized
+  `diagnostic-raw:sha256:` content from the authoritative in-memory DiagnosticStore
+  after media-type, reference, SHA-256, and byte-count validation. Clearing that
+  source, as occurs across Runtime restart or eviction, makes inspection fail closed;
+  the persisted descriptor is never treated as a body.
   Duplicate/missing
-  IDs, stale set identity, cross-session selection, and image/diagnostic/terminal/
-  Git/child-handoff kinds fail explicitly. Qt now
+  IDs, stale set identity, cross-session selection, and image/terminal/Git/
+  child-handoff kinds fail explicitly. Qt now
   loads project pins and covers authoritative file and editor-selection pin creation,
   CAS persistence, range metadata, per-turn inclusion, bounded order changes, and
-  unpin in the Workbench render fixture. Remaining non-file assembly, cross-resource atomicity, automatic invalidation,
+  unpin in the Workbench render fixture. The Structure diagnostics surface also
+  exposes explicit diagnostic pin/unpin: Qt rereads `workspace/diagnostics/raw`,
+  validates project/root, media type, reference, SHA-256, and UTF-8 byte count, and
+  submits only a metadata descriptor through CAS. Remaining image/terminal/Git/
+  child-handoff assembly, cross-resource atomicity, automatic invalidation,
   orphan GC, and complete cross-platform pin evidence remain incomplete; task
   17.3 remains unchecked. Qt workspace-watch and user-save callbacks also mark
   loaded matching file and selection pins stale locally without rewriting durable metadata; the
@@ -796,6 +805,7 @@ Known limitations:
   objects, object/pointer tampering, update refusal on damaged current authority,
   and symlinked-layout denial. Cross-resource event/object/Blob atomicity, Blob
   release/lifecycle binding, orphan GC, automatic source invalidation, Windows
-  execution, non-file assembly, and the Qt surface remain open.
+  execution, remaining image/terminal/Git/child-handoff assembly, and their Qt
+  surfaces remain open.
 - Windows packaging, TLS runtime, scaling, IME, and accessibility evidence remain
   required before a Windows release claim.

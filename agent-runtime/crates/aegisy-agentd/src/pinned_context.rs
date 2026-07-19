@@ -234,7 +234,10 @@ fn validate_reference(value: &str, kind: &str) -> Result<(), PinnedContextError>
     {
         return Err(error("pinned-context-reference-unsafe"));
     }
-    if matches!(kind, "file" | "selection" | "diagnostic") && value.contains(':') {
+    if matches!(kind, "file" | "selection") && value.contains(':') {
+        return Err(error("pinned-context-reference-path-invalid"));
+    }
+    if kind == "diagnostic" && value.contains(':') && !value.starts_with("diagnostic-raw:sha256:") {
         return Err(error("pinned-context-reference-path-invalid"));
     }
     Ok(())
@@ -318,6 +321,10 @@ mod tests {
         for (kind, reference) in [
             ("file", "src/main.rs"),
             ("selection", "src/main.rs"),
+            (
+                "diagnostic",
+                "diagnostic-raw:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             ("image", "blob:sha256:abc"),
             ("diagnostic", "src/main.rs"),
             ("terminal_excerpt", "terminal:output-1"),

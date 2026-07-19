@@ -1829,6 +1829,31 @@ int main(int argc, char *argv[])
                     "context removal control did not clear the diagnostic")) {
             return 1;
         }
+        QAction *pinDiagnosticContext = workbench.findChild<QAction *>(
+            QStringLiteral("agentPinDiagnosticContextTableAction"));
+        if (!expect(pinDiagnosticContext,
+                    "diagnostic table did not expose an explicit pin action")) {
+            return 1;
+        }
+        pinDiagnosticContext->trigger();
+        if (!expect(waitUntil(application, [&workbench, contextSummary]() {
+                        return workbench.findChildren<QPushButton *>(
+                                   QStringLiteral("agentPinnedContextRemoveButton")).size() == 1
+                            && contextSummary->text().contains(QStringLiteral("固定 1"));
+                    }),
+                    "diagnostic pin action did not persist a project/root-scoped descriptor")) {
+            return 1;
+        }
+        const QList<QPushButton *> diagnosticPinRemoveButtons = workbench.findChildren<QPushButton *>(
+            QStringLiteral("agentPinnedContextRemoveButton"));
+        diagnosticPinRemoveButtons.first()->click();
+        if (!expect(waitUntil(application, [&workbench]() {
+                        return workbench.findChildren<QPushButton *>(
+                                   QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
+                    }),
+                    "diagnostic pin unpin did not remove the persisted descriptor")) {
+            return 1;
+        }
         QMetaObject::invokeMethod(languageDiagnostics, "itemActivated", Qt::DirectConnection,
                                   Q_ARG(QTreeWidgetItem *, diagnosticItem), Q_ARG(int, 0));
         if (!expect(waitUntil(application, [editorPath]() {

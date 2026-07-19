@@ -825,7 +825,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_pinnedContextMutationRequestId.clear();
         m_pinnedFileReadRequestId.clear();
         m_pendingPinnedSelection = {};
+        m_pendingPinnedDiagnostic = {};
         m_pendingPinnedIncludeId.clear();
+        m_pendingPinnedDiagnosticRequestId.clear();
         m_pendingContext = {};
         m_pendingPinnedContextSetIdentity.clear();
         m_pendingPinnedContextIds.clear();
@@ -1765,6 +1767,18 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::diagnosticRawRead,
             this, [this](const QString &requestId, const QJsonObject &result) {
+        if (requestId == m_pendingPinnedDiagnosticRequestId) {
+            if (result.value(QStringLiteral("project_id")).toString() != m_projectId
+                    || result.value(QStringLiteral("root_id")).toString() != m_workspaceRootId) {
+                m_pendingPinnedDiagnosticRequestId.clear();
+                m_pendingPinnedDiagnostic = {};
+                addNotice(QStringLiteral("诊断原始记录的项目或 root 身份不匹配。"), true);
+                return;
+            }
+            m_pendingPinnedDiagnosticRequestId.clear();
+            finishPinnedDiagnosticRaw(result);
+            return;
+        }
         if (requestId != m_diagnosticRawRequestId
                 || (result.contains(QStringLiteral("root_id"))
                     && result.value(QStringLiteral("root_id")).toString()
@@ -2157,6 +2171,11 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             updateEditorActions();
         } else if (method == QStringLiteral("workspace/language-server/stop")) {
             m_languageStatus->setText(QStringLiteral("停止 LSP 失败：%1").arg(message));
+        } else if (method == QStringLiteral("workspace/diagnostics/raw")
+                   && requestId == m_pendingPinnedDiagnosticRequestId) {
+            m_pendingPinnedDiagnosticRequestId.clear();
+            m_pendingPinnedDiagnostic = {};
+            addNotice(QStringLiteral("读取待固定诊断原始记录失败：%1").arg(message), true);
         } else if (method == QStringLiteral("workspace/diagnostics/raw")
                    && requestId == m_diagnosticRawRequestId) {
             m_diagnosticRawRequestId.clear();
@@ -2866,6 +2885,13 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
         QStringLiteral("agentPinSelectionContextAction"));
     connect(m_pinSelectionContextAction, &QAction::triggered,
             this, &AgentWorkbenchWidget::pinEditorSelectionContext);
+    m_pinDiagnosticContextAction = contextMenu->addAction(
+        QIcon(QStringLiteral(":/icons/lucide/paperclip.svg")),
+        QStringLiteral("固定选中诊断"));
+    m_pinDiagnosticContextAction->setObjectName(
+        QStringLiteral("agentPinDiagnosticContextAction"));
+    connect(m_pinDiagnosticContextAction, &QAction::triggered,
+            this, &AgentWorkbenchWidget::pinSelectedDiagnosticContext);
     connect(contextMenu, &QMenu::aboutToShow, this,
             [this, fileContext, selectionContext, searchContext, diagnosticContext]() {
         QTreeWidgetItem *file = m_fileTree ? m_fileTree->currentItem() : nullptr;
@@ -2895,6 +2921,19 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
                 && m_pinnedContextMutationRequestId.isEmpty()
                 && m_pinnedFileReadRequestId.isEmpty() && selectionContext->isEnabled()
                 && !buffer.modified && !buffer.conflict);
+        }
+        if (m_pinDiagnosticContextAction) {
+            const QTreeWidgetItem *diagnostic = m_languageDiagnostics
+                ? m_languageDiagnostics->currentItem() : nullptr;
+            const bool hasRaw = diagnostic
+                && !diagnostic->data(0, kContextRole).toMap()
+                    .value(QStringLiteral("raw_output_ref")).toString().isEmpty();
+            m_pinDiagnosticContextAction->setEnabled(m_pinnedContextAvailable
+                && !m_runtimeRecoveryMode && !m_projectId.isEmpty()
+                && !currentSessionRecoveryRequired() && !currentSessionDeletionPending()
+                && !currentOperationStatusBlocked()
+                && m_pinnedContextMutationRequestId.isEmpty()
+                && m_pendingPinnedDiagnosticRequestId.isEmpty() && hasRaw);
         }
     });
     m_attachContextButton->setMenu(contextMenu);
@@ -3284,6 +3323,14 @@ QWidget *AgentWorkbenchWidget::buildWorkCanvas()
     connect(diagnosticContextAction, &QAction::triggered,
             this, &AgentWorkbenchWidget::addDiagnosticContext);
     m_languageDiagnostics->addAction(diagnosticContextAction);
+    auto *pinDiagnosticContextAction = new QAction(
+        QIcon(QStringLiteral(":/icons/lucide/paperclip.svg")),
+        QStringLiteral("固定选中诊断"), m_languageDiagnostics);
+    pinDiagnosticContextAction->setObjectName(
+        QStringLiteral("agentPinDiagnosticContextTableAction"));
+    connect(pinDiagnosticContextAction, &QAction::triggered,
+            this, &AgentWorkbenchWidget::pinSelectedDiagnosticContext);
+    m_languageDiagnostics->addAction(pinDiagnosticContextAction);
     m_languageDiagnostics->setContextMenuPolicy(Qt::ActionsContextMenu);
     m_structureWorkspaceTab = m_workspaceTabs->addTab(structurePage, QStringLiteral("结构"));
 
@@ -8130,6 +8177,146 @@ void AgentWorkbenchWidget::addDiagnosticContext()
     context.insert(QStringLiteral("size"),
                    context.value(QStringLiteral("content")).toString().toUtf8().size());
     addContextItem(context);
+}
+
+void AgentWorkbenchWidget::pinSelectedDiagnosticContext()
+{
+    if (!m_pinnedContextAvailable || m_runtimeRecoveryMode || m_projectId.isEmpty()) {
+        addNotice(QStringLiteral("当前运行时未提供固定上下文能力。"), true);
+        return;
+    }
+    if (currentSessionRecoveryRequired() || currentSessionDeletionPending()
+            || currentOperationStatusBlocked()) {
+        addNotice(QStringLiteral("当前会话状态不允许更新固定上下文。"), true);
+        return;
+    }
+    if (!m_pinnedContextMutationRequestId.isEmpty()
+            || !m_pinnedFileReadRequestId.isEmpty()
+            || !m_pendingPinnedDiagnosticRequestId.isEmpty()
+            || !m_diagnosticRawRequestId.isEmpty()) {
+        addNotice(QStringLiteral("固定上下文或诊断原始记录正在更新，请稍候。"));
+        return;
+    }
+    QTreeWidgetItem *item = m_languageDiagnostics
+        ? m_languageDiagnostics->currentItem() : nullptr;
+    if (!item) {
+        addNotice(QStringLiteral("请先选择一条诊断。"), true);
+        return;
+    }
+    const QJsonObject diagnostic = QJsonObject::fromVariantMap(
+        item->data(0, kContextRole).toMap());
+    const QString reference = diagnostic.value(QStringLiteral("raw_output_ref")).toString();
+    const QString freshness = diagnostic.value(QStringLiteral("freshness"))
+        .toString(QStringLiteral("fresh"));
+    if (reference.isEmpty() || freshness == QStringLiteral("stale")) {
+        addNotice(QStringLiteral("诊断原始记录已过期或不可用，请重新计算诊断。"), true);
+        return;
+    }
+    m_pendingPinnedDiagnostic = diagnostic;
+    m_pendingPinnedDiagnosticRequestId = m_runtime->diagnosticRaw(
+        m_projectId, reference, m_workspaceRootId);
+    if (m_pendingPinnedDiagnosticRequestId.isEmpty()) {
+        m_pendingPinnedDiagnostic = {};
+        addNotice(QStringLiteral("无法读取待固定诊断原始记录。"), true);
+    }
+}
+
+void AgentWorkbenchWidget::finishPinnedDiagnosticRaw(const QJsonObject &raw)
+{
+    const QJsonObject diagnostic = m_pendingPinnedDiagnostic;
+    m_pendingPinnedDiagnostic = {};
+    const QString reference = raw.value(QStringLiteral("reference")).toString();
+    const QString sha256 = raw.value(QStringLiteral("sha256")).toString();
+    const QString contentType = raw.value(QStringLiteral("content_type")).toString();
+    const QString prefix = QStringLiteral("diagnostic-raw:sha256:");
+    const QByteArray content = raw.value(QStringLiteral("content")).toString().toUtf8();
+    const auto isLowerHex = [](const QString &value) {
+        return value.size() == 64
+            && std::all_of(value.cbegin(), value.cend(), [](QChar character) {
+                return (character >= QLatin1Char('0') && character <= QLatin1Char('9'))
+                    || (character >= QLatin1Char('a') && character <= QLatin1Char('f'));
+            });
+    };
+    if (contentType != QStringLiteral("application/vnd.aegisy.diagnostics+json")
+            || !reference.startsWith(prefix) || !isLowerHex(sha256)
+            || reference.mid(prefix.size()) != sha256
+            || QString::fromLatin1(QCryptographicHash::hash(
+                   content, QCryptographicHash::Sha256).toHex()) != sha256
+            || raw.value(QStringLiteral("size")).toVariant().toLongLong() != content.size()
+            || diagnostic.value(QStringLiteral("raw_output_ref")).toString() != reference) {
+        addNotice(QStringLiteral("诊断原始记录身份校验失败，未写入固定上下文。"), true);
+        return;
+    }
+    const QString path = diagnostic.value(QStringLiteral("path")).toString();
+    const int line = diagnostic.value(QStringLiteral("line")).toInt();
+    const int column = diagnostic.value(QStringLiteral("column")).toInt();
+    const QString severity = diagnostic.value(QStringLiteral("severity")).toString();
+    const QString sourceIdentity = diagnostic.value(QStringLiteral("source_identity"))
+        .toString(QStringLiteral("diagnostic"));
+    if (path.isEmpty() || sourceIdentity.isEmpty()) {
+        addNotice(QStringLiteral("诊断缺少可固定的来源或文件身份。"), true);
+        return;
+    }
+    const QByteArray idDigest = QCryptographicHash::hash(
+        QStringLiteral("%1\n%2\n%3\n%4\n%5\n%6")
+            .arg(m_projectId, m_workspaceRootId, reference, path)
+            .arg(line).arg(column).arg(severity).toUtf8(),
+        QCryptographicHash::Sha256).toHex();
+    const QString id = QStringLiteral("pin-diagnostic-%1")
+        .arg(QString::fromLatin1(idDigest));
+    const QJsonObject metadata{
+        {QStringLiteral("path"), path},
+        {QStringLiteral("line"), QString::number(line)},
+        {QStringLiteral("column"), QString::number(column)},
+        {QStringLiteral("end_line"), QString::number(
+             diagnostic.value(QStringLiteral("end_line")).toInt(line))},
+        {QStringLiteral("end_column"), QString::number(
+             diagnostic.value(QStringLiteral("end_column")).toInt(column))},
+        {QStringLiteral("severity"), severity},
+        {QStringLiteral("source_identity"), sourceIdentity},
+    };
+    QJsonObject descriptor{
+        {QStringLiteral("id"), id},
+        {QStringLiteral("project_id"), m_projectId},
+        {QStringLiteral("root_id"), m_workspaceRootId},
+        {QStringLiteral("kind"), QStringLiteral("diagnostic")},
+        {QStringLiteral("source"), sourceIdentity},
+        {QStringLiteral("label"), QStringLiteral("%1 · %2").arg(
+             path, severity.isEmpty() ? QStringLiteral("诊断") : severity)},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("content_hash"), QStringLiteral("sha256:%1").arg(sha256)},
+        {QStringLiteral("bytes"), static_cast<double>(content.size())},
+        {QStringLiteral("revision"), diagnostic.value(QStringLiteral("file_hash"))},
+        {QStringLiteral("freshness"), diagnostic.value(QStringLiteral("freshness"))
+            .toString(QStringLiteral("fresh"))},
+        {QStringLiteral("priority"), 760},
+        {QStringLiteral("metadata"), metadata},
+    };
+    QJsonArray items;
+    bool replaced = false;
+    for (QJsonObject existing : m_pinnedContextItems) {
+        existing.remove(QStringLiteral("included"));
+        if (existing.value(QStringLiteral("id")).toString() == id) {
+            items.append(descriptor);
+            replaced = true;
+        } else {
+            items.append(existing);
+        }
+    }
+    if (!replaced) {
+        if (items.size() >= 128) {
+            addNotice(QStringLiteral("固定上下文已达到 128 项上限。"), true);
+            return;
+        }
+        items.append(descriptor);
+    }
+    m_pendingPinnedIncludeId = id;
+    m_pinnedContextMutationRequestId = m_runtime->savePinnedContext(
+        m_projectId, items, m_pinnedContextSetIdentity);
+    if (m_pinnedContextMutationRequestId.isEmpty()) {
+        m_pendingPinnedIncludeId.clear();
+        addNotice(QStringLiteral("无法提交诊断固定上下文更新。"), true);
+    }
 }
 
 void AgentWorkbenchWidget::addTextExcerptContext(const QString &kind,

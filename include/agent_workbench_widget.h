@@ -113,6 +113,8 @@ private:
     void addEditorSelectionContext();
     void addSearchResultContext();
     void addDiagnosticContext();
+    void pinSelectedDiagnosticContext();
+    void finishPinnedDiagnosticRaw(const QJsonObject &raw);
     void addTextExcerptContext(const QString &kind, const QString &origin,
                                const QString &label, QPlainTextEdit *source);
     void markPinnedContextStale(const QSet<QString> &paths);
@@ -246,6 +248,7 @@ private:
     QPushButton *m_contextInspectButton = nullptr;
     QAction *m_pinFileContextAction = nullptr;
     QAction *m_pinSelectionContextAction = nullptr;
+    QAction *m_pinDiagnosticContextAction = nullptr;
     QPushButton *m_sendButton = nullptr;
     QTabWidget *m_workspaceTabs = nullptr;
     QTreeWidget *m_fileTree = nullptr;
@@ -434,7 +437,9 @@ private:
     QString m_pinnedContextMutationRequestId;
     QString m_pinnedFileReadRequestId;
     QJsonObject m_pendingPinnedSelection;
+    QJsonObject m_pendingPinnedDiagnostic;
     QString m_pendingPinnedIncludeId;
+    QString m_pendingPinnedDiagnosticRequestId;
     QString m_pinnedContextSetIdentity;
     QJsonArray m_pendingContext;
     QString m_pendingPinnedContextSetIdentity;
