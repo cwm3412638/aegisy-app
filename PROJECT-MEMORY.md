@@ -299,18 +299,23 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   object publication; the two resources are deliberately not one transaction,
   and event failure is reported as an incomplete save. Capability
   `turn.context.pinned-selected` now lets `turn/context/inspect` and `turn/start`
-  consume only explicit selected file/selection-pin IDs together with the exact
-  current set identity. Selection is capped at 16 unique IDs; project/session/
+  consume only explicit selected file/selection/diagnostic/terminal/artifact pin IDs
+  together with the exact current set identity. Selection is capped at 16 unique IDs; project/session/
   root bindings and file policy are rechecked. Both paths share authoritative
   file reread, raw-byte SHA-256/revision stale detection, bounded untrusted
   context, and metadata-only inspection. Selection pins carry bounded line/
-  column metadata (1-based Unicode scalar columns) and are sliced only after source validation. Session-owned
+  column metadata (1-based Unicode scalar columns) and are sliced only after source
+  validation. Session-owned
   `artifact` pins may resolve validated command-output text references. Project/
   root-bound `diagnostic` pins may resolve only normalized `diagnostic-raw:sha256:`
   content from the authoritative in-memory DiagnosticStore after media-type,
   reference, SHA-256, and byte-count validation; Runtime restart or eviction removes
-  that source and must fail closed. Image, terminal, Git, and child-handoff kinds
-  still fail closed. Qt now loads
+  that source and must fail closed. Session-owned `terminal_excerpt` pins resolve
+  only `terminal-excerpt:<terminal>:<generation>:<start>:<end>` references against
+  the Runtime-owned PTY capture. The reread requires the same session, terminal,
+  generation, retained absolute range, normalized UTF-8 content, SHA-256, and byte
+  count; Runtime/terminal restart, removal, generation change, or buffer eviction
+  fails closed. Image, Git, and child-handoff kinds still fail closed. Qt now loads
   project pins into the composer, creates or refreshes file descriptors from
   authoritative workspace reads with reconstructed raw UTF-8/BOM/newline bytes,
   saves through CAS, and supports explicit per-turn inclusion, deterministic
@@ -335,12 +340,19 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   SHA-256, and UTF-8 byte count, and then persists only a project/root-bound
   metadata descriptor through the same CAS path. It never persists the raw body or
   includes the pin automatically; the Runtime remains the authority at inspect/start.
+  The Terminal context menu now separates transient `添加选中内容` from persistent
+  `固定最近输出`. The latter calls read-only `terminal/excerpt/read`, which captures
+  at most 16 KiB of the current retained tail, strips ANSI/OSC through pinned
+  `strip-ansi-escapes` 0.2.1, removes remaining non-text controls, and returns an
+  absolute range/generation/hash. Qt validates that response and persists only a
+  session/root-bound metadata descriptor through CAS. It does not claim that xterm's
+  visual selection has raw PTY offsets.
   Transient inline `selection` context with client-provided content remains on
   the existing bounded inline path; only selection items without inline content
   are resolved from the authoritative file range.
   This foundation still has no cross-resource atomicity, Blob body/reference
-  lifecycle binding, durable diagnostic authority/invalidation, orphan GC, or image,
-  terminal, Git, and child-handoff assembly; keep `17.3` unchecked.
+  lifecycle binding, durable diagnostic/terminal authority and invalidation, orphan
+  GC, or image, Git, and child-handoff assembly; keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
   auto-discovered instructions. Instruction precedence ranks and pinned priority
@@ -723,11 +735,11 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 294 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 296 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 50 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
-denied. The latest unit count includes the diagnostic pinned-context authority and
-source-loss fail-closed invariant.
+denied. The latest unit count includes diagnostic and terminal pinned-context
+authority, terminal normalization, and source-loss fail-closed invariants.
 
 ## Session History Boundary
 
@@ -1168,22 +1180,25 @@ source-loss fail-closed invariant.
   standard `*:sha256:` Blob references receive a read-only SQLite metadata
   ownership/hash/byte check, and save records the separate metadata-only
   project event. `turn/context/inspect` and `turn/start` can consume only an
-  explicit reviewed list of file/selection-pin IDs plus the exact current set
-  identity; they never include every persisted pin automatically. Files are
+  explicit reviewed list of file/selection/diagnostic/terminal/artifact pin IDs plus
+  the exact current set identity; they never include every persisted pin automatically. Files are
   reread through the normal root/policy resolver and raw-byte hash or revision
   drift is marked stale before the same budget/manifest path is used; selection
   ranges are extracted only after that validation. Session-owned artifact pins
   resolve only validated command-output text references with matching UTF-8,
   byte count, and SHA-256. Diagnostic pins resolve only project/root-scoped
   in-memory normalized raw Artifacts with matching media type, reference, hash,
-  and byte count; missing authority after Runtime restart fails closed. Inspection
-  still returns metadata only. Image/terminal/Git/child-handoff kinds, cross-resource Workbench
+  and byte count; missing authority after Runtime restart fails closed. Terminal
+  excerpt pins re-read the exact session/terminal/generation/absolute PTY range,
+  apply the same ANSI/control normalization, and validate hash and byte count;
+  missing or evicted authority fails closed. Inspection still returns metadata only.
+  Image/Git/child-handoff kinds, cross-resource Workbench
   event/Blob authority, automatic invalidation, and orphan GC remain unavailable; the
   composer queue is otherwise transient. Qt render evidence covers file and
   editor-selection pin persistence, range labels, inclusion, order boundaries,
-  and unpin. The diagnostic surface provides explicit raw-read, validate, CAS pin,
-  include, and unpin behavior without persisting diagnostic bodies. Watch/save
-  changes also project stale state locally without mutating durable pin metadata;
+  and unpin. The diagnostic and terminal surfaces provide explicit authority-read,
+  validate, CAS pin, include, and unpin behavior without persisting their bodies.
+  Watch/save changes also project stale state locally without mutating durable pin metadata;
   remaining non-file pin producers and complete cross-platform pin behavior remain
   open.
 
@@ -1470,7 +1485,7 @@ source-loss fail-closed invariant.
 ## Terminal Boundary
 
 - AAP methods: `terminal/open-user`, `terminal/list`, `terminal/attach`,
-  `terminal/read`, `terminal/input-user`, `terminal/resize`,
+  `terminal/read`, `terminal/excerpt/read`, `terminal/input-user`, `terminal/resize`,
   `terminal/signal-user`, `terminal/stop-user`, `terminal/close-user`,
   `terminal/restart-user`, and `terminal/remove-user`.
 - Creation and input are explicitly user-labelled operations and require a
@@ -1486,6 +1501,12 @@ source-loss fail-closed invariant.
 - PTY bytes cross JSON-RPC as Base64. Each terminal retains at most the newest
   1 MiB with absolute output offsets and explicit omission metadata; one input is
   limited to 64 KiB and dimensions to 1-1000 rows/columns.
+- Read-only `terminal/excerpt/read` snapshots at most 16 KiB from the retained tail
+  and returns normalized UTF-8 text plus session/project/root, terminal generation,
+  absolute start/end, SHA-256, and byte count. It strips terminal escape sequences
+  with pinned `strip-ansi-escapes` 0.2.1 and removes remaining non-text controls.
+  This endpoint is explicit user pin preparation, not durable terminal history and
+  not an Agent read primitive; the corresponding descriptor never stores the body.
 - Resize uses the native PTY and foreground signals target the current terminal
   process group. Close/runtime shutdown signal both foreground work and the shell
   session leader, retain exit code/signal for polling, and avoid unbounded waits.

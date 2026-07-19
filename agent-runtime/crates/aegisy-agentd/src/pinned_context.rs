@@ -240,6 +240,9 @@ fn validate_reference(value: &str, kind: &str) -> Result<(), PinnedContextError>
     if kind == "diagnostic" && value.contains(':') && !value.starts_with("diagnostic-raw:sha256:") {
         return Err(error("pinned-context-reference-path-invalid"));
     }
+    if kind == "terminal_excerpt" && !value.starts_with("terminal-excerpt:terminal-") {
+        return Err(error("pinned-context-reference-path-invalid"));
+    }
     Ok(())
 }
 
@@ -327,7 +330,7 @@ mod tests {
             ),
             ("image", "blob:sha256:abc"),
             ("diagnostic", "src/main.rs"),
-            ("terminal_excerpt", "terminal:output-1"),
+            ("terminal_excerpt", "terminal-excerpt:terminal-1:1:0:12"),
             ("git_commit", "git:commit:abc"),
             ("git_diff", "git:diff:abc"),
             ("artifact", "artifact:sha256:abc"),

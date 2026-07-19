@@ -997,6 +997,17 @@ QString AgentRuntimeClient::attachTerminal(const QString &sessionId,
     });
 }
 
+QString AgentRuntimeClient::readTerminalExcerpt(const QString &sessionId,
+                                                const QString &terminalId,
+                                                int maxBytes)
+{
+    return sendRequest(QStringLiteral("terminal/excerpt/read"), {
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("terminal_id"), terminalId},
+        {QStringLiteral("max_bytes"), maxBytes},
+    });
+}
+
 QString AgentRuntimeClient::inputUserTerminal(const QString &sessionId,
                                               const QString &terminalId,
                                               const QByteArray &data)
@@ -1350,6 +1361,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
     } else if (pendingMethod == QStringLiteral("terminal/read")
                || pendingMethod == QStringLiteral("terminal/attach")) {
         emit terminalAttached(id, result);
+    } else if (pendingMethod == QStringLiteral("terminal/excerpt/read")) {
+        emit terminalExcerptRead(id, result);
     } else if (pendingMethod == QStringLiteral("terminal/input-user")) {
         emit terminalInputAccepted(id, result);
     } else if (pendingMethod == QStringLiteral("terminal/resize")) {

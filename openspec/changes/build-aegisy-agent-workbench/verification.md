@@ -698,7 +698,7 @@ Current editor evidence:
   project-directory removal, case-insensitive credential masking, dangerous loader
   variable rejection, value/count limits, deterministic session identity, explicit
   terminal derivation, and value-free AAP metadata.
-- Two hundred and eighty-nine Rust sidecar unit tests, forty-nine AAP protocol tests,
+- Two hundred and ninety-six Rust sidecar unit tests, fifty AAP protocol tests,
   eleven sidecar stdio/Codex contract tests, and sixteen desktop CTest tests pass;
   Clippy passes with warnings denied.
 
@@ -773,15 +773,25 @@ Known limitations:
   after media-type, reference, SHA-256, and byte-count validation. Clearing that
   source, as occurs across Runtime restart or eviction, makes inspection fail closed;
   the persisted descriptor is never treated as a body.
+  Session-owned terminal pins use a strict
+  `terminal-excerpt:<terminal>:<generation>:<start>:<end>` reference. Assembly
+  re-reads the Runtime-owned retained PTY range, applies the same ANSI/OSC and
+  control normalization, and validates session, generation, offsets, SHA-256, and
+  byte count. Runtime/terminal restart, removal, generation change, and capture
+  eviction therefore fail closed instead of using the descriptor as content.
   Duplicate/missing
-  IDs, stale set identity, cross-session selection, and image/terminal/Git/
+  IDs, stale set identity, cross-session selection, and image/Git/
   child-handoff kinds fail explicitly. Qt now
   loads project pins and covers authoritative file and editor-selection pin creation,
   CAS persistence, range metadata, per-turn inclusion, bounded order changes, and
   unpin in the Workbench render fixture. The Structure diagnostics surface also
   exposes explicit diagnostic pin/unpin: Qt rereads `workspace/diagnostics/raw`,
   validates project/root, media type, reference, SHA-256, and UTF-8 byte count, and
-  submits only a metadata descriptor through CAS. Remaining image/terminal/Git/
+  submits only a metadata descriptor through CAS. Qt terminal context separately
+  exposes transient selected text and persistent `固定最近输出`; the latter reads a
+  bounded `terminal-excerpt/0.1` authority, validates it, and saves only the
+  descriptor. Real Runtime and render fixtures cover assembly, metadata-only
+  inspection, pin/unpin, and failure after removal. Remaining image/Git/
   child-handoff assembly, cross-resource atomicity, automatic invalidation,
   orphan GC, and complete cross-platform pin evidence remain incomplete; task
   17.3 remains unchecked. Qt workspace-watch and user-save callbacks also mark
@@ -805,7 +815,7 @@ Known limitations:
   objects, object/pointer tampering, update refusal on damaged current authority,
   and symlinked-layout denial. Cross-resource event/object/Blob atomicity, Blob
   release/lifecycle binding, orphan GC, automatic source invalidation, Windows
-  execution, remaining image/terminal/Git/child-handoff assembly, and their Qt
+  execution, remaining image/Git/child-handoff assembly, and their Qt
   surfaces remain open.
 - Windows packaging, TLS runtime, scaling, IME, and accessibility evidence remain
   required before a Windows release claim.

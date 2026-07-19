@@ -187,6 +187,8 @@ private:
     void pollActiveTerminal();
     void updateTerminalControls();
     void addTerminalSelectionContext();
+    void pinRecentTerminalExcerpt();
+    void finishPinnedTerminalExcerpt(const QJsonObject &excerpt);
 #ifdef AEGISY_HAS_MONACO
     void initializeMonacoEditor(QWidget *parent);
     void syncMonacoModel();
@@ -311,6 +313,8 @@ private:
     QPushButton *m_terminalRestartButton = nullptr;
     QPushButton *m_terminalRemoveButton = nullptr;
     QPushButton *m_terminalContextButton = nullptr;
+    QAction *m_terminalSelectionContextAction = nullptr;
+    QAction *m_pinTerminalExcerptAction = nullptr;
     QLabel *m_gitSummary = nullptr;
     QTreeWidget *m_gitHistory = nullptr;
     QComboBox *m_gitDiffScope = nullptr;
@@ -425,6 +429,7 @@ private:
     QString m_activeTerminalId;
     QString m_terminalAttachRequestId;
     QString m_terminalListRequestId;
+    QString m_terminalExcerptRequestId;
     QString m_pendingTerminalKind;
     QString m_pendingTerminalName;
     QString m_terminalSelection;

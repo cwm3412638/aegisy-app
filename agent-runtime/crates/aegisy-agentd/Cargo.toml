@@ -12,6 +12,7 @@ serde_json.workspace = true
 lsp-types.workspace = true
 sha2.workspace = true
 similar.workspace = true
+strip-ansi-escapes.workspace = true
 tree-sitter.workspace = true
 tree-sitter-cpp.workspace = true
 tree-sitter-javascript.workspace = true

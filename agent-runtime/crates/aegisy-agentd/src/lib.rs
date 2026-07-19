@@ -103,6 +103,8 @@ const RUNTIME_REPLAY_PAGE_SIZE: usize = 200;
 const MAX_TURN_METADATA_UPDATES_PER_KIND: usize = 32;
 const MAX_AUTO_INSTRUCTION_ITEMS: usize = 8;
 const MAX_AUTO_INSTRUCTION_BYTES: u64 = 32 * 1024;
+const MAX_TERMINAL_EXCERPT_BYTES: usize = 16 * 1024;
+const TERMINAL_EXCERPT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 
 const TRUST_INSTRUCTION_NAMES: &[&str] = &[
     "AGENTS.md",
@@ -1115,6 +1117,14 @@ struct TerminalReadParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct TerminalExcerptParams {
+    session_id: String,
+    terminal_id: String,
+    #[serde(default = "default_terminal_excerpt_bytes")]
+    max_bytes: usize,
+}
+
+#[derive(Debug, Deserialize)]
 struct TerminalInputParams {
     session_id: String,
     terminal_id: String,
@@ -1160,7 +1170,151 @@ struct TerminalRecord {
     updated_at_ms: u64,
 }
 
+#[derive(Debug, Clone)]
+struct TerminalExcerptContent {
+    terminal_id: String,
+    session_id: String,
+    project_id: String,
+    generation: u64,
+    output_start: u64,
+    output_end: u64,
+    source_output_end: u64,
+    content: String,
+}
+
 impl TerminalState {
+    fn create_excerpt(
+        &mut self,
+        terminal_id: &str,
+        session_id: &str,
+        max_bytes: usize,
+    ) -> Result<TerminalExcerptContent, TerminalError> {
+        if max_bytes == 0 || max_bytes > MAX_TERMINAL_EXCERPT_BYTES {
+            return Err(terminal_error(
+                -32602,
+                "terminal excerpt max_bytes must be between 1 and 16384",
+            ));
+        }
+        let record = self.bound_terminal_record(terminal_id, session_id)?;
+        let tail = self.manager.snapshot(terminal_id, session_id, u64::MAX)?;
+        let source_output_end = tail.output_end;
+        let retained_start = tail.omitted_before_start;
+        if source_output_end <= retained_start {
+            return Err(terminal_error(-32078, "terminal output is empty"));
+        }
+        let desired_start = source_output_end
+            .saturating_sub(max_bytes as u64)
+            .max(retained_start);
+        let prefetch_start = desired_start.saturating_sub(3).max(retained_start);
+        let snapshot = self
+            .manager
+            .snapshot(terminal_id, session_id, prefetch_start)?;
+        if snapshot.output_start != prefetch_start || snapshot.output_end < source_output_end {
+            return Err(terminal_error(
+                -32078,
+                "terminal excerpt range is no longer retained",
+            ));
+        }
+        let output = BASE64_STANDARD
+            .decode(&snapshot.output_base64)
+            .map_err(|_| terminal_error(-32078, "terminal excerpt bytes are invalid"))?;
+        let requested_end = usize::try_from(source_output_end - prefetch_start)
+            .map_err(|_| terminal_error(-32078, "terminal excerpt range is invalid"))?;
+        if output.len() < requested_end {
+            return Err(terminal_error(
+                -32078,
+                "terminal excerpt range is incomplete",
+            ));
+        }
+        let desired_offset = usize::try_from(desired_start - prefetch_start)
+            .map_err(|_| terminal_error(-32078, "terminal excerpt range is invalid"))?;
+        let (start_offset, end_offset) =
+            terminal_utf8_bounds(&output[..requested_end], desired_offset, requested_end)
+                .ok_or_else(|| terminal_error(-32078, "terminal excerpt is not valid UTF-8"))?;
+        let content = normalize_terminal_excerpt(&output[start_offset..end_offset])?;
+        Ok(TerminalExcerptContent {
+            terminal_id: record.terminal_id,
+            session_id: record.session_id,
+            project_id: record.project_id,
+            generation: record.generation,
+            output_start: prefetch_start + start_offset as u64,
+            output_end: prefetch_start + end_offset as u64,
+            source_output_end,
+            content,
+        })
+    }
+
+    fn read_excerpt_range(
+        &mut self,
+        terminal_id: &str,
+        session_id: &str,
+        generation: u64,
+        output_start: u64,
+        output_end: u64,
+    ) -> Result<TerminalExcerptContent, TerminalError> {
+        if output_start >= output_end
+            || output_end.saturating_sub(output_start) > MAX_TERMINAL_EXCERPT_BYTES as u64
+        {
+            return Err(terminal_error(-32078, "terminal excerpt range is invalid"));
+        }
+        let record = self.bound_terminal_record(terminal_id, session_id)?;
+        if record.generation != generation {
+            return Err(terminal_error(
+                -32078,
+                "terminal excerpt generation is no longer available",
+            ));
+        }
+        let snapshot = self
+            .manager
+            .snapshot(terminal_id, session_id, output_start)?;
+        if snapshot.output_start != output_start || snapshot.output_end < output_end {
+            return Err(terminal_error(
+                -32078,
+                "terminal excerpt range is no longer retained",
+            ));
+        }
+        let output = BASE64_STANDARD
+            .decode(&snapshot.output_base64)
+            .map_err(|_| terminal_error(-32078, "terminal excerpt bytes are invalid"))?;
+        let requested = usize::try_from(output_end - output_start)
+            .map_err(|_| terminal_error(-32078, "terminal excerpt range is invalid"))?;
+        if output.len() < requested {
+            return Err(terminal_error(
+                -32078,
+                "terminal excerpt range is incomplete",
+            ));
+        }
+        let content = normalize_terminal_excerpt(&output[..requested])?;
+        Ok(TerminalExcerptContent {
+            terminal_id: record.terminal_id,
+            session_id: record.session_id,
+            project_id: record.project_id,
+            generation: record.generation,
+            output_start,
+            output_end,
+            source_output_end: snapshot.output_end,
+            content,
+        })
+    }
+
+    fn bound_terminal_record(
+        &self,
+        terminal_id: &str,
+        session_id: &str,
+    ) -> Result<TerminalRecord, TerminalError> {
+        let record = self
+            .records
+            .get(terminal_id)
+            .ok_or_else(|| terminal_error(-32093, "terminal not found"))?;
+        if record.session_id != session_id {
+            return Err(terminal_error(
+                -32093,
+                "terminal does not belong to session",
+            ));
+        }
+        Ok(record.clone())
+    }
+
     fn stop_user(&mut self, terminal_id: &str, session_id: &str) -> Result<Value, TerminalError> {
         let snapshot = self.manager.close_user(terminal_id, session_id)?;
         if let Some(record) = self.records.get_mut(terminal_id) {
@@ -1269,6 +1423,112 @@ impl TerminalState {
         }
         value
     }
+}
+
+const fn default_terminal_excerpt_bytes() -> usize {
+    MAX_TERMINAL_EXCERPT_BYTES
+}
+
+fn terminal_error(code: i64, message: impl Into<String>) -> TerminalError {
+    TerminalError {
+        code,
+        message: message.into(),
+    }
+}
+
+fn terminal_utf8_bounds(
+    bytes: &[u8],
+    desired_start: usize,
+    requested_end: usize,
+) -> Option<(usize, usize)> {
+    if desired_start >= requested_end || requested_end > bytes.len() {
+        return None;
+    }
+    let max_start = desired_start.saturating_add(3).min(requested_end);
+    for start in desired_start..=max_start {
+        for trim in 0..=3 {
+            let Some(end) = requested_end.checked_sub(trim) else {
+                continue;
+            };
+            if start < end && std::str::from_utf8(&bytes[start..end]).is_ok() {
+                return Some((start, end));
+            }
+        }
+    }
+    None
+}
+
+fn normalize_terminal_excerpt(bytes: &[u8]) -> Result<String, TerminalError> {
+    let stripped = strip_ansi_escapes::strip(bytes);
+    let text = std::str::from_utf8(&stripped)
+        .map_err(|_| terminal_error(-32078, "terminal excerpt is not valid UTF-8"))?;
+    let mut normalized = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                normalized.push('\n');
+            }
+            '\n' | '\t' => normalized.push(character),
+            _ if character.is_control() => {}
+            _ => normalized.push(character),
+        }
+    }
+    if normalized.trim().is_empty() {
+        return Err(terminal_error(
+            -32078,
+            "terminal excerpt has no visible text",
+        ));
+    }
+    if normalized.len() > MAX_TERMINAL_EXCERPT_BYTES {
+        return Err(terminal_error(
+            -32078,
+            "terminal excerpt exceeds the normalized byte limit",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn terminal_excerpt_reference(excerpt: &TerminalExcerptContent) -> String {
+    format!(
+        "terminal-excerpt:{}:{}:{}:{}",
+        excerpt.terminal_id, excerpt.generation, excerpt.output_start, excerpt.output_end
+    )
+}
+
+fn parse_terminal_excerpt_reference(reference: &str) -> Option<(String, u64, u64, u64)> {
+    let mut parts = reference.split(':');
+    if parts.next()? != "terminal-excerpt" {
+        return None;
+    }
+    let terminal_id = parts.next()?;
+    let generation_text = parts.next()?;
+    let start_text = parts.next()?;
+    let end_text = parts.next()?;
+    if parts.next().is_some()
+        || !terminal_id.starts_with("terminal-")
+        || !terminal_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        return None;
+    }
+    let generation = generation_text.parse::<u64>().ok()?;
+    let output_start = start_text.parse::<u64>().ok()?;
+    let output_end = end_text.parse::<u64>().ok()?;
+    if generation == 0
+        || generation.to_string() != generation_text
+        || output_start.to_string() != start_text
+        || output_end.to_string() != end_text
+        || output_start >= output_end
+        || output_end.saturating_sub(output_start) > MAX_TERMINAL_EXCERPT_BYTES as u64
+    {
+        return None;
+    }
+    Some((terminal_id.to_owned(), generation, output_start, output_end))
 }
 
 fn default_search_mode() -> String {
@@ -2389,6 +2649,7 @@ impl Runtime {
                     | "workspace/pinned-context/list"
                     | "terminal/list"
                     | "terminal/read"
+                    | "terminal/excerpt/read"
                     | "terminal/attach"
                     | "terminal/stop-user"
                     | "terminal/close-user"
@@ -2423,6 +2684,7 @@ impl Runtime {
                 | "workspace/pinned-context/list"
                 | "terminal/list"
                 | "terminal/read"
+                | "terminal/excerpt/read"
                 | "terminal/attach"
                 | "terminal/stop-user"
                 | "terminal/close-user"
@@ -2561,6 +2823,7 @@ impl Runtime {
             "workspace/edit/artifact/read" => self.workspace_edit_artifact_read(request),
             "terminal/open-user" => self.terminal_open_user(request),
             "terminal/read" => self.terminal_read(request),
+            "terminal/excerpt/read" => self.terminal_excerpt_read(request),
             "terminal/attach" => self.terminal_read(request),
             "terminal/list" => self.terminal_list(request),
             "terminal/input-user" => self.terminal_input_user(request),
@@ -2905,6 +3168,7 @@ impl Runtime {
                 "workspace.edit.preview.read-only".into(),
                 "terminal.environment.session-scoped".into(),
                 "terminal.lifecycle.named".into(),
+                "terminal.excerpt.read".into(),
                 "terminal.stop.out-of-band".into(),
                 TerminalManager::capability().into(),
             ]);
@@ -7059,6 +7323,66 @@ impl Runtime {
         Ok(artifact.content)
     }
 
+    fn read_pinned_terminal_excerpt_text(
+        &self,
+        session_id: &str,
+        item: &pinned_context::PinnedContextItem,
+    ) -> Result<String, (i64, String)> {
+        if item.session_id.as_deref() != Some(session_id) {
+            return Err((
+                -32095,
+                "terminal excerpt pinned context must be bound to the current session".into(),
+            ));
+        }
+        let Some((terminal_id, generation, output_start, output_end)) =
+            parse_terminal_excerpt_reference(&item.reference)
+        else {
+            return Err((
+                -32078,
+                "invalid terminal excerpt pinned context reference".into(),
+            ));
+        };
+        let excerpt = self
+            .control
+            .terminals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .read_excerpt_range(
+                &terminal_id,
+                session_id,
+                generation,
+                output_start,
+                output_end,
+            )
+            .map_err(|_| {
+                (
+                    -32078,
+                    "terminal excerpt pinned context authority is unavailable".into(),
+                )
+            })?;
+        let Some(expected_hash) = item.content_hash.strip_prefix("sha256:") else {
+            return Err((
+                -32048,
+                "terminal excerpt pinned context hash is invalid".into(),
+            ));
+        };
+        let actual_hash = ContentHash::for_bytes(excerpt.content.as_bytes()).sha256;
+        if excerpt.terminal_id != terminal_id
+            || excerpt.session_id != session_id
+            || excerpt.generation != generation
+            || excerpt.output_start != output_start
+            || excerpt.output_end != output_end
+            || expected_hash != actual_hash
+            || item.bytes != excerpt.content.len() as u64
+        {
+            return Err((
+                -32048,
+                "terminal excerpt pinned context content identity changed".into(),
+            ));
+        }
+        Ok(excerpt.content)
+    }
+
     /// Resolve only the explicitly selected persisted pins. The descriptor is
     /// metadata-only; file contents are reread by the normal turn-context
     /// resolver after root, ignore, symlink, and stale checks.
@@ -7159,11 +7483,12 @@ impl Runtime {
             if item.kind != "file"
                 && item.kind != "selection"
                 && item.kind != "diagnostic"
+                && item.kind != "terminal_excerpt"
                 && item.kind != "artifact"
             {
                 return Err((
                     -32048,
-                    "only file, selection, diagnostic, and artifact pinned context are available in turn assembly"
+                    "only file, selection, diagnostic, terminal excerpt, and artifact pinned context are available in turn assembly"
                         .into(),
                 ));
             }
@@ -7209,6 +7534,30 @@ impl Runtime {
             selected.push((item, root_id));
         }
         for (item, root_id) in selected {
+            if item.kind == "terminal_excerpt" {
+                let content = self.read_pinned_terminal_excerpt_text(session_id, &item)?;
+                context_items.push(TurnContextItem {
+                    id: item.id,
+                    kind: item.kind,
+                    label: item.label,
+                    origin: "pinned-context".into(),
+                    root_id: Some(root_id),
+                    path: None,
+                    content: Some(content),
+                    revision: item.revision,
+                    expected_content_hash: None,
+                    line: None,
+                    column: None,
+                    end_line: None,
+                    end_column: None,
+                    freshness: Some(item.freshness),
+                    raw_output_ref: None,
+                    priority: Some(format!("pinned-priority-{}", item.priority)),
+                    inclusion_reason: Some("pinned-context".into()),
+                    exclusion_reason: None,
+                });
+                continue;
+            }
             if item.kind == "diagnostic" {
                 let content = self.read_pinned_diagnostic_text(&project_id, &root_id, &item)?;
                 context_items.push(TurnContextItem {
@@ -8551,6 +8900,59 @@ impl Runtime {
             Ok(snapshot) => self.success_for(&request, snapshot),
             Err(error) => self.error_for(&request, error.code, error.message),
         }
+    }
+
+    fn terminal_excerpt_read(&mut self, request: Request) -> Vec<Value> {
+        let params: TerminalExcerptParams = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(cause) => {
+                return self.error_for(&request, -32602, format!("invalid params: {cause}"))
+            }
+        };
+        let (project_id, _, _) = match self.terminal_session_binding(&params.session_id) {
+            Ok(binding) => binding,
+            Err((code, message)) => return self.error_for(&request, code, message),
+        };
+        let excerpt = self
+            .control
+            .terminals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .create_excerpt(&params.terminal_id, &params.session_id, params.max_bytes);
+        let excerpt = match excerpt {
+            Ok(excerpt) => excerpt,
+            Err(error) => return self.error_for(&request, error.code, error.message),
+        };
+        if excerpt.project_id != project_id {
+            return self.error_for(
+                &request,
+                -32095,
+                "terminal excerpt project binding is invalid",
+            );
+        }
+        let content_hash = ContentHash::for_bytes(excerpt.content.as_bytes());
+        let reference = terminal_excerpt_reference(&excerpt);
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "terminal-excerpt/0.1",
+                "session_id": excerpt.session_id,
+                "project_id": excerpt.project_id,
+                "root_id": "root-1",
+                "terminal_id": excerpt.terminal_id,
+                "generation": excerpt.generation,
+                "reference": reference,
+                "content_type": TERMINAL_EXCERPT_MEDIA_TYPE,
+                "content_hash": format!("sha256:{}", content_hash.sha256),
+                "bytes": excerpt.content.len(),
+                "output_start": excerpt.output_start,
+                "output_end": excerpt.output_end,
+                "source_output_end": excerpt.source_output_end,
+                "content": excerpt.content,
+                "truncated": excerpt.output_start > 0,
+                "content_bodies_persisted": false
+            }),
+        )
     }
 
     fn terminal_input_user(&mut self, request: Request) -> Vec<Value> {
@@ -11318,6 +11720,214 @@ mod pinned_context_assembly_tests {
         assert!(!serde_json::to_string(&unavailable)
             .unwrap()
             .contains("cannot find value"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn normalizes_terminal_excerpt_escape_sequences_and_controls() {
+        let normalized = normalize_terminal_excerpt(
+            b"\x1b]0;private title\x07\x1b[31mred\x1b[0m\r\nnext\x08!\0",
+        )
+        .unwrap();
+        assert_eq!(normalized, "red\nnext!");
+        assert!(normalize_terminal_excerpt(b"\x1b[31m\x1b[0m").is_err());
+
+        let split = "界".as_bytes();
+        let mut bytes = vec![split[1], split[2]];
+        bytes.extend_from_slice("面".as_bytes());
+        let (start, end) = terminal_utf8_bounds(&bytes, 0, bytes.len()).unwrap();
+        assert_eq!(std::str::from_utf8(&bytes[start..end]).unwrap(), "面");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn assembles_session_terminal_excerpt_pin_and_rejects_removed_authority() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("aegisy-pinned-terminal-{unique}"));
+        let data_root = root.join("data");
+        let project_root = root.join("project");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+        let mut runtime = Runtime::with_store(&data_root).unwrap();
+        runtime.handle_line(&request(
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": {"name": "terminal-pin", "version": "1"}
+            }),
+        ));
+        runtime.handle_line(&request("initialized", json!({})));
+        let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
+        let project_id = opened[0]["result"]["project"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = runtime.handle_line(&request(
+            "session/start",
+            json!({"mode": "work", "project_id": project_id}),
+        ));
+        let session_id = session[0]["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let opened_terminal = runtime.handle_line(&request(
+            "terminal/open-user",
+            json!({"session_id": session_id, "kind": "foreground"}),
+        ));
+        let terminal_id = opened_terminal[0]["result"]["terminal_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let command =
+            b"printf '\\x1b]0;title\\x07\\x1b[31mAegisy pinned terminal\\x1b[0m\\r\\n'; exit 0\n";
+        let input = runtime.handle_line(&request(
+            "terminal/input-user",
+            json!({
+                "session_id": session_id,
+                "terminal_id": terminal_id,
+                "data_base64": BASE64_STANDARD.encode(command)
+            }),
+        ));
+        assert_eq!(input[0]["result"]["written"], command.len());
+
+        let mut saw_output = false;
+        for attempt in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let read = runtime.handle_line(&request_with_id(
+                &format!("terminal-pin-read-{attempt}"),
+                "terminal/read",
+                json!({
+                    "session_id": session_id,
+                    "terminal_id": terminal_id,
+                    "after": 0
+                }),
+            ));
+            let output = BASE64_STANDARD
+                .decode(
+                    read[0]["result"]["output_base64"]
+                        .as_str()
+                        .unwrap_or_default(),
+                )
+                .unwrap();
+            if output
+                .windows("Aegisy pinned terminal".len())
+                .any(|window| window == b"Aegisy pinned terminal")
+                && read[0]["result"]["running"] == false
+            {
+                saw_output = true;
+                break;
+            }
+        }
+        assert!(
+            saw_output,
+            "terminal fixture did not produce bounded output"
+        );
+
+        let excerpt_response = runtime.handle_line(&request(
+            "terminal/excerpt/read",
+            json!({
+                "session_id": session_id,
+                "terminal_id": terminal_id,
+                "max_bytes": MAX_TERMINAL_EXCERPT_BYTES
+            }),
+        ));
+        let excerpt = excerpt_response[0]["result"].clone();
+        let content = excerpt["content"].as_str().unwrap();
+        assert!(content.contains("Aegisy pinned terminal"));
+        assert!(!content.contains('\u{1b}'));
+        assert_eq!(excerpt["content_type"], TERMINAL_EXCERPT_MEDIA_TYPE);
+        assert_eq!(excerpt["bytes"], content.len());
+        assert_eq!(
+            excerpt["content_hash"],
+            format!(
+                "sha256:{}",
+                ContentHash::for_bytes(content.as_bytes()).sha256
+            )
+        );
+
+        let set: pinned_context::PinnedContextSet = serde_json::from_value(json!({
+            "schema_version": pinned_context::SCHEMA_VERSION,
+            "project_id": project_id,
+            "items": [{
+                "id": "pin-terminal",
+                "project_id": project_id,
+                "session_id": session_id,
+                "root_id": "root-1",
+                "kind": "terminal_excerpt",
+                "source": "terminal-output",
+                "label": "terminal excerpt",
+                "reference": excerpt["reference"],
+                "content_hash": excerpt["content_hash"],
+                "bytes": excerpt["bytes"],
+                "revision": format!("terminal-generation:{}", excerpt["generation"]),
+                "freshness": "fresh",
+                "priority": 680,
+                "metadata": {
+                    "terminal_id": terminal_id,
+                    "generation": excerpt["generation"].to_string(),
+                    "output_start": excerpt["output_start"].to_string(),
+                    "output_end": excerpt["output_end"].to_string()
+                }
+            }]
+        }))
+        .unwrap();
+        let identity = runtime
+            .pinned_context_store
+            .as_ref()
+            .unwrap()
+            .persist(&set)
+            .unwrap()
+            .set_identity;
+        let mut context = Vec::new();
+        runtime
+            .append_pinned_context(
+                &session_id,
+                Some(&identity),
+                &["pin-terminal".into()],
+                &mut context,
+            )
+            .unwrap();
+        assert_eq!(context[0].kind, "terminal_excerpt");
+        assert!(context[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("Aegisy pinned terminal"));
+
+        let inspected = runtime.handle_line(&request_with_id(
+            "inspect-terminal-pin",
+            "turn/context/inspect",
+            json!({
+                "session_id": session_id,
+                "pinned_context_set_identity": identity,
+                "pinned_context_ids": ["pin-terminal"]
+            }),
+        ));
+        assert_eq!(
+            inspected[0]["result"]["context"]["manifest"]["entries"][0]["kind"],
+            "terminal_excerpt"
+        );
+        assert!(!serde_json::to_string(&inspected)
+            .unwrap()
+            .contains("Aegisy pinned terminal"));
+
+        let removed = runtime.handle_line(&request(
+            "terminal/remove-user",
+            json!({"session_id": session_id, "terminal_id": terminal_id}),
+        ));
+        assert_eq!(removed[0]["result"]["removed"], true);
+        let error = runtime
+            .append_pinned_context(
+                &session_id,
+                Some(&identity),
+                &["pin-terminal".into()],
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.0, -32078);
         fs::remove_dir_all(root).unwrap();
     }
 }

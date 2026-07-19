@@ -275,6 +275,8 @@ int main(int argc, char *argv[])
         QStringLiteral("agentDiagnosticContextAction"));
     QAction *terminalContextAction = workbench.findChild<QAction *>(
         QStringLiteral("agentTerminalExcerptContextAction"));
+    QAction *pinTerminalExcerptAction = workbench.findChild<QAction *>(
+        QStringLiteral("agentPinTerminalExcerptAction"));
     QAction *gitContextAction = workbench.findChild<QAction *>(
         QStringLiteral("agentGitDiffContextAction"));
     QPushButton *newSession = buttonWithText(workbench, QStringLiteral("新建会话"));
@@ -345,6 +347,7 @@ int main(int argc, char *argv[])
                            && pinFileContextAction
                            && pinSelectionContextAction
                            && diagnosticContextAction && terminalContextAction
+                           && pinTerminalExcerptAction
                            && gitContextAction && contextList->count() == 0
                            && contextPanel->isHidden() && !contextInspect->isEnabled()
                            && !editorContext->isEnabled(),
@@ -1317,6 +1320,29 @@ int main(int argc, char *argv[])
                         && terminalStatus->text().contains(QStringLiteral("exited"));
                 }, 5000),
                 "terminal UI did not stream PTY output and observe process exit")) {
+        return 1;
+    }
+    if (!expect(pinTerminalExcerptAction->isEnabled(),
+                "terminal output did not enable its explicit pin action")) {
+        return 1;
+    }
+    pinTerminalExcerptAction->trigger();
+    if (!expect(waitUntil(application, [&workbench, contextSummary]() {
+                    return workbench.findChildren<QPushButton *>(
+                               QStringLiteral("agentPinnedContextRemoveButton")).size() == 1
+                        && contextSummary->text().contains(QStringLiteral("固定 1"));
+                }),
+                "terminal excerpt pin did not persist a session-scoped descriptor")) {
+        return 1;
+    }
+    const QList<QPushButton *> terminalPinRemoveButtons = workbench.findChildren<QPushButton *>(
+        QStringLiteral("agentPinnedContextRemoveButton"));
+    terminalPinRemoveButtons.first()->click();
+    if (!expect(waitUntil(application, [&workbench]() {
+                    return workbench.findChildren<QPushButton *>(
+                               QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
+                }),
+                "terminal excerpt unpin did not remove the persisted descriptor")) {
         return 1;
     }
     terminalRemove->click();

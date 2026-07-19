@@ -175,6 +175,8 @@ public:
     QString listTerminals(const QString &sessionId);
     QString attachTerminal(const QString &sessionId, const QString &terminalId,
                            quint64 after = 0);
+    QString readTerminalExcerpt(const QString &sessionId, const QString &terminalId,
+                                int maxBytes = 16 * 1024);
     QString inputUserTerminal(const QString &sessionId, const QString &terminalId,
                               const QByteArray &data);
     QString resizeTerminal(const QString &sessionId, const QString &terminalId,
@@ -270,6 +272,7 @@ signals:
     void terminalOpened(const QString &requestId, const QJsonObject &terminal);
     void terminalsListed(const QString &requestId, const QJsonObject &result);
     void terminalAttached(const QString &requestId, const QJsonObject &terminal);
+    void terminalExcerptRead(const QString &requestId, const QJsonObject &excerpt);
     void terminalInputAccepted(const QString &requestId, const QJsonObject &result);
     void terminalResized(const QString &requestId, const QJsonObject &result);
     void terminalSignalled(const QString &requestId, const QJsonObject &result);

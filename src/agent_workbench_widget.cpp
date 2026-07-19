@@ -828,6 +828,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_pendingPinnedDiagnostic = {};
         m_pendingPinnedIncludeId.clear();
         m_pendingPinnedDiagnosticRequestId.clear();
+        m_terminalExcerptRequestId.clear();
         m_pendingContext = {};
         m_pendingPinnedContextSetIdentity.clear();
         m_pendingPinnedContextIds.clear();
@@ -1486,6 +1487,13 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_terminalAttachRequestId.clear();
         applyTerminalSnapshot(terminal);
     });
+    connect(m_runtime, &AgentRuntimeClient::terminalExcerptRead,
+            this, [this](const QString &requestId, const QJsonObject &excerpt) {
+        if (requestId != m_terminalExcerptRequestId) return;
+        m_terminalExcerptRequestId.clear();
+        finishPinnedTerminalExcerpt(excerpt);
+        updateTerminalControls();
+    });
     connect(m_runtime, &AgentRuntimeClient::terminalStopped,
             this, [this](const QString &, const QJsonObject &terminal) {
         applyTerminalSnapshot(terminal);
@@ -2066,6 +2074,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         } else if (method.startsWith(QStringLiteral("terminal/"))) {
             if (requestId == m_terminalAttachRequestId) m_terminalAttachRequestId.clear();
             if (requestId == m_terminalListRequestId) m_terminalListRequestId.clear();
+            if (requestId == m_terminalExcerptRequestId) {
+                m_terminalExcerptRequestId.clear();
+                addNotice(QStringLiteral("固定终端摘录失败：%1").arg(message), true);
+            }
             m_terminalStatus->setText(QStringLiteral("终端操作失败：%1").arg(message));
             if (method == QStringLiteral("terminal/restart-user")) requestTerminalList();
             updateTerminalControls();
@@ -4045,21 +4057,34 @@ QWidget *AgentWorkbenchWidget::buildTerminalPage()
     m_terminalExcerptPreview->setStyleSheet(QStringLiteral(
         "QPlainTextEdit { background:#101828; color:#d0d5dd; border:none; padding:10px;"
         "font-family:Menlo,Consolas,monospace; font-size:10px; }"));
-    auto *contextAction = new QAction(
+    connect(m_terminalExcerptPreview, &QPlainTextEdit::selectionChanged,
+            this, &AgentWorkbenchWidget::updateTerminalControls);
+    m_terminalSelectionContextAction = new QAction(
         QStringLiteral("添加选中内容到对话上下文"), m_terminalExcerptPreview);
-    contextAction->setObjectName(QStringLiteral("agentTerminalExcerptContextAction"));
-    connect(contextAction, &QAction::triggered, this, [this]() {
-        addTextExcerptContext(QStringLiteral("terminal_excerpt"),
-                              QStringLiteral("terminal-selection"),
-                              QStringLiteral("终端"), m_terminalExcerptPreview);
-    });
+    m_terminalSelectionContextAction->setObjectName(
+        QStringLiteral("agentTerminalExcerptContextAction"));
+    connect(m_terminalSelectionContextAction, &QAction::triggered,
+            this, &AgentWorkbenchWidget::addTerminalSelectionContext);
+    m_pinTerminalExcerptAction = new QAction(
+        QIcon(QStringLiteral(":/icons/lucide/paperclip.svg")),
+        QStringLiteral("固定最近输出"), m_terminalExcerptPreview);
+    m_pinTerminalExcerptAction->setObjectName(
+        QStringLiteral("agentPinTerminalExcerptAction"));
+    connect(m_pinTerminalExcerptAction, &QAction::triggered,
+            this, &AgentWorkbenchWidget::pinRecentTerminalExcerpt);
+    auto *terminalContextMenu = new QMenu(m_terminalContextButton);
+    terminalContextMenu->addAction(m_terminalSelectionContextAction);
+    terminalContextMenu->addAction(m_pinTerminalExcerptAction);
+    m_terminalContextButton->setMenu(terminalContextMenu);
+    m_terminalContextButton->setToolTip(QStringLiteral("添加或固定终端上下文"));
     m_terminalExcerptPreview->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_terminalExcerptPreview, &QPlainTextEdit::customContextMenuRequested,
-            this, [this, contextAction](const QPoint &point) {
+            this, [this](const QPoint &point) {
         QMenu *menu = m_terminalExcerptPreview->createStandardContextMenu();
-        contextAction->setEnabled(m_terminalExcerptPreview->textCursor().hasSelection());
+        updateTerminalControls();
         menu->addSeparator();
-        menu->addAction(contextAction);
+        menu->addAction(m_terminalSelectionContextAction);
+        menu->addAction(m_pinTerminalExcerptAction);
         menu->exec(m_terminalExcerptPreview->mapToGlobal(point));
         delete menu;
     });
@@ -4093,8 +4118,6 @@ QWidget *AgentWorkbenchWidget::buildTerminalPage()
             m_runtime->removeUserTerminal(m_workSessionId, m_activeTerminalId);
         }
     });
-    connect(m_terminalContextButton, &QPushButton::clicked,
-            this, &AgentWorkbenchWidget::addTerminalSelectionContext);
     updateTerminalControls();
     return page;
 }
@@ -4275,8 +4298,19 @@ void AgentWorkbenchWidget::updateTerminalControls()
     if (m_terminalContextButton) {
         const bool nativeSelection = m_terminalExcerptPreview
             && m_terminalExcerptPreview->textCursor().hasSelection();
-        m_terminalContextButton->setEnabled(
-            selected && (!m_terminalSelection.isEmpty() || nativeSelection));
+        const bool hasSelection = !m_terminalSelection.isEmpty() || nativeSelection;
+        const bool canPin = ready && selected && m_terminalOutputOffset > 0
+            && !m_workSessionId.isEmpty() && m_pinnedContextAvailable
+            && !currentOperationStatusBlocked()
+            && m_pinnedContextMutationRequestId.isEmpty()
+            && m_terminalExcerptRequestId.isEmpty();
+        m_terminalContextButton->setEnabled(hasSelection || canPin);
+        if (m_terminalSelectionContextAction) {
+            m_terminalSelectionContextAction->setEnabled(hasSelection);
+        }
+        if (m_pinTerminalExcerptAction) {
+            m_pinTerminalExcerptAction->setEnabled(canPin);
+        }
     }
 }
 
@@ -4304,6 +4338,141 @@ void AgentWorkbenchWidget::addTerminalSelectionContext()
         {QStringLiteral("truncated"), truncated},
         {QStringLiteral("size"), selected.toUtf8().size()},
     });
+}
+
+void AgentWorkbenchWidget::pinRecentTerminalExcerpt()
+{
+    if (!m_pinnedContextAvailable || m_runtimeRecoveryMode || m_projectId.isEmpty()
+            || m_workSessionId.isEmpty() || m_activeTerminalId.isEmpty()) {
+        addNotice(QStringLiteral("当前终端不能固定输出。"), true);
+        return;
+    }
+    if (currentSessionRecoveryRequired() || currentSessionDeletionPending()
+            || currentOperationStatusBlocked()) {
+        addNotice(QStringLiteral("当前会话状态不允许更新固定上下文。"), true);
+        return;
+    }
+    if (!m_pinnedContextMutationRequestId.isEmpty()
+            || !m_terminalExcerptRequestId.isEmpty()) {
+        addNotice(QStringLiteral("固定上下文或终端摘录正在更新，请稍候。"));
+        return;
+    }
+    if (m_terminalOutputOffset == 0) {
+        addNotice(QStringLiteral("当前终端还没有可固定的输出。"), true);
+        return;
+    }
+    m_terminalExcerptRequestId = m_runtime->readTerminalExcerpt(
+        m_workSessionId, m_activeTerminalId, 16 * 1024);
+    if (m_terminalExcerptRequestId.isEmpty()) {
+        addNotice(QStringLiteral("无法读取待固定的终端摘录。"), true);
+    }
+    updateTerminalControls();
+}
+
+void AgentWorkbenchWidget::finishPinnedTerminalExcerpt(const QJsonObject &excerpt)
+{
+    const QString sessionId = excerpt.value(QStringLiteral("session_id")).toString();
+    const QString projectId = excerpt.value(QStringLiteral("project_id")).toString();
+    const QString rootId = excerpt.value(QStringLiteral("root_id")).toString();
+    const QString terminalId = excerpt.value(QStringLiteral("terminal_id")).toString();
+    const QString reference = excerpt.value(QStringLiteral("reference")).toString();
+    const QString contentType = excerpt.value(QStringLiteral("content_type")).toString();
+    const QString contentHash = excerpt.value(QStringLiteral("content_hash")).toString();
+    const QByteArray content = excerpt.value(QStringLiteral("content")).toString().toUtf8();
+    const quint64 generation = excerpt.value(QStringLiteral("generation"))
+        .toVariant().toULongLong();
+    const quint64 outputStart = excerpt.value(QStringLiteral("output_start"))
+        .toVariant().toULongLong();
+    const quint64 outputEnd = excerpt.value(QStringLiteral("output_end"))
+        .toVariant().toULongLong();
+    const quint64 sourceOutputEnd = excerpt.value(QStringLiteral("source_output_end"))
+        .toVariant().toULongLong();
+    static const QRegularExpression referencePattern(QStringLiteral(
+        "^terminal-excerpt:(terminal-[A-Za-z0-9-]+):([1-9][0-9]*):(0|[1-9][0-9]*):([1-9][0-9]*)$"));
+    const QRegularExpressionMatch match = referencePattern.match(reference);
+    const QString digest = contentHash.startsWith(QStringLiteral("sha256:"))
+        ? contentHash.mid(7) : QString();
+    const auto isLowerHex = [](const QString &value) {
+        return value.size() == 64
+            && std::all_of(value.cbegin(), value.cend(), [](QChar character) {
+                return (character >= QLatin1Char('0') && character <= QLatin1Char('9'))
+                    || (character >= QLatin1Char('a') && character <= QLatin1Char('f'));
+            });
+    };
+    if (excerpt.value(QStringLiteral("schema_version")).toString()
+                != QStringLiteral("terminal-excerpt/0.1")
+            || sessionId != m_workSessionId || projectId != m_projectId
+            || rootId != QStringLiteral("root-1") || terminalId != m_activeTerminalId
+            || contentType != QStringLiteral("text/plain; charset=utf-8")
+            || excerpt.value(QStringLiteral("content_bodies_persisted")).toBool(true)
+            || content.isEmpty() || content.size() > 16 * 1024
+            || excerpt.value(QStringLiteral("bytes")).toVariant().toLongLong() != content.size()
+            || !isLowerHex(digest)
+            || QString::fromLatin1(QCryptographicHash::hash(
+                   content, QCryptographicHash::Sha256).toHex()) != digest
+            || !match.hasMatch() || match.captured(1) != terminalId
+            || match.captured(2).toULongLong() != generation
+            || match.captured(3).toULongLong() != outputStart
+            || match.captured(4).toULongLong() != outputEnd
+            || generation == 0 || outputStart >= outputEnd
+            || outputEnd - outputStart > 16 * 1024 || sourceOutputEnd < outputEnd
+            || !m_pinnedContextMutationRequestId.isEmpty()) {
+        addNotice(QStringLiteral("终端摘录身份校验失败，未写入固定上下文。"), true);
+        return;
+    }
+    const QByteArray idDigest = QCryptographicHash::hash(
+        QStringLiteral("%1\n%2\n%3\n%4")
+            .arg(projectId, sessionId, terminalId, reference).toUtf8(),
+        QCryptographicHash::Sha256).toHex();
+    const QString id = QStringLiteral("pin-terminal-%1")
+        .arg(QString::fromLatin1(idDigest));
+    const QJsonObject descriptor{
+        {QStringLiteral("id"), id},
+        {QStringLiteral("project_id"), projectId},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("root_id"), rootId},
+        {QStringLiteral("kind"), QStringLiteral("terminal_excerpt")},
+        {QStringLiteral("source"), QStringLiteral("terminal-output")},
+        {QStringLiteral("label"), QStringLiteral("终端摘录")},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("content_hash"), contentHash},
+        {QStringLiteral("bytes"), static_cast<double>(content.size())},
+        {QStringLiteral("revision"), QStringLiteral("terminal-generation:%1")
+            .arg(generation)},
+        {QStringLiteral("freshness"), QStringLiteral("fresh")},
+        {QStringLiteral("priority"), 680},
+        {QStringLiteral("metadata"), QJsonObject{
+            {QStringLiteral("terminal_id"), terminalId},
+            {QStringLiteral("generation"), QString::number(generation)},
+            {QStringLiteral("output_start"), QString::number(outputStart)},
+            {QStringLiteral("output_end"), QString::number(outputEnd)},
+        }},
+    };
+    QJsonArray items;
+    bool replaced = false;
+    for (QJsonObject existing : m_pinnedContextItems) {
+        existing.remove(QStringLiteral("included"));
+        if (existing.value(QStringLiteral("id")).toString() == id) {
+            items.append(descriptor);
+            replaced = true;
+        } else {
+            items.append(existing);
+        }
+    }
+    if (!replaced) {
+        if (items.size() >= 128) {
+            addNotice(QStringLiteral("固定上下文已达到 128 项上限。"), true);
+            return;
+        }
+        items.append(descriptor);
+    }
+    m_pendingPinnedIncludeId = id;
+    m_pinnedContextMutationRequestId = m_runtime->savePinnedContext(
+        projectId, items, m_pinnedContextSetIdentity);
+    if (m_pinnedContextMutationRequestId.isEmpty()) {
+        m_pendingPinnedIncludeId.clear();
+        addNotice(QStringLiteral("无法提交终端固定上下文更新。"), true);
+    }
 }
 
 void AgentWorkbenchWidget::populateDirectory(const QJsonObject &listing)

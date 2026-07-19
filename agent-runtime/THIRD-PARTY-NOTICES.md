@@ -8,6 +8,12 @@ The Aegisy Agent Runtime uses the following third-party components:
   https://github.com/RustCrypto/hashes
 - similar, version 3.1.1 (Apache-2.0), used for bounded text diff previews:
   https://github.com/mitsuhiko/similar
+- strip-ansi-escapes, version 0.2.1 (MIT OR Apache-2.0), used to normalize
+  explicitly pinned recent terminal output before pinned-context hashing:
+  https://github.com/luser/strip-ansi-escapes
+- vte, version 0.14.1 (MIT OR Apache-2.0), used transitively by
+  strip-ansi-escapes to parse terminal escape sequences:
+  https://github.com/alacritty/vte
 - base64, version 0.22.1 (MIT OR Apache-2.0), used to preserve PTY byte output
   across JSON-RPC:
   https://github.com/marshallpierce/rust-base64
