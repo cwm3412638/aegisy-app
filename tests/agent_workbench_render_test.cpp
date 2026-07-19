@@ -265,6 +265,8 @@ int main(int argc, char *argv[])
         QStringLiteral("agentWorkspaceEditMoreButton"));
     QAction *fileContextAction = workbench.findChild<QAction *>(
         QStringLiteral("agentFileTreeContextAction"));
+    QAction *pinFileContextAction = workbench.findChild<QAction *>(
+        QStringLiteral("agentPinFileContextAction"));
     QAction *searchContextAction = workbench.findChild<QAction *>(
         QStringLiteral("agentSearchResultContextAction"));
     QAction *diagnosticContextAction = workbench.findChild<QAction *>(
@@ -338,6 +340,7 @@ int main(int argc, char *argv[])
             || !expect(attachContext && contextInspect && contextPanel && contextSummary && contextList
                            && editorContext && terminalExcerpt && gitDiff
                            && fileContextAction && searchContextAction
+                           && pinFileContextAction
                            && diagnosticContextAction && terminalContextAction
                            && gitContextAction && contextList->count() == 0
                            && contextPanel->isHidden() && !contextInspect->isEnabled()
@@ -418,6 +421,10 @@ int main(int argc, char *argv[])
     runtimeClient->runtimeInitialized(QJsonObject{
         {QStringLiteral("backend"), QJsonObject{
             {QStringLiteral("status"), QStringLiteral("ready")},
+        }},
+        {QStringLiteral("capabilities"), QJsonArray{
+            QStringLiteral("session.compaction.checkpoint-review"),
+            QStringLiteral("turn.context.pinned-selected"),
         }},
     });
     runtimeClient->runtimeDegradationsRead(QStringLiteral("degradation-fixture"), QJsonObject{
@@ -1517,6 +1524,81 @@ int main(int argc, char *argv[])
                     return contextList->count() == 0;
                 }),
                 "context inspector fixture did not clean up its context item")) {
+        return 1;
+    }
+    fileTree->setCurrentItem(editableItem);
+    if (!expect(pinFileContextAction->isEnabled(), "file pin action was not enabled after project open")) {
+        return 1;
+    }
+    pinFileContextAction->trigger();
+    if (!expect(waitUntil(application, [&workbench, contextSummary]() {
+                    return !workbench.findChildren<QPushButton *>(
+                                QStringLiteral("agentPinnedContextRemoveButton")).isEmpty()
+                        && contextSummary->text().contains(QStringLiteral("固定 1"));
+                }),
+                "file pin action did not persist and render a fixed context row")) {
+        return 1;
+    }
+    const QList<QPushButton *> pinMoveUpButtons = workbench.findChildren<QPushButton *>(
+        QStringLiteral("agentPinnedContextMoveUpButton"));
+    const QList<QPushButton *> pinMoveDownButtons = workbench.findChildren<QPushButton *>(
+        QStringLiteral("agentPinnedContextMoveDownButton"));
+    if (!expect(pinMoveUpButtons.size() == 1 && pinMoveDownButtons.size() == 1
+                    && !pinMoveUpButtons.first()->isEnabled()
+                    && !pinMoveDownButtons.first()->isEnabled(),
+                "single fixed context row did not expose bounded order controls")) {
+        return 1;
+    }
+    QList<QCheckBox *> pinChecks = workbench.findChildren<QCheckBox *>(
+        QStringLiteral("agentContextIncludeCheck"));
+    pinChecks.erase(std::remove_if(pinChecks.begin(), pinChecks.end(),
+                                   [](QCheckBox *check) { return !check->isVisible(); }),
+                    pinChecks.end());
+    if (!expect(pinChecks.size() == 1, "fixed context row did not expose inclusion control")) {
+        return 1;
+    }
+    pinChecks.first()->setChecked(false);
+    if (!expect(waitUntil(application, [contextSummary]() {
+                    return contextSummary->text().contains(QStringLiteral("发送 0/16 项"));
+                }),
+                "fixed context inclusion toggle did not update turn selection")) {
+        return 1;
+    }
+    pinChecks = workbench.findChildren<QCheckBox *>(QStringLiteral("agentContextIncludeCheck"));
+    pinChecks.erase(std::remove_if(pinChecks.begin(), pinChecks.end(),
+                                   [](QCheckBox *check) { return !check->isVisible(); }),
+                    pinChecks.end());
+    pinChecks.first()->setChecked(true);
+    if (!expect(waitUntil(application, [contextSummary]() {
+                    return contextSummary->text().contains(QStringLiteral("发送 1/16 项"));
+                }),
+                "fixed context inclusion toggle did not restore turn selection")) {
+        return 1;
+    }
+#ifdef AEGISY_EXPECT_AGENTD
+    contextInspect->click();
+    QTreeWidget *pinnedInspection = nullptr;
+    if (!expect(waitUntil(application, [&workbench, &pinnedInspection]() {
+                    pinnedInspection = workbench.findChild<QTreeWidget *>(
+                        QStringLiteral("agentContextInspectionTable"));
+                    return pinnedInspection && pinnedInspection->topLevelItemCount() > 0;
+                }),
+                "fixed context selection was not sent through the inspect AAP path")) {
+        return 1;
+    }
+    if (QDialog *dialog = qobject_cast<QDialog *>(pinnedInspection->window())) dialog->close();
+#endif
+    const QList<QPushButton *> pinRemoveButtons = workbench.findChildren<QPushButton *>(
+        QStringLiteral("agentPinnedContextRemoveButton"));
+    if (!expect(pinRemoveButtons.size() == 1, "fixed context row did not expose unpin control")) {
+        return 1;
+    }
+    pinRemoveButtons.first()->click();
+    if (!expect(waitUntil(application, [&workbench]() {
+                    return workbench.findChildren<QPushButton *>(
+                               QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
+                }),
+                "fixed context unpin did not remove the persisted row")) {
         return 1;
     }
     editor->selectAll();

@@ -251,11 +251,13 @@ may leave a preserved unreferenced object. This does not claim cross-resource
 atomicity. When a descriptor uses a standard `*:sha256:` Blob reference, save
 checks active SQLite metadata for exact project/session ownership, hash, and
 byte count without reading Blob bytes or updating access time. File pins now
-have explicit selected turn assembly and authoritative reread/stale detection;
-selection/image/diagnostic/terminal/Git/artifact/child-handoff assembly,
-automatic invalidation, orphan GC, Qt pin/order/inclusion controls,
-cross-resource atomicity, and Windows runtime evidence remain open.
-Agent/Codex remains read-only.
+have explicit selected turn assembly and authoritative reread/stale detection.
+Qt loads project pins into the composer and exposes CAS-protected file pin
+creation, per-turn inclusion, deterministic order changes, and unpin without
+turning persisted pins into implicit model context. Selection/image/diagnostic/
+terminal/Git/artifact/child-handoff assembly, automatic invalidation, orphan GC,
+cross-resource atomicity, and Windows runtime evidence remain open. Agent/Codex
+remains read-only.
 
 ## Operation Reconciliation
 

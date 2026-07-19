@@ -95,9 +95,18 @@ private:
     void inspectContext();
     void showContextInspection(const QJsonObject &result);
     void startPendingTurnIfReady();
-    void ensureSessionAndSubmit(const QString &prompt, const QJsonArray &context);
+    void ensureSessionAndSubmit(const QString &prompt, const QJsonArray &context,
+                                const QString &pinnedContextSetIdentity,
+                                const QStringList &pinnedContextIds);
     void addContextItem(QJsonObject item);
     void addSelectedFileContext();
+    void pinSelectedFileContext();
+    void finishPinnedFileRead(const QJsonObject &file);
+    void requestPinnedContext();
+    void applyPinnedContextResult(const QJsonObject &result);
+    void savePinnedContextOrder();
+    QJsonArray persistedPinnedContextItems() const;
+    QStringList includedPinnedContextIds() const;
     void addEditorSelectionContext();
     void addSearchResultContext();
     void addDiagnosticContext();
@@ -231,6 +240,7 @@ private:
     QListWidget *m_contextList = nullptr;
     QPushButton *m_attachContextButton = nullptr;
     QPushButton *m_contextInspectButton = nullptr;
+    QAction *m_pinFileContextAction = nullptr;
     QPushButton *m_sendButton = nullptr;
     QTabWidget *m_workspaceTabs = nullptr;
     QTreeWidget *m_fileTree = nullptr;
@@ -415,8 +425,16 @@ private:
     QString m_activeTurnId;
     QString m_turnCancelRequestId;
     QString m_contextInspectRequestId;
+    QString m_pinnedContextListRequestId;
+    QString m_pinnedContextMutationRequestId;
+    QString m_pinnedFileReadRequestId;
+    QString m_pendingPinnedIncludeId;
+    QString m_pinnedContextSetIdentity;
     QJsonArray m_pendingContext;
+    QString m_pendingPinnedContextSetIdentity;
+    QStringList m_pendingPinnedContextIds;
     QList<QJsonObject> m_contextItems;
+    QList<QJsonObject> m_pinnedContextItems;
     QString m_provider = QStringLiteral("aegisy");
     QString m_model = QStringLiteral("Codex Auto");
     bool m_gitStatusPending = false;
@@ -426,6 +444,7 @@ private:
     bool m_operationStatusKnown = true;
     bool m_operationStatusBlocked = false;
     bool m_compactionAvailable = false;
+    bool m_pinnedContextAvailable = false;
     bool m_runtimeDegradationsAvailable = false;
     QHash<QString, QString> m_runtimeDegradationStates;
     quint64 m_startupRebuiltSessionCount = 0;

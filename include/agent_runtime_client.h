@@ -77,9 +77,13 @@ public:
     QString removeRetentionPolicy(const QString &scopeKind, const QString &scopeId);
     QString runRetentionMaintenance();
     QString startTurn(const QString &sessionId, const QString &input,
-                      const QJsonArray &context = {});
+                      const QJsonArray &context = {},
+                      const QString &pinnedContextSetIdentity = QString(),
+                      const QStringList &pinnedContextIds = {});
     QString inspectTurnContext(const QString &sessionId,
-                               const QJsonArray &context = {});
+                               const QJsonArray &context = {},
+                               const QString &pinnedContextSetIdentity = QString(),
+                               const QStringList &pinnedContextIds = {});
     QString cancelTurn(const QString &sessionId, const QString &turnId);
     QString readSession(const QString &sessionId, const QString &cursor = QString(),
                         int limit = 100);
@@ -99,6 +103,11 @@ public:
                                        const QString &preservationInstructions,
                                        const QJsonObject &summary);
     QString runtimeRecoveryStatus();
+    QString listPinnedContext(const QString &projectId);
+    QString savePinnedContext(const QString &projectId, const QJsonArray &items,
+                              const QString &expectedSetIdentity = QString());
+    QString removePinnedContext(const QString &projectId, const QString &itemId,
+                                const QString &expectedSetIdentity = QString());
     QString listWorkspace(const QString &projectId, const QString &path = QString(),
                           const QString &rootId = QString());
     QString readWorkspaceFile(const QString &projectId, const QString &path,
@@ -228,6 +237,9 @@ signals:
     void runtimeRecoveryStatusRead(const QJsonObject &status);
     void timelineEvent(const QJsonObject &event);
     void turnContextInspected(const QString &requestId, const QJsonObject &result);
+    void pinnedContextListed(const QString &requestId, const QJsonObject &result);
+    void pinnedContextChanged(const QString &requestId, const QString &method,
+                              const QJsonObject &result);
     void turnCancellationRequested(const QString &requestId, const QJsonObject &result);
     void workspaceListed(const QString &requestId, const QJsonObject &listing);
     void workspaceFileRead(const QString &requestId, const QJsonObject &file);

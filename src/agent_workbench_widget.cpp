@@ -435,11 +435,19 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_runtimeRecoveryMode = backend.value(QStringLiteral("status")).toString()
             == QStringLiteral("read-only-recovery");
         m_compactionAvailable = false;
+        m_pinnedContextAvailable = false;
         for (const QJsonValue &capability : result.value(QStringLiteral("capabilities")).toArray()) {
-            if (capability.toString() == QStringLiteral("session.compaction.checkpoint-review")) {
+            const QString name = capability.toString();
+            if (name == QStringLiteral("session.compaction.checkpoint-review")) {
                 m_compactionAvailable = true;
-                break;
+            } else if (name == QStringLiteral("turn.context.pinned-selected")) {
+                m_pinnedContextAvailable = true;
             }
+        }
+        if (m_pinnedContextAvailable && !m_projectId.isEmpty()) requestPinnedContext();
+        if (m_pinFileContextAction) {
+            m_pinFileContextAction->setEnabled(
+                m_pinnedContextAvailable && !m_runtimeRecoveryMode && !m_projectId.isEmpty());
         }
         m_runtimeRestartRequired = false;
         m_runtimeDegradationsAvailable = false;
@@ -810,7 +818,16 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_languageRequestId.clear();
         m_languageResultsStale = false;
         clearContextItems();
+        m_pinnedContextItems.clear();
+        m_pinnedContextSetIdentity.clear();
+        m_pinnedContextListRequestId.clear();
+        m_pinnedContextMutationRequestId.clear();
+        m_pinnedFileReadRequestId.clear();
+        m_pendingPinnedIncludeId.clear();
         m_pendingContext = {};
+        m_pendingPinnedContextSetIdentity.clear();
+        m_pendingPinnedContextIds.clear();
+        rebuildContextPanel();
         m_languageStatus->setText(QStringLiteral("LSP · 正在检查本地服务器…"));
         m_repositoryMapPreview->clear();
         m_repositoryStatus->setText(QStringLiteral("进入结构页后建立项目索引"));
@@ -828,6 +845,11 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         refreshGitStatus();
         requestLanguageServers();
         requestSessionList();
+        requestPinnedContext();
+        if (m_pinFileContextAction) {
+            m_pinFileContextAction->setEnabled(
+                m_pinnedContextAvailable && !m_runtimeRecoveryMode);
+        }
     });
     connect(m_runtime, &AgentRuntimeClient::projectRelinkRequired,
             this, [this](const QString &, const QJsonObject &project,
@@ -1380,6 +1402,28 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         if (result.value(QStringLiteral("session_id")).toString() != currentSession) return;
         showContextInspection(result);
     });
+    connect(m_runtime, &AgentRuntimeClient::pinnedContextListed,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        if (requestId != m_pinnedContextListRequestId
+                || result.value(QStringLiteral("project_id")).toString() != m_projectId) {
+            return;
+        }
+        m_pinnedContextListRequestId.clear();
+        applyPinnedContextResult(result);
+    });
+    connect(m_runtime, &AgentRuntimeClient::pinnedContextChanged,
+            this, [this](const QString &requestId, const QString &method,
+                         const QJsonObject &result) {
+        if (requestId != m_pinnedContextMutationRequestId
+                || result.value(QStringLiteral("project_id")).toString() != m_projectId) {
+            return;
+        }
+        m_pinnedContextMutationRequestId.clear();
+        applyPinnedContextResult(result);
+        addNotice(method == QStringLiteral("workspace/pinned-context/remove")
+            ? QStringLiteral("已解除固定上下文。")
+            : QStringLiteral("固定上下文已保存。"));
+    });
     connect(m_runtime, &AgentRuntimeClient::terminalsListed,
             this, [this](const QString &requestId, const QJsonObject &result) {
         if (requestId != m_terminalListRequestId
@@ -1461,6 +1505,11 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::workspaceFileRead,
             this, [this](const QString &requestId, const QJsonObject &file) {
+        if (requestId == m_pinnedFileReadRequestId) {
+            m_pinnedFileReadRequestId.clear();
+            finishPinnedFileRead(file);
+            return;
+        }
         const bool restoring = m_editorRestoreRequests.remove(requestId);
         m_workspaceReadRequests.remove(requestId);
         const QString path = file.value(QStringLiteral("path")).toString();
@@ -1853,6 +1902,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                          const QString &message, int code) {
         m_pendingPrompt.clear();
         m_pendingContext = {};
+        m_pendingPinnedContextSetIdentity.clear();
+        m_pendingPinnedContextIds.clear();
         updateTurnAction();
         if (method == QStringLiteral("turn/cancel")
                 && requestId == m_turnCancelRequestId) {
@@ -1864,6 +1915,22 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_contextInspectRequestId.clear();
             updateContextStrip();
             addNotice(QStringLiteral("上下文预检失败：%1").arg(message), true);
+        } else if (method == QStringLiteral("workspace/pinned-context/list")
+                   && requestId == m_pinnedContextListRequestId) {
+            m_pinnedContextListRequestId.clear();
+            addNotice(QStringLiteral("读取固定上下文失败：%1").arg(message), true);
+        } else if ((method == QStringLiteral("workspace/pinned-context/save")
+                    || method == QStringLiteral("workspace/pinned-context/remove"))
+                   && requestId == m_pinnedContextMutationRequestId) {
+            m_pinnedContextMutationRequestId.clear();
+            m_pendingPinnedIncludeId.clear();
+            addNotice(QStringLiteral("更新固定上下文失败：%1").arg(message), true);
+            if (code == -32041) requestPinnedContext();
+            rebuildContextPanel();
+        } else if (method == QStringLiteral("workspace/read")
+                   && requestId == m_pinnedFileReadRequestId) {
+            m_pinnedFileReadRequestId.clear();
+            addNotice(QStringLiteral("读取待固定文件失败：%1").arg(message), true);
         } else if (method == QStringLiteral("runtime/degradations")) {
             m_runtimeDegradationsAvailable = false;
             m_runtimeDegradationStates.clear();
@@ -2753,6 +2820,11 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
     searchContext->setObjectName(QStringLiteral("agentAddSearchContextAction"));
     QAction *diagnosticContext = contextMenu->addAction(QStringLiteral("添加选中诊断"));
     diagnosticContext->setObjectName(QStringLiteral("agentAddDiagnosticContextAction"));
+    contextMenu->addSeparator();
+    m_pinFileContextAction = contextMenu->addAction(
+        QIcon(QStringLiteral(":/icons/lucide/paperclip.svg")),
+        QStringLiteral("固定文件树选中文件"));
+    m_pinFileContextAction->setObjectName(QStringLiteral("agentPinFileContextAction"));
     connect(fileContext, &QAction::triggered,
             this, &AgentWorkbenchWidget::addSelectedFileContext);
     connect(selectionContext, &QAction::triggered,
@@ -2761,6 +2833,8 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
             this, &AgentWorkbenchWidget::addSearchResultContext);
     connect(diagnosticContext, &QAction::triggered,
             this, &AgentWorkbenchWidget::addDiagnosticContext);
+    connect(m_pinFileContextAction, &QAction::triggered,
+            this, &AgentWorkbenchWidget::pinSelectedFileContext);
     connect(contextMenu, &QMenu::aboutToShow, this,
             [this, fileContext, selectionContext, searchContext, diagnosticContext]() {
         QTreeWidgetItem *file = m_fileTree ? m_fileTree->currentItem() : nullptr;
@@ -2773,6 +2847,14 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
             && m_workspaceSearchResults->currentItem());
         diagnosticContext->setEnabled(m_languageDiagnostics
             && m_languageDiagnostics->currentItem());
+        if (m_pinFileContextAction) {
+            m_pinFileContextAction->setEnabled(m_pinnedContextAvailable
+                && !m_runtimeRecoveryMode && !m_projectId.isEmpty()
+                && !currentSessionRecoveryRequired() && !currentSessionDeletionPending()
+                && !currentOperationStatusBlocked()
+                && m_pinnedContextMutationRequestId.isEmpty()
+                && m_pinnedFileReadRequestId.isEmpty() && fileContext->isEnabled());
+        }
     });
     m_attachContextButton->setMenu(contextMenu);
     actions->addWidget(m_attachContextButton);
@@ -2895,6 +2977,7 @@ QWidget *AgentWorkbenchWidget::buildWorkCanvas()
     connect(fileContextAction, &QAction::triggered,
             this, &AgentWorkbenchWidget::addSelectedFileContext);
     m_fileTree->addAction(fileContextAction);
+    if (m_pinFileContextAction) m_fileTree->addAction(m_pinFileContextAction);
     m_fileTree->setContextMenuPolicy(Qt::ActionsContextMenu);
     m_workspaceTabs->addTab(filesPage, QStringLiteral("文件"));
 
@@ -6298,6 +6381,11 @@ void AgentWorkbenchWidget::updateRecoveryUi()
     }
     if (m_composer) m_composer->setReadOnly(blocking);
     if (m_attachContextButton) m_attachContextButton->setEnabled(!blocking);
+    if (m_pinFileContextAction) {
+        m_pinFileContextAction->setEnabled(m_pinnedContextAvailable && !blocking
+            && !m_projectId.isEmpty() && m_pinnedContextMutationRequestId.isEmpty()
+            && m_pinnedFileReadRequestId.isEmpty());
+    }
     if (m_workspaceTabs) m_workspaceTabs->setEnabled(!m_runtimeRecoveryMode);
     updateContextStrip();
     updateTurnAction();
@@ -7322,9 +7410,14 @@ void AgentWorkbenchWidget::submitPrompt()
         return;
     }
     const QJsonArray context = includedTurnContext();
+    const QStringList pinnedContextIds = includedPinnedContextIds();
+    if (!pinnedContextIds.isEmpty() && m_pinnedContextSetIdentity.isEmpty()) {
+        addNotice(QStringLiteral("固定上下文集合身份未知，请刷新项目后重试。"), true);
+        return;
+    }
     m_composer->clear();
     m_sendButton->setEnabled(false);
-    ensureSessionAndSubmit(prompt, context);
+    ensureSessionAndSubmit(prompt, context, m_pinnedContextSetIdentity, pinnedContextIds);
 }
 
 void AgentWorkbenchWidget::startPendingTurnIfReady()
@@ -7338,9 +7431,14 @@ void AgentWorkbenchWidget::startPendingTurnIfReady()
     if (sessionId.isEmpty()) return;
     const QString prompt = m_pendingPrompt;
     const QJsonArray context = m_pendingContext;
+    const QString pinnedContextSetIdentity = m_pendingPinnedContextSetIdentity;
+    const QStringList pinnedContextIds = m_pendingPinnedContextIds;
     m_pendingPrompt.clear();
     m_pendingContext = {};
-    m_runtime->startTurn(sessionId, prompt, context);
+    m_pendingPinnedContextSetIdentity.clear();
+    m_pendingPinnedContextIds.clear();
+    m_runtime->startTurn(sessionId, prompt, context,
+                         pinnedContextSetIdentity, pinnedContextIds);
 }
 
 void AgentWorkbenchWidget::cancelActiveTurn()
@@ -7410,9 +7508,11 @@ void AgentWorkbenchWidget::updateTurnAction()
 }
 
 void AgentWorkbenchWidget::ensureSessionAndSubmit(const QString &prompt,
-                                                   const QJsonArray &context)
+                                                   const QJsonArray &context,
+                                                   const QString &pinnedContextSetIdentity,
+                                                   const QStringList &pinnedContextIds)
 {
-    bool contextNeedsProject = false;
+    bool contextNeedsProject = !pinnedContextIds.isEmpty();
     for (const QJsonValue &value : context) {
         if (!value.toObject().value(QStringLiteral("path")).toString().isEmpty()) {
             contextNeedsProject = true;
@@ -7427,7 +7527,10 @@ void AgentWorkbenchWidget::ensureSessionAndSubmit(const QString &prompt,
     }
     const QString sessionId = m_mode == QStringLiteral("work") ? m_workSessionId : m_chatSessionId;
     if (!sessionId.isEmpty()) {
-        if (!m_runtime->startTurn(sessionId, prompt, context).isEmpty()) clearContextItems();
+        if (!m_runtime->startTurn(sessionId, prompt, context,
+                                  pinnedContextSetIdentity, pinnedContextIds).isEmpty()) {
+            clearContextItems();
+        }
         return;
     }
     if (!m_pendingPrompt.isEmpty()) {
@@ -7436,9 +7539,11 @@ void AgentWorkbenchWidget::ensureSessionAndSubmit(const QString &prompt,
     }
     m_pendingPrompt = prompt;
     m_pendingContext = context;
+    m_pendingPinnedContextSetIdentity = pinnedContextSetIdentity;
+    m_pendingPinnedContextIds = pinnedContextIds;
     clearContextItems();
     const bool bindProject = m_mode == QStringLiteral("work")
-        || (!context.isEmpty() && !m_projectId.isEmpty());
+        || ((!context.isEmpty() || !pinnedContextIds.isEmpty()) && !m_projectId.isEmpty());
     m_runtime->startSession(m_mode, bindProject ? m_projectId : QString());
 }
 
@@ -7496,6 +7601,174 @@ void AgentWorkbenchWidget::addSelectedFileContext()
         {QStringLiteral("revision"), item->data(0, kRevisionRole).toString()},
         {QStringLiteral("size"), item->text(1).toLongLong()},
     });
+}
+
+void AgentWorkbenchWidget::requestPinnedContext()
+{
+    if (!m_pinnedContextAvailable || !m_runtime || !m_runtime->isReady()
+            || m_runtimeRecoveryMode || m_projectId.isEmpty()
+            || !m_pinnedContextListRequestId.isEmpty()
+            || !m_pinnedContextMutationRequestId.isEmpty()) {
+        return;
+    }
+    m_pinnedContextListRequestId = m_runtime->listPinnedContext(m_projectId);
+}
+
+void AgentWorkbenchWidget::applyPinnedContextResult(const QJsonObject &result)
+{
+    if (result.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("pinned-context/0.1")
+            || result.value(QStringLiteral("content_bodies_included")).toBool(true)) {
+        m_pendingPinnedIncludeId.clear();
+        addNotice(QStringLiteral("运行时返回了无效的固定上下文集合。"), true);
+        return;
+    }
+    QSet<QString> includedIds;
+    for (const QJsonObject &item : std::as_const(m_pinnedContextItems)) {
+        if (item.value(QStringLiteral("included")).toBool()) {
+            includedIds.insert(item.value(QStringLiteral("id")).toString());
+        }
+    }
+    if (!m_pendingPinnedIncludeId.isEmpty()) {
+        includedIds.insert(m_pendingPinnedIncludeId);
+    }
+    m_pendingPinnedIncludeId.clear();
+    m_pinnedContextItems.clear();
+    const QJsonArray items = result.value(QStringLiteral("items")).toArray();
+    for (const QJsonValue &value : items) {
+        QJsonObject item = value.toObject();
+        const QString id = item.value(QStringLiteral("id")).toString();
+        if (id.isEmpty()) continue;
+        item.insert(QStringLiteral("included"), includedIds.contains(id));
+        m_pinnedContextItems.append(item);
+    }
+    m_pinnedContextSetIdentity = result.value(QStringLiteral("set_identity")).toString();
+    rebuildContextPanel();
+}
+
+QJsonArray AgentWorkbenchWidget::persistedPinnedContextItems() const
+{
+    QJsonArray items;
+    for (QJsonObject item : m_pinnedContextItems) {
+        item.remove(QStringLiteral("included"));
+        items.append(item);
+    }
+    return items;
+}
+
+QStringList AgentWorkbenchWidget::includedPinnedContextIds() const
+{
+    QStringList ids;
+    for (const QJsonObject &item : m_pinnedContextItems) {
+        if (item.value(QStringLiteral("included")).toBool()) {
+            ids.append(item.value(QStringLiteral("id")).toString());
+        }
+    }
+    return ids;
+}
+
+void AgentWorkbenchWidget::pinSelectedFileContext()
+{
+    if (!m_pinnedContextAvailable || m_runtimeRecoveryMode || m_projectId.isEmpty()) {
+        addNotice(QStringLiteral("当前运行时未提供固定上下文能力。"), true);
+        return;
+    }
+    if (!m_pinnedContextMutationRequestId.isEmpty()
+            || !m_pinnedFileReadRequestId.isEmpty()) {
+        addNotice(QStringLiteral("固定上下文正在更新，请稍候。"));
+        return;
+    }
+    QTreeWidgetItem *item = m_fileTree ? m_fileTree->currentItem() : nullptr;
+    if (!item || item->data(0, kKindRole).toString() != QStringLiteral("file")) {
+        addNotice(QStringLiteral("请先在文件树选择一个文本文件。"), true);
+        return;
+    }
+    const QString path = item->data(0, kPathRole).toString();
+    m_pinnedFileReadRequestId = m_runtime->readWorkspaceFile(
+        m_projectId, path, m_workspaceRootId);
+    if (m_pinnedFileReadRequestId.isEmpty()) {
+        addNotice(QStringLiteral("无法读取待固定文件。"), true);
+    }
+}
+
+void AgentWorkbenchWidget::finishPinnedFileRead(const QJsonObject &file)
+{
+    const QString path = file.value(QStringLiteral("path")).toString();
+    const QString encoding = file.value(QStringLiteral("encoding")).toString();
+    const QString newline = file.value(QStringLiteral("newline")).toString();
+    if (path.isEmpty()
+            || (newline != QStringLiteral("lf") && newline != QStringLiteral("crlf")
+                && newline != QStringLiteral("none"))) {
+        addNotice(QStringLiteral("混合或未知换行文件暂不能固定；请先规范化并保存。"), true);
+        return;
+    }
+    QString rawText = file.value(QStringLiteral("content")).toString();
+    if (newline == QStringLiteral("crlf")) {
+        rawText.replace(QStringLiteral("\n"), QStringLiteral("\r\n"));
+    }
+    QByteArray raw = rawText.toUtf8();
+    if (encoding == QStringLiteral("utf-8-bom")) raw.prepend("\xef\xbb\xbf", 3);
+    else if (encoding != QStringLiteral("utf-8")) {
+        addNotice(QStringLiteral("该文件编码暂不支持固定上下文。"), true);
+        return;
+    }
+    const qint64 expectedBytes = file.value(QStringLiteral("size")).toVariant().toLongLong();
+    if (raw.size() != expectedBytes) {
+        addNotice(QStringLiteral("文件字节身份无法重建，未写入固定上下文。"), true);
+        return;
+    }
+    const QByteArray idDigest = QCryptographicHash::hash(
+        QStringLiteral("%1\n%2\n%3").arg(m_projectId, m_workspaceRootId, path).toUtf8(),
+        QCryptographicHash::Sha256).toHex();
+    const QString id = QStringLiteral("pin-file-%1").arg(QString::fromLatin1(idDigest));
+    QJsonObject descriptor{
+        {QStringLiteral("id"), id},
+        {QStringLiteral("project_id"), m_projectId},
+        {QStringLiteral("root_id"), m_workspaceRootId},
+        {QStringLiteral("kind"), QStringLiteral("file")},
+        {QStringLiteral("source"), QStringLiteral("file-tree")},
+        {QStringLiteral("label"), path},
+        {QStringLiteral("reference"), path},
+        {QStringLiteral("content_hash"), QStringLiteral("sha256:%1").arg(
+             QString::fromLatin1(QCryptographicHash::hash(raw, QCryptographicHash::Sha256)
+                                     .toHex()))},
+        {QStringLiteral("bytes"), static_cast<double>(raw.size())},
+        {QStringLiteral("revision"), file.value(QStringLiteral("revision"))},
+        {QStringLiteral("freshness"), QStringLiteral("fresh")},
+        {QStringLiteral("priority"), 850},
+        {QStringLiteral("metadata"), QJsonObject{}},
+    };
+    QJsonArray items;
+    bool replaced = false;
+    for (QJsonObject item : m_pinnedContextItems) {
+        item.remove(QStringLiteral("included"));
+        if (item.value(QStringLiteral("id")).toString() == id) {
+            items.append(descriptor);
+            replaced = true;
+        } else {
+            items.append(item);
+        }
+    }
+    if (!replaced) items.append(descriptor);
+    m_pendingPinnedIncludeId = id;
+    m_pinnedContextMutationRequestId = m_runtime->savePinnedContext(
+        m_projectId, items, m_pinnedContextSetIdentity);
+    if (m_pinnedContextMutationRequestId.isEmpty()) {
+        m_pendingPinnedIncludeId.clear();
+        addNotice(QStringLiteral("无法提交固定上下文更新。"), true);
+    }
+}
+
+void AgentWorkbenchWidget::savePinnedContextOrder()
+{
+    if (!m_runtime || !m_runtime->isReady() || m_projectId.isEmpty()
+            || !m_pinnedContextMutationRequestId.isEmpty()) {
+        return;
+    }
+    m_pinnedContextMutationRequestId = m_runtime->savePinnedContext(
+        m_projectId, persistedPinnedContextItems(), m_pinnedContextSetIdentity);
+    if (m_pinnedContextMutationRequestId.isEmpty()) requestPinnedContext();
+    rebuildContextPanel();
 }
 
 void AgentWorkbenchWidget::addEditorSelectionContext()
@@ -7634,7 +7907,9 @@ void AgentWorkbenchWidget::rebuildContextPanel()
     m_contextList->clear();
     qint64 includedBytes = 0;
     int includedCount = 0;
-    for (const QJsonObject &context : std::as_const(m_contextItems)) {
+    auto appendRow = [this, &includedBytes, &includedCount](const QJsonObject &context,
+                                                              bool pinned,
+                                                              int pinnedIndex) {
         auto *item = new QListWidgetItem(m_contextList);
         item->setSizeHint(QSize(0, 28));
         auto *row = new QWidget(m_contextList);
@@ -7644,31 +7919,70 @@ void AgentWorkbenchWidget::rebuildContextPanel()
         auto *included = new QCheckBox(row);
         included->setObjectName(QStringLiteral("agentContextIncludeCheck"));
         included->setChecked(context.value(QStringLiteral("included")).toBool(true));
-        included->setToolTip(QStringLiteral("包含在下一次发送中"));
+        included->setToolTip(pinned ? QStringLiteral("将固定上下文包含在下一次发送中")
+                                    : QStringLiteral("包含在下一次发送中"));
         layout->addWidget(included);
         const QString label = context.value(QStringLiteral("label")).toString();
-        const qint64 size = context.value(QStringLiteral("size")).toVariant().toLongLong();
+        const qint64 size = pinned
+            ? context.value(QStringLiteral("bytes")).toVariant().toLongLong()
+            : context.value(QStringLiteral("size")).toVariant().toLongLong();
         const QString suffix = context.value(QStringLiteral("truncated")).toBool()
             ? QStringLiteral(" · 已截断") : QString();
-        auto *text = new QLabel(QStringLiteral("%1 · %2 B%3").arg(label).arg(size).arg(suffix), row);
+        const QString prefix = pinned ? QStringLiteral("固定 · ") : QString();
+        auto *text = new QLabel(QStringLiteral("%1%2 · %3 B%4")
+                                    .arg(prefix, label).arg(size).arg(suffix), row);
         text->setToolTip(QStringLiteral("来源：%1\n类型：%2\n%3")
             .arg(context.value(QStringLiteral("origin")).toString(),
                  context.value(QStringLiteral("kind")).toString(), label));
         text->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         text->setStyleSheet(QStringLiteral("color:#475467; font-size:9px; border:none;"));
         layout->addWidget(text, 1);
+        QPushButton *moveUp = nullptr;
+        QPushButton *moveDown = nullptr;
+        if (pinned) {
+            moveUp = new QPushButton(QStringLiteral("↑"), row);
+            moveUp->setObjectName(QStringLiteral("agentPinnedContextMoveUpButton"));
+            moveUp->setToolTip(QStringLiteral("提高固定上下文优先顺序"));
+            moveUp->setEnabled(pinnedIndex > 0 && m_pinnedContextMutationRequestId.isEmpty());
+            moveUp->setFixedSize(22, 22);
+            moveDown = new QPushButton(QStringLiteral("↓"), row);
+            moveDown->setObjectName(QStringLiteral("agentPinnedContextMoveDownButton"));
+            moveDown->setToolTip(QStringLiteral("降低固定上下文优先顺序"));
+            moveDown->setEnabled(pinnedIndex + 1 < m_pinnedContextItems.size()
+                && m_pinnedContextMutationRequestId.isEmpty());
+            moveDown->setFixedSize(22, 22);
+            for (QPushButton *button : {moveUp, moveDown}) {
+                button->setStyleSheet(QStringLiteral(
+                    "QPushButton { background:transparent; border:none; border-radius:4px;"
+                    " padding:1px; color:#667085; font-size:12px; }"
+                    "QPushButton:hover { background:#eaecf0; color:#101828; }"
+                    "QPushButton:disabled { color:#d0d5dd; }"));
+                layout->addWidget(button);
+            }
+        }
         auto *remove = new QPushButton(row);
-        remove->setObjectName(QStringLiteral("agentContextRemoveButton"));
+        remove->setObjectName(pinned ? QStringLiteral("agentPinnedContextRemoveButton")
+                                     : QStringLiteral("agentContextRemoveButton"));
         remove->setIcon(QIcon(QStringLiteral(":/icons/lucide/x.svg")));
-        remove->setToolTip(QStringLiteral("移除此上下文"));
+        remove->setToolTip(pinned ? QStringLiteral("解除固定上下文")
+                                  : QStringLiteral("移除此上下文"));
         remove->setFixedSize(22, 22);
         remove->setStyleSheet(QStringLiteral(
             "QPushButton { background:transparent; border:none; border-radius:4px; padding:4px; }"
             "QPushButton:hover { background:#eaecf0; }"));
         layout->addWidget(remove);
         const QString id = context.value(QStringLiteral("id")).toString();
-        connect(included, &QCheckBox::toggled, this, [this, id](bool checked) {
-            for (QJsonObject &candidate : m_contextItems) {
+        connect(included, &QCheckBox::toggled, this, [this, id, pinned, included](bool checked) {
+            if (checked && includedTurnContext().size() + includedPinnedContextIds().size()
+                    >= kMaxTurnContextItems) {
+                const QSignalBlocker blocker(included);
+                included->setChecked(false);
+                addNotice(QStringLiteral("一个 turn 最多包含 %1 项上下文。")
+                              .arg(kMaxTurnContextItems), true);
+                return;
+            }
+            QList<QJsonObject> &items = pinned ? m_pinnedContextItems : m_contextItems;
+            for (QJsonObject &candidate : items) {
                 if (candidate.value(QStringLiteral("id")).toString() == id) {
                     candidate.insert(QStringLiteral("included"), checked);
                     break;
@@ -7676,23 +7990,55 @@ void AgentWorkbenchWidget::rebuildContextPanel()
             }
             QTimer::singleShot(0, this, &AgentWorkbenchWidget::rebuildContextPanel);
         });
-        connect(remove, &QPushButton::clicked, this, [this, id]() {
+        connect(remove, &QPushButton::clicked, this, [this, id, pinned]() {
+            if (pinned) {
+                if (!m_pinnedContextMutationRequestId.isEmpty() || m_projectId.isEmpty()) return;
+                m_pinnedContextMutationRequestId = m_runtime->removePinnedContext(
+                    m_projectId, id, m_pinnedContextSetIdentity);
+                return;
+            }
             m_contextItems.removeIf([&id](const QJsonObject &candidate) {
                 return candidate.value(QStringLiteral("id")).toString() == id;
             });
             QTimer::singleShot(0, this, &AgentWorkbenchWidget::rebuildContextPanel);
         });
+        if (pinned) {
+            connect(moveUp, &QPushButton::clicked, this, [this, pinnedIndex]() {
+                if (pinnedIndex <= 0 || !m_pinnedContextMutationRequestId.isEmpty()) return;
+                m_pinnedContextItems.swapItemsAt(pinnedIndex, pinnedIndex - 1);
+                savePinnedContextOrder();
+            });
+            connect(moveDown, &QPushButton::clicked, this, [this, pinnedIndex]() {
+                if (pinnedIndex + 1 >= m_pinnedContextItems.size()
+                        || !m_pinnedContextMutationRequestId.isEmpty()) return;
+                m_pinnedContextItems.swapItemsAt(pinnedIndex, pinnedIndex + 1);
+                savePinnedContextOrder();
+            });
+        }
         m_contextList->setItemWidget(item, row);
         if (included->isChecked()) {
             ++includedCount;
             includedBytes += size;
         }
+    };
+    for (const QJsonObject &context : std::as_const(m_contextItems)) {
+        appendRow(context, false, -1);
     }
-    m_contextSummary->setText(QStringLiteral("上下文 %1/%2 · 发送 %3 项 · %4 B")
-        .arg(m_contextItems.size()).arg(kMaxTurnContextItems)
-        .arg(includedCount).arg(includedBytes));
-    m_contextList->setFixedHeight(qMin(3, m_contextItems.size()) * 28 + 2);
-    m_contextPanel->setVisible(!m_contextItems.isEmpty());
+    for (int index = 0; index < m_pinnedContextItems.size(); ++index) {
+        appendRow(m_pinnedContextItems.at(index), true, index);
+    }
+    if (m_pinnedContextItems.isEmpty()) {
+        m_contextSummary->setText(QStringLiteral("上下文 %1/%2 · 发送 %3 项 · %4 B")
+            .arg(m_contextItems.size()).arg(kMaxTurnContextItems)
+            .arg(includedCount).arg(includedBytes));
+    } else {
+        m_contextSummary->setText(QStringLiteral("临时 %1 · 固定 %2 · 发送 %3/%4 项 · %5 B")
+            .arg(m_contextItems.size()).arg(m_pinnedContextItems.size())
+            .arg(includedCount).arg(kMaxTurnContextItems).arg(includedBytes));
+    }
+    const int rows = m_contextItems.size() + m_pinnedContextItems.size();
+    m_contextList->setFixedHeight(qMin(5, rows) * 28 + 2);
+    m_contextPanel->setVisible(rows > 0);
     updateContextStrip();
 }
 
@@ -7849,13 +8195,16 @@ void AgentWorkbenchWidget::updateContextStrip()
     if (m_contextInspectButton) {
         const bool blocked = m_runtimeRecoveryMode || currentSessionRecoveryRequired()
             || currentSessionDeletionPending() || currentOperationStatusBlocked();
+        const QStringList pinnedContextIds = includedPinnedContextIds();
         m_contextInspectButton->setEnabled(!blocked && !m_turnRunning
-            && !m_contextItems.isEmpty() && !sessionId.isEmpty()
+            && (!m_contextItems.isEmpty() || !pinnedContextIds.isEmpty())
+            && !sessionId.isEmpty()
             && m_runtime && m_runtime->isReady()
             && m_contextInspectRequestId.isEmpty());
     }
-    const QString context = m_contextItems.isEmpty()
-        ? QString() : QStringLiteral(" · 上下文 %1").arg(includedTurnContext().size());
+    const int selectedCount = includedTurnContext().size() + includedPinnedContextIds().size();
+    const QString context = selectedCount == 0
+        ? QString() : QStringLiteral(" · 上下文 %1").arg(selectedCount);
     if (m_mode == QStringLiteral("chat")) {
         m_contextStrip->setText(QStringLiteral("Chat · Agent 只读 · %1 / %2%3")
             .arg(m_provider, m_model, context));
@@ -7869,7 +8218,8 @@ void AgentWorkbenchWidget::updateContextStrip()
 
 void AgentWorkbenchWidget::inspectContext()
 {
-    if (!m_runtime || !m_runtime->isReady() || m_contextItems.isEmpty()) return;
+    if (!m_runtime || !m_runtime->isReady()
+            || (m_contextItems.isEmpty() && includedPinnedContextIds().isEmpty())) return;
     const QString sessionId = m_mode == QStringLiteral("work")
         ? m_workSessionId : m_chatSessionId;
     if (sessionId.isEmpty()) {
@@ -7889,7 +8239,13 @@ void AgentWorkbenchWidget::inspectContext()
         }
         context.append(item);
     }
-    m_contextInspectRequestId = m_runtime->inspectTurnContext(sessionId, context);
+    const QStringList pinnedContextIds = includedPinnedContextIds();
+    if (!pinnedContextIds.isEmpty() && m_pinnedContextSetIdentity.isEmpty()) {
+        addNotice(QStringLiteral("固定上下文集合身份未知，请刷新项目后重试。"), true);
+        return;
+    }
+    m_contextInspectRequestId = m_runtime->inspectTurnContext(
+        sessionId, context, m_pinnedContextSetIdentity, pinnedContextIds);
     updateContextStrip();
 }
 

@@ -303,10 +303,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   set identity. Selection is capped at 16 unique IDs; project/session/root
   bindings and file policy are rechecked. Both paths share authoritative file
   reread, raw-byte SHA-256/revision stale detection, bounded untrusted context,
-  and metadata-only inspection. Non-file pin kinds fail closed. This foundation
-  still has no cross-resource atomicity, Blob body/reference lifecycle binding,
-  automatic source invalidation, orphan GC, other-kind assembly, or Qt pin/unpin/
-  order/inclusion surface; keep `17.3` unchecked.
+  and metadata-only inspection. Non-file pin kinds fail closed. Qt now loads
+  project pins into the composer, creates or refreshes file descriptors from
+  authoritative workspace reads with reconstructed raw UTF-8/BOM/newline bytes,
+  saves through CAS, and supports explicit per-turn inclusion, deterministic
+  order changes, and unpin. It passes selected IDs and set identity separately
+  to inspect/start and never turns persisted pins into implicit model context.
+  This foundation still has no cross-resource atomicity, Blob body/reference
+  lifecycle binding, automatic source invalidation, orphan GC, or other-kind
+  assembly; keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
   auto-discovered instructions. Instruction precedence ranks and pinned priority
@@ -1136,10 +1141,12 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   explicit reviewed list of file-pin IDs plus the exact current set identity;
   they never include every persisted pin automatically. Files are reread through
   the normal root/policy resolver and raw-byte hash or revision drift is marked
-  stale before the same budget/manifest path is used. Other pin kinds, Qt
-  pin/order/inclusion controls, cross-resource Workbench event/Blob authority,
-  automatic invalidation, and orphan GC remain unavailable; the composer queue
-  is otherwise transient.
+  stale before the same budget/manifest path is used. Other pin kinds,
+  cross-resource Workbench event/Blob authority, automatic invalidation, and
+  orphan GC remain unavailable; the composer queue is otherwise transient. Qt
+  render evidence covers file pin persistence, inclusion, order boundaries, and
+  unpin; non-file pin producers and complete cross-platform pin behavior remain
+  open.
 
 ## Workspace Edit Boundary
 

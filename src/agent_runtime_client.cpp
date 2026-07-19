@@ -459,26 +459,86 @@ QString AgentRuntimeClient::runRetentionMaintenance()
 }
 
 QString AgentRuntimeClient::startTurn(const QString &sessionId, const QString &input,
-                                      const QJsonArray &context)
+                                      const QJsonArray &context,
+                                      const QString &pinnedContextSetIdentity,
+                                      const QStringList &pinnedContextIds)
 {
     ++m_nextTurnKey;
-    return sendRequest(QStringLiteral("turn/start"), {
+    QJsonObject params{
         {QStringLiteral("session_id"), sessionId},
         {QStringLiteral("input"), input},
         {QStringLiteral("context"), context},
         {QStringLiteral("idempotency_key"),
          QStringLiteral("qt-turn-%1").arg(m_nextTurnKey)},
-    });
+    };
+    if (!pinnedContextIds.isEmpty()) {
+        params.insert(QStringLiteral("pinned_context_set_identity"),
+                      pinnedContextSetIdentity);
+        params.insert(QStringLiteral("pinned_context_ids"),
+                      QJsonArray::fromStringList(pinnedContextIds));
+    }
+    return sendRequest(QStringLiteral("turn/start"), params);
 }
 
 QString AgentRuntimeClient::inspectTurnContext(const QString &sessionId,
-                                                const QJsonArray &context)
+                                                const QJsonArray &context,
+                                                const QString &pinnedContextSetIdentity,
+                                                const QStringList &pinnedContextIds)
 {
     if (sessionId.isEmpty()) return {};
-    return sendRequest(QStringLiteral("turn/context/inspect"), {
+    QJsonObject params{
         {QStringLiteral("session_id"), sessionId},
         {QStringLiteral("context"), context},
+    };
+    if (!pinnedContextIds.isEmpty()) {
+        params.insert(QStringLiteral("pinned_context_set_identity"),
+                      pinnedContextSetIdentity);
+        params.insert(QStringLiteral("pinned_context_ids"),
+                      QJsonArray::fromStringList(pinnedContextIds));
+    }
+    return sendRequest(QStringLiteral("turn/context/inspect"), params);
+}
+
+QString AgentRuntimeClient::listPinnedContext(const QString &projectId)
+{
+    if (projectId.isEmpty()) return {};
+    return sendRequest(QStringLiteral("workspace/pinned-context/list"), {
+        {QStringLiteral("project_id"), projectId},
     });
+}
+
+QString AgentRuntimeClient::savePinnedContext(const QString &projectId,
+                                               const QJsonArray &items,
+                                               const QString &expectedSetIdentity)
+{
+    if (projectId.isEmpty()) return {};
+    QJsonObject params{
+        {QStringLiteral("project_id"), projectId},
+        {QStringLiteral("set"), QJsonObject{
+            {QStringLiteral("schema_version"), QStringLiteral("pinned-context/0.1")},
+            {QStringLiteral("project_id"), projectId},
+            {QStringLiteral("items"), items},
+        }},
+    };
+    if (!expectedSetIdentity.isEmpty()) {
+        params.insert(QStringLiteral("expected_set_identity"), expectedSetIdentity);
+    }
+    return sendRequest(QStringLiteral("workspace/pinned-context/save"), params);
+}
+
+QString AgentRuntimeClient::removePinnedContext(const QString &projectId,
+                                                 const QString &itemId,
+                                                 const QString &expectedSetIdentity)
+{
+    if (projectId.isEmpty() || itemId.isEmpty()) return {};
+    QJsonObject params{
+        {QStringLiteral("project_id"), projectId},
+        {QStringLiteral("item_id"), itemId},
+    };
+    if (!expectedSetIdentity.isEmpty()) {
+        params.insert(QStringLiteral("expected_set_identity"), expectedSetIdentity);
+    }
+    return sendRequest(QStringLiteral("workspace/pinned-context/remove"), params);
 }
 
 QString AgentRuntimeClient::cancelTurn(const QString &sessionId, const QString &turnId)
@@ -1226,6 +1286,11 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit turnCancellationRequested(id, result);
     } else if (pendingMethod == QStringLiteral("turn/context/inspect")) {
         emit turnContextInspected(id, result);
+    } else if (pendingMethod == QStringLiteral("workspace/pinned-context/list")) {
+        emit pinnedContextListed(id, result);
+    } else if (pendingMethod == QStringLiteral("workspace/pinned-context/save")
+               || pendingMethod == QStringLiteral("workspace/pinned-context/remove")) {
+        emit pinnedContextChanged(id, pendingMethod, result);
     } else if (pendingMethod == QStringLiteral("workspace/list")) {
         emit workspaceListed(id, result);
     } else if (pendingMethod == QStringLiteral("workspace/read")) {

@@ -764,9 +764,12 @@ Known limitations:
   `turn/start`. The shared resolver rechecks project/session/root scope, rereads the
   file under workspace policy, compares raw-byte SHA-256 and revision, marks drift
   stale, and keeps inspection metadata-only. Duplicate/missing IDs, stale set
-  identity, cross-session selection, and non-file kinds fail explicitly. Qt
-  pin/unpin/order/inclusion and non-file assembly remain incomplete; task 17.3
-  remains unchecked.
+  identity, cross-session selection, and non-file kinds fail explicitly. Qt now
+  loads project pins and covers authoritative file pin creation, CAS persistence,
+  per-turn inclusion, bounded order changes, and unpin in the Workbench render
+  fixture. Non-file assembly, cross-resource atomicity, automatic invalidation,
+  orphan GC, and complete cross-platform pin evidence remain incomplete; task
+  17.3 remains unchecked.
 - `pinned-context-store/0.1` persists metadata-only sets using private immutable
   content-addressed objects and atomic project-pointer replacement. Store fixtures
   cover reopen/update, idempotency, absence of a content body field, retained old
