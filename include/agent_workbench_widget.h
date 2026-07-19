@@ -112,6 +112,7 @@ private:
     void addDiagnosticContext();
     void addTextExcerptContext(const QString &kind, const QString &origin,
                                const QString &label, QPlainTextEdit *source);
+    void markPinnedContextStale(const QSet<QString> &paths);
     void rebuildContextPanel();
     void clearContextItems();
     QJsonArray includedTurnContext() const;

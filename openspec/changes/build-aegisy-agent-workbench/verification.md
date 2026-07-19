@@ -769,7 +769,9 @@ Known limitations:
   per-turn inclusion, bounded order changes, and unpin in the Workbench render
   fixture. Non-file assembly, cross-resource atomicity, automatic invalidation,
   orphan GC, and complete cross-platform pin evidence remain incomplete; task
-  17.3 remains unchecked.
+  17.3 remains unchecked. Qt workspace-watch and user-save callbacks also mark
+  loaded matching file pins stale locally without rewriting durable metadata; the
+  sidecar reread remains authoritative.
 - `pinned-context-store/0.1` persists metadata-only sets using private immutable
   content-addressed objects and atomic project-pointer replacement. Store fixtures
   cover reopen/update, idempotency, absence of a content body field, retained old

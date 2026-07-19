@@ -1568,6 +1568,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         storeActiveEditorState();
         m_editorPath->setText(m_openEditorPath);
         m_fileStatus->setText(QStringLiteral("已原子保存 · Agent 仍保持只读"));
+        markPinnedContextStale(QSet<QString>{m_openEditorPath});
         if (m_workspaceSearchResults->topLevelItemCount() > 0) {
             m_workspaceSearchStale = true;
             m_workspaceSearchStatus->setText(
@@ -1844,12 +1845,14 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             this, [this](const QString &, const QJsonObject &result) {
         const QJsonArray changes = result.value(QStringLiteral("changes")).toArray();
         QSet<QString> directories;
+        QSet<QString> changedPaths;
         QSet<QString> changedEditorPaths;
         bool watchSetChanged = false;
         for (const QJsonValue &value : changes) {
             const QJsonObject change = value.toObject();
             QString parent = change.value(QStringLiteral("parent")).toString();
             const QString path = change.value(QStringLiteral("path")).toString();
+            if (!path.isEmpty()) changedPaths.insert(path);
             if (change.value(QStringLiteral("kind")).toString() == QStringLiteral("unavailable")) {
                 markDirectoryUnavailable(path, QStringLiteral("目录已移动、删除或不可访问"));
                 watchSetChanged = m_watchedDirectories.remove(path) || watchSetChanged;
@@ -1865,6 +1868,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
         }
         if (!changes.isEmpty()) {
+            markPinnedContextStale(changedPaths);
             m_gitStatusTimer->stop();
             refreshGitStatus();
             if (m_workspaceSearchResults->topLevelItemCount() > 0) {
@@ -7901,6 +7905,25 @@ void AgentWorkbenchWidget::addTextExcerptContext(const QString &kind,
     });
 }
 
+void AgentWorkbenchWidget::markPinnedContextStale(const QSet<QString> &paths)
+{
+    if (paths.isEmpty() || m_pinnedContextItems.isEmpty()) return;
+    bool changed = false;
+    for (QJsonObject &item : m_pinnedContextItems) {
+        if (item.value(QStringLiteral("kind")).toString() != QStringLiteral("file")
+                || !paths.contains(item.value(QStringLiteral("reference")).toString())
+                || item.value(QStringLiteral("freshness")).toString() == QStringLiteral("stale")) {
+            continue;
+        }
+        item.insert(QStringLiteral("freshness"), QStringLiteral("stale"));
+        changed = true;
+    }
+    if (changed) {
+        rebuildContextPanel();
+        addNotice(QStringLiteral("固定上下文已标记为 stale，请重新固定或确认预检结果。"));
+    }
+}
+
 void AgentWorkbenchWidget::rebuildContextPanel()
 {
     if (!m_contextList || !m_contextPanel || !m_contextSummary) return;
@@ -7926,8 +7949,12 @@ void AgentWorkbenchWidget::rebuildContextPanel()
         const qint64 size = pinned
             ? context.value(QStringLiteral("bytes")).toVariant().toLongLong()
             : context.value(QStringLiteral("size")).toVariant().toLongLong();
-        const QString suffix = context.value(QStringLiteral("truncated")).toBool()
+        QString suffix = context.value(QStringLiteral("truncated")).toBool()
             ? QStringLiteral(" · 已截断") : QString();
+        if (pinned && context.value(QStringLiteral("freshness")).toString()
+                == QStringLiteral("stale")) {
+            suffix += QStringLiteral(" · stale");
+        }
         const QString prefix = pinned ? QStringLiteral("固定 · ") : QString();
         auto *text = new QLabel(QStringLiteral("%1%2 · %3 B%4")
                                     .arg(prefix, label).arg(size).arg(suffix), row);

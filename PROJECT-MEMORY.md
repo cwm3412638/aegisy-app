@@ -309,8 +309,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   saves through CAS, and supports explicit per-turn inclusion, deterministic
   order changes, and unpin. It passes selected IDs and set identity separately
   to inspect/start and never turns persisted pins into implicit model context.
+  Qt workspace watcher and user-save events mark matching loaded file pins stale
+  in the composer without rewriting their durable descriptor or hash; sidecar
+  reread remains the final authority at inspect/start.
   This foundation still has no cross-resource atomicity, Blob body/reference
-  lifecycle binding, automatic source invalidation, orphan GC, or other-kind
+  lifecycle binding, durable source invalidation, orphan GC, or other-kind
   assembly; keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
@@ -1145,8 +1148,9 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   cross-resource Workbench event/Blob authority, automatic invalidation, and
   orphan GC remain unavailable; the composer queue is otherwise transient. Qt
   render evidence covers file pin persistence, inclusion, order boundaries, and
-  unpin; non-file pin producers and complete cross-platform pin behavior remain
-  open.
+  unpin. Watch/save changes also project stale state locally without mutating
+  durable pin metadata; non-file pin producers and complete cross-platform pin
+  behavior remain open.
 
 ## Workspace Edit Boundary
 

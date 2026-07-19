@@ -255,9 +255,11 @@ have explicit selected turn assembly and authoritative reread/stale detection.
 Qt loads project pins into the composer and exposes CAS-protected file pin
 creation, per-turn inclusion, deterministic order changes, and unpin without
 turning persisted pins into implicit model context. Selection/image/diagnostic/
-terminal/Git/artifact/child-handoff assembly, automatic invalidation, orphan GC,
-cross-resource atomicity, and Windows runtime evidence remain open. Agent/Codex
-remains read-only.
+terminal/Git/artifact/child-handoff assembly, durable automatic invalidation,
+orphan GC, cross-resource atomicity, and Windows runtime evidence remain open.
+Qt watch/save callbacks may mark loaded file pins stale locally, but never rewrite
+the durable descriptor; inspect/start remains authoritative. Agent/Codex remains
+read-only.
 
 ## Operation Reconciliation
 
