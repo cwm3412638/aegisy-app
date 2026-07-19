@@ -547,6 +547,28 @@ QString AgentRuntimeClient::readCompactionCheckpoint(const QString &sessionId,
     });
 }
 
+QString AgentRuntimeClient::reviseCompactionCheckpoint(
+    const QString &sessionId, const QString &sourceCheckpointId,
+    const QString &sourceReviewId, const QString &checkpointId,
+    const QString &preservationInstructions, const QJsonObject &summary)
+{
+    if (sessionId.isEmpty() || sourceCheckpointId.isEmpty() || sourceReviewId.isEmpty()
+            || checkpointId.isEmpty() || sourceCheckpointId == checkpointId) {
+        return {};
+    }
+    QJsonObject params{
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("source_checkpoint_id"), sourceCheckpointId},
+        {QStringLiteral("source_review_id"), sourceReviewId},
+        {QStringLiteral("checkpoint_id"), checkpointId},
+        {QStringLiteral("summary"), summary},
+    };
+    if (!preservationInstructions.isEmpty()) {
+        params.insert(QStringLiteral("preservation_instructions"), preservationInstructions);
+    }
+    return sendRequest(QStringLiteral("session/compaction/checkpoint/revise"), params);
+}
+
 QString AgentRuntimeClient::runtimeRecoveryStatus()
 {
     return sendRequest(QStringLiteral("runtime/recovery/status"));
@@ -1186,6 +1208,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit compactionCheckpointCreated(id, result);
     } else if (pendingMethod == QStringLiteral("session/compaction/checkpoint/read")) {
         emit compactionCheckpointRead(id, result);
+    } else if (pendingMethod == QStringLiteral("session/compaction/checkpoint/revise")) {
+        emit compactionCheckpointRevised(id, result);
     } else if (pendingMethod == QStringLiteral("runtime/recovery/status")) {
         emit runtimeRecoveryStatusRead(result);
     } else if (pendingMethod == QStringLiteral("turn/cancel")) {

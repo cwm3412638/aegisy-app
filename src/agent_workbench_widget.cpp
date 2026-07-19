@@ -105,6 +105,129 @@ constexpr int kMaxTurnContextItems = 16;
 constexpr int kMaxInlineContextBytes = 16 * 1024;
 constexpr qint64 kMaxPortableSessionBytes = 4LL * 1024 * 1024;
 
+const QList<QPair<QString, QString>> &compactionSummaryCategories()
+{
+    static const QList<QPair<QString, QString>> categories{
+        {QStringLiteral("decisions"), QStringLiteral("决策")},
+        {QStringLiteral("unresolved_tasks"), QStringLiteral("未解决任务")},
+        {QStringLiteral("changed_files"), QStringLiteral("变更文件")},
+        {QStringLiteral("commands"), QStringLiteral("命令")},
+        {QStringLiteral("tests"), QStringLiteral("测试")},
+        {QStringLiteral("failures"), QStringLiteral("失败")},
+        {QStringLiteral("next_actions"), QStringLiteral("下一步")},
+    };
+    return categories;
+}
+
+struct CompactionReviewFormData {
+    bool accepted = false;
+    QString checkpointId;
+    QString preservationInstructions;
+    QJsonObject summary;
+    QString error;
+};
+
+CompactionReviewFormData promptCompactionReview(
+    QWidget *parent, const QString &title, const QString &introText,
+    const QString &submitText, const QString &initialCheckpointId = {},
+    const QString &initialPreservation = {}, const QJsonObject &initialSummary = {})
+{
+    QDialog dialog(parent);
+    dialog.setWindowTitle(title);
+    dialog.resize(620, 620);
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setSpacing(8);
+    auto *intro = new QLabel(introText, &dialog);
+    intro->setWordWrap(true);
+    intro->setStyleSheet(QStringLiteral("color:#667085; font-size:10px;"));
+    layout->addWidget(intro);
+    auto *checkpointId = new QLineEdit(&dialog);
+    checkpointId->setObjectName(QStringLiteral("agentCompactionCheckpointIdInput"));
+    checkpointId->setMaxLength(128);
+    checkpointId->setPlaceholderText(QStringLiteral("例如：checkpoint-before-refactor"));
+    checkpointId->setText(initialCheckpointId);
+    layout->addWidget(new QLabel(QStringLiteral("审查 ID"), &dialog));
+    layout->addWidget(checkpointId);
+    auto *preservation = new QPlainTextEdit(&dialog);
+    preservation->setObjectName(QStringLiteral("agentCompactionPreservationInput"));
+    preservation->setPlaceholderText(QStringLiteral("可选：需要保留的上下文和注意事项"));
+    preservation->setPlainText(initialPreservation);
+    preservation->setFixedHeight(58);
+    preservation->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    layout->addWidget(new QLabel(QStringLiteral("保留指令（可选）"), &dialog));
+    layout->addWidget(preservation);
+
+    QHash<QString, QPlainTextEdit *> fields;
+    for (const auto &category : compactionSummaryCategories()) {
+        layout->addWidget(new QLabel(category.second, &dialog));
+        auto *field = new QPlainTextEdit(&dialog);
+        field->setObjectName(QStringLiteral("agentCompaction%1Input").arg(category.first));
+        field->setPlaceholderText(QStringLiteral("每行一项，最多 64 项"));
+        QStringList initialValues;
+        for (const QJsonValue &value : initialSummary.value(category.first).toArray()) {
+            initialValues.append(value.toString());
+        }
+        field->setPlainText(initialValues.join(QLatin1Char('\n')));
+        field->setFixedHeight(48);
+        field->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+        fields.insert(category.first, field);
+        layout->addWidget(field);
+    }
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setObjectName(
+        QStringLiteral("agentCompactionReviewSubmitButton"));
+    buttons->button(QDialogButtonBox::Ok)->setText(submitText);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted) return {};
+
+    CompactionReviewFormData result;
+    result.checkpointId = checkpointId->text().trimmed();
+    static const QRegularExpression checkpointPattern(
+        QStringLiteral("^[A-Za-z0-9_-]{1,128}$"));
+    if (!checkpointPattern.match(result.checkpointId).hasMatch()) {
+        result.error = QStringLiteral("审查 ID 只能包含字母、数字、下划线或连字符，且不超过 128 个字符。");
+        return result;
+    }
+    result.preservationInstructions = preservation->toPlainText().trimmed();
+    if (result.preservationInstructions.toUtf8().size() > 8 * 1024) {
+        result.error = QStringLiteral("保留指令超过 8 KiB，未提交。");
+        return result;
+    }
+    int summaryBytes = 0;
+    for (const auto &category : compactionSummaryCategories()) {
+        QJsonArray values;
+        const QStringList lines = fields.value(category.first)->toPlainText().split(
+            QLatin1Char('\n'), Qt::KeepEmptyParts);
+        for (const QString &line : lines) {
+            const QString value = line.trimmed();
+            if (value.isEmpty()) continue;
+            const int itemBytes = value.toUtf8().size();
+            if (itemBytes > 1024) {
+                result.error = QStringLiteral("%1中有单项超过 1024 字节，未提交。")
+                    .arg(category.second);
+                return result;
+            }
+            if (values.size() >= 64) {
+                result.error = QStringLiteral("%1超过 64 项，未提交。").arg(category.second);
+                return result;
+            }
+            summaryBytes += itemBytes;
+            values.append(value);
+        }
+        result.summary.insert(category.first, values);
+    }
+    if (summaryBytes > 64 * 1024) {
+        result.error = QStringLiteral("摘要内容超过 64 KiB，未提交。");
+        return result;
+    }
+    result.accepted = true;
+    return result;
+}
+
 QString formatByteCount(qint64 bytes)
 {
     if (bytes >= 1024 * 1024) {
@@ -487,6 +610,14 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_compactionOperation.clear();
         showCompactionReview(result, true);
     });
+    connect(m_runtime, &AgentRuntimeClient::compactionCheckpointRevised,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        if (requestId != m_compactionRequestId
+                || m_compactionOperation != QStringLiteral("revise")) return;
+        m_compactionRequestId.clear();
+        m_compactionOperation.clear();
+        showCompactionReview(result, result.value(QStringLiteral("idempotent_replay")).toBool());
+    });
     connect(m_runtime, &AgentRuntimeClient::connectionStateChanged,
             this, [this](bool ready, const QString &detail) {
         m_runtimeStatus->setText(
@@ -548,10 +679,12 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             return;
         }
         if (method == QStringLiteral("session/compaction/checkpoint/create")
-                || method == QStringLiteral("session/compaction/checkpoint/read")) {
+                || method == QStringLiteral("session/compaction/checkpoint/read")
+                || method == QStringLiteral("session/compaction/checkpoint/revise")) {
             if (requestId.isEmpty() || requestId != m_compactionRequestId) return;
             m_compactionRequestId.clear();
             m_compactionOperation.clear();
+            m_compactionSessionId.clear();
             addNotice(QStringLiteral("压缩审查操作失败（错误码 %1）；原始会话历史未改变。")
                           .arg(code), true);
             return;
@@ -5821,90 +5954,24 @@ void AgentWorkbenchWidget::beginCompactionCheckpoint(const QString &sessionId)
             || m_runtimeRecoveryMode || !m_compactionRequestId.isEmpty()) {
         return;
     }
-    QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("创建压缩审查记录"));
-    dialog.resize(620, 620);
-    auto *layout = new QVBoxLayout(&dialog);
-    layout->setContentsMargins(16, 16, 16, 16);
-    layout->setSpacing(8);
-    auto *intro = new QLabel(QStringLiteral(
-        "这是手动审查记录，不会压缩、删除或替换原始会话历史。激活和 provider compact 当前不可用。"),
-        &dialog);
-    intro->setWordWrap(true);
-    intro->setStyleSheet(QStringLiteral("color:#667085; font-size:10px;"));
-    layout->addWidget(intro);
-    auto *checkpointId = new QLineEdit(&dialog);
-    checkpointId->setMaxLength(256);
-    checkpointId->setPlaceholderText(QStringLiteral("例如：checkpoint-before-refactor"));
-    layout->addWidget(new QLabel(QStringLiteral("审查 ID"), &dialog));
-    layout->addWidget(checkpointId);
-    auto *preservation = new QPlainTextEdit(&dialog);
-    preservation->setPlaceholderText(QStringLiteral("可选：需要保留的上下文和注意事项，每行一条"));
-    preservation->setFixedHeight(58);
-    preservation->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-    layout->addWidget(new QLabel(QStringLiteral("保留指令（可选）"), &dialog));
-    layout->addWidget(preservation);
-
-    const QList<QPair<QString, QString>> categories{
-        {QStringLiteral("decisions"), QStringLiteral("决策")},
-        {QStringLiteral("unresolved_tasks"), QStringLiteral("未解决任务")},
-        {QStringLiteral("changed_files"), QStringLiteral("变更文件")},
-        {QStringLiteral("commands"), QStringLiteral("命令")},
-        {QStringLiteral("tests"), QStringLiteral("测试")},
-        {QStringLiteral("failures"), QStringLiteral("失败")},
-        {QStringLiteral("next_actions"), QStringLiteral("下一步")},
-    };
-    QHash<QString, QPlainTextEdit *> fields;
-    for (const auto &category : categories) {
-        layout->addWidget(new QLabel(category.second, &dialog));
-        auto *field = new QPlainTextEdit(&dialog);
-        field->setObjectName(QStringLiteral("agentCompaction%1Input")
-                                 .arg(category.first));
-        field->setPlaceholderText(QStringLiteral("每行一项，最多 64 项"));
-        field->setFixedHeight(48);
-        field->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-        fields.insert(category.first, field);
-        layout->addWidget(field);
-    }
-    auto *buttons = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("保存审查"));
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons);
-    if (dialog.exec() != QDialog::Accepted) return;
-
-    const QString id = checkpointId->text().trimmed();
-    if (id.isEmpty()) {
-        addNotice(QStringLiteral("审查 ID 不能为空。"), true);
+    const CompactionReviewFormData form = promptCompactionReview(
+        this,
+        QStringLiteral("创建压缩审查记录"),
+        QStringLiteral(
+            "这是手动审查记录，不会压缩、删除或替换原始会话历史。激活和 provider compact 当前不可用。"),
+        QStringLiteral("保存审查"));
+    if (!form.error.isEmpty()) {
+        addNotice(form.error, true);
         return;
     }
-    QJsonObject summary;
-    int totalBytes = 0;
-    for (const auto &category : categories) {
-        QJsonArray values;
-        const QStringList lines = fields.value(category.first)->toPlainText().split(
-            QLatin1Char('\n'), Qt::SkipEmptyParts);
-        for (const QString &line : lines) {
-            const QString value = line.trimmed();
-            if (value.isEmpty()) continue;
-            totalBytes += value.toUtf8().size();
-            if (values.size() < 64) values.append(value);
-        }
-        summary.insert(category.first, values);
-    }
-    const QString instructions = preservation->toPlainText().trimmed();
-    totalBytes += instructions.toUtf8().size();
-    if (totalBytes > 64 * 1024) {
-        addNotice(QStringLiteral("审查内容超过 64 KiB，未提交。"), true);
-        return;
-    }
+    if (!form.accepted) return;
     m_compactionSessionId = sessionId;
     m_compactionOperation = QStringLiteral("create");
     m_compactionRequestId = m_runtime->createCompactionCheckpoint(
-        sessionId, id, instructions, summary);
+        sessionId, form.checkpointId, form.preservationInstructions, form.summary);
     if (m_compactionRequestId.isEmpty()) {
         m_compactionOperation.clear();
+        m_compactionSessionId.clear();
         addNotice(QStringLiteral("无法提交压缩审查记录。"), true);
         return;
     }
@@ -5927,10 +5994,58 @@ void AgentWorkbenchWidget::beginCompactionCheckpointRead(const QString &sessionI
     m_compactionRequestId = m_runtime->readCompactionCheckpoint(sessionId, id);
     if (m_compactionRequestId.isEmpty()) {
         m_compactionOperation.clear();
+        m_compactionSessionId.clear();
         addNotice(QStringLiteral("无法读取压缩审查记录。"), true);
         return;
     }
     addNotice(QStringLiteral("正在读取压缩审查记录…"));
+}
+
+void AgentWorkbenchWidget::beginCompactionCheckpointRevision(
+    const QString &sessionId, const QJsonObject &sourceReview)
+{
+    const QString sourceCheckpointId = sourceReview.value(QStringLiteral("checkpoint_id"))
+        .toString();
+    const QString sourceReviewId = sourceReview.value(QStringLiteral("review_id")).toString();
+    if (sessionId.isEmpty() || sourceReview.value(QStringLiteral("session_id")).toString()
+                != sessionId
+            || sourceCheckpointId.isEmpty() || sourceReviewId.isEmpty()
+            || !m_runtime || !m_runtime->isReady() || m_runtimeRecoveryMode
+            || !m_compactionAvailable || !m_compactionRequestId.isEmpty()) {
+        addNotice(QStringLiteral("当前压缩审查无法创建修订版。"), true);
+        return;
+    }
+    const QString suggestedId = sourceCheckpointId.left(124) + QStringLiteral("-rev");
+    const CompactionReviewFormData form = promptCompactionReview(
+        this,
+        QStringLiteral("编辑为新的压缩审查"),
+        QStringLiteral(
+            "编辑会创建新的不可变审查记录，并保留旧记录和修订关系。不会覆盖旧记录、激活上下文或调用 provider compact。"),
+        QStringLiteral("保存修订版"),
+        suggestedId,
+        sourceReview.value(QStringLiteral("preservation_instructions")).toString(),
+        sourceReview.value(QStringLiteral("summary")).toObject());
+    if (!form.error.isEmpty()) {
+        addNotice(form.error, true);
+        return;
+    }
+    if (!form.accepted) return;
+    if (form.checkpointId == sourceCheckpointId) {
+        addNotice(QStringLiteral("修订版必须使用新的审查 ID。"), true);
+        return;
+    }
+    m_compactionSessionId = sessionId;
+    m_compactionOperation = QStringLiteral("revise");
+    m_compactionRequestId = m_runtime->reviseCompactionCheckpoint(
+        sessionId, sourceCheckpointId, sourceReviewId, form.checkpointId,
+        form.preservationInstructions, form.summary);
+    if (m_compactionRequestId.isEmpty()) {
+        m_compactionOperation.clear();
+        m_compactionSessionId.clear();
+        addNotice(QStringLiteral("无法提交压缩审查修订版。"), true);
+        return;
+    }
+    addNotice(QStringLiteral("正在保存压缩审查修订版…"));
 }
 
 void AgentWorkbenchWidget::showCompactionReview(const QJsonObject &result, bool replayed)
@@ -5938,9 +6053,20 @@ void AgentWorkbenchWidget::showCompactionReview(const QJsonObject &result, bool 
     const QJsonObject review = result.value(QStringLiteral("review")).toObject();
     const QString sessionId = m_compactionSessionId;
     const QString schema = result.value(QStringLiteral("schema_version")).toString();
+    const bool revisionSchema = schema == QStringLiteral(
+        "session-compaction-checkpoint-revise-result/0.1");
     const bool validSchema = schema == QStringLiteral(
         "session-compaction-checkpoint-create-result/0.1")
-        || schema == QStringLiteral("session-compaction-checkpoint-read-result/0.1");
+        || schema == QStringLiteral("session-compaction-checkpoint-read-result/0.1")
+        || revisionSchema;
+    const QJsonObject supersedes = result.value(QStringLiteral("supersedes")).toObject();
+    const bool validSupersedes = supersedes.isEmpty()
+        || (!supersedes.value(QStringLiteral("checkpoint_id")).toString().isEmpty()
+            && !supersedes.value(QStringLiteral("review_id")).toString().isEmpty()
+            && supersedes.value(QStringLiteral("checkpoint_id")).toString()
+                != review.value(QStringLiteral("checkpoint_id")).toString()
+            && supersedes.value(QStringLiteral("review_id")).toString()
+                != review.value(QStringLiteral("review_id")).toString());
     const bool explicitUnavailable = result.value(QStringLiteral("activation_available")).isBool()
         && !result.value(QStringLiteral("activation_available")).toBool()
         && result.value(QStringLiteral("provider_compact_invoked")).isBool()
@@ -5949,7 +6075,8 @@ void AgentWorkbenchWidget::showCompactionReview(const QJsonObject &result, bool 
             || review.value(QStringLiteral("schema_version")).toString()
                 != QStringLiteral("session-compaction/0.1")
             || review.value(QStringLiteral("review_id")).toString().isEmpty()
-            || !explicitUnavailable) {
+            || !explicitUnavailable || !validSupersedes
+            || (revisionSchema && supersedes.isEmpty())) {
         m_compactionSessionId.clear();
         addNotice(QStringLiteral("压缩审查结果无效或包含不可用激活动作，未展示。"), true);
         return;
@@ -5975,6 +6102,12 @@ void AgentWorkbenchWidget::showCompactionReview(const QJsonObject &result, bool 
         QStringLiteral("激活：不可用 · Provider compact：未调用"),
     };
     if (replayed) lines.append(QStringLiteral("来源：已读取的持久化审查记录"));
+    if (!supersedes.isEmpty()) {
+        lines.append(QStringLiteral("修订自：%1").arg(
+            supersedes.value(QStringLiteral("checkpoint_id")).toString()));
+        lines.append(QStringLiteral("来源 Review ID：%1").arg(
+            supersedes.value(QStringLiteral("review_id")).toString()));
+    }
     const QString instructions = review.value(QStringLiteral("preservation_instructions"))
         .toString();
     if (!instructions.isEmpty()) {
@@ -6008,6 +6141,18 @@ void AgentWorkbenchWidget::showCompactionReview(const QJsonObject &result, bool 
     summary->setPlainText(lines.join(QLatin1Char('\n')));
     layout->addWidget(summary, 1);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+    auto *revise = buttons->addButton(
+        QStringLiteral("编辑为新审查"), QDialogButtonBox::ActionRole);
+    revise->setObjectName(QStringLiteral("agentCompactionReviewReviseButton"));
+    revise->setEnabled(m_compactionAvailable && !m_runtimeRecoveryMode
+        && m_compactionRequestId.isEmpty());
+    revise->setToolTip(QStringLiteral("创建新的不可变修订版；旧记录和原始事件历史保持不变"));
+    connect(revise, &QPushButton::clicked, this, [this, dialog, sessionId, review]() {
+        dialog->close();
+        QTimer::singleShot(0, this, [this, sessionId, review]() {
+            beginCompactionCheckpointRevision(sessionId, review);
+        });
+    });
     connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
     layout->addWidget(buttons);
     dialog->show();

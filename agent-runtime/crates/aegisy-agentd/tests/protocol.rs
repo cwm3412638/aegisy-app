@@ -3567,6 +3567,72 @@ fn session_compaction_checkpoint_is_durable_review_only_and_idempotent() {
     ));
     assert_eq!(conflict[0]["error"]["code"], -32009);
 
+    let revision_params = json!({
+        "session_id": session_id,
+        "source_checkpoint_id": "checkpoint-1",
+        "source_review_id": review_id,
+        "checkpoint_id": "checkpoint-2",
+        "preservation_instructions": "Preserve unresolved work and reviewed decisions",
+        "summary": {
+            "decisions": ["Keep original event history authoritative"],
+            "unresolved_tasks": ["Activate only after an explicit review"],
+            "changed_files": [],
+            "commands": [],
+            "tests": ["protocol", "restart replay"],
+            "failures": [],
+            "next_actions": ["Integrate provider-safe activation"]
+        }
+    });
+    let revised = runtime.handle_line(&request(
+        "revision",
+        "session/compaction/checkpoint/revise",
+        revision_params.clone(),
+    ));
+    assert_eq!(
+        revised[0]["result"]["schema_version"],
+        "session-compaction-checkpoint-revise-result/0.1"
+    );
+    assert_eq!(revised[0]["result"]["idempotent_replay"], false);
+    assert_eq!(
+        revised[0]["result"]["supersedes"]["checkpoint_id"],
+        "checkpoint-1"
+    );
+    assert_eq!(revised[0]["result"]["supersedes"]["review_id"], review_id);
+    assert_eq!(revised[0]["result"]["activation_available"], false);
+    assert_eq!(revised[0]["result"]["provider_compact_invoked"], false);
+    let revised_review_id = revised[0]["result"]["review"]["review_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let revised_event_sequence = revised[0]["result"]["event_sequence"].as_u64().unwrap();
+
+    let duplicate_revision = runtime.handle_line(&request(
+        "revision-duplicate",
+        "session/compaction/checkpoint/revise",
+        revision_params.clone(),
+    ));
+    assert_eq!(duplicate_revision[0]["result"]["idempotent_replay"], true);
+    assert_eq!(
+        duplicate_revision[0]["result"]["event_sequence"],
+        revised_event_sequence
+    );
+    let mut stale_source = revision_params.clone();
+    stale_source["source_review_id"] = json!(revised_review_id);
+    let stale_source = runtime.handle_line(&request(
+        "revision-stale-source",
+        "session/compaction/checkpoint/revise",
+        stale_source,
+    ));
+    assert_eq!(stale_source[0]["error"]["code"], -32009);
+    let mut same_id = revision_params.clone();
+    same_id["checkpoint_id"] = json!("checkpoint-1");
+    let same_id = runtime.handle_line(&request(
+        "revision-same-id",
+        "session/compaction/checkpoint/revise",
+        same_id,
+    ));
+    assert_eq!(same_id[0]["error"]["code"], -32602);
+
     let read = runtime.handle_line(&request(
         "6",
         "session/compaction/checkpoint/read",
@@ -3590,6 +3656,23 @@ fn session_compaction_checkpoint_is_durable_review_only_and_idempotent() {
     ));
     assert_eq!(replayed[0]["result"]["review"]["review_id"], review_id);
     assert_eq!(replayed[0]["result"]["event_sequence"], event_sequence);
+    let replayed_revision = restarted.handle_line(&request(
+        "9",
+        "session/compaction/checkpoint/read",
+        json!({ "session_id": session_id, "checkpoint_id": "checkpoint-2" }),
+    ));
+    assert_eq!(
+        replayed_revision[0]["result"]["review"]["review_id"],
+        revised_review_id
+    );
+    assert_eq!(
+        replayed_revision[0]["result"]["event_sequence"],
+        revised_event_sequence
+    );
+    assert_eq!(
+        replayed_revision[0]["result"]["supersedes"]["review_id"],
+        review_id
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

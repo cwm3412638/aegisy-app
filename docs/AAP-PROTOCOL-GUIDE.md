@@ -163,20 +163,27 @@ activate compacted context, delete history, or call a provider compact method.
 {"jsonrpc":"2.0","id":"8","method":"session/compaction/checkpoint/create","params":{"session_id":"session-1","checkpoint_id":"checkpoint-1","preservation_instructions":"Preserve unresolved work","summary":{"decisions":["Keep history authoritative"],"unresolved_tasks":["Review the UI"],"changed_files":[],"commands":[],"tests":[],"failures":[],"next_actions":["Continue implementation"]}}}
 {"jsonrpc":"2.0","id":"8","result":{"schema_version":"session-compaction-checkpoint-create-result/0.1","review":{"schema_version":"session-compaction/0.1","checkpoint_id":"checkpoint-1","session_id":"session-1","through_sequence":7,"source_context_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","review_id":"compaction-review:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"review-required"},"descriptor":{"schema_version":"session-compaction-checkpoint-store/0.1","state":"review-persisted","original_event_history_authoritative":true},"event_sequence":8,"idempotent_replay":false,"activation_available":false,"provider_compact_invoked":false,"original_event_history_authoritative":true}}
 {"jsonrpc":"2.0","id":"9","method":"session/compaction/checkpoint/read","params":{"session_id":"session-1","checkpoint_id":"checkpoint-1"}}
+{"jsonrpc":"2.0","id":"10","method":"session/compaction/checkpoint/revise","params":{"session_id":"session-1","source_checkpoint_id":"checkpoint-1","source_review_id":"compaction-review:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","checkpoint_id":"checkpoint-2","preservation_instructions":"Preserve unresolved work","summary":{"decisions":["Keep history authoritative"],"unresolved_tasks":["Review the edited summary"],"changed_files":[],"commands":[],"tests":[],"failures":[],"next_actions":["Continue implementation"]}}}
 ```
 
 Create derives `through_sequence` and `source_context_hash` from the complete,
 verified session event stream; clients do not supply either value. It is blocked
 while the session has an active turn. An identical retry returns the original
 review and event, while reusing a checkpoint ID with different preservation or
-summary content is a conflict. Read succeeds only when the content-addressed
-object and matching metadata-only session event both validate after restart.
+summary content is a conflict. `revise` requires the exact source Review ID and a
+new checkpoint ID; it never overwrites the source object, records a metadata-only
+`supersedes` descriptor in the new event, and an identical retry returns the same
+revision event. Read succeeds only when the content-addressed object and matching
+metadata-only session event both validate after restart. Event replay rejects a
+revision whose source checkpoint event is missing or whose lineage descriptor does
+not match an earlier validated checkpoint.
 
 The summary and preservation instructions are bounded and secret-shape checked,
-but remain user-provided manual review data at this milestone. They are not added
-to model context automatically. Provider `thread/compact/start`, editable Qt
-review, activation, automatic thresholds, model-generated summaries, and
-cross-resource failure compensation remain unavailable.
+but remain user-provided manual review data at this milestone. Qt can edit a read
+review into a new immutable revision, but revisions are not added to model context
+automatically. Provider `thread/compact/start`, activation, automatic thresholds,
+model-generated summaries, and cross-resource failure compensation remain
+unavailable.
 
 ## Security Boundary
 

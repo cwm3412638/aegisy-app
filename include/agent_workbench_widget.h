@@ -80,6 +80,8 @@ private:
     void showOperationReviewFailure(const QString &message);
     void beginCompactionCheckpoint(const QString &sessionId);
     void beginCompactionCheckpointRead(const QString &sessionId);
+    void beginCompactionCheckpointRevision(const QString &sessionId,
+                                           const QJsonObject &sourceReview);
     void showCompactionReview(const QJsonObject &result, bool replayed);
     bool currentOperationStatusBlocked() const;
     bool currentSessionRecoveryRequired() const;

@@ -976,6 +976,64 @@ int main(int argc, char *argv[])
                 "workspace edit preview fixture did not create a Work session")) {
         return 1;
     }
+    const QJsonObject compactionSummary{
+        {QStringLiteral("decisions"), QJsonArray{QStringLiteral("Keep history authoritative")}},
+        {QStringLiteral("unresolved_tasks"), QJsonArray{QStringLiteral("Review activation")}},
+        {QStringLiteral("changed_files"), QJsonArray{}},
+        {QStringLiteral("commands"), QJsonArray{}},
+        {QStringLiteral("tests"), QJsonArray{QStringLiteral("Qt client dispatch")}},
+        {QStringLiteral("failures"), QJsonArray{}},
+        {QStringLiteral("next_actions"), QJsonArray{QStringLiteral("Create revision")}},
+    };
+    QString compactionCreateRequest;
+    QString compactionReviewId;
+    QObject::connect(runtime, &AgentRuntimeClient::compactionCheckpointCreated,
+                     &workbench, [&compactionCreateRequest, &compactionReviewId](
+                         const QString &requestId, const QJsonObject &result) {
+        if (requestId != compactionCreateRequest) return;
+        compactionReviewId = result.value(QStringLiteral("review")).toObject()
+            .value(QStringLiteral("review_id")).toString();
+    });
+    compactionCreateRequest = runtime->createCompactionCheckpoint(
+        previewSessionId, QStringLiteral("qt-review-1"),
+        QStringLiteral("Preserve reviewed decisions"), compactionSummary);
+    if (!expect(!compactionCreateRequest.isEmpty()
+                    && waitUntil(application, [&compactionReviewId]() {
+                        return !compactionReviewId.isEmpty();
+                    }),
+                "Qt client did not dispatch compaction checkpoint creation")) {
+        return 1;
+    }
+    QJsonObject revisedSummary = compactionSummary;
+    revisedSummary.insert(
+        QStringLiteral("next_actions"),
+        QJsonArray{QStringLiteral("Keep revision lineage durable")});
+    QString compactionRevisionRequest;
+    QJsonObject compactionRevisionResult;
+    QObject::connect(runtime, &AgentRuntimeClient::compactionCheckpointRevised,
+                     &workbench, [&compactionRevisionRequest, &compactionRevisionResult](
+                         const QString &requestId, const QJsonObject &result) {
+        if (requestId == compactionRevisionRequest) compactionRevisionResult = result;
+    });
+    compactionRevisionRequest = runtime->reviseCompactionCheckpoint(
+        previewSessionId, QStringLiteral("qt-review-1"), compactionReviewId,
+        QStringLiteral("qt-review-2"), QStringLiteral("Preserve reviewed decisions"),
+        revisedSummary);
+    if (!expect(!compactionRevisionRequest.isEmpty()
+                    && waitUntil(application, [&compactionRevisionResult]() {
+                        return !compactionRevisionResult.isEmpty();
+                    })
+                    && compactionRevisionResult.value(QStringLiteral("schema_version")).toString()
+                        == QStringLiteral("session-compaction-checkpoint-revise-result/0.1")
+                    && compactionRevisionResult.value(QStringLiteral("supersedes")).toObject()
+                        .value(QStringLiteral("review_id")).toString() == compactionReviewId
+                    && !compactionRevisionResult
+                        .value(QStringLiteral("activation_available")).toBool()
+                    && !compactionRevisionResult
+                        .value(QStringLiteral("provider_compact_invoked")).toBool(),
+                "Qt client did not preserve immutable compaction revision lineage")) {
+        return 1;
+    }
     auto sha256 = [](const QByteArray &bytes) {
         return QString::fromLatin1(
             QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());

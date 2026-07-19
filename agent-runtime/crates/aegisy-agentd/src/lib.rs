@@ -752,6 +752,17 @@ struct SessionCompactionCheckpointReadParams {
     checkpoint_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SessionCompactionCheckpointReviseParams {
+    session_id: String,
+    source_checkpoint_id: String,
+    source_review_id: String,
+    checkpoint_id: String,
+    #[serde(default)]
+    preservation_instructions: Option<String>,
+    summary: session_compaction::CompactionSummary,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum PortableSessionCollisionStrategy {
@@ -1994,6 +2005,19 @@ fn find_compaction_checkpoint_event(
     Err("compaction checkpoint event is missing".into())
 }
 
+fn compaction_event_supersedes(
+    event: &workbench_store::WorkbenchEvent,
+    source: &session_compaction_store::CompactionCheckpointDescriptor,
+) -> bool {
+    let Some(supersedes) = event.payload.get("supersedes").and_then(Value::as_object) else {
+        return false;
+    };
+    supersedes.get("checkpoint_id").and_then(Value::as_str) == Some(source.checkpoint_id.as_str())
+        && supersedes.get("review_id").and_then(Value::as_str) == Some(source.review_id.as_str())
+        && supersedes.get("object_reference").and_then(Value::as_str)
+            == Some(source.object_reference.as_str())
+}
+
 fn normalize_terminal_kind(kind: &str) -> Result<String, (i64, String)> {
     match kind {
         "foreground" | "background" => Ok(kind.to_owned()),
@@ -2405,6 +2429,9 @@ impl Runtime {
             }
             "session/compaction/checkpoint/read" => {
                 self.session_compaction_checkpoint_read(request)
+            }
+            "session/compaction/checkpoint/revise" => {
+                self.session_compaction_checkpoint_revise(request)
             }
             "session/export/preview" => self.session_export_preview(request),
             "session/export" => self.session_export(request),
@@ -5092,6 +5119,185 @@ impl Runtime {
                 "review": stored.review,
                 "descriptor": descriptor,
                 "event_sequence": event.sequence,
+                "activation_available": false,
+                "provider_compact_invoked": false,
+                "original_event_history_authoritative": true,
+                "supersedes": event.payload.get("supersedes").cloned(),
+            }),
+        )
+    }
+
+    fn session_compaction_checkpoint_revise(&mut self, request: Request) -> Vec<Value> {
+        let params: SessionCompactionCheckpointReviseParams =
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => params,
+                Err(error) => {
+                    return self.error_for(&request, -32602, format!("invalid params: {error}"))
+                }
+            };
+        if params.source_checkpoint_id == params.checkpoint_id {
+            return self.error_for(
+                &request,
+                -32602,
+                "a compaction checkpoint revision requires a new checkpoint ID",
+            );
+        }
+        if self.control.has_active_turn(&params.session_id) {
+            return self.error_for(
+                &request,
+                -32010,
+                "session compaction checkpoint is unavailable during an active turn",
+            );
+        }
+        let Some(compaction_store) = self.compaction_store.as_ref() else {
+            return self.error_for(
+                &request,
+                -32024,
+                "session compaction checkpoint storage is unavailable",
+            );
+        };
+        let Some(workbench_store) = self.workbench_store.as_mut() else {
+            return self.error_for(
+                &request,
+                -32024,
+                "session compaction checkpoint requires durable workbench storage",
+            );
+        };
+        let candidate = match workbench_store
+            .rebuild_session_projection_candidate(&params.session_id)
+        {
+            Ok(candidate) if candidate.source_complete && candidate.matches_current_projection => {
+                candidate
+            }
+            Ok(_) => {
+                return self.error_for(
+                    &request,
+                    -32115,
+                    "session event authority is incomplete for compaction checkpoint",
+                )
+            }
+            Err(error) => return self.error_for(&request, -32115, error.message),
+        };
+        if candidate
+            .session
+            .as_ref()
+            .is_none_or(|session| session.status != "active")
+        {
+            return self.error_for(
+                &request,
+                -32011,
+                "session compaction checkpoint requires an active session",
+            );
+        }
+        let (source_stored, source_descriptor) = match compaction_store
+            .load_with_descriptor(&params.session_id, &params.source_checkpoint_id)
+        {
+            Ok(value) => value,
+            Err(error) => return self.error_for(&request, -32113, error.message),
+        };
+        if source_stored.review.review_id != params.source_review_id {
+            return self.error_for(
+                &request,
+                -32009,
+                "source compaction review identity changed",
+            );
+        }
+        if let Err(error) = find_compaction_checkpoint_event(
+            workbench_store,
+            &params.session_id,
+            &source_descriptor,
+            candidate.source_event_count,
+        ) {
+            return self.error_for(&request, -32115, error);
+        }
+        match compaction_store
+            .load_optional_with_descriptor(&params.session_id, &params.checkpoint_id)
+        {
+            Ok(Some((stored, descriptor))) => {
+                if stored.review.preservation_instructions != params.preservation_instructions
+                    || stored.review.summary != params.summary
+                {
+                    return self.error_for(
+                        &request,
+                        -32009,
+                        "session compaction checkpoint ID is bound to different content",
+                    );
+                }
+                let event = match find_compaction_checkpoint_event(
+                    workbench_store,
+                    &params.session_id,
+                    &descriptor,
+                    candidate.source_event_count,
+                ) {
+                    Ok(event) if compaction_event_supersedes(&event, &source_descriptor) => event,
+                    Ok(_) => {
+                        return self.error_for(
+                            &request,
+                            -32115,
+                            "compaction checkpoint revision lineage is invalid",
+                        )
+                    }
+                    Err(error) => return self.error_for(&request, -32115, error),
+                };
+                return self.success_for(
+                    &request,
+                    json!({
+                        "schema_version": "session-compaction-checkpoint-revise-result/0.1",
+                        "review": stored.review,
+                        "descriptor": descriptor,
+                        "event_sequence": event.sequence,
+                        "idempotent_replay": true,
+                        "supersedes": event.payload.get("supersedes").cloned(),
+                        "activation_available": false,
+                        "provider_compact_invoked": false,
+                        "original_event_history_authoritative": true,
+                    }),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => return self.error_for(&request, -32113, error.message),
+        }
+        let Some(source_hash) = candidate.source_hash.as_ref() else {
+            return self.error_for(
+                &request,
+                -32115,
+                "session event authority has no content identity",
+            );
+        };
+        let review = match session_compaction::create_review(
+            &params.checkpoint_id,
+            &params.session_id,
+            candidate.source_event_count,
+            &source_hash.sha256,
+            params.preservation_instructions.as_deref(),
+            params.summary,
+        ) {
+            Ok(review) => review,
+            Err(error) => return self.error_for(&request, -32602, error.message),
+        };
+        let descriptor = match compaction_store.persist(&review) {
+            Ok(descriptor) => descriptor,
+            Err(error) => return self.error_for(&request, -32113, error.message),
+        };
+        let event = match workbench_store.append_session_compaction_checkpoint_revision_event(
+            &descriptor,
+            &review,
+            &source_descriptor,
+            &source_stored.review,
+            now_ms(),
+        ) {
+            Ok(event) => event,
+            Err(error) => return self.error_for(&request, -32113, error.message),
+        };
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "session-compaction-checkpoint-revise-result/0.1",
+                "review": review,
+                "descriptor": descriptor,
+                "event_sequence": event.sequence,
+                "idempotent_replay": false,
+                "supersedes": event.payload.get("supersedes").cloned(),
                 "activation_available": false,
                 "provider_compact_invoked": false,
                 "original_event_history_authoritative": true,

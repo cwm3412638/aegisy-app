@@ -538,11 +538,16 @@ Current editor evidence:
   transitions.
 - The manual session-compaction checkpoint AAP methods are now reachable from the
   Qt session context menu. Create collects bounded user-authored summary fields
-  and optional preservation instructions; read accepts an explicit checkpoint ID.
-  Both results render in a plain-text read-only dialog and require
+  and optional preservation instructions; read accepts an explicit checkpoint ID;
+  revise creates a new immutable checkpoint from an exact source Review ID while
+  preserving the old object and recording a validated `supersedes` descriptor.
+  Both results and revision results render in a plain-text read-only dialog and require
   `activation_available:false`, `provider_compact_invoked:false`, matching session
-  identity, and a non-empty review ID before display. No activation, provider
-  compact, startup compensation, or model-generated summary producer is exposed;
+  identity, and a non-empty review ID before display. Rust protocol/store fixtures
+  cover conflicting IDs, stale source identity, idempotent revision, restart replay,
+  and tampered lineage; the Qt render fixture covers client request serialization and
+  revision signal dispatch. No activation, provider compact, startup compensation, or
+  model-generated summary producer is exposed;
   task `6.10` remains unchecked.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
