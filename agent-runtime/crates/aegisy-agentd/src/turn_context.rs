@@ -67,6 +67,8 @@ pub struct TurnContextItem {
     pub priority: Option<String>,
     #[serde(default)]
     pub inclusion_reason: Option<String>,
+    #[serde(default)]
+    pub exclusion_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -135,6 +137,20 @@ pub fn prepare_turn_context_scoped(
 
     for item in items {
         validate_item(item)?;
+        if let Some(reason) = item.exclusion_reason.as_deref() {
+            if let Some(root_id) = item.root_id.as_deref() {
+                let roots = roots.ok_or_else(|| error("context root is unavailable"))?;
+                if !roots.contains_key(root_id) {
+                    return Err(error("context root is unavailable or not registered"));
+                }
+            }
+            let mut manifest_entry = manifest_entry(item, "", false)?;
+            manifest_entry.included = false;
+            manifest_entry.inclusion_reason = reason.to_owned();
+            manifest_entry.token_size = 0;
+            manifest.entries.push(manifest_entry);
+            continue;
+        }
         let (content, actual_revision, stale) = resolve_content(item, roots)?;
         let mut manifest_entry = manifest_entry(item, &content, stale)?;
         let mut header = format!(
@@ -277,6 +293,12 @@ fn validate_item(item: &TurnContextItem) -> Result<(), TurnContextError> {
         if reason.is_empty() || reason.chars().count() > 128 || reason.chars().any(char::is_control)
         {
             return Err(error("context inclusion reason is invalid"));
+        }
+    }
+    if let Some(reason) = item.exclusion_reason.as_deref() {
+        if reason.is_empty() || reason.chars().count() > 160 || reason.chars().any(char::is_control)
+        {
+            return Err(error("context exclusion reason is invalid"));
         }
     }
     if let Some(reference) = &item.raw_output_ref {
@@ -450,6 +472,7 @@ mod tests {
             raw_output_ref: None,
             priority: None,
             inclusion_reason: None,
+            exclusion_reason: None,
         }
     }
 

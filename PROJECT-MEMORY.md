@@ -1046,6 +1046,13 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   ignore before model context is assembled.
 - Context evidence is labelled as untrusted data rather than instructions. The
   composer displays origin, size, inclusion, truncation, and removal before send.
+- Work-mode turn/start discovers the primary-root instruction chain and appends
+  at most eight valid instruction items after explicit user context, capped at
+  32 KiB before the shared 16-item/64 KiB context boundary. Generated manifest
+  entries preserve the instruction precedence rank and inclusion reason.
+  Rejected or per-instruction budget-excluded files produce no-body exclusion
+  entries when capacity permits; they never become authority or permission
+  inputs. Secondary-root context paths do not select the primary-root chain.
 - The terminal excerpt action now consumes real selected PTY/xterm output. The Git
   view still provides only the shared excerpt-action contract without fabricated
   data. Git diff context now comes from the project-scoped read-only task `16.2`

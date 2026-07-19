@@ -6828,40 +6828,70 @@ impl Runtime {
         .map_err(|error| (error.code, error.message))?;
         let mut added = 0_usize;
         let mut added_bytes = 0_u64;
+        let mut exclusion_markers = 0_usize;
+        let mut sequence = 0_usize;
         for entry in result.entries {
-            if added >= MAX_AUTO_INSTRUCTION_ITEMS
-                || context_items.len() >= turn_context::MAX_CONTEXT_ITEMS
-            {
+            if context_items.len() >= turn_context::MAX_CONTEXT_ITEMS {
                 break;
             }
-            let Some(content) = entry.content else {
-                continue;
+            let content = entry.content;
+            let can_include = entry.included
+                && content.is_some()
+                && added < MAX_AUTO_INSTRUCTION_ITEMS
+                && added_bytes.saturating_add(entry.bytes) <= MAX_AUTO_INSTRUCTION_BYTES;
+            let exclusion_reason = if can_include {
+                None
+            } else if !entry.included {
+                Some(format!(
+                    "instruction-excluded:{}",
+                    entry
+                        .rejection_reason
+                        .unwrap_or_else(|| "not-included".into())
+                ))
+            } else if added >= MAX_AUTO_INSTRUCTION_ITEMS {
+                Some("instruction-excluded:item-limit".into())
+            } else {
+                Some("instruction-excluded:byte-budget".into())
             };
-            if !entry.included
-                || added_bytes.saturating_add(entry.bytes) > MAX_AUTO_INSTRUCTION_BYTES
-            {
-                continue;
+            if exclusion_reason.is_some() {
+                if exclusion_markers >= 4 {
+                    continue;
+                }
+                exclusion_markers += 1;
             }
+            let freshness = if matches!(entry.freshness.as_str(), "fresh" | "stale" | "unknown") {
+                entry.freshness
+            } else {
+                "unknown".into()
+            };
             context_items.push(TurnContextItem {
-                id: format!("instruction-{added}"),
+                id: format!("instruction-{sequence}"),
                 kind: "instruction".into(),
                 label: entry.relative_path,
                 origin: "instruction-discovery".into(),
                 root_id: Some("root-1".into()),
                 path: None,
-                content: Some(content),
+                content: if can_include { content } else { None },
                 revision: entry.revision,
                 line: None,
                 column: None,
                 end_line: None,
                 end_column: None,
-                freshness: Some(entry.freshness),
+                freshness: Some(freshness),
                 raw_output_ref: None,
                 priority: Some(format!("instruction-rank-{}", entry.precedence_rank)),
-                inclusion_reason: Some(format!("instruction-{}", entry.precedence_reason)),
+                inclusion_reason: Some(if can_include {
+                    format!("instruction-{}", entry.precedence_reason)
+                } else {
+                    "instruction-discovery".into()
+                }),
+                exclusion_reason,
             });
-            added += 1;
-            added_bytes = added_bytes.saturating_add(entry.bytes);
+            sequence += 1;
+            if can_include {
+                added += 1;
+                added_bytes = added_bytes.saturating_add(entry.bytes);
+            }
         }
         Ok(())
     }

@@ -2189,6 +2189,7 @@ fn work_turn_auto_includes_bounded_project_instructions_after_user_context() {
     let root = std::env::temp_dir().join(format!("aegisy-aap-auto-instructions-{unique}"));
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("AGENTS.md"), "project guidance stays untrusted\n").unwrap();
+    fs::write(root.join("CODEX.md"), "API_KEY=sk-12345678901234567890\n").unwrap();
     fs::write(root.join("visible.rs"), "fn visible() {}\n").unwrap();
 
     let mut runtime = ready_runtime();
@@ -2220,7 +2221,7 @@ fn work_turn_auto_includes_bounded_project_instructions_after_user_context() {
     let manifest_entries = messages[0]["result"]["context"]["manifest"]["entries"]
         .as_array()
         .unwrap();
-    assert_eq!(manifest_entries.len(), 2);
+    assert_eq!(manifest_entries.len(), 3);
     assert_eq!(manifest_entries[1]["kind"], "instruction");
     assert_eq!(manifest_entries[1]["source"], "instruction-discovery");
     assert!(manifest_entries[1]["priority"]
@@ -2233,8 +2234,15 @@ fn work_turn_auto_includes_bounded_project_instructions_after_user_context() {
     );
     assert_eq!(manifest_entries[1]["trust"], "untrusted-data");
     assert!(manifest_entries[1].get("content").is_none());
+    assert_eq!(manifest_entries[2]["included"], false);
+    assert_eq!(
+        manifest_entries[2]["inclusion_reason"],
+        "instruction-excluded:secret-shaped-content"
+    );
+    assert!(manifest_entries[2].get("content").is_none());
     let serialized = serde_json::to_string(&messages).unwrap();
     assert!(serialized.contains("project guidance stays untrusted"));
+    assert!(!serialized.contains("API_KEY=sk-"));
     let _ = fs::remove_dir_all(root);
 }
 
