@@ -308,8 +308,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   write transaction; identity drift remains rejected. Updates that release Blobs carry
   a content-hashed, body-free release-batch identity and count, so repeated transitions
   to the same empty set do not reuse an unrelated earlier event. The earlier external
-  pointer publication is still outside that SQLite transaction, so startup compensation
-  for a published set whose event/release transaction failed remains open. Capability
+  pointer publication is still outside that SQLite transaction. A private
+  `pinned-context-publication/0.1` journal now records the previous/next set and
+  object identities before pointer replacement and is removed only after the SQLite
+  event/release transaction succeeds. Runtime startup validates each journal against
+  its pointer, immutable objects, and latest project event; it cleans an unchanged
+  previous pointer, replays only an uncommitted forward event/release transaction,
+  and cleans an already-committed forward event without duplicating it. Any malformed,
+  tampered, or ambiguous state disables pinned-context capabilities while preserving
+  immutable objects and Blob data. Capability
   `turn.context.pinned-selected` now lets `turn/context/inspect` and `turn/start`
   consume only explicit selected file/selection/image/diagnostic/terminal/Git/artifact pin IDs
   together with the exact current set identity. Selection is capped at 16 unique IDs; project/session/
@@ -390,8 +397,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Transient inline `selection` context with client-provided content remains on
   the existing bounded inline path; only selection items without inline content
   are resolved from the authoritative file range.
-  This foundation still has no atomic boundary or startup compensation across the
-  external pin object/pointer and SQLite event/release transaction, durable diagnostic/
+  This foundation still has no atomic boundary across the external pin object/pointer
+  and SQLite event/release transaction, durable diagnostic/
   terminal authority and invalidation, conservative pin-object/Blob orphan GC, or
   child-handoff assembly; complete image/Git lifecycle and cross-platform evidence
   also remain open, so keep `17.3` unchecked.

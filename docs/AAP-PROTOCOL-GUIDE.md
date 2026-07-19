@@ -320,10 +320,17 @@ The project pointer, immutable object, and Workbench SQLite event are separate
 publications. A successful save appends a metadata-only
 `project.pinned-context-updated/0.1` event after object publication; a failed
 event append returns an incomplete-save error, and a failed pointer replacement
-may leave a preserved unreferenced object. This does not claim cross-resource
+may leave a preserved unreferenced object. A private
+`pinned-context-publication/0.1` journal records the previous/next set and object
+identities before pointer replacement and is removed only after the event and Blob
+release transaction succeeds. Runtime startup validates the journal against the
+pointer, immutable objects, and latest project event: it cleans an unchanged
+previous pointer, replays an uncommitted forward event/release, or cleans an already
+committed event without appending a duplicate. Tamper or ambiguous state disables
+the pin capability and preserves data. This does not claim cross-resource
 atomicity. Image Blob release is atomic with the SQLite event, not with the earlier
 external object/pointer publication; database failure therefore preserves the active
-Blob but still requires later startup compensation for the published pointer. When a
+Blob and is recovered from the journal on the next startup. When a
 descriptor uses a standard `*:sha256:` Blob reference, save
 checks active SQLite metadata for exact project/session ownership, hash, and
 byte count without reading Blob bytes or updating access time. File, selection,
@@ -355,9 +362,8 @@ source identity, bytes, and truncation. Worktree/staged changes therefore invali
 their pins; commit and commit-diff pins survive unrelated worktree changes but fail
 if the exact Git object is no longer available. No Git mutation is added.
 
-Child-handoff assembly, durable automatic invalidation, failed-publication startup
-compensation, orphan GC, full cross-resource atomicity, and Windows runtime evidence
-remain open.
+Child-handoff assembly, durable automatic invalidation, orphan GC, full cross-resource
+atomicity, and Windows runtime evidence remain open.
 Qt watch/save callbacks may mark loaded file and selection pins stale locally, but never rewrite
 the durable descriptor; inspect/start remains authoritative. Agent/Codex remains
 read-only.

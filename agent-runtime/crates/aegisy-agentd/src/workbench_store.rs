@@ -1637,6 +1637,25 @@ impl WorkbenchStore {
         session_id: Option<&str>,
         content_reference: &str,
     ) -> Result<StoredDurableBlobReference, WorkbenchStoreError> {
+        let reference = self.inspect_durable_blob_reference_lifecycle(
+            project_id,
+            session_id,
+            content_reference,
+        )?;
+        if reference.state != "active" {
+            return Err(error(
+                "durable Blob metadata is unavailable for pinned context",
+            ));
+        }
+        Ok(reference)
+    }
+
+    pub fn inspect_durable_blob_reference_lifecycle(
+        &self,
+        project_id: &str,
+        session_id: Option<&str>,
+        content_reference: &str,
+    ) -> Result<StoredDurableBlobReference, WorkbenchStoreError> {
         validate_identifier(project_id, "pinned context Blob project ID")?;
         if let Some(session_id) = session_id {
             validate_identifier(session_id, "pinned context Blob session ID")?;
@@ -1648,9 +1667,10 @@ impl WorkbenchStore {
                 "SELECT reference_id FROM durable_blob_references
                  WHERE project_id = ?1
                    AND content_reference = ?2
-                   AND state = 'active'
+                   AND state IN ('active', 'released')
                    AND ((?3 IS NULL AND session_id IS NULL) OR session_id = ?3)
-                 ORDER BY created_at_ms DESC, reference_id ASC
+                 ORDER BY CASE state WHEN 'active' THEN 0 ELSE 1 END,
+                          created_at_ms DESC, reference_id ASC
                  LIMIT 1",
                 params![project_id, content_reference, session_id],
                 |row| row.get(0),
@@ -1661,7 +1681,7 @@ impl WorkbenchStore {
         let reference = load_durable_blob_reference(&self.connection, &reference_id)?;
         if reference.project_id.as_deref() != Some(project_id)
             || reference.session_id.as_deref() != session_id
-            || reference.state != "active"
+            || !matches!(reference.state.as_str(), "active" | "released")
             || reference.content_reference != content_reference
         {
             return Err(error("durable Blob metadata scope is invalid"));
@@ -7983,6 +8003,25 @@ impl WorkbenchStore {
             &[],
             persisted_at_ms,
         )
+    }
+
+    pub fn latest_pinned_context_event(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<WorkbenchEvent>, WorkbenchStoreError> {
+        validate_identifier(project_id, "pinned context project ID")?;
+        let candidate = self.rebuild_project_projection_candidate(project_id)?;
+        if !candidate.source_complete {
+            return Err(error(
+                "pinned context project event authority is incomplete",
+            ));
+        }
+        let events =
+            load_projection_source_events(&self.connection, &project_event_stream_id(project_id))?;
+        Ok(events
+            .into_iter()
+            .rev()
+            .find(|event| event.event_kind == "project.pinned-context-updated"))
     }
 
     pub fn append_pinned_context_event_with_blob_releases(

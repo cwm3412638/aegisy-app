@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const STORE_SCHEMA_VERSION: &str = "pinned-context-store/0.1";
+pub const PUBLICATION_SCHEMA_VERSION: &str = "pinned-context-publication/0.1";
 const MAX_SET_BYTES: u64 = 1024 * 1024;
 const MAX_PROJECTS: usize = 1_024;
 const MAX_OBJECTS: usize = 4_096;
@@ -27,6 +28,19 @@ pub struct PinnedContextStoreDescriptor {
 pub struct StoredPinnedContextSet {
     pub schema_version: String,
     pub set: PinnedContextSet,
+    pub content_bodies_persisted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PinnedContextPublication {
+    pub schema_version: String,
+    pub publication_id: String,
+    pub project_id: String,
+    pub previous_set_identity: Option<String>,
+    pub previous_object_reference: Option<String>,
+    pub next_set_identity: String,
+    pub next_object_reference: String,
+    pub created_at_ms: u64,
     pub content_bodies_persisted: bool,
 }
 
@@ -53,6 +67,7 @@ impl PinnedContextStore {
         create_secure_directory(&root)?;
         create_secure_directory(&root.join("objects"))?;
         create_secure_directory(&root.join("pointers"))?;
+        create_secure_directory(&root.join("publications"))?;
         let canonical = root
             .canonicalize()
             .map_err(|_| error("pinned-context-store-unavailable"))?;
@@ -66,6 +81,150 @@ impl PinnedContextStore {
         &self,
         set: &PinnedContextSet,
     ) -> Result<PinnedContextStoreDescriptor, PinnedContextStoreError> {
+        let (descriptor, current_hash, object_hash, pointer_name) = self.persist_object(set)?;
+        if current_hash.as_deref() != Some(object_hash.as_str()) {
+            self.write_pointer(&pointer_name, &object_hash)?;
+        }
+        Ok(descriptor)
+    }
+
+    pub fn persist_publication(
+        &self,
+        set: &PinnedContextSet,
+        created_at_ms: u64,
+    ) -> Result<
+        (
+            PinnedContextStoreDescriptor,
+            Option<PinnedContextPublication>,
+        ),
+        PinnedContextStoreError,
+    > {
+        let previous = self.load_optional(&set.project_id)?;
+        let (descriptor, current_hash, object_hash, pointer_name) = self.persist_object(set)?;
+        let pending = self.read_optional_publication(&pointer_name)?;
+        if let Some(pending) = pending {
+            let previous_set_identity = previous
+                .as_ref()
+                .map(|(_, descriptor)| descriptor.set_identity.as_str());
+            let previous_object_reference = previous
+                .as_ref()
+                .map(|(_, descriptor)| descriptor.object_reference.as_str());
+            if pending.previous_set_identity.as_deref() != previous_set_identity
+                || pending.previous_object_reference.as_deref() != previous_object_reference
+                || pending.next_set_identity != descriptor.set_identity
+                || pending.next_object_reference != descriptor.object_reference
+            {
+                return Err(error("pinned-context-publication-identity-changed"));
+            }
+            if current_hash.as_deref() == Some(object_hash.as_str()) {
+                return Err(error("pinned-context-publication-pending"));
+            }
+            let expected_previous_hash = pending
+                .previous_object_reference
+                .as_deref()
+                .and_then(|value| value.strip_prefix("pinned-context-object:sha256:"));
+            if current_hash.as_deref() != expected_previous_hash {
+                return Err(error("pinned-context-publication-current-changed"));
+            }
+            self.write_pointer(&pointer_name, &object_hash)?;
+            return Ok((descriptor, Some(pending)));
+        }
+        if current_hash.as_deref() == Some(object_hash.as_str()) {
+            return Ok((descriptor, None));
+        }
+        let observed_hash = self.read_optional_pointer(&pointer_name)?;
+        if observed_hash != current_hash {
+            return Err(error("pinned-context-publication-current-changed"));
+        }
+        let mut publication = PinnedContextPublication {
+            schema_version: PUBLICATION_SCHEMA_VERSION.into(),
+            publication_id: String::new(),
+            project_id: set.project_id.clone(),
+            previous_set_identity: previous
+                .as_ref()
+                .map(|(_, descriptor)| descriptor.set_identity.clone()),
+            previous_object_reference: previous
+                .as_ref()
+                .map(|(_, descriptor)| descriptor.object_reference.clone()),
+            next_set_identity: descriptor.set_identity.clone(),
+            next_object_reference: descriptor.object_reference.clone(),
+            created_at_ms,
+            content_bodies_persisted: false,
+        };
+        publication.publication_id = publication_identity(&publication)?;
+        self.write_publication(&pointer_name, &publication)?;
+        self.write_pointer(&pointer_name, &object_hash)?;
+        Ok((descriptor, Some(publication)))
+    }
+
+    pub fn complete_publication(
+        &self,
+        project_id: &str,
+        publication_id: &str,
+    ) -> Result<(), PinnedContextStoreError> {
+        validate_project_id(project_id)?;
+        let path = self
+            .root
+            .join("publications")
+            .join(pointer_name(project_id));
+        let publication = self.read_publication_path(&path)?;
+        if publication.project_id != project_id || publication.publication_id != publication_id {
+            return Err(error("pinned-context-publication-identity-changed"));
+        }
+        fs::remove_file(path).map_err(|_| error("pinned-context-publication-remove-failed"))?;
+        sync_directory(&self.root.join("publications"))
+    }
+
+    fn read_optional_publication(
+        &self,
+        pointer_file_name: &str,
+    ) -> Result<Option<PinnedContextPublication>, PinnedContextStoreError> {
+        if !valid_hash(pointer_file_name) {
+            return Err(error("pinned-context-publication-name-invalid"));
+        }
+        let path = self.root.join("publications").join(pointer_file_name);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => self.read_publication_path(&path).map(Some),
+            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(error("pinned-context-publication-unavailable")),
+        }
+    }
+
+    pub fn pending_publications(
+        &self,
+    ) -> Result<Vec<PinnedContextPublication>, PinnedContextStoreError> {
+        self.validate_layout()?;
+        let directory = self.root.join("publications");
+        let mut publications = Vec::new();
+        for entry in fs::read_dir(&directory)
+            .map_err(|_| error("pinned-context-publication-enumeration-failed"))?
+            .take(MAX_PROJECTS + 1)
+        {
+            if publications.len() >= MAX_PROJECTS {
+                return Err(error("pinned-context-publication-limit"));
+            }
+            let entry = entry.map_err(|_| error("pinned-context-publication-inspection-failed"))?;
+            let name = entry
+                .file_name()
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| error("pinned-context-publication-name-invalid"))?;
+            if !valid_hash(&name) {
+                return Err(error("pinned-context-publication-name-invalid"));
+            }
+            publications.push(self.read_publication_path(&entry.path())?);
+        }
+        publications.sort_by(|left, right| left.project_id.cmp(&right.project_id));
+        Ok(publications)
+    }
+
+    fn persist_object(
+        &self,
+        set: &PinnedContextSet,
+    ) -> Result<
+        (PinnedContextStoreDescriptor, Option<String>, String, String),
+        PinnedContextStoreError,
+    > {
         set.validate()
             .map_err(|_| error("pinned-context-set-invalid"))?;
         self.validate_layout()?;
@@ -87,7 +246,12 @@ impl PinnedContextStore {
         if current_hash.as_deref() == Some(object_hash.as_str()) {
             let existing = self.read_object(&object_hash)?;
             if existing == bytes {
-                return descriptor(set, &object_hash);
+                return Ok((
+                    descriptor(set, &object_hash)?,
+                    current_hash,
+                    object_hash,
+                    pointer_name,
+                ));
             }
             return Err(error("pinned-context-object-changed"));
         }
@@ -96,8 +260,12 @@ impl PinnedContextStore {
             .unwrap_or(false);
         self.enforce_store_limits(current_hash.is_none(), !object_exists, bytes.len() as u64)?;
         self.write_object(&object_hash, &bytes)?;
-        self.write_pointer(&pointer_name, &object_hash)?;
-        descriptor(set, &object_hash)
+        Ok((
+            descriptor(set, &object_hash)?,
+            current_hash,
+            object_hash,
+            pointer_name,
+        ))
     }
 
     pub fn load(
@@ -109,7 +277,29 @@ impl PinnedContextStore {
         let object_hash = self
             .read_optional_pointer(&pointer_name(project_id))?
             .ok_or_else(|| error("pinned-context-pointer-missing"))?;
-        let bytes = self.read_object(&object_hash)?;
+        self.load_object_hash(project_id, &object_hash)
+    }
+
+    pub fn load_object_reference(
+        &self,
+        project_id: &str,
+        object_reference: &str,
+    ) -> Result<(PinnedContextSet, PinnedContextStoreDescriptor), PinnedContextStoreError> {
+        validate_project_id(project_id)?;
+        self.validate_layout()?;
+        let object_hash = object_reference
+            .strip_prefix("pinned-context-object:sha256:")
+            .filter(|value| valid_hash(value))
+            .ok_or_else(|| error("pinned-context-object-reference-invalid"))?;
+        self.load_object_hash(project_id, object_hash)
+    }
+
+    fn load_object_hash(
+        &self,
+        project_id: &str,
+        object_hash: &str,
+    ) -> Result<(PinnedContextSet, PinnedContextStoreDescriptor), PinnedContextStoreError> {
+        let bytes = self.read_object(object_hash)?;
         if sha256_hex(&bytes) != object_hash {
             return Err(error("pinned-context-object-hash-mismatch"));
         }
@@ -126,7 +316,7 @@ impl PinnedContextStore {
             .set
             .validate()
             .map_err(|_| error("pinned-context-set-invalid"))?;
-        let descriptor = descriptor(&stored.set, &object_hash)?;
+        let descriptor = descriptor(&stored.set, object_hash)?;
         Ok((stored.set, descriptor))
     }
 
@@ -150,7 +340,7 @@ impl PinnedContextStore {
         if self.root.canonicalize().ok().as_deref() != Some(self.root.as_path()) {
             return Err(error("pinned-context-store-identity-changed"));
         }
-        for directory in ["objects", "pointers"] {
+        for directory in ["objects", "pointers", "publications"] {
             let path = self.root.join(directory);
             let metadata = fs::symlink_metadata(path)
                 .map_err(|_| error("pinned-context-directory-unavailable"))?;
@@ -257,6 +447,81 @@ impl PinnedContextStore {
         Ok(bytes)
     }
 
+    fn write_publication(
+        &self,
+        pointer_file_name: &str,
+        publication: &PinnedContextPublication,
+    ) -> Result<(), PinnedContextStoreError> {
+        validate_publication(publication)?;
+        if pointer_file_name != pointer_name(&publication.project_id) {
+            return Err(error("pinned-context-publication-project-mismatch"));
+        }
+        let parent = self.root.join("publications");
+        let target = parent.join(pointer_file_name);
+        if fs::symlink_metadata(&target).is_ok() {
+            let existing = self.read_publication_path(&target)?;
+            if existing == *publication {
+                return Ok(());
+            }
+            return Err(error("pinned-context-publication-pending"));
+        }
+        let bytes = serde_json::to_vec(publication)
+            .map_err(|_| error("pinned-context-publication-serialize"))?;
+        if bytes.len() as u64 > MAX_SET_BYTES {
+            return Err(error("pinned-context-publication-too-large"));
+        }
+        let temporary = temporary_path(&parent, "publication");
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|_| error("pinned-context-publication-stage-failed"))?;
+            secure_file(&file)?;
+            file.write_all(&bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|_| error("pinned-context-publication-flush-failed"))?;
+            fs::hard_link(&temporary, &target)
+                .map_err(|_| error("pinned-context-publication-commit-failed"))?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(&temporary);
+        result?;
+        sync_directory(&parent)
+    }
+
+    fn read_publication_path(
+        &self,
+        path: &Path,
+    ) -> Result<PinnedContextPublication, PinnedContextStoreError> {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|_| error("pinned-context-publication-unavailable"))?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > MAX_SET_BYTES
+        {
+            return Err(error("pinned-context-publication-type-invalid"));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        File::open(path)
+            .and_then(|file| file.take(MAX_SET_BYTES + 1).read_to_end(&mut bytes))
+            .map_err(|_| error("pinned-context-publication-read-failed"))?;
+        if bytes.len() as u64 > MAX_SET_BYTES {
+            return Err(error("pinned-context-publication-too-large"));
+        }
+        let publication: PinnedContextPublication = serde_json::from_slice(&bytes)
+            .map_err(|_| error("pinned-context-publication-invalid"))?;
+        validate_publication(&publication)?;
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| error("pinned-context-publication-name-invalid"))?;
+        if name != pointer_name(&publication.project_id) {
+            return Err(error("pinned-context-publication-project-mismatch"));
+        }
+        Ok(publication)
+    }
+
     fn write_pointer(
         &self,
         pointer_name: &str,
@@ -316,6 +581,58 @@ impl PinnedContextStore {
         }
         Ok(Some(object_hash.into()))
     }
+}
+
+fn validate_publication(
+    publication: &PinnedContextPublication,
+) -> Result<(), PinnedContextStoreError> {
+    validate_project_id(&publication.project_id)?;
+    if publication.schema_version != PUBLICATION_SCHEMA_VERSION
+        || publication.content_bodies_persisted
+        || publication.created_at_ms == 0
+        || !valid_prefixed_hash(
+            &publication.publication_id,
+            "pinned-context-publication:sha256:",
+        )
+        || !valid_prefixed_hash(&publication.next_set_identity, "pinned-context:sha256:")
+        || !valid_prefixed_hash(
+            &publication.next_object_reference,
+            "pinned-context-object:sha256:",
+        )
+        || publication.previous_set_identity.is_some()
+            != publication.previous_object_reference.is_some()
+        || publication
+            .previous_set_identity
+            .as_deref()
+            .is_some_and(|value| !valid_prefixed_hash(value, "pinned-context:sha256:"))
+        || publication
+            .previous_object_reference
+            .as_deref()
+            .is_some_and(|value| !valid_prefixed_hash(value, "pinned-context-object:sha256:"))
+        || publication.previous_set_identity.as_deref()
+            == Some(publication.next_set_identity.as_str())
+        || publication_identity(publication)? != publication.publication_id
+    {
+        return Err(error("pinned-context-publication-identity-invalid"));
+    }
+    Ok(())
+}
+
+fn publication_identity(
+    publication: &PinnedContextPublication,
+) -> Result<String, PinnedContextStoreError> {
+    let mut identity = publication.clone();
+    identity.publication_id.clear();
+    let bytes =
+        serde_json::to_vec(&identity).map_err(|_| error("pinned-context-publication-serialize"))?;
+    Ok(format!(
+        "pinned-context-publication:sha256:{}",
+        sha256_hex(&bytes)
+    ))
+}
+
+fn valid_prefixed_hash(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(valid_hash)
 }
 
 fn descriptor(
@@ -544,6 +861,102 @@ mod tests {
     }
 
     #[test]
+    fn publication_journal_is_explicitly_completed_after_pointer_publish() {
+        let root = root();
+        let store = PinnedContextStore::open(&root).unwrap();
+        let expected = set();
+        let (descriptor, publication) = store.persist_publication(&expected, 1).unwrap();
+        let publication = publication.expect("new object has a publication journal");
+        assert_eq!(publication.next_set_identity, descriptor.set_identity);
+        assert_eq!(
+            publication.next_object_reference,
+            descriptor.object_reference
+        );
+        assert_eq!(
+            store.pending_publications().unwrap(),
+            vec![publication.clone()]
+        );
+        let (loaded, loaded_descriptor) = store
+            .load_object_reference("project-1", &publication.next_object_reference)
+            .unwrap();
+        assert_eq!(loaded, expected);
+        assert_eq!(loaded_descriptor, descriptor);
+
+        store
+            .complete_publication("project-1", &publication.publication_id)
+            .unwrap();
+        assert!(store.pending_publications().unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn publication_retry_reuses_journal_without_changing_identity() {
+        let root = root();
+        let store = PinnedContextStore::open(&root).unwrap();
+        let initial = set();
+        let (initial_descriptor, initial_publication) =
+            store.persist_publication(&initial, 1).unwrap();
+        let initial_publication = initial_publication.unwrap();
+        let pointer = store.root.join("pointers").join(pointer_name("project-1"));
+        fs::remove_file(&pointer).unwrap();
+        let (retried_descriptor, retried_publication) =
+            store.persist_publication(&initial, 2).unwrap();
+        assert_eq!(retried_descriptor, initial_descriptor);
+        assert_eq!(retried_publication, Some(initial_publication.clone()));
+        assert!(store.load("project-1").is_ok());
+        store
+            .complete_publication("project-1", &initial_publication.publication_id)
+            .unwrap();
+
+        let mut updated = initial.clone();
+        updated.add(item("pin-2", "src/lib.rs")).unwrap();
+        let (updated_descriptor, updated_publication) =
+            store.persist_publication(&updated, 3).unwrap();
+        let updated_publication = updated_publication.unwrap();
+        let initial_hash = initial_descriptor
+            .object_reference
+            .strip_prefix("pinned-context-object:sha256:")
+            .unwrap();
+        fs::write(&pointer, format!("{initial_hash}\n")).unwrap();
+        let (retried_updated_descriptor, retried_updated_publication) =
+            store.persist_publication(&updated, 4).unwrap();
+        assert_eq!(retried_updated_descriptor, updated_descriptor);
+        assert_eq!(
+            retried_updated_publication,
+            Some(updated_publication.clone())
+        );
+        assert_eq!(store.load("project-1").unwrap().0, updated);
+        store
+            .complete_publication("project-1", &updated_publication.publication_id)
+            .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tampered_publication_journal_is_rejected_without_guessing_pointer_state() {
+        let root = root();
+        let store = PinnedContextStore::open(&root).unwrap();
+        let (_, publication) = store.persist_publication(&set(), 1).unwrap();
+        let publication = publication.unwrap();
+        let journal = store
+            .root
+            .join("publications")
+            .join(pointer_name("project-1"));
+        let mut bytes = fs::read(&journal).unwrap();
+        bytes.extend_from_slice(b"tampered");
+        fs::write(&journal, bytes).unwrap();
+        assert_eq!(
+            store.pending_publications().unwrap_err().code,
+            "pinned-context-publication-invalid"
+        );
+        assert!(store.load("project-1").is_ok());
+        assert!(store
+            .complete_publication("project-1", &publication.publication_id)
+            .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn tampered_object_and_pointer_are_rejected_without_rewrite() {
         let root = root();
         let store = PinnedContextStore::open(&root).unwrap();
@@ -588,6 +1001,12 @@ mod tests {
         symlink(&outside, store.root.join("objects")).unwrap();
         assert_eq!(
             store.persist(&set()).unwrap_err().code,
+            "pinned-context-directory-unsafe"
+        );
+        fs::remove_dir(store.root.join("publications")).unwrap();
+        symlink(&outside, store.root.join("publications")).unwrap();
+        assert_eq!(
+            store.pending_publications().unwrap_err().code,
             "pinned-context-directory-unsafe"
         );
         fs::remove_dir_all(root).unwrap();

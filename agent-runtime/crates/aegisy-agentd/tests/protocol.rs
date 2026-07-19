@@ -1,3 +1,5 @@
+use aegisy_agentd::pinned_context::{PinnedContextSet, SCHEMA_VERSION as PINNED_CONTEXT_SCHEMA};
+use aegisy_agentd::pinned_context_store::PinnedContextStore;
 use aegisy_agentd::workbench_store::{
     durable_blob_reference_id, DurableBlobKind, DurableBlobWrite, WorkbenchStore,
 };
@@ -1485,6 +1487,218 @@ fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
     assert_eq!(reopened[0]["result"]["persisted"], true);
     assert_eq!(reopened[0]["result"]["set_identity"], removed_identity);
     assert_eq!(reopened[0]["result"]["items"].as_array().unwrap().len(), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pinned_context_publication_compensation_cleans_abandoned_pointer_without_releasing_data() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("aegisy-aap-pinned-publication-abandoned-{unique}"));
+    let data_root = root.join("data");
+    let project_root = root.join("project");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({"protocol_version":"0.1","client":{"name":"publication","version":"1"}}),
+    ));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    let opened = runtime.handle_line(&request(
+        "project-open",
+        "project/open",
+        json!({"root": project_root}),
+    ));
+    let project_id = opened[0]["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let set_one = json!({
+        "schema_version": PINNED_CONTEXT_SCHEMA,
+        "project_id": project_id,
+        "items": [{
+            "id": "pin-one", "project_id": project_id, "root_id": "root-1",
+            "kind": "file", "source": "file-tree", "label": "one.rs",
+            "reference": "one.rs", "content_hash": format!("sha256:{}", "a".repeat(64)),
+            "bytes": 1, "freshness": "fresh", "priority": 850, "metadata": {}
+        }]
+    });
+    let saved = runtime.handle_line(&request(
+        "save-one",
+        "workspace/pinned-context/save",
+        json!({"project_id": project_id, "set": set_one}),
+    ));
+    let first_descriptor = saved[0]["result"]["descriptor"].clone();
+    drop(runtime);
+
+    let store = PinnedContextStore::open(&data_root).unwrap();
+    let set_two: PinnedContextSet = serde_json::from_value(json!({
+        "schema_version": PINNED_CONTEXT_SCHEMA,
+        "project_id": project_id,
+        "items": [{
+            "id": "pin-two", "project_id": project_id, "root_id": "root-1",
+            "kind": "file", "source": "file-tree", "label": "two.rs",
+            "reference": "two.rs", "content_hash": format!("sha256:{}", "b".repeat(64)),
+            "bytes": 1, "freshness": "fresh", "priority": 850, "metadata": {}
+        }]
+    }))
+    .unwrap();
+    let (second_descriptor, publication) = store.persist_publication(&set_two, 1).unwrap();
+    assert!(publication.is_some());
+    let first_hash = first_descriptor["object_reference"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("pinned-context-object:sha256:")
+        .unwrap();
+    let pointer_name = format!("{:x}", Sha256::digest(project_id.as_bytes()));
+    fs::write(
+        data_root
+            .join("pinned-context-v1")
+            .join("pointers")
+            .join(pointer_name),
+        format!("{first_hash}\n"),
+    )
+    .unwrap();
+    drop(store);
+
+    let mut restarted = Runtime::with_store(&data_root).unwrap();
+    restarted.handle_line(&request(
+        "initialize-restarted",
+        "initialize",
+        json!({"protocol_version":"0.1","client":{"name":"publication","version":"1"}}),
+    ));
+    restarted.handle_line(&request("initialized-restarted", "initialized", json!({})));
+    let listed = restarted.handle_line(&request(
+        "list-after-compensation",
+        "workspace/pinned-context/list",
+        json!({"project_id": project_id}),
+    ));
+    assert_eq!(
+        listed[0]["result"]["set_identity"],
+        first_descriptor["set_identity"]
+    );
+    let reopened_store = PinnedContextStore::open(&data_root).unwrap();
+    assert!(reopened_store.pending_publications().unwrap().is_empty());
+    let (_, reopened_second_descriptor) = reopened_store
+        .load_object_reference(&project_id, &second_descriptor.object_reference)
+        .unwrap();
+    assert_eq!(reopened_second_descriptor, second_descriptor);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pinned_context_publication_compensation_only_cleans_after_event_commit() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("aegisy-aap-pinned-publication-committed-{unique}"));
+    let data_root = root.join("data");
+    let project_root = root.join("project");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({"protocol_version":"0.1","client":{"name":"publication","version":"1"}}),
+    ));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    let opened = runtime.handle_line(&request(
+        "project-open",
+        "project/open",
+        json!({"root": project_root}),
+    ));
+    let project_id = opened[0]["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let set_one: PinnedContextSet = serde_json::from_value(json!({
+        "schema_version": PINNED_CONTEXT_SCHEMA,
+        "project_id": project_id,
+        "items": [{
+            "id": "pin-one", "project_id": project_id, "root_id": "root-1",
+            "kind": "file", "source": "file-tree", "label": "one.rs",
+            "reference": "one.rs", "content_hash": format!("sha256:{}", "a".repeat(64)),
+            "bytes": 1, "freshness": "fresh", "priority": 850, "metadata": {}
+        }]
+    }))
+    .unwrap();
+    let first = runtime.handle_line(&request(
+        "save-one",
+        "workspace/pinned-context/save",
+        json!({"project_id": project_id, "set": set_one}),
+    ));
+    assert_eq!(first[0]["result"]["event"]["persisted"], true);
+    drop(runtime);
+
+    let store = PinnedContextStore::open(&data_root).unwrap();
+    let set_two: PinnedContextSet = serde_json::from_value(json!({
+        "schema_version": PINNED_CONTEXT_SCHEMA,
+        "project_id": project_id,
+        "items": [{
+            "id": "pin-two", "project_id": project_id, "root_id": "root-1",
+            "kind": "file", "source": "file-tree", "label": "two.rs",
+            "reference": "two.rs", "content_hash": format!("sha256:{}", "b".repeat(64)),
+            "bytes": 1, "freshness": "fresh", "priority": 850, "metadata": {}
+        }]
+    }))
+    .unwrap();
+    let (second_descriptor, publication) = store.persist_publication(&set_two, 2).unwrap();
+    assert!(publication.is_some());
+    let mut workbench = WorkbenchStore::open(&data_root).unwrap();
+    let event = workbench
+        .append_pinned_context_event(
+            &project_id,
+            &second_descriptor.set_identity,
+            &second_descriptor.object_reference,
+            second_descriptor.item_count,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        )
+        .unwrap();
+    assert_eq!(event.event_kind, "project.pinned-context-updated");
+    drop(workbench);
+    drop(store);
+
+    let mut restarted = Runtime::with_store(&data_root).unwrap();
+    restarted.handle_line(&request(
+        "initialize-restarted",
+        "initialize",
+        json!({"protocol_version":"0.1","client":{"name":"publication","version":"1"}}),
+    ));
+    restarted.handle_line(&request("initialized-restarted", "initialized", json!({})));
+    let listed = restarted.handle_line(&request(
+        "list-after-compensation",
+        "workspace/pinned-context/list",
+        json!({"project_id": project_id}),
+    ));
+    assert_eq!(
+        listed[0]["result"]["set_identity"],
+        second_descriptor.set_identity
+    );
+    let reopened_store = PinnedContextStore::open(&data_root).unwrap();
+    assert!(reopened_store.pending_publications().unwrap().is_empty());
+    let event_store = WorkbenchStore::open(&data_root).unwrap();
+    let project_stream_id = format!(
+        "project-stream-{}",
+        &format!("{:x}", Sha256::digest(project_id.as_bytes()))[..32]
+    );
+    let events = event_store
+        .read_session_events(&project_stream_id, 0, 64)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.event_kind == "project.pinned-context-updated")
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
     fs::remove_dir_all(root).unwrap();
 }
 

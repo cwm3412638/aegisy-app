@@ -2574,13 +2574,180 @@ impl Runtime {
         CodexAdapter::start().map(|adapter| Self::with_backend(Backend::Codex(adapter)))
     }
 
+    fn open_compensated_pinned_context_store(
+        data_root: &Path,
+        workbench_store: &mut WorkbenchStore,
+    ) -> Option<pinned_context_store::PinnedContextStore> {
+        let store = pinned_context_store::PinnedContextStore::open(data_root).ok()?;
+        Self::compensate_pinned_context_publications(workbench_store, &store).ok()?;
+        Some(store)
+    }
+
+    fn compensate_pinned_context_publications(
+        workbench_store: &mut WorkbenchStore,
+        pinned_store: &pinned_context_store::PinnedContextStore,
+    ) -> Result<(), String> {
+        for publication in pinned_store
+            .pending_publications()
+            .map_err(|error| error.code.to_owned())?
+        {
+            let next = pinned_store
+                .load_object_reference(&publication.project_id, &publication.next_object_reference)
+                .map_err(|error| error.code.to_owned())?;
+            if next.1.set_identity != publication.next_set_identity
+                || next.1.object_reference != publication.next_object_reference
+            {
+                return Err("pinned context publication next authority changed".into());
+            }
+            let previous = match publication.previous_object_reference.as_deref() {
+                Some(object_reference) => {
+                    let previous = pinned_store
+                        .load_object_reference(&publication.project_id, object_reference)
+                        .map_err(|error| error.code.to_owned())?;
+                    if previous.1.set_identity
+                        != publication
+                            .previous_set_identity
+                            .as_deref()
+                            .unwrap_or_default()
+                        || previous.1.object_reference != object_reference
+                    {
+                        return Err("pinned context publication previous authority changed".into());
+                    }
+                    Some(previous)
+                }
+                None if publication.previous_set_identity.is_none() => None,
+                None => {
+                    return Err("pinned context publication previous authority is invalid".into())
+                }
+            };
+            let current = pinned_store
+                .load_optional(&publication.project_id)
+                .map_err(|error| error.code.to_owned())?;
+            let latest = workbench_store
+                .latest_pinned_context_event(&publication.project_id)
+                .map_err(|error| error.message)?;
+            let latest_identity = latest.as_ref().and_then(|event| {
+                Some((
+                    event.payload.get("set_identity")?.as_str()?,
+                    event.payload.get("object_reference")?.as_str()?,
+                ))
+            });
+            let previous_identity = previous.as_ref().map(|(_, descriptor)| {
+                (
+                    descriptor.set_identity.as_str(),
+                    descriptor.object_reference.as_str(),
+                )
+            });
+            let next_identity = (
+                next.1.set_identity.as_str(),
+                next.1.object_reference.as_str(),
+            );
+            let current_identity = current.as_ref().map(|(_, descriptor)| {
+                (
+                    descriptor.set_identity.as_str(),
+                    descriptor.object_reference.as_str(),
+                )
+            });
+            if current_identity == previous_identity {
+                if latest_identity != previous_identity {
+                    return Err("pinned context abandoned publication event changed".into());
+                }
+                pinned_store
+                    .complete_publication(&publication.project_id, &publication.publication_id)
+                    .map_err(|error| error.code.to_owned())?;
+                continue;
+            }
+            if current_identity != Some(next_identity)
+                || (latest_identity != previous_identity && latest_identity != Some(next_identity))
+            {
+                return Err("pinned context publication pointer/event state is ambiguous".into());
+            }
+            let release_references = Self::pinned_image_release_references(
+                Some(workbench_store),
+                &publication.project_id,
+                previous.as_ref().map(|(set, _)| set),
+                &next.0,
+            )
+            .map_err(|(_, message)| message)?;
+            if latest_identity == Some(next_identity) {
+                let Some(latest) = latest.as_ref() else {
+                    return Err("pinned context next event is unavailable".into());
+                };
+                let release_count = latest
+                    .payload
+                    .get("released_blob_reference_count")
+                    .and_then(Value::as_u64);
+                let release_identity = latest
+                    .payload
+                    .get("release_batch_identity")
+                    .and_then(Value::as_str);
+                let persisted_at_ms = latest
+                    .payload
+                    .get("persisted_at_ms")
+                    .and_then(Value::as_u64);
+                let release_binding_valid = if release_references.is_empty() {
+                    release_count.is_none() && release_identity.is_none()
+                } else {
+                    let release_reference_ids = release_references
+                        .iter()
+                        .map(|(reference_id, _)| reference_id.clone())
+                        .collect::<Vec<_>>();
+                    let expected_release_identity = persisted_at_ms.map(|timestamp| {
+                        Self::pinned_context_release_batch_identity(
+                            &publication.project_id,
+                            &next.1.set_identity,
+                            &release_reference_ids,
+                            timestamp,
+                        )
+                    });
+                    release_count == Some(release_reference_ids.len() as u64)
+                        && release_identity == expected_release_identity.as_deref()
+                        && release_references
+                            .iter()
+                            .all(|(_, state)| state == "released")
+                };
+                if !release_binding_valid {
+                    return Err("pinned context next event lacks its Blob release binding".into());
+                }
+                pinned_store
+                    .complete_publication(&publication.project_id, &publication.publication_id)
+                    .map_err(|error| error.code.to_owned())?;
+                continue;
+            }
+            if release_references
+                .iter()
+                .any(|(_, state)| state != "active")
+            {
+                return Err("pinned context previous event has an unexpected Blob state".into());
+            }
+            let release_reference_ids = release_references
+                .iter()
+                .map(|(reference_id, _)| reference_id.clone())
+                .collect::<Vec<_>>();
+            workbench_store
+                .append_pinned_context_event_with_blob_releases(
+                    &publication.project_id,
+                    &next.1.set_identity,
+                    &next.1.object_reference,
+                    next.1.item_count,
+                    &release_reference_ids,
+                    now_ms().max(publication.created_at_ms),
+                )
+                .map_err(|error| error.message)?;
+            pinned_store
+                .complete_publication(&publication.project_id, &publication.publication_id)
+                .map_err(|error| error.code.to_owned())?;
+        }
+        Ok(())
+    }
+
     pub fn with_store(data_root: &Path) -> Result<Self, String> {
         match WorkbenchStore::open_or_recover(data_root).map_err(|cause| cause.message)? {
-            WorkbenchStoreOpen::Writable(store) => {
+            WorkbenchStoreOpen::Writable(mut store) => {
                 let compaction_store =
                     session_compaction_store::CompactionCheckpointStore::open(data_root).ok();
                 let pinned_context_store =
-                    pinned_context_store::PinnedContextStore::open(data_root).ok();
+                    Self::open_compensated_pinned_context_store(data_root, &mut store);
                 Ok(Self::with_backend_and_store(
                     Backend::Preview,
                     Some(store),
@@ -2596,12 +2763,12 @@ impl Runtime {
 
     pub fn with_codex_and_store(data_root: &Path) -> Result<Self, String> {
         match WorkbenchStore::open_or_recover(data_root).map_err(|cause| cause.message)? {
-            WorkbenchStoreOpen::Writable(store) => {
-                let adapter = CodexAdapter::start()?;
+            WorkbenchStoreOpen::Writable(mut store) => {
                 let compaction_store =
                     session_compaction_store::CompactionCheckpointStore::open(data_root).ok();
                 let pinned_context_store =
-                    pinned_context_store::PinnedContextStore::open(data_root).ok();
+                    Self::open_compensated_pinned_context_store(data_root, &mut store);
+                let adapter = CodexAdapter::start()?;
                 Ok(Self::with_backend_and_store(
                     Backend::Codex(adapter),
                     Some(store),
@@ -10261,7 +10428,8 @@ impl Runtime {
                 "pinned context changed since the reviewed identity",
             );
         }
-        let release_reference_ids = match self.pinned_image_release_reference_ids(
+        let release_reference_ids = match Self::pinned_image_release_reference_ids(
+            self.workbench_store.as_ref(),
             project_id,
             current.as_ref().map(|(set, _)| set),
             set,
@@ -10269,12 +10437,12 @@ impl Runtime {
             Ok(reference_ids) => reference_ids,
             Err((code, message)) => return self.error_for(request, code, message),
         };
-        let descriptor = {
+        let (descriptor, publication) = {
             let Some(store) = self.pinned_context_store.as_ref() else {
                 return self.error_for(request, -32122, "pinned context store unavailable");
             };
-            match store.persist(set) {
-                Ok(descriptor) => descriptor,
+            match store.persist_publication(set, now_ms()) {
+                Ok(publication) => publication,
                 Err(error) => return self.error_for(request, -32123, error.code),
             }
         };
@@ -10307,6 +10475,23 @@ impl Runtime {
                 "reason": "workbench-event-store-unavailable"
             })
         };
+        if event.get("persisted").and_then(Value::as_bool) == Some(true) {
+            if let Some(publication) = publication.as_ref() {
+                let Some(store) = self.pinned_context_store.as_ref() else {
+                    return self.error_for(request, -32122, "pinned context store unavailable");
+                };
+                if store
+                    .complete_publication(project_id, &publication.publication_id)
+                    .is_err()
+                {
+                    return self.error_for(
+                        request,
+                        -32124,
+                        "pinned context event persisted but publication cleanup failed",
+                    );
+                }
+            }
+        }
         self.success_for(
             request,
             json!({
@@ -10323,11 +10508,25 @@ impl Runtime {
     }
 
     fn pinned_image_release_reference_ids(
-        &self,
+        workbench_store: Option<&WorkbenchStore>,
         project_id: &str,
         current: Option<&pinned_context::PinnedContextSet>,
         next: &pinned_context::PinnedContextSet,
     ) -> Result<Vec<String>, (i64, String)> {
+        Ok(
+            Self::pinned_image_release_references(workbench_store, project_id, current, next)?
+                .into_iter()
+                .filter_map(|(reference_id, state)| (state == "active").then_some(reference_id))
+                .collect(),
+        )
+    }
+
+    fn pinned_image_release_references(
+        workbench_store: Option<&WorkbenchStore>,
+        project_id: &str,
+        current: Option<&pinned_context::PinnedContextSet>,
+        next: &pinned_context::PinnedContextSet,
+    ) -> Result<Vec<(String, String)>, (i64, String)> {
         let next_images = next
             .items
             .iter()
@@ -10351,20 +10550,24 @@ impl Runtime {
         if removed_images.is_empty() {
             return Ok(Vec::new());
         }
-        let Some(store) = self.workbench_store.as_ref() else {
+        let Some(store) = workbench_store else {
             return Err((
                 -32125,
                 "durable image storage is unavailable for pinned context release".into(),
             ));
         };
-        let mut reference_ids = BTreeSet::new();
+        let mut references = BTreeMap::new();
         for item in removed_images {
             let session_id = item
                 .session_id
                 .as_deref()
                 .ok_or_else(|| (-32044, "pinned image session binding is invalid".to_owned()))?;
             let reference = store
-                .inspect_durable_blob_reference(project_id, Some(session_id), &item.reference)
+                .inspect_durable_blob_reference_lifecycle(
+                    project_id,
+                    Some(session_id),
+                    &item.reference,
+                )
                 .map_err(|_| {
                     (
                         -32125,
@@ -10377,9 +10580,31 @@ impl Runtime {
             {
                 return Err((-32044, "pinned image Blob release scope is invalid".into()));
             }
-            reference_ids.insert(reference.reference_id);
+            references
+                .entry(reference.reference_id)
+                .or_insert(reference.state);
         }
-        Ok(reference_ids.into_iter().collect())
+        Ok(references.into_iter().collect())
+    }
+
+    fn pinned_context_release_batch_identity(
+        project_id: &str,
+        set_identity: &str,
+        reference_ids: &[String],
+        persisted_at_ms: u64,
+    ) -> String {
+        let reference_ids = reference_ids.iter().collect::<BTreeSet<_>>();
+        let batch = serde_json::to_vec(&json!({
+            "project_id": project_id,
+            "set_identity": set_identity,
+            "reference_ids": reference_ids,
+            "persisted_at_ms": persisted_at_ms,
+        }))
+        .expect("pinned context release batch serialization");
+        format!(
+            "pinned-context-release:sha256:{}",
+            ContentHash::for_bytes(&batch).sha256
+        )
     }
 
     fn workspace_instructions(&self, request: Request) -> Vec<Value> {
