@@ -130,6 +130,12 @@ content, command output, arbitrary paths, or caller-selected PIDs. The event
 state remains explicitly caller-supplied, so a probe result must still be sent
 through `operation/reconcile` for durable review and mutation gating.
 
+With durable storage, Runtime startup scans the latest event for each
+session/operation pair, validates the event identity and evidence hash, and
+preloads the bounded reconciliation cache. The event store remains authoritative
+for request-time gating; a failed or over-limit startup scan must not be treated
+as evidence that an operation is safe.
+
 ```jsonl
 {"jsonrpc":"2.0","id":"10","method":"operation/reconcile","params":{"operation_id":"operation-1","session_id":"session-1","kind":"turn","evidence":{"event":"none","process":"not-observed","workspace":{"state":"not-required"},"git":{"state":"not-required"}}}}
 {"jsonrpc":"2.0","id":"10","result":{"schema_version":"operation-reconciliation-result/0.1","reconciliation":{"state":"unknown","writes_blocked":true,"decision":"explicit-review-required"},"durable":true,"event_sequence":8}}

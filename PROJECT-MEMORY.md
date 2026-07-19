@@ -153,6 +153,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   paths, or caller-selected PIDs. Event state remains caller-supplied and the probe
   does not persist, approve, mutate, or recover an operation; startup discovery,
   authoritative event sourcing, Qt review, and recovery actions remain open.
+- Durable Runtime startup now preloads the latest validated reconciliation event
+  for each session/operation pair into a bounded cache. The SQLite event stream
+  remains authoritative for request-time gating, and a malformed, missing, or
+  over-limit startup scan never implies that an operation is safe. This is only
+  partial startup discovery; automatic operation source registration, Qt review,
+  and recovery actions remain incomplete.
 - Task `6.6` now has a bounded read-only Session search foundation. AAP
   `session/search` filters durable Session projections by project, exact model,
   runtime, status, title, or a combined title/approved-transcript query. Transcript
@@ -660,6 +666,10 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   only runtime-owned turn/terminal state. It returns no paths/content/PIDs and
   leaves event state explicitly caller-supplied. This is evidence collection only;
   it does not write events or execute recovery.
+- On durable startup, `WorkbenchStore::load_operation_reconciliations` scans the
+  latest event for each session/operation pair, validates the content-hashed
+  evidence and identity, and hydrates the Runtime cache with a 10,000-record
+  bound. Per-request store checks remain authoritative when the cache is absent.
 
 ## Project And Session Projection Consistency And Rebuild Boundary
 

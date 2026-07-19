@@ -2112,6 +2112,21 @@ impl Runtime {
             .into_iter()
             .map(|entry| (entry.project.project_id.clone(), entry.navigation))
             .collect();
+        let operation_reconciliations = workbench_store
+            .as_ref()
+            .and_then(|store| store.load_operation_reconciliations().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|record| {
+                (
+                    Self::operation_reconciliation_key(
+                        &record.input.session_id,
+                        &record.input.operation_id,
+                    ),
+                    record.result,
+                )
+            })
+            .collect();
         Self {
             initialized: false,
             client_ready: false,
@@ -2133,7 +2148,7 @@ impl Runtime {
             cancelled_workspace_searches: HashSet::new(),
             cancelled_workspace_indexes: HashSet::new(),
             archived_sessions: HashSet::new(),
-            operation_reconciliations: HashMap::new(),
+            operation_reconciliations,
             workbench_store,
             compaction_store,
             backend,
@@ -4293,8 +4308,10 @@ impl Runtime {
         if !self.sessions.contains_key(&input.session_id) {
             return self.error_for(&request, -32023, "session does not exist");
         }
-        self.operation_reconciliations
-            .insert(input.operation_id.clone(), result.clone());
+        self.operation_reconciliations.insert(
+            Self::operation_reconciliation_key(&input.session_id, &input.operation_id),
+            result.clone(),
+        );
         self.success_for(
             &request,
             json!({
@@ -8079,6 +8096,10 @@ impl Runtime {
 
     fn workspace_scope_key(project_id: &str, root_id: &str) -> String {
         format!("{project_id}\0{root_id}")
+    }
+
+    fn operation_reconciliation_key(session_id: &str, operation_id: &str) -> String {
+        format!("{session_id}\0{operation_id}")
     }
 
     fn workspace_list(&self, request: Request) -> Vec<Value> {

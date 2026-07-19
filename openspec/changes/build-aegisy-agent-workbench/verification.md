@@ -510,6 +510,12 @@ Current editor evidence:
   probe does not persist, approve, mutate, or recover an operation. Task `6.9`
   remains unchecked until startup discovery, authoritative event sourcing, Qt
   review, and recovery actions are integrated.
+- Durable Runtime startup now scans and validates the latest
+  `operation.reconciled/0.1` event per session/operation pair into a bounded
+  cache; the SQLite event stream remains authoritative for request-time gating.
+  A malformed, missing, or over-limit scan cannot be interpreted as a safe
+  operation result. This is partial startup discovery and does not complete task
+  `6.9` without automatic operation source registration, Qt review, or recovery.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or

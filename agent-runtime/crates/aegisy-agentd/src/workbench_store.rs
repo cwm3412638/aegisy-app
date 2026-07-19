@@ -44,6 +44,7 @@ const MAX_SESSION_DELETE_PREVIEW_MEMBERS: usize = 200;
 const MAX_SESSION_DELETE_SWEEP: usize = 32;
 const MAX_SESSION_SEARCH_LIMIT: usize = 100;
 const MAX_SESSION_SEARCH_TERM_BYTES: usize = 256;
+const MAX_OPERATION_RECONCILIATIONS: usize = 10_000;
 const MAX_PORTABLE_SESSION_ITEMS: usize = 2_000;
 const MAX_PORTABLE_SESSION_BYTES: usize = 4 * 1024 * 1024;
 const DATABASE_WRITE_HEADROOM_BYTES: u64 = 8 * 1024 * 1024;
@@ -7763,6 +7764,68 @@ impl WorkbenchStore {
         Ok(None)
     }
 
+    pub fn load_operation_reconciliations(
+        &self,
+    ) -> Result<Vec<StoredOperationReconciliation>, WorkbenchStoreError> {
+        let limit = i64::try_from(MAX_OPERATION_RECONCILIATIONS + 1)
+            .map_err(|_| error("operation reconciliation limit is invalid"))?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT session_id, operation_id, MAX(sequence) AS latest_sequence
+                 FROM events
+                 WHERE event_kind = 'operation.reconciled'
+                 GROUP BY session_id, operation_id
+                 ORDER BY latest_sequence ASC
+                 LIMIT ?1",
+            )
+            .map_err(|_| error("cannot prepare operation reconciliation startup scan"))?;
+        let rows = statement
+            .query_map([limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|_| error("cannot read operation reconciliation startup scan"))?;
+        let mut latest = Vec::new();
+        for row in rows {
+            let (session_id, operation_id, sequence) =
+                row.map_err(|_| error("operation reconciliation startup row is invalid"))?;
+            latest.push((
+                session_id,
+                operation_id,
+                to_u64(sequence, "operation reconciliation event sequence")?,
+            ));
+        }
+        if latest.len() > MAX_OPERATION_RECONCILIATIONS {
+            return Err(error(
+                "operation reconciliation startup scan limit exceeded",
+            ));
+        }
+        latest
+            .into_iter()
+            .map(|(session_id, operation_id, sequence)| {
+                let event = self
+                    .read_session_events(&session_id, sequence.saturating_sub(1), 1)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| error("operation reconciliation startup event is missing"))?;
+                let record = parse_operation_reconciliation_event(&event)?;
+                if record.input.session_id != session_id
+                    || record.input.operation_id != operation_id
+                    || record.event_sequence != sequence
+                {
+                    return Err(error(
+                        "operation reconciliation startup identity is invalid",
+                    ));
+                }
+                Ok(record)
+            })
+            .collect()
+    }
+
     pub fn read_session_events(
         &self,
         session_id: &str,
@@ -12057,6 +12120,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(loaded.result, unknown_result);
+        let startup_records = reopened.load_operation_reconciliations().unwrap();
+        assert_eq!(startup_records.len(), 1);
+        assert_eq!(startup_records[0].result, unknown_result);
         let completed = ReconciliationInput {
             evidence: crate::operation_reconciliation::ReconciliationEvidence {
                 event: crate::operation_reconciliation::EventState::Completed,

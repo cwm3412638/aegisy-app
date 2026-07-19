@@ -68,6 +68,11 @@ The event state is explicitly caller-supplied until durable operation discovery
 and startup reconciliation are implemented; the probe does not approve, mutate,
 or recover an operation.
 
+When the Workbench store is available, Runtime startup preloads the latest
+validated reconciliation record for each session/operation pair. The SQLite
+event stream remains authoritative and per-request checks still fail closed if
+the startup cache is unavailable or a record cannot be validated.
+
 Codex `runtime/health` includes only process state, PID/exit metadata, restart
 recommendation, and a content-free stderr summary: observed bytes, newline count,
 redacted-line count, and the last stable class (`fatal`, `error`, `warning`,
