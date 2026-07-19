@@ -68,6 +68,11 @@ fn ready_runtime() -> Runtime {
         .as_array()
         .unwrap()
         .iter()
+        .any(|capability| capability == "turn.context.manifest"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|capability| capability == "terminal.environment.session-scoped"));
     assert!(messages[0]["result"]["capabilities"]
         .as_array()
@@ -2048,6 +2053,30 @@ fn turn_context_is_bounded_project_scoped_and_authoritatively_read() {
     ));
     assert_eq!(messages[0]["result"]["context"]["item_count"], 2);
     assert_eq!(messages[0]["result"]["context"]["truncated"], false);
+    assert_eq!(
+        messages[0]["result"]["context"]["manifest"]["schema_version"],
+        "context-manifest/0.1"
+    );
+    assert_eq!(
+        messages[0]["result"]["context"]["manifest"]["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        messages[0]["result"]["context"]["manifest"]["entries"][0]["freshness"],
+        "stale"
+    );
+    assert!(
+        messages[0]["result"]["context"]["manifest"]["entries"][0]["content_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert!(messages[0]["result"]["context"]["manifest"]["entries"][0]
+        .get("content")
+        .is_none());
     let preview = messages[4]["params"]["item"]["content"].as_str().unwrap();
     assert!(preview.contains("fn authoritative()"));
     assert!(preview.contains("stale=true"));

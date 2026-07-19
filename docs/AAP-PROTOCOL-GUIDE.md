@@ -110,6 +110,26 @@ binding is valid only when its pinned adapter version and opaque provider thread
 identity still match; otherwise the user must fork a portable, provider-neutral
 session.
 
+## Turn Context Manifest
+
+Capability `turn.context.manifest` adds a content-free manifest to the
+`turn/start` response whenever structured context is prepared. The manifest is
+`context-manifest/0.1`; each included entry carries the client item ID, kind,
+source, `pinned` priority, `untrusted-data` trust, a `sha256:` content identity,
+conservative token estimate, freshness, inclusion reason, and an `included` flag.
+File attachments are reread and validated against the registered roots before
+their hash is calculated, so a stale revision is labelled `stale`. The manifest
+does not contain attachment text, and bounded/truncated context is explicitly
+marked rather than silently treated as complete.
+
+```jsonl
+{"jsonrpc":"2.0","id":"20","method":"turn/start","params":{"session_id":"session-1","input":"Review this file","idempotency_key":"turn-1","context":[{"id":"context-file","kind":"file","label":"main.rs","origin":"file-tree","path":"main.rs","revision":"content:old"}]}}
+{"jsonrpc":"2.0","id":"20","result":{"turn":{"id":"turn-1","state":"started"},"context":{"item_count":1,"bytes":96,"truncated":false,"manifest":{"schema_version":"context-manifest/0.1","entries":[{"id":"context-file","kind":"file","source":"file-tree","priority":"pinned","trust":"untrusted-data","content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","token_size":12,"freshness":"stale","inclusion_reason":"user-selected","included":true}],"estimated_tokens":12,"truncated":false}}}}
+```
+
+This is metadata for later context budgeting and inspection, not an authority
+grant. It does not persist source content or activate compaction.
+
 ## Operation Reconciliation
 
 `operation/reconcile` accepts only content-free event, process, workspace, and Git

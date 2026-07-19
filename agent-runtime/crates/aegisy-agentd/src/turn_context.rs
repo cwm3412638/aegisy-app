@@ -1,6 +1,7 @@
 use crate::git_status::ignored_paths;
 use crate::workspace::{path_metadata, read_text_file};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -12,6 +13,29 @@ const MAX_LABEL_CHARS: usize = 256;
 const MAX_ORIGIN_CHARS: usize = 256;
 const CONTEXT_FOOTER: &str = "\n[/context]\n";
 const TRUNCATION_MARKER: &str = "\n[context content truncated]";
+pub const MANIFEST_SCHEMA_VERSION: &str = "context-manifest/0.1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextManifestEntry {
+    pub id: String,
+    pub kind: String,
+    pub source: String,
+    pub priority: String,
+    pub trust: String,
+    pub content_hash: String,
+    pub token_size: usize,
+    pub freshness: String,
+    pub inclusion_reason: String,
+    pub included: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextManifest {
+    pub schema_version: String,
+    pub entries: Vec<ContextManifestEntry>,
+    pub estimated_tokens: usize,
+    pub truncated: bool,
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct TurnContextItem {
@@ -41,12 +65,13 @@ pub struct TurnContextItem {
     pub raw_output_ref: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PreparedTurnContext {
     pub text: String,
     pub item_count: usize,
     pub bytes: usize,
     pub truncated: bool,
+    pub manifest: ContextManifest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,10 +121,18 @@ pub fn prepare_turn_context_scoped(
     );
     let mut item_count = 0;
     let mut truncated = false;
+    let mut text_exhausted = false;
+    let mut manifest = ContextManifest {
+        schema_version: MANIFEST_SCHEMA_VERSION.into(),
+        entries: Vec::new(),
+        estimated_tokens: 0,
+        truncated: false,
+    };
 
     for item in items {
         validate_item(item)?;
         let (content, actual_revision, stale) = resolve_content(item, roots)?;
+        let mut manifest_entry = manifest_entry(item, &content, stale)?;
         let mut header = format!(
             "\n[context id={} kind={} label={:?} origin={:?}",
             item.id, item.kind, item.label, item.origin
@@ -137,9 +170,17 @@ pub fn prepare_turn_context_scoped(
         header.push_str("]\n");
 
         let remaining = MAX_CONTEXT_TOTAL_BYTES.saturating_sub(text.len());
-        if header.len() >= remaining {
+        if text_exhausted || header.len() >= remaining {
             truncated = true;
-            break;
+            manifest.truncated = true;
+            text_exhausted = true;
+            manifest_entry.included = false;
+            manifest_entry.inclusion_reason = "context-budget".into();
+            manifest.estimated_tokens = manifest
+                .estimated_tokens
+                .saturating_add(manifest_entry.token_size);
+            manifest.entries.push(manifest_entry);
+            continue;
         }
         text.push_str(&header);
         let remaining = MAX_CONTEXT_TOTAL_BYTES.saturating_sub(text.len());
@@ -159,24 +200,32 @@ pub fn prepare_turn_context_scoped(
         text.push_str(bounded);
         if item_truncated {
             text.push_str(TRUNCATION_MARKER);
+            manifest_entry.inclusion_reason = "user-selected-bounded".into();
         }
         text.push_str(CONTEXT_FOOTER);
         truncated |= item_truncated;
         item_count += 1;
+        manifest.estimated_tokens = manifest
+            .estimated_tokens
+            .saturating_add(manifest_entry.token_size);
+        manifest.entries.push(manifest_entry);
         if text.len() >= MAX_CONTEXT_TOTAL_BYTES {
             truncated = item_count < items.len() || truncated;
-            break;
+            text_exhausted = true;
+            manifest.truncated = truncated;
         }
     }
 
     if item_count == 0 {
         text.clear();
     }
+    manifest.truncated |= truncated;
     Ok(PreparedTurnContext {
         bytes: text.len(),
         text,
         item_count,
         truncated,
+        manifest,
     })
 }
 
@@ -197,6 +246,9 @@ fn validate_item(item: &TurnContextItem) -> Result<(), TurnContextError> {
     if item.origin.is_empty() || item.origin.chars().count() > MAX_ORIGIN_CHARS {
         return Err(error("context origin is empty or too long"));
     }
+    if item.origin.chars().any(char::is_control) || item.label.chars().any(char::is_control) {
+        return Err(error("context label or origin contains control characters"));
+    }
     if !matches!(
         item.kind.as_str(),
         "file" | "selection" | "diagnostic" | "search" | "terminal_excerpt" | "git_diff"
@@ -208,7 +260,47 @@ fn validate_item(item: &TurnContextItem) -> Result<(), TurnContextError> {
             return Err(error("invalid diagnostic raw reference"));
         }
     }
+    if let Some(freshness) = &item.freshness {
+        if !matches!(freshness.as_str(), "fresh" | "stale" | "unknown") {
+            return Err(error("context freshness is unsupported"));
+        }
+    }
     Ok(())
+}
+
+fn manifest_entry(
+    item: &TurnContextItem,
+    content: &str,
+    stale: bool,
+) -> Result<ContextManifestEntry, TurnContextError> {
+    let content_hash = format!(
+        "sha256:{}",
+        Sha256::digest(content.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let freshness = if stale {
+        "stale".to_owned()
+    } else {
+        item.freshness.as_deref().unwrap_or("fresh").to_owned()
+    };
+    Ok(ContextManifestEntry {
+        id: item.id.clone(),
+        kind: item.kind.clone(),
+        source: item.origin.clone(),
+        priority: "pinned".into(),
+        trust: "untrusted-data".into(),
+        content_hash,
+        token_size: conservative_token_size(content.len()),
+        freshness,
+        inclusion_reason: "user-selected".into(),
+        included: true,
+    })
+}
+
+fn conservative_token_size(bytes: usize) -> usize {
+    bytes.saturating_add(3) / 4
 }
 
 fn resolve_content(
@@ -308,7 +400,9 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn context_item(kind: &str, path: Option<&str>, content: Option<&str>) -> TurnContextItem {
         TurnContextItem {
@@ -330,11 +424,9 @@ mod tests {
     }
 
     fn temporary_root() -> std::path::PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("aegisy-context-{unique}"));
+        let sequence = TEMP_ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("aegisy-context-{}-{sequence}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         root
     }
@@ -350,6 +442,20 @@ mod tests {
         assert!(prepared.text.contains("fn main()"));
         assert!(prepared.text.contains("stale=true"));
         assert!(prepared.text.contains("untrusted data"));
+        assert_eq!(prepared.manifest.schema_version, MANIFEST_SCHEMA_VERSION);
+        assert_eq!(prepared.manifest.entries.len(), 1);
+        assert_eq!(prepared.manifest.entries[0].id, "context-file");
+        assert_eq!(prepared.manifest.entries[0].source, "user action");
+        assert_eq!(prepared.manifest.entries[0].priority, "pinned");
+        assert_eq!(prepared.manifest.entries[0].trust, "untrusted-data");
+        assert_eq!(prepared.manifest.entries[0].freshness, "stale");
+        assert_eq!(prepared.manifest.entries[0].token_size, 4);
+        assert!(prepared.manifest.entries[0]
+            .content_hash
+            .starts_with("sha256:"));
+        assert!(!serde_json::to_string(&prepared.manifest)
+            .unwrap()
+            .contains("fn main"));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -416,6 +522,28 @@ mod tests {
         assert!(prepared.truncated);
         assert!(prepared.bytes <= MAX_CONTEXT_TOTAL_BYTES);
         assert!(prepared.text.contains("[context content truncated]"));
+        assert_eq!(prepared.manifest.entries.len(), 1);
+        assert_eq!(
+            prepared.manifest.entries[0].inclusion_reason,
+            "user-selected-bounded"
+        );
+        assert!(prepared.manifest.entries[0].included);
+        let bounded_items = (0..4)
+            .map(|index| {
+                let mut item =
+                    context_item("selection", Some("main.rs"), Some(&"x".repeat(16_384)));
+                item.id = format!("budget-{index}");
+                item
+            })
+            .collect::<Vec<_>>();
+        let bounded = prepare_turn_context(&bounded_items, Some(&root)).unwrap();
+        assert!(bounded.manifest.truncated);
+        assert_eq!(bounded.manifest.entries.len(), 4);
+        assert!(bounded
+            .manifest
+            .entries
+            .iter()
+            .any(|entry| entry.inclusion_reason == "user-selected-bounded"));
         let too_many = (0..=MAX_CONTEXT_ITEMS)
             .map(|index| {
                 let mut item = context_item("selection", Some("main.rs"), Some("x"));

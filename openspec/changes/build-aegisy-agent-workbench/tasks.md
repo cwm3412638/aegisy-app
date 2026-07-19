@@ -364,6 +364,7 @@
 ## 17. Context Engine and Compaction
 
 - [ ] 17.1 Define context manifest entry schema with source, priority, trust, hash, token size, freshness, and inclusion reason
+  - Partial manifest foundation: capability `turn.context.manifest` returns `context-manifest/0.1` metadata for each bounded, root-validated turn attachment. Entries include source, kind, pinned priority, untrusted-data trust, SHA-256 content identity, conservative four-byte token estimate, freshness, inclusion reason, and included state; the manifest never contains attachment text. Stale revisions are labelled `stale`, bounded items use an explicit reason, and manifest truncation is fail-closed. Keep this task unchecked until instruction discovery, budget allocation, context inspection, provider-aware token accounting, and cross-provider scale evidence consume the same manifest authority.
 - [ ] 17.2 Implement deterministic instruction discovery and precedence for managed, user, project, and nested files
 - [ ] 17.3 Implement pinned context for files, selections, images, diagnostics, terminal excerpts, Git commits/diffs, artifacts, and child handoffs
 - [ ] 17.4 Implement token-budget allocation across instructions, task state, recent turns, tool results, pinned context, search, and repository map

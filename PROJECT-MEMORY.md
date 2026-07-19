@@ -234,6 +234,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   controls. File-tree, editor-selection, search-result, diagnostic, terminal-
   excerpt, and Git-diff actions produce structured `turn/start` context rather
   than silently concatenating UI text into a prompt.
+- OpenSpec task `17.1` now has a partial `context-manifest/0.1` foundation. The
+  `turn.context.manifest` capability adds content-free entries to `turn/start`
+  responses with source/kind, pinned priority, untrusted-data trust, SHA-256
+  content identity, conservative token estimates, freshness, inclusion reason,
+  and included state. File attachments are hashed only after the existing root,
+  ignore, symlink, and stale checks; truncation is explicit and the manifest never
+  contains attachment text. Instruction discovery, budget allocation, tokenizer
+  authority, context inspection, and provider-scale evidence remain open, so
+  `17.1` is not complete.
 - User-initiated macOS PTY execution, the named lifecycle, and the Qt/xterm.js
   terminal frontend are verified; Windows ConPTY is implemented but not yet
   runtime-verified. Read-only Codex command events now have a partial structured
@@ -594,7 +603,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 268 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 269 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 43 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
@@ -994,6 +1003,14 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
 - AAP capability `turn.context.structured` adds typed context to `turn/start` for
   files, editor selections, diagnostics, search results, terminal excerpts, and
   Git diffs. The user-visible prompt remains separate from context evidence.
+- Capability `turn.context.manifest` adds a `context-manifest/0.1` object to the
+  `turn/start` response. Entries are bounded and content-free: source/kind,
+  `pinned` priority, `untrusted-data` trust, a lowercase SHA-256 identity,
+  conservative four-byte token estimate, freshness, inclusion reason, and
+  included state. The hash is computed from the authoritative post-validation
+  attachment; stale file revisions are labelled `stale`, and omitted/truncated
+  context is never implied complete. The manifest is not persisted as source text
+  and does not grant authority or activate compaction.
 - One turn accepts at most 16 items. Rendered content is limited to 16 KiB per
   item and the complete context envelope to 64 KiB, including metadata and
   explicit truncation markers. Client-supplied inline content is also rejected

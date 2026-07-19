@@ -2804,6 +2804,7 @@ impl Runtime {
                 "session.work.preview".into(),
                 "timeline.streaming".into(),
                 "turn.context.structured".into(),
+                "turn.context.manifest".into(),
                 "permission.read-only".into(),
                 "workspace.list".into(),
                 "workspace.read-text".into(),
@@ -6952,7 +6953,8 @@ impl Runtime {
                                     "context": {
                                         "item_count": prepared_context.item_count,
                                         "bytes": prepared_context.bytes,
-                                        "truncated": prepared_context.truncated
+                                        "truncated": prepared_context.truncated,
+                                        "manifest": prepared_context.manifest
                                     }
                                 }),
                             ))
@@ -7525,7 +7527,8 @@ impl Runtime {
                     "context": {
                         "item_count": prepared_context.item_count,
                         "bytes": prepared_context.bytes,
-                        "truncated": prepared_context.truncated
+                        "truncated": prepared_context.truncated,
+                        "manifest": prepared_context.manifest
                     }
                 }),
             ))

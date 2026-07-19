@@ -32,6 +32,8 @@ or session methods are accepted.
 - `project/trust-acknowledge` (user review record only; grants no execution authority)
 - `session/start`
 - `turn/start`
+- `session/compaction/checkpoint/create`, `read`, and immutable `revise` (manual
+  review only; activation and provider compact remain unavailable)
 - `turn/steer` (Codex only; same-turn, identity-scoped)
 - `session/search` (bounded local Session metadata and approved transcript fields)
 - `operation/probe` (session-bound, read-only workspace/Git/runtime evidence probe)
@@ -59,6 +61,12 @@ contracts are complete.
 Clients can query `runtime/degradations` to render disabled or metadata-only
 features explicitly. This is authoritative capability state, not a request to
 silently fall back to a mutating or provider-opaque implementation.
+
+When structured context is attached to `turn/start`, capability
+`turn.context.manifest` adds a `context-manifest/0.1` object to the immediate
+response. It contains only bounded source/kind, priority, trust, SHA-256,
+conservative token, freshness, inclusion, and truncation metadata; attachment
+text is never copied into the manifest.
 
 `operation/probe` is a read-only evidence collector for the reconciliation
 workflow. It resolves only registered project roots through the Work session,

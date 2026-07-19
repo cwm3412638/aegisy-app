@@ -549,6 +549,13 @@ Current editor evidence:
   revision signal dispatch. No activation, provider compact, startup compensation, or
   model-generated summary producer is exposed;
   task `6.10` remains unchecked.
+- The partial `context-manifest/0.1` foundation is emitted with `turn/start` when
+  structured context is present. It records only bounded source/kind/priority/
+  trust/hash/token/freshness/inclusion metadata, labels stale file revisions,
+  exposes `turn.context.manifest`, and never includes attachment text. Rust unit
+  and protocol fixtures verify deterministic metadata, conservative token sizing,
+  truncation, and absence of a `content` field; task `17.1` remains unchecked until
+  instruction, budget, inspector, tokenizer, and provider-scale consumers exist.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or
