@@ -146,8 +146,9 @@ tokenizer authority, and provider context windows are not yet budget consumers.
 
 Capability `turn.context.inspect` exposes the read-only
 `turn/context/inspect` preflight. It uses the same session-root validation,
-instruction discovery, stale checks, and `context-budget/0.1` allocator as
-`turn/start`, but never calls a model or persists history. The versioned
+explicit selected-pin resolution, instruction discovery, stale checks, and
+`context-budget/0.1` allocator as `turn/start`, but never calls a model or
+persists history. The versioned
 `context-inspector/0.1` response contains only manifest/budget metadata and
 explicit `content_included:false`, `model_started:false`, and `persisted:false`
 flags. Source and instruction bodies are never returned. The Qt Work composer
@@ -220,11 +221,26 @@ newer set. Removing the final item writes a valid empty set with a new identity;
 the next list therefore distinguishes an intentional empty set from a project
 that has never stored pins.
 
+Capability `turn.context.pinned-selected` indicates that `turn/start` and
+`turn/context/inspect` accept `pinned_context_set_identity` together with an
+explicit `pinned_context_ids` list. The runtime never sends all persisted pins
+implicitly. A non-empty selection requires the exact current set identity,
+contains at most 16 unique IDs, and is revalidated against the current project,
+session, and registered root. The first assembly phase accepts only `file` pins;
+all other descriptor kinds fail explicitly instead of becoming unverified inline
+content. The metadata-only descriptor supplies a root-relative path, expected
+raw-byte SHA-256, revision, freshness, and priority. Both inspect and start then
+use the normal authoritative file resolver: it rereads the file, reapplies
+ignore/sensitive/symlink/root policy, hashes the raw bytes, and marks a hash or
+revision change `stale`. Only normalized UTF-8 text enters the bounded untrusted
+context envelope, and the inspector still returns metadata only.
+
 ```jsonl
 {"jsonrpc":"2.0","id":"30","method":"workspace/pinned-context/list","params":{"project_id":"project-1"}}
 {"jsonrpc":"2.0","id":"30","result":{"schema_version":"pinned-context/0.1","project_id":"project-1","set_identity":null,"items":[],"persisted":false,"content_bodies_included":false}}
 {"jsonrpc":"2.0","id":"31","method":"workspace/pinned-context/save","params":{"project_id":"project-1","set":{"schema_version":"pinned-context/0.1","project_id":"project-1","items":[{"id":"pin-file","project_id":"project-1","root_id":"root-1","kind":"file","source":"file-tree","label":"src/main.rs","reference":"src/main.rs","content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":32,"freshness":"fresh","priority":850,"metadata":{}}]},"expected_set_identity":null}}
 {"jsonrpc":"2.0","id":"31","result":{"schema_version":"pinned-context/0.1","project_id":"project-1","set_identity":"pinned-context:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","items":[{"id":"pin-file","project_id":"project-1","root_id":"root-1","kind":"file","source":"file-tree","label":"src/main.rs","reference":"src/main.rs","content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":32,"freshness":"fresh","priority":850,"metadata":{}}],"persisted":true,"content_bodies_included":false}}
+{"jsonrpc":"2.0","id":"32","method":"turn/context/inspect","params":{"session_id":"session-1","pinned_context_set_identity":"pinned-context:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pinned_context_ids":["pin-file"]}}
 ```
 
 The project pointer, immutable object, and Workbench SQLite event are separate
@@ -234,9 +250,12 @@ event append returns an incomplete-save error, and a failed pointer replacement
 may leave a preserved unreferenced object. This does not claim cross-resource
 atomicity. When a descriptor uses a standard `*:sha256:` Blob reference, save
 checks active SQLite metadata for exact project/session ownership, hash, and
-byte count without reading Blob bytes or updating access time. Source
-reread/invalidation, orphan GC, turn assembly, Qt pin controls, and Windows
-runtime evidence remain open. Agent/Codex remains read-only.
+byte count without reading Blob bytes or updating access time. File pins now
+have explicit selected turn assembly and authoritative reread/stale detection;
+selection/image/diagnostic/terminal/Git/artifact/child-handoff assembly,
+automatic invalidation, orphan GC, Qt pin/order/inclusion controls,
+cross-resource atomicity, and Windows runtime evidence remain open.
+Agent/Codex remains read-only.
 
 ## Operation Reconciliation
 

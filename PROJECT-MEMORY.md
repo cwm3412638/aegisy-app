@@ -297,10 +297,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   idempotency, stale-write rejection, and no body fields. A successful save or
   remove appends `project.pinned-context-updated/0.1` after immutable
   object publication; the two resources are deliberately not one transaction,
-  and event failure is reported as an incomplete save. This foundation still
-  has no cross-resource atomicity, Blob body/reference lifecycle binding,
-  authoritative source reread/invalidation, turn assembly, orphan GC, or Qt
-  pin/unpin surface; keep `17.3` unchecked.
+  and event failure is reported as an incomplete save. Capability
+  `turn.context.pinned-selected` now lets `turn/context/inspect` and `turn/start`
+  consume only explicit selected file-pin IDs together with the exact current
+  set identity. Selection is capped at 16 unique IDs; project/session/root
+  bindings and file policy are rechecked. Both paths share authoritative file
+  reread, raw-byte SHA-256/revision stale detection, bounded untrusted context,
+  and metadata-only inspection. Non-file pin kinds fail closed. This foundation
+  still has no cross-resource atomicity, Blob body/reference lifecycle binding,
+  automatic source invalidation, orphan GC, other-kind assembly, or Qt pin/unpin/
+  order/inclusion surface; keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
   auto-discovered instructions. Instruction precedence ranks and pinned priority
@@ -683,8 +689,8 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 286 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 48 Rust
+Current verified baseline: 16 desktop tests, 289 passed Rust sidecar unit tests plus
+one explicitly ignored live Codex fixture, 49 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -1126,8 +1132,14 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   with project/root/session validation and compare-and-swap identity checks;
   standard `*:sha256:` Blob references receive a read-only SQLite metadata
   ownership/hash/byte check, and save records the separate metadata-only
-  project event. No cross-resource Workbench event/Blob authority or turn
-  assembly consumes the set yet; the composer queue remains transient.
+  project event. `turn/context/inspect` and `turn/start` can consume only an
+  explicit reviewed list of file-pin IDs plus the exact current set identity;
+  they never include every persisted pin automatically. Files are reread through
+  the normal root/policy resolver and raw-byte hash or revision drift is marked
+  stale before the same budget/manifest path is used. Other pin kinds, Qt
+  pin/order/inclusion controls, cross-resource Workbench event/Blob authority,
+  automatic invalidation, and orphan GC remain unavailable; the composer queue
+  is otherwise transient.
 
 ## Workspace Edit Boundary
 

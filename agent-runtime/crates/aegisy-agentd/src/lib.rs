@@ -863,6 +863,10 @@ struct TurnStartParams {
     idempotency_key: String,
     #[serde(default)]
     context: Vec<TurnContextItem>,
+    #[serde(default)]
+    pinned_context_set_identity: Option<String>,
+    #[serde(default)]
+    pinned_context_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -870,6 +874,10 @@ struct TurnContextInspectParams {
     session_id: String,
     #[serde(default)]
     context: Vec<TurnContextItem>,
+    #[serde(default)]
+    pinned_context_set_identity: Option<String>,
+    #[serde(default)]
+    pinned_context_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2907,6 +2915,7 @@ impl Runtime {
                 capabilities.extend([
                     "workspace.pinned-context.store".into(),
                     "workspace.pinned-context.manage".into(),
+                    "turn.context.pinned-selected".into(),
                 ]);
             }
         }
@@ -6930,6 +6939,7 @@ impl Runtime {
                 path: None,
                 content: if can_include { content } else { None },
                 revision: entry.revision,
+                expected_content_hash: None,
                 line: None,
                 column: None,
                 end_line: None,
@@ -6949,6 +6959,144 @@ impl Runtime {
                 added += 1;
                 added_bytes = added_bytes.saturating_add(entry.bytes);
             }
+        }
+        Ok(())
+    }
+
+    /// Resolve only the explicitly selected persisted pins. The descriptor is
+    /// metadata-only; file contents are reread by the normal turn-context
+    /// resolver after root, ignore, symlink, and stale checks.
+    fn append_pinned_context(
+        &self,
+        session_id: &str,
+        set_identity: Option<&str>,
+        ids: &[String],
+        context_items: &mut Vec<TurnContextItem>,
+    ) -> Result<(), (i64, String)> {
+        if ids.is_empty() {
+            if set_identity.is_some() {
+                return Err((
+                    -32602,
+                    "pinned_context_set_identity requires explicit pinned_context_ids".into(),
+                ));
+            }
+            return Ok(());
+        }
+        if ids.len() > turn_context::MAX_CONTEXT_ITEMS {
+            return Err((
+                -32602,
+                format!(
+                    "pinned context exceeds {} selected item limit",
+                    turn_context::MAX_CONTEXT_ITEMS
+                ),
+            ));
+        }
+        let Some(expected_identity) = set_identity else {
+            return Err((
+                -32602,
+                "pinned_context_ids requires pinned_context_set_identity".into(),
+            ));
+        };
+        let Some(state) = self.sessions.get(session_id) else {
+            return Err((-32023, "session not found".into()));
+        };
+        let Some(project_id) = state.session.project_id.as_deref() else {
+            return Err((
+                -32095,
+                "pinned context requires a project-bound session".into(),
+            ));
+        };
+        if context_items.len().saturating_add(ids.len()) > turn_context::MAX_CONTEXT_ITEMS {
+            return Err((
+                -32602,
+                format!(
+                    "turn context exceeds {} item limit after pinned context",
+                    turn_context::MAX_CONTEXT_ITEMS
+                ),
+            ));
+        }
+        let mut unique_ids = HashSet::with_capacity(ids.len());
+        for id in ids {
+            if id.is_empty()
+                || id.len() > 128
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
+                || !unique_ids.insert(id.as_str())
+            {
+                return Err((
+                    -32602,
+                    "pinned context item ID is invalid or duplicated".into(),
+                ));
+            }
+        }
+        let Some(store) = self.pinned_context_store.as_ref() else {
+            return Err((-32122, "pinned context store unavailable".into()));
+        };
+        let loaded = store
+            .load_optional(project_id)
+            .map_err(|error| (-32123, error.code.to_owned()))?;
+        let Some((set, descriptor)) = loaded else {
+            return Err((-32046, "pinned context set not found".into()));
+        };
+        if descriptor.set_identity != expected_identity {
+            return Err((
+                -32041,
+                "pinned context changed since the reviewed identity".into(),
+            ));
+        }
+        let mut selected = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(item) = set.items.iter().find(|item| item.id == *id).cloned() else {
+                return Err((-32046, "pinned context item not found".into()));
+            };
+            if item
+                .session_id
+                .as_deref()
+                .is_some_and(|owner| owner != session_id)
+            {
+                return Err((
+                    -32095,
+                    "pinned context item is bound to another session".into(),
+                ));
+            }
+            if item.kind != "file" {
+                return Err((
+                    -32048,
+                    "only file pinned context is available in turn assembly".into(),
+                ));
+            }
+            let root_id = item.root_id.clone().unwrap_or_else(|| "root-1".into());
+            self.workspace_root_binding(project_id, Some(&root_id), false)?;
+            if context_items.iter().any(|context| context.id == item.id) {
+                return Err((
+                    -32602,
+                    "pinned context item ID duplicates explicit context".into(),
+                ));
+            }
+            selected.push((item, root_id));
+        }
+        for (item, root_id) in selected {
+            context_items.push(TurnContextItem {
+                id: item.id,
+                kind: "file".into(),
+                label: item.label,
+                origin: "pinned-context".into(),
+                root_id: Some(root_id),
+                path: Some(item.reference),
+                content: None,
+                revision: item.revision,
+                expected_content_hash: Some(item.content_hash),
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                freshness: Some(item.freshness),
+                raw_output_ref: None,
+                priority: Some(format!("pinned-priority-{}", item.priority)),
+                inclusion_reason: Some("pinned-context".into()),
+                exclusion_reason: None,
+            });
         }
         Ok(())
     }
@@ -6986,6 +7134,14 @@ impl Runtime {
                 .collect::<HashMap<_, _>>()
         });
         let mut context_items = params.context;
+        if let Err((code, message)) = self.append_pinned_context(
+            &params.session_id,
+            params.pinned_context_set_identity.as_deref(),
+            &params.pinned_context_ids,
+            &mut context_items,
+        ) {
+            return self.error_for(&request, code, message);
+        }
         if let Some(context_roots) = context_roots.as_ref() {
             if let Err((code, message)) =
                 self.append_instruction_context(context_roots, &mut context_items)
@@ -7088,6 +7244,15 @@ impl Runtime {
                 .collect::<HashMap<_, _>>()
         });
         let mut context_items = params.context.clone();
+        if let Err((code, message)) = self.append_pinned_context(
+            &params.session_id,
+            params.pinned_context_set_identity.as_deref(),
+            &params.pinned_context_ids,
+            &mut context_items,
+        ) {
+            self.emit_all(self.error_for(&request, code, message), emit);
+            return;
+        }
         if let Some(context_roots) = context_roots.as_ref() {
             if let Err((code, message)) =
                 self.append_instruction_context(context_roots, &mut context_items)

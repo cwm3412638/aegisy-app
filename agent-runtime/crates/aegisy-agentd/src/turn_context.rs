@@ -1,6 +1,8 @@
 use crate::context_budget::{allocate, BudgetInput, BudgetPlan};
 use crate::git_status::ignored_paths;
-use crate::workspace::{path_metadata, read_text_file};
+#[cfg(test)]
+use crate::workspace::read_text_file;
+use crate::workspace::{path_metadata, read_text_file_with_bytes};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -52,6 +54,8 @@ pub struct TurnContextItem {
     pub content: Option<String>,
     #[serde(default)]
     pub revision: Option<String>,
+    #[serde(default)]
+    pub expected_content_hash: Option<String>,
     #[serde(default)]
     pub line: Option<usize>,
     #[serde(default)]
@@ -345,6 +349,18 @@ fn validate_item(item: &TurnContextItem) -> Result<(), TurnContextError> {
             return Err(error("invalid diagnostic raw reference"));
         }
     }
+    if let Some(content_hash) = item.expected_content_hash.as_deref() {
+        let Some(digest) = content_hash.strip_prefix("sha256:") else {
+            return Err(error("expected context content hash is invalid"));
+        };
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(error("expected context content hash is invalid"));
+        }
+    }
     if let Some(freshness) = &item.freshness {
         if !matches!(freshness.as_str(), "fresh" | "stale" | "unknown") {
             return Err(error("context freshness is unsupported"));
@@ -408,15 +424,33 @@ fn resolve_content(
         let root = selected_root()?;
         let path = required_path(item)?;
         validate_project_path(root, path)?;
-        let file = read_text_file(root, path).map_err(|cause| TurnContextError {
-            code: cause.code,
-            message: cause.message,
-        })?;
-        let stale = item
+        let (file, raw_bytes) =
+            read_text_file_with_bytes(root, path).map_err(|cause| TurnContextError {
+                code: cause.code,
+                message: cause.message,
+            })?;
+        let revision_stale = item
             .revision
             .as_deref()
             .is_some_and(|revision| revision != file.revision);
-        return Ok((file.content, Some(file.revision), stale));
+        let hash_stale = item
+            .expected_content_hash
+            .as_deref()
+            .is_some_and(|expected| {
+                expected
+                    != format!(
+                        "sha256:{}",
+                        Sha256::digest(&raw_bytes)
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                    )
+            });
+        return Ok((
+            file.content,
+            Some(file.revision),
+            revision_stale || hash_stale,
+        ));
     }
 
     if let Some(path) = item.path.as_deref() {
@@ -503,6 +537,7 @@ mod tests {
             path: path.map(str::to_owned),
             content: content.map(str::to_owned),
             revision: None,
+            expected_content_hash: None,
             line: Some(1),
             column: Some(1),
             end_line: None,
@@ -548,6 +583,34 @@ mod tests {
         assert!(!serde_json::to_string(&prepared.manifest)
             .unwrap()
             .contains("fn main"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn marks_reread_file_stale_when_expected_content_hash_changed() {
+        let root = temporary_root();
+        fs::write(root.join("main.rs"), "fn current() {}\n").unwrap();
+        let mut item = context_item("file", Some("main.rs"), None);
+        item.expected_content_hash = Some(format!("sha256:{}", "0".repeat(64)));
+        let prepared = prepare_turn_context(&[item], Some(&root)).unwrap();
+        assert_eq!(prepared.item_count, 1);
+        assert_eq!(prepared.manifest.entries[0].freshness, "stale");
+        assert!(prepared.text.contains("fn current"));
+        assert!(prepared.text.contains("stale=true"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compares_expected_file_hash_with_raw_bom_and_crlf_bytes() {
+        let root = temporary_root();
+        let raw = b"\xef\xbb\xbffn raw() {}\r\n";
+        fs::write(root.join("main.rs"), raw).unwrap();
+        let mut item = context_item("file", Some("main.rs"), None);
+        item.expected_content_hash = Some(format!("sha256:{:x}", Sha256::digest(raw)));
+        let prepared = prepare_turn_context(&[item], Some(&root)).unwrap();
+        assert_eq!(prepared.manifest.entries[0].freshness, "fresh");
+        assert!(prepared.text.contains("fn raw() {}\n"));
+        assert!(!prepared.text.contains("stale=true"));
         fs::remove_dir_all(root).unwrap();
     }
 

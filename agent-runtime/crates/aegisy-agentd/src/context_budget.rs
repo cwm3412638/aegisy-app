@@ -103,7 +103,9 @@ pub fn allocate(
 fn context_class(priority: Option<&str>) -> String {
     if priority.is_some_and(|value| value.starts_with("instruction-rank-")) {
         "instruction".into()
-    } else if priority == Some("pinned") {
+    } else if priority == Some("pinned")
+        || priority.is_some_and(|value| value.starts_with("pinned-priority-"))
+    {
         "pinned".into()
     } else {
         "context".into()
@@ -119,6 +121,9 @@ fn priority_score(priority: Option<&str>) -> u32 {
     }
     if priority == "pinned" {
         return 850;
+    }
+    if let Some(rank) = priority.strip_prefix("pinned-priority-") {
+        return rank.parse::<u32>().unwrap_or(850).min(1_000);
     }
     500
 }
@@ -162,6 +167,32 @@ mod tests {
         assert_eq!(plan.entries[2].allocated_bytes, 0);
         assert_eq!(plan.entries[2].reason, "context-budget");
         assert!(plan.truncated);
+    }
+
+    #[test]
+    fn selected_pin_priority_remains_a_pinned_budget_class() {
+        let plan = allocate(
+            &[
+                BudgetInput {
+                    id: "ordinary",
+                    priority: None,
+                    requested_bytes: 8,
+                    excluded: false,
+                },
+                BudgetInput {
+                    id: "selected-pin",
+                    priority: Some("pinned-priority-900"),
+                    requested_bytes: 8,
+                    excluded: false,
+                },
+            ],
+            8,
+            8,
+        );
+        assert_eq!(plan.entries[0].allocated_bytes, 0);
+        assert_eq!(plan.entries[1].class, "pinned");
+        assert_eq!(plan.entries[1].priority_score, 900);
+        assert_eq!(plan.entries[1].allocated_bytes, 8);
     }
 
     #[test]

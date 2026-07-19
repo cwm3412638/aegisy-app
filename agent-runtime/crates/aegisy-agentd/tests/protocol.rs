@@ -1347,6 +1347,11 @@ fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
         .unwrap()
         .iter()
         .any(|capability| capability == "workspace.pinned-context.store"));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "turn.context.pinned-selected"));
     runtime.handle_line(&request("initialized", "initialized", json!({})));
     let opened = runtime.handle_line(&request(
         "project-open",
@@ -2587,6 +2592,205 @@ fn context_inspector_is_read_only_and_does_not_return_instruction_content() {
     assert!(!serialized.contains("do not expose this instruction body"));
     assert!(!serialized.contains("fn inspectable"));
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-pinned-turn-{unique}"));
+    let data_root = root.join("data");
+    let project_root = root.join("project");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    let original = "fn pinned_original() {}\n";
+    fs::write(project_root.join("pinned.rs"), original).unwrap();
+
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "pinned-turn", "version": "1"}
+        }),
+    ));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    let opened = runtime.handle_line(&request(
+        "project-open",
+        "project/open",
+        json!({"root": project_root}),
+    ));
+    let project_id = opened[0]["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let session = runtime.handle_line(&request(
+        "session-start",
+        "session/start",
+        json!({"mode": "work", "project_id": project_id}),
+    ));
+    let session_id = session[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second = runtime.handle_line(&request(
+        "session-second",
+        "session/start",
+        json!({"mode": "work", "project_id": project_id}),
+    ));
+    let second_session_id = second[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let original_hash = format!("sha256:{:x}", Sha256::digest(original.as_bytes()));
+    let set = json!({
+        "schema_version": "pinned-context/0.1",
+        "project_id": project_id,
+        "items": [{
+            "id": "pin-file",
+            "project_id": project_id,
+            "session_id": session_id,
+            "root_id": "root-1",
+            "kind": "file",
+            "source": "file-tree",
+            "label": "pinned.rs",
+            "reference": "pinned.rs",
+            "content_hash": original_hash,
+            "bytes": original.len(),
+            "freshness": "fresh",
+            "priority": 900,
+            "metadata": {}
+        }, {
+            "id": "pin-selection",
+            "project_id": project_id,
+            "session_id": session_id,
+            "root_id": "root-1",
+            "kind": "selection",
+            "source": "editor-selection",
+            "label": "selection",
+            "reference": "pinned.rs",
+            "content_hash": format!("sha256:{}", "0".repeat(64)),
+            "bytes": 4,
+            "freshness": "fresh",
+            "priority": 800,
+            "metadata": {}
+        }]
+    });
+    let saved = runtime.handle_line(&request(
+        "pins-save",
+        "workspace/pinned-context/save",
+        json!({"project_id": project_id, "set": set}),
+    ));
+    assert_eq!(saved[0]["result"]["persisted"], true);
+    let set_identity = saved[0]["result"]["set_identity"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let inspected = runtime.handle_line(&request(
+        "inspect-pin",
+        "turn/context/inspect",
+        json!({
+            "session_id": session_id,
+            "pinned_context_set_identity": set_identity,
+            "pinned_context_ids": ["pin-file"]
+        }),
+    ));
+    let inspected_entry = &inspected[0]["result"]["context"]["manifest"]["entries"][0];
+    assert_eq!(inspected_entry["id"], "pin-file");
+    assert_eq!(inspected_entry["source"], "pinned-context");
+    assert_eq!(inspected_entry["priority"], "pinned-priority-900");
+    assert_eq!(inspected_entry["inclusion_reason"], "pinned-context");
+    assert_eq!(inspected_entry["freshness"], "fresh");
+    assert_eq!(inspected_entry["content_hash"], original_hash);
+    assert_eq!(
+        inspected[0]["result"]["context"]["budget"]["entries"][0]["class"],
+        "pinned"
+    );
+    assert_eq!(
+        inspected[0]["result"]["context"]["budget"]["entries"][0]["priority_score"],
+        900
+    );
+    assert!(!serde_json::to_string(&inspected)
+        .unwrap()
+        .contains("pinned_original"));
+
+    let wrong_identity = runtime.handle_line(&request(
+        "inspect-stale-set",
+        "turn/context/inspect",
+        json!({
+            "session_id": session_id,
+            "pinned_context_set_identity": format!("pinned-context:sha256:{}", "f".repeat(64)),
+            "pinned_context_ids": ["pin-file"]
+        }),
+    ));
+    assert_eq!(wrong_identity[0]["error"]["code"], -32041);
+    let duplicate = runtime.handle_line(&request(
+        "inspect-duplicate",
+        "turn/context/inspect",
+        json!({
+            "session_id": session_id,
+            "pinned_context_set_identity": set_identity,
+            "pinned_context_ids": ["pin-file", "pin-file"]
+        }),
+    ));
+    assert_eq!(duplicate[0]["error"]["code"], -32602);
+    let missing = runtime.handle_line(&request(
+        "inspect-missing",
+        "turn/context/inspect",
+        json!({
+            "session_id": session_id,
+            "pinned_context_set_identity": set_identity,
+            "pinned_context_ids": ["pin-missing"]
+        }),
+    ));
+    assert_eq!(missing[0]["error"]["code"], -32046);
+    let unsupported = runtime.handle_line(&request(
+        "inspect-selection",
+        "turn/context/inspect",
+        json!({
+            "session_id": session_id,
+            "pinned_context_set_identity": set_identity,
+            "pinned_context_ids": ["pin-selection"]
+        }),
+    ));
+    assert_eq!(unsupported[0]["error"]["code"], -32048);
+    let cross_session = runtime.handle_line(&request(
+        "inspect-cross-session",
+        "turn/context/inspect",
+        json!({
+            "session_id": second_session_id,
+            "pinned_context_set_identity": set_identity,
+            "pinned_context_ids": ["pin-file"]
+        }),
+    ));
+    assert_eq!(cross_session[0]["error"]["code"], -32095);
+
+    let changed = "fn pinned_changed() {}\n";
+    fs::write(project_root.join("pinned.rs"), changed).unwrap();
+    let turn = runtime.handle_line(&request(
+        "turn-pin",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "inspect the selected pin",
+            "idempotency_key": "pinned-turn-1",
+            "pinned_context_set_identity": set_identity,
+            "pinned_context_ids": ["pin-file"]
+        }),
+    ));
+    assert_eq!(turn[0]["result"]["context"]["item_count"], 1);
+    assert_eq!(
+        turn[0]["result"]["context"]["manifest"]["entries"][0]["freshness"],
+        "stale"
+    );
+    let serialized = serde_json::to_string(&turn).unwrap();
+    assert!(serialized.contains("pinned_changed"));
+    assert!(!serialized.contains("pinned_original"));
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

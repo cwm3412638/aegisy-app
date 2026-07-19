@@ -698,7 +698,7 @@ Current editor evidence:
   project-directory removal, case-insensitive credential masking, dangerous loader
   variable rejection, value/count limits, deterministic session identity, explicit
   terminal derivation, and value-free AAP metadata.
-- Two hundred and forty-six Rust sidecar unit tests, thirty-six AAP protocol tests,
+- Two hundred and eighty-nine Rust sidecar unit tests, forty-nine AAP protocol tests,
   eleven sidecar stdio/Codex contract tests, and sixteen desktop CTest tests pass;
   Clippy passes with warnings denied.
 
@@ -759,14 +759,20 @@ Known limitations:
   incomplete. Standard `*:sha256:` Blob references are checked through a
   read-only metadata query for active project/session ownership and exact
   hash/byte identity; no Blob body is read and no access timestamp is updated.
-  Source reread, turn assembly, and Qt pin/unpin/order surface remain incomplete; task
-  17.3 remains unchecked.
+  Capability `turn.context.pinned-selected` now binds an explicit selected file-pin
+  ID list to the exact current set identity for both `turn/context/inspect` and
+  `turn/start`. The shared resolver rechecks project/session/root scope, rereads the
+  file under workspace policy, compares raw-byte SHA-256 and revision, marks drift
+  stale, and keeps inspection metadata-only. Duplicate/missing IDs, stale set
+  identity, cross-session selection, and non-file kinds fail explicitly. Qt
+  pin/unpin/order/inclusion and non-file assembly remain incomplete; task 17.3
+  remains unchecked.
 - `pinned-context-store/0.1` persists metadata-only sets using private immutable
   content-addressed objects and atomic project-pointer replacement. Store fixtures
   cover reopen/update, idempotency, absence of a content body field, retained old
   objects, object/pointer tampering, update refusal on damaged current authority,
   and symlinked-layout denial. Cross-resource event/object/Blob atomicity, Blob
-  release/lifecycle binding, orphan GC, authoritative source rereads, Windows
-  execution, and turn assembly remain open.
+  release/lifecycle binding, orphan GC, automatic source invalidation, Windows
+  execution, non-file assembly, and the Qt surface remain open.
 - Windows packaging, TLS runtime, scaling, IME, and accessibility evidence remain
   required before a Windows release claim.
