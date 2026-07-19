@@ -1131,6 +1131,7 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
     let command_output = receive_until(&receiver, |message| {
         message["id"] == "diagnostic-command-output"
     });
+    assert_eq!(command_output["result"]["session_id"], session_id);
     assert!(command_output["result"]["content"]
         .as_str()
         .unwrap()

@@ -102,6 +102,8 @@ private:
     void addSelectedFileContext();
     void pinSelectedFileContext();
     void pinEditorSelectionContext();
+    bool canPinCommandArtifact(const QJsonObject &artifact, QString *reason = nullptr) const;
+    void pinCommandArtifact(const QJsonObject &artifact);
     void finishPinnedFileRead(const QJsonObject &file);
     void requestPinnedContext();
     void applyPinnedContextResult(const QJsonObject &result);

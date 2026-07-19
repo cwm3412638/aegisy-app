@@ -221,6 +221,18 @@ newer set. Removing the final item writes a valid empty set with a new identity;
 the next list therefore distinguishes an intentional empty set from a project
 that has never stored pins.
 
+`artifact/read-command-output` remains session-scoped and returns the validated
+text Artifact together with an additive `session_id` binding field. Clients must
+not infer ownership from the timeline item or request correlation ID. The Qt
+read-only Artifact dialog uses that field for an explicit `固定完整输出` action:
+only a matching active project-bound Work session may submit a metadata-only
+`artifact` descriptor through `workspace/pinned-context/save`, with
+`source:"command-output"`, the exact `command-output:sha256:` reference,
+`content_hash`, retained UTF-8 byte count, priority `700`, and
+`metadata.item_id`. The action is user initiated, never implicit model context,
+and is disabled for cross-session, recovery/deletion/reconciliation-blocked,
+busy-mutation, invalid-identity, or unsupported-media states.
+
 Capability `turn.context.pinned-selected` indicates that `turn/start` and
 `turn/context/inspect` accept `pinned_context_set_identity` together with an
 explicit `pinned_context_ids` list. The runtime never sends all persisted pins

@@ -778,6 +778,18 @@ Known limitations:
   17.3 remains unchecked. Qt workspace-watch and user-save callbacks also mark
   loaded matching file and selection pins stale locally without rewriting durable metadata; the
   sidecar reread remains authoritative.
+  The command-output Artifact dialog now receives an additive originating
+  `session_id` from `artifact/read-command-output` and exposes an explicit
+  `固定完整输出` control only for the active project-bound Work session after
+  client-side UTF-8/reference/SHA-256 validation. The control assembles a
+  session-owned metadata-only `artifact` descriptor (`metadata.item_id`, priority
+  700, retained UTF-8 byte count) and submits it through the existing CAS path;
+  it remains disabled for cross-session, recovery, deletion, reconciliation-blocked,
+  busy, invalid-identity, or unsupported-media responses. Render coverage proves
+  current-session enabled and cross-session disabled states. A real command
+  Artifact click-to-persist fixture is still pending because the render runtime
+  has no command producer; durable Artifact Blob reload and turn assembly remain
+  covered by the protocol fixture.
 - `pinned-context-store/0.1` persists metadata-only sets using private immutable
   content-addressed objects and atomic project-pointer replacement. Store fixtures
   cover reopen/update, idempotency, absence of a content body field, retained old

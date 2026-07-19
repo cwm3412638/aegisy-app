@@ -1489,6 +1489,57 @@ int main(int argc, char *argv[])
                 "structured context was not sent through AAP with authoritative file data")) {
         return 1;
     }
+    const QByteArray artifactContent("complete command artifact\n");
+    const QString artifactSha = QString::fromLatin1(QCryptographicHash::hash(
+        artifactContent, QCryptographicHash::Sha256).toHex());
+    const QString artifactReference = QStringLiteral("command-output:sha256:%1")
+        .arg(artifactSha);
+    const auto artifactResponse = [&](const QString &sessionId) {
+        return QJsonObject{
+            {QStringLiteral("session_id"), sessionId},
+            {QStringLiteral("reference"), artifactReference},
+            {QStringLiteral("sha256"), artifactSha},
+            {QStringLiteral("content_type"), QStringLiteral("text/plain; charset=utf-8")},
+            {QStringLiteral("item_id"), QStringLiteral("command-render-fixture")},
+            {QStringLiteral("total_bytes"), artifactContent.size()},
+            {QStringLiteral("retained_bytes"), artifactContent.size()},
+            {QStringLiteral("omitted_bytes"), 0},
+            {QStringLiteral("content"), QString::fromUtf8(artifactContent)},
+        };
+    };
+    runtime->commandArtifactRead(
+        QStringLiteral("artifact-current-session"), artifactResponse(previewSessionId));
+    QPushButton *artifactPin = nullptr;
+    if (!expect(waitUntil(application, [&workbench, &artifactPin]() {
+                    artifactPin = workbench.findChild<QPushButton *>(
+                        QStringLiteral("commandArtifactPinButton"));
+                    return artifactPin && artifactPin->isVisible();
+                })
+                    && artifactPin->isEnabled()
+                    && artifactPin->toolTip().contains(QStringLiteral("不会自动发送")),
+                "current Work command artifact did not expose an explicit pin action")) {
+        return 1;
+    }
+    if (QDialog *dialog = qobject_cast<QDialog *>(artifactPin->window())) dialog->close();
+    application.processEvents();
+    runtime->commandArtifactRead(
+        QStringLiteral("artifact-other-session"), artifactResponse(
+            QStringLiteral("session-other-render-fixture")));
+    artifactPin = nullptr;
+    if (!expect(waitUntil(application, [&workbench, &artifactPin]() {
+                    const QList<QPushButton *> buttons = workbench.findChildren<QPushButton *>(
+                        QStringLiteral("commandArtifactPinButton"));
+                    auto visible = std::find_if(buttons.cbegin(), buttons.cend(),
+                        [](QPushButton *button) { return button->isVisible(); });
+                    artifactPin = visible == buttons.cend() ? nullptr : *visible;
+                    return artifactPin != nullptr;
+                })
+                    && !artifactPin->isEnabled()
+                    && artifactPin->toolTip().contains(QStringLiteral("当前 Work 会话")),
+                "cross-session command artifact pinning did not fail closed")) {
+        return 1;
+    }
+    if (QDialog *dialog = qobject_cast<QDialog *>(artifactPin->window())) dialog->close();
     fileTree->setCurrentItem(editableItem);
     fileContextAction->trigger();
     if (!expect(waitUntil(application, [contextInspect]() {

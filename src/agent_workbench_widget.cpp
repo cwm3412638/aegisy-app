@@ -70,6 +70,7 @@
 #include <QVBoxLayout>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
+#include <algorithm>
 #include <utility>
 
 namespace {
@@ -1841,6 +1842,20 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             "padding:10px; font-family:Menlo,Consolas,monospace; font-size:10px; }"));
         layout->addWidget(content, 1);
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+        auto *pin = buttons->addButton(
+            QStringLiteral("固定完整输出"), QDialogButtonBox::ActionRole);
+        pin->setObjectName(QStringLiteral("commandArtifactPinButton"));
+        pin->setIcon(QIcon(QStringLiteral(":/icons/lucide/paperclip.svg")));
+        QString pinReason;
+        pin->setEnabled(canPinCommandArtifact(artifact, &pinReason));
+        pin->setToolTip(pinReason.isEmpty()
+            ? QStringLiteral("将完整命令输出固定到当前 Work 会话；不会自动发送")
+            : pinReason);
+        connect(pin, &QPushButton::clicked, dialog, [this, artifact, pin]() {
+            pin->setEnabled(false);
+            pin->setText(QStringLiteral("正在固定"));
+            pinCommandArtifact(artifact);
+        });
         connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
         layout->addWidget(buttons);
         dialog->show();
@@ -7794,6 +7809,115 @@ void AgentWorkbenchWidget::pinEditorSelectionContext()
     if (m_pinnedFileReadRequestId.isEmpty()) {
         m_pendingPinnedSelection = {};
         addNotice(QStringLiteral("无法读取待固定选区的文件。"), true);
+    }
+}
+
+bool AgentWorkbenchWidget::canPinCommandArtifact(const QJsonObject &artifact,
+                                                 QString *reason) const
+{
+    const auto reject = [reason](const QString &message) {
+        if (reason) *reason = message;
+        return false;
+    };
+    if (!m_runtime || !m_runtime->isReady() || !m_pinnedContextAvailable) {
+        return reject(QStringLiteral("当前运行时未提供固定上下文能力"));
+    }
+    const QString sessionId = artifact.value(QStringLiteral("session_id")).toString();
+    if (m_mode != QStringLiteral("work") || m_workSessionId.isEmpty()
+            || sessionId != m_workSessionId) {
+        return reject(QStringLiteral("只能固定到生成该输出的当前 Work 会话"));
+    }
+    if (m_projectId.isEmpty()) {
+        return reject(QStringLiteral("请先打开该 Work 会话绑定的项目"));
+    }
+    if (m_runtimeRecoveryMode || currentSessionRecoveryRequired()
+            || currentSessionDeletionPending() || currentOperationStatusBlocked()) {
+        return reject(QStringLiteral("当前会话状态不允许更新固定上下文"));
+    }
+    if (!m_pinnedContextMutationRequestId.isEmpty()
+            || !m_pinnedFileReadRequestId.isEmpty()) {
+        return reject(QStringLiteral("固定上下文正在更新，请稍候"));
+    }
+    const QString reference = artifact.value(QStringLiteral("reference")).toString();
+    const QString sha256 = artifact.value(QStringLiteral("sha256")).toString();
+    const QString itemId = artifact.value(QStringLiteral("item_id")).toString();
+    const QString contentType = artifact.value(QStringLiteral("content_type")).toString();
+    const QByteArray content = artifact.value(QStringLiteral("content")).toString().toUtf8();
+    const QString prefix = QStringLiteral("command-output:sha256:");
+    const auto isLowerHex = [](const QString &value) {
+        return value.size() == 64
+            && std::all_of(value.cbegin(), value.cend(), [](QChar character) {
+                return (character >= QLatin1Char('0') && character <= QLatin1Char('9'))
+                    || (character >= QLatin1Char('a') && character <= QLatin1Char('f'));
+            });
+    };
+    if (!reference.startsWith(prefix) || !isLowerHex(sha256)
+            || reference.mid(prefix.size()) != sha256 || itemId.isEmpty()
+            || itemId.size() > 128 || contentType != QStringLiteral("text/plain; charset=utf-8")
+            || QString::fromLatin1(QCryptographicHash::hash(
+                   content, QCryptographicHash::Sha256).toHex()) != sha256) {
+        return reject(QStringLiteral("命令输出身份校验失败，不能固定"));
+    }
+    if (reason) reason->clear();
+    return true;
+}
+
+void AgentWorkbenchWidget::pinCommandArtifact(const QJsonObject &artifact)
+{
+    QString reason;
+    if (!canPinCommandArtifact(artifact, &reason)) {
+        addNotice(reason, true);
+        return;
+    }
+    const QString sessionId = artifact.value(QStringLiteral("session_id")).toString();
+    const QString reference = artifact.value(QStringLiteral("reference")).toString();
+    const QString sha256 = artifact.value(QStringLiteral("sha256")).toString();
+    const QString itemId = artifact.value(QStringLiteral("item_id")).toString();
+    const QByteArray content = artifact.value(QStringLiteral("content")).toString().toUtf8();
+    const QByteArray idDigest = QCryptographicHash::hash(
+        QStringLiteral("%1\n%2\n%3").arg(m_projectId, sessionId, reference).toUtf8(),
+        QCryptographicHash::Sha256).toHex();
+    const QString id = QStringLiteral("pin-artifact-%1").arg(QString::fromLatin1(idDigest));
+    QJsonObject descriptor{
+        {QStringLiteral("id"), id},
+        {QStringLiteral("project_id"), m_projectId},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("kind"), QStringLiteral("artifact")},
+        {QStringLiteral("source"), QStringLiteral("command-output")},
+        {QStringLiteral("label"), QStringLiteral("命令输出 Artifact")},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("content_hash"), QStringLiteral("sha256:%1").arg(sha256)},
+        {QStringLiteral("bytes"), static_cast<double>(content.size())},
+        {QStringLiteral("freshness"), QStringLiteral("fresh")},
+        {QStringLiteral("priority"), 700},
+        {QStringLiteral("metadata"), QJsonObject{
+            {QStringLiteral("item_id"), itemId},
+        }},
+    };
+    QJsonArray items;
+    bool replaced = false;
+    for (QJsonObject item : m_pinnedContextItems) {
+        item.remove(QStringLiteral("included"));
+        if (item.value(QStringLiteral("id")).toString() == id) {
+            items.append(descriptor);
+            replaced = true;
+        } else {
+            items.append(item);
+        }
+    }
+    if (!replaced) {
+        if (items.size() >= 128) {
+            addNotice(QStringLiteral("固定上下文已达到 128 项上限。"), true);
+            return;
+        }
+        items.append(descriptor);
+    }
+    m_pendingPinnedIncludeId = id;
+    m_pinnedContextMutationRequestId = m_runtime->savePinnedContext(
+        m_projectId, items, m_pinnedContextSetIdentity);
+    if (m_pinnedContextMutationRequestId.isEmpty()) {
+        m_pendingPinnedIncludeId.clear();
+        addNotice(QStringLiteral("无法提交命令输出固定上下文更新。"), true);
     }
 }
 

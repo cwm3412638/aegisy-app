@@ -10285,10 +10285,13 @@ impl Runtime {
                 content,
             }
         };
-        self.success_for(
-            &request,
-            serde_json::to_value(artifact).expect("command output artifact serialization"),
-        )
+        let mut result =
+            serde_json::to_value(artifact).expect("command output artifact serialization");
+        result
+            .as_object_mut()
+            .expect("command output artifact serializes as an object")
+            .insert("session_id".into(), Value::String(params.session_id));
+        self.success_for(&request, result)
     }
 
     fn record_command_diagnostics(
@@ -11394,6 +11397,7 @@ mod command_timeline_tests {
             .unwrap();
         let read = runtime.command_artifact_read(request("session-1", &artifact.reference));
         assert_eq!(read[0]["result"]["reference"], artifact.reference);
+        assert_eq!(read[0]["result"]["session_id"], "session-1");
         assert_eq!(
             read[0]["result"]["content_type"],
             "text/plain; charset=utf-8"
@@ -12156,6 +12160,7 @@ mod durable_runtime_tests {
             json!({"session_id": &session_id, "reference": &reference}),
         ));
         assert_eq!(read[0]["result"]["content"], "durable command output\n");
+        assert_eq!(read[0]["result"]["session_id"], session_id);
         assert_eq!(read[0]["result"]["item_id"], "command-restart");
         let denied = restarted.handle_line(&request(
             "artifact-cross-session",

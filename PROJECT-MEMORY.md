@@ -317,6 +317,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Qt workspace watcher and user-save events mark matching loaded file and
   selection pins stale in the composer without rewriting their durable descriptor
   or hash; sidecar reread remains the final authority at inspect/start.
+  `artifact/read-command-output` now returns the originating `session_id` as an
+  additive, content-free binding field. The Qt read-only Artifact dialog exposes
+  an explicit `固定完整输出` action only when the response is valid UTF-8 text
+  whose reference/hash agree and whose session is the active project-bound Work
+  session; it saves a session-owned artifact descriptor through the existing
+  pinned-context CAS with `metadata.item_id`, priority 700, and the retained
+  content byte count. The action never sends the Artifact implicitly. Cross-
+  session, recovery, deletion, reconciliation-blocked, busy-mutation, invalid
+  hash, and unsupported-media states remain disabled/fail closed.
   Transient inline `selection` context with client-provided content remains on
   the existing bounded inline path; only selection items without inline content
   are resolved from the authoritative file range.
@@ -1586,7 +1595,13 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   Codex stderr is drained with a fixed 8 KiB buffer and is not copied into logs.
 - Qt retrieves a completed artifact through a button bound to its originating
   session and SHA-256 reference, renders it as read-only plain text, and never adds
-  it to model context implicitly. Task `14.6` is complete.
+  it to model context implicitly. The read-only Artifact dialog now also exposes
+  an explicit `固定完整输出` action. That control requires the additive response
+  `session_id` to match the active project-bound Work session, rechecks
+  UTF-8/reference/SHA-256 identity, and persists only a metadata descriptor through
+  the existing pinned-context CAS; it remains disabled for cross-session or
+  blocked/recovery states. Task `14.6` is complete; the remaining Artifact pin
+  lifecycle and non-file pin classes remain under OpenSpec `17.3`.
 
 ## Cancellation Boundary
 
