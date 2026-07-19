@@ -523,6 +523,11 @@ Current editor evidence:
   Turn is reported as `durable-event-stream` without exposing the prompt. Other
   operation event families remain unknown until their authoritative sources are
   registered.
+- Capability `operation.reconciliation.status` exposes a read-only
+  `operation/status` snapshot while a session is blocked. It returns only the
+  bounded review summary and `recovery_action_available:false`; it cannot clear
+  the gate or invoke recovery. Protocol coverage verifies the blocked-to-cleared
+  transition.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or

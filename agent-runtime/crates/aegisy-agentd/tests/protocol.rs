@@ -98,6 +98,11 @@ fn ready_runtime() -> Runtime {
         .as_array()
         .unwrap()
         .iter()
+        .any(|capability| capability == "operation.reconciliation.status"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|capability| capability == "runtime.health"));
     assert!(messages[0]["result"]["capabilities"]
         .as_array()
@@ -568,6 +573,17 @@ fn operation_reconcile_persists_state_and_blocks_then_unblocks_session_writes() 
         unknown[0]["result"]["reconciliation"]["writes_blocked"],
         true
     );
+    let status = runtime.handle_line(&request(
+        "reconcile-status",
+        "operation/status",
+        json!({"session_id": session_id}),
+    ));
+    assert_eq!(
+        status[0]["result"]["schema_version"],
+        "operation-reconciliation-status/0.1"
+    );
+    assert_eq!(status[0]["result"]["blocked"], true);
+    assert_eq!(status[0]["result"]["recovery_action_available"], false);
 
     let blocked = runtime.handle_line(&request(
         "blocked-turn",
@@ -599,6 +615,12 @@ fn operation_reconcile_persists_state_and_blocks_then_unblocks_session_writes() 
         completed[0]["result"]["reconciliation"]["writes_blocked"],
         false
     );
+    let cleared_status = runtime.handle_line(&request(
+        "reconcile-status-cleared",
+        "operation/status",
+        json!({"session_id": session_id}),
+    ));
+    assert_eq!(cleared_status[0]["result"]["blocked"], false);
     let allowed = runtime.handle_line(&request(
         "allowed-turn",
         "turn/start",

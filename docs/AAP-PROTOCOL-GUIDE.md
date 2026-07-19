@@ -132,6 +132,11 @@ only the latest registered `turn.*` state from the session event stream. The
 probe result must still be sent through `operation/reconcile` for durable review
 and mutation gating.
 
+Capability `operation.reconciliation.status` exposes a content-free status read
+that remains available while a session is blocked. It reports the current
+review summary and `recovery_action_available:false`; it never clears the gate
+or exposes a recovery mutation.
+
 With durable storage, Runtime startup scans the latest event for each
 session/operation pair, validates the event identity and evidence hash, and
 preloads the bounded reconciliation cache. The event store remains authoritative
@@ -143,6 +148,8 @@ as evidence that an operation is safe.
 {"jsonrpc":"2.0","id":"10","result":{"schema_version":"operation-reconciliation-result/0.1","reconciliation":{"state":"unknown","writes_blocked":true,"decision":"explicit-review-required"},"durable":true,"event_sequence":8}}
 {"jsonrpc":"2.0","id":"11","method":"operation/probe","params":{"operation_id":"operation-1","session_id":"session-1","kind":"workspace-edit","event":"none","root_id":"root-1"}}
 {"jsonrpc":"2.0","id":"11","result":{"schema_version":"operation-reconciliation-probe/0.1","evidence":{"event":"none","process":"not-observed","workspace":{"state":"not-observed"},"git":{"state":"not-required"}},"workspace_snapshot_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event_source":"caller-supplied","process_source":"not-required"}}
+{"jsonrpc":"2.0","id":"12","method":"operation/status","params":{"session_id":"session-1"}}
+{"jsonrpc":"2.0","id":"12","result":{"schema_version":"operation-reconciliation-status/0.1","session_id":"session-1","blocked":true,"operation":{"state":"unknown","writes_blocked":true},"recovery_action_available":false}}
 ```
 
 ## Compaction Checkpoint Review

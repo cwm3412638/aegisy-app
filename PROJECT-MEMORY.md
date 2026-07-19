@@ -164,6 +164,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   remain caller-labelled; workspace-edit, terminal, background-job, and Git event
   sources are not inferred. The probe still requires a later `operation/reconcile`
   review and never exposes prompt/content data.
+- Capability `operation.reconciliation.status` exposes read-only
+  `operation/status` for the current session gate. It returns a bounded review
+  summary and `recovery_action_available:false` while blocked, never clears the
+  gate, and never invokes recovery.
 - Task `6.6` now has a bounded read-only Session search foundation. AAP
   `session/search` filters durable Session projections by project, exact model,
   runtime, status, title, or a combined title/approved-transcript query. Transcript
@@ -679,6 +683,10 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   `turn.created`, `turn.completed`, `turn.failed`, and `turn.interrupted/cancelled`
   events to reconciliation evidence. Unknown operation event kinds return no
   authority rather than being treated as success.
+- `operation/status` is a content-free status projection for the latest blocked
+  reconciliation in a session. It is intentionally available during the block
+  so a future Qt review surface can explain the gate without adding a mutation
+  path.
 
 ## Project And Session Projection Consistency And Rebuild Boundary
 

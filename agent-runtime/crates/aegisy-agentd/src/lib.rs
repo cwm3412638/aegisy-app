@@ -832,6 +832,11 @@ struct OperationProbeParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct OperationStatusParams {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SessionReadParams {
     session_id: String,
     #[serde(default)]
@@ -2201,6 +2206,7 @@ impl Runtime {
                     | "session/recovery/status"
                     | "runtime/projection-recovery/status"
                     | "operation/probe"
+                    | "operation/status"
                     | "turn/cancel"
                     | "turn/steer"
                     | "terminal/stop-user"
@@ -2251,7 +2257,7 @@ impl Runtime {
         }
         let blocked_operation = if matches!(
             request.method.as_str(),
-            "operation/reconcile" | "operation/probe"
+            "operation/reconcile" | "operation/probe" | "operation/status"
         ) {
             None
         } else if let Some(session_id) = request.params.get("session_id").and_then(Value::as_str) {
@@ -2406,6 +2412,7 @@ impl Runtime {
             "session/list" => self.session_list(request),
             "session/search" => self.session_search(request),
             "operation/probe" => self.operation_probe(request),
+            "operation/status" => self.operation_status(request),
             "operation/reconcile" => self.operation_reconcile(request),
             "session/recovery/status" => self.session_recovery_status(request),
             "runtime/projection-recovery/status" => self.projection_recovery_status(request),
@@ -2762,6 +2769,7 @@ impl Runtime {
                 "session.recovery.status".into(),
                 "operation.reconciliation".into(),
                 "operation.reconciliation.probe".into(),
+                "operation.reconciliation.status".into(),
                 "runtime.projection-recovery.status".into(),
                 "runtime.health".into(),
                 "runtime.degradations".into(),
@@ -4046,6 +4054,36 @@ impl Runtime {
                 "truncated": truncated,
                 "cursor_supported": false,
                 "unavailable_filters": []
+            }),
+        )
+    }
+
+    fn operation_status(&self, request: Request) -> Vec<Value> {
+        let params: OperationStatusParams = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        let operation = if let Some(store) = self.workbench_store.as_ref() {
+            match store.session_blocked_operation(&params.session_id) {
+                Ok(operation) => operation.map(|record| record.result),
+                Err(error) => return self.error_for(&request, -32114, error.message),
+            }
+        } else {
+            self.operation_reconciliations
+                .values()
+                .find(|result| result.session_id == params.session_id && result.writes_blocked)
+                .cloned()
+        };
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "operation-reconciliation-status/0.1",
+                "session_id": params.session_id,
+                "blocked": operation.is_some(),
+                "operation": operation,
+                "recovery_action_available": false
             }),
         )
     }

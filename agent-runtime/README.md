@@ -35,6 +35,7 @@ or session methods are accepted.
 - `turn/steer` (Codex only; same-turn, identity-scoped)
 - `session/search` (bounded local Session metadata and approved transcript fields)
 - `operation/probe` (session-bound, read-only workspace/Git/runtime evidence probe)
+- `operation/status` (content-free session reconciliation gate status)
 - `operation/reconcile` (content-free evidence review with durable session event)
 - `session/read`
 - `runtime/health`
@@ -73,6 +74,11 @@ When the Workbench store is available, Runtime startup preloads the latest
 validated reconciliation record for each session/operation pair. The SQLite
 event stream remains authoritative and per-request checks still fail closed if
 the startup cache is unavailable or a record cannot be validated.
+
+`operation/status` exposes the current content-free blocked review for a session
+and explicitly reports that no recovery action is available. It is safe to call
+while a session is blocked and never returns operation content or unlocks a
+mutation by itself.
 
 Codex `runtime/health` includes only process state, PID/exit metadata, restart
 recommendation, and a content-free stderr summary: observed bytes, newline count,
