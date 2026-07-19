@@ -145,6 +145,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   persistence, restart blocking, idempotency, and unblocking. This remains partial:
   the method consumes caller-supplied evidence only and has no authoritative host
   probes, Qt review/recovery surface, or recovery action.
+- Capability `operation.reconciliation.probe` now adds a separate read-only
+  `operation/probe` method. It resolves only a registered project root through a
+  Work session, hashes bounded visible workspace metadata, reads the structured
+  Git status query, and observes runtime-owned turn or terminal state. The response
+  contains state labels and snapshot hashes but no source content, arbitrary host
+  paths, or caller-selected PIDs. Event state remains caller-supplied and the probe
+  does not persist, approve, mutate, or recover an operation; startup discovery,
+  authoritative event sourcing, Qt review, and recovery actions remain open.
 - Task `6.6` now has a bounded read-only Session search foundation. AAP
   `session/search` filters durable Session projections by project, exact model,
   runtime, status, title, or a combined title/approved-transcript query. Transcript
@@ -553,8 +561,8 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 264 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 41 Rust
+Current verified baseline: 16 desktop tests, 267 passed Rust sidecar unit tests plus
+one explicitly ignored live Codex fixture, 42 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -642,9 +650,16 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   every session-bound request consult the latest event per operation, so unknown,
   running, or blocked results fail closed with `-32132` until an authoritative
   terminal review clears the gate. Event replay validates the evidence/result hash
-  and identity without adding operation content to the projection. The current
-  implementation still has no host probes, Qt review/recovery control, or automatic
-  recovery action; those remain necessary for OpenSpec `6.9` completion.
+  and identity without adding operation content to the projection. The reconcile
+  method still does not perform probes automatically and there is no Qt review/
+  recovery control or recovery action; those remain necessary for OpenSpec `6.9`
+  completion.
+- AAP `operation/probe` is the first host-observation boundary. It binds to a
+  registered Work-session root, hashes bounded workspace metadata without reading
+  source bodies, consumes the existing structured Git status query, and observes
+  only runtime-owned turn/terminal state. It returns no paths/content/PIDs and
+  leaves event state explicitly caller-supplied. This is evidence collection only;
+  it does not write events or execute recovery.
 
 ## Project And Session Projection Consistency And Rebuild Boundary
 

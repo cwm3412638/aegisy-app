@@ -93,6 +93,11 @@ fn ready_runtime() -> Runtime {
         .as_array()
         .unwrap()
         .iter()
+        .any(|capability| capability == "operation.reconciliation.probe"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|capability| capability == "runtime.health"));
     assert!(messages[0]["result"]["capabilities"]
         .as_array()
@@ -604,6 +609,100 @@ fn operation_reconcile_persists_state_and_blocks_then_unblocks_session_writes() 
         }),
     ));
     assert_eq!(allowed[0]["result"]["turn"]["state"], "started");
+}
+
+#[test]
+fn operation_probe_reads_registered_workspace_without_returning_content() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-operation-probe-{unique}"));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+    let mut runtime = ready_runtime();
+    let opened = runtime.handle_line(&request(
+        "probe-project",
+        "project/open",
+        json!({
+            "root": root
+        }),
+    ));
+    let project_id = opened[0]["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let started = runtime.handle_line(&request(
+        "probe-session",
+        "session/start",
+        json!({ "mode": "work", "project_id": project_id }),
+    ));
+    let session_id = started[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first = runtime.handle_line(&request(
+        "probe-first",
+        "operation/probe",
+        json!({
+            "operation_id": "operation-workspace-probe",
+            "session_id": session_id,
+            "kind": "workspace-edit",
+            "event": "none",
+            "root_id": "root-1"
+        }),
+    ));
+    assert_eq!(
+        first[0]["result"]["schema_version"],
+        "operation-reconciliation-probe/0.1"
+    );
+    assert_eq!(
+        first[0]["result"]["evidence"]["workspace"]["state"],
+        "not-observed"
+    );
+    let workspace_hash = first[0]["result"]["workspace_snapshot_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(first[0]["result"]["evidence"].get("content").is_none());
+    let same = runtime.handle_line(&request(
+        "probe-same",
+        "operation/probe",
+        json!({
+            "operation_id": "operation-workspace-probe",
+            "session_id": session_id,
+            "kind": "workspace-edit",
+            "event": "none",
+            "root_id": "root-1",
+            "workspace_snapshot_hash": workspace_hash
+        }),
+    ));
+    assert_eq!(
+        same[0]["result"]["evidence"]["workspace"]["state"],
+        "unchanged"
+    );
+    fs::write(
+        root.join("main.rs"),
+        "fn main() { println!(\"changed\"); }\n",
+    )
+    .unwrap();
+    let changed = runtime.handle_line(&request(
+        "probe-changed",
+        "operation/probe",
+        json!({
+            "operation_id": "operation-workspace-probe",
+            "session_id": session_id,
+            "kind": "workspace-edit",
+            "event": "none",
+            "root_id": "root-1",
+            "workspace_snapshot_hash": workspace_hash
+        }),
+    ));
+    assert_eq!(
+        changed[0]["result"]["evidence"]["workspace"]["state"],
+        "changed"
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

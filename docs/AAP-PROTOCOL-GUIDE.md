@@ -121,9 +121,20 @@ state. Reconciliation retries with identical evidence are idempotent; different
 evidence receives a new review event. The runtime never infers success, probes the
 host on behalf of the caller, or executes recovery actions through this method.
 
+Capability `operation.reconciliation.probe` exposes the separate read-only
+`operation/probe` method. It resolves a registered project root through the
+session, hashes bounded visible workspace metadata, reads the existing Git
+status query, and observes only runtime-owned turn or terminal state. A probe
+returns state labels plus optional snapshot hashes; it never returns source
+content, command output, arbitrary paths, or caller-selected PIDs. The event
+state remains explicitly caller-supplied, so a probe result must still be sent
+through `operation/reconcile` for durable review and mutation gating.
+
 ```jsonl
 {"jsonrpc":"2.0","id":"10","method":"operation/reconcile","params":{"operation_id":"operation-1","session_id":"session-1","kind":"turn","evidence":{"event":"none","process":"not-observed","workspace":{"state":"not-required"},"git":{"state":"not-required"}}}}
 {"jsonrpc":"2.0","id":"10","result":{"schema_version":"operation-reconciliation-result/0.1","reconciliation":{"state":"unknown","writes_blocked":true,"decision":"explicit-review-required"},"durable":true,"event_sequence":8}}
+{"jsonrpc":"2.0","id":"11","method":"operation/probe","params":{"operation_id":"operation-1","session_id":"session-1","kind":"workspace-edit","event":"none","root_id":"root-1"}}
+{"jsonrpc":"2.0","id":"11","result":{"schema_version":"operation-reconciliation-probe/0.1","evidence":{"event":"none","process":"not-observed","workspace":{"state":"not-observed"},"git":{"state":"not-required"}},"workspace_snapshot_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","event_source":"caller-supplied","process_source":"not-required"}}
 ```
 
 ## Compaction Checkpoint Review

@@ -17,6 +17,7 @@ pub mod git_workflow_state;
 pub mod git_worktree_lifecycle;
 mod language_server;
 pub mod non_git_checkpoint;
+mod operation_probe;
 pub mod operation_reconciliation;
 mod output_redaction;
 pub mod permission_issuer;
@@ -55,7 +56,10 @@ use diagnostic_store::DiagnosticStore;
 use git_query::{commit as git_commit, diff as git_diff, log as git_log, overview as git_overview};
 use git_status::{ignored_paths, status as git_status};
 use language_server::LanguageServerManager;
-use operation_reconciliation::{reconcile as reconcile_operation, ReconciliationInput};
+use operation_reconciliation::{
+    reconcile as reconcile_operation, EventState, GitState, OperationKind, ProcessState,
+    ReconciliationEvidence, ReconciliationInput, WorkspaceState,
+};
 use repository_index::WorkspaceIndex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -811,6 +815,23 @@ struct TurnStartParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct OperationProbeParams {
+    operation_id: String,
+    session_id: String,
+    kind: OperationKind,
+    #[serde(default = "default_operation_event_state")]
+    event: EventState,
+    #[serde(default)]
+    root_id: Option<String>,
+    #[serde(default)]
+    terminal_id: Option<String>,
+    #[serde(default)]
+    workspace_snapshot_hash: Option<String>,
+    #[serde(default)]
+    git_snapshot_hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct SessionReadParams {
     session_id: String,
     #[serde(default)]
@@ -1470,6 +1491,10 @@ fn default_terminal_kind() -> String {
 
 fn default_primary_root_id() -> String {
     "root-1".into()
+}
+
+fn default_operation_event_state() -> EventState {
+    EventState::None
 }
 
 fn parse_session_history_cursor(cursor: Option<&str>) -> Result<Option<u64>, String> {
@@ -2164,6 +2189,7 @@ impl Runtime {
                 "session/read"
                     | "session/recovery/status"
                     | "runtime/projection-recovery/status"
+                    | "operation/probe"
                     | "turn/cancel"
                     | "turn/steer"
                     | "terminal/stop-user"
@@ -2212,7 +2238,10 @@ impl Runtime {
             );
             return;
         }
-        let blocked_operation = if request.method == "operation/reconcile" {
+        let blocked_operation = if matches!(
+            request.method.as_str(),
+            "operation/reconcile" | "operation/probe"
+        ) {
             None
         } else if let Some(session_id) = request.params.get("session_id").and_then(Value::as_str) {
             if let Some(store) = self.workbench_store.as_ref() {
@@ -2365,6 +2394,7 @@ impl Runtime {
             "session/import" => self.session_import(request),
             "session/list" => self.session_list(request),
             "session/search" => self.session_search(request),
+            "operation/probe" => self.operation_probe(request),
             "operation/reconcile" => self.operation_reconcile(request),
             "session/recovery/status" => self.session_recovery_status(request),
             "runtime/projection-recovery/status" => self.projection_recovery_status(request),
@@ -2720,6 +2750,7 @@ impl Runtime {
                 "retention.maintenance.host-triggered".into(),
                 "session.recovery.status".into(),
                 "operation.reconciliation".into(),
+                "operation.reconciliation.probe".into(),
                 "runtime.projection-recovery.status".into(),
                 "runtime.health".into(),
                 "runtime.degradations".into(),
@@ -4006,6 +4037,218 @@ impl Runtime {
                 "unavailable_filters": []
             }),
         )
+    }
+
+    fn operation_probe(&mut self, request: Request) -> Vec<Value> {
+        let params: OperationProbeParams = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        let skeleton = ReconciliationInput {
+            operation_id: params.operation_id.clone(),
+            session_id: params.session_id.clone(),
+            kind: params.kind,
+            evidence: ReconciliationEvidence {
+                event: params.event,
+                process: ProcessState::NotObserved,
+                workspace: WorkspaceState::NotRequired,
+                git: GitState::NotRequired,
+            },
+        };
+        if let Err(error) = reconcile_operation(&skeleton) {
+            return self.error_for(
+                &request,
+                -32602,
+                format!("invalid probe params: {}", error.message),
+            );
+        }
+        if !self.sessions.contains_key(&params.session_id)
+            && !self
+                .workbench_store
+                .as_ref()
+                .and_then(|store| store.load_session(&params.session_id).ok())
+                .is_some()
+        {
+            return self.error_for(&request, -32023, "session does not exist");
+        }
+        if params.terminal_id.is_some()
+            && !matches!(
+                params.kind,
+                OperationKind::Terminal | OperationKind::BackgroundJob
+            )
+        {
+            return self.error_for(
+                &request,
+                -32602,
+                "terminal_id is only valid for terminal or background-job probes",
+            );
+        }
+        let process = match params.kind {
+            OperationKind::Turn => {
+                if self.control.has_active_turn(&params.session_id) {
+                    ProcessState::Running
+                } else {
+                    ProcessState::NotRunning
+                }
+            }
+            OperationKind::Terminal | OperationKind::BackgroundJob => {
+                let Some(terminal_id) = params.terminal_id.as_deref() else {
+                    return self.error_for(
+                        &request,
+                        -32602,
+                        "terminal_id is required for terminal or background-job probes",
+                    );
+                };
+                let mut terminals = self
+                    .control
+                    .terminals
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let snapshot_result =
+                    terminals.snapshot_value(terminal_id, &params.session_id, u64::MAX);
+                drop(terminals);
+                let snapshot = match snapshot_result {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => return self.error_for(&request, error.code, error.message),
+                };
+                if snapshot
+                    .get("running")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    ProcessState::Running
+                } else {
+                    ProcessState::NotRunning
+                }
+            }
+            OperationKind::WorkspaceEdit | OperationKind::Git => ProcessState::NotObserved,
+        };
+
+        let needs_root = matches!(
+            params.kind,
+            OperationKind::WorkspaceEdit | OperationKind::Git
+        ) || params.root_id.is_some()
+            || params.workspace_snapshot_hash.is_some()
+            || params.git_snapshot_hash.is_some();
+        let mut workspace_state = WorkspaceState::NotRequired;
+        let mut git_state = GitState::NotRequired;
+        let mut workspace_hash = None;
+        let mut git_hash = None;
+        let mut workspace_truncated = false;
+        let mut git_truncated = false;
+        if needs_root {
+            let root =
+                match self.operation_probe_root(&params.session_id, params.root_id.as_deref()) {
+                    Ok((_, root)) => Some(root),
+                    Err((-32020, _)) => None,
+                    Err((code, message)) => return self.error_for(&request, code, message),
+                };
+            if matches!(params.kind, OperationKind::WorkspaceEdit)
+                || params.workspace_snapshot_hash.is_some()
+            {
+                if let Some(root) = root.as_deref() {
+                    match operation_probe::workspace(
+                        root,
+                        params.workspace_snapshot_hash.as_deref(),
+                        matches!(params.kind, OperationKind::WorkspaceEdit),
+                    ) {
+                        Ok(probe) => {
+                            workspace_state = probe.state;
+                            workspace_hash = probe.snapshot_hash;
+                            workspace_truncated = probe.truncated;
+                        }
+                        Err(error) => return self.error_for(&request, -32032, error.message),
+                    }
+                } else {
+                    workspace_state = WorkspaceState::Unavailable;
+                }
+            }
+            if matches!(params.kind, OperationKind::Git) || params.git_snapshot_hash.is_some() {
+                if let Some(root) = root.as_deref() {
+                    match operation_probe::git(
+                        root,
+                        params.git_snapshot_hash.as_deref(),
+                        matches!(params.kind, OperationKind::Git),
+                    ) {
+                        Ok(probe) => {
+                            git_state = probe.state;
+                            git_hash = probe.snapshot_hash;
+                            git_truncated = probe.truncated;
+                        }
+                        Err(error) => return self.error_for(&request, -32032, error.message),
+                    }
+                } else {
+                    git_state = GitState::Unavailable;
+                }
+            }
+        }
+        let evidence = ReconciliationEvidence {
+            event: params.event,
+            process,
+            workspace: workspace_state,
+            git: git_state,
+        };
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": operation_probe::SCHEMA_VERSION,
+                "operation_id": params.operation_id,
+                "session_id": params.session_id,
+                "kind": params.kind,
+                "evidence": evidence,
+                "workspace_snapshot_hash": workspace_hash,
+                "git_snapshot_hash": git_hash,
+                "workspace_truncated": workspace_truncated,
+                "git_truncated": git_truncated,
+                "event_source": "caller-supplied",
+                "process_source": match params.kind {
+                    OperationKind::Turn => "runtime-control.active-turn",
+                    OperationKind::Terminal | OperationKind::BackgroundJob => "runtime-terminal-record",
+                    OperationKind::WorkspaceEdit | OperationKind::Git => "not-required"
+                }
+            }),
+        )
+    }
+
+    fn operation_probe_root(
+        &self,
+        session_id: &str,
+        root_id: Option<&str>,
+    ) -> Result<(String, PathBuf), (i64, String)> {
+        let project_id = if let Some(state) = self.sessions.get(session_id) {
+            if state.session.mode != SessionMode::Work {
+                return Err((
+                    -32095,
+                    "operation probes require a project-bound Work session".into(),
+                ));
+            }
+            state
+                .session
+                .project_id
+                .clone()
+                .ok_or_else(|| (-32021, "Work session requires a project".into()))?
+        } else {
+            let store = self
+                .workbench_store
+                .as_ref()
+                .ok_or_else(|| (-32023, "session not found".into()))?;
+            let session = store
+                .load_session(session_id)
+                .map_err(|_| (-32023, "session not found".into()))?;
+            if session.mode != StoredSessionMode::Work {
+                return Err((
+                    -32095,
+                    "operation probes require a project-bound Work session".into(),
+                ));
+            }
+            session
+                .project_id
+                .ok_or_else(|| (-32021, "Work session requires a project".into()))?
+        };
+        let (_, root) = self.workspace_root_binding(&project_id, root_id, false)?;
+        Ok((project_id, root))
     }
 
     fn operation_reconcile(&mut self, request: Request) -> Vec<Value> {

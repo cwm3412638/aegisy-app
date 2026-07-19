@@ -34,6 +34,7 @@ or session methods are accepted.
 - `turn/start`
 - `turn/steer` (Codex only; same-turn, identity-scoped)
 - `session/search` (bounded local Session metadata and approved transcript fields)
+- `operation/probe` (session-bound, read-only workspace/Git/runtime evidence probe)
 - `operation/reconcile` (content-free evidence review with durable session event)
 - `session/read`
 - `runtime/health`
@@ -57,6 +58,15 @@ contracts are complete.
 Clients can query `runtime/degradations` to render disabled or metadata-only
 features explicitly. This is authoritative capability state, not a request to
 silently fall back to a mutating or provider-opaque implementation.
+
+`operation/probe` is a read-only evidence collector for the reconciliation
+workflow. It resolves only registered project roots through the Work session,
+hashes bounded workspace metadata and read-only Git status, and observes only
+runtime-owned turn or terminal state. It returns hashes and state labels, never
+file contents, command output, arbitrary host paths, or caller-selected PIDs.
+The event state is explicitly caller-supplied until durable operation discovery
+and startup reconciliation are implemented; the probe does not approve, mutate,
+or recover an operation.
 
 Codex `runtime/health` includes only process state, PID/exit metadata, restart
 recommendation, and a content-free stderr summary: observed bytes, newline count,

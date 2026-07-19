@@ -501,6 +501,15 @@ Current editor evidence:
   restart blocking, idempotency, and unblocking. Task `6.9` remains unchecked because
   the current method does not perform authoritative host probes or expose Qt review,
   recovery, or recovery-action controls.
+- Capability `operation.reconciliation.probe` now exposes read-only
+  `operation/probe`. It resolves only a registered root through a Work session,
+  hashes bounded visible workspace metadata, reads the existing structured Git
+  status query, and observes runtime-owned turn/terminal state. Probe responses
+  contain state labels and snapshot hashes but no content, arbitrary paths, or
+  caller-selected PIDs. Event state remains explicitly caller-supplied and the
+  probe does not persist, approve, mutate, or recover an operation. Task `6.9`
+  remains unchecked until startup discovery, authoritative event sourcing, Qt
+  review, and recovery actions are integrated.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or
