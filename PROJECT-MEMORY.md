@@ -304,8 +304,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   root bindings and file policy are rechecked. Both paths share authoritative
   file reread, raw-byte SHA-256/revision stale detection, bounded untrusted
   context, and metadata-only inspection. Selection pins carry bounded line/
-  column metadata (1-based Unicode scalar columns) and are sliced only after source validation; image, diagnostic,
-  terminal, Git, artifact, and child-handoff kinds fail closed. Qt now loads
+  column metadata (1-based Unicode scalar columns) and are sliced only after source validation. Session-owned
+  `artifact` pins may resolve validated command-output text references; image,
+  diagnostic, terminal, Git, and child-handoff kinds fail closed. Qt now loads
   project pins into the composer, creates or refreshes file descriptors from
   authoritative workspace reads with reconstructed raw UTF-8/BOM/newline bytes,
   saves through CAS, and supports explicit per-turn inclusion, deterministic
@@ -704,7 +705,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 292 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 293 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 49 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
@@ -1152,9 +1153,11 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   identity; they never include every persisted pin automatically. Files are
   reread through the normal root/policy resolver and raw-byte hash or revision
   drift is marked stale before the same budget/manifest path is used; selection
-  ranges are extracted only after that validation. Image/diagnostic/terminal/
-  Git/artifact/child-handoff kinds, cross-resource Workbench event/Blob
-  authority, automatic invalidation, and orphan GC remain unavailable; the
+  ranges are extracted only after that validation. Session-owned artifact pins
+  resolve only validated command-output text references with matching UTF-8,
+  byte count, and SHA-256; inspection still returns metadata only. Image/
+  diagnostic/terminal/Git/child-handoff kinds, cross-resource Workbench
+  event/Blob authority, automatic invalidation, and orphan GC remain unavailable; the
   composer queue is otherwise transient. Qt render evidence covers file and
   editor-selection pin persistence, range labels, inclusion, order boundaries,
   and unpin. Watch/save changes also project stale state locally without mutating

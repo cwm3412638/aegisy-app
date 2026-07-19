@@ -6963,11 +6963,62 @@ impl Runtime {
         Ok(())
     }
 
+    fn read_pinned_artifact_text(
+        &mut self,
+        session_id: &str,
+        item: &pinned_context::PinnedContextItem,
+    ) -> Result<String, (i64, String)> {
+        if item.session_id.as_deref() != Some(session_id) {
+            return Err((
+                -32095,
+                "artifact pinned context must be bound to the current session".into(),
+            ));
+        }
+        if !item.reference.starts_with("command-output:sha256:")
+            || item.reference.len() != "command-output:sha256:".len() + 64
+        {
+            return Err((-32079, "invalid artifact pinned context reference".into()));
+        }
+        let content = if let Some(artifact) =
+            self.command_artifacts.read(session_id, &item.reference)
+        {
+            artifact.content
+        } else {
+            let Some(store) = self.workbench_store.as_ref() else {
+                return Err((-32079, "artifact content is unavailable".into()));
+            };
+            let durable = store
+                .read_durable_blob_for_session_read_only(session_id, &item.reference, now_ms())
+                .map_err(|_| {
+                    (
+                        -32079,
+                        "artifact content is unavailable or failed integrity verification".into(),
+                    )
+                })?;
+            if durable.reference.kind != DurableBlobKind::CommandOutput {
+                return Err((-32079, "artifact Blob kind is invalid".into()));
+            }
+            String::from_utf8(durable.content)
+                .map_err(|_| (-32079, "artifact content is not valid UTF-8".into()))?
+        };
+        let Some(expected_hash) = item.content_hash.strip_prefix("sha256:") else {
+            return Err((-32048, "artifact pinned context hash is invalid".into()));
+        };
+        let actual_hash = ContentHash::for_bytes(content.as_bytes()).sha256;
+        if expected_hash != actual_hash || item.bytes != content.len() as u64 {
+            return Err((
+                -32048,
+                "artifact pinned context content identity changed".into(),
+            ));
+        }
+        Ok(content)
+    }
+
     /// Resolve only the explicitly selected persisted pins. The descriptor is
     /// metadata-only; file contents are reread by the normal turn-context
     /// resolver after root, ignore, symlink, and stale checks.
     fn append_pinned_context(
-        &self,
+        &mut self,
         session_id: &str,
         set_identity: Option<&str>,
         ids: &[String],
@@ -7060,10 +7111,17 @@ impl Runtime {
                     "pinned context item is bound to another session".into(),
                 ));
             }
-            if item.kind != "file" && item.kind != "selection" {
+            if item.kind != "file" && item.kind != "selection" && item.kind != "artifact" {
                 return Err((
                     -32048,
-                    "only file and selection pinned context are available in turn assembly".into(),
+                    "only file, selection, and artifact pinned context are available in turn assembly"
+                        .into(),
+                ));
+            }
+            if item.kind == "artifact" && item.session_id.as_deref() != Some(session_id) {
+                return Err((
+                    -32095,
+                    "artifact pinned context must be bound to the current session".into(),
                 ));
             }
             let root_id = item.root_id.clone().unwrap_or_else(|| "root-1".into());
@@ -7102,6 +7160,30 @@ impl Runtime {
             selected.push((item, root_id));
         }
         for (item, root_id) in selected {
+            if item.kind == "artifact" {
+                let content = self.read_pinned_artifact_text(session_id, &item)?;
+                context_items.push(TurnContextItem {
+                    id: item.id,
+                    kind: item.kind,
+                    label: item.label,
+                    origin: "pinned-context".into(),
+                    root_id: Some(root_id),
+                    path: None,
+                    content: Some(content),
+                    revision: item.revision,
+                    expected_content_hash: None,
+                    line: None,
+                    column: None,
+                    end_line: None,
+                    end_column: None,
+                    freshness: Some(item.freshness),
+                    raw_output_ref: Some(item.reference),
+                    priority: Some(format!("pinned-priority-{}", item.priority)),
+                    inclusion_reason: Some("pinned-context".into()),
+                    exclusion_reason: None,
+                });
+                continue;
+            }
             let selection = if item.kind == "selection" {
                 let parse_position = |key: &str| {
                     item.metadata
@@ -7145,7 +7227,7 @@ impl Runtime {
         Ok(())
     }
 
-    fn turn_context_inspect(&self, request: Request) -> Vec<Value> {
+    fn turn_context_inspect(&mut self, request: Request) -> Vec<Value> {
         let params: TurnContextInspectParams = match serde_json::from_value(request.params.clone())
         {
             Ok(params) => params,
@@ -10896,6 +10978,110 @@ fn capture_watch_snapshot(
         .map(|entry| (entry.path.clone(), entry.revision.clone()))
         .collect();
     Ok((listing.path, snapshot))
+}
+
+#[cfg(test)]
+mod pinned_context_assembly_tests {
+    use super::*;
+
+    fn request(method: &str, params: Value) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": method,
+            "method": method,
+            "params": params
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn assembles_session_owned_command_artifact_pin_without_exposing_body_in_inspection() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("aegisy-pinned-artifact-{unique}"));
+        let data_root = root.join("data");
+        let project_root = root.join("project");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+        let mut runtime = Runtime::with_store(&data_root).unwrap();
+        runtime.handle_line(&request(
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": {"name": "artifact-pin", "version": "1"}
+            }),
+        ));
+        runtime.handle_line(&request("initialized", json!({})));
+        let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
+        let project_id = opened[0]["result"]["project"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = runtime.handle_line(&request(
+            "session/start",
+            json!({"mode": "work", "project_id": project_id}),
+        ));
+        let session_id = session[0]["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut capture = command_output::CommandOutputCapture::default();
+        capture.append("artifact body must stay behind the manifest\n");
+        let artifact = runtime.command_artifacts.record_diagnostic_source(
+            &session_id,
+            "artifact-item",
+            &capture,
+            48,
+            0,
+        );
+        let set = json!({
+            "schema_version": pinned_context::SCHEMA_VERSION,
+            "project_id": project_id,
+            "items": [{
+                "id": "pin-artifact",
+                "project_id": project_id,
+                "session_id": session_id,
+                "kind": "artifact",
+                "source": "command-output",
+                "label": "command output",
+                "reference": artifact.reference,
+                "content_hash": format!("sha256:{}", artifact.sha256),
+                "bytes": artifact.content.len(),
+                "freshness": "fresh",
+                "priority": 700,
+                "metadata": {}
+            }]
+        });
+        let set: pinned_context::PinnedContextSet = serde_json::from_value(set).unwrap();
+        let identity = runtime
+            .pinned_context_store
+            .as_ref()
+            .unwrap()
+            .persist(&set)
+            .unwrap()
+            .set_identity;
+        let inspected = runtime.handle_line(&request(
+            "turn/context/inspect",
+            json!({
+                "session_id": session_id,
+                "pinned_context_set_identity": identity,
+                "pinned_context_ids": ["pin-artifact"]
+            }),
+        ));
+        assert_eq!(
+            inspected[0]["result"]["context"]["manifest"]["entries"][0]["kind"],
+            "artifact"
+        );
+        assert_eq!(
+            inspected[0]["result"]["context"]["manifest"]["entries"][0]["content_hash"],
+            format!("sha256:{}", artifact.sha256)
+        );
+        let serialized = serde_json::to_string(&inspected).unwrap();
+        assert!(!serialized.contains("artifact body must stay behind"));
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]

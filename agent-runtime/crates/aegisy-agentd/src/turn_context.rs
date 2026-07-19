@@ -317,6 +317,7 @@ fn validate_item(item: &TurnContextItem) -> Result<(), TurnContextError> {
         "file"
             | "selection"
             | "diagnostic"
+            | "artifact"
             | "search"
             | "terminal_excerpt"
             | "git_diff"
@@ -345,8 +346,10 @@ fn validate_item(item: &TurnContextItem) -> Result<(), TurnContextError> {
         }
     }
     if let Some(reference) = &item.raw_output_ref {
-        if !reference.starts_with("diagnostic-raw:sha256:") || reference.len() > 128 {
-            return Err(error("invalid diagnostic raw reference"));
+        let valid = (item.kind == "artifact" && reference.starts_with("command-output:sha256:"))
+            || (item.kind != "artifact" && reference.starts_with("diagnostic-raw:sha256:"));
+        if !valid || reference.len() > 128 {
+            return Err(error("invalid raw artifact reference"));
         }
     }
     if let Some(content_hash) = item.expected_content_hash.as_deref() {

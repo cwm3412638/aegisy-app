@@ -227,13 +227,16 @@ explicit `pinned_context_ids` list. The runtime never sends all persisted pins
 implicitly. A non-empty selection requires the exact current set identity,
 contains at most 16 unique IDs, and is revalidated against the current project,
 session, and registered root. The first assembly phase accepts `file` and
-`selection` pins; image, diagnostic, terminal, Git, artifact, and child-handoff
-descriptors fail explicitly instead of becoming unverified inline content. The
+`selection` and session-owned `artifact` pins; image, diagnostic, terminal, Git,
+and child-handoff descriptors fail explicitly instead of becoming unverified
+inline content. Artifact assembly accepts only validated `command-output:sha256:`
+text references and rechecks UTF-8, byte count, and SHA-256 before adding content.
+The
 metadata-only descriptor supplies a root-relative path, expected raw-byte
 SHA-256/revision, freshness, and priority. A selection additionally carries
 bounded 1-based Unicode scalar `line`, `column`, `end_line`, and `end_column`
-metadata. Both inspect and
-start use the normal authoritative resolver: it rereads the file, reapplies
+metadata. Both inspect and start use the normal authoritative resolver: it rereads
+the file, reapplies
 ignore/sensitive/symlink/root policy, hashes the raw bytes, marks a hash or
 revision change `stale`, and only then extracts the selection range. Only
 normalized UTF-8 text enters the bounded untrusted context envelope, and the
@@ -254,13 +257,13 @@ event append returns an incomplete-save error, and a failed pointer replacement
 may leave a preserved unreferenced object. This does not claim cross-resource
 atomicity. When a descriptor uses a standard `*:sha256:` Blob reference, save
 checks active SQLite metadata for exact project/session ownership, hash, and
-byte count without reading Blob bytes or updating access time. File and selection
-pins now have explicit selected turn assembly and authoritative reread/stale
-detection.
+byte count without reading Blob bytes or updating access time. File, selection,
+and validated artifact pins now have explicit selected turn assembly and
+authoritative reread/stale detection.
 Qt loads project pins into the composer and exposes CAS-protected file and
 clean, conflict-free editor-selection pin creation, per-turn inclusion, deterministic
 order changes, and unpin without turning persisted pins into implicit model context. Image/diagnostic/
-terminal/Git/artifact/child-handoff assembly, durable automatic invalidation,
+terminal/Git/child-handoff assembly, durable automatic invalidation,
 orphan GC, cross-resource atomicity, and Windows runtime evidence remain open.
 Qt watch/save callbacks may mark loaded file and selection pins stale locally, but never rewrite
 the durable descriptor; inspect/start remains authoritative. Agent/Codex remains

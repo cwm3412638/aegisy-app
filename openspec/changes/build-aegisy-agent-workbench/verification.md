@@ -765,8 +765,10 @@ Known limitations:
   project/session/root scope, rereads the file under workspace policy, compares
   raw-byte SHA-256 and revision, marks drift stale, and for selections extracts
   only bounded metadata line/column ranges while keeping inspection metadata-only.
-  Duplicate/missing IDs, stale set identity, cross-session selection, and image/
-  diagnostic/terminal/Git/artifact/child-handoff kinds fail explicitly. Qt now
+  Session-owned artifact pins additionally resolve only validated command-output
+  text references with matching UTF-8, byte count, and SHA-256. Duplicate/missing
+  IDs, stale set identity, cross-session selection, and image/diagnostic/terminal/
+  Git/child-handoff kinds fail explicitly. Qt now
   loads project pins and covers authoritative file and editor-selection pin creation,
   CAS persistence, range metadata, per-turn inclusion, bounded order changes, and
   unpin in the Workbench render fixture. Remaining non-file assembly, cross-resource atomicity, automatic invalidation,

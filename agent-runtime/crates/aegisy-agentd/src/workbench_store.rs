@@ -1542,8 +1542,8 @@ impl WorkbenchStore {
         persist_result
     }
 
-    pub fn read_durable_blob_for_session(
-        &mut self,
+    pub fn read_durable_blob_for_session_read_only(
+        &self,
         session_id: &str,
         content_reference: &str,
         accessed_at_ms: u64,
@@ -1574,6 +1574,23 @@ impl WorkbenchStore {
             .blob_files
             .read(&reference.content_hash.sha256, reference.content_hash.bytes)
             .map_err(blob_file_error)?;
+        Ok(DurableBlobRead { reference, content })
+    }
+
+    pub fn read_durable_blob_for_session(
+        &mut self,
+        session_id: &str,
+        content_reference: &str,
+        accessed_at_ms: u64,
+    ) -> Result<DurableBlobRead, WorkbenchStoreError> {
+        let read = self.read_durable_blob_for_session_read_only(
+            session_id,
+            content_reference,
+            accessed_at_ms,
+        )?;
+        let reference_id = read.reference.reference_id.clone();
+        let reference = read.reference;
+        let content = read.content;
         let timestamp = to_i64(accessed_at_ms, "durable blob access time")?;
         let transaction =
             match self.begin_database_write("cannot start durable blob access transaction") {
