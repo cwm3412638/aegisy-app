@@ -105,6 +105,14 @@ exposed through AAP, persisted as a job, or connected to an executor; clients
 must not infer plan authority or write permission from Codex `turn/plan/updated`
 notifications.
 
+The related internal `child-task/0.1` request contract binds a parent session and
+turn to a bounded goal, content-addressed context identities, project/root and
+`read_only` or `dedicated_worktree` isolation, tool list, model profile,
+permission/network policy, token/cost/time/turn/tool/concurrency budgets, and an
+expected `child-handoff/0.1` result shape. Validation does not create a child,
+grant permissions, allocate a worktree, or start a provider. Parent/child
+lineage, approval, scheduling, and execution remain unavailable.
+
 ## Replay And Reconnect
 
 The durable session stream is ordered by a session-local sequence. After a

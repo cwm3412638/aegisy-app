@@ -117,6 +117,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   revision drift marks affected steps `stale` without resetting their status.
   The contract is unit-tested but is not persisted, exposed through AAP/Qt, or
   connected to an executor; keep `21.2` unchecked.
+- Task `21.3` now has a partial internal `child-task/0.1` contract. It binds a
+  parent session/turn to bounded goal/context/workspace/tool/model/permission/
+  budget/result metadata, validates isolation and content identities, and grants
+  no authority. It is unit-tested but has no child-session lineage, approval,
+  worktree, scheduler, or executor integration; keep `21.3` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is
@@ -820,14 +825,14 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 318 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 322 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
-and protocol counts include the structured-plan dependency/evidence/stale contract
-alongside diagnostic, terminal, Git, and child-handoff pinned-context authority,
-strict Git references, complete-source drift detection, terminal normalization,
-image import/preview/assembly/release rollback, and source-loss fail-closed
-invariants.
+and protocol counts include the structured-plan dependency/evidence/stale contract,
+the child-task scope/budget/handoff contract, and diagnostic, terminal, Git, and
+child-handoff pinned-context authority, strict Git references, complete-source
+drift detection, terminal normalization, image import/preview/assembly/release
+rollback, and source-loss fail-closed invariants.
 
 ## Session History Boundary
 

@@ -57,6 +57,17 @@ Structured-plan foundation evidence:
   drift, and secret/non-hash rejection. AAP/UI persistence, plan questions,
   durable job state, and execution remain unavailable under task `21.2`.
 
+Child-task contract evidence:
+
+- An internal `child-task/0.1` request contract binds parent session/turn,
+  bounded goal and context identities, project/root isolation, tools, model and
+  permission policy, six independent budgets, and a bounded
+  `child-handoff/0.1` result shape. Validation grants no permissions or
+  execution authority. Four unit fixtures cover identity, unsafe scope,
+  duplicate/budget bounds, and secret/result rejection; lineage, approvals,
+  scheduling, worktree allocation, and executor integration remain open under
+  task `21.3`.
+
 Current editor evidence:
 
 - The macOS Qt build and all 15 desktop tests pass.

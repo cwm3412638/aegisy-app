@@ -44,6 +44,9 @@ or session methods are accepted.
 - `runtime/degradations`
 - internal `structured-plan/0.1` validation (bounded steps, dependencies,
   content-free evidence, and stale revalidation; no AAP mutation surface yet)
+- internal `child-task/0.1` validation (goal, context identities, workspace
+  isolation, tools, model/permission policy, budgets, and handoff shape; no
+  child-session or executor surface yet)
 - `workspace/list`
 - `workspace/read`
 - `workspace/instructions` (deterministic, bounded, untrusted instruction discovery)

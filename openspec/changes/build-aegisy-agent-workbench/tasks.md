@@ -450,6 +450,7 @@
 - [ ] 21.2 Implement structured plan steps with IDs, dependencies, owners, evidence, and stale-state revalidation
   - Partial internal `structured-plan/0.1` foundation validates bounded step IDs/statuses/owners, dependency references and cycles, content-free SHA-256 evidence, and completion evidence. Revalidation compares plan/base/evidence revisions and marks affected steps stale without resetting status. It has unit coverage but no AAP/UI persistence, plan question flow, or executor integration yet; keep this task unchecked.
 - [ ] 21.3 Define child-task contract for goal, context, worktree, tools, model profile, permissions, budgets, and handoff
+  - Partial internal `child-task/0.1` contract binds parent session/turn, bounded goal, content-addressed context identities, project/root and `read_only` or `dedicated_worktree` isolation, tools, model profile, permission/network policy, token/cost/time/turn/tool/concurrency budgets, and an expected `child-handoff/0.1` result shape. Validation is content-free and grants no authority; four unit fixtures cover valid identity, unsafe scope, duplicate resources/budgets, and secret/result rejection. Parent/child lineage, approval, scheduler, worktree creation, and execution remain unavailable, so keep this task unchecked.
 - [ ] 21.4 Implement parent/child session lineage, navigation, status, cancellation, and bounded result handoff
 - [ ] 21.5 Enforce dedicated worktree for every concurrent write-capable child
 - [ ] 21.6 Implement token, cost, time, turn, tool, concurrency, and network budgets in the runtime

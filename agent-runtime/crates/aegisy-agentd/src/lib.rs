@@ -1,3 +1,4 @@
+pub mod child_task;
 pub(crate) mod codex_adapter;
 mod command_action;
 mod command_artifact;
