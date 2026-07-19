@@ -136,7 +136,11 @@ preserving data. For
 standard `*:sha256:` Blob references, save performs a read-only SQLite metadata
 check for active project/session ownership plus exact hash/byte identity; it
 does not read Blob bytes or update access timestamps. It does not reread or
-invalidate source references and has no orphan GC.
+invalidate source references. After startup publication compensation, the store
+runs `pinned-context-object-gc/0.1` with a 24-hour orphan grace period; current
+pointers and pending journals are protected, object hash/schema integrity is
+rechecked before deletion, and unknown, corrupt, recent, future-dated, or changed
+entries are retained and reported.
 
 Every full-set save compares the previous and next image descriptors. Removing
 the final pin for one session-owned image releases its durable Blob reference in
@@ -147,8 +151,8 @@ write with the exact same content, owner, reference, and metadata reactivates th
 released reference transactionally; any identity difference remains an error. Release
 events carry only a hashed batch identity and count, allowing repeated transitions to
 the same empty set without persisting reference IDs or content. The external
-pin pointer is still published first, so cross-resource atomicity, conservative
-orphan GC, and automatic source invalidation remain open.
+pin pointer is still published first, so cross-resource atomicity and automatic
+source invalidation remain open.
 
 Capabilities `workspace.image.import-user` and `workspace.image.preview` add the
 session/project-scoped image authority used by pinned context. Import accepts

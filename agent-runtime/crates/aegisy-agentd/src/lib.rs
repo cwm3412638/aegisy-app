@@ -2580,6 +2580,7 @@ impl Runtime {
     ) -> Option<pinned_context_store::PinnedContextStore> {
         let store = pinned_context_store::PinnedContextStore::open(data_root).ok()?;
         Self::compensate_pinned_context_publications(workbench_store, &store).ok()?;
+        store.garbage_collect_orphan_objects(now_ms()).ok()?;
         Some(store)
     }
 

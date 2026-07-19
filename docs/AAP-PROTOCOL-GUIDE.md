@@ -362,8 +362,11 @@ source identity, bytes, and truncation. Worktree/staged changes therefore invali
 their pins; commit and commit-diff pins survive unrelated worktree changes but fail
 if the exact Git object is no longer available. No Git mutation is added.
 
-Child-handoff assembly, durable automatic invalidation, orphan GC, full cross-resource
-atomicity, and Windows runtime evidence remain open.
+Child-handoff assembly, durable automatic invalidation, full cross-resource atomicity,
+and Windows runtime evidence remain open. Startup also runs the bounded
+`pinned-context-object-gc/0.1` sweep after publication compensation: it protects
+pointer/journal objects, applies a 24-hour grace period, rechecks hash/schema and
+file metadata, and preserves uncertain entries.
 Qt watch/save callbacks may mark loaded file and selection pins stale locally, but never rewrite
 the durable descriptor; inspect/start remains authoritative. Agent/Codex remains
 read-only.

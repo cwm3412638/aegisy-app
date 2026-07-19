@@ -316,7 +316,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   previous pointer, replays only an uncommitted forward event/release transaction,
   and cleans an already-committed forward event without duplicating it. Any malformed,
   tampered, or ambiguous state disables pinned-context capabilities while preserving
-  immutable objects and Blob data. Capability
+  immutable objects and Blob data. After successful compensation, startup runs the
+  bounded `pinned-context-object-gc/0.1` sweep with a 24-hour orphan grace period.
+  It protects every current pointer and pending journal object, rechecks object
+  hash/schema/set integrity and file metadata before deletion, and reports while
+  preserving unknown, corrupt, future-dated, recently-created, or changed entries.
+  Capability
   `turn.context.pinned-selected` now lets `turn/context/inspect` and `turn/start`
   consume only explicit selected file/selection/image/diagnostic/terminal/Git/artifact pin IDs
   together with the exact current set identity. Selection is capped at 16 unique IDs; project/session/
@@ -399,7 +404,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   are resolved from the authoritative file range.
   This foundation still has no atomic boundary across the external pin object/pointer
   and SQLite event/release transaction, durable diagnostic/
-  terminal authority and invalidation, conservative pin-object/Blob orphan GC, or
+  terminal authority and invalidation, automatic source invalidation, or
   child-handoff assembly; complete image/Git lifecycle and cross-platform evidence
   also remain open, so keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.

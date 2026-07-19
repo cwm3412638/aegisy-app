@@ -5,13 +5,16 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::UNIX_EPOCH;
 
 pub const STORE_SCHEMA_VERSION: &str = "pinned-context-store/0.1";
 pub const PUBLICATION_SCHEMA_VERSION: &str = "pinned-context-publication/0.1";
+pub const ORPHAN_OBJECT_GRACE_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_SET_BYTES: u64 = 1024 * 1024;
 const MAX_PROJECTS: usize = 1_024;
 const MAX_OBJECTS: usize = 4_096;
 const MAX_STORE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_GC_ENTRIES: usize = 256;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,6 +45,17 @@ pub struct PinnedContextPublication {
     pub next_object_reference: String,
     pub created_at_ms: u64,
     pub content_bodies_persisted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PinnedContextObjectGcReport {
+    pub schema_version: String,
+    pub examined: u64,
+    pub deleted: u64,
+    pub deleted_bytes: u64,
+    pub retained: u64,
+    pub uncertain: u64,
+    pub issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,6 +230,218 @@ impl PinnedContextStore {
         }
         publications.sort_by(|left, right| left.project_id.cmp(&right.project_id));
         Ok(publications)
+    }
+
+    pub fn garbage_collect_orphan_objects(
+        &self,
+        now_ms: u64,
+    ) -> Result<PinnedContextObjectGcReport, PinnedContextStoreError> {
+        self.validate_layout()?;
+        let protected = self.protected_object_hashes()?;
+        let mut report = PinnedContextObjectGcReport {
+            schema_version: "pinned-context-object-gc/0.1".into(),
+            examined: 0,
+            deleted: 0,
+            deleted_bytes: 0,
+            retained: 0,
+            uncertain: 0,
+            issues: Vec::new(),
+        };
+        let entries = fs::read_dir(self.root.join("objects"))
+            .map_err(|_| error("pinned-context-object-enumeration-failed"))?
+            .take(MAX_GC_ENTRIES + 1)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| error("pinned-context-object-inspection-failed"))?;
+        if entries.len() > MAX_GC_ENTRIES {
+            report.uncertain = report.uncertain.saturating_add(1);
+            report
+                .issues
+                .push("pinned-context-gc-limit-exceeded".into());
+            return Ok(report);
+        }
+        for entry in entries {
+            report.examined = report.examined.saturating_add(1);
+            let name = match entry.file_name().to_str().map(str::to_owned) {
+                Some(name) if valid_hash(&name) => name,
+                _ => {
+                    report.uncertain = report.uncertain.saturating_add(1);
+                    report
+                        .issues
+                        .push("pinned-context-gc-unknown-object".into());
+                    continue;
+                }
+            };
+            let path = entry.path();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                    metadata
+                }
+                _ => {
+                    report.uncertain = report.uncertain.saturating_add(1);
+                    report
+                        .issues
+                        .push("pinned-context-gc-object-layout-unsafe".into());
+                    continue;
+                }
+            };
+            if protected.contains(&name) {
+                report.retained = report.retained.saturating_add(1);
+                continue;
+            }
+            let bytes = match self.read_object(&name) {
+                Ok(bytes) if sha256_hex(&bytes) == name => bytes,
+                _ => {
+                    report.uncertain = report.uncertain.saturating_add(1);
+                    report
+                        .issues
+                        .push("pinned-context-gc-integrity-uncertain".into());
+                    continue;
+                }
+            };
+            let stored: StoredPinnedContextSet =
+                match serde_json::from_slice::<StoredPinnedContextSet>(&bytes) {
+                    Ok(stored)
+                        if stored.schema_version == STORE_SCHEMA_VERSION
+                            && stored.set.schema_version == SCHEMA_VERSION
+                            && !stored.content_bodies_persisted
+                            && stored.set.validate().is_ok() =>
+                    {
+                        stored
+                    }
+                    _ => {
+                        report.uncertain = report.uncertain.saturating_add(1);
+                        report
+                            .issues
+                            .push("pinned-context-gc-integrity-uncertain".into());
+                        continue;
+                    }
+                };
+            if descriptor(&stored.set, &name).is_err() {
+                report.uncertain = report.uncertain.saturating_add(1);
+                report
+                    .issues
+                    .push("pinned-context-gc-integrity-uncertain".into());
+                continue;
+            }
+            let modified_ms = match modified_time_ms(&metadata) {
+                Some(modified_ms) => modified_ms,
+                None => {
+                    report.uncertain = report.uncertain.saturating_add(1);
+                    report
+                        .issues
+                        .push("pinned-context-gc-mtime-unavailable".into());
+                    continue;
+                }
+            };
+            if modified_ms > now_ms || now_ms.saturating_sub(modified_ms) < ORPHAN_OBJECT_GRACE_MS {
+                report.retained = report.retained.saturating_add(1);
+                continue;
+            }
+            if self.protected_object_hashes()?.contains(&name) {
+                report.retained = report.retained.saturating_add(1);
+                continue;
+            }
+            let latest = match fs::symlink_metadata(&path) {
+                Ok(latest)
+                    if latest.is_file()
+                        && !latest.file_type().is_symlink()
+                        && latest.len() == metadata.len()
+                        && modified_time_ms(&latest) == Some(modified_ms) =>
+                {
+                    latest
+                }
+                _ => {
+                    report.uncertain = report.uncertain.saturating_add(1);
+                    report
+                        .issues
+                        .push("pinned-context-gc-candidate-changed".into());
+                    continue;
+                }
+            };
+            if fs::remove_file(&path).is_err() {
+                report.uncertain = report.uncertain.saturating_add(1);
+                report.issues.push("pinned-context-gc-delete-failed".into());
+                continue;
+            }
+            report.deleted = report.deleted.saturating_add(1);
+            report.deleted_bytes = report.deleted_bytes.saturating_add(latest.len());
+        }
+        if report.deleted > 0 {
+            sync_directory(&self.root.join("objects"))?;
+        }
+        Ok(report)
+    }
+
+    fn protected_object_hashes(
+        &self,
+    ) -> Result<std::collections::BTreeSet<String>, PinnedContextStoreError> {
+        let mut protected = std::collections::BTreeSet::new();
+        let pointers = fs::read_dir(self.root.join("pointers"))
+            .map_err(|_| error("pinned-context-pointer-enumeration-failed"))?
+            .take(MAX_PROJECTS + 1)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| error("pinned-context-pointer-inspection-failed"))?;
+        if pointers.len() > MAX_PROJECTS {
+            return Err(error("pinned-context-project-limit"));
+        }
+        for entry in pointers {
+            let name = entry
+                .file_name()
+                .to_str()
+                .map(str::to_owned)
+                .filter(|name| valid_hash(name))
+                .ok_or_else(|| error("pinned-context-pointer-name-invalid"))?;
+            let metadata = fs::symlink_metadata(entry.path())
+                .map_err(|_| error("pinned-context-pointer-inspection-failed"))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(error("pinned-context-pointer-unsafe"));
+            }
+            let object_hash = self
+                .read_optional_pointer(&name)?
+                .ok_or_else(|| error("pinned-context-pointer-missing"))?;
+            let bytes = self.read_object(&object_hash)?;
+            if sha256_hex(&bytes) != object_hash {
+                return Err(error("pinned-context-object-hash-mismatch"));
+            }
+            let stored: StoredPinnedContextSet = serde_json::from_slice(&bytes)
+                .map_err(|_| error("pinned-context-object-invalid"))?;
+            if stored.schema_version != STORE_SCHEMA_VERSION
+                || stored.set.schema_version != SCHEMA_VERSION
+                || stored.content_bodies_persisted
+                || pointer_name(&stored.set.project_id) != name
+            {
+                return Err(error("pinned-context-object-identity-invalid"));
+            }
+            stored
+                .set
+                .validate()
+                .map_err(|_| error("pinned-context-set-invalid"))?;
+            descriptor(&stored.set, &object_hash)?;
+            protected.insert(object_hash);
+        }
+        for publication in self.pending_publications()? {
+            self.load_object_reference(
+                &publication.project_id,
+                &publication.next_object_reference,
+            )?;
+            protected.insert(
+                publication
+                    .next_object_reference
+                    .strip_prefix("pinned-context-object:sha256:")
+                    .ok_or_else(|| error("pinned-context-publication-identity-invalid"))?
+                    .into(),
+            );
+            if let Some(previous) = publication.previous_object_reference.as_deref() {
+                self.load_object_reference(&publication.project_id, previous)?;
+                protected.insert(
+                    previous
+                        .strip_prefix("pinned-context-object:sha256:")
+                        .ok_or_else(|| error("pinned-context-publication-identity-invalid"))?
+                        .into(),
+                );
+            }
+        }
+        Ok(protected)
     }
 
     fn persist_object(
@@ -679,6 +905,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn modified_time_ms(metadata: &fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .try_into()
+        .ok()
+}
+
 fn temporary_path(parent: &Path, kind: &str) -> PathBuf {
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     parent.join(format!(
@@ -776,6 +1013,7 @@ mod tests {
     use super::*;
     use crate::pinned_context::PinnedContextItem;
     use std::collections::BTreeMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn root() -> PathBuf {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -810,6 +1048,15 @@ mod tests {
         let mut set = PinnedContextSet::new("project-1").unwrap();
         set.add(item("pin-1", "src/main.rs")).unwrap();
         set
+    }
+
+    fn future_gc_time() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + ORPHAN_OBJECT_GRACE_MS
+            + 1
     }
 
     #[test]
@@ -953,6 +1200,84 @@ mod tests {
         assert!(store
             .complete_publication("project-1", &publication.publication_id)
             .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn orphan_gc_protects_current_and_journal_objects_then_reclaims_old_orphans() {
+        let root = root();
+        let store = PinnedContextStore::open(&root).unwrap();
+        let initial = set();
+        let initial_descriptor = store.persist(&initial).unwrap();
+        let mut updated = initial.clone();
+        updated.add(item("pin-2", "src/lib.rs")).unwrap();
+        let (updated_descriptor, publication) = store.persist_publication(&updated, 1).unwrap();
+        let publication = publication.unwrap();
+        let initial_hash = initial_descriptor
+            .object_reference
+            .strip_prefix("pinned-context-object:sha256:")
+            .unwrap();
+        let updated_hash = updated_descriptor
+            .object_reference
+            .strip_prefix("pinned-context-object:sha256:")
+            .unwrap();
+        let journal_gc = store
+            .garbage_collect_orphan_objects(future_gc_time())
+            .unwrap();
+        assert_eq!(journal_gc.deleted, 0);
+        assert!(store.root.join("objects").join(initial_hash).exists());
+        assert!(store.root.join("objects").join(updated_hash).exists());
+
+        store
+            .complete_publication("project-1", &publication.publication_id)
+            .unwrap();
+        let reclaimed = store
+            .garbage_collect_orphan_objects(future_gc_time())
+            .unwrap();
+        assert_eq!(reclaimed.deleted, 1);
+        assert!(reclaimed.deleted_bytes > 0);
+        assert!(!store.root.join("objects").join(initial_hash).exists());
+        assert!(store.root.join("objects").join(updated_hash).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn orphan_gc_preserves_unknown_and_corrupt_objects() {
+        let root = root();
+        let store = PinnedContextStore::open(&root).unwrap();
+        let unknown = store.root.join("objects").join("unknown-entry");
+        fs::write(&unknown, b"not an object").unwrap();
+        let report = store
+            .garbage_collect_orphan_objects(future_gc_time())
+            .unwrap();
+        assert_eq!(report.deleted, 0);
+        assert!(report.uncertain > 0);
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue == "pinned-context-gc-unknown-object"));
+        assert!(unknown.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn orphan_gc_fails_closed_when_current_pointer_object_is_tampered() {
+        let root = root();
+        let store = PinnedContextStore::open(&root).unwrap();
+        let descriptor = store.persist(&set()).unwrap();
+        let object_hash = descriptor
+            .object_reference
+            .strip_prefix("pinned-context-object:sha256:")
+            .unwrap();
+        fs::write(store.root.join("objects").join(object_hash), b"tampered").unwrap();
+        assert_eq!(
+            store
+                .garbage_collect_orphan_objects(future_gc_time())
+                .unwrap_err()
+                .code,
+            "pinned-context-object-hash-mismatch"
+        );
+        assert!(store.root.join("objects").join(object_hash).exists());
         fs::remove_dir_all(root).unwrap();
     }
 
