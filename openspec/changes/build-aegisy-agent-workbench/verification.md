@@ -36,6 +36,17 @@ Each milestone in `roadmap.md` must attach:
 Implementation is in progress and does not claim that the full workbench, model
 catalog, sandbox, or autonomous feature set is complete.
 
+Autonomy release-gate evidence:
+
+- OpenSpec `21.1` is complete. `runtime/degradations` reports bounded,
+  content-free disabled gates for background jobs, multi-agent execution, and
+  unattended writes. Each gate is explicitly `not-advertised`, has
+  `stable_enabled=false` and `override_available=false`, and names the missing
+  prerequisite tasks. The initialize response advertises no autonomy capability,
+  and protocol coverage rejects a hidden background dispatch method. No
+  scheduling, child execution, Agent write, or unattended mode is enabled by
+  this gate.
+
 Current editor evidence:
 
 - The macOS Qt build and all 15 desktop tests pass.

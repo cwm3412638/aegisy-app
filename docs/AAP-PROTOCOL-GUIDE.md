@@ -78,13 +78,16 @@ for `storage` in older clients.
 
 `runtime/degradations` is a versioned, content-free explanation for features that
 are unavailable, metadata-only, or blocked. The current Codex adapter reports
-read-only Agent mutation, metadata-only provider thread items, and blocked
-provider delete/compact. A client must fail closed when the schema is unknown or
-the request fails.
+read-only Agent mutation, metadata-only provider thread items, blocked provider
+delete/compact, and the release gate for background/multi-agent autonomy. The
+autonomy entries use `availability: not-advertised`, `stable_enabled: false`,
+`override_available: false`, and bounded `missing_gates`; there is no hidden
+experimental switch. A client must fail closed when the schema is unknown or the
+request fails.
 
 ```jsonl
 {"jsonrpc":"2.0","id":"6","method":"runtime/degradations","params":{}}
-{"jsonrpc":"2.0","id":"6","result":{"schema_version":"runtime-degradations/0.1","degradations":[{"feature":"agent-mutation","state":"disabled","scope":"runtime"},{"feature":"provider-thread-item-content","state":"metadata-only","scope":"provider"},{"feature":"provider-thread-compact","state":"blocked","scope":"provider"}]}}
+{"jsonrpc":"2.0","id":"6","result":{"schema_version":"runtime-degradations/0.1","degradations":[{"feature":"agent-mutation","state":"disabled","scope":"runtime"},{"feature":"provider-thread-item-content","state":"metadata-only","scope":"provider"},{"feature":"provider-thread-compact","state":"blocked","scope":"provider"},{"feature":"background-jobs","state":"disabled","availability":"not-advertised","stable_enabled":false,"override_available":false,"scope":"runtime","missing_gates":["21.2","21.6","21.8","21.9","20.9"]},{"feature":"multi-agent","state":"disabled","availability":"not-advertised","stable_enabled":false,"override_available":false,"scope":"runtime","missing_gates":["18.3","21.3","21.4","21.5","21.6","21.10"]},{"feature":"unattended-writes","state":"disabled","availability":"not-advertised","stable_enabled":false,"override_available":false,"scope":"runtime","missing_gates":["15.3","16.7","18.3","18.4","18.5","18.6"]}]}}
 ```
 
 No degradation response grants write, command, Hook, network, deletion, or

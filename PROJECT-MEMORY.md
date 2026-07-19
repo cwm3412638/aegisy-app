@@ -63,8 +63,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   state, and provides a guarded `重启 Codex` action. Full crash-loop recovery UI and
   cross-platform recovery evidence remain under task `7.2`.
   AAP `runtime/degradations` provides explicit, content-free feature states for
-  read-only Agent mutation, metadata-only provider items, and blocked provider
-  delete/compact so clients do not simulate unavailable behavior.
+  read-only Agent mutation, metadata-only provider items, blocked provider
+  delete/compact, and the background/multi-agent/unattended-write release gates
+  so clients do not simulate unavailable behavior. The autonomy entries are
+  `availability=not-advertised`, `stable_enabled=false`, and
+  `override_available=false`, with bounded missing-task IDs; no hidden stable
+  or experimental switch can enable them.
   Qt now requests this versioned response after initialization and renders a
   compact capability status (`Agent 只读`, metadata/deletion/compact unavailable,
   or provider unavailable). Invalid schemas or request failures return to an
@@ -99,9 +103,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 41 of 235 checkbox tasks are complete and 194 remain
+- OpenSpec task baseline: 42 of 235 checkbox tasks are complete and 193 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
+- OpenSpec task `21.1` is complete: background jobs, multi-agent execution, and
+  unattended writes remain unadvertised and disabled until their prerequisite
+  security, recovery, budget, evaluation, and release gates are recorded. The
+  runtime exposes only a bounded degradation report and no dispatch capability;
+  tasks `21.2+` remain future work.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is

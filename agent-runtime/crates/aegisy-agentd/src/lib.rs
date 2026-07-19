@@ -3342,7 +3342,7 @@ impl Runtime {
     }
 
     fn runtime_degradations(&self, request: Request) -> Vec<Value> {
-        let degradations = match &self.backend {
+        let mut degradations = match &self.backend {
             Backend::Codex(_) => vec![
                 json!({
                     "feature": "agent-mutation",
@@ -3388,6 +3388,7 @@ impl Runtime {
                 "scope": "runtime"
             })],
         };
+        degradations.extend(Self::autonomy_degradations());
         self.success_for(
             &request,
             json!({
@@ -3395,6 +3396,41 @@ impl Runtime {
                 "degradations": degradations
             }),
         )
+    }
+
+    fn autonomy_degradations() -> Vec<Value> {
+        vec![
+            json!({
+                "feature": "background-jobs",
+                "state": "disabled",
+                "availability": "not-advertised",
+                "stable_enabled": false,
+                "override_available": false,
+                "scope": "runtime",
+                "reason": "durable scheduling, recovery, budgets, notifications, and release evidence are incomplete",
+                "missing_gates": ["21.2", "21.6", "21.8", "21.9", "20.9"]
+            }),
+            json!({
+                "feature": "multi-agent",
+                "state": "disabled",
+                "availability": "not-advertised",
+                "stable_enabled": false,
+                "override_available": false,
+                "scope": "runtime",
+                "reason": "child contracts, isolated worktrees, approvals, budgets, recovery, and review are incomplete",
+                "missing_gates": ["18.3", "21.3", "21.4", "21.5", "21.6", "21.10"]
+            }),
+            json!({
+                "feature": "unattended-writes",
+                "state": "disabled",
+                "availability": "not-advertised",
+                "stable_enabled": false,
+                "override_available": false,
+                "scope": "runtime",
+                "reason": "Agent mutation remains read-only until permission, sandbox, approval, checkpoint, and recovery gates complete",
+                "missing_gates": ["15.3", "16.7", "18.3", "18.4", "18.5", "18.6"]
+            }),
+        ]
     }
 
     fn recovery_diagnostic(&self, request: Request, export: bool) -> Vec<Value> {

@@ -64,7 +64,11 @@ contracts are complete.
 
 Clients can query `runtime/degradations` to render disabled or metadata-only
 features explicitly. This is authoritative capability state, not a request to
-silently fall back to a mutating or provider-opaque implementation.
+silently fall back to a mutating or provider-opaque implementation. Background
+jobs, multi-agent execution, and unattended writes are explicitly
+`not-advertised` with `stable_enabled=false` and `override_available=false`
+until their listed release gates are complete; no hidden development switch can
+enable them in a stable runtime.
 
 When structured context is attached to `turn/start`, capability
 `turn.context.manifest` adds a `context-manifest/0.1` object to the immediate

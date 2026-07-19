@@ -142,6 +142,13 @@ fn ready_runtime() -> Runtime {
         .unwrap()
         .iter()
         .any(|capability| capability == "runtime.degradations"));
+    let capabilities = messages[0]["result"]["capabilities"].as_array().unwrap();
+    for gated in ["background-jobs", "multi-agent", "unattended-writes"] {
+        assert!(
+            !capabilities.iter().any(|capability| capability == gated),
+            "gated autonomy capability must not be advertised: {gated}"
+        );
+    }
     assert!(messages[0]["result"]["capabilities"]
         .as_array()
         .unwrap()
@@ -211,6 +218,25 @@ fn runtime_degradations_are_explicit_for_preview() {
         messages[0]["result"]["degradations"][0]["state"],
         "unavailable"
     );
+    for feature in ["background-jobs", "multi-agent", "unattended-writes"] {
+        let gate = messages[0]["result"]["degradations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["feature"] == feature)
+            .unwrap_or_else(|| panic!("missing autonomy gate {feature}"));
+        assert_eq!(gate["state"], "disabled");
+        assert_eq!(gate["availability"], "not-advertised");
+        assert_eq!(gate["stable_enabled"], false);
+        assert_eq!(gate["override_available"], false);
+        assert!(!gate["missing_gates"].as_array().unwrap().is_empty());
+    }
+    let hidden_switch = runtime.handle_line(&request(
+        "background-start",
+        "background/start",
+        json!({"session_id": "session-1"}),
+    ));
+    assert_eq!(hidden_switch[0]["error"]["code"], -32601);
 }
 
 #[test]
