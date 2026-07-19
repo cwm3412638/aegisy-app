@@ -759,15 +759,17 @@ Known limitations:
   incomplete. Standard `*:sha256:` Blob references are checked through a
   read-only metadata query for active project/session ownership and exact
   hash/byte identity; no Blob body is read and no access timestamp is updated.
-  Capability `turn.context.pinned-selected` now binds an explicit selected file-pin
-  ID list to the exact current set identity for both `turn/context/inspect` and
-  `turn/start`. The shared resolver rechecks project/session/root scope, rereads the
-  file under workspace policy, compares raw-byte SHA-256 and revision, marks drift
-  stale, and keeps inspection metadata-only. Duplicate/missing IDs, stale set
-  identity, cross-session selection, and non-file kinds fail explicitly. Qt now
+  Capability `turn.context.pinned-selected` now binds an explicit selected file/
+  selection-pin ID list to the exact current set identity for both
+  `turn/context/inspect` and `turn/start`. The shared resolver rechecks
+  project/session/root scope, rereads the file under workspace policy, compares
+  raw-byte SHA-256 and revision, marks drift stale, and for selections extracts
+  only bounded metadata line/column ranges while keeping inspection metadata-only.
+  Duplicate/missing IDs, stale set identity, cross-session selection, and image/
+  diagnostic/terminal/Git/artifact/child-handoff kinds fail explicitly. Qt now
   loads project pins and covers authoritative file pin creation, CAS persistence,
   per-turn inclusion, bounded order changes, and unpin in the Workbench render
-  fixture. Non-file assembly, cross-resource atomicity, automatic invalidation,
+  fixture. Remaining non-file assembly, cross-resource atomicity, automatic invalidation,
   orphan GC, and complete cross-platform pin evidence remain incomplete; task
   17.3 remains unchecked. Qt workspace-watch and user-save callbacks also mark
   loaded matching file pins stale locally without rewriting durable metadata; the

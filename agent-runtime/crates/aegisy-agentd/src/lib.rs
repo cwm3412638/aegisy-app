@@ -7060,14 +7060,39 @@ impl Runtime {
                     "pinned context item is bound to another session".into(),
                 ));
             }
-            if item.kind != "file" {
+            if item.kind != "file" && item.kind != "selection" {
                 return Err((
                     -32048,
-                    "only file pinned context is available in turn assembly".into(),
+                    "only file and selection pinned context are available in turn assembly".into(),
                 ));
             }
             let root_id = item.root_id.clone().unwrap_or_else(|| "root-1".into());
             self.workspace_root_binding(project_id, Some(&root_id), false)?;
+            let selection = if item.kind == "selection" {
+                let parse_position = |key: &str| {
+                    item.metadata
+                        .get(key)
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .filter(|value| *value > 0)
+                };
+                Some((
+                    parse_position("line"),
+                    parse_position("column"),
+                    parse_position("end_line"),
+                    parse_position("end_column"),
+                ))
+            } else {
+                None
+            };
+            if let Some((line, column, end_line, end_column)) = selection {
+                if line.is_none() || column.is_none() || end_line.is_none() || end_column.is_none()
+                {
+                    return Err((
+                        -32602,
+                        "selection pinned context requires bounded line and column metadata".into(),
+                    ));
+                }
+            }
             if context_items.iter().any(|context| context.id == item.id) {
                 return Err((
                     -32602,
@@ -7077,9 +7102,28 @@ impl Runtime {
             selected.push((item, root_id));
         }
         for (item, root_id) in selected {
+            let selection = if item.kind == "selection" {
+                let parse_position = |key: &str| {
+                    item.metadata
+                        .get(key)
+                        .and_then(|value| value.parse::<usize>().ok())
+                };
+                (
+                    parse_position("line"),
+                    parse_position("column"),
+                    parse_position("end_line"),
+                    parse_position("end_column"),
+                )
+            } else {
+                (None, None, None, None)
+            };
             context_items.push(TurnContextItem {
                 id: item.id,
-                kind: "file".into(),
+                kind: if selection.0.is_some() {
+                    "selection".into()
+                } else {
+                    "file".into()
+                },
                 label: item.label,
                 origin: "pinned-context".into(),
                 root_id: Some(root_id),
@@ -7087,10 +7131,10 @@ impl Runtime {
                 content: None,
                 revision: item.revision,
                 expected_content_hash: Some(item.content_hash),
-                line: None,
-                column: None,
-                end_line: None,
-                end_column: None,
+                line: selection.0,
+                column: selection.1,
+                end_line: selection.2,
+                end_column: selection.3,
                 freshness: Some(item.freshness),
                 raw_output_ref: None,
                 priority: Some(format!("pinned-priority-{}", item.priority)),

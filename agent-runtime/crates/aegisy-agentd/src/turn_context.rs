@@ -420,7 +420,7 @@ fn resolve_content(
             .map(PathBuf::as_path)
             .ok_or_else(|| error("context root is unavailable or not registered"))
     };
-    if item.kind == "file" {
+    if matches!(item.kind.as_str(), "file" | "selection") && item.content.is_none() {
         let root = selected_root()?;
         let path = required_path(item)?;
         validate_project_path(root, path)?;
@@ -446,11 +446,12 @@ fn resolve_content(
                             .collect::<String>()
                     )
             });
-        return Ok((
-            file.content,
-            Some(file.revision),
-            revision_stale || hash_stale,
-        ));
+        let content = if item.kind == "selection" {
+            select_range(&file.content, item)?
+        } else {
+            file.content
+        };
+        return Ok((content, Some(file.revision), revision_stale || hash_stale));
     }
 
     if let Some(path) = item.path.as_deref() {
@@ -474,6 +475,53 @@ fn required_path(item: &TurnContextItem) -> Result<&str, TurnContextError> {
         .as_deref()
         .filter(|path| !path.is_empty())
         .ok_or_else(|| error("file context path must not be empty"))
+}
+
+fn select_range(content: &str, item: &TurnContextItem) -> Result<String, TurnContextError> {
+    let start_line = item
+        .line
+        .ok_or_else(|| error("selection context start line is missing"))?;
+    let start_column = item
+        .column
+        .ok_or_else(|| error("selection context start column is missing"))?;
+    let end_line = item
+        .end_line
+        .ok_or_else(|| error("selection context end line is missing"))?;
+    let end_column = item
+        .end_column
+        .ok_or_else(|| error("selection context end column is missing"))?;
+    let lines = content.split('\n').collect::<Vec<_>>();
+    let offset = |line: usize, column: usize| {
+        if line == 0 || column == 0 {
+            return None;
+        }
+        let line_index = line - 1;
+        let line_text = *lines.get(line_index)?;
+        let byte_column = line_text
+            .char_indices()
+            .nth(column - 1)
+            .map(|(offset, _)| offset)
+            .unwrap_or_else(|| line_text.len());
+        if column > line_text.chars().count().saturating_add(1) {
+            return None;
+        }
+        let prefix_bytes = lines[..line_index]
+            .iter()
+            .map(|value| value.len().saturating_add(1))
+            .fold(0_usize, usize::saturating_add);
+        Some(prefix_bytes.saturating_add(byte_column))
+    };
+    let start = offset(start_line, start_column)
+        .ok_or_else(|| error("selection context start position is invalid"))?;
+    let end = offset(end_line, end_column)
+        .ok_or_else(|| error("selection context end position is invalid"))?;
+    if end < start {
+        return Err(error("selection context range is reversed"));
+    }
+    content
+        .get(start..end)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| error("selection context range is not UTF-8 aligned"))
 }
 
 fn validate_project_path(root: &Path, path: &str) -> Result<(), TurnContextError> {
@@ -611,6 +659,39 @@ mod tests {
         assert_eq!(prepared.manifest.entries[0].freshness, "fresh");
         assert!(prepared.text.contains("fn raw() {}\n"));
         assert!(!prepared.text.contains("stale=true"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolves_selection_from_authoritative_file_range_without_inline_body() {
+        let root = temporary_root();
+        let raw = b"one\ntwo\nthree\n";
+        fs::write(root.join("main.rs"), raw).unwrap();
+        let mut item = context_item("selection", Some("main.rs"), None);
+        item.line = Some(1);
+        item.column = Some(2);
+        item.end_line = Some(3);
+        item.end_column = Some(4);
+        item.expected_content_hash = Some(format!("sha256:{:x}", Sha256::digest(raw)));
+        let prepared = prepare_turn_context(&[item], Some(&root)).unwrap();
+        assert_eq!(prepared.item_count, 1);
+        assert!(prepared.text.contains("ne\ntwo\nthr"));
+        assert_eq!(prepared.manifest.entries[0].kind, "selection");
+        assert_eq!(prepared.manifest.entries[0].freshness, "fresh");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_reversed_selection_ranges() {
+        let root = temporary_root();
+        fs::write(root.join("main.rs"), "one\ntwo\n").unwrap();
+        let mut item = context_item("selection", Some("main.rs"), None);
+        item.line = Some(2);
+        item.column = Some(1);
+        item.end_line = Some(1);
+        item.end_column = Some(1);
+        let error = prepare_turn_context(&[item], Some(&root)).unwrap_err();
+        assert!(error.message.contains("range is reversed"));
         fs::remove_dir_all(root).unwrap();
     }
 

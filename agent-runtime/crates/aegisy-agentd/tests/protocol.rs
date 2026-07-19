@@ -2672,10 +2672,28 @@ fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() 
             "source": "editor-selection",
             "label": "selection",
             "reference": "pinned.rs",
+            "content_hash": original_hash,
+            "bytes": original.len(),
+            "freshness": "fresh",
+            "priority": 800,
+            "metadata": {
+                "line": "1",
+                "column": "1",
+                "end_line": "1",
+                "end_column": "4"
+            }
+        }, {
+            "id": "pin-image",
+            "project_id": project_id,
+            "session_id": session_id,
+            "kind": "image",
+            "source": "image-store",
+            "label": "screenshot",
+            "reference": "screenshots/one.png",
             "content_hash": format!("sha256:{}", "0".repeat(64)),
             "bytes": 4,
             "freshness": "fresh",
-            "priority": 800,
+            "priority": 700,
             "metadata": {}
         }]
     });
@@ -2748,13 +2766,31 @@ fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() 
         }),
     ));
     assert_eq!(missing[0]["error"]["code"], -32046);
+    let selection = runtime.handle_line(&request(
+        "inspect-selection-range",
+        "turn/context/inspect",
+        json!({
+            "session_id": session_id,
+            "pinned_context_set_identity": set_identity,
+            "pinned_context_ids": ["pin-selection"]
+        }),
+    ));
+    assert_eq!(selection[0]["result"]["context"]["item_count"], 1);
+    assert_eq!(
+        selection[0]["result"]["context"]["manifest"]["entries"][0]["kind"],
+        "selection"
+    );
+    assert_eq!(
+        selection[0]["result"]["context"]["manifest"]["entries"][0]["freshness"],
+        "fresh"
+    );
     let unsupported = runtime.handle_line(&request(
         "inspect-selection",
         "turn/context/inspect",
         json!({
             "session_id": session_id,
             "pinned_context_set_identity": set_identity,
-            "pinned_context_ids": ["pin-selection"]
+            "pinned_context_ids": ["pin-image"]
         }),
     ));
     assert_eq!(unsupported[0]["error"]["code"], -32048);

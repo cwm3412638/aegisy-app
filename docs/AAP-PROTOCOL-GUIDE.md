@@ -226,14 +226,17 @@ Capability `turn.context.pinned-selected` indicates that `turn/start` and
 explicit `pinned_context_ids` list. The runtime never sends all persisted pins
 implicitly. A non-empty selection requires the exact current set identity,
 contains at most 16 unique IDs, and is revalidated against the current project,
-session, and registered root. The first assembly phase accepts only `file` pins;
-all other descriptor kinds fail explicitly instead of becoming unverified inline
-content. The metadata-only descriptor supplies a root-relative path, expected
-raw-byte SHA-256, revision, freshness, and priority. Both inspect and start then
-use the normal authoritative file resolver: it rereads the file, reapplies
-ignore/sensitive/symlink/root policy, hashes the raw bytes, and marks a hash or
-revision change `stale`. Only normalized UTF-8 text enters the bounded untrusted
-context envelope, and the inspector still returns metadata only.
+session, and registered root. The first assembly phase accepts `file` and
+`selection` pins; image, diagnostic, terminal, Git, artifact, and child-handoff
+descriptors fail explicitly instead of becoming unverified inline content. The
+metadata-only descriptor supplies a root-relative path, expected raw-byte
+SHA-256/revision, freshness, and priority. A selection additionally carries
+bounded `line`, `column`, `end_line`, and `end_column` metadata. Both inspect and
+start use the normal authoritative resolver: it rereads the file, reapplies
+ignore/sensitive/symlink/root policy, hashes the raw bytes, marks a hash or
+revision change `stale`, and only then extracts the selection range. Only
+normalized UTF-8 text enters the bounded untrusted context envelope, and the
+inspector still returns metadata only.
 
 ```jsonl
 {"jsonrpc":"2.0","id":"30","method":"workspace/pinned-context/list","params":{"project_id":"project-1"}}
@@ -250,11 +253,12 @@ event append returns an incomplete-save error, and a failed pointer replacement
 may leave a preserved unreferenced object. This does not claim cross-resource
 atomicity. When a descriptor uses a standard `*:sha256:` Blob reference, save
 checks active SQLite metadata for exact project/session ownership, hash, and
-byte count without reading Blob bytes or updating access time. File pins now
-have explicit selected turn assembly and authoritative reread/stale detection.
+byte count without reading Blob bytes or updating access time. File and selection
+pins now have explicit selected turn assembly and authoritative reread/stale
+detection.
 Qt loads project pins into the composer and exposes CAS-protected file pin
 creation, per-turn inclusion, deterministic order changes, and unpin without
-turning persisted pins into implicit model context. Selection/image/diagnostic/
+turning persisted pins into implicit model context. Image/diagnostic/
 terminal/Git/artifact/child-handoff assembly, durable automatic invalidation,
 orphan GC, cross-resource atomicity, and Windows runtime evidence remain open.
 Qt watch/save callbacks may mark loaded file pins stale locally, but never rewrite
