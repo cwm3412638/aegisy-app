@@ -92,6 +92,8 @@ private:
     void submitPrompt();
     void cancelActiveTurn();
     void updateTurnAction();
+    void inspectContext();
+    void showContextInspection(const QJsonObject &result);
     void startPendingTurnIfReady();
     void ensureSessionAndSubmit(const QString &prompt, const QJsonArray &context);
     void addContextItem(QJsonObject item);
@@ -228,6 +230,7 @@ private:
     QLabel *m_contextSummary = nullptr;
     QListWidget *m_contextList = nullptr;
     QPushButton *m_attachContextButton = nullptr;
+    QPushButton *m_contextInspectButton = nullptr;
     QPushButton *m_sendButton = nullptr;
     QTabWidget *m_workspaceTabs = nullptr;
     QTreeWidget *m_fileTree = nullptr;
@@ -411,6 +414,7 @@ private:
     QString m_activeTurnSessionId;
     QString m_activeTurnId;
     QString m_turnCancelRequestId;
+    QString m_contextInspectRequestId;
     QJsonArray m_pendingContext;
     QList<QJsonObject> m_contextItems;
     QString m_provider = QStringLiteral("aegisy");

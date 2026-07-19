@@ -78,6 +78,8 @@ public:
     QString runRetentionMaintenance();
     QString startTurn(const QString &sessionId, const QString &input,
                       const QJsonArray &context = {});
+    QString inspectTurnContext(const QString &sessionId,
+                               const QJsonArray &context = {});
     QString cancelTurn(const QString &sessionId, const QString &turnId);
     QString readSession(const QString &sessionId, const QString &cursor = QString(),
                         int limit = 100);
@@ -225,6 +227,7 @@ signals:
     void compactionCheckpointRevised(const QString &requestId, const QJsonObject &result);
     void runtimeRecoveryStatusRead(const QJsonObject &status);
     void timelineEvent(const QJsonObject &event);
+    void turnContextInspected(const QString &requestId, const QJsonObject &result);
     void turnCancellationRequested(const QString &requestId, const QJsonObject &result);
     void workspaceListed(const QString &requestId, const QJsonObject &listing);
     void workspaceFileRead(const QString &requestId, const QJsonObject &file);

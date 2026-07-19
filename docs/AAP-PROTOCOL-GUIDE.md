@@ -150,7 +150,10 @@ instruction discovery, stale checks, and `context-budget/0.1` allocator as
 `turn/start`, but never calls a model or persists history. The versioned
 `context-inspector/0.1` response contains only manifest/budget metadata and
 explicit `content_included:false`, `model_started:false`, and `persisted:false`
-flags. Source and instruction bodies are never returned.
+flags. Source and instruction bodies are never returned. The Qt Work composer
+exposes a preflight action for an existing session and renders only the
+source/type/trust/size/status/reason metadata table; unchecked client context is
+sent as an explicit exclusion marker.
 
 ## Instruction Discovery
 

@@ -471,6 +471,16 @@ QString AgentRuntimeClient::startTurn(const QString &sessionId, const QString &i
     });
 }
 
+QString AgentRuntimeClient::inspectTurnContext(const QString &sessionId,
+                                                const QJsonArray &context)
+{
+    if (sessionId.isEmpty()) return {};
+    return sendRequest(QStringLiteral("turn/context/inspect"), {
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("context"), context},
+    });
+}
+
 QString AgentRuntimeClient::cancelTurn(const QString &sessionId, const QString &turnId)
 {
     if (sessionId.isEmpty() || turnId.isEmpty()) return {};
@@ -1214,6 +1224,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit runtimeRecoveryStatusRead(result);
     } else if (pendingMethod == QStringLiteral("turn/cancel")) {
         emit turnCancellationRequested(id, result);
+    } else if (pendingMethod == QStringLiteral("turn/context/inspect")) {
+        emit turnContextInspected(id, result);
     } else if (pendingMethod == QStringLiteral("workspace/list")) {
         emit workspaceListed(id, result);
     } else if (pendingMethod == QStringLiteral("workspace/read")) {

@@ -8,6 +8,7 @@
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDebug>
+#include <QDialog>
 #include <QImage>
 #include <QElapsedTimer>
 #include <QFile>
@@ -200,6 +201,8 @@ int main(int argc, char *argv[])
         QStringLiteral("agentComposer"));
     QPushButton *attachContext = workbench.findChild<QPushButton *>(
         QStringLiteral("agentAttachContextButton"));
+    QPushButton *contextInspect = workbench.findChild<QPushButton *>(
+        QStringLiteral("agentContextInspectButton"));
     QWidget *contextPanel = workbench.findChild<QWidget *>(
         QStringLiteral("agentContextPanel"));
     QLabel *contextSummary = workbench.findChild<QLabel *>(
@@ -332,12 +335,13 @@ int main(int argc, char *argv[])
                            && !editorReload->isEnabled()
                            && !editorSplit->isEnabled(),
                        "editor save controls have an invalid empty state")
-            || !expect(attachContext && contextPanel && contextSummary && contextList
+            || !expect(attachContext && contextInspect && contextPanel && contextSummary && contextList
                            && editorContext && terminalExcerpt && gitDiff
                            && fileContextAction && searchContextAction
                            && diagnosticContextAction && terminalContextAction
                            && gitContextAction && contextList->count() == 0
-                           && contextPanel->isHidden() && !editorContext->isEnabled(),
+                           && contextPanel->isHidden() && !contextInspect->isEnabled()
+                           && !editorContext->isEnabled(),
                        "structured turn-context controls are missing")
             || !expect(workspaceEditSummary && workspaceEditFiles && workspaceEditDiff
                            && workspaceEditMore && workspaceEditDiff->isReadOnly()
@@ -374,6 +378,7 @@ int main(int argc, char *argv[])
                            && !newSession->icon().isNull()
                            && !openFolder->icon().isNull()
                            && !sendButton->icon().isNull()
+                           && !contextInspect->icon().isNull()
                            && !editorSave->icon().isNull()
                            && !editorReload->icon().isNull()
                            && !editorSplit->icon().isNull()
@@ -1472,6 +1477,46 @@ int main(int argc, char *argv[])
                         });
                 }),
                 "structured context was not sent through AAP with authoritative file data")) {
+        return 1;
+    }
+    fileTree->setCurrentItem(editableItem);
+    fileContextAction->trigger();
+    if (!expect(waitUntil(application, [contextInspect]() {
+                    return contextInspect->isEnabled();
+                }),
+                "context inspector did not become available for an active Work session")) {
+        return 1;
+    }
+#ifdef AEGISY_EXPECT_AGENTD
+    contextInspect->click();
+    QTreeWidget *inspectionTable = nullptr;
+    if (!expect(waitUntil(application, [&workbench, &inspectionTable]() {
+                    inspectionTable = workbench.findChild<QTreeWidget *>(
+                        QStringLiteral("agentContextInspectionTable"));
+                    return inspectionTable && inspectionTable->topLevelItemCount() > 0;
+                }),
+                "context inspector did not render the read-only manifest")) {
+        return 1;
+    }
+    QLabel *inspectionSummary = workbench.findChild<QLabel *>(
+        QStringLiteral("agentContextInspectionSummary"));
+    if (!expect(inspectionSummary
+                    && inspectionSummary->text().contains(QStringLiteral("预算")),
+                "context inspector did not render budget metadata")) {
+        return 1;
+    }
+    if (QDialog *dialog = qobject_cast<QDialog *>(inspectionTable->window())) dialog->close();
+#endif
+    const QList<QPushButton *> inspectionRemoveButtons = workbench.findChildren<QPushButton *>(
+        QStringLiteral("agentContextRemoveButton"));
+    auto inspectionRemove = std::find_if(inspectionRemoveButtons.cbegin(),
+                                         inspectionRemoveButtons.cend(),
+                                         [](QPushButton *button) { return button->isVisible(); });
+    if (inspectionRemove != inspectionRemoveButtons.cend()) (*inspectionRemove)->click();
+    if (!expect(waitUntil(application, [contextList]() {
+                    return contextList->count() == 0;
+                }),
+                "context inspector fixture did not clean up its context item")) {
         return 1;
     }
     editor->selectAll();

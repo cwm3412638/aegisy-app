@@ -378,7 +378,8 @@
 - [ ] 17.5 Implement model-specific tokenizer adapters plus conservative unknown-tokenizer behavior
 - [ ] 17.6 Implement context inspector showing what will be sent, source, trust, size, redaction, and exclusion reason
   - Partial read-only inspector: AAP turn/context/inspect reuses the exact Work-session instruction discovery, stale validation, and context-budget/0.1 preparation path without starting a model or persisting content. It returns manifest/budget provenance, trust, size, freshness, inclusion, and exclusion metadata with content_included:false; source bodies are never returned.
-  - Keep this task unchecked until the Qt context-inspector surface, all context classes, explicit redaction/exclusion explanations, provider/tokenizer authority, and cross-platform render evidence exist.
+  - Qt now exposes a search-icon preflight action for an existing session and a read-only metadata table; unchecked client context is represented as an explicit exclusion marker. The Workbench render fixture covers the control and metadata-only result.
+  - Keep this task unchecked until all context classes, explicit redaction/exclusion explanations, provider/tokenizer authority, and cross-platform render evidence exist.
 - [ ] 17.7 Implement automatic compaction thresholds based on authoritative or conservative context state
 - [ ] 17.8 Implement compaction summary schema covering decisions, unresolved tasks, changed files, commands, tests, failures, and next steps
 - [ ] 17.9 Implement manual compaction preservation instructions and editable review before activation

@@ -588,7 +588,10 @@ Current editor evidence:
   It returns context-inspector/0.1, manifest/budget metadata, and explicit
   content_included:false, model_started:false, and persisted:false flags;
   protocol coverage proves instruction/source bodies never enter the response.
-  Task 17.6 remains unchecked until Qt inspection, complete context classes,
+  Qt exposes a preflight action for an existing session and renders a read-only
+  source/type/trust/size/status/reason table; the Workbench render fixture
+  exercises the control and metadata-only result. Unchecked client context is
+  represented as an explicit exclusion marker. Task 17.6 remains unchecked until complete context classes,
   redaction/exclusion explanations, provider/tokenizer authority, and
   cross-platform evidence are complete.
 - Session metadata management now has bounded `session/title`, `session/archive`,

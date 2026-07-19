@@ -83,7 +83,9 @@ remain future budget classes.
 without starting a turn or writing history. It returns only the
 `context-inspector/0.1` manifest/budget and explicit
 `content_included:false`, `model_started:false`, and `persisted:false` flags; instruction and source bodies
-never cross this response.
+never cross this response. The Qt Work composer exposes a search-icon preflight
+action for an existing session and renders a read-only metadata table; it does
+not preview source or instruction bodies.
 
 `workspace/instructions` returns `instruction-discovery/0.1` metadata for the
 registered project root and optional target path. It merges applicable sources

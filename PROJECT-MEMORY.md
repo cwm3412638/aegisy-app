@@ -282,8 +282,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   without starting a model or persisting history. The
   `context-inspector/0.1` response returns only manifest/budget metadata and
   explicit `content_included:false`, `model_started:false`, and
-  `persisted:false`; source/instruction bodies never cross the response.
-  Qt inspection, complete context classes, redaction/exclusion explanations,
+  `persisted:false`; source/instruction bodies never cross the response. Qt
+  now exposes a composer search-icon preflight action for an existing session
+  and renders a read-only source/type/trust/size/status/reason table; unchecked
+  client context is sent as an explicit exclusion marker. The Workbench render
+  fixture exercises the control and metadata-only result.
+  Complete context classes, explicit redaction/exclusion explanations,
   provider/tokenizer authority, and cross-platform evidence remain open; keep
   `17.6` unchecked.
 - User-initiated macOS PTY execution, the named lifecycle, and the Qt/xterm.js
@@ -1060,7 +1064,9 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   order in rendered text. The plan is metadata-only and does not imply tokenizer
   or provider-window authority.
 - `turn/context/inspect` exposes that same plan and manifest before sending,
-  with no model call, persistence, or source body in the response.
+  with no model call, persistence, or source body in the response. The Qt Work
+  composer exposes this as a read-only preflight dialog for an existing
+  session; it displays only source/type/trust/size/status/reason metadata.
 - One turn accepts at most 16 items. Rendered content is limited to 16 KiB per
   item and the complete context envelope to 64 KiB, including metadata and
   explicit truncation markers. Client-supplied inline content is also rejected

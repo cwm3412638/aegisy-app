@@ -1370,6 +1370,16 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_turnCancelling = true;
         updateTurnAction();
     });
+    connect(m_runtime, &AgentRuntimeClient::turnContextInspected,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        if (requestId != m_contextInspectRequestId) return;
+        m_contextInspectRequestId.clear();
+        updateContextStrip();
+        const QString currentSession = m_mode == QStringLiteral("work")
+            ? m_workSessionId : m_chatSessionId;
+        if (result.value(QStringLiteral("session_id")).toString() != currentSession) return;
+        showContextInspection(result);
+    });
     connect(m_runtime, &AgentRuntimeClient::terminalsListed,
             this, [this](const QString &requestId, const QJsonObject &result) {
         if (requestId != m_terminalListRequestId
@@ -1849,6 +1859,11 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_turnCancelRequestId.clear();
             m_turnCancelling = false;
             updateTurnAction();
+        } else if (method == QStringLiteral("turn/context/inspect")
+                   && requestId == m_contextInspectRequestId) {
+            m_contextInspectRequestId.clear();
+            updateContextStrip();
+            addNotice(QStringLiteral("上下文预检失败：%1").arg(message), true);
         } else if (method == QStringLiteral("runtime/degradations")) {
             m_runtimeDegradationsAvailable = false;
             m_runtimeDegradationStates.clear();
@@ -2761,6 +2776,18 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
     });
     m_attachContextButton->setMenu(contextMenu);
     actions->addWidget(m_attachContextButton);
+    m_contextInspectButton = new QPushButton(composerFrame);
+    m_contextInspectButton->setObjectName(QStringLiteral("agentContextInspectButton"));
+    m_contextInspectButton->setIcon(QIcon(QStringLiteral(":/icons/lucide/search.svg")));
+    m_contextInspectButton->setToolTip(QStringLiteral("预检发送上下文（不启动模型）"));
+    m_contextInspectButton->setFixedSize(30, 30);
+    m_contextInspectButton->setStyleSheet(QStringLiteral(
+        "QPushButton { background:transparent; border:none; border-radius:5px; }"
+        "QPushButton:hover { background:#eaecf0; }"
+        "QPushButton:disabled { opacity:0.45; }"));
+    connect(m_contextInspectButton, &QPushButton::clicked,
+            this, &AgentWorkbenchWidget::inspectContext);
+    actions->addWidget(m_contextInspectButton);
     actions->addStretch();
     auto *hint = new QLabel(QStringLiteral("Ctrl+Enter"), composerFrame);
     hint->setStyleSheet(QStringLiteral("border:none; color:#98a2b3; font-size:10px;"));
@@ -6272,6 +6299,7 @@ void AgentWorkbenchWidget::updateRecoveryUi()
     if (m_composer) m_composer->setReadOnly(blocking);
     if (m_attachContextButton) m_attachContextButton->setEnabled(!blocking);
     if (m_workspaceTabs) m_workspaceTabs->setEnabled(!m_runtimeRecoveryMode);
+    updateContextStrip();
     updateTurnAction();
     updateTerminalControls();
     updateEditorActions();
@@ -7816,6 +7844,16 @@ void AgentWorkbenchWidget::addNotice(const QString &text, bool error)
 void AgentWorkbenchWidget::updateContextStrip()
 {
     if (!m_contextStrip) return;
+    const QString sessionId = m_mode == QStringLiteral("work")
+        ? m_workSessionId : m_chatSessionId;
+    if (m_contextInspectButton) {
+        const bool blocked = m_runtimeRecoveryMode || currentSessionRecoveryRequired()
+            || currentSessionDeletionPending() || currentOperationStatusBlocked();
+        m_contextInspectButton->setEnabled(!blocked && !m_turnRunning
+            && !m_contextItems.isEmpty() && !sessionId.isEmpty()
+            && m_runtime && m_runtime->isReady()
+            && m_contextInspectRequestId.isEmpty());
+    }
     const QString context = m_contextItems.isEmpty()
         ? QString() : QStringLiteral(" · 上下文 %1").arg(includedTurnContext().size());
     if (m_mode == QStringLiteral("chat")) {
@@ -7827,4 +7865,130 @@ void AgentWorkbenchWidget::updateContextStrip()
                                          : QFileInfo(m_projectRoot).fileName(),
                  m_provider, m_model, context));
     }
+}
+
+void AgentWorkbenchWidget::inspectContext()
+{
+    if (!m_runtime || !m_runtime->isReady() || m_contextItems.isEmpty()) return;
+    const QString sessionId = m_mode == QStringLiteral("work")
+        ? m_workSessionId : m_chatSessionId;
+    if (sessionId.isEmpty()) {
+        addNotice(QStringLiteral("请先发送一条消息创建会话，再预检上下文。"), true);
+        return;
+    }
+    if (!m_contextInspectRequestId.isEmpty()) return;
+    QJsonArray context;
+    for (QJsonObject item : std::as_const(m_contextItems)) {
+        const bool included = item.value(QStringLiteral("included")).toBool(true);
+        item.remove(QStringLiteral("included"));
+        item.remove(QStringLiteral("size"));
+        item.remove(QStringLiteral("truncated"));
+        if (!included && !item.contains(QStringLiteral("exclusion_reason"))) {
+            item.insert(QStringLiteral("exclusion_reason"),
+                        QStringLiteral("client-excluded"));
+        }
+        context.append(item);
+    }
+    m_contextInspectRequestId = m_runtime->inspectTurnContext(sessionId, context);
+    updateContextStrip();
+}
+
+void AgentWorkbenchWidget::showContextInspection(const QJsonObject &result)
+{
+    if (result.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("context-inspector/0.1")
+            || result.value(QStringLiteral("content_included")).toBool(true)
+            || result.value(QStringLiteral("model_started")).toBool(true)
+            || result.value(QStringLiteral("persisted")).toBool(true)) {
+        addNotice(QStringLiteral("运行时返回了无效的上下文预检结果，已保持只读。"), true);
+        return;
+    }
+    const QJsonObject context = result.value(QStringLiteral("context")).toObject();
+    const QJsonObject manifest = context.value(QStringLiteral("manifest")).toObject();
+    const QJsonObject budget = context.value(QStringLiteral("budget")).toObject();
+    auto *dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QStringLiteral("发送前上下文预检"));
+    dialog->setMinimumSize(700, 430);
+    auto *layout = new QVBoxLayout(dialog);
+    layout->setContentsMargins(18, 16, 18, 16);
+    layout->setSpacing(10);
+    auto *title = new QLabel(QStringLiteral("上下文将如何进入下一次 turn"), dialog);
+    title->setStyleSheet(QStringLiteral("font-size:14px; font-weight:700; color:#101828;"));
+    layout->addWidget(title);
+    const QString summary = QStringLiteral(
+        "%1 项 · %2 · 预算 %3/%4 · 估算 %5 tokens · %6")
+        .arg(context.value(QStringLiteral("item_count")).toInt())
+        .arg(formatByteCount(context.value(QStringLiteral("bytes")).toVariant().toLongLong()))
+        .arg(formatByteCount(budget.value(QStringLiteral("allocated_bytes"))
+                            .toVariant().toLongLong()))
+        .arg(formatByteCount(budget.value(QStringLiteral("max_total_bytes"))
+                            .toVariant().toLongLong()))
+        .arg(manifest.value(QStringLiteral("estimated_tokens")).toInt())
+        .arg(context.value(QStringLiteral("truncated")).toBool()
+                 ? QStringLiteral("已截断") : QStringLiteral("未截断"));
+    auto *summaryLabel = new QLabel(summary, dialog);
+    summaryLabel->setObjectName(QStringLiteral("agentContextInspectionSummary"));
+    summaryLabel->setStyleSheet(QStringLiteral(
+        "color:#475467; background:#f2f4f7; border:1px solid #e4e7ec;"
+        "border-radius:6px; padding:8px;"));
+    layout->addWidget(summaryLabel);
+    auto *table = new QTreeWidget(dialog);
+    table->setObjectName(QStringLiteral("agentContextInspectionTable"));
+    table->setColumnCount(6);
+    table->setHeaderLabels({QStringLiteral("来源"), QStringLiteral("类型"),
+                            QStringLiteral("信任"), QStringLiteral("大小"),
+                            QStringLiteral("状态"), QStringLiteral("原因")});
+    table->setRootIsDecorated(false);
+    table->setUniformRowHeights(true);
+    table->setAlternatingRowColors(true);
+    table->setSelectionMode(QAbstractItemView::NoSelection);
+    table->header()->setStretchLastSection(true);
+    table->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    table->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    table->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    table->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    table->header()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    const QJsonArray budgetEntries = budget.value(QStringLiteral("entries")).toArray();
+    QHash<QString, QJsonObject> budgetById;
+    for (const QJsonValue &value : budgetEntries) {
+        const QJsonObject entry = value.toObject();
+        budgetById.insert(entry.value(QStringLiteral("id")).toString(), entry);
+    }
+    for (const QJsonValue &value : manifest.value(QStringLiteral("entries")).toArray()) {
+        const QJsonObject entry = value.toObject();
+        const QJsonObject budgetEntry = budgetById.value(entry.value(QStringLiteral("id"))
+                                                               .toString());
+        auto *row = new QTreeWidgetItem(table);
+        QString source = entry.value(QStringLiteral("source")).toString();
+        for (const QJsonObject &clientItem : std::as_const(m_contextItems)) {
+            if (clientItem.value(QStringLiteral("id")).toString()
+                    == entry.value(QStringLiteral("id")).toString()) {
+                source = QStringLiteral("%1 · %2")
+                    .arg(clientItem.value(QStringLiteral("label")).toString(), source);
+                break;
+            }
+        }
+        row->setText(0, source);
+        row->setText(1, entry.value(QStringLiteral("kind")).toString());
+        row->setText(2, entry.value(QStringLiteral("trust")).toString());
+        row->setText(3, formatByteCount(budgetEntry.value(QStringLiteral("requested_bytes"))
+                                        .toVariant().toLongLong()));
+        const bool included = entry.value(QStringLiteral("included")).toBool();
+        row->setText(4, included ? QStringLiteral("包含") : QStringLiteral("排除"));
+        row->setText(5, entry.value(QStringLiteral("inclusion_reason")).toString());
+        row->setToolTip(0, QStringLiteral("新鲜度：%1")
+                            .arg(entry.value(QStringLiteral("freshness")).toString()));
+    }
+    layout->addWidget(table, 1);
+    auto *footer = new QLabel(QStringLiteral(
+        "只读预检：不会启动模型、写入历史或返回文件/指令正文。上下文内容仍按 untrusted-data 处理。"),
+                              dialog);
+    footer->setWordWrap(true);
+    footer->setStyleSheet(QStringLiteral("color:#667085; font-size:10px;"));
+    layout->addWidget(footer);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+    layout->addWidget(buttons);
+    dialog->show();
 }
