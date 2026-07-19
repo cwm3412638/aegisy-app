@@ -45,6 +45,7 @@ or session methods are accepted.
 - `workspace/list`
 - `workspace/read`
 - `workspace/instructions` (deterministic, bounded, untrusted instruction discovery)
+- `turn/context/inspect` (read-only preflight; no model call or persistence)
 - `shutdown`
 
 Both Chat and Work currently force Codex into `read-only` sandbox mode with an
@@ -77,6 +78,12 @@ while rendered text keeps caller order. The plan enforces a 64 KiB total and
 priority score, inclusion, and exclusion reason. Task-state, recent-turn,
 tool-result, search, repository-map, tokenizer, and provider-window consumers
 remain future budget classes.
+
+`turn/context/inspect` runs the same bounded context preparation for a session
+without starting a turn or writing history. It returns only the
+`context-inspector/0.1` manifest/budget and explicit
+`content_included:false`, `model_started:false`, and `persisted:false` flags; instruction and source bodies
+never cross this response.
 
 `workspace/instructions` returns `instruction-discovery/0.1` metadata for the
 registered project root and optional target path. It merges applicable sources

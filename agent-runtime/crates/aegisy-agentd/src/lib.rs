@@ -842,6 +842,13 @@ struct TurnStartParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct TurnContextInspectParams {
+    session_id: String,
+    #[serde(default)]
+    context: Vec<TurnContextItem>,
+}
+
+#[derive(Debug, Deserialize)]
 struct OperationProbeParams {
     operation_id: String,
     session_id: String,
@@ -2249,6 +2256,7 @@ impl Runtime {
                     | "operation/status"
                     | "turn/cancel"
                     | "turn/steer"
+                    | "turn/context/inspect"
                     | "terminal/stop-user"
                     | "terminal/close-user"
                     | "terminal/remove-user"
@@ -2336,6 +2344,7 @@ impl Runtime {
                     | "session/deletion/status"
                     | "turn/cancel"
                     | "turn/steer"
+                    | "turn/context/inspect"
                     | "terminal/list"
                     | "terminal/read"
                     | "terminal/attach"
@@ -2368,6 +2377,7 @@ impl Runtime {
                 | "session/recovery/status"
                 | "turn/cancel"
                 | "turn/steer"
+                | "turn/context/inspect"
                 | "terminal/list"
                 | "terminal/read"
                 | "terminal/attach"
@@ -2474,6 +2484,7 @@ impl Runtime {
             "retention/maintenance/run" => self.retention_maintenance_run(request),
             "turn/cancel" => self.control.cancel_claimed(request),
             "turn/steer" => self.control.steer_claimed(request),
+            "turn/context/inspect" => self.turn_context_inspect(request),
             "workspace/list" => self.workspace_list(request),
             "workspace/read" => self.workspace_read(request),
             "workspace/instructions" => self.workspace_instructions(request),
@@ -2822,6 +2833,7 @@ impl Runtime {
                 "timeline.streaming".into(),
                 "turn.context.structured".into(),
                 "turn.context.manifest".into(),
+                "turn.context.inspect".into(),
                 "permission.read-only".into(),
                 "workspace.list".into(),
                 "workspace.read-text".into(),
@@ -6895,6 +6907,69 @@ impl Runtime {
             }
         }
         Ok(())
+    }
+
+    fn turn_context_inspect(&self, request: Request) -> Vec<Value> {
+        let params: TurnContextInspectParams = match serde_json::from_value(request.params.clone())
+        {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        let Some(state) = self.sessions.get(&params.session_id) else {
+            return self.error_for(&request, -32023, "session not found");
+        };
+        let project_id = state.session.project_id.clone();
+        let context_roots = project_id.as_ref().map(|project_id| {
+            let roots = self
+                .project_roots
+                .get(project_id)
+                .cloned()
+                .or_else(|| {
+                    self.workbench_store
+                        .as_ref()
+                        .and_then(|store| store.load_project_roots(project_id).ok())
+                })
+                .unwrap_or_default();
+            roots
+                .into_iter()
+                .filter_map(|root| {
+                    self.workspace_root_binding(project_id, Some(&root.root_id), false)
+                        .ok()
+                        .map(|(_, path)| (root.root_id, path))
+                })
+                .collect::<HashMap<_, _>>()
+        });
+        let mut context_items = params.context;
+        if let Some(context_roots) = context_roots.as_ref() {
+            if let Err((code, message)) =
+                self.append_instruction_context(context_roots, &mut context_items)
+            {
+                return self.error_for(&request, code, message);
+            }
+        }
+        let prepared = match prepare_turn_context_scoped(&context_items, context_roots.as_ref()) {
+            Ok(prepared) => prepared,
+            Err(error) => return self.error_for(&request, error.code, error.message),
+        };
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "context-inspector/0.1",
+                "session_id": params.session_id,
+                "content_included": false,
+                "model_started": false,
+                "persisted": false,
+                "context": {
+                    "item_count": prepared.item_count,
+                    "bytes": prepared.bytes,
+                    "truncated": prepared.truncated,
+                    "manifest": prepared.manifest,
+                    "budget": prepared.budget
+                }
+            }),
+        )
     }
 
     fn turn_start_stream<F>(&mut self, request: Request, emit: &mut F)

@@ -73,6 +73,11 @@ fn ready_runtime() -> Runtime {
         .as_array()
         .unwrap()
         .iter()
+        .any(|capability| capability == "turn.context.inspect"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|capability| capability == "workspace.instructions.discovery"));
     assert!(messages[0]["result"]["capabilities"]
         .as_array()
@@ -2253,6 +2258,67 @@ fn work_turn_auto_includes_bounded_project_instructions_after_user_context() {
     let serialized = serde_json::to_string(&messages).unwrap();
     assert!(serialized.contains("project guidance stays untrusted"));
     assert!(!serialized.contains("API_KEY=sk-"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn context_inspector_is_read_only_and_does_not_return_instruction_content() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-context-inspect-{unique}"));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("AGENTS.md"),
+        "do not expose this instruction body\n",
+    )
+    .unwrap();
+    fs::write(root.join("visible.rs"), "fn inspectable() {}\n").unwrap();
+    let mut runtime = ready_runtime();
+    let opened = runtime.handle_line(&request("open", "project/open", json!({ "root": root })));
+    let project_id = opened[0]["result"]["project"]["id"].as_str().unwrap();
+    let session = runtime.handle_line(&request(
+        "session",
+        "session/start",
+        json!({ "mode": "work", "project_id": project_id }),
+    ));
+    let session_id = session[0]["result"]["session"]["id"].as_str().unwrap();
+    let inspected = runtime.handle_line(&request(
+        "inspect",
+        "turn/context/inspect",
+        json!({
+            "session_id": session_id,
+            "context": [{
+                "id": "selected-file",
+                "kind": "file",
+                "label": "visible.rs",
+                "origin": "file-tree",
+                "path": "visible.rs"
+            }]
+        }),
+    ));
+    assert_eq!(
+        inspected[0]["result"]["schema_version"],
+        "context-inspector/0.1"
+    );
+    assert_eq!(inspected[0]["result"]["content_included"], false);
+    assert_eq!(inspected[0]["result"]["model_started"], false);
+    assert_eq!(inspected[0]["result"]["persisted"], false);
+    assert_eq!(
+        inspected[0]["result"]["context"]["manifest"]["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        inspected[0]["result"]["context"]["budget"]["schema_version"],
+        "context-budget/0.1"
+    );
+    let serialized = serde_json::to_string(&inspected).unwrap();
+    assert!(!serialized.contains("do not expose this instruction body"));
+    assert!(!serialized.contains("fn inspectable"));
     let _ = fs::remove_dir_all(root);
 }
 

@@ -142,6 +142,16 @@ score, inclusion, and exclusion reason without source content. This is a partial
 17.4 foundation; task state, recent turns, tools, search, repository maps,
 tokenizer authority, and provider context windows are not yet budget consumers.
 
+## Context Inspector
+
+Capability `turn.context.inspect` exposes the read-only
+`turn/context/inspect` preflight. It uses the same session-root validation,
+instruction discovery, stale checks, and `context-budget/0.1` allocator as
+`turn/start`, but never calls a model or persists history. The versioned
+`context-inspector/0.1` response contains only manifest/budget metadata and
+explicit `content_included:false`, `model_started:false`, and `persisted:false`
+flags. Source and instruction bodies are never returned.
+
 ## Instruction Discovery
 
 Capability `workspace.instructions.discovery` exposes the read-only

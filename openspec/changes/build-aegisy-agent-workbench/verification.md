@@ -583,6 +583,14 @@ Current editor evidence:
   fixture verifies the budget schema. Task 17.4 remains unchecked until all
   context classes, tokenizer/provider window authority, and scale evidence use
   this allocator.
+- AAP turn/context/inspect is a read-only preflight that reuses the exact
+  instruction discovery and budget preparation path for the bound session.
+  It returns context-inspector/0.1, manifest/budget metadata, and explicit
+  content_included:false, model_started:false, and persisted:false flags;
+  protocol coverage proves instruction/source bodies never enter the response.
+  Task 17.6 remains unchecked until Qt inspection, complete context classes,
+  redaction/exclusion explanations, provider/tokenizer authority, and
+  cross-platform evidence are complete.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or
