@@ -167,7 +167,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 - Capability `operation.reconciliation.status` exposes read-only
   `operation/status` for the current session gate. It returns a bounded review
   summary and `recovery_action_available:false` while blocked, never clears the
-  gate, and never invokes recovery.
+  gate, and never invokes recovery. Qt requests this status after session
+  start/resume/fork/load/import, renders a content-free gate banner, and keeps
+  the composer and Send action read-only while the result is unknown, malformed,
+  unavailable, or blocked. A queued first turn is deferred until an explicit
+  unblocked status arrives; a status error cannot be interpreted as success.
 - Task `6.6` now has a bounded read-only Session search foundation. AAP
   `session/search` filters durable Session projections by project, exact model,
   runtime, status, title, or a combined title/approved-transcript query. Transcript
@@ -666,9 +670,11 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   running, or blocked results fail closed with `-32132` until an authoritative
   terminal review clears the gate. Event replay validates the evidence/result hash
   and identity without adding operation content to the projection. The reconcile
-  method still does not perform probes automatically and there is no Qt review/
-  recovery control or recovery action; those remain necessary for OpenSpec `6.9`
-  completion.
+  method still does not perform probes automatically and there is no recovery
+  action; Qt only exposes the read-only review summary and fail-closed gate.
+  The read-only status query remains available while a session is pending
+  deletion, and Qt refreshes it after deletion undo so a stale unknown state
+  cannot keep a healthy session blocked.
 - AAP `operation/probe` is the first host-observation boundary. It binds to a
   registered Work-session root, hashes bounded workspace metadata without reading
   source bodies, consumes the existing structured Git status query, and observes
@@ -685,8 +691,8 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   authority rather than being treated as success.
 - `operation/status` is a content-free status projection for the latest blocked
   reconciliation in a session. It is intentionally available during the block
-  so a future Qt review surface can explain the gate without adding a mutation
-  path.
+  and during pending deletion so Qt can explain the gate without adding a
+  mutation or recovery path.
 
 ## Project And Session Projection Consistency And Rebuild Boundary
 

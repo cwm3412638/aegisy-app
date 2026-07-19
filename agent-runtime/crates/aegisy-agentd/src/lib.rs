@@ -2320,6 +2320,7 @@ impl Runtime {
             request.method.as_str(),
             "session/read"
                 | "session/deletion/status"
+                | "operation/status"
                 | "session/delete/preview"
                 | "session/export/preview"
                 | "session/export"

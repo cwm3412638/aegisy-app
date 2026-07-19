@@ -73,6 +73,9 @@ private:
                               const QString &scopeLabel);
     void showRetentionPolicyDialog(const QJsonObject &result);
     void updateRecoveryUi();
+    void requestOperationStatus();
+    void updateOperationStatusUi(const QJsonObject &status);
+    bool currentOperationStatusBlocked() const;
     bool currentSessionRecoveryRequired() const;
     bool currentSessionDeletionPending() const;
     void loadSessionFromList(QListWidgetItem *item);
@@ -81,6 +84,7 @@ private:
     void submitPrompt();
     void cancelActiveTurn();
     void updateTurnAction();
+    void startPendingTurnIfReady();
     void ensureSessionAndSubmit(const QString &prompt, const QJsonArray &context);
     void addContextItem(QJsonObject item);
     void addSelectedFileContext();
@@ -183,6 +187,7 @@ private:
     QLabel *m_runtimeCapabilityStatus = nullptr;
     QPushButton *m_runtimeRestartButton = nullptr;
     QLabel *m_recoveryBanner = nullptr;
+    QLabel *m_operationStatusBanner = nullptr;
     QLabel *m_projectLabel = nullptr;
     QString m_workspaceRootId = QStringLiteral("root-1");
     QString m_workspaceRootPath;
@@ -360,6 +365,8 @@ private:
     QString m_directoryStatus;
     QString m_sessionListRequestId;
     QString m_sessionReadRequestId;
+    QString m_operationStatusRequestId;
+    QString m_operationStatusSessionId;
     QString m_sessionMutationRequestId;
     QString m_sessionDeletionRequestId;
     QString m_portableSessionRequestId;
@@ -396,6 +403,8 @@ private:
     bool m_sessionListRefreshPending = false;
     bool m_sessionHistoryAppending = false;
     bool m_runtimeRecoveryMode = false;
+    bool m_operationStatusKnown = true;
+    bool m_operationStatusBlocked = false;
     bool m_runtimeDegradationsAvailable = false;
     QHash<QString, QString> m_runtimeDegradationStates;
     quint64 m_startupRebuiltSessionCount = 0;

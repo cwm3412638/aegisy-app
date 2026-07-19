@@ -503,6 +503,14 @@ QString AgentRuntimeClient::sessionRecoveryStatus(const QString &sessionId)
     });
 }
 
+QString AgentRuntimeClient::operationStatus(const QString &sessionId)
+{
+    if (sessionId.isEmpty()) return {};
+    return sendRequest(QStringLiteral("operation/status"), {
+        {QStringLiteral("session_id"), sessionId},
+    });
+}
+
 QString AgentRuntimeClient::runtimeRecoveryStatus()
 {
     return sendRequest(QStringLiteral("runtime/recovery/status"));
@@ -1132,6 +1140,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit runtimeRestarted(id, result);
     } else if (pendingMethod == QStringLiteral("session/recovery/status")) {
         emit sessionRecoveryStatusRead(result);
+    } else if (pendingMethod == QStringLiteral("operation/status")) {
+        emit operationStatusRead(id, result);
     } else if (pendingMethod == QStringLiteral("runtime/recovery/status")) {
         emit runtimeRecoveryStatusRead(result);
     } else if (pendingMethod == QStringLiteral("turn/cancel")) {

@@ -1664,6 +1664,16 @@ fn durable_session_deletion_protocol_requires_preview_and_supports_undo() {
         }),
     ));
     assert_eq!(frozen[0]["error"]["code"], -32131);
+    let operation_status = runtime.handle_line(&request(
+        "operation-status-pending",
+        "operation/status",
+        json!({"session_id": &session_id}),
+    ));
+    assert_eq!(
+        operation_status[0]["result"]["schema_version"],
+        "operation-reconciliation-status/0.1"
+    );
+    assert_eq!(operation_status[0]["result"]["blocked"], false);
     let status = runtime.handle_line(&request(
         "status",
         "session/deletion/status",

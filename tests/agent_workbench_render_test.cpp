@@ -196,6 +196,8 @@ int main(int argc, char *argv[])
         QStringLiteral("agentEditorSplitButton"));
     QPushButton *sendButton = workbench.findChild<QPushButton *>(
         QStringLiteral("agentSendButton"));
+    QTextEdit *operationComposer = workbench.findChild<QTextEdit *>(
+        QStringLiteral("agentComposer"));
     QPushButton *attachContext = workbench.findChild<QPushButton *>(
         QStringLiteral("agentAttachContextButton"));
     QWidget *contextPanel = workbench.findChild<QWidget *>(
@@ -236,6 +238,8 @@ int main(int argc, char *argv[])
         QStringLiteral("agentSessionHistoryMoreButton"));
     QLabel *recoveryBanner = workbench.findChild<QLabel *>(
         QStringLiteral("agentRecoveryBanner"));
+    QLabel *operationStatusBanner = workbench.findChild<QLabel *>(
+        QStringLiteral("agentOperationStatusBanner"));
     QPlainTextEdit *gitDiff = workbench.findChild<QPlainTextEdit *>(
         QStringLiteral("agentGitDiffPreview"));
     QLabel *gitSummary = workbench.findChild<QLabel *>(
@@ -358,8 +362,9 @@ int main(int argc, char *argv[])
                            && !sessionHistoryMore->icon().isNull(),
                        "terminal lifecycle controls have an invalid empty state")
             || !expect(recoveryBanner && recoveryBanner->isHidden()
+                           && operationStatusBanner && operationStatusBanner->isHidden()
                            && runtimeRestart && !runtimeRestart->isEnabled(),
-                       "recovery banner must exist and start hidden for a healthy runtime")
+                       "recovery banners must exist and start hidden for a healthy runtime")
             || !expect(runtimeCapability && !runtimeCapability->text().isEmpty(),
                        "runtime capability status must exist before negotiation")
             || !expect(newSession && openFolder && sendButton
@@ -467,6 +472,19 @@ int main(int argc, char *argv[])
             QStringLiteral("event-payload-or-sequence-invalid"),
         }},
     });
+    runtimeClient->operationStatusRead({}, QJsonObject{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("operation-reconciliation-status/0.1")},
+        {QStringLiteral("session_id"), QStringLiteral("session-recovery-render")},
+        {QStringLiteral("blocked"), true},
+        {QStringLiteral("operation"), QJsonObject{
+            {QStringLiteral("state"), QStringLiteral("unknown")},
+            {QStringLiteral("decision"), QStringLiteral("explicit-review-required")},
+            {QStringLiteral("blockers"), QJsonArray{QStringLiteral("no-authoritative-terminal-event")}},
+            {QStringLiteral("review_id"), QStringLiteral("reconciliation-review:sha256:aaaaaaaa")},
+        }},
+        {QStringLiteral("recovery_action_available"), false},
+    });
     application.processEvents();
     if (!expect(recoveryBanner->text().contains(QStringLiteral("当前会话"))
                     && sendButton->text() == QStringLiteral("只读恢复")
@@ -479,6 +497,14 @@ int main(int argc, char *argv[])
         {QStringLiteral("recovery_required"), false},
         {QStringLiteral("issues"), QJsonArray{}},
     });
+    runtimeClient->operationStatusRead({}, QJsonObject{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("operation-reconciliation-status/0.1")},
+        {QStringLiteral("session_id"), QStringLiteral("session-recovery-render")},
+        {QStringLiteral("blocked"), false},
+        {QStringLiteral("operation"), QJsonValue::Null},
+        {QStringLiteral("recovery_action_available"), false},
+    });
     runtimeClient->projectionRecoveryStatusRead(QJsonObject{
         {QStringLiteral("startup"), QJsonObject{
             {QStringLiteral("rebuilt_sessions"), 0},
@@ -486,8 +512,43 @@ int main(int argc, char *argv[])
         {QStringLiteral("current_quarantined_sessions"), 0},
     });
     application.processEvents();
-    if (!expect(recoveryBanner->isHidden() && sendButton->isEnabled(),
+    if (!expect(recoveryBanner->isHidden() && operationStatusBanner->isHidden()
+                    && sendButton->isEnabled(),
                 "cleared recovery state did not restore the healthy composer")) {
+        return 1;
+    }
+    runtimeClient->operationStatusRead({}, QJsonObject{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("operation-reconciliation-status/0.1")},
+        {QStringLiteral("session_id"), QStringLiteral("session-recovery-render")},
+        {QStringLiteral("blocked"), true},
+        {QStringLiteral("operation"), QJsonObject{
+            {QStringLiteral("state"), QStringLiteral("unknown")},
+            {QStringLiteral("decision"), QStringLiteral("explicit-review-required")},
+        }},
+        {QStringLiteral("recovery_action_available"), false},
+    });
+    application.processEvents();
+    if (!expect(operationStatusBanner && !operationStatusBanner->isHidden()
+                    && sendButton->text() == QStringLiteral("操作暂停")
+                    && !sendButton->isEnabled() && operationComposer
+                    && operationComposer->isReadOnly(),
+                "blocked operation status did not enforce a read-only composer")) {
+        return 1;
+    }
+    runtimeClient->operationStatusRead({}, QJsonObject{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("operation-reconciliation-status/0.1")},
+        {QStringLiteral("session_id"), QStringLiteral("session-recovery-render")},
+        {QStringLiteral("blocked"), false},
+        {QStringLiteral("operation"), QJsonValue::Null},
+        {QStringLiteral("recovery_action_available"), false},
+    });
+    application.processEvents();
+    if (!expect(operationStatusBanner->isHidden()
+                    && sendButton->text() == QStringLiteral("发送")
+                    && sendButton->isEnabled() && !operationComposer->isReadOnly(),
+                "cleared operation status did not restore the composer")) {
         return 1;
     }
     runtimeClient->runtimeHealthRead(QJsonObject{
