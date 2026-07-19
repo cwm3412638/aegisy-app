@@ -151,8 +151,12 @@ write with the exact same content, owner, reference, and metadata reactivates th
 released reference transactionally; any identity difference remains an error. Release
 events carry only a hashed batch identity and count, allowing repeated transitions to
 the same empty set without persisting reference IDs or content. The external
-pin pointer is still published first, so cross-resource atomicity and automatic
-source invalidation remain open.
+pin pointer is still published first, so cross-resource atomicity and durable
+sidecar-driven source invalidation remain open. The Qt Workbench marks matching
+file/selection/diagnostic pins stale after workspace saves or watcher changes and
+marks terminal-excerpt pins stale after terminal restart/removal; these local
+indicators never rewrite durable metadata, and Runtime inspect/start remains the
+final authority.
 
 Capabilities `workspace.image.import-user` and `workspace.image.preview` add the
 session/project-scoped image authority used by pinned context. Import accepts
@@ -167,7 +171,7 @@ temporary hard links. Normal turn completion removes the links; runtime startup
 removes only safely named crash leftovers and preserves unknown entries. Image
 paths and bodies are not stored in turn history or returned by context inspection.
 Final unpin releases the active reference through the event transaction. Cross-resource
-atomicity, automatic source invalidation, and pin/Blob GC lifecycle remain open under
+atomicity, durable sidecar-driven source invalidation, and pin/Blob GC lifecycle remain open under
 OpenSpec task 17.3.
 
 `operation/probe` is a read-only evidence collector for the reconciliation

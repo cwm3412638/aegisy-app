@@ -1477,21 +1477,28 @@ int main(int argc, char *argv[])
                 "terminal excerpt pin did not persist a session-scoped descriptor")) {
         return 1;
     }
+    terminalRemove->click();
+    if (!expect(waitUntil(application, [terminalPicker, &workbench]() {
+                    if (terminalPicker->count() != 0) return false;
+                    const QList<QLabel *> labels = workbench.findChildren<QLabel *>();
+                    return std::any_of(labels.cbegin(), labels.cend(), [](QLabel *label) {
+                        return label->text().contains(QStringLiteral("终端摘录"))
+                            && label->text().contains(QStringLiteral("stale"));
+                    });
+                }),
+                "terminal removal did not mark the pinned excerpt stale")) {
+        return 1;
+    }
     const QList<QPushButton *> terminalPinRemoveButtons = workbench.findChildren<QPushButton *>(
         QStringLiteral("agentPinnedContextRemoveButton"));
+    if (!expect(terminalPinRemoveButtons.size() == 1,
+                "stale terminal excerpt did not retain its unpin control")) return 1;
     terminalPinRemoveButtons.first()->click();
     if (!expect(waitUntil(application, [&workbench]() {
                     return workbench.findChildren<QPushButton *>(
                                QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
                 }),
-                "terminal excerpt unpin did not remove the persisted descriptor")) {
-        return 1;
-    }
-    terminalRemove->click();
-    if (!expect(waitUntil(application, [terminalPicker]() {
-                    return terminalPicker->count() == 0;
-                }),
-                "terminal UI did not remove the exited terminal")) {
+                "stale terminal excerpt unpin did not remove the persisted descriptor")) {
         return 1;
     }
 #endif
@@ -2102,16 +2109,6 @@ int main(int argc, char *argv[])
                     "diagnostic pin action did not persist a project/root-scoped descriptor")) {
             return 1;
         }
-        const QList<QPushButton *> diagnosticPinRemoveButtons = workbench.findChildren<QPushButton *>(
-            QStringLiteral("agentPinnedContextRemoveButton"));
-        diagnosticPinRemoveButtons.first()->click();
-        if (!expect(waitUntil(application, [&workbench]() {
-                        return workbench.findChildren<QPushButton *>(
-                                   QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
-                    }),
-                    "diagnostic pin unpin did not remove the persisted descriptor")) {
-            return 1;
-        }
         QMetaObject::invokeMethod(languageDiagnostics, "itemActivated", Qt::DirectConnection,
                                   Q_ARG(QTreeWidgetItem *, diagnosticItem), Q_ARG(int, 0));
         if (!expect(waitUntil(application, [editorPath]() {
@@ -2121,11 +2118,30 @@ int main(int argc, char *argv[])
             return 1;
         }
         editorSave->click();
-        if (!expect(waitUntil(application, [diagnosticItem, languageStatus]() {
+        if (!expect(waitUntil(application, [diagnosticItem, languageStatus, &workbench]() {
                         return diagnosticItem->text(3) == QStringLiteral("已过期")
-                            && languageStatus->text().contains(QStringLiteral("已过期"));
+                            && languageStatus->text().contains(QStringLiteral("已过期"))
+                            && [&workbench]() {
+                        const QList<QLabel *> labels = workbench.findChildren<QLabel *>();
+                        return std::any_of(labels.cbegin(), labels.cend(), [](QLabel *label) {
+                            return label->text().contains(QStringLiteral("source.cpp"))
+                                && label->text().contains(QStringLiteral("stale"));
+                        });
+                    }();
                     }),
-                    "workspace save did not mark observed diagnostics stale")) {
+                    "workspace save did not mark observed diagnostics and pinned context stale")) {
+            return 1;
+        }
+        const QList<QPushButton *> diagnosticPinRemoveButtons = workbench.findChildren<QPushButton *>(
+            QStringLiteral("agentPinnedContextRemoveButton"));
+        if (!expect(diagnosticPinRemoveButtons.size() == 1,
+                    "stale diagnostic pin did not retain its unpin control")) return 1;
+        diagnosticPinRemoveButtons.first()->click();
+        if (!expect(waitUntil(application, [&workbench]() {
+                        return workbench.findChildren<QPushButton *>(
+                                   QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
+                    }),
+                    "stale diagnostic pin unpin did not remove the persisted descriptor")) {
             return 1;
         }
         languageStop->click();

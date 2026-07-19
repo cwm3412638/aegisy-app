@@ -352,9 +352,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   clean, conflict-free selection pin after the same authoritative reread;
   transient inline selections remain available for unsaved buffers. It passes selected IDs and set identity separately to
   inspect/start and never turns persisted pins into implicit model context.
-  Qt workspace watcher and user-save events mark matching loaded file and
-  selection pins stale in the composer without rewriting their durable descriptor
-  or hash; sidecar reread remains the final authority at inspect/start.
+  Qt workspace watcher and user-save events mark matching loaded file, selection,
+  and diagnostic pins stale in the composer using their root-relative metadata path;
+  terminal restart/removal marks matching terminal-excerpt pins stale by terminal
+  identity. These local indicators never rewrite the durable descriptor or hash;
+  sidecar reread/authority remains the final gate at inspect/start.
   `artifact/read-command-output` now returns the originating `session_id` as an
   additive, content-free binding field. The Qt read-only Artifact dialog exposes
   an explicit `固定完整输出` action only when the response is valid UTF-8 text
@@ -404,7 +406,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   are resolved from the authoritative file range.
   This foundation still has no atomic boundary across the external pin object/pointer
   and SQLite event/release transaction, durable diagnostic/
-  terminal authority and invalidation, automatic source invalidation, or
+  terminal authority and invalidation, durable sidecar-driven source invalidation, or
   child-handoff assembly; complete image/Git lifecycle and cross-platform evidence
   also remain open, so keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.

@@ -1553,12 +1553,14 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::terminalRestarted,
             this, [this](const QString &, const QJsonObject &terminal) {
+        markPinnedTerminalStale(terminal.value(QStringLiteral("terminal_id")).toString());
         m_activeTerminalId = terminal.value(QStringLiteral("terminal_id")).toString();
         applyTerminalSnapshot(terminal, true);
         requestTerminalList();
     });
     connect(m_runtime, &AgentRuntimeClient::terminalRemoved,
             this, [this](const QString &, const QJsonObject &result) {
+        markPinnedTerminalStale(result.value(QStringLiteral("terminal_id")).toString());
         if (result.value(QStringLiteral("terminal_id")).toString() == m_activeTerminalId) {
             activateTerminal(QString());
         }
@@ -9045,8 +9047,14 @@ void AgentWorkbenchWidget::markPinnedContextStale(const QSet<QString> &paths)
     bool changed = false;
     for (QJsonObject &item : m_pinnedContextItems) {
         const QString kind = item.value(QStringLiteral("kind")).toString();
-        if ((kind != QStringLiteral("file") && kind != QStringLiteral("selection"))
-                || !paths.contains(item.value(QStringLiteral("reference")).toString())
+        const QString reference = item.value(QStringLiteral("reference")).toString();
+        const QString diagnosticPath = item.value(QStringLiteral("metadata"))
+            .toObject().value(QStringLiteral("path")).toString();
+        const bool pathMatches = (kind == QStringLiteral("file")
+                                  || kind == QStringLiteral("selection"))
+            ? paths.contains(reference)
+            : kind == QStringLiteral("diagnostic") && paths.contains(diagnosticPath);
+        if (!pathMatches
                 || item.value(QStringLiteral("freshness")).toString() == QStringLiteral("stale")) {
             continue;
         }
@@ -9056,6 +9064,28 @@ void AgentWorkbenchWidget::markPinnedContextStale(const QSet<QString> &paths)
     if (changed) {
         rebuildContextPanel();
         addNotice(QStringLiteral("固定上下文已标记为 stale，请重新固定或确认预检结果。"));
+    }
+}
+
+void AgentWorkbenchWidget::markPinnedTerminalStale(const QString &terminalId)
+{
+    if (terminalId.isEmpty() || m_pinnedContextItems.isEmpty()) return;
+    bool changed = false;
+    for (QJsonObject &item : m_pinnedContextItems) {
+        if (item.value(QStringLiteral("kind")).toString()
+                != QStringLiteral("terminal_excerpt")
+                || item.value(QStringLiteral("metadata")).toObject()
+                    .value(QStringLiteral("terminal_id")).toString() != terminalId
+                || item.value(QStringLiteral("freshness")).toString()
+                    == QStringLiteral("stale")) {
+            continue;
+        }
+        item.insert(QStringLiteral("freshness"), QStringLiteral("stale"));
+        changed = true;
+    }
+    if (changed) {
+        rebuildContextPanel();
+        addNotice(QStringLiteral("终端固定上下文已失效，请重新固定终端输出。"));
     }
 }
 

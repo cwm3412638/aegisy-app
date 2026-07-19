@@ -795,11 +795,12 @@ Known limitations:
   render fixture validates both authority reads, CAS persistence, labels, and unpin.
   Real Runtime and render fixtures cover assembly, metadata-only inspection,
   pin/unpin, mutable Git drift, and failure after source removal. Remaining image/
-  child-handoff assembly, cross-resource atomicity, automatic invalidation,
-  orphan GC, and complete cross-platform pin evidence remain incomplete; task
-  17.3 remains unchecked. Qt workspace-watch and user-save callbacks also mark
-  loaded matching file and selection pins stale locally without rewriting durable metadata; the
-  sidecar reread remains authoritative.
+  child-handoff assembly, cross-resource atomicity, durable sidecar-driven
+  invalidation, and complete cross-platform pin evidence remain incomplete; task
+  17.3 remains unchecked. Qt workspace-watch and user-save callbacks mark loaded
+  matching file, selection, and diagnostic pins stale locally; terminal
+  restart/removal marks matching terminal-excerpt pins stale. None of these local
+  indicators rewrite durable metadata; the sidecar reread remains authoritative.
   The command-output Artifact dialog now receives an additive originating
   `session_id` from `artifact/read-command-output` and exposes an explicit
   `固定完整输出` control only for the active project-bound Work session after
@@ -817,7 +818,7 @@ Known limitations:
   cover reopen/update, idempotency, absence of a content body field, retained old
   objects, object/pointer tampering, update refusal on damaged current authority,
   and symlinked-layout denial. Cross-resource event/object/Blob atomicity, Blob
-  release/lifecycle binding, orphan GC, automatic source invalidation, Windows
+  release/lifecycle binding, durable source invalidation, Windows
   execution, remaining image/child-handoff assembly, complete Git lifecycle, and their Qt
   surfaces remain open.
 - Windows packaging, TLS runtime, scaling, IME, and accessibility evidence remain
