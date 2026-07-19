@@ -130,6 +130,18 @@ marked rather than silently treated as complete.
 This is metadata for later context budgeting and inspection, not an authority
 grant. It does not persist source content or activate compaction.
 
+## Context Budget
+
+Every prepared `turn/start` response also carries a content-free
+`context-budget/0.1` plan. Current inputs are explicit context items and
+auto-discovered instructions. Instruction precedence ranks and `pinned`
+priority determine deterministic allocation order; the rendered context text
+keeps the caller/context order. The allocator enforces a 64 KiB total and 16
+KiB per-item hard bound and reports requested/allocated bytes, class, priority
+score, inclusion, and exclusion reason without source content. This is a partial
+17.4 foundation; task state, recent turns, tools, search, repository maps,
+tokenizer authority, and provider context windows are not yet budget consumers.
+
 ## Instruction Discovery
 
 Capability `workspace.instructions.discovery` exposes the read-only

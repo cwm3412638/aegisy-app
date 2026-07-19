@@ -3,6 +3,7 @@ mod command_action;
 mod command_artifact;
 mod command_diagnostics;
 mod command_output;
+mod context_budget;
 mod diagnostic_store;
 mod durable_blob;
 pub mod git_branch_transaction;
@@ -7080,7 +7081,8 @@ impl Runtime {
                                         "item_count": prepared_context.item_count,
                                         "bytes": prepared_context.bytes,
                                         "truncated": prepared_context.truncated,
-                                        "manifest": prepared_context.manifest
+                                        "manifest": prepared_context.manifest,
+                                        "budget": prepared_context.budget
                                     }
                                 }),
                             ))
@@ -7654,7 +7656,8 @@ impl Runtime {
                         "item_count": prepared_context.item_count,
                         "bytes": prepared_context.bytes,
                         "truncated": prepared_context.truncated,
-                        "manifest": prepared_context.manifest
+                        "manifest": prepared_context.manifest,
+                        "budget": prepared_context.budget
                     }
                 }),
             ))

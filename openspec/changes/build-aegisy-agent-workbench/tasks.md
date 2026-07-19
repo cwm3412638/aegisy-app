@@ -373,6 +373,8 @@
   - Keep this task unchecked: host-managed policy roots, durable configuration, complete instruction exclusion reporting and budget accounting, context inspection, trust/approval intersection, and clean Windows/runtime evidence remain required before this is a complete product feature.
 - [ ] 17.3 Implement pinned context for files, selections, images, diagnostics, terminal excerpts, Git commits/diffs, artifacts, and child handoffs
 - [ ] 17.4 Implement token-budget allocation across instructions, task state, recent turns, tool results, pinned context, search, and repository map
+  - Partial context-budget/0.1 foundation: the existing turn preparation now emits a deterministic budget plan across current explicit context and auto-discovered instruction items. Instruction precedence ranks and pinned context priority determine allocation order, while rendered text order remains the caller/context order. A 64 KiB total and 16 KiB per-item hard bound are enforced; every allocation and budget exclusion is content-free and included in the turn manifest response.
+  - Keep this task unchecked until task-state/recent-turn/tool/search/repository-map classes join the same allocator, model-specific tokenizer authority is available, provider context windows are enforced, and scale/cross-platform evidence exists.
 - [ ] 17.5 Implement model-specific tokenizer adapters plus conservative unknown-tokenizer behavior
 - [ ] 17.6 Implement context inspector showing what will be sent, source, trust, size, redaction, and exclusion reason
 - [ ] 17.7 Implement automatic compaction thresholds based on authoritative or conservative context state

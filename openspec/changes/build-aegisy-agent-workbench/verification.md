@@ -574,6 +574,15 @@ Current editor evidence:
   until durable managed/user configuration, complete exclusion/budget reporting,
   policy/trust review, context inspection, and cross-platform evidence are
   complete.
+- The partial context-budget/0.1 allocator is emitted with each prepared
+  turn context. It deterministically scores instruction precedence and pinned
+  context, allocates within a 64 KiB total/16 KiB per-item hard bound without
+  reordering rendered context, and returns requested/allocated bytes, class,
+  priority score, inclusion, and content-free reason metadata. Unit fixtures
+  cover priority ordering, excluded entries, and hard bounds; the protocol
+  fixture verifies the budget schema. Task 17.4 remains unchecked until all
+  context classes, tokenizer/provider window authority, and scale evidence use
+  this allocator.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or

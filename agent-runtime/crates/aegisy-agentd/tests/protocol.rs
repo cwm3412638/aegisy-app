@@ -2218,6 +2218,16 @@ fn work_turn_auto_includes_bounded_project_instructions_after_user_context() {
         }),
     ));
     assert_eq!(messages[0]["result"]["context"]["item_count"], 2);
+    assert_eq!(
+        messages[0]["result"]["context"]["budget"]["schema_version"],
+        "context-budget/0.1"
+    );
+    assert!(
+        messages[0]["result"]["context"]["budget"]["allocated_bytes"]
+            .as_u64()
+            .unwrap()
+            <= 64 * 1024
+    );
     let manifest_entries = messages[0]["result"]["context"]["manifest"]["entries"]
         .as_array()
         .unwrap();

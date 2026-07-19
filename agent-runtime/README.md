@@ -69,6 +69,15 @@ response. It contains only bounded source/kind, priority, trust, SHA-256,
 conservative token, freshness, inclusion, and truncation metadata; attachment
 text is never copied into the manifest.
 
+The same response includes a content-free `context-budget/0.1` plan for the
+current explicit context and auto-discovered instructions. Instruction
+precedence ranks and pinned priority receive deterministic allocation order,
+while rendered text keeps caller order. The plan enforces a 64 KiB total and
+16 KiB per-item hard bound and reports requested/allocated bytes, class,
+priority score, inclusion, and exclusion reason. Task-state, recent-turn,
+tool-result, search, repository-map, tokenizer, and provider-window consumers
+remain future budget classes.
+
 `workspace/instructions` returns `instruction-discovery/0.1` metadata for the
 registered project root and optional target path. It merges applicable sources
 in weakest-first order with managed > user > closer nested > project precedence.

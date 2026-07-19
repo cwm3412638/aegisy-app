@@ -240,9 +240,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   content identity, conservative token estimates, freshness, inclusion reason,
   and included state. File attachments are hashed only after the existing root,
   ignore, symlink, and stale checks; truncation is explicit and the manifest never
-  contains attachment text. Instruction discovery now has a separate partial
-  AAP foundation, while budget allocation, tokenizer authority, context inspection,
-  and provider-scale evidence remain open, so
+  contains attachment text. Instruction discovery and a first deterministic
+  context-budget foundation now share the turn preparation path, while tokenizer
+  authority, context inspection, and provider-scale evidence remain open, so
   `17.1` is not complete.
 - OpenSpec task `17.2` now has a partial `instruction-discovery/0.1`
   foundation. Read-only AAP `workspace/instructions` binds a registered project
@@ -268,6 +268,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   complete rejection/budget reporting, trust/managed-policy intersection,
   context inspection, and cross-platform evidence remain open; keep `17.2`
   unchecked.
+- OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
+  Prepared turn responses include a content-free plan for explicit context and
+  auto-discovered instructions. Instruction precedence ranks and pinned priority
+  determine deterministic allocation order without reordering rendered text;
+  a 64 KiB total and 16 KiB per-item hard bound report requested/allocated bytes,
+  class, score, inclusion, and exclusion reason. Task-state, recent-turn,
+  tool-result, search, repository-map, tokenizer, and provider-window consumers
+  remain open; keep `17.4` unchecked.
 - User-initiated macOS PTY execution, the named lifecycle, and the Qt/xterm.js
   terminal frontend are verified; Windows ConPTY is implemented but not yet
   runtime-verified. Read-only Codex command events now have a partial structured
@@ -1036,6 +1044,11 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   attachment; stale file revisions are labelled `stale`, and omitted/truncated
   context is never implied complete. The manifest is not persisted as source text
   and does not grant authority or activate compaction.
+- The same prepared response carries `context-budget/0.1`. It allocates current
+  explicit context and instruction items by deterministic priority score under
+  the existing 64 KiB total/16 KiB per-item boundary, while preserving input
+  order in rendered text. The plan is metadata-only and does not imply tokenizer
+  or provider-window authority.
 - One turn accepts at most 16 items. Rendered content is limited to 16 KiB per
   item and the complete context envelope to 64 KiB, including metadata and
   explicit truncation markers. Client-supplied inline content is also rejected
