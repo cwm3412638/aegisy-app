@@ -1263,6 +1263,11 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   duration, exit code, and diagnostic artifact linkage. This strengthens task
   `14.5` evidence without claiming child-process mutation proof or native command
   producers.
+- An explicitly ignored macOS live fixture has run against the installed pinned
+  `codex-cli 0.144.5` selected through `AEGISY_CODEX_PATH`, proving app-server
+  initialize and read-only `thread/start` while keeping the adapter permission
+  profile read-only. It does not start a model turn or claim command-item or
+  child-process observation; task `14.5` therefore remains incomplete.
 - Codex remains configured with `sandbox=read-only` and `approvalPolicy=never`;
   approval requests are declined. No AAP/native Agent command-open or arbitrary
   execution method was added. User terminal input remains a separate explicit user

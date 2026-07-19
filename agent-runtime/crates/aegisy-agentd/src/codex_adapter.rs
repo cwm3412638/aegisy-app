@@ -1639,6 +1639,23 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires an explicitly selected installed codex-cli 0.144.5 binary; run with AEGISY_CODEX_PATH=... --ignored"]
+    fn live_pinned_binary_initializes_and_starts_read_only_thread() {
+        let path = std::env::var_os("AEGISY_CODEX_PATH")
+            .expect("AEGISY_CODEX_PATH must select the live pinned Codex binary");
+        assert!(Path::new(&path).is_file());
+        let mut adapter = CodexAdapter::start().expect("pinned Codex app-server must initialize");
+        assert_eq!(adapter.info().version, PINNED_CODEX_VERSION);
+        let session = adapter
+            .start_session(Path::new("/tmp"), true)
+            .expect("pinned Codex app-server must accept a read-only thread start");
+        assert!(!session.thread_id.is_empty());
+        assert_eq!(adapter.info().permission_profile, "read-only");
+        assert_eq!(adapter.health().state, "running");
+    }
+
     #[test]
     fn command_metadata_is_redacted_at_the_adapter_boundary() {
         let secret = "ghp_123456789012345678901234567890";
