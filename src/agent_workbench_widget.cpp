@@ -106,6 +106,15 @@ constexpr int kMaxTurnContextItems = 16;
 constexpr int kMaxInlineContextBytes = 16 * 1024;
 constexpr qint64 kMaxPortableSessionBytes = 4LL * 1024 * 1024;
 
+bool isLowerHex(const QString &value, int length)
+{
+    return value.size() == length
+        && std::all_of(value.cbegin(), value.cend(), [](QChar character) {
+            return (character >= QLatin1Char('0') && character <= QLatin1Char('9'))
+                || (character >= QLatin1Char('a') && character <= QLatin1Char('f'));
+        });
+}
+
 const QList<QPair<QString, QString>> &compactionSummaryCategories()
 {
     static const QList<QPair<QString, QString>> categories{
@@ -437,12 +446,15 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             == QStringLiteral("read-only-recovery");
         m_compactionAvailable = false;
         m_pinnedContextAvailable = false;
+        m_gitContextAvailable = false;
         for (const QJsonValue &capability : result.value(QStringLiteral("capabilities")).toArray()) {
             const QString name = capability.toString();
             if (name == QStringLiteral("session.compaction.checkpoint-review")) {
                 m_compactionAvailable = true;
             } else if (name == QStringLiteral("turn.context.pinned-selected")) {
                 m_pinnedContextAvailable = true;
+            } else if (name == QStringLiteral("workspace.git-context.read-only")) {
+                m_gitContextAvailable = true;
             }
         }
         if (m_pinnedContextAvailable && !m_projectId.isEmpty()) requestPinnedContext();
@@ -455,6 +467,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_runtimeDegradationStates.clear();
         updateRuntimeCapabilityUi();
         updateRecoveryUi();
+        updateGitPinControls();
     });
     connect(m_runtime, &AgentRuntimeClient::runtimeDegradationsRead,
             this, [this](const QString &, const QJsonObject &result) {
@@ -778,10 +791,16 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_gitDiffRequestId.clear();
         m_gitDiffRequestedScope.clear();
         m_gitDiffRequestedOid.clear();
+        m_gitContextRequestId.clear();
+        m_gitContextRequestedKind.clear();
+        m_gitContextRequestedScope.clear();
+        m_gitContextRequestedOid.clear();
+        m_gitContextRequestedLabel.clear();
         m_selectedGitOid.clear();
         if (m_gitHistory) m_gitHistory->clear();
         if (m_gitDiffPreview) m_gitDiffPreview->clear();
         if (m_gitSummary) m_gitSummary->setText(QStringLiteral("未检测到仓库"));
+        updateGitPinControls();
         if (!m_workspaceSearchId.isEmpty()) {
             m_runtime->cancelWorkspaceSearch(
                 m_workspaceSearchId, m_projectId, m_workspaceRootId);
@@ -1428,6 +1447,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         }
         m_pinnedContextMutationRequestId.clear();
         applyPinnedContextResult(result);
+        updateGitPinControls();
         addNotice(method == QStringLiteral("workspace/pinned-context/remove")
             ? QStringLiteral("已解除固定上下文。")
             : QStringLiteral("固定上下文已保存。"));
@@ -1656,6 +1676,17 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         } else {
             requestGitDiff();
         }
+    });
+    connect(m_runtime, &AgentRuntimeClient::gitContextRead,
+            this, [this](const QString &requestId, const QJsonObject &context) {
+        if (requestId != m_gitContextRequestId) return;
+        m_gitContextRequestId.clear();
+        finishPinnedGitContext(context);
+        m_gitContextRequestedKind.clear();
+        m_gitContextRequestedScope.clear();
+        m_gitContextRequestedOid.clear();
+        m_gitContextRequestedLabel.clear();
+        updateGitPinControls();
     });
     connect(m_runtime, &AgentRuntimeClient::workspaceSearchCompleted,
             this, [this](const QString &requestId, const QJsonObject &result) {
@@ -1972,6 +2003,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             addNotice(QStringLiteral("更新固定上下文失败：%1").arg(message), true);
             if (code == -32041) requestPinnedContext();
             rebuildContextPanel();
+            updateGitPinControls();
         } else if (method == QStringLiteral("workspace/read")
                    && requestId == m_pinnedFileReadRequestId) {
             m_pinnedFileReadRequestId.clear();
@@ -2136,6 +2168,15 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         } else if (method == QStringLiteral("workspace/git-status")) {
             m_gitStatusPending = false;
             if (!m_projectId.isEmpty()) m_gitStatusTimer->start();
+        } else if (method == QStringLiteral("workspace/git/context/read")
+                   && requestId == m_gitContextRequestId) {
+            m_gitContextRequestId.clear();
+            m_gitContextRequestedKind.clear();
+            m_gitContextRequestedScope.clear();
+            m_gitContextRequestedOid.clear();
+            m_gitContextRequestedLabel.clear();
+            addNotice(QStringLiteral("读取待固定 Git 上下文失败：%1").arg(message), true);
+            updateGitPinControls();
         } else if (method.startsWith(QStringLiteral("workspace/git/"))) {
             if (requestId == m_gitOverviewRequestId) m_gitOverviewRequestId.clear();
             if (requestId == m_gitLogRequestId) m_gitLogRequestId.clear();
@@ -2145,6 +2186,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 m_gitDiffRequestedOid.clear();
             }
             if (m_gitSummary) m_gitSummary->setText(QStringLiteral("Git 查询失败"));
+            updateGitPinControls();
         } else if (method == QStringLiteral("workspace/search")
                    && requestId == m_workspaceSearchRequestId) {
             m_workspaceSearchRequestId.clear();
@@ -3722,6 +3764,16 @@ QWidget *AgentWorkbenchWidget::buildGitPage()
     m_gitRefreshButton->setToolTip(QStringLiteral("刷新 Git"));
     m_gitRefreshButton->setFixedSize(32, 32);
     toolbar->addWidget(m_gitRefreshButton);
+    m_gitPinDiffButton = new QPushButton(QStringLiteral("固定差异"), page);
+    m_gitPinDiffButton->setObjectName(QStringLiteral("agentGitPinDiffButton"));
+    m_gitPinDiffButton->setIcon(QIcon(QStringLiteral(":/icons/lucide/paperclip.svg")));
+    m_gitPinDiffButton->setToolTip(QStringLiteral("固定当前 Git 差异"));
+    toolbar->addWidget(m_gitPinDiffButton);
+    m_gitPinCommitButton = new QPushButton(QStringLiteral("固定提交"), page);
+    m_gitPinCommitButton->setObjectName(QStringLiteral("agentGitPinCommitButton"));
+    m_gitPinCommitButton->setIcon(QIcon(QStringLiteral(":/icons/lucide/paperclip.svg")));
+    m_gitPinCommitButton->setToolTip(QStringLiteral("固定历史中选中的提交"));
+    toolbar->addWidget(m_gitPinCommitButton);
     layout->addLayout(toolbar);
 
     auto *splitter = new QSplitter(Qt::Vertical, page);
@@ -3771,8 +3823,15 @@ QWidget *AgentWorkbenchWidget::buildGitPage()
     });
     connect(m_gitRefreshButton, &QPushButton::clicked,
             this, &AgentWorkbenchWidget::refreshGitWorkspace);
+    connect(m_gitPinDiffButton, &QPushButton::clicked,
+            this, &AgentWorkbenchWidget::pinCurrentGitDiffContext);
+    connect(m_gitPinCommitButton, &QPushButton::clicked,
+            this, &AgentWorkbenchWidget::pinSelectedGitCommitContext);
     connect(m_gitDiffScope, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this]() { requestGitDiff(); });
+            this, [this]() {
+        updateGitPinControls();
+        requestGitDiff();
+    });
     connect(m_gitHistory, &QTreeWidget::itemSelectionChanged, this, [this]() {
         QTreeWidgetItem *item = m_gitHistory->currentItem();
         if (!item) return;
@@ -3780,7 +3839,9 @@ QWidget *AgentWorkbenchWidget::buildGitPage()
         const int index = m_gitDiffScope->findData(QStringLiteral("commit"));
         if (index >= 0) m_gitDiffScope->setCurrentIndex(index);
         requestGitDiff();
+        updateGitPinControls();
     });
+    updateGitPinControls();
     return page;
 }
 
@@ -4651,6 +4712,7 @@ void AgentWorkbenchWidget::requestGitDiff()
     const QString scope = m_gitDiffScope->currentData().toString();
     if (scope == QStringLiteral("commit") && m_selectedGitOid.isEmpty()) {
         if (m_gitDiffPreview) m_gitDiffPreview->clear();
+        updateGitPinControls();
         return;
     }
     m_gitDiffRequestId = m_runtime->gitDiff(
@@ -4659,6 +4721,7 @@ void AgentWorkbenchWidget::requestGitDiff()
         m_gitDiffRequestedScope = scope;
         m_gitDiffRequestedOid = scope == QStringLiteral("commit") ? m_selectedGitOid : QString();
     }
+    updateGitPinControls();
 }
 
 void AgentWorkbenchWidget::populateGitOverview(const QJsonObject &overview)
@@ -4684,6 +4747,7 @@ void AgentWorkbenchWidget::populateGitOverview(const QJsonObject &overview)
 void AgentWorkbenchWidget::populateGitLog(const QJsonObject &log)
 {
     m_gitHistory->clear();
+    m_selectedGitOid.clear();
     for (const QJsonValue &value : log.value(QStringLiteral("commits")).toArray()) {
         const QJsonObject commit = value.toObject();
         const QString oid = commit.value(QStringLiteral("oid")).toString();
@@ -4699,6 +4763,7 @@ void AgentWorkbenchWidget::populateGitLog(const QJsonObject &log)
         item->setData(0, kGitOidRole, oid);
         item->setToolTip(0, oid);
     }
+    updateGitPinControls();
 }
 
 void AgentWorkbenchWidget::populateGitDiff(const QJsonObject &diff)
@@ -4708,6 +4773,197 @@ void AgentWorkbenchWidget::populateGitDiff(const QJsonObject &diff)
     const int additions = diff.value(QStringLiteral("additions")).toInt();
     const int deletions = diff.value(QStringLiteral("deletions")).toInt();
     m_gitDiffPreview->setToolTip(QStringLiteral("+%1 / -%2").arg(additions).arg(deletions));
+    updateGitPinControls();
+}
+
+void AgentWorkbenchWidget::updateGitPinControls()
+{
+    if (!m_gitPinDiffButton || !m_gitPinCommitButton) return;
+    const bool blocked = !m_runtime || !m_runtime->isReady() || m_runtimeRecoveryMode
+        || currentSessionRecoveryRequired() || currentSessionDeletionPending()
+        || currentOperationStatusBlocked() || m_projectId.isEmpty()
+        || !m_pinnedContextAvailable || !m_gitContextAvailable
+        || !m_gitContextRequestId.isEmpty()
+        || !m_pinnedContextMutationRequestId.isEmpty();
+    const QString scope = m_gitDiffScope ? m_gitDiffScope->currentData().toString() : QString();
+    const bool validSelectedOid = isLowerHex(m_selectedGitOid, 40);
+    const bool diffReady = m_gitDiffPreview && !m_gitDiffPreview->toPlainText().isEmpty()
+        && m_gitDiffRequestId.isEmpty()
+        && (scope == QStringLiteral("worktree") || scope == QStringLiteral("staged")
+            || scope == QStringLiteral("commit"))
+        && (scope != QStringLiteral("commit") || validSelectedOid);
+    m_gitPinDiffButton->setEnabled(!blocked && diffReady);
+    m_gitPinCommitButton->setEnabled(!blocked && validSelectedOid);
+}
+
+void AgentWorkbenchWidget::pinCurrentGitDiffContext()
+{
+    updateGitPinControls();
+    if (!m_gitPinDiffButton || !m_gitPinDiffButton->isEnabled()) {
+        addNotice(QStringLiteral("当前 Git 差异不能固定，请等待查询完成或解除只读阻塞。"), true);
+        return;
+    }
+    const QString scope = m_gitDiffScope->currentData().toString();
+    const QString oid = scope == QStringLiteral("commit") ? m_selectedGitOid : QString();
+    const QString label = scope == QStringLiteral("worktree")
+        ? QStringLiteral("工作区差异")
+        : scope == QStringLiteral("staged")
+            ? QStringLiteral("暂存区差异")
+            : QStringLiteral("提交差异 · %1").arg(oid.left(8));
+    m_gitContextRequestedKind = QStringLiteral("git_diff");
+    m_gitContextRequestedScope = scope;
+    m_gitContextRequestedOid = oid;
+    m_gitContextRequestedLabel = label;
+    m_gitContextRequestId = m_runtime->gitContext(
+        m_projectId, m_gitContextRequestedKind, scope, oid);
+    if (m_gitContextRequestId.isEmpty()) {
+        m_gitContextRequestedKind.clear();
+        m_gitContextRequestedScope.clear();
+        m_gitContextRequestedOid.clear();
+        m_gitContextRequestedLabel.clear();
+        addNotice(QStringLiteral("无法读取待固定 Git 差异。"), true);
+    }
+    updateGitPinControls();
+}
+
+void AgentWorkbenchWidget::pinSelectedGitCommitContext()
+{
+    updateGitPinControls();
+    if (!m_gitPinCommitButton || !m_gitPinCommitButton->isEnabled()) {
+        addNotice(QStringLiteral("请先选择可固定的完整 Git 提交。"), true);
+        return;
+    }
+    QTreeWidgetItem *item = m_gitHistory ? m_gitHistory->currentItem() : nullptr;
+    const QString subject = item ? item->text(3) : QString();
+    m_gitContextRequestedKind = QStringLiteral("git_commit");
+    m_gitContextRequestedScope.clear();
+    m_gitContextRequestedOid = m_selectedGitOid;
+    m_gitContextRequestedLabel = subject.isEmpty()
+        ? QStringLiteral("Git 提交 · %1").arg(m_selectedGitOid.left(8))
+        : QStringLiteral("%1 · %2").arg(m_selectedGitOid.left(8), subject);
+    m_gitContextRequestId = m_runtime->gitContext(
+        m_projectId, m_gitContextRequestedKind, {}, m_gitContextRequestedOid);
+    if (m_gitContextRequestId.isEmpty()) {
+        m_gitContextRequestedKind.clear();
+        m_gitContextRequestedOid.clear();
+        m_gitContextRequestedLabel.clear();
+        addNotice(QStringLiteral("无法读取待固定 Git 提交。"), true);
+    }
+    updateGitPinControls();
+}
+
+void AgentWorkbenchWidget::finishPinnedGitContext(const QJsonObject &context)
+{
+    const QString kind = m_gitContextRequestedKind;
+    const QString scope = m_gitContextRequestedScope;
+    const QString oid = m_gitContextRequestedOid;
+    const QString responseKind = context.value(QStringLiteral("kind")).toString();
+    const QString responseScope = context.value(QStringLiteral("scope")).toString();
+    const QString responseOid = context.value(QStringLiteral("oid")).toString();
+    const QString reference = context.value(QStringLiteral("reference")).toString();
+    const QString contentHash = context.value(QStringLiteral("content_hash")).toString();
+    const QString digest = contentHash.startsWith(QStringLiteral("sha256:"))
+        ? contentHash.mid(7) : QString();
+    const QByteArray content = context.value(QStringLiteral("content")).toString().toUtf8();
+    const qint64 bytes = context.value(QStringLiteral("bytes")).toVariant().toLongLong();
+    const qint64 sourceBytes = context.value(QStringLiteral("source_bytes"))
+        .toVariant().toLongLong();
+    const QString sourceHash = context.value(QStringLiteral("source_hash")).toString();
+    const QString sourceDigest = sourceHash.startsWith(QStringLiteral("sha256:"))
+        ? sourceHash.mid(7) : QString();
+    const bool truncated = context.value(QStringLiteral("truncated")).toBool();
+    const QString expectedReference = kind == QStringLiteral("git_commit")
+        ? QStringLiteral("git-commit:%1").arg(oid)
+        : scope == QStringLiteral("commit")
+            ? QStringLiteral("git-diff:commit:%1").arg(oid)
+            : QStringLiteral("git-diff:%1").arg(scope);
+    const bool selectionUnchanged = kind == QStringLiteral("git_commit")
+        ? m_selectedGitOid == oid
+        : m_gitDiffScope && m_gitDiffScope->currentData().toString() == scope
+            && (scope != QStringLiteral("commit") || m_selectedGitOid == oid);
+    const bool truncationValid = context.value(QStringLiteral("truncated")).isBool()
+        && ((truncated && sourceBytes > bytes
+             && content.endsWith("\n[Aegisy Git context truncated]\n"))
+            || (!truncated && sourceBytes == bytes));
+    const bool identityValid = context.value(QStringLiteral("schema_version")).toString()
+            == QStringLiteral("git-context/0.1")
+        && context.value(QStringLiteral("project_id")).toString() == m_projectId
+        && context.value(QStringLiteral("root_id")).toString() == QStringLiteral("root-1")
+        && responseKind == kind && responseScope == scope && responseOid == oid
+        && reference == expectedReference
+        && context.value(QStringLiteral("content_type")).toString()
+            == QStringLiteral("text/plain; charset=utf-8")
+        && !context.value(QStringLiteral("content_bodies_persisted")).toBool(true)
+        && !content.isEmpty() && content.size() <= kMaxInlineContextBytes
+        && bytes == content.size() && sourceBytes >= bytes
+        && isLowerHex(digest, 64)
+        && isLowerHex(sourceDigest, 64)
+        && (truncated || sourceHash == contentHash)
+        && QString::fromLatin1(QCryptographicHash::hash(
+               content, QCryptographicHash::Sha256).toHex()) == digest
+        && truncationValid && selectionUnchanged
+        && ((kind == QStringLiteral("git_commit") && scope.isEmpty() && isLowerHex(oid, 40))
+            || (kind == QStringLiteral("git_diff")
+                && (scope == QStringLiteral("worktree")
+                    || scope == QStringLiteral("staged")
+                    || (scope == QStringLiteral("commit") && isLowerHex(oid, 40)))));
+    if (!identityValid || !m_pinnedContextMutationRequestId.isEmpty()) {
+        addNotice(QStringLiteral("Git 上下文身份、范围或截断状态校验失败，未写入固定上下文。"), true);
+        return;
+    }
+    const QByteArray idDigest = QCryptographicHash::hash(
+        QStringLiteral("%1\n%2\n%3").arg(m_projectId, kind, reference).toUtf8(),
+        QCryptographicHash::Sha256).toHex();
+    const QString id = QStringLiteral("pin-%1-%2").arg(
+        kind, QString::fromLatin1(idDigest));
+    QJsonObject metadata{
+        {QStringLiteral("truncated"), truncated ? QStringLiteral("true")
+                                                : QStringLiteral("false")},
+        {QStringLiteral("source_bytes"), QString::number(sourceBytes)},
+        {QStringLiteral("source_hash"), sourceHash},
+    };
+    if (!scope.isEmpty()) metadata.insert(QStringLiteral("scope"), scope);
+    if (!oid.isEmpty()) metadata.insert(QStringLiteral("oid"), oid);
+    const QJsonObject descriptor{
+        {QStringLiteral("id"), id},
+        {QStringLiteral("project_id"), m_projectId},
+        {QStringLiteral("root_id"), QStringLiteral("root-1")},
+        {QStringLiteral("kind"), kind},
+        {QStringLiteral("source"), QStringLiteral("git-query")},
+        {QStringLiteral("label"), m_gitContextRequestedLabel},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("content_hash"), contentHash},
+        {QStringLiteral("bytes"), static_cast<double>(bytes)},
+        {QStringLiteral("revision"), kind == QStringLiteral("git_commit") ? oid : contentHash},
+        {QStringLiteral("freshness"), QStringLiteral("fresh")},
+        {QStringLiteral("priority"), kind == QStringLiteral("git_commit") ? 710 : 720},
+        {QStringLiteral("metadata"), metadata},
+    };
+    QJsonArray items;
+    bool replaced = false;
+    for (QJsonObject existing : m_pinnedContextItems) {
+        existing.remove(QStringLiteral("included"));
+        if (existing.value(QStringLiteral("id")).toString() == id) {
+            items.append(descriptor);
+            replaced = true;
+        } else {
+            items.append(existing);
+        }
+    }
+    if (!replaced) {
+        if (items.size() >= 128) {
+            addNotice(QStringLiteral("固定上下文已达到 128 项上限。"), true);
+            return;
+        }
+        items.append(descriptor);
+    }
+    m_pendingPinnedIncludeId = id;
+    m_pinnedContextMutationRequestId = m_runtime->savePinnedContext(
+        m_projectId, items, m_pinnedContextSetIdentity);
+    if (m_pinnedContextMutationRequestId.isEmpty()) {
+        m_pendingPinnedIncludeId.clear();
+        addNotice(QStringLiteral("无法提交 Git 固定上下文更新。"), true);
+    }
 }
 
 void AgentWorkbenchWidget::applyGitDecorations()
@@ -6663,6 +6919,7 @@ void AgentWorkbenchWidget::updateRecoveryUi()
     updateTurnAction();
     updateTerminalControls();
     updateEditorActions();
+    updateGitPinControls();
 }
 
 void AgentWorkbenchWidget::requestProjectList()

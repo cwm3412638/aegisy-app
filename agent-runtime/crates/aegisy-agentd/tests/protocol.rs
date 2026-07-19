@@ -1352,6 +1352,11 @@ fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
         .unwrap()
         .iter()
         .any(|capability| capability == "turn.context.pinned-selected"));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "workspace.git-context.read-only"));
     runtime.handle_line(&request("initialized", "initialized", json!({})));
     let opened = runtime.handle_line(&request(
         "project-open",
@@ -3979,8 +3984,57 @@ fn git_queries_are_read_only_project_scoped_and_content_filtered() {
     let diff_json = serde_json::to_string(&diff[0]["result"]).unwrap();
     assert!(!diff_json.contains("hidden-worktree"));
 
+    let commit_context = runtime.handle_line(&request(
+        "git-commit-context",
+        "workspace/git/context/read",
+        json!({
+            "project_id": project_id,
+            "kind": "git_commit",
+            "oid": oid
+        }),
+    ));
+    assert_eq!(
+        commit_context[0]["result"]["schema_version"],
+        "git-context/0.1"
+    );
+    assert_eq!(
+        commit_context[0]["result"]["reference"],
+        format!("git-commit:{oid}")
+    );
+    assert_eq!(
+        commit_context[0]["result"]["content_bodies_persisted"],
+        false
+    );
+    assert_eq!(
+        commit_context[0]["result"]["source_hash"],
+        commit_context[0]["result"]["content_hash"]
+    );
+    let commit_context_json = serde_json::to_string(&commit_context[0]["result"]).unwrap();
+    assert!(commit_context_json.contains("visible.txt"));
+    assert!(!commit_context_json.contains(".env"));
+    assert!(!commit_context_json.contains("outside.txt"));
+
+    let diff_context = runtime.handle_line(&request(
+        "git-diff-context",
+        "workspace/git/context/read",
+        json!({
+            "project_id": project_id,
+            "kind": "git_diff",
+            "scope": "worktree"
+        }),
+    ));
+    assert_eq!(diff_context[0]["result"]["reference"], "git-diff:worktree");
+    assert!(diff_context[0]["result"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("worktree"));
+    assert_eq!(
+        diff_context[0]["result"]["bytes"],
+        diff_context[0]["result"]["content"].as_str().unwrap().len()
+    );
+
     let invalid = runtime.handle_line(&request(
-        "7",
+        "git-invalid-oid",
         "workspace/git/commit",
         json!({ "project_id": project_id, "oid": "HEAD" }),
     ));

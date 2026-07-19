@@ -239,9 +239,9 @@ explicit `pinned_context_ids` list. The runtime never sends all persisted pins
 implicitly. A non-empty selection requires the exact current set identity,
 contains at most 16 unique IDs, and is revalidated against the current project,
 session, and registered root. The first assembly phase accepts `file`, `selection`,
-project/root-bound `diagnostic`, session-owned `terminal_excerpt`, and session-owned
-`artifact` pins; image, Git, and child-handoff descriptors fail explicitly instead
-of becoming unverified inline content. Artifact assembly accepts only validated `command-output:sha256:`
+project/root-bound `diagnostic`, session-owned `terminal_excerpt`, primary-root
+`git_commit`/`git_diff`, and session-owned `artifact` pins; image and child-handoff
+descriptors fail explicitly instead of becoming unverified inline content. Artifact assembly accepts only validated `command-output:sha256:`
 text references and rechecks UTF-8, byte count, and SHA-256 before adding content.
 The durable command-output path is reloaded through session-scoped Blob ownership
 after Runtime restart; inspection remains metadata-only while turn assembly may
@@ -294,7 +294,23 @@ The Terminal context menu separates transient `添加选中内容` from persiste
 `固定最近输出`. Read-only `terminal/excerpt/read` returns at most 16 KiB of the
 retained tail as `terminal-excerpt/0.1`, after pinned ANSI/OSC stripping and control
 normalization, with absolute offsets/generation/hash. Qt validates it and persists
-only the descriptor through CAS. Image/Git/child-handoff assembly, durable automatic
+only the descriptor through CAS.
+
+Capability `workspace.git-context.read-only` exposes the explicit user-preparation
+method `workspace/git/context/read`. `git_commit` requires one complete lowercase
+40-character OID and returns filtered deterministic commit detail under
+`git-commit:<oid>`. `git_diff` accepts only `worktree`, `staged`, or `commit`; commit
+scope also requires a complete OID and uses `git-diff:commit:<oid>`, while mutable
+scopes use `git-diff:worktree` or `git-diff:staged`. Results are normalized text,
+bounded to 16 KiB with explicit truncation, and return both the bounded
+`content_hash` and complete normalized `source_hash`/`source_bytes`. Qt validates
+the complete response before persisting only a metadata descriptor. Assembly
+re-runs the same filtered query and checks reference, bounded content, complete
+source identity, bytes, and truncation. Worktree/staged changes therefore invalidate
+their pins; commit and commit-diff pins survive unrelated worktree changes but fail
+if the exact Git object is no longer available. No Git mutation is added.
+
+Image/child-handoff assembly, durable automatic
 invalidation,
 orphan GC, cross-resource atomicity, and Windows runtime evidence remain open.
 Qt watch/save callbacks may mark loaded file and selection pins stale locally, but never rewrite

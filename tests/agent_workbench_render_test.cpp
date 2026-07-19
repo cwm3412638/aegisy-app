@@ -25,6 +25,8 @@
 #include <QThread>
 #include <QTreeWidget>
 #include <QPlainTextEdit>
+#include <QProcess>
+#include <QStandardPaths>
 #include <algorithm>
 #include <iterator>
 
@@ -52,6 +54,23 @@ bool isLightPixel(const QImage &image, const QPoint &point)
     if (!image.rect().contains(point)) return false;
     const QColor color = image.pixelColor(point);
     return color.red() > 180 && color.green() > 180 && color.blue() > 180;
+}
+
+bool runGit(const QString &executable, const QString &root, const QStringList &arguments,
+            QString *standardOutput = nullptr)
+{
+    QProcess process;
+    process.setWorkingDirectory(root);
+    process.start(executable, arguments);
+    if (!process.waitForStarted(3000) || !process.waitForFinished(10000)
+            || process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        qCritical() << "git fixture failed" << arguments << process.readAllStandardError();
+        return false;
+    }
+    if (standardOutput) {
+        *standardOutput = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+    }
+    return true;
 }
 
 QPushButton *buttonWithText(QWidget &root, const QString &text)
@@ -255,6 +274,10 @@ int main(int argc, char *argv[])
         QStringLiteral("agentGitDiffScope"));
     QPushButton *gitRefresh = workbench.findChild<QPushButton *>(
         QStringLiteral("agentGitRefreshButton"));
+    QPushButton *gitPinDiff = workbench.findChild<QPushButton *>(
+        QStringLiteral("agentGitPinDiffButton"));
+    QPushButton *gitPinCommit = workbench.findChild<QPushButton *>(
+        QStringLiteral("agentGitPinCommitButton"));
     QLabel *workspaceEditSummary = workbench.findChild<QLabel *>(
         QStringLiteral("agentWorkspaceEditSummary"));
     QTreeWidget *workspaceEditFiles = workbench.findChild<QTreeWidget *>(
@@ -356,10 +379,13 @@ int main(int argc, char *argv[])
                            && workspaceEditMore && workspaceEditDiff->isReadOnly()
                            && !workspaceEditMore->isEnabled(),
                        "workspace edit preview controls are missing")
-            || !expect(gitSummary && gitHistory && gitDiffScope && gitRefresh && gitDiff
+            || !expect(gitSummary && gitHistory && gitDiffScope && gitRefresh && gitPinDiff
+                           && gitPinCommit && gitDiff
                            && gitHistory->columnCount() == 4
                            && gitDiffScope->count() == 3 && gitDiff->isReadOnly()
-                           && !gitRefresh->icon().isNull(),
+                           && !gitRefresh->icon().isNull()
+                           && !gitPinDiff->icon().isNull() && !gitPinCommit->icon().isNull()
+                           && !gitPinDiff->isEnabled() && !gitPinCommit->isEnabled(),
                        "read-only Git query workspace controls are missing")
             || !expect(terminalPicker && terminalStatus && terminalNew && terminalStop
                            && terminalRestart && terminalRemove && terminalContext
@@ -431,6 +457,7 @@ int main(int argc, char *argv[])
         {QStringLiteral("capabilities"), QJsonArray{
             QStringLiteral("session.compaction.checkpoint-review"),
             QStringLiteral("turn.context.pinned-selected"),
+            QStringLiteral("workspace.git-context.read-only"),
         }},
     });
     runtimeClient->runtimeDegradationsRead(QStringLiteral("degradation-fixture"), QJsonObject{
@@ -955,6 +982,43 @@ int main(int argc, char *argv[])
         "int run() { return add(1, 2); }\n");
     source.write(sourceContent.toUtf8());
     source.close();
+    QFile gitChange(project.filePath(QStringLiteral("git-change.txt")));
+    if (!expect(gitChange.open(QIODevice::WriteOnly),
+                "could not create Git context fixture")) {
+        return 1;
+    }
+    gitChange.write("base\n");
+    gitChange.close();
+    const QString gitExecutable = QStandardPaths::findExecutable(QStringLiteral("git"));
+    QString fixtureCommitOid;
+    if (!expect(!gitExecutable.isEmpty()
+                    && runGit(gitExecutable, project.path(), {QStringLiteral("init"),
+                                                              QStringLiteral("-q")})
+                    && runGit(gitExecutable, project.path(), {QStringLiteral("config"),
+                                                              QStringLiteral("user.name"),
+                                                              QStringLiteral("Aegisy Render Test")})
+                    && runGit(gitExecutable, project.path(), {QStringLiteral("config"),
+                                                              QStringLiteral("user.email"),
+                                                              QStringLiteral("render@aegisy.invalid")})
+                    && runGit(gitExecutable, project.path(), {QStringLiteral("add"),
+                                                              QStringLiteral(".")})
+                    && runGit(gitExecutable, project.path(), {QStringLiteral("commit"),
+                                                              QStringLiteral("-q"),
+                                                              QStringLiteral("-m"),
+                                                              QStringLiteral("initial Git context")})
+                    && runGit(gitExecutable, project.path(), {QStringLiteral("rev-parse"),
+                                                              QStringLiteral("HEAD")},
+                              &fixtureCommitOid)
+                    && fixtureCommitOid.size() == 40,
+                "could not initialize real Git context fixture")) {
+        return 1;
+    }
+    if (!expect(gitChange.open(QIODevice::WriteOnly | QIODevice::Truncate),
+                "could not create worktree Git diff")) {
+        return 1;
+    }
+    gitChange.write("base\nworktree change\n");
+    gitChange.close();
     AgentRuntimeClient *runtime = workbench.findChild<AgentRuntimeClient *>();
     QString openedProjectId;
     QString openedProjectRoot;
@@ -992,6 +1056,74 @@ int main(int argc, char *argv[])
                     return !previewSessionId.isEmpty();
                 }),
                 "workspace edit preview fixture did not create a Work session")) {
+        return 1;
+    }
+    int gitTabIndex = -1;
+    for (int index = 0; index < tabs->count(); ++index) {
+        if (tabs->tabText(index) == QStringLiteral("Git")) {
+            gitTabIndex = index;
+            break;
+        }
+    }
+    if (!expect(gitTabIndex >= 0, "Git workspace tab is missing")) return 1;
+    tabs->setCurrentIndex(gitTabIndex);
+    if (!expect(waitUntil(application, [gitHistory, gitDiff, gitPinDiff]() {
+                    return gitHistory->topLevelItemCount() > 0
+                        && gitDiff->toPlainText().contains(QStringLiteral("worktree change"))
+                        && gitPinDiff->isEnabled();
+                }, 10000),
+                "real Git worktree diff did not enable persistent pinning")) {
+        return 1;
+    }
+    gitPinDiff->click();
+    if (!expect(waitUntil(application, [&workbench, contextSummary]() {
+                    return workbench.findChildren<QPushButton *>(
+                               QStringLiteral("agentPinnedContextRemoveButton")).size() == 1
+                        && contextSummary->text().contains(QStringLiteral("固定 1"));
+                }),
+                "Git diff pin did not persist through the metadata-only CAS")) {
+        return 1;
+    }
+    workbench.findChildren<QPushButton *>(
+        QStringLiteral("agentPinnedContextRemoveButton")).first()->click();
+    if (!expect(waitUntil(application, [&workbench]() {
+                    return workbench.findChildren<QPushButton *>(
+                               QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
+                }),
+                "Git diff pin could not be removed")) {
+        return 1;
+    }
+    gitHistory->setCurrentItem(gitHistory->topLevelItem(0));
+    if (!expect(waitUntil(application, [gitDiffScope, gitPinCommit, &fixtureCommitOid,
+                                        gitHistory]() {
+                    QTreeWidgetItem *selected = gitHistory->currentItem();
+                    return selected
+                        && selected->data(0, Qt::UserRole + 7).toString() == fixtureCommitOid
+                        && gitDiffScope->currentData().toString() == QStringLiteral("commit")
+                        && gitPinCommit->isEnabled();
+                }),
+                "selected Git commit did not enable persistent commit pinning")) {
+        return 1;
+    }
+    gitPinCommit->click();
+    if (!expect(waitUntil(application, [&workbench]() {
+                    const QList<QLabel *> labels = workbench.findChildren<QLabel *>();
+                    return workbench.findChildren<QPushButton *>(
+                               QStringLiteral("agentPinnedContextRemoveButton")).size() == 1
+                        && std::any_of(labels.cbegin(), labels.cend(), [](QLabel *label) {
+                            return label->text().contains(QStringLiteral("initial Git context"));
+                        });
+                }),
+                "Git commit pin did not persist and render its selected commit label")) {
+        return 1;
+    }
+    workbench.findChildren<QPushButton *>(
+        QStringLiteral("agentPinnedContextRemoveButton")).first()->click();
+    if (!expect(waitUntil(application, [&workbench]() {
+                    return workbench.findChildren<QPushButton *>(
+                               QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
+                }),
+                "Git commit pin could not be removed")) {
         return 1;
     }
     const QJsonObject compactionSummary{

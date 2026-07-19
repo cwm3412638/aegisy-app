@@ -243,7 +243,28 @@ fn validate_reference(value: &str, kind: &str) -> Result<(), PinnedContextError>
     if kind == "terminal_excerpt" && !value.starts_with("terminal-excerpt:terminal-") {
         return Err(error("pinned-context-reference-path-invalid"));
     }
+    if kind == "git_commit" {
+        let oid = value.strip_prefix("git-commit:").unwrap_or_default();
+        if !valid_git_oid(oid) {
+            return Err(error("pinned-context-reference-path-invalid"));
+        }
+    }
+    if kind == "git_diff" {
+        let suffix = value.strip_prefix("git-diff:").unwrap_or_default();
+        let valid = matches!(suffix, "worktree" | "staged")
+            || suffix.strip_prefix("commit:").is_some_and(valid_git_oid);
+        if !valid {
+            return Err(error("pinned-context-reference-path-invalid"));
+        }
+    }
     Ok(())
+}
+
+fn valid_git_oid(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_sha256(value: &str) -> Result<(), PinnedContextError> {
@@ -331,8 +352,11 @@ mod tests {
             ("image", "blob:sha256:abc"),
             ("diagnostic", "src/main.rs"),
             ("terminal_excerpt", "terminal-excerpt:terminal-1:1:0:12"),
-            ("git_commit", "git:commit:abc"),
-            ("git_diff", "git:diff:abc"),
+            (
+                "git_commit",
+                "git-commit:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            ("git_diff", "git-diff:worktree"),
             ("artifact", "artifact:sha256:abc"),
             ("child_handoff", "handoff:sha256:abc"),
         ] {
@@ -354,6 +378,25 @@ mod tests {
             secret.validate().unwrap_err().code,
             "pinned-context-secret-shaped"
         );
+    }
+
+    #[test]
+    fn rejects_non_authoritative_git_references() {
+        for (kind, reference) in [
+            ("git_commit", "git-commit:abc123"),
+            (
+                "git_commit",
+                "git-commit:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ),
+            ("git_diff", "git-diff:working"),
+            ("git_diff", "git-diff:worktree:abc123"),
+            ("git_diff", "git-diff:commit:abc123"),
+        ] {
+            assert_eq!(
+                item(kind, reference).validate().unwrap_err().code,
+                "pinned-context-reference-path-invalid"
+            );
+        }
     }
 
     #[test]

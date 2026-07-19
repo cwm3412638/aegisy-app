@@ -698,7 +698,7 @@ Current editor evidence:
   project-directory removal, case-insensitive credential masking, dangerous loader
   variable rejection, value/count limits, deterministic session identity, explicit
   terminal derivation, and value-free AAP metadata.
-- Two hundred and ninety-six Rust sidecar unit tests, fifty AAP protocol tests,
+- Two hundred and ninety-eight Rust sidecar unit tests, fifty AAP protocol tests,
   eleven sidecar stdio/Codex contract tests, and sixteen desktop CTest tests pass;
   Clippy passes with warnings denied.
 
@@ -738,12 +738,10 @@ Known limitations:
   milestone; build/test/lint diagnostic parsing remains task 14.8. The raw artifact
   is the filtered Aegisy authority payload, not the original unfiltered LSP wire
   message.
-- Terminal excerpts now come from the real runtime-owned PTY/xterm surface; Git diff
-  actions remain registered against a read-only placeholder until task 15.x. macOS
-  PTY and named lifecycle are runtime-verified, while Windows ConPTY is implemented
-  but awaits Windows execution. The current
-  composer queue is transient turn input, not the durable pinned-context system
-  planned in 17.3.
+- Terminal excerpts now come from the real runtime-owned PTY/xterm surface. Git diff
+  context and Git commit/diff pins come from the filtered read-only Git query rather
+  than fabricated text. macOS PTY and named lifecycle are runtime-verified, while
+  Windows ConPTY is implemented but awaits Windows execution.
 - The internal `pinned-context/0.1` contract validates content-free descriptors for
   every 17.3 source kind. Unit fixtures cover kind support, project/duplicate
   binding, deterministic identity, unsafe absolute/parent/network references,
@@ -779,9 +777,12 @@ Known limitations:
   control normalization, and validates session, generation, offsets, SHA-256, and
   byte count. Runtime/terminal restart, removal, generation change, and capture
   eviction therefore fail closed instead of using the descriptor as content.
-  Duplicate/missing
-  IDs, stale set identity, cross-session selection, and image/Git/
-  child-handoff kinds fail explicitly. Qt now
+  Primary-root Git commit/diff pins use strict full-OID or fixed-scope references,
+  re-run the filtered read-only query, and compare the bounded content hash plus the
+  complete normalized source hash/byte count/truncation state. Worktree/staged drift
+  fails stale, while commit-backed context remains valid only while its exact object
+  is available. Duplicate/missing IDs, stale set identity, cross-session selection,
+  and image/child-handoff kinds fail explicitly. Qt now
   loads project pins and covers authoritative file and editor-selection pin creation,
   CAS persistence, range metadata, per-turn inclusion, bounded order changes, and
   unpin in the Workbench render fixture. The Structure diagnostics surface also
@@ -790,8 +791,10 @@ Known limitations:
   submits only a metadata descriptor through CAS. Qt terminal context separately
   exposes transient selected text and persistent `固定最近输出`; the latter reads a
   bounded `terminal-excerpt/0.1` authority, validates it, and saves only the
-  descriptor. Real Runtime and render fixtures cover assembly, metadata-only
-  inspection, pin/unpin, and failure after removal. Remaining image/Git/
+  descriptor. The Git surface exposes explicit `固定差异` and `固定提交`; a real Git
+  render fixture validates both authority reads, CAS persistence, labels, and unpin.
+  Real Runtime and render fixtures cover assembly, metadata-only inspection,
+  pin/unpin, mutable Git drift, and failure after source removal. Remaining image/
   child-handoff assembly, cross-resource atomicity, automatic invalidation,
   orphan GC, and complete cross-platform pin evidence remain incomplete; task
   17.3 remains unchecked. Qt workspace-watch and user-save callbacks also mark
@@ -815,7 +818,7 @@ Known limitations:
   objects, object/pointer tampering, update refusal on damaged current authority,
   and symlinked-layout denial. Cross-resource event/object/Blob atomicity, Blob
   release/lifecycle binding, orphan GC, automatic source invalidation, Windows
-  execution, remaining image/Git/child-handoff assembly, and their Qt
+  execution, remaining image/child-handoff assembly, complete Git lifecycle, and their Qt
   surfaces remain open.
 - Windows packaging, TLS runtime, scaling, IME, and accessibility evidence remain
   required before a Windows release claim.

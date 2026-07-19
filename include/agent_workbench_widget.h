@@ -139,6 +139,10 @@ private:
     void populateGitOverview(const QJsonObject &overview);
     void populateGitLog(const QJsonObject &log);
     void populateGitDiff(const QJsonObject &diff);
+    void pinCurrentGitDiffContext();
+    void pinSelectedGitCommitContext();
+    void finishPinnedGitContext(const QJsonObject &context);
+    void updateGitPinControls();
     void startWorkspaceSearch(bool nextPage = false);
     void cancelWorkspaceSearch();
     void appendWorkspaceSearchResults(const QJsonObject &result);
@@ -319,6 +323,8 @@ private:
     QTreeWidget *m_gitHistory = nullptr;
     QComboBox *m_gitDiffScope = nullptr;
     QPushButton *m_gitRefreshButton = nullptr;
+    QPushButton *m_gitPinDiffButton = nullptr;
+    QPushButton *m_gitPinCommitButton = nullptr;
     QPlainTextEdit *m_gitDiffPreview = nullptr;
     QLabel *m_fileStatus = nullptr;
     QTimer *m_workspaceWatchTimer = nullptr;
@@ -390,6 +396,11 @@ private:
     QString m_gitDiffRequestId;
     QString m_gitDiffRequestedScope;
     QString m_gitDiffRequestedOid;
+    QString m_gitContextRequestId;
+    QString m_gitContextRequestedKind;
+    QString m_gitContextRequestedScope;
+    QString m_gitContextRequestedOid;
+    QString m_gitContextRequestedLabel;
     QString m_selectedGitOid;
     QString m_pendingSearchPath;
     QString m_openEditorPath;
@@ -461,6 +472,7 @@ private:
     bool m_operationStatusBlocked = false;
     bool m_compactionAvailable = false;
     bool m_pinnedContextAvailable = false;
+    bool m_gitContextAvailable = false;
     bool m_runtimeDegradationsAvailable = false;
     QHash<QString, QString> m_runtimeDegradationStates;
     quint64 m_startupRebuiltSessionCount = 0;

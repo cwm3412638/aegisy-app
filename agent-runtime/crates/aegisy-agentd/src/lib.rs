@@ -57,7 +57,10 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use codex_adapter::{BackendInfo, CodexAdapter, CodexEvent, CodexSession, CommandItem};
 use diagnostic_store::DiagnosticStore;
-use git_query::{commit as git_commit, diff as git_diff, log as git_log, overview as git_overview};
+use git_query::{
+    commit as git_commit, diff as git_diff, log as git_log, overview as git_overview,
+    GitCommitDetail,
+};
 use git_status::{ignored_paths, status as git_status};
 use instruction_discovery::{discover as discover_instructions, roots_from_environment};
 use language_server::LanguageServerManager;
@@ -105,6 +108,8 @@ const MAX_AUTO_INSTRUCTION_ITEMS: usize = 8;
 const MAX_AUTO_INSTRUCTION_BYTES: u64 = 32 * 1024;
 const MAX_TERMINAL_EXCERPT_BYTES: usize = 16 * 1024;
 const TERMINAL_EXCERPT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
+const MAX_PINNED_GIT_CONTEXT_BYTES: usize = 16 * 1024;
+const GIT_CONTEXT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 
 const TRUST_INSTRUCTION_NAMES: &[&str] = &[
     "AGENTS.md",
@@ -955,6 +960,16 @@ struct WorkspaceGitDiffParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct WorkspaceGitContextParams {
+    project_id: String,
+    kind: String,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    oid: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct WorkspaceIndexParams {
     project_id: String,
     #[serde(default)]
@@ -1180,6 +1195,18 @@ struct TerminalExcerptContent {
     output_end: u64,
     source_output_end: u64,
     content: String,
+}
+
+#[derive(Debug, Clone)]
+struct GitContextContent {
+    kind: String,
+    reference: String,
+    scope: Option<String>,
+    oid: Option<String>,
+    source_bytes: usize,
+    source_hash: String,
+    content: String,
+    truncated: bool,
 }
 
 impl TerminalState {
@@ -1529,6 +1556,153 @@ fn parse_terminal_excerpt_reference(reference: &str) -> Option<(String, u64, u64
         return None;
     }
     Some((terminal_id.to_owned(), generation, output_start, output_end))
+}
+
+fn normalize_git_context(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                normalized.push('\n');
+            }
+            '\n' | '\t' => normalized.push(character),
+            _ if character.is_control() => {}
+            _ => normalized.push(character),
+        }
+    }
+    normalized
+}
+
+fn bound_git_context(value: String) -> (String, bool) {
+    const MARKER: &str = "\n[Aegisy Git context truncated]\n";
+    if value.len() <= MAX_PINNED_GIT_CONTEXT_BYTES {
+        return (value, false);
+    }
+    let mut end = MAX_PINNED_GIT_CONTEXT_BYTES.saturating_sub(MARKER.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut bounded = value[..end].to_owned();
+    bounded.push_str(MARKER);
+    (bounded, true)
+}
+
+fn valid_git_oid(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn git_commit_context(detail: &GitCommitDetail) -> Result<String, String> {
+    serde_json::to_string_pretty(detail).map_err(|_| "Git commit context is unavailable".into())
+}
+
+fn load_git_context(
+    root: &Path,
+    kind: &str,
+    scope: Option<&str>,
+    oid: Option<&str>,
+) -> Result<GitContextContent, String> {
+    let (reference, scope, oid, raw) = match kind {
+        "git_commit" => {
+            let oid = oid
+                .filter(|value| valid_git_oid(value))
+                .ok_or_else(|| "Git commit context requires a complete lowercase OID".to_owned())?;
+            let detail = git_commit(root, oid)
+                .map_err(|_| "Git commit context authority is unavailable".to_owned())?;
+            (
+                format!("git-commit:{oid}"),
+                None,
+                Some(oid.to_owned()),
+                git_commit_context(&detail)?,
+            )
+        }
+        "git_diff" => {
+            let scope = scope.ok_or_else(|| "Git diff context requires a scope".to_owned())?;
+            if !matches!(scope, "worktree" | "staged" | "commit") {
+                return Err("Git diff context scope is unsupported".into());
+            }
+            let oid = if scope == "commit" {
+                Some(
+                    oid.filter(|value| valid_git_oid(value))
+                        .ok_or_else(|| {
+                            "Git commit diff context requires a complete lowercase OID".to_owned()
+                        })?
+                        .to_owned(),
+                )
+            } else {
+                if oid.is_some() {
+                    return Err("Git mutable diff context does not accept an OID".into());
+                }
+                None
+            };
+            let result = git_diff(root, scope, oid.as_deref(), None)
+                .map_err(|_| "Git diff context authority is unavailable".to_owned())?;
+            if result.patch.is_empty() {
+                return Err("Git diff context is empty".into());
+            }
+            let reference = match oid.as_deref() {
+                Some(oid) => format!("git-diff:commit:{oid}"),
+                None => format!("git-diff:{scope}"),
+            };
+            (reference, Some(scope.to_owned()), oid, result.patch)
+        }
+        _ => return Err("Git context kind is unsupported".into()),
+    };
+    let normalized = normalize_git_context(&raw);
+    if normalized.trim().is_empty() {
+        return Err("Git context has no visible text".into());
+    }
+    let source_bytes = normalized.len();
+    let source_hash = ContentHash::for_bytes(normalized.as_bytes()).sha256;
+    let (content, truncated) = bound_git_context(normalized);
+    Ok(GitContextContent {
+        kind: kind.into(),
+        reference,
+        scope,
+        oid,
+        source_bytes,
+        source_hash,
+        content,
+        truncated,
+    })
+}
+
+fn load_git_context_reference(
+    root: &Path,
+    kind: &str,
+    reference: &str,
+) -> Result<GitContextContent, String> {
+    match kind {
+        "git_commit" => {
+            let oid = reference
+                .strip_prefix("git-commit:")
+                .filter(|value| valid_git_oid(value))
+                .ok_or_else(|| "Git commit pinned reference is invalid".to_owned())?;
+            load_git_context(root, kind, None, Some(oid))
+        }
+        "git_diff" => {
+            let suffix = reference
+                .strip_prefix("git-diff:")
+                .ok_or_else(|| "Git diff pinned reference is invalid".to_owned())?;
+            match suffix {
+                "worktree" | "staged" => load_git_context(root, kind, Some(suffix), None),
+                _ => {
+                    let oid = suffix
+                        .strip_prefix("commit:")
+                        .filter(|value| valid_git_oid(value))
+                        .ok_or_else(|| "Git diff pinned reference is invalid".to_owned())?;
+                    load_git_context(root, kind, Some("commit"), Some(oid))
+                }
+            }
+        }
+        _ => Err("Git pinned context kind is unsupported".into()),
+    }
 }
 
 fn default_search_mode() -> String {
@@ -2805,6 +2979,7 @@ impl Runtime {
             "workspace/git/log" => self.workspace_git_log(request),
             "workspace/git/commit" => self.workspace_git_commit(request),
             "workspace/git/diff" => self.workspace_git_diff(request),
+            "workspace/git/context/read" => self.workspace_git_context(request),
             "workspace/search" => self.workspace_search(request),
             "workspace/search/cancel" => self.workspace_search_cancel(request),
             "workspace/index" => self.workspace_index(request),
@@ -3152,6 +3327,7 @@ impl Runtime {
                 "workspace.watch.poll".into(),
                 "workspace.git-status".into(),
                 "workspace.git-query.read-only".into(),
+                "workspace.git-context.read-only".into(),
                 "workspace.search.bounded".into(),
                 "workspace.search.cancel".into(),
                 "workspace.index.tree-sitter".into(),
@@ -7383,6 +7559,61 @@ impl Runtime {
         Ok(excerpt.content)
     }
 
+    fn read_pinned_git_context_text(
+        &self,
+        project_id: &str,
+        root_id: &str,
+        item: &pinned_context::PinnedContextItem,
+    ) -> Result<String, (i64, String)> {
+        if root_id != "root-1" {
+            return Err((
+                -32076,
+                "Git pinned context requires the primary project root".into(),
+            ));
+        }
+        let project = self
+            .projects
+            .get(project_id)
+            .ok_or_else(|| (-32022, "project not found".to_owned()))?;
+        let context =
+            load_git_context_reference(Path::new(&project.root), &item.kind, &item.reference)
+                .map_err(|_| (-32076, "Git pinned context authority is unavailable".into()))?;
+        let Some(expected_hash) = item.content_hash.strip_prefix("sha256:") else {
+            return Err((-32048, "Git pinned context hash is invalid".into()));
+        };
+        let actual_hash = ContentHash::for_bytes(context.content.as_bytes()).sha256;
+        let expected_source_hash = item
+            .metadata
+            .get("source_hash")
+            .and_then(|value| value.strip_prefix("sha256:"))
+            .ok_or_else(|| (-32048, "Git pinned source hash is invalid".to_owned()))?;
+        let expected_source_bytes = item
+            .metadata
+            .get("source_bytes")
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or_else(|| (-32048, "Git pinned source byte count is invalid".to_owned()))?;
+        let expected_truncated = item
+            .metadata
+            .get("truncated")
+            .and_then(|value| match value.as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            })
+            .ok_or_else(|| (-32048, "Git pinned truncation state is invalid".to_owned()))?;
+        if context.kind != item.kind
+            || context.reference != item.reference
+            || expected_hash != actual_hash
+            || expected_source_hash != context.source_hash
+            || expected_source_bytes != context.source_bytes
+            || expected_truncated != context.truncated
+            || item.bytes != context.content.len() as u64
+        {
+            return Err((-32048, "Git pinned context content identity changed".into()));
+        }
+        Ok(context.content)
+    }
+
     /// Resolve only the explicitly selected persisted pins. The descriptor is
     /// metadata-only; file contents are reread by the normal turn-context
     /// resolver after root, ignore, symlink, and stale checks.
@@ -7484,11 +7715,13 @@ impl Runtime {
                 && item.kind != "selection"
                 && item.kind != "diagnostic"
                 && item.kind != "terminal_excerpt"
+                && item.kind != "git_commit"
+                && item.kind != "git_diff"
                 && item.kind != "artifact"
             {
                 return Err((
                     -32048,
-                    "only file, selection, diagnostic, terminal excerpt, and artifact pinned context are available in turn assembly"
+                    "only file, selection, diagnostic, terminal excerpt, Git, and artifact pinned context are available in turn assembly"
                         .into(),
                 ));
             }
@@ -7534,6 +7767,30 @@ impl Runtime {
             selected.push((item, root_id));
         }
         for (item, root_id) in selected {
+            if item.kind == "git_commit" || item.kind == "git_diff" {
+                let content = self.read_pinned_git_context_text(&project_id, &root_id, &item)?;
+                context_items.push(TurnContextItem {
+                    id: item.id,
+                    kind: item.kind,
+                    label: item.label,
+                    origin: "pinned-context".into(),
+                    root_id: Some(root_id),
+                    path: None,
+                    content: Some(content),
+                    revision: item.revision,
+                    expected_content_hash: None,
+                    line: None,
+                    column: None,
+                    end_line: None,
+                    end_column: None,
+                    freshness: Some(item.freshness),
+                    raw_output_ref: None,
+                    priority: Some(format!("pinned-priority-{}", item.priority)),
+                    inclusion_reason: Some("pinned-context".into()),
+                    exclusion_reason: None,
+                });
+                continue;
+            }
             if item.kind == "terminal_excerpt" {
                 let content = self.read_pinned_terminal_excerpt_text(session_id, &item)?;
                 context_items.push(TurnContextItem {
@@ -9943,6 +10200,49 @@ impl Runtime {
         }
     }
 
+    fn workspace_git_context(&self, request: Request) -> Vec<Value> {
+        let params: WorkspaceGitContextParams = match serde_json::from_value(request.params.clone())
+        {
+            Ok(params) => params,
+            Err(cause) => {
+                return self.error_for(&request, -32602, format!("invalid params: {cause}"))
+            }
+        };
+        let Some(project) = self.projects.get(&params.project_id) else {
+            return self.error_for(&request, -32022, "project not found");
+        };
+        let context = match load_git_context(
+            Path::new(&project.root),
+            &params.kind,
+            params.scope.as_deref(),
+            params.oid.as_deref(),
+        ) {
+            Ok(context) => context,
+            Err(message) => return self.error_for(&request, -32076, message),
+        };
+        let content_hash = ContentHash::for_bytes(context.content.as_bytes());
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "git-context/0.1",
+                "project_id": params.project_id,
+                "root_id": "root-1",
+                "kind": context.kind,
+                "reference": context.reference,
+                "scope": context.scope,
+                "oid": context.oid,
+                "content_type": GIT_CONTEXT_MEDIA_TYPE,
+                "content_hash": format!("sha256:{}", content_hash.sha256),
+                "bytes": context.content.len(),
+                "source_bytes": context.source_bytes,
+                "source_hash": format!("sha256:{}", context.source_hash),
+                "content": context.content,
+                "truncated": context.truncated,
+                "content_bodies_persisted": false
+            }),
+        )
+    }
+
     fn workspace_search(&self, request: Request) -> Vec<Value> {
         let params: WorkspaceSearchParams = match serde_json::from_value(request.params.clone()) {
             Ok(params) => params,
@@ -11488,6 +11788,26 @@ mod pinned_context_assembly_tests {
         .to_string()
     }
 
+    #[cfg(target_os = "macos")]
+    fn run_git(root: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("/usr/bin/git")
+            .current_dir(root)
+            .env_clear()
+            .env("HOME", root)
+            .env("LC_ALL", "C")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
     #[test]
     fn assembles_session_owned_command_artifact_pin_without_exposing_body_in_inspection() {
         let unique = SystemTime::now()
@@ -11928,6 +12248,221 @@ mod pinned_context_assembly_tests {
             )
             .unwrap_err();
         assert_eq!(error.0, -32078);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn assembles_git_commit_and_diff_pins_and_rejects_mutable_drift() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("aegisy-pinned-git-{unique}"));
+        let data_root = root.join("data");
+        let project_root = root.join("project");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+        run_git(&project_root, &["init"]);
+        run_git(&project_root, &["config", "user.name", "Aegisy Test"]);
+        run_git(
+            &project_root,
+            &["config", "user.email", "aegisy@example.invalid"],
+        );
+        fs::write(project_root.join("tracked.txt"), "base\n").unwrap();
+        fs::write(project_root.join("large.txt"), "base\n").unwrap();
+        run_git(&project_root, &["add", "tracked.txt"]);
+        run_git(&project_root, &["add", "large.txt"]);
+        run_git(&project_root, &["commit", "-m", "initial context"]);
+        let oid = run_git(&project_root, &["rev-parse", "HEAD"]);
+        fs::write(project_root.join("tracked.txt"), "base\nfirst change\n").unwrap();
+        let mut large_content = String::from("base\n");
+        for index in 0..2_000 {
+            large_content.push_str(&format!("large context line {index:04}\n"));
+        }
+        large_content.push_str("tail-a\n");
+        fs::write(project_root.join("large.txt"), &large_content).unwrap();
+
+        let mut runtime = Runtime::with_store(&data_root).unwrap();
+        runtime.handle_line(&request(
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": {"name": "git-pin", "version": "1"}
+            }),
+        ));
+        runtime.handle_line(&request("initialized", json!({})));
+        let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
+        let project_id = opened[0]["result"]["project"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = runtime.handle_line(&request(
+            "session/start",
+            json!({"mode": "work", "project_id": project_id}),
+        ));
+        let session_id = session[0]["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let commit_response = runtime.handle_line(&request_with_id(
+            "read-git-commit-context",
+            "workspace/git/context/read",
+            json!({
+                "project_id": project_id,
+                "kind": "git_commit",
+                "oid": oid
+            }),
+        ));
+        let commit_context = commit_response[0]["result"].clone();
+        assert_eq!(commit_context["reference"], format!("git-commit:{oid}"));
+        assert!(commit_context["content"]
+            .as_str()
+            .unwrap()
+            .contains("initial context"));
+        let diff_response = runtime.handle_line(&request_with_id(
+            "read-git-diff-context",
+            "workspace/git/context/read",
+            json!({
+                "project_id": project_id,
+                "kind": "git_diff",
+                "scope": "worktree"
+            }),
+        ));
+        assert!(
+            diff_response[0].get("error").is_none(),
+            "Git diff context read failed: {diff_response:?}"
+        );
+        let diff_context = diff_response[0]["result"].clone();
+        assert_eq!(diff_context["reference"], "git-diff:worktree");
+        assert!(diff_context["content"]
+            .as_str()
+            .unwrap()
+            .contains("large context line 0000"));
+        assert_eq!(diff_context["truncated"], true);
+
+        let set: pinned_context::PinnedContextSet = serde_json::from_value(json!({
+            "schema_version": pinned_context::SCHEMA_VERSION,
+            "project_id": project_id,
+            "items": [{
+                "id": "pin-git-commit",
+                "project_id": project_id,
+                "root_id": "root-1",
+                "kind": "git_commit",
+                "source": "git-query",
+                "label": "initial context",
+                "reference": commit_context["reference"],
+                "content_hash": commit_context["content_hash"],
+                "bytes": commit_context["bytes"],
+                "revision": oid,
+                "freshness": "fresh",
+                "priority": 710,
+                "metadata": {
+                    "oid": oid,
+                    "source_hash": commit_context["source_hash"],
+                    "source_bytes": commit_context["source_bytes"].to_string(),
+                    "truncated": commit_context["truncated"].to_string()
+                }
+            }, {
+                "id": "pin-git-diff",
+                "project_id": project_id,
+                "root_id": "root-1",
+                "kind": "git_diff",
+                "source": "git-query",
+                "label": "worktree diff",
+                "reference": diff_context["reference"],
+                "content_hash": diff_context["content_hash"],
+                "bytes": diff_context["bytes"],
+                "revision": diff_context["content_hash"],
+                "freshness": "fresh",
+                "priority": 720,
+                "metadata": {
+                    "scope": "worktree",
+                    "source_hash": diff_context["source_hash"],
+                    "source_bytes": diff_context["source_bytes"].to_string(),
+                    "truncated": diff_context["truncated"].to_string()
+                }
+            }]
+        }))
+        .unwrap();
+        let identity = runtime
+            .pinned_context_store
+            .as_ref()
+            .unwrap()
+            .persist(&set)
+            .unwrap()
+            .set_identity;
+        let mut assembled = Vec::new();
+        runtime
+            .append_pinned_context(
+                &session_id,
+                Some(&identity),
+                &["pin-git-commit".into(), "pin-git-diff".into()],
+                &mut assembled,
+            )
+            .unwrap();
+        assert_eq!(assembled[0].kind, "git_commit");
+        assert_eq!(assembled[1].kind, "git_diff");
+
+        let inspected = runtime.handle_line(&request_with_id(
+            "inspect-git-pins",
+            "turn/context/inspect",
+            json!({
+                "session_id": session_id,
+                "pinned_context_set_identity": identity,
+                "pinned_context_ids": ["pin-git-commit", "pin-git-diff"]
+            }),
+        ));
+        let serialized = serde_json::to_string(&inspected).unwrap();
+        assert_eq!(
+            inspected[0]["result"]["context"]["manifest"]["entries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(!serialized.contains("large context line 0000"));
+        assert!(!serialized.contains("initial context"));
+
+        large_content.truncate(large_content.len() - "tail-a\n".len());
+        large_content.push_str("tail-b\n");
+        fs::write(project_root.join("large.txt"), &large_content).unwrap();
+        let changed_diff_response = runtime.handle_line(&request_with_id(
+            "read-changed-git-diff-context",
+            "workspace/git/context/read",
+            json!({
+                "project_id": project_id,
+                "kind": "git_diff",
+                "scope": "worktree"
+            }),
+        ));
+        assert_ne!(
+            changed_diff_response[0]["result"]["source_hash"],
+            diff_context["source_hash"]
+        );
+        let mut commit_only = Vec::new();
+        runtime
+            .append_pinned_context(
+                &session_id,
+                Some(&identity),
+                &["pin-git-commit".into()],
+                &mut commit_only,
+            )
+            .unwrap();
+        assert!(commit_only[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("initial context"));
+        let error = runtime
+            .append_pinned_context(
+                &session_id,
+                Some(&identity),
+                &["pin-git-diff".into()],
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.0, -32048);
         fs::remove_dir_all(root).unwrap();
     }
 }

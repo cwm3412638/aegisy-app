@@ -736,6 +736,16 @@ QString AgentRuntimeClient::gitDiff(const QString &projectId, const QString &sco
     return sendRequest(QStringLiteral("workspace/git/diff"), params);
 }
 
+QString AgentRuntimeClient::gitContext(const QString &projectId, const QString &kind,
+                                       const QString &scope, const QString &oid)
+{
+    QJsonObject params{{QStringLiteral("project_id"), projectId},
+                       {QStringLiteral("kind"), kind}};
+    if (!scope.isEmpty()) params.insert(QStringLiteral("scope"), scope);
+    if (!oid.isEmpty()) params.insert(QStringLiteral("oid"), oid);
+    return sendRequest(QStringLiteral("workspace/git/context/read"), params);
+}
+
 QString AgentRuntimeClient::searchWorkspace(const QString &projectId,
                                             const QString &searchId,
                                             const QString &query,
@@ -1320,6 +1330,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit gitCommitRead(id, result);
     } else if (pendingMethod == QStringLiteral("workspace/git/diff")) {
         emit gitDiffRead(id, result);
+    } else if (pendingMethod == QStringLiteral("workspace/git/context/read")) {
+        emit gitContextRead(id, result);
     } else if (pendingMethod == QStringLiteral("workspace/search")) {
         emit workspaceSearchCompleted(id, result);
     } else if (pendingMethod == QStringLiteral("workspace/search/cancel")) {

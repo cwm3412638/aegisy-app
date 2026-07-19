@@ -125,6 +125,8 @@ public:
     QString gitCommit(const QString &projectId, const QString &oid);
     QString gitDiff(const QString &projectId, const QString &scope,
                     const QString &oid = QString(), const QString &path = QString());
+    QString gitContext(const QString &projectId, const QString &kind,
+                       const QString &scope = QString(), const QString &oid = QString());
     QString searchWorkspace(const QString &projectId, const QString &searchId,
                             const QString &query, const QString &mode,
                             bool caseSensitive, const QString &cursor = QString(),
@@ -252,6 +254,7 @@ signals:
     void gitLogRead(const QString &requestId, const QJsonObject &log);
     void gitCommitRead(const QString &requestId, const QJsonObject &commit);
     void gitDiffRead(const QString &requestId, const QJsonObject &diff);
+    void gitContextRead(const QString &requestId, const QJsonObject &context);
     void workspaceSearchCompleted(const QString &requestId, const QJsonObject &result);
     void workspaceSearchCancelled(const QString &requestId, const QJsonObject &result);
     void workspaceIndexed(const QString &requestId, const QJsonObject &result);

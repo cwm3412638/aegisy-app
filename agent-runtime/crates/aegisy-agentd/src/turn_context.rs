@@ -320,6 +320,7 @@ fn validate_item(item: &TurnContextItem) -> Result<(), TurnContextError> {
             | "artifact"
             | "search"
             | "terminal_excerpt"
+            | "git_commit"
             | "git_diff"
             | "instruction"
     ) {

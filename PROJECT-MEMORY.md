@@ -299,7 +299,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   object publication; the two resources are deliberately not one transaction,
   and event failure is reported as an incomplete save. Capability
   `turn.context.pinned-selected` now lets `turn/context/inspect` and `turn/start`
-  consume only explicit selected file/selection/diagnostic/terminal/artifact pin IDs
+  consume only explicit selected file/selection/diagnostic/terminal/Git/artifact pin IDs
   together with the exact current set identity. Selection is capped at 16 unique IDs; project/session/
   root bindings and file policy are rechecked. Both paths share authoritative
   file reread, raw-byte SHA-256/revision stale detection, bounded untrusted
@@ -315,7 +315,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   the Runtime-owned PTY capture. The reread requires the same session, terminal,
   generation, retained absolute range, normalized UTF-8 content, SHA-256, and byte
   count; Runtime/terminal restart, removal, generation change, or buffer eviction
-  fails closed. Image, Git, and child-handoff kinds still fail closed. Qt now loads
+  fails closed. Primary-root `git_commit` and `git_diff` pins use strict full-OID or
+  fixed-scope references and re-run the filtered read-only Git query at assembly.
+  They bind both the bounded 16 KiB content hash and the complete normalized source
+  hash/byte count/truncation state. Worktree/staged drift fails stale; commit and
+  commit-diff context remains valid only while the exact Git object is available.
+  Image and child-handoff kinds still fail closed. Qt now loads
   project pins into the composer, creates or refreshes file descriptors from
   authoritative workspace reads with reconstructed raw UTF-8/BOM/newline bytes,
   saves through CAS, and supports explicit per-turn inclusion, deterministic
@@ -347,12 +352,19 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   absolute range/generation/hash. Qt validates that response and persists only a
   session/root-bound metadata descriptor through CAS. It does not claim that xterm's
   visual selection has raw PTY offsets.
+  Capability `workspace.git-context.read-only` exposes
+  `workspace/git/context/read` for filtered Git commit detail and worktree/staged/
+  full-OID commit diffs. Qt exposes explicit `固定差异` and `固定提交`, validates the
+  project/root/kind/scope/OID/media/hash/bytes/full-source/truncation identity, and
+  persists only the descriptor through CAS. The real Git render fixture clicks both
+  actions, verifies their persisted rows, and unpins them.
   Transient inline `selection` context with client-provided content remains on
   the existing bounded inline path; only selection items without inline content
   are resolved from the authoritative file range.
   This foundation still has no cross-resource atomicity, Blob body/reference
   lifecycle binding, durable diagnostic/terminal authority and invalidation, orphan
-  GC, or image, Git, and child-handoff assembly; keep `17.3` unchecked.
+  GC, or image and child-handoff assembly; complete Git lifecycle and cross-platform
+  evidence also remain open, so keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
   auto-discovered instructions. Instruction precedence ranks and pinned priority
@@ -735,11 +747,12 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 296 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 298 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 50 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
-denied. The latest unit count includes diagnostic and terminal pinned-context
-authority, terminal normalization, and source-loss fail-closed invariants.
+denied. The latest unit count includes diagnostic, terminal, and Git pinned-context
+authority, strict Git references, complete-source drift detection, terminal
+normalization, and source-loss fail-closed invariants.
 
 ## Session History Boundary
 
@@ -1180,7 +1193,7 @@ authority, terminal normalization, and source-loss fail-closed invariants.
   standard `*:sha256:` Blob references receive a read-only SQLite metadata
   ownership/hash/byte check, and save records the separate metadata-only
   project event. `turn/context/inspect` and `turn/start` can consume only an
-  explicit reviewed list of file/selection/diagnostic/terminal/artifact pin IDs plus
+  explicit reviewed list of file/selection/diagnostic/terminal/Git/artifact pin IDs plus
   the exact current set identity; they never include every persisted pin automatically. Files are
   reread through the normal root/policy resolver and raw-byte hash or revision
   drift is marked stale before the same budget/manifest path is used; selection
@@ -1192,11 +1205,14 @@ authority, terminal normalization, and source-loss fail-closed invariants.
   excerpt pins re-read the exact session/terminal/generation/absolute PTY range,
   apply the same ANSI/control normalization, and validate hash and byte count;
   missing or evicted authority fails closed. Inspection still returns metadata only.
-  Image/Git/child-handoff kinds, cross-resource Workbench
+  Git commit/diff pins re-run the filtered primary-root query and validate strict
+  references, bounded plus complete source identity, bytes, and truncation; mutable
+  diffs fail on drift and commit-backed context depends on the exact object remaining
+  available. Image/child-handoff kinds, cross-resource Workbench
   event/Blob authority, automatic invalidation, and orphan GC remain unavailable; the
   composer queue is otherwise transient. Qt render evidence covers file and
   editor-selection pin persistence, range labels, inclusion, order boundaries,
-  and unpin. The diagnostic and terminal surfaces provide explicit authority-read,
+  and unpin. The diagnostic, terminal, and Git surfaces provide explicit authority-read,
   validate, CAS pin, include, and unpin behavior without persisting their bodies.
   Watch/save changes also project stale state locally without mutating durable pin metadata;
   remaining non-file pin producers and complete cross-platform pin behavior remain
