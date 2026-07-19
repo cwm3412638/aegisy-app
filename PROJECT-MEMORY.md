@@ -176,6 +176,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   the composer and Send action read-only while the result is unknown, malformed,
   unavailable, or blocked. A queued first turn is deferred until an explicit
   unblocked status arrives; a status error cannot be interpreted as success.
+  A visible `重新检查` action may collect a bounded `operation/probe` result and
+  submit `operation/reconcile` only for a blocked `turn`; the flow validates
+  session/operation identities, never performs recovery, and leaves other
+  operation kinds unavailable.
 - Task `6.6` now has a bounded read-only Session search foundation. AAP
   `session/search` filters durable Session projections by project, exact model,
   runtime, status, title, or a combined title/approved-transcript query. Transcript
@@ -584,7 +588,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 267 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 268 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 43 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
@@ -675,7 +679,9 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   terminal review clears the gate. Event replay validates the evidence/result hash
   and identity without adding operation content to the projection. The reconcile
   method still does not perform probes automatically and there is no recovery
-  action; Qt only exposes the read-only review summary and fail-closed gate.
+  action; Qt exposes the read-only review summary plus an explicit turn-only
+  probe/reconcile review, while Git/Workspace/Terminal operation review remains
+  unavailable.
   The read-only status query remains available while a session is pending
   deletion, and Qt refreshes it after deletion undo so a stale unknown state
   cannot keep a healthy session blocked.
@@ -683,8 +689,10 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   registered Work-session root, hashes bounded workspace metadata without reading
   source bodies, consumes the existing structured Git status query, and observes
   only runtime-owned turn/terminal state. It returns no paths/content/PIDs and
-  leaves event state explicitly caller-supplied. This is evidence collection only;
-  it does not write events or execute recovery.
+  leaves event state explicitly caller-supplied except for the bounded durable
+  turn/Git mappings above. This is evidence collection only; it does not write
+  events or execute recovery. Qt can explicitly submit a turn probe result through
+  `operation/reconcile`, but the probe itself never mutates state.
 - On durable startup, `WorkbenchStore::load_operation_reconciliations` scans the
   latest event for each session/operation pair, validates the content-hashed
   evidence and identity, and hydrates the Runtime cache with a 10,000-record

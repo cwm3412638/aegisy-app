@@ -75,6 +75,9 @@ private:
     void updateRecoveryUi();
     void requestOperationStatus();
     void updateOperationStatusUi(const QJsonObject &status);
+    void reviewOperationStatus();
+    void updateOperationReviewButton();
+    void showOperationReviewFailure(const QString &message);
     bool currentOperationStatusBlocked() const;
     bool currentSessionRecoveryRequired() const;
     bool currentSessionDeletionPending() const;
@@ -188,6 +191,8 @@ private:
     QPushButton *m_runtimeRestartButton = nullptr;
     QLabel *m_recoveryBanner = nullptr;
     QLabel *m_operationStatusBanner = nullptr;
+    QWidget *m_operationStatusRow = nullptr;
+    QPushButton *m_operationStatusReviewButton = nullptr;
     QLabel *m_projectLabel = nullptr;
     QString m_workspaceRootId = QStringLiteral("root-1");
     QString m_workspaceRootPath;
@@ -367,6 +372,9 @@ private:
     QString m_sessionReadRequestId;
     QString m_operationStatusRequestId;
     QString m_operationStatusSessionId;
+    QString m_operationProbeRequestId;
+    QString m_operationReconcileRequestId;
+    QJsonObject m_operationReview;
     QString m_sessionMutationRequestId;
     QString m_sessionDeletionRequestId;
     QString m_portableSessionRequestId;

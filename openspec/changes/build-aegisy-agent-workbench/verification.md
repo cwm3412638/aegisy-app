@@ -499,8 +499,9 @@ Current editor evidence:
   authoritative terminal review clears the gate. Capability negotiation advertises
   `operation.reconciliation`; store and protocol fixtures cover persistence,
   restart blocking, idempotency, and unblocking. Task `6.9` remains unchecked because
-  the current method does not perform authoritative host probes or expose Qt review,
-  recovery, or recovery-action controls.
+  the current method does not perform authoritative host probes automatically and
+  exposes no recovery or recovery-action controls; Qt review is limited to an
+  explicit, identity-checked turn-only probe/reconcile flow.
 - Capability `operation.reconciliation.probe` now exposes read-only
   `operation/probe`. It resolves only a registered root through a Work session,
   hashes bounded visible workspace metadata, reads the existing structured Git
@@ -530,8 +531,11 @@ Current editor evidence:
 - Capability `operation.reconciliation.status` exposes a read-only
   `operation/status` snapshot while a session is blocked. It returns only the
   bounded review summary and `recovery_action_available:false`; it cannot clear
-  the gate or invoke recovery. Protocol coverage verifies the blocked-to-cleared
-  transition.
+  the gate or invoke recovery. Qt renders the same summary and, for a blocked
+  turn, can explicitly collect `operation/probe` evidence and record a validated
+  `operation/reconcile`; malformed, stale, or unsupported operation responses
+  remain fail-closed. Render coverage verifies the blocked, review, and cleared
+  transitions.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or

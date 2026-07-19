@@ -84,6 +84,8 @@ public:
     QString projectionRecoveryStatus();
     QString sessionRecoveryStatus(const QString &sessionId);
     QString operationStatus(const QString &sessionId);
+    QString operationProbe(const QJsonObject &params);
+    QString operationReconcile(const QJsonObject &params);
     QString runtimeRecoveryStatus();
     QString listWorkspace(const QString &projectId, const QString &path = QString(),
                           const QString &rootId = QString());
@@ -206,6 +208,8 @@ signals:
     void projectionRecoveryStatusRead(const QJsonObject &status);
     void sessionRecoveryStatusRead(const QJsonObject &status);
     void operationStatusRead(const QString &requestId, const QJsonObject &status);
+    void operationProbeRead(const QString &requestId, const QJsonObject &result);
+    void operationReconciled(const QString &requestId, const QJsonObject &result);
     void runtimeRecoveryStatusRead(const QJsonObject &status);
     void timelineEvent(const QJsonObject &event);
     void turnCancellationRequested(const QString &requestId, const QJsonObject &result);

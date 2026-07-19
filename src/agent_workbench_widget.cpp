@@ -404,6 +404,66 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         }
         updateOperationStatusUi(status);
     });
+    connect(m_runtime, &AgentRuntimeClient::operationProbeRead,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        if (!requestId.isEmpty() && requestId != m_operationProbeRequestId) return;
+        if (requestId.isEmpty() || requestId == m_operationProbeRequestId) {
+            m_operationProbeRequestId.clear();
+        }
+        const QString sessionId = m_operationStatusSessionId;
+        const QString operationId = m_operationReview.value(QStringLiteral("operation_id"))
+            .toString();
+        const QString kind = m_operationReview.value(QStringLiteral("kind")).toString();
+        const bool valid = result.value(QStringLiteral("schema_version")).toString()
+                == QStringLiteral("operation-reconciliation-probe/0.1")
+            && result.value(QStringLiteral("session_id")).toString() == sessionId
+            && result.value(QStringLiteral("operation_id")).toString() == operationId
+            && result.value(QStringLiteral("kind")).toString() == kind
+            && result.value(QStringLiteral("evidence")).isObject();
+        if (!valid || operationId.isEmpty() || sessionId.isEmpty() || kind.isEmpty()) {
+            showOperationReviewFailure(
+                QStringLiteral("重新检查返回了无效的 operation/probe 结果，当前会话继续保持只读。"));
+            return;
+        }
+        m_operationReconcileRequestId = m_runtime->operationReconcile({
+            {QStringLiteral("operation_id"), operationId},
+            {QStringLiteral("session_id"), sessionId},
+            {QStringLiteral("kind"), kind},
+            {QStringLiteral("evidence"), result.value(QStringLiteral("evidence"))},
+        });
+        if (m_operationReconcileRequestId.isEmpty()) {
+            showOperationReviewFailure(
+                QStringLiteral("无法提交重新检查结果，当前会话继续保持只读。"));
+            return;
+        }
+        if (m_operationStatusBanner) {
+            m_operationStatusBanner->setText(QStringLiteral(
+                "正在记录重新检查结果；在明确终态前不会恢复会话写入。"));
+        }
+        updateOperationReviewButton();
+    });
+    connect(m_runtime, &AgentRuntimeClient::operationReconciled,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        if (!requestId.isEmpty() && requestId != m_operationReconcileRequestId) return;
+        if (requestId.isEmpty() || requestId == m_operationReconcileRequestId) {
+            m_operationReconcileRequestId.clear();
+        }
+        const QJsonObject reconciliation = result.value(QStringLiteral("reconciliation"))
+            .toObject();
+        const bool valid = result.value(QStringLiteral("schema_version")).toString()
+                == QStringLiteral("operation-reconciliation-result/0.1")
+            && reconciliation.value(QStringLiteral("session_id")).toString()
+                == m_operationStatusSessionId
+            && reconciliation.value(QStringLiteral("operation_id")).toString()
+                == m_operationReview.value(QStringLiteral("operation_id")).toString();
+        if (!valid) {
+            showOperationReviewFailure(
+                QStringLiteral("重新检查结果未通过身份校验，当前会话继续保持只读。"));
+            return;
+        }
+        addNotice(QStringLiteral("已完成一次只读操作复核；运行时将按新证据重新评估会话门控。"));
+        requestOperationStatus();
+    });
     connect(m_runtime, &AgentRuntimeClient::connectionStateChanged,
             this, [this](bool ready, const QString &detail) {
         m_runtimeStatus->setText(
@@ -444,19 +504,24 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             this, [this](const QString &requestId, const QString &method,
                          const QString &, int code) {
         if (method == QStringLiteral("operation/status")) {
-            if (!m_operationStatusRequestId.isEmpty()
-                    && requestId != m_operationStatusRequestId) return;
-            if (requestId == m_operationStatusRequestId) m_operationStatusRequestId.clear();
-            m_operationStatusKnown = false;
-            m_operationStatusBlocked = true;
-            if (m_operationStatusBanner) {
-                m_operationStatusBanner->setText(
-                    QStringLiteral("操作状态未知；当前会话保持只读门控，未执行任何恢复动作。"));
-                m_operationStatusBanner->setToolTip(
-                    QStringLiteral("无法读取版本化 operation/status，客户端不会推断操作是否成功。"));
-                m_operationStatusBanner->show();
-            }
-            updateRecoveryUi();
+            if (requestId.isEmpty() || requestId != m_operationStatusRequestId) return;
+            m_operationStatusRequestId.clear();
+            showOperationReviewFailure(
+                QStringLiteral("无法读取版本化 operation/status，当前会话保持只读门控。"));
+            return;
+        }
+        if (method == QStringLiteral("operation/probe")) {
+            if (requestId.isEmpty() || requestId != m_operationProbeRequestId) return;
+            m_operationProbeRequestId.clear();
+            showOperationReviewFailure(
+                QStringLiteral("无法采集 operation/probe 证据，当前会话保持只读门控。"));
+            return;
+        }
+        if (method == QStringLiteral("operation/reconcile")) {
+            if (requestId.isEmpty() || requestId != m_operationReconcileRequestId) return;
+            m_operationReconcileRequestId.clear();
+            showOperationReviewFailure(
+                QStringLiteral("无法记录 operation/reconcile 结果，当前会话保持只读门控。"));
             return;
         }
         if (method != QStringLiteral("runtime/restart")) return;
@@ -2359,7 +2424,12 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
     m_recoveryBanner->hide();
     layout->addWidget(m_recoveryBanner);
 
-    m_operationStatusBanner = new QLabel(surface);
+    m_operationStatusRow = new QWidget(surface);
+    m_operationStatusRow->setObjectName(QStringLiteral("agentOperationStatusRow"));
+    auto *operationStatusLayout = new QHBoxLayout(m_operationStatusRow);
+    operationStatusLayout->setContentsMargins(0, 0, 0, 0);
+    operationStatusLayout->setSpacing(8);
+    m_operationStatusBanner = new QLabel(m_operationStatusRow);
     m_operationStatusBanner->setObjectName(QStringLiteral("agentOperationStatusBanner"));
     m_operationStatusBanner->setWordWrap(true);
     m_operationStatusBanner->setTextFormat(Qt::PlainText);
@@ -2367,7 +2437,29 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
         "QLabel { background:#fffaeb; color:#93370d; border-top:1px solid #fedf89;"
         "border-bottom:1px solid #fedf89; padding:8px 12px; font-size:10px; }"));
     m_operationStatusBanner->hide();
-    layout->addWidget(m_operationStatusBanner);
+    m_operationStatusReviewButton = new QPushButton(QStringLiteral("重新检查"),
+                                                    m_operationStatusRow);
+    m_operationStatusReviewButton->setObjectName(
+        QStringLiteral("agentOperationStatusReviewButton"));
+    m_operationStatusReviewButton->setIcon(
+        QIcon(QStringLiteral(":/icons/lucide/rotate-ccw.svg")));
+    m_operationStatusReviewButton->setToolTip(QStringLiteral(
+        "读取受限运行时证据并记录复核；不会执行恢复或修改项目文件"));
+    m_operationStatusReviewButton->setFixedHeight(30);
+    m_operationStatusReviewButton->setCursor(Qt::PointingHandCursor);
+    m_operationStatusReviewButton->setStyleSheet(QStringLiteral(
+        "QPushButton { background:#fff7ed; color:#9a3412; border:1px solid #fed7aa;"
+        "border-radius:5px; padding:0 9px; font-size:10px; }"
+        "QPushButton:hover { background:#ffedd5; }"
+        "QPushButton:disabled { color:#98a2b3; background:#f8fafc; border-color:#e4e7ec; }"));
+    m_operationStatusReviewButton->setEnabled(false);
+    m_operationStatusReviewButton->hide();
+    operationStatusLayout->addWidget(m_operationStatusBanner, 1);
+    operationStatusLayout->addWidget(m_operationStatusReviewButton);
+    connect(m_operationStatusReviewButton, &QPushButton::clicked,
+            this, &AgentWorkbenchWidget::reviewOperationStatus);
+    m_operationStatusRow->hide();
+    layout->addWidget(m_operationStatusRow);
 
     m_sessionHistoryMoreButton = new QPushButton(QStringLiteral("加载更早记录"), surface);
     m_sessionHistoryMoreButton->setObjectName(QStringLiteral("agentSessionHistoryMoreButton"));
@@ -5534,7 +5626,12 @@ void AgentWorkbenchWidget::setMode(const QString &mode)
 
 void AgentWorkbenchWidget::requestOperationStatus()
 {
+    m_operationProbeRequestId.clear();
+    m_operationReconcileRequestId.clear();
+    m_operationReview = {};
     if (m_operationStatusBanner) m_operationStatusBanner->hide();
+    if (m_operationStatusRow) m_operationStatusRow->hide();
+    if (m_operationStatusReviewButton) m_operationStatusReviewButton->hide();
     const QString sessionId = m_mode == QStringLiteral("work")
         ? m_workSessionId : m_chatSessionId;
     m_operationStatusSessionId = sessionId;
@@ -5548,13 +5645,8 @@ void AgentWorkbenchWidget::requestOperationStatus()
     if (m_operationStatusRequestId.isEmpty()) {
         m_operationStatusKnown = false;
         m_operationStatusBlocked = true;
-        if (m_operationStatusBanner) {
-            m_operationStatusBanner->setText(
-                QStringLiteral("操作状态未知；当前会话保持只读门控，未执行任何恢复动作。"));
-            m_operationStatusBanner->setToolTip(
-                QStringLiteral("运行时未接受 operation/status 请求，客户端不会推断操作是否成功。"));
-            m_operationStatusBanner->show();
-        }
+        showOperationReviewFailure(
+            QStringLiteral("运行时未接受 operation/status 请求，当前会话保持只读门控。"));
     }
     updateRecoveryUi();
 }
@@ -5575,25 +5667,25 @@ void AgentWorkbenchWidget::updateOperationStatusUi(const QJsonObject &status)
     if (!valid) {
         m_operationStatusKnown = false;
         m_operationStatusBlocked = true;
-        if (m_operationStatusBanner) {
-            m_operationStatusBanner->setText(
-                QStringLiteral("操作状态未知；当前会话保持只读门控，未执行任何恢复动作。"));
-            m_operationStatusBanner->setToolTip(
-                QStringLiteral("运行时返回的 operation/status 版本或会话标识无效。"));
-            m_operationStatusBanner->show();
-        }
+        m_operationReview = {};
+        showOperationReviewFailure(
+            QStringLiteral("运行时返回的 operation/status 版本或会话标识无效。"));
         updateRecoveryUi();
         return;
     }
     m_operationStatusKnown = true;
     m_operationStatusBlocked = status.value(QStringLiteral("blocked")).toBool();
     if (!m_operationStatusBlocked) {
+        m_operationReview = {};
         if (m_operationStatusBanner) m_operationStatusBanner->hide();
+        if (m_operationStatusRow) m_operationStatusRow->hide();
+        if (m_operationStatusReviewButton) m_operationStatusReviewButton->hide();
         updateRecoveryUi();
         startPendingTurnIfReady();
         return;
     }
     const QJsonObject operation = status.value(QStringLiteral("operation")).toObject();
+    m_operationReview = operation;
     const QString state = operation.value(QStringLiteral("state")).toString(
         QStringLiteral("unknown"));
     const QString decision = operation.value(QStringLiteral("decision")).toString(
@@ -5613,10 +5705,86 @@ void AgentWorkbenchWidget::updateOperationStatusUi(const QJsonObject &status)
         QStringLiteral("、")));
     const QString reviewId = operation.value(QStringLiteral("review_id")).toString();
     if (!reviewId.isEmpty()) tooltip += QStringLiteral("\n审核标识：%1").arg(reviewId);
-    if (m_operationStatusBanner) {
-        m_operationStatusBanner->setToolTip(tooltip);
+    if (m_operationStatusRow) {
         m_operationStatusBanner->show();
+        m_operationStatusBanner->setToolTip(tooltip);
+        m_operationStatusRow->show();
     }
+    updateOperationReviewButton();
+    updateRecoveryUi();
+}
+
+void AgentWorkbenchWidget::reviewOperationStatus()
+{
+    if (!m_runtime || !m_runtime->isReady() || m_runtimeRecoveryMode
+            || !m_operationStatusKnown || !m_operationStatusBlocked
+            || !m_operationProbeRequestId.isEmpty()
+            || !m_operationReconcileRequestId.isEmpty()) {
+        return;
+    }
+    const QString sessionId = m_operationStatusSessionId;
+    const QString operationId = m_operationReview.value(QStringLiteral("operation_id"))
+        .toString();
+    const QString kind = m_operationReview.value(QStringLiteral("kind")).toString();
+    if (sessionId.isEmpty() || operationId.isEmpty() || kind != QStringLiteral("turn")) {
+        addNotice(QStringLiteral(
+            "当前操作类型暂不支持自动采集复核证据；未执行任何恢复动作。"), true);
+        return;
+    }
+    m_operationProbeRequestId = m_runtime->operationProbe({
+        {QStringLiteral("operation_id"), operationId},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("kind"), kind},
+    });
+    if (m_operationProbeRequestId.isEmpty()) {
+        showOperationReviewFailure(
+            QStringLiteral("无法启动 operation/probe，当前会话继续保持只读。"));
+        return;
+    }
+    if (m_operationStatusBanner) {
+        m_operationStatusBanner->setText(QStringLiteral(
+            "正在采集受限运行时证据；在复核完成前不会恢复会话写入。"));
+    }
+    updateOperationReviewButton();
+}
+
+void AgentWorkbenchWidget::updateOperationReviewButton()
+{
+    if (!m_operationStatusReviewButton) return;
+    const QString kind = m_operationReview.value(QStringLiteral("kind")).toString();
+    const bool pending = !m_operationProbeRequestId.isEmpty()
+        || !m_operationReconcileRequestId.isEmpty();
+    const bool supported = m_operationStatusKnown && m_operationStatusBlocked
+        && kind == QStringLiteral("turn")
+        && !m_operationReview.value(QStringLiteral("operation_id")).toString().isEmpty();
+    if (m_operationStatusRow && !m_operationStatusRow->isHidden()) {
+        m_operationStatusReviewButton->show();
+    } else {
+        m_operationStatusReviewButton->hide();
+    }
+    m_operationStatusReviewButton->setText(pending
+        ? QStringLiteral("正在检查…") : QStringLiteral("重新检查"));
+    m_operationStatusReviewButton->setEnabled(supported && !pending
+        && m_runtime && m_runtime->isReady() && !m_runtimeRecoveryMode);
+    if (kind != QStringLiteral("turn") && !kind.isEmpty()) {
+        m_operationStatusReviewButton->setToolTip(QStringLiteral(
+            "当前仅支持对 turn 进行受限证据复核；不会执行恢复或 Git mutation"));
+    }
+}
+
+void AgentWorkbenchWidget::showOperationReviewFailure(const QString &message)
+{
+    m_operationStatusKnown = false;
+    m_operationStatusBlocked = true;
+    m_operationReview = {};
+    if (m_operationStatusBanner) {
+        m_operationStatusBanner->setText(message);
+        m_operationStatusBanner->show();
+        m_operationStatusBanner->setToolTip(QStringLiteral(
+            "操作状态或复核结果不可验证；客户端不会推断成功，也不会执行恢复。"));
+    }
+    if (m_operationStatusRow) m_operationStatusRow->show();
+    updateOperationReviewButton();
     updateRecoveryUi();
 }
 
