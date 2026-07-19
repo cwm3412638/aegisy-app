@@ -1,4 +1,6 @@
-use aegisy_agentd::workbench_store::WorkbenchStore;
+use aegisy_agentd::workbench_store::{
+    durable_blob_reference_id, DurableBlobKind, DurableBlobWrite, WorkbenchStore,
+};
 use aegisy_agentd::Runtime;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -1444,6 +1446,127 @@ fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
     assert_eq!(reopened[0]["result"]["persisted"], true);
     assert_eq!(reopened[0]["result"]["set_identity"], identity);
     assert_eq!(reopened[0]["result"]["items"].as_array().unwrap().len(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pinned_context_aap_validates_project_blob_metadata_without_reading_body() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-pinned-context-blob-{unique}"));
+    let data_root = root.join("data");
+    let project_root = root.join("project");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "pinned-context-blob", "version": "1"}
+        }),
+    ));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    let opened = runtime.handle_line(&request(
+        "project-open",
+        "project/open",
+        json!({"root": project_root}),
+    ));
+    let project_id = opened[0]["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(runtime);
+
+    let content = b"pinned artifact metadata".to_vec();
+    let content_hash = format!("{:x}", Sha256::digest(&content));
+    let content_reference = format!("artifact:sha256:{content_hash}");
+    let mut store = WorkbenchStore::open(&data_root).unwrap();
+    store
+        .put_durable_blob(DurableBlobWrite {
+            reference_id: durable_blob_reference_id(
+                None,
+                Some(&project_id),
+                "checkpoint",
+                &project_id,
+                &content_reference,
+            ),
+            content_reference: content_reference.clone(),
+            session_id: None,
+            project_id: Some(project_id.clone()),
+            kind: DurableBlobKind::Artifact,
+            media_type: "application/octet-stream".into(),
+            owner_kind: "checkpoint".into(),
+            owner_id: project_id.clone(),
+            metadata: json!({"source": "pinned-context-test"}),
+            content,
+            created_at_ms: 2_000_000_000_000,
+            retain_until_ms: 2_000_086_400_000,
+        })
+        .unwrap();
+    drop(store);
+
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    runtime.handle_line(&request(
+        "initialize-2",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "pinned-context-blob", "version": "1"}
+        }),
+    ));
+    runtime.handle_line(&request("initialized-2", "initialized", json!({})));
+    let set = json!({
+        "schema_version": "pinned-context/0.1",
+        "project_id": project_id.clone(),
+        "items": [{
+            "id": "pin-artifact",
+            "project_id": project_id.clone(),
+            "kind": "artifact",
+            "source": "artifact-store",
+            "label": "artifact",
+            "reference": content_reference,
+            "content_hash": format!("sha256:{content_hash}"),
+            "bytes": 24,
+            "freshness": "fresh",
+            "priority": 700,
+            "metadata": {}
+        }]
+    });
+    let saved = runtime.handle_line(&request(
+        "blob-save",
+        "workspace/pinned-context/save",
+        json!({"project_id": project_id.clone(), "set": set.clone()}),
+    ));
+    assert_eq!(saved[0]["result"]["persisted"], true);
+    assert_eq!(saved[0]["result"]["event"]["persisted"], true);
+
+    let mismatched = json!({
+        "schema_version": "pinned-context/0.1",
+        "project_id": project_id.clone(),
+        "items": [{
+            "id": "pin-artifact",
+            "project_id": project_id.clone(),
+            "kind": "artifact",
+            "source": "artifact-store",
+            "label": "artifact",
+            "reference": format!("artifact:sha256:{content_hash}"),
+            "content_hash": format!("sha256:{}", "b".repeat(64)),
+            "bytes": 24,
+            "freshness": "fresh",
+            "priority": 700,
+            "metadata": {}
+        }]
+    });
+    let rejected = runtime.handle_line(&request(
+        "blob-mismatch",
+        "workspace/pinned-context/save",
+        json!({"project_id": project_id, "set": mismatched}),
+    ));
+    assert_eq!(rejected[0]["error"]["code"], -32044);
     fs::remove_dir_all(root).unwrap();
 }
 

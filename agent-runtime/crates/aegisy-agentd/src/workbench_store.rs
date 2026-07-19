@@ -1614,6 +1614,44 @@ impl WorkbenchStore {
         Ok(DurableBlobRead { reference, content })
     }
 
+    pub fn inspect_durable_blob_reference(
+        &self,
+        project_id: &str,
+        session_id: Option<&str>,
+        content_reference: &str,
+    ) -> Result<StoredDurableBlobReference, WorkbenchStoreError> {
+        validate_identifier(project_id, "pinned context Blob project ID")?;
+        if let Some(session_id) = session_id {
+            validate_identifier(session_id, "pinned context Blob session ID")?;
+        }
+        validate_content_reference(content_reference, None)?;
+        let reference_id: String = self
+            .connection
+            .query_row(
+                "SELECT reference_id FROM durable_blob_references
+                 WHERE project_id = ?1
+                   AND content_reference = ?2
+                   AND state = 'active'
+                   AND ((?3 IS NULL AND session_id IS NULL) OR session_id = ?3)
+                 ORDER BY created_at_ms DESC, reference_id ASC
+                 LIMIT 1",
+                params![project_id, content_reference, session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot locate durable Blob metadata"))?
+            .ok_or_else(|| error("durable Blob metadata is unavailable for pinned context"))?;
+        let reference = load_durable_blob_reference(&self.connection, &reference_id)?;
+        if reference.project_id.as_deref() != Some(project_id)
+            || reference.session_id.as_deref() != session_id
+            || reference.state != "active"
+            || reference.content_reference != content_reference
+        {
+            return Err(error("durable Blob metadata scope is invalid"));
+        }
+        Ok(reference)
+    }
+
     pub fn release_durable_blob_reference(
         &mut self,
         reference_id: &str,

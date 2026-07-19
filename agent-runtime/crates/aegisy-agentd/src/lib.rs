@@ -8611,6 +8611,47 @@ impl Runtime {
                     return Err((-32022, "pinned context session project mismatch".into()));
                 }
             }
+            let blob_reference = [
+                "command-output:sha256:",
+                "patch:sha256:",
+                "image:sha256:",
+                "diagnostic:sha256:",
+                "workspace-edit:sha256:",
+                "artifact:sha256:",
+            ]
+            .iter()
+            .any(|prefix| item.reference.starts_with(prefix));
+            if blob_reference {
+                let Some(workbench_store) = self.workbench_store.as_ref() else {
+                    return Err((
+                        -32125,
+                        "durable Blob metadata is unavailable for pinned context".into(),
+                    ));
+                };
+                let reference = workbench_store
+                    .inspect_durable_blob_reference(
+                        &set.project_id,
+                        item.session_id.as_deref(),
+                        &item.reference,
+                    )
+                    .map_err(|_| {
+                        (
+                            -32125,
+                            "durable Blob metadata is unavailable for pinned context".into(),
+                        )
+                    })?;
+                let Some(expected_sha256) = item.content_hash.strip_prefix("sha256:") else {
+                    continue;
+                };
+                if reference.content_hash.sha256 != expected_sha256
+                    || reference.content_hash.bytes != item.bytes
+                {
+                    return Err((
+                        -32044,
+                        "pinned context Blob identity does not match its descriptor".into(),
+                    ));
+                }
+            }
         }
         Ok(())
     }

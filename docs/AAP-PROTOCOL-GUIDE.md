@@ -225,9 +225,11 @@ publications. A successful save appends a metadata-only
 `project.pinned-context-updated/0.1` event after object publication; a failed
 event append returns an incomplete-save error, and a failed pointer replacement
 may leave a preserved unreferenced object. This does not claim cross-resource
-atomicity, durable Blob references, source reread/invalidation, orphan GC, turn
-assembly, Qt pin controls, or Windows runtime evidence. Agent/Codex remains
-read-only.
+atomicity. When a descriptor uses a standard `*:sha256:` Blob reference, save
+checks active SQLite metadata for exact project/session ownership, hash, and
+byte count without reading Blob bytes or updating access time. Source
+reread/invalidation, orphan GC, turn assembly, Qt pin controls, and Windows
+runtime evidence remain open. Agent/Codex remains read-only.
 
 ## Operation Reconciliation
 

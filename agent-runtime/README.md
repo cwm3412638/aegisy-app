@@ -123,9 +123,12 @@ protection. Responses contain only descriptors and
 `content_bodies_included:false`; the store never contains source bodies. It is
 not atomically bound to Workbench events or durable Blob references: a
 successful AAP save appends a separate metadata-only project event after object
-publication, and a failed event append is reported as an incomplete save. It
-does not reread or invalidate source references and has no orphan GC, turn
-assembly, or Qt pin/unpin/order surface.
+publication, and a failed event append is reported as an incomplete save. For
+standard `*:sha256:` Blob references, save performs a read-only SQLite metadata
+check for active project/session ownership plus exact hash/byte identity; it
+does not read Blob bytes or update access timestamps. It does not reread or
+invalidate source references and has no orphan GC, turn assembly, or Qt
+pin/unpin/order surface.
 
 `operation/probe` is a read-only evidence collector for the reconciliation
 workflow. It resolves only registered project roots through the Work session,

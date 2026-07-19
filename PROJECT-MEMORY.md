@@ -291,14 +291,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   AAP `workspace/pinned-context/list` reads a project set and
   `workspace/pinned-context/save` validates project/root/session bindings and
   supports optional `expected_set_identity` compare-and-swap protection. The
-  protocol fixture proves metadata-only persistence, restart recovery, project
-  event replay, idempotency, stale-write rejection, and no body fields. A
+  protocol fixtures prove metadata-only persistence, restart recovery, project
+  event replay, Blob scope/hash validation, idempotency, stale-write rejection,
+  and no body fields. A
   successful save appends `project.pinned-context-updated/0.1` after immutable
   object publication; the two resources are deliberately not one transaction,
   and event failure is reported as an incomplete save. This foundation still
-  has no cross-resource atomicity, durable Blob binding, authoritative source
-  reread/invalidation, turn assembly, orphan GC, or Qt pin/unpin surface; keep
-  `17.3` unchecked.
+  has no cross-resource atomicity, Blob body/reference lifecycle binding,
+  authoritative source reread/invalidation, turn assembly, orphan GC, or Qt
+  pin/unpin surface; keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
   auto-discovered instructions. Instruction precedence ranks and pinned priority
@@ -682,7 +683,7 @@ git diff --check
 ```
 
 Current verified baseline: 16 desktop tests, 286 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 47 Rust
+one explicitly ignored live Codex fixture, 48 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -1122,9 +1123,10 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   descriptor validates all planned source kinds and its project-external store
   durably preserves metadata-only sets. AAP list/save methods expose that store
   with project/root/session validation and compare-and-swap identity checks;
-  save also records the separate metadata-only project event. No cross-resource
-  Workbench event/Blob authority or turn assembly consumes the set yet; the
-  composer queue remains transient.
+  standard `*:sha256:` Blob references receive a read-only SQLite metadata
+  ownership/hash/byte check, and save records the separate metadata-only
+  project event. No cross-resource Workbench event/Blob authority or turn
+  assembly consumes the set yet; the composer queue remains transient.
 
 ## Workspace Edit Boundary
 
