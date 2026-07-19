@@ -220,11 +220,14 @@ publish a new immutable object and retain the old one. Both responses state
 {"jsonrpc":"2.0","id":"31","result":{"schema_version":"pinned-context/0.1","project_id":"project-1","set_identity":"pinned-context:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","items":[{"id":"pin-file","project_id":"project-1","root_id":"root-1","kind":"file","source":"file-tree","label":"src/main.rs","reference":"src/main.rs","content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":32,"freshness":"fresh","priority":850,"metadata":{}}],"persisted":true,"content_bodies_included":false}}
 ```
 
-The project pointer and immutable object are separate filesystem publications;
-a failed pointer replacement may leave a preserved unreferenced object. AAP
-exposure therefore does not claim Workbench event/Blob atomicity, source
-reread/invalidation, orphan GC, turn assembly, Qt pin controls, or Windows
-runtime evidence. Agent/Codex remains read-only.
+The project pointer, immutable object, and Workbench SQLite event are separate
+publications. A successful save appends a metadata-only
+`project.pinned-context-updated/0.1` event after object publication; a failed
+event append returns an incomplete-save error, and a failed pointer replacement
+may leave a preserved unreferenced object. This does not claim cross-resource
+atomicity, durable Blob references, source reread/invalidation, orphan GC, turn
+assembly, Qt pin controls, or Windows runtime evidence. Agent/Codex remains
+read-only.
 
 ## Operation Reconciliation
 

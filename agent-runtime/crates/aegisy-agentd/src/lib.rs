@@ -8667,28 +8667,57 @@ impl Runtime {
         if let Err((code, message)) = self.validate_pinned_context_scope(&params.set) {
             return self.error_for(&request, code, message);
         }
-        let Some(store) = self.pinned_context_store.as_ref() else {
-            return self.error_for(&request, -32122, "pinned context store unavailable");
+        let descriptor = {
+            let Some(store) = self.pinned_context_store.as_ref() else {
+                return self.error_for(&request, -32122, "pinned context store unavailable");
+            };
+            let current = match store.load_optional(&params.project_id) {
+                Ok(current) => current,
+                Err(error) => return self.error_for(&request, -32123, error.code),
+            };
+            let current_identity = current
+                .as_ref()
+                .map(|(_, descriptor)| descriptor.set_identity.as_str());
+            if params.expected_set_identity.as_deref() != current_identity
+                && params.expected_set_identity.is_some()
+            {
+                return self.error_for(
+                    &request,
+                    -32041,
+                    "pinned context changed since the reviewed identity",
+                );
+            }
+            match store.persist(&params.set) {
+                Ok(descriptor) => descriptor,
+                Err(error) => return self.error_for(&request, -32123, error.code),
+            }
         };
-        let current = match store.load_optional(&params.project_id) {
-            Ok(current) => current,
-            Err(error) => return self.error_for(&request, -32123, error.code),
-        };
-        let current_identity = current
-            .as_ref()
-            .map(|(_, descriptor)| descriptor.set_identity.as_str());
-        if params.expected_set_identity.as_deref() != current_identity
-            && params.expected_set_identity.is_some()
-        {
-            return self.error_for(
-                &request,
-                -32041,
-                "pinned context changed since the reviewed identity",
-            );
-        }
-        let descriptor = match store.persist(&params.set) {
-            Ok(descriptor) => descriptor,
-            Err(error) => return self.error_for(&request, -32123, error.code),
+        let event = if let Some(workbench_store) = self.workbench_store.as_mut() {
+            match workbench_store.append_pinned_context_event(
+                &params.project_id,
+                &descriptor.set_identity,
+                &descriptor.object_reference,
+                descriptor.item_count,
+                now_ms(),
+            ) {
+                Ok(event) => json!({
+                    "persisted": true,
+                    "sequence": event.sequence,
+                    "schema_version": "project.pinned-context-updated/0.1"
+                }),
+                Err(_error) => {
+                    return self.error_for(
+                        &request,
+                        -32124,
+                        "pinned context metadata persisted but event binding failed",
+                    )
+                }
+            }
+        } else {
+            json!({
+                "persisted": false,
+                "reason": "workbench-event-store-unavailable"
+            })
         };
         self.success_for(
             &request,
@@ -8699,7 +8728,8 @@ impl Runtime {
                 "items": params.set.items,
                 "persisted": true,
                 "content_bodies_included": false,
-                "descriptor": descriptor
+                "descriptor": descriptor,
+                "event": event
             }),
         )
     }

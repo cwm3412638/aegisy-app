@@ -1,3 +1,4 @@
+use aegisy_agentd::workbench_store::WorkbenchStore;
 use aegisy_agentd::Runtime;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -1385,11 +1386,20 @@ fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
     ));
     assert_eq!(saved[0]["result"]["persisted"], true);
     assert_eq!(saved[0]["result"]["content_bodies_included"], false);
+    assert_eq!(saved[0]["result"]["event"]["persisted"], true);
     assert!(saved[0]["result"].get("content").is_none());
     let identity = saved[0]["result"]["set_identity"]
         .as_str()
         .unwrap()
         .to_owned();
+    let event_sequence = saved[0]["result"]["event"]["sequence"].as_u64().unwrap();
+    let duplicate = runtime.handle_line(&request(
+        "pins-save-duplicate",
+        "workspace/pinned-context/save",
+        json!({"project_id": project_id.clone(), "set": set.clone()}),
+    ));
+    assert_eq!(duplicate[0]["result"]["persisted"], true);
+    assert_eq!(duplicate[0]["result"]["event"]["sequence"], event_sequence);
     let stale = runtime.handle_line(&request(
         "pins-stale",
         "workspace/pinned-context/save",
@@ -1397,6 +1407,24 @@ fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
     ));
     assert_eq!(stale[0]["error"]["code"], -32041);
     drop(runtime);
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    let candidate = store
+        .rebuild_project_projection_candidate(&project_id)
+        .unwrap();
+    assert!(candidate.source_complete);
+    assert!(candidate.issues.is_empty());
+    let events = store
+        .read_session_events(&candidate.stream_id, 0, 64)
+        .unwrap();
+    let pinned_event = events
+        .iter()
+        .find(|event| event.event_kind == "project.pinned-context-updated")
+        .expect("pinned context event");
+    assert_eq!(pinned_event.payload["set_identity"], identity);
+    assert_eq!(pinned_event.payload["content_bodies_persisted"], false);
+    assert!(pinned_event.payload.get("items").is_none());
+    drop(store);
 
     let mut restarted = Runtime::with_store(&data_root).unwrap();
     restarted.handle_line(&request(

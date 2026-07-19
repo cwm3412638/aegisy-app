@@ -5955,6 +5955,86 @@ impl WorkbenchStore {
                         push_projection_issue(&mut issues, "project-trust-event-invalid");
                     }
                 }
+                "project.pinned-context-updated" => {
+                    let set_identity = event
+                        .payload
+                        .get("set_identity")
+                        .and_then(serde_json::Value::as_str);
+                    let object_reference = event
+                        .payload
+                        .get("object_reference")
+                        .and_then(serde_json::Value::as_str);
+                    let item_count = event
+                        .payload
+                        .get("item_count")
+                        .and_then(serde_json::Value::as_u64);
+                    let persisted_at_ms = event
+                        .payload
+                        .get("persisted_at_ms")
+                        .and_then(serde_json::Value::as_u64);
+                    let valid = match (
+                        project.as_ref(),
+                        set_identity,
+                        object_reference,
+                        item_count,
+                        persisted_at_ms,
+                    ) {
+                        (
+                            Some(project),
+                            Some(set_identity),
+                            Some(object_reference),
+                            Some(item_count),
+                            Some(persisted_at_ms),
+                        ) => {
+                            projection_event_schema(event)
+                                == Some("project.pinned-context-updated/0.1")
+                                && event
+                                    .payload
+                                    .get("project_id")
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some(project_id)
+                                && event
+                                    .payload
+                                    .get("content_bodies_persisted")
+                                    .and_then(serde_json::Value::as_bool)
+                                    == Some(false)
+                                && event
+                                    .payload
+                                    .get("state")
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some("metadata-persisted")
+                                && validate_pinned_context_reference(
+                                    set_identity,
+                                    "pinned-context:sha256:",
+                                    "pinned context set identity",
+                                )
+                                .is_ok()
+                                && validate_pinned_context_reference(
+                                    object_reference,
+                                    "pinned-context-object:sha256:",
+                                    "pinned context object reference",
+                                )
+                                .is_ok()
+                                && item_count <= 128
+                                && persisted_at_ms == event.timestamp_ms
+                                && persisted_at_ms >= project.created_at_ms
+                                && event.event_id
+                                    == derived_event_id(
+                                        "pinned-context-updated",
+                                        format!("{project_id}:{set_identity}").as_bytes(),
+                                    )
+                                && event.correlation_id == set_identity
+                                && event.operation_id
+                                    == pinned_context_operation_id(project_id, set_identity)
+                                && event.generation == 0
+                                && event.project_id.as_deref() == Some(project_id)
+                        }
+                        _ => false,
+                    };
+                    if !valid {
+                        push_projection_issue(&mut issues, "project-pinned-context-event-invalid");
+                    }
+                }
                 "project.projection-rebuilt" => {
                     if projection_event_schema(event) != Some("project.projection-rebuilt/0.1") {
                         push_projection_issue(&mut issues, "project-audit-event-invalid");
@@ -7795,6 +7875,118 @@ impl WorkbenchStore {
         Ok(event)
     }
 
+    pub fn append_pinned_context_event(
+        &mut self,
+        project_id: &str,
+        set_identity: &str,
+        object_reference: &str,
+        item_count: usize,
+        persisted_at_ms: u64,
+    ) -> Result<WorkbenchEvent, WorkbenchStoreError> {
+        validate_identifier(project_id, "pinned context project ID")?;
+        validate_pinned_context_reference(
+            set_identity,
+            "pinned-context:sha256:",
+            "pinned context set identity",
+        )?;
+        validate_pinned_context_reference(
+            object_reference,
+            "pinned-context-object:sha256:",
+            "pinned context object reference",
+        )?;
+        if item_count > 128 {
+            return Err(error("pinned context item count is invalid"));
+        }
+        let project = self.load_project(project_id)?;
+        if persisted_at_ms < project.created_at_ms {
+            return Err(error("pinned context event timestamp is stale"));
+        }
+        let stream_id = project_event_stream_id(project_id);
+        let operation_id = pinned_context_operation_id(project_id, set_identity);
+        let event_id = derived_event_id(
+            "pinned-context-updated",
+            format!("{project_id}:{set_identity}").as_bytes(),
+        );
+        let payload = json!({
+            "schema_version": "project.pinned-context-updated/0.1",
+            "project_id": project_id,
+            "set_identity": set_identity,
+            "object_reference": object_reference,
+            "item_count": item_count,
+            "content_bodies_persisted": false,
+            "state": "metadata-persisted",
+            "persisted_at_ms": persisted_at_ms,
+        });
+        let existing_sequence = self
+            .connection
+            .query_row(
+                "SELECT sequence FROM events WHERE session_id = ?1 AND event_id = ?2",
+                params![stream_id, event_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot inspect pinned context event"))?;
+        if let Some(sequence) = existing_sequence {
+            let sequence = to_u64(sequence, "pinned context event sequence")?;
+            let event = self
+                .read_session_events(
+                    &project_event_stream_id(project_id),
+                    sequence.saturating_sub(1),
+                    1,
+                )?
+                .into_iter()
+                .next()
+                .ok_or_else(|| error("pinned context event is unavailable"))?;
+            if event.event_kind == "project.pinned-context-updated"
+                && event.event_id == event_id
+                && event.correlation_id == set_identity
+                && event.project_id.as_deref() == Some(project_id)
+                && event.operation_id == operation_id
+                && event.generation == 0
+                && event.payload.get("schema_version").and_then(Value::as_str)
+                    == Some("project.pinned-context-updated/0.1")
+                && event.payload.get("project_id").and_then(Value::as_str) == Some(project_id)
+                && event.payload.get("set_identity").and_then(Value::as_str) == Some(set_identity)
+                && event
+                    .payload
+                    .get("object_reference")
+                    .and_then(Value::as_str)
+                    == Some(object_reference)
+                && event.payload.get("item_count").and_then(Value::as_u64)
+                    == Some(item_count as u64)
+                && event
+                    .payload
+                    .get("content_bodies_persisted")
+                    .and_then(Value::as_bool)
+                    == Some(false)
+                && event.payload.get("state").and_then(Value::as_str) == Some("metadata-persisted")
+            {
+                return Ok(event);
+            }
+            return Err(error("pinned context event identity conflicts"));
+        }
+        let transaction =
+            self.begin_database_write("cannot start pinned context event transaction")?;
+        let event = append_event_tx(
+            &transaction,
+            EventInput {
+                session_id: &stream_id,
+                event_id: &event_id,
+                timestamp_ms: persisted_at_ms,
+                correlation_id: set_identity,
+                event_kind: "project.pinned-context-updated",
+                project_id: Some(project_id),
+                operation_id: &operation_id,
+                generation: 0,
+                payload,
+            },
+        )?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit pinned context event"))?;
+        Ok(event)
+    }
+
     pub fn append_operation_reconciliation(
         &mut self,
         input: &ReconciliationInput,
@@ -9007,6 +9199,13 @@ fn derived_event_id(prefix: &str, bytes: &[u8]) -> String {
 
 fn project_event_stream_id(project_id: &str) -> String {
     derived_event_id("project-stream", project_id.as_bytes())
+}
+
+fn pinned_context_operation_id(project_id: &str, set_identity: &str) -> String {
+    derived_event_id(
+        "pinned-context-operation",
+        format!("{project_id}:{set_identity}").as_bytes(),
+    )
 }
 
 #[cfg(test)]
@@ -10489,6 +10688,18 @@ fn validate_content_reference(
         || expected_sha256.is_some_and(|expected| expected != sha256)
     {
         return Err(error("durable blob content reference is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_pinned_context_reference(
+    value: &str,
+    prefix: &str,
+    label: &str,
+) -> Result<(), WorkbenchStoreError> {
+    validate_content_reference(value, None)?;
+    if !value.starts_with(prefix) {
+        return Err(error(format!("{label} is invalid")));
     }
     Ok(())
 }

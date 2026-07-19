@@ -749,16 +749,21 @@ Known limitations:
   binding, deterministic identity, unsafe absolute/parent/network references,
   secret-shaped metadata, item size, and aggregate size bounds. The runtime now
   opens `pinned-context-store/0.1` beside the Workbench store and exposes
-  metadata-only AAP list/save methods when it is healthy. Protocol coverage
-  verifies project/root/session scope, restart recovery, idempotent persistence,
-  compare-and-swap stale-write rejection, and that responses contain no body.
-  Workbench event/Blob atomicity, source reread, turn assembly, and Qt pin/unpin
-  surface remain incomplete; task 17.3 remains unchecked.
+  metadata-only AAP list/save methods when it is healthy. A successful save
+  appends a separate content-free `project.pinned-context-updated/0.1` event
+  after object publication; project projection replay validates its set/object
+  identities, bounds, and `content_bodies_persisted:false` invariant. Protocol
+  coverage verifies project/root/session scope, restart recovery, event replay,
+  idempotent persistence, compare-and-swap stale-write rejection, and that
+  responses contain no body. Cross-resource event/object atomicity, durable Blob
+  references, source reread, turn assembly, and Qt pin/unpin surface remain
+  incomplete; task 17.3 remains unchecked.
 - `pinned-context-store/0.1` persists metadata-only sets using private immutable
   content-addressed objects and atomic project-pointer replacement. Store fixtures
   cover reopen/update, idempotency, absence of a content body field, retained old
   objects, object/pointer tampering, update refusal on damaged current authority,
-  and symlinked-layout denial. Workbench event/Blob atomicity, orphan GC, AAP/Qt,
-  authoritative source rereads, Windows execution, and turn assembly remain open.
+  and symlinked-layout denial. Cross-resource event/object atomicity, durable
+  Blob references, orphan GC, authoritative source rereads, Windows execution,
+  and turn assembly remain open.
 - Windows packaging, TLS runtime, scaling, IME, and accessibility evidence remain
   required before a Windows release claim.

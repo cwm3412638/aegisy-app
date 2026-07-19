@@ -121,8 +121,10 @@ project set and `workspace/pinned-context/save` validates project/root/session
 bindings and supports optional `expected_set_identity` compare-and-swap
 protection. Responses contain only descriptors and
 `content_bodies_included:false`; the store never contains source bodies. It is
-not yet bound atomically to Workbench events or durable Blob references, does
-not reread or invalidate source references, and has no orphan GC, turn
+not atomically bound to Workbench events or durable Blob references: a
+successful AAP save appends a separate metadata-only project event after object
+publication, and a failed event append is reported as an incomplete save. It
+does not reread or invalidate source references and has no orphan GC, turn
 assembly, or Qt pin/unpin/order surface.
 
 `operation/probe` is a read-only evidence collector for the reconciliation
