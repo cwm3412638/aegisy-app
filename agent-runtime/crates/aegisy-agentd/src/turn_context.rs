@@ -696,6 +696,22 @@ mod tests {
     }
 
     #[test]
+    fn resolves_selection_columns_by_unicode_scalar() {
+        let root = temporary_root();
+        let raw = "a😀b\n".as_bytes();
+        fs::write(root.join("main.rs"), raw).unwrap();
+        let mut item = context_item("selection", Some("main.rs"), None);
+        item.line = Some(1);
+        item.column = Some(2);
+        item.end_line = Some(1);
+        item.end_column = Some(3);
+        item.expected_content_hash = Some(format!("sha256:{:x}", Sha256::digest(raw)));
+        let prepared = prepare_turn_context(&[item], Some(&root)).unwrap();
+        assert!(prepared.text.contains("😀"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn rejects_ignored_and_outside_paths() {
         let root = temporary_root();
         let initialized = Command::new("git").arg("init").arg(&root).output().unwrap();

@@ -231,7 +231,8 @@ session, and registered root. The first assembly phase accepts `file` and
 descriptors fail explicitly instead of becoming unverified inline content. The
 metadata-only descriptor supplies a root-relative path, expected raw-byte
 SHA-256/revision, freshness, and priority. A selection additionally carries
-bounded `line`, `column`, `end_line`, and `end_column` metadata. Both inspect and
+bounded 1-based Unicode scalar `line`, `column`, `end_line`, and `end_column`
+metadata. Both inspect and
 start use the normal authoritative resolver: it rereads the file, reapplies
 ignore/sensitive/symlink/root policy, hashes the raw bytes, marks a hash or
 revision change `stale`, and only then extracts the selection range. Only

@@ -304,7 +304,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   root bindings and file policy are rechecked. Both paths share authoritative
   file reread, raw-byte SHA-256/revision stale detection, bounded untrusted
   context, and metadata-only inspection. Selection pins carry bounded line/
-  column metadata and are sliced only after source validation; image, diagnostic,
+  column metadata (1-based Unicode scalar columns) and are sliced only after source validation; image, diagnostic,
   terminal, Git, artifact, and child-handoff kinds fail closed. Qt now loads
   project pins into the composer, creates or refreshes file descriptors from
   authoritative workspace reads with reconstructed raw UTF-8/BOM/newline bytes,
@@ -704,7 +704,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 291 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 292 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 49 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
