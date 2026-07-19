@@ -10242,41 +10242,56 @@ impl Runtime {
         set: &pinned_context::PinnedContextSet,
         expected_set_identity: Option<&str>,
     ) -> Vec<Value> {
+        let current = {
+            let Some(store) = self.pinned_context_store.as_ref() else {
+                return self.error_for(request, -32122, "pinned context store unavailable");
+            };
+            match store.load_optional(project_id) {
+                Ok(current) => current,
+                Err(error) => return self.error_for(request, -32123, error.code),
+            }
+        };
+        let current_identity = current
+            .as_ref()
+            .map(|(_, descriptor)| descriptor.set_identity.as_str());
+        if expected_set_identity != current_identity && expected_set_identity.is_some() {
+            return self.error_for(
+                request,
+                -32041,
+                "pinned context changed since the reviewed identity",
+            );
+        }
+        let release_reference_ids = match self.pinned_image_release_reference_ids(
+            project_id,
+            current.as_ref().map(|(set, _)| set),
+            set,
+        ) {
+            Ok(reference_ids) => reference_ids,
+            Err((code, message)) => return self.error_for(request, code, message),
+        };
         let descriptor = {
             let Some(store) = self.pinned_context_store.as_ref() else {
                 return self.error_for(request, -32122, "pinned context store unavailable");
             };
-            let current = match store.load_optional(project_id) {
-                Ok(current) => current,
-                Err(error) => return self.error_for(request, -32123, error.code),
-            };
-            let current_identity = current
-                .as_ref()
-                .map(|(_, descriptor)| descriptor.set_identity.as_str());
-            if expected_set_identity != current_identity && expected_set_identity.is_some() {
-                return self.error_for(
-                    request,
-                    -32041,
-                    "pinned context changed since the reviewed identity",
-                );
-            }
             match store.persist(set) {
                 Ok(descriptor) => descriptor,
                 Err(error) => return self.error_for(request, -32123, error.code),
             }
         };
         let event = if let Some(workbench_store) = self.workbench_store.as_mut() {
-            match workbench_store.append_pinned_context_event(
+            match workbench_store.append_pinned_context_event_with_blob_releases(
                 project_id,
                 &descriptor.set_identity,
                 &descriptor.object_reference,
                 descriptor.item_count,
+                &release_reference_ids,
                 now_ms(),
             ) {
                 Ok(event) => json!({
                     "persisted": true,
                     "sequence": event.sequence,
-                    "schema_version": "project.pinned-context-updated/0.1"
+                    "schema_version": "project.pinned-context-updated/0.1",
+                    "released_blob_reference_count": release_reference_ids.len()
                 }),
                 Err(_error) => {
                     return self.error_for(
@@ -10305,6 +10320,66 @@ impl Runtime {
                 "event": event
             }),
         )
+    }
+
+    fn pinned_image_release_reference_ids(
+        &self,
+        project_id: &str,
+        current: Option<&pinned_context::PinnedContextSet>,
+        next: &pinned_context::PinnedContextSet,
+    ) -> Result<Vec<String>, (i64, String)> {
+        let next_images = next
+            .items
+            .iter()
+            .filter(|item| item.kind == "image")
+            .filter_map(|item| {
+                item.session_id
+                    .as_ref()
+                    .map(|session_id| (session_id.clone(), item.reference.clone()))
+            })
+            .collect::<BTreeSet<_>>();
+        let removed_images = current
+            .into_iter()
+            .flat_map(|set| &set.items)
+            .filter(|item| item.kind == "image")
+            .filter(|item| {
+                item.session_id.as_ref().is_none_or(|session_id| {
+                    !next_images.contains(&(session_id.clone(), item.reference.clone()))
+                })
+            })
+            .collect::<Vec<_>>();
+        if removed_images.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(store) = self.workbench_store.as_ref() else {
+            return Err((
+                -32125,
+                "durable image storage is unavailable for pinned context release".into(),
+            ));
+        };
+        let mut reference_ids = BTreeSet::new();
+        for item in removed_images {
+            let session_id = item
+                .session_id
+                .as_deref()
+                .ok_or_else(|| (-32044, "pinned image session binding is invalid".to_owned()))?;
+            let reference = store
+                .inspect_durable_blob_reference(project_id, Some(session_id), &item.reference)
+                .map_err(|_| {
+                    (
+                        -32125,
+                        "pinned image Blob authority is unavailable for release".into(),
+                    )
+                })?;
+            if reference.kind != DurableBlobKind::Image
+                || reference.owner_kind != "session"
+                || reference.owner_id != session_id
+            {
+                return Err((-32044, "pinned image Blob release scope is invalid".into()));
+            }
+            reference_ids.insert(reference.reference_id);
+        }
+        Ok(reference_ids.into_iter().collect())
     }
 
     fn workspace_instructions(&self, request: Request) -> Vec<Value> {

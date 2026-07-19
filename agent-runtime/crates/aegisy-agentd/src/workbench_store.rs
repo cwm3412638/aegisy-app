@@ -1718,37 +1718,10 @@ impl WorkbenchStore {
         if existing.state == "released" {
             return Ok(existing);
         }
-        let minimum_retention = released_at_ms
-            .checked_add(MIN_BLOB_RETENTION_MS)
-            .ok_or_else(|| error("durable blob release time is out of range"))?;
         let transaction =
             self.begin_database_write("cannot start durable blob release transaction")?;
-        transaction
-            .execute(
-                "UPDATE durable_blob_references
-                 SET state = 'released', released_at_ms = ?1,
-                     retain_until_ms = CASE
-                         WHEN retain_until_ms < ?2 THEN ?2 ELSE retain_until_ms END
-                 WHERE reference_id = ?3 AND state = 'active'",
-                params![
-                    to_i64(released_at_ms, "durable blob release time")?,
-                    to_i64(minimum_retention, "durable blob undo retention time")?,
-                    reference_id
-                ],
-            )
-            .map_err(|_| error("cannot release durable blob reference"))?;
-        transaction
-            .execute(
-                "UPDATE durable_blobs SET retain_until_ms = CASE
-                    WHEN retain_until_ms < ?1 THEN ?1 ELSE retain_until_ms END
-                 WHERE sha256 = ?2",
-                params![
-                    to_i64(minimum_retention, "durable blob undo retention time")?,
-                    existing.content_hash.sha256
-                ],
-            )
-            .map_err(|_| error("cannot retain released durable blob"))?;
-        let released = load_durable_blob_reference_tx(&transaction, reference_id)?;
+        let released =
+            release_durable_blob_reference_tx(&transaction, reference_id, released_at_ms)?;
         transaction
             .commit()
             .map_err(|_| error("cannot commit durable blob release"))?;
@@ -6063,6 +6036,14 @@ impl WorkbenchStore {
                         .payload
                         .get("persisted_at_ms")
                         .and_then(serde_json::Value::as_u64);
+                    let release_batch_identity = event
+                        .payload
+                        .get("release_batch_identity")
+                        .and_then(serde_json::Value::as_str);
+                    let released_blob_reference_count = event
+                        .payload
+                        .get("released_blob_reference_count")
+                        .and_then(serde_json::Value::as_u64);
                     let valid = match (
                         project.as_ref(),
                         set_identity,
@@ -6077,6 +6058,25 @@ impl WorkbenchStore {
                             Some(item_count),
                             Some(persisted_at_ms),
                         ) => {
+                            let release_batch_valid =
+                                match (release_batch_identity, released_blob_reference_count) {
+                                    (None, None) => true,
+                                    (Some(identity), Some(count)) => {
+                                        count > 0
+                                            && count <= 128
+                                            && validate_pinned_context_reference(
+                                                identity,
+                                                "pinned-context-release:sha256:",
+                                                "pinned context release batch identity",
+                                            )
+                                            .is_ok()
+                                    }
+                                    _ => false,
+                                };
+                            let event_seed = release_batch_identity.map_or_else(
+                                || format!("{project_id}:{set_identity}"),
+                                |identity| format!("{project_id}:{set_identity}:{identity}"),
+                            );
                             projection_event_schema(event)
                                 == Some("project.pinned-context-updated/0.1")
                                 && event
@@ -6107,12 +6107,13 @@ impl WorkbenchStore {
                                 )
                                 .is_ok()
                                 && item_count <= 128
+                                && release_batch_valid
                                 && persisted_at_ms == event.timestamp_ms
                                 && persisted_at_ms >= project.created_at_ms
                                 && event.event_id
                                     == derived_event_id(
                                         "pinned-context-updated",
-                                        format!("{project_id}:{set_identity}").as_bytes(),
+                                        event_seed.as_bytes(),
                                     )
                                 && event.correlation_id == set_identity
                                 && event.operation_id
@@ -7974,6 +7975,25 @@ impl WorkbenchStore {
         item_count: usize,
         persisted_at_ms: u64,
     ) -> Result<WorkbenchEvent, WorkbenchStoreError> {
+        self.append_pinned_context_event_with_blob_releases(
+            project_id,
+            set_identity,
+            object_reference,
+            item_count,
+            &[],
+            persisted_at_ms,
+        )
+    }
+
+    pub fn append_pinned_context_event_with_blob_releases(
+        &mut self,
+        project_id: &str,
+        set_identity: &str,
+        object_reference: &str,
+        item_count: usize,
+        release_reference_ids: &[String],
+        persisted_at_ms: u64,
+    ) -> Result<WorkbenchEvent, WorkbenchStoreError> {
         validate_identifier(project_id, "pinned context project ID")?;
         validate_pinned_context_reference(
             set_identity,
@@ -7988,17 +8008,50 @@ impl WorkbenchStore {
         if item_count > 128 {
             return Err(error("pinned context item count is invalid"));
         }
+        if release_reference_ids.len() > 128 {
+            return Err(error("pinned context Blob release count is invalid"));
+        }
+        let mut unique_release_ids = BTreeSet::new();
+        for reference_id in release_reference_ids {
+            validate_identifier(reference_id, "pinned context Blob reference ID")?;
+            if !unique_release_ids.insert(reference_id.as_str()) {
+                return Err(error("pinned context Blob release is duplicated"));
+            }
+            let reference = load_durable_blob_reference(&self.connection, reference_id)?;
+            validate_pinned_image_release(project_id, &reference)?;
+            if let Some(session_id) = reference.session_id.as_deref() {
+                self.ensure_session_writable(session_id)?;
+            }
+        }
         let project = self.load_project(project_id)?;
         if persisted_at_ms < project.created_at_ms {
             return Err(error("pinned context event timestamp is stale"));
         }
         let stream_id = project_event_stream_id(project_id);
         let operation_id = pinned_context_operation_id(project_id, set_identity);
-        let event_id = derived_event_id(
-            "pinned-context-updated",
-            format!("{project_id}:{set_identity}").as_bytes(),
+        let release_batch_identity = if unique_release_ids.is_empty() {
+            None
+        } else {
+            let batch = serde_json::to_vec(&json!({
+                "project_id": project_id,
+                "set_identity": set_identity,
+                "reference_ids": unique_release_ids,
+                "persisted_at_ms": persisted_at_ms,
+            }))
+            .map_err(|_| error("cannot serialize pinned context Blob release batch"))?;
+            Some(format!(
+                "pinned-context-release:sha256:{}",
+                ContentHash::for_bytes(&batch).sha256
+            ))
+        };
+        let event_seed = release_batch_identity.as_ref().map_or_else(
+            || format!("{project_id}:{set_identity}"),
+            |release_batch_identity| {
+                format!("{project_id}:{set_identity}:{release_batch_identity}")
+            },
         );
-        let payload = json!({
+        let event_id = derived_event_id("pinned-context-updated", event_seed.as_bytes());
+        let mut payload = json!({
             "schema_version": "project.pinned-context-updated/0.1",
             "project_id": project_id,
             "set_identity": set_identity,
@@ -8008,6 +8061,10 @@ impl WorkbenchStore {
             "state": "metadata-persisted",
             "persisted_at_ms": persisted_at_ms,
         });
+        if let Some(release_batch_identity) = release_batch_identity.as_deref() {
+            payload["release_batch_identity"] = release_batch_identity.into();
+            payload["released_blob_reference_count"] = unique_release_ids.len().into();
+        }
         let existing_sequence = self
             .connection
             .query_row(
@@ -8051,7 +8108,28 @@ impl WorkbenchStore {
                     .and_then(Value::as_bool)
                     == Some(false)
                 && event.payload.get("state").and_then(Value::as_str) == Some("metadata-persisted")
+                && event
+                    .payload
+                    .get("release_batch_identity")
+                    .and_then(Value::as_str)
+                    == release_batch_identity.as_deref()
+                && event
+                    .payload
+                    .get("released_blob_reference_count")
+                    .and_then(Value::as_u64)
+                    == release_batch_identity
+                        .as_ref()
+                        .map(|_| unique_release_ids.len() as u64)
             {
+                for reference_id in &unique_release_ids {
+                    let reference = load_durable_blob_reference(&self.connection, reference_id)?;
+                    validate_pinned_image_release(project_id, &reference)?;
+                    if reference.state != "released" {
+                        return Err(error(
+                            "pinned context event exists without its Blob release binding",
+                        ));
+                    }
+                }
                 return Ok(event);
             }
             return Err(error("pinned context event identity conflicts"));
@@ -8072,6 +8150,11 @@ impl WorkbenchStore {
                 payload,
             },
         )?;
+        for reference_id in &unique_release_ids {
+            let reference = load_durable_blob_reference_tx(&transaction, reference_id)?;
+            validate_pinned_image_release(project_id, &reference)?;
+            release_durable_blob_reference_tx(&transaction, reference_id, persisted_at_ms)?;
+        }
         transaction
             .commit()
             .map_err(|_| error("cannot commit pinned context event"))?;
@@ -10570,7 +10653,7 @@ fn persist_durable_blob_tx(
             ],
         )
         .map_err(|_| error("cannot persist durable blob reference"))?;
-    let stored = load_durable_blob_reference_tx(transaction, &request.reference_id)?;
+    let mut stored = load_durable_blob_reference_tx(transaction, &request.reference_id)?;
     if stored.content_reference != request.content_reference
         || stored.content_hash != prepared.content_hash
         || stored.session_id != request.session_id
@@ -10580,11 +10663,23 @@ fn persist_durable_blob_tx(
         || stored.owner_kind != request.owner_kind
         || stored.owner_id != request.owner_id
         || stored.metadata != request.metadata
-        || stored.state != "active"
+        || !matches!(stored.state.as_str(), "active" | "released")
     {
         return Err(error(
             "durable blob reference identity already has different data",
         ));
+    }
+    if stored.state == "released" {
+        reactivate_durable_blob_reference_tx(
+            transaction,
+            &request.reference_id,
+            request.created_at_ms,
+            request.retain_until_ms,
+        )?;
+        stored = load_durable_blob_reference_tx(transaction, &request.reference_id)?;
+        if stored.state != "active" || stored.released_at_ms.is_some() {
+            return Err(error("durable blob reference reactivation failed"));
+        }
     }
     Ok(stored)
 }
@@ -10746,6 +10841,97 @@ fn load_durable_blob_reference_tx(
     reference_id: &str,
 ) -> Result<StoredDurableBlobReference, WorkbenchStoreError> {
     load_durable_blob_reference(transaction, reference_id)
+}
+
+fn validate_pinned_image_release(
+    project_id: &str,
+    reference: &StoredDurableBlobReference,
+) -> Result<(), WorkbenchStoreError> {
+    if reference.project_id.as_deref() != Some(project_id)
+        || reference.session_id.as_deref() != Some(reference.owner_id.as_str())
+        || reference.kind != DurableBlobKind::Image
+        || reference.owner_kind != "session"
+        || !matches!(reference.state.as_str(), "active" | "released")
+    {
+        return Err(error("pinned image Blob release scope is invalid"));
+    }
+    Ok(())
+}
+
+fn release_durable_blob_reference_tx(
+    transaction: &Transaction<'_>,
+    reference_id: &str,
+    released_at_ms: u64,
+) -> Result<StoredDurableBlobReference, WorkbenchStoreError> {
+    let existing = load_durable_blob_reference_tx(transaction, reference_id)?;
+    if existing.state == "released" {
+        return Ok(existing);
+    }
+    let minimum_retention = released_at_ms
+        .checked_add(MIN_BLOB_RETENTION_MS)
+        .ok_or_else(|| error("durable blob release time is out of range"))?;
+    transaction
+        .execute(
+            "UPDATE durable_blob_references
+             SET state = 'released', released_at_ms = ?1,
+                 retain_until_ms = CASE
+                     WHEN retain_until_ms < ?2 THEN ?2 ELSE retain_until_ms END
+             WHERE reference_id = ?3 AND state = 'active'",
+            params![
+                to_i64(released_at_ms, "durable blob release time")?,
+                to_i64(minimum_retention, "durable blob undo retention time")?,
+                reference_id
+            ],
+        )
+        .map_err(|_| error("cannot release durable blob reference"))?;
+    transaction
+        .execute(
+            "UPDATE durable_blobs SET retain_until_ms = CASE
+                WHEN retain_until_ms < ?1 THEN ?1 ELSE retain_until_ms END
+             WHERE sha256 = ?2",
+            params![
+                to_i64(minimum_retention, "durable blob undo retention time")?,
+                existing.content_hash.sha256
+            ],
+        )
+        .map_err(|_| error("cannot retain released durable blob"))?;
+    load_durable_blob_reference_tx(transaction, reference_id)
+}
+
+fn reactivate_durable_blob_reference_tx(
+    transaction: &Transaction<'_>,
+    reference_id: &str,
+    accessed_at_ms: u64,
+    retain_until_ms: u64,
+) -> Result<(), WorkbenchStoreError> {
+    let accessed_at_ms = to_i64(accessed_at_ms, "durable blob reactivation time")?;
+    let retain_until_ms = to_i64(retain_until_ms, "durable blob reactivation retention time")?;
+    let updated = transaction
+        .execute(
+            "UPDATE durable_blob_references
+             SET state = 'active', released_at_ms = NULL,
+                 last_accessed_at_ms = CASE
+                     WHEN last_accessed_at_ms < ?1 THEN ?1 ELSE last_accessed_at_ms END,
+                 retain_until_ms = CASE
+                     WHEN retain_until_ms < ?2 THEN ?2 ELSE retain_until_ms END
+             WHERE reference_id = ?3 AND state = 'released'",
+            params![accessed_at_ms, retain_until_ms, reference_id],
+        )
+        .map_err(|_| error("cannot reactivate durable blob reference"))?;
+    if updated != 1 {
+        return Err(error("durable blob reference reactivation lost its state"));
+    }
+    transaction
+        .execute(
+            "UPDATE durable_blobs SET retain_until_ms = CASE
+                WHEN retain_until_ms < ?1 THEN ?1 ELSE retain_until_ms END
+             WHERE sha256 = (
+                SELECT blob_sha256 FROM durable_blob_references WHERE reference_id = ?2
+             )",
+            params![retain_until_ms, reference_id],
+        )
+        .map_err(|_| error("cannot retain reactivated durable blob"))?;
+    Ok(())
 }
 
 fn parse_durable_blob_kind(value: &str) -> Result<DurableBlobKind, WorkbenchStoreError> {
@@ -16125,6 +16311,95 @@ mod tests {
             )
             .is_err());
         assert!(store.scan_durable_blobs().unwrap().consistent);
+    }
+
+    #[test]
+    fn pinned_context_event_and_image_release_commit_or_roll_back_together() {
+        let root = Root::new("pinned-image-release-transaction");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_blob_owners(&mut store, &root);
+        let content = b"bounded-image-fixture".to_vec();
+        let sha256 = sha256_hex(&content);
+        let content_reference = format!("image:sha256:{sha256}");
+        let stored = store
+            .put_durable_blob(DurableBlobWrite {
+                reference_id: durable_blob_reference_id(
+                    Some("blob-session-a"),
+                    Some("blob-project"),
+                    "session",
+                    "blob-session-a",
+                    &content_reference,
+                ),
+                content_reference,
+                session_id: Some("blob-session-a".into()),
+                project_id: Some("blob-project".into()),
+                kind: DurableBlobKind::Image,
+                media_type: "image/png".into(),
+                owner_kind: "session".into(),
+                owner_id: "blob-session-a".into(),
+                metadata: json!({"width": 1, "height": 1}),
+                content,
+                created_at_ms: 2_000,
+                retain_until_ms: 2_000 + MIN_BLOB_RETENTION_MS,
+            })
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_pinned_context_release_event
+                 BEFORE INSERT ON events
+                 WHEN NEW.event_kind = 'project.pinned-context-updated'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected pinned context event failure');
+                 END;",
+            )
+            .unwrap();
+        let set_identity = format!("pinned-context:sha256:{}", "a".repeat(64));
+        let object_reference = format!("pinned-context-object:sha256:{}", "b".repeat(64));
+        assert!(store
+            .append_pinned_context_event_with_blob_releases(
+                "blob-project",
+                &set_identity,
+                &object_reference,
+                0,
+                std::slice::from_ref(&stored.reference_id),
+                3_000,
+            )
+            .is_err());
+        assert_eq!(
+            store
+                .inspect_durable_blob_reference(
+                    "blob-project",
+                    Some("blob-session-a"),
+                    &stored.content_reference,
+                )
+                .unwrap()
+                .state,
+            "active"
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_pinned_context_release_event;")
+            .unwrap();
+        let event = store
+            .append_pinned_context_event_with_blob_releases(
+                "blob-project",
+                &set_identity,
+                &object_reference,
+                0,
+                std::slice::from_ref(&stored.reference_id),
+                3_000,
+            )
+            .unwrap();
+        assert_eq!(event.event_kind, "project.pinned-context-updated");
+        let candidate = store
+            .rebuild_project_projection_candidate("blob-project")
+            .unwrap();
+        assert!(candidate.source_complete, "{:?}", candidate.issues);
+        let released =
+            load_durable_blob_reference(&store.connection, &stored.reference_id).unwrap();
+        assert_eq!(released.state, "released");
+        assert!(released.retain_until_ms >= 3_000 + MIN_BLOB_RETENTION_MS);
     }
 
     #[test]

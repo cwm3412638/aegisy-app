@@ -1714,6 +1714,20 @@ fn pinned_image_import_preview_selection_and_restart_are_scope_bound() {
                     "freshness": "fresh",
                     "priority": 800,
                     "metadata": {"media_type": "image/png", "width": "96", "height": "64"}
+                }, {
+                    "id": "pin-image-copy",
+                    "project_id": project_id,
+                    "session_id": session_id,
+                    "root_id": "root-1",
+                    "kind": "image",
+                    "source": "user-image-import",
+                    "label": "layout-copy.png",
+                    "reference": reference,
+                    "content_hash": content_hash,
+                    "bytes": content.len(),
+                    "freshness": "fresh",
+                    "priority": 790,
+                    "metadata": {"media_type": "image/png", "width": "96", "height": "64"}
                 }]
             }
         }),
@@ -1728,7 +1742,7 @@ fn pinned_image_import_preview_selection_and_restart_are_scope_bound() {
         "turn/context/inspect",
         json!({
             "session_id": session_id,
-            "pinned_context_set_identity": set_identity,
+            "pinned_context_set_identity": set_identity.clone(),
             "pinned_context_ids": ["pin-image"]
         }),
     ));
@@ -1775,6 +1789,112 @@ fn pinned_image_import_preview_selection_and_restart_are_scope_bound() {
         )
         .unwrap();
     assert!(!thumbnail.is_empty());
+    let first_removed = restarted.handle_line(&request(
+        "remove-one-shared-pinned-image-restart",
+        "workspace/pinned-context/remove",
+        json!({
+            "project_id": project_id,
+            "item_id": "pin-image",
+            "expected_set_identity": set_identity
+        }),
+    ));
+    assert_eq!(
+        first_removed[0]["result"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        first_removed[0]["result"]["event"]["released_blob_reference_count"],
+        0
+    );
+    let after_first_remove = restarted.handle_line(&request(
+        "preview-shared-pinned-image",
+        "workspace/image/read",
+        json!({"session_id": session_id, "reference": reference}),
+    ));
+    assert_eq!(after_first_remove[0]["result"]["width"], 96);
+    let second_set_identity = first_removed[0]["result"]["set_identity"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let removed = restarted.handle_line(&request(
+        "remove-final-shared-pinned-image-restart",
+        "workspace/pinned-context/remove",
+        json!({
+            "project_id": project_id,
+            "item_id": "pin-image-copy",
+            "expected_set_identity": second_set_identity
+        }),
+    ));
+    assert_eq!(removed[0]["result"]["items"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        removed[0]["result"]["event"]["released_blob_reference_count"],
+        1
+    );
+    let unavailable = restarted.handle_line(&request(
+        "preview-released-pinned-image",
+        "workspace/image/read",
+        json!({"session_id": session_id, "reference": reference}),
+    ));
+    assert_eq!(unavailable[0]["error"]["code"], -32125);
+    drop(restarted);
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    assert!(store
+        .inspect_durable_blob_reference(&project_id, Some(&session_id), &reference)
+        .is_err());
+    let read_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let retained = store
+        .read_durable_blob_for_session_read_only(&session_id, &reference, read_at)
+        .unwrap();
+    assert_eq!(retained.reference.state, "released");
+    assert!(retained.reference.retain_until_ms >= read_at);
+    assert_eq!(retained.content, content);
+    drop(store);
+
+    let mut reimported_runtime = Runtime::with_store(&data_root).unwrap();
+    reimported_runtime.handle_line(&request(
+        "initialize-image-reimport",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "pinned-image", "version": "1"}
+        }),
+    ));
+    reimported_runtime.handle_line(&request(
+        "initialized-image-reimport",
+        "initialized",
+        json!({}),
+    ));
+    let resumed = reimported_runtime.handle_line(&request(
+        "resume-image-session-reimport",
+        "session/resume",
+        json!({"session_id": session_id}),
+    ));
+    assert_eq!(resumed[0]["result"]["session"]["id"], session_id);
+    let imported_again = reimported_runtime.handle_line(&request(
+        "reimport-released-image",
+        "workspace/image/import-user",
+        json!({
+            "session_id": session_id,
+            "root_id": "root-1",
+            "label": "layout-again.png",
+            "media_type": "image/png",
+            "data_base64": BASE64_STANDARD.encode(&content)
+        }),
+    ));
+    assert_eq!(imported_again[0]["result"]["reference"], reference);
+    let preview_again = reimported_runtime.handle_line(&request(
+        "preview-reimported-image",
+        "workspace/image/read",
+        json!({"session_id": session_id, "reference": reference}),
+    ));
+    assert_eq!(preview_again[0]["result"]["width"], 96);
     fs::remove_dir_all(root).unwrap();
 }
 

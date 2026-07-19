@@ -1943,10 +1943,18 @@ int main(int argc, char *argv[])
     previewCloser.stop();
     workbench.findChildren<QPushButton *>(
         QStringLiteral("agentPinnedContextRemoveButton")).first()->click();
-    if (!expect(waitUntil(application, [&workbench]() {
-                    return workbench.findChildren<QPushButton *>(
-                               QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
-                }),
+    const bool imageUnpinned = waitUntil(application, [&workbench]() {
+        return workbench.findChildren<QPushButton *>(
+                   QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
+    });
+    if (!imageUnpinned) {
+        for (QLabel *label : workbench.findChildren<QLabel *>()) {
+            if (label->text().contains(QStringLiteral("固定上下文"))) {
+                qWarning().noquote() << label->text();
+            }
+        }
+    }
+    if (!expect(imageUnpinned,
                 "fixed image unpin did not remove the persisted descriptor")) {
         return 1;
     }

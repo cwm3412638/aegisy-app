@@ -297,7 +297,19 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   idempotency, stale-write rejection, and no body fields. A successful save or
   remove appends `project.pinned-context-updated/0.1` after immutable
   object publication; the two resources are deliberately not one transaction,
-  and event failure is reported as an incomplete save. Capability
+  and event failure is reported as an incomplete save. Runtime compares the
+  previous and next complete sets for every save/remove. When the final descriptor
+  for a session-owned image disappears, its project event and durable Blob-reference
+  release now commit in one SQLite transaction; shared duplicate image pins keep the
+  reference active until the last one is removed, and release preserves at least the
+  normal 24-hour undo window. Event/storage failure rolls back every release and
+  conservatively leaves the Blob active. A later explicit import of the exact same
+  content, scope, reference, and metadata reactivates the released reference in the
+  write transaction; identity drift remains rejected. Updates that release Blobs carry
+  a content-hashed, body-free release-batch identity and count, so repeated transitions
+  to the same empty set do not reuse an unrelated earlier event. The earlier external
+  pointer publication is still outside that SQLite transaction, so startup compensation
+  for a published set whose event/release transaction failed remains open. Capability
   `turn.context.pinned-selected` now lets `turn/context/inspect` and `turn/start`
   consume only explicit selected file/selection/image/diagnostic/terminal/Git/artifact pin IDs
   together with the exact current set identity. Selection is capped at 16 unique IDs; project/session/
@@ -372,15 +384,17 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   private temporary hard links. Normal turn completion drops the links and Blob-
   store startup removes only safely named crash leftovers, preserving unknown
   entries. Qt exposes `固定图片`, client preflight, dimension/media/size display,
-  explicit thumbnail preview, inclusion/order, and unpin. Image unpin removes the
-  descriptor but does not yet atomically release its active Blob reference.
+  explicit thumbnail preview, inclusion/order, and unpin. The final image unpin
+  releases its active Blob reference atomically with the project event while retaining
+  the bounded undo window; an earlier duplicate pin keeps the shared reference active.
   Transient inline `selection` context with client-provided content remains on
   the existing bounded inline path; only selection items without inline content
   are resolved from the authoritative file range.
-  This foundation still has no cross-resource atomicity, Blob body/reference
-  lifecycle binding, durable diagnostic/terminal authority and invalidation, orphan
-  GC, or child-handoff assembly; complete image/Git lifecycle and cross-platform
-  evidence also remain open, so keep `17.3` unchecked.
+  This foundation still has no atomic boundary or startup compensation across the
+  external pin object/pointer and SQLite event/release transaction, durable diagnostic/
+  terminal authority and invalidation, conservative pin-object/Blob orphan GC, or
+  child-handoff assembly; complete image/Git lifecycle and cross-platform evidence
+  also remain open, so keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
   auto-discovered instructions. Instruction precedence ranks and pinned priority
@@ -763,12 +777,13 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 305 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 306 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 51 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes diagnostic, terminal, and Git pinned-context
 authority, strict Git references, complete-source drift detection, terminal
-normalization, image import/preview/assembly, and source-loss fail-closed invariants.
+normalization, image import/preview/assembly/release rollback, and source-loss
+fail-closed invariants.
 
 ## Session History Boundary
 
@@ -1228,8 +1243,8 @@ normalization, image import/preview/assembly, and source-loss fail-closed invari
   session scope, revalidate PNG/JPEG/WebP hash, bytes, media, dimensions, and decode
   limits, and enter the manifest/budget without entering prompt text. Included images
   become temporary verified `localImage` paths only for the Codex turn. Child-handoff
-  kinds, cross-resource Workbench event/Blob authority, automatic invalidation, and
-  orphan GC remain unavailable; the
+  kinds, cross-resource external-object/SQLite compensation, automatic invalidation,
+  and orphan GC remain unavailable; the
   composer queue is otherwise transient. Qt render evidence covers file and
   editor-selection pin persistence, range labels, inclusion, order boundaries,
   and unpin. The diagnostic, terminal, and Git surfaces provide explicit authority-read,

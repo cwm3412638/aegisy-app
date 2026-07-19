@@ -123,13 +123,25 @@ protection; `workspace/pinned-context/remove` removes one item through the same
 CAS path. Removing the last item persists an explicit empty set identity.
 Responses contain only descriptors and
 `content_bodies_included:false`; the store never contains source bodies. It is
-not atomically bound to Workbench events or durable Blob references: a
-successful AAP save appends a separate metadata-only project event after object
-publication, and a failed event append is reported as an incomplete save. For
+not atomically bound to the Workbench database: a successful AAP save publishes
+the external object/pointer before appending a separate metadata-only project
+event, and a failed database transaction is reported as an incomplete save. For
 standard `*:sha256:` Blob references, save performs a read-only SQLite metadata
 check for active project/session ownership plus exact hash/byte identity; it
 does not read Blob bytes or update access timestamps. It does not reread or
 invalidate source references and has no orphan GC.
+
+Every full-set save compares the previous and next image descriptors. Removing
+the final pin for one session-owned image releases its durable Blob reference in
+the same SQLite transaction as the project event; duplicate pins sharing that
+reference keep it active until the last removal. Transaction failure rolls back
+all releases, and success extends retention by at least 24 hours. An explicit later
+write with the exact same content, owner, reference, and metadata reactivates the
+released reference transactionally; any identity difference remains an error. Release
+events carry only a hashed batch identity and count, allowing repeated transitions to
+the same empty set without persisting reference IDs or content. The external
+pin pointer is still published first, so startup compensation for a pointer whose
+event/release transaction failed and conservative orphan GC remain open.
 
 Capabilities `workspace.image.import-user` and `workspace.image.preview` add the
 session/project-scoped image authority used by pinned context. Import accepts
@@ -143,8 +155,9 @@ are passed to pinned Codex 0.144.5 as `localImage` inputs through verified priva
 temporary hard links. Normal turn completion removes the links; runtime startup
 removes only safely named crash leftovers and preserves unknown entries. Image
 paths and bodies are not stored in turn history or returned by context inspection.
-Unpin does not yet atomically release the durable Blob reference, so full pin/Blob
-GC lifecycle remains open under OpenSpec task 17.3.
+Final unpin releases the active reference through the event transaction, but complete
+cross-resource compensation and pin/Blob GC lifecycle remain open under OpenSpec
+task 17.3.
 
 `operation/probe` is a read-only evidence collector for the reconciliation
 workflow. It resolves only registered project roots through the Work session,

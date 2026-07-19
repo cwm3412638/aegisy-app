@@ -221,6 +221,21 @@ newer set. Removing the final item writes a valid empty set with a new identity;
 the next list therefore distinguishes an intentional empty set from a project
 that has never stored pins.
 
+Every save/remove compares the previous and next complete image-reference set.
+If the final descriptor for a session-owned image is removed, the response event
+reports additive `released_blob_reference_count`; the project event and release
+commit in one SQLite transaction. Duplicate pins for the same session/reference
+keep the Blob active until the final descriptor disappears. Failure rolls back all
+releases, while success retains released content for at least 24 hours. This release
+rule applies only to imported image references; command Artifacts retain their
+independent Session-history lifecycle. Explicitly importing the exact same image into
+the same Session later reactivates the identical released reference transactionally;
+changed ownership, content, reference, media, or metadata cannot reuse that identity.
+Release-bearing project events persist only a `pinned-context-release:sha256:` batch
+identity and bounded count. The hash binds the release inputs and final set without
+placing reference IDs, paths, or content in the event, and prevents an unrelated older
+event for the same empty set from satisfying a later release.
+
 `artifact/read-command-output` remains session-scoped and returns the validated
 text Artifact together with an additive `session_id` binding field. Clients must
 not infer ownership from the timeline item or request correlation ID. The Qt
@@ -306,7 +321,10 @@ publications. A successful save appends a metadata-only
 `project.pinned-context-updated/0.1` event after object publication; a failed
 event append returns an incomplete-save error, and a failed pointer replacement
 may leave a preserved unreferenced object. This does not claim cross-resource
-atomicity. When a descriptor uses a standard `*:sha256:` Blob reference, save
+atomicity. Image Blob release is atomic with the SQLite event, not with the earlier
+external object/pointer publication; database failure therefore preserves the active
+Blob but still requires later startup compensation for the published pointer. When a
+descriptor uses a standard `*:sha256:` Blob reference, save
 checks active SQLite metadata for exact project/session ownership, hash, and
 byte count without reading Blob bytes or updating access time. File, selection,
 validated artifact, diagnostic, and terminal pins now have explicit selected turn
@@ -337,8 +355,9 @@ source identity, bytes, and truncation. Worktree/staged changes therefore invali
 their pins; commit and commit-diff pins survive unrelated worktree changes but fail
 if the exact Git object is no longer available. No Git mutation is added.
 
-Child-handoff assembly, durable automatic invalidation, image Blob release on
-unpin, orphan GC, cross-resource atomicity, and Windows runtime evidence remain open.
+Child-handoff assembly, durable automatic invalidation, failed-publication startup
+compensation, orphan GC, full cross-resource atomicity, and Windows runtime evidence
+remain open.
 Qt watch/save callbacks may mark loaded file and selection pins stale locally, but never rewrite
 the durable descriptor; inspect/start remains authoritative. Agent/Codex remains
 read-only.
