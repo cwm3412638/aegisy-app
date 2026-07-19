@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = 72 * 1024;
@@ -39,6 +39,8 @@ const MAX_STARTUP_RECOVERY_ROWS: u64 = 100_000;
 const MAX_SESSION_DELETE_MEMBERS: usize = 10_000;
 const MAX_SESSION_DELETE_PREVIEW_MEMBERS: usize = 200;
 const MAX_SESSION_DELETE_SWEEP: usize = 32;
+const MAX_SESSION_SEARCH_LIMIT: usize = 100;
+const MAX_SESSION_SEARCH_TERM_BYTES: usize = 256;
 const MAX_PORTABLE_SESSION_ITEMS: usize = 2_000;
 const MAX_PORTABLE_SESSION_BYTES: usize = 4 * 1024 * 1024;
 const DATABASE_WRITE_HEADROOM_BYTES: u64 = 8 * 1024 * 1024;
@@ -67,6 +69,19 @@ const REQUIRED_RETENTION_TABLES: [&str; 3] = [
 ];
 const REQUIRED_NAVIGATION_TABLES: [&str; 1] = ["project_navigation"];
 const REQUIRED_RUNTIME_BINDING_TABLES: [&str; 1] = ["session_runtime_bindings"];
+const REQUIRED_SESSION_SEARCH_INDEXES: [&str; 3] = [
+    "sessions_status_updated_idx",
+    "session_runtime_binding_model_idx",
+    "items_transcript_search_idx",
+];
+const SESSION_SEARCH_INDEX_SCHEMA_SQL: &str = "
+    CREATE INDEX IF NOT EXISTS sessions_status_updated_idx
+        ON sessions(status, updated_at_ms DESC, session_id ASC);
+    CREATE INDEX IF NOT EXISTS session_runtime_binding_model_idx
+        ON session_runtime_bindings(model, adapter, adapter_version, session_id);
+    CREATE INDEX IF NOT EXISTS items_transcript_search_idx
+        ON items(session_id, role, item_kind, item_sequence);
+";
 const SESSION_SCHEMA_SQL: &str = "
     CREATE TABLE projects (
         project_id TEXT PRIMARY KEY,
@@ -467,6 +482,33 @@ pub struct StoredSession {
     pub environment_identity: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSearchRequest {
+    pub project_id: Option<String>,
+    pub model: Option<String>,
+    pub runtime: Option<String>,
+    pub status: Option<String>,
+    pub title: Option<String>,
+    pub text: Option<String>,
+    pub include_archived: bool,
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredSessionSearchResult {
+    pub session: StoredSession,
+    pub runtime: Option<StoredSessionRuntimeBinding>,
+    pub matched_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSearchPage {
+    pub results: Vec<StoredSessionSearchResult>,
+    pub next_cursor: Option<String>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3008,6 +3050,218 @@ impl WorkbenchStore {
             .map_err(|_| error("cannot read session listing"))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|_| error("session listing row is invalid"))
+    }
+
+    pub fn search_sessions(
+        &self,
+        request: &SessionSearchRequest,
+    ) -> Result<SessionSearchPage, WorkbenchStoreError> {
+        if let Some(project_id) = request.project_id.as_deref() {
+            validate_identifier(project_id, "session search project filter")?;
+        }
+        for (term, label) in [
+            (request.model.as_deref(), "session search model filter"),
+            (request.runtime.as_deref(), "session search runtime filter"),
+            (request.status.as_deref(), "session search status filter"),
+            (request.title.as_deref(), "session search title query"),
+            (request.text.as_deref(), "session search transcript query"),
+        ] {
+            if let Some(term) = term {
+                validate_session_search_term(term, label)?;
+            }
+        }
+        if request.status.as_deref().is_some_and(|status| {
+            !matches!(status, "active" | "archived" | "failed" | "interrupted")
+        }) {
+            return Err(error("session search status filter is invalid"));
+        }
+        if request.limit == 0 || request.limit > MAX_SESSION_SEARCH_LIMIT {
+            return Err(error("session search limit is invalid"));
+        }
+        let (cursor_updated_at, cursor_session_id) = request
+            .cursor
+            .as_deref()
+            .map(parse_session_search_cursor)
+            .transpose()?
+            .map_or((None, None), |(timestamp, session_id)| {
+                (Some(timestamp), Some(session_id))
+            });
+        let title_pattern = request.title.as_deref().map(session_search_like_pattern);
+        let text_pattern = request.text.as_deref().map(session_search_like_pattern);
+        let limit = i64::try_from(request.limit.saturating_add(1))
+            .map_err(|_| error("session search limit is invalid"))?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT s.session_id, s.project_id, s.mode, s.title,
+                        s.parent_session_id, s.lineage_kind, s.status,
+                        s.environment_identity, s.created_at_ms, s.updated_at_ms,
+                        rb.session_id, rb.adapter, rb.adapter_version,
+                        rb.backend_session_id, rb.provider, rb.model,
+                        rb.permission_profile, rb.created_at_ms, rb.updated_at_ms,
+                        CASE WHEN ?6 IS NULL THEN 0 ELSE EXISTS(
+                            SELECT 1 FROM items AS transcript
+                            WHERE transcript.session_id = s.session_id
+                              AND transcript.item_kind = 'message'
+                              AND transcript.role IN ('user', 'assistant')
+                              AND (
+                                  lower(COALESCE(json_extract(transcript.payload_json, '$.text'), ''))
+                                      LIKE lower(?6) ESCAPE '\\'
+                                  OR lower(COALESCE(json_extract(transcript.payload_json, '$.content'), ''))
+                                      LIKE lower(?6) ESCAPE '\\'
+                                  OR lower(COALESCE(json_extract(transcript.payload_json, '$.output'), ''))
+                                      LIKE lower(?6) ESCAPE '\\'
+                                  OR lower(COALESCE(json_extract(transcript.payload_json, '$.diff'), ''))
+                                      LIKE lower(?6) ESCAPE '\\'
+                              )
+                        ) END AS text_match
+                 FROM sessions AS s
+                 LEFT JOIN session_runtime_bindings AS rb
+                   ON rb.session_id = s.session_id
+                 WHERE (?1 IS NULL OR s.project_id = ?1)
+                   AND (?2 IS NULL OR rb.model = ?2)
+                   AND (?3 IS NULL OR rb.adapter = ?3 OR rb.adapter_version = ?3
+                        OR rb.provider = ?3)
+                   AND (?4 IS NULL OR s.status = ?4)
+                   AND (?5 IS NULL OR lower(s.title) LIKE lower(?5) ESCAPE '\\')
+                   AND (?6 IS NULL OR lower(s.title) LIKE lower(?6) ESCAPE '\\'
+                        OR EXISTS(
+                       SELECT 1 FROM items AS transcript_filter
+                       WHERE transcript_filter.session_id = s.session_id
+                         AND transcript_filter.item_kind = 'message'
+                         AND transcript_filter.role IN ('user', 'assistant')
+                         AND (
+                             lower(COALESCE(json_extract(transcript_filter.payload_json, '$.text'), ''))
+                                 LIKE lower(?6) ESCAPE '\\'
+                             OR lower(COALESCE(json_extract(transcript_filter.payload_json, '$.content'), ''))
+                                 LIKE lower(?6) ESCAPE '\\'
+                             OR lower(COALESCE(json_extract(transcript_filter.payload_json, '$.output'), ''))
+                                 LIKE lower(?6) ESCAPE '\\'
+                             OR lower(COALESCE(json_extract(transcript_filter.payload_json, '$.diff'), ''))
+                                 LIKE lower(?6) ESCAPE '\\'
+                         )
+                   ))
+                   AND (?7 OR ?4 = 'archived' OR s.status != 'archived')
+                   AND (?8 IS NULL OR s.updated_at_ms < ?8
+                        OR (s.updated_at_ms = ?8 AND s.session_id > ?9))
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM session_deletion_members AS deletion_member
+                       JOIN session_deletions AS deletion
+                         ON deletion.deletion_id = deletion_member.deletion_id
+                       WHERE deletion_member.session_id = s.session_id
+                         AND deletion.state = 'purged'
+                   )
+                 ORDER BY s.updated_at_ms DESC, s.session_id ASC
+                 LIMIT ?10",
+            )
+            .map_err(|_| error("cannot prepare session search"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    request.project_id.as_deref(),
+                    request.model.as_deref(),
+                    request.runtime.as_deref(),
+                    request.status.as_deref(),
+                    title_pattern,
+                    text_pattern,
+                    request.include_archived,
+                    cursor_updated_at,
+                    cursor_session_id,
+                    limit,
+                ],
+                |row| {
+                    let session = StoredSession {
+                        session_id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        mode: parse_session_mode(&row.get::<_, String>(2)?)?,
+                        title: row.get(3)?,
+                        parent_session_id: row.get(4)?,
+                        lineage_kind: parse_session_lineage(&row.get::<_, String>(5)?)?,
+                        status: row.get(6)?,
+                        environment_identity: row.get(7)?,
+                        created_at_ms: to_u64_sql(row.get(8)?, "session creation time")?,
+                        updated_at_ms: to_u64_sql(row.get(9)?, "session update time")?,
+                    };
+                    let runtime = row
+                        .get::<_, Option<String>>(10)?
+                        .map(
+                            |session_id| -> rusqlite::Result<StoredSessionRuntimeBinding> {
+                                Ok(StoredSessionRuntimeBinding {
+                                    session_id,
+                                    adapter: row.get(11)?,
+                                    adapter_version: row.get(12)?,
+                                    backend_session_id: row.get(13)?,
+                                    provider: row.get(14)?,
+                                    model: row.get(15)?,
+                                    permission_profile: row.get(16)?,
+                                    created_at_ms: to_u64_sql(
+                                        row.get(17)?,
+                                        "session runtime binding creation time",
+                                    )?,
+                                    updated_at_ms: to_u64_sql(
+                                        row.get(18)?,
+                                        "session runtime binding update time",
+                                    )?,
+                                })
+                            },
+                        )
+                        .transpose()?;
+                    let text_match = row.get::<_, i64>(19)? != 0;
+                    let mut matched_fields = Vec::new();
+                    if request
+                        .title
+                        .as_deref()
+                        .is_some_and(|query| contains_case_insensitive(&session.title, query))
+                    {
+                        matched_fields.push("title".into());
+                    }
+                    if text_match {
+                        matched_fields.push("text".into());
+                    }
+                    if request
+                        .text
+                        .as_deref()
+                        .is_some_and(|query| contains_case_insensitive(&session.title, query))
+                    {
+                        matched_fields.push("title".into());
+                    }
+                    if request.model.is_some() {
+                        matched_fields.push("model".into());
+                    }
+                    if request.runtime.is_some() {
+                        matched_fields.push("runtime".into());
+                    }
+                    Ok(StoredSessionSearchResult {
+                        session,
+                        runtime,
+                        matched_fields,
+                    })
+                },
+            )
+            .map_err(|_| error("cannot read session search"))?;
+        let mut results = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| error("session search row is invalid"))?;
+        let truncated = results.len() > request.limit;
+        if truncated {
+            results.truncate(request.limit);
+        }
+        let next_cursor = if truncated {
+            results.last().map(|result| {
+                format!(
+                    "after:{}:{}",
+                    result.session.updated_at_ms, result.session.session_id
+                )
+            })
+        } else {
+            None
+        };
+        Ok(SessionSearchPage {
+            results,
+            next_cursor,
+            truncated,
+        })
     }
 
     pub fn preview_portable_session_export(
@@ -7522,6 +7776,20 @@ impl WorkbenchStore {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
+        if version == 8 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start session search index migration"))?;
+            apply_session_search_indexes(&transaction)?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit session search index migration"));
+        }
         if version == 7 {
             let transaction = self
                 .connection
@@ -7530,6 +7798,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(SESSION_RUNTIME_BINDING_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply session runtime binding migration"))?;
+            apply_session_search_indexes(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -7549,6 +7818,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(SESSION_RUNTIME_BINDING_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply session runtime binding migration"))?;
+            apply_session_search_indexes(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -7571,6 +7841,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(SESSION_RUNTIME_BINDING_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply session runtime binding migration"))?;
+            apply_session_search_indexes(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -7596,6 +7867,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(SESSION_RUNTIME_BINDING_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply session runtime binding migration"))?;
+            apply_session_search_indexes(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -7627,6 +7899,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(SESSION_RUNTIME_BINDING_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply session runtime binding migration"))?;
+            apply_session_search_indexes(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -7664,6 +7937,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(SESSION_RUNTIME_BINDING_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply session runtime binding migration"))?;
+            apply_session_search_indexes(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -7698,6 +7972,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(SESSION_RUNTIME_BINDING_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply session runtime binding migration"))?;
+            apply_session_search_indexes(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -7787,6 +8062,7 @@ impl WorkbenchStore {
         transaction
             .execute_batch(SESSION_RUNTIME_BINDING_SCHEMA_SQL)
             .map_err(|_| error("cannot apply session runtime binding migration"))?;
+        apply_session_search_indexes(&transaction)?;
         verify_required_schema(&transaction)?;
         transaction
             .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -9082,6 +9358,12 @@ fn query_count(
     to_u64(count, "projection row count")
 }
 
+fn apply_session_search_indexes(connection: &Connection) -> Result<(), WorkbenchStoreError> {
+    connection
+        .execute_batch(SESSION_SEARCH_INDEX_SCHEMA_SQL)
+        .map_err(|_| error("cannot apply session search index migration"))
+}
+
 fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreError> {
     for table in REQUIRED_TABLES
         .into_iter()
@@ -9104,6 +9386,20 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             .map_err(|_| error("cannot verify workbench schema"))?;
         if exists.as_deref() != Some(table) {
             return Err(error("workbench database schema is incomplete"));
+        }
+    }
+    for index in REQUIRED_SESSION_SEARCH_INDEXES {
+        let exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot verify workbench search indexes"))?;
+        if exists.as_deref() != Some(index) {
+            return Err(error("workbench database search indexes are incomplete"));
         }
     }
     Ok(())
@@ -9763,6 +10059,58 @@ fn validate_trust_review_id(value: &str) -> Result<(), WorkbenchStoreError> {
         return Err(error("project trust review ID is invalid"));
     }
     Ok(())
+}
+
+fn validate_session_search_term(value: &str, label: &str) -> Result<(), WorkbenchStoreError> {
+    if value.is_empty()
+        || value.len() > MAX_SESSION_SEARCH_TERM_BYTES
+        || value.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(error(format!("{label} is invalid")));
+    }
+    validate_persisted_text(value, label)
+}
+
+fn session_search_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len().saturating_add(2));
+    escaped.push('%');
+    for character in value.chars() {
+        match character {
+            '\\' | '%' | '_' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            _ => escaped.push(character),
+        }
+    }
+    escaped.push('%');
+    escaped
+}
+
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
+}
+
+fn parse_session_search_cursor(cursor: &str) -> Result<(i64, String), WorkbenchStoreError> {
+    let Some(rest) = cursor.strip_prefix("after:") else {
+        return Err(error("session search cursor is invalid"));
+    };
+    let Some((timestamp, session_id)) = rest.split_once(':') else {
+        return Err(error("session search cursor is invalid"));
+    };
+    let timestamp = timestamp
+        .parse::<i64>()
+        .map_err(|_| error("session search cursor is invalid"))?;
+    if timestamp < 0 {
+        return Err(error("session search cursor is invalid"));
+    }
+    validate_identifier(session_id, "session search cursor session ID")?;
+    if format!("after:{timestamp}:{session_id}") != cursor {
+        return Err(error("session search cursor is non-canonical"));
+    }
+    Ok((timestamp, session_id.to_owned()))
 }
 
 fn to_i64(value: u64, label: &str) -> Result<i64, WorkbenchStoreError> {
@@ -11172,6 +11520,63 @@ mod tests {
     }
 
     #[test]
+    fn upgrades_schema_v8_to_search_indexes_after_backup() {
+        let root = Root::new("schema-v8-search-index-migration");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "session-v8".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Preserved from v8".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        drop(store);
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch(
+                "DROP INDEX sessions_status_updated_idx;
+                 DROP INDEX session_runtime_binding_model_idx;
+                 DROP INDEX items_transcript_search_idx;
+                 PRAGMA user_version = 8;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened.load_session("session-v8").unwrap().title,
+            "Preserved from v8"
+        );
+        for index in REQUIRED_SESSION_SEARCH_INDEXES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1
+                     )",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing session search index {index}");
+        }
+        let version: i64 = reopened
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let manifests = migration_backup_manifests(&root.path).unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].source_schema_version, 8);
+        assert_eq!(manifests[0].target_schema_version, SCHEMA_VERSION as u64);
+    }
+
+    #[test]
     fn upgrades_schema_v5_to_retention_tables_after_backup() {
         let root = Root::new("schema-v5-retention-migration");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
@@ -11491,6 +11896,185 @@ mod tests {
         assert!(reopened
             .update_session_title("work-session", "", 80)
             .is_err());
+    }
+
+    #[test]
+    fn indexed_session_search_filters_metadata_and_approved_transcript_fields() {
+        let root = Root::new("session-search");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let project_root = root.parent.canonicalize().unwrap();
+        store
+            .create_project(StoredProjectCreate {
+                project_id: "search-project".into(),
+                root_id: "root-1".into(),
+                canonical_root: project_root.to_string_lossy().into_owned(),
+                root_identity:
+                    "root:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .into(),
+                display_name: "Search project".into(),
+                root_access: "write".into(),
+                created_at_ms: 1,
+            })
+            .unwrap();
+        let runtime_binding = StoredSessionRuntimeBindingCreate {
+            session_id: "search-session-a".into(),
+            adapter: "codex-app-server".into(),
+            adapter_version: "codex-cli 0.144.5".into(),
+            backend_session_id: Some("thread-search-a".into()),
+            provider: Some("aegisy".into()),
+            model: Some("gpt-search".into()),
+            permission_profile: "read-only".into(),
+            created_at_ms: 10,
+        };
+        store
+            .create_session_with_runtime_binding(
+                StoredSessionCreate {
+                    session_id: "search-session-a".into(),
+                    project_id: Some("search-project".into()),
+                    mode: StoredSessionMode::Work,
+                    title: "Fix TLS streaming".into(),
+                    parent_session_id: None,
+                    lineage_kind: StoredSessionLineage::New,
+                    environment_identity: None,
+                    created_at_ms: 10,
+                },
+                Some(runtime_binding),
+            )
+            .unwrap();
+        store
+            .append_item(StoredItemAppend {
+                session_id: "search-session-a".into(),
+                turn_id: None,
+                item_id: "search-item-a".into(),
+                item_kind: "message".into(),
+                role: "user".into(),
+                state: "completed".into(),
+                payload: json!({"text": "Investigate stream disconnect"}),
+                created_at_ms: 11,
+            })
+            .unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "search-session-b".into(),
+                project_id: Some("search-project".into()),
+                mode: StoredSessionMode::Work,
+                title: "Unrelated".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 20,
+            })
+            .unwrap();
+        store
+            .append_item(StoredItemAppend {
+                session_id: "search-session-b".into(),
+                turn_id: None,
+                item_id: "search-item-b".into(),
+                item_kind: "diagnostic".into(),
+                role: "system".into(),
+                state: "completed".into(),
+                payload: json!({"text": "stream disconnect"}),
+                created_at_ms: 21,
+            })
+            .unwrap();
+
+        let text_page = store
+            .search_sessions(&SessionSearchRequest {
+                project_id: Some("search-project".into()),
+                model: None,
+                runtime: None,
+                status: None,
+                title: None,
+                text: Some("disconnect".into()),
+                include_archived: false,
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(text_page.results.len(), 1);
+        assert_eq!(text_page.results[0].session.session_id, "search-session-a");
+        assert_eq!(
+            text_page.results[0]
+                .runtime
+                .as_ref()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("gpt-search")
+        );
+        assert_eq!(text_page.results[0].matched_fields, vec!["text"]);
+
+        let model_page = store
+            .search_sessions(&SessionSearchRequest {
+                project_id: None,
+                model: Some("gpt-search".into()),
+                runtime: Some("codex-app-server".into()),
+                status: None,
+                title: Some("TLS".into()),
+                text: None,
+                include_archived: false,
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(model_page.results.len(), 1);
+        assert_eq!(
+            model_page.results[0].matched_fields,
+            vec!["title", "model", "runtime"]
+        );
+
+        let first_page = store
+            .search_sessions(&SessionSearchRequest {
+                project_id: Some("search-project".into()),
+                model: None,
+                runtime: None,
+                status: None,
+                title: None,
+                text: None,
+                include_archived: false,
+                cursor: None,
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(first_page.results[0].session.session_id, "search-session-b");
+        assert!(first_page.truncated);
+        assert_eq!(
+            first_page.next_cursor.as_deref(),
+            Some("after:20:search-session-b")
+        );
+        let second_page = store
+            .search_sessions(&SessionSearchRequest {
+                project_id: Some("search-project".into()),
+                model: None,
+                runtime: None,
+                status: None,
+                title: None,
+                text: None,
+                include_archived: false,
+                cursor: first_page.next_cursor,
+                limit: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            second_page.results[0].session.session_id,
+            "search-session-a"
+        );
+        assert!(!second_page.truncated);
+        assert!(second_page.next_cursor.is_none());
+        let invalid_cursor = store
+            .search_sessions(&SessionSearchRequest {
+                project_id: None,
+                model: None,
+                runtime: None,
+                status: None,
+                title: None,
+                text: None,
+                include_archived: false,
+                cursor: Some("after:020:search-session-b".into()),
+                limit: 10,
+            })
+            .unwrap_err();
+        assert!(invalid_cursor.message.contains("non-canonical"));
     }
 
     #[test]

@@ -203,6 +203,7 @@ private:
     QString m_sessionForkRequestId;
     QComboBox *m_modelPicker = nullptr;
     QListWidget *m_projectList = nullptr;
+    QLineEdit *m_sessionSearchInput = nullptr;
     QListWidget *m_sessionList = nullptr;
     QScrollArea *m_timelineScroll = nullptr;
     QWidget *m_timelineContent = nullptr;

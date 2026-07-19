@@ -316,6 +316,18 @@ QString AgentRuntimeClient::listSessions(const QString &projectId, const QString
     return sendRequest(QStringLiteral("session/list"), params);
 }
 
+QString AgentRuntimeClient::searchSessions(const QString &query, const QString &projectId,
+                                           bool includeArchived, int limit)
+{
+    QJsonObject params{
+        {QStringLiteral("text"), query},
+        {QStringLiteral("include_archived"), includeArchived},
+        {QStringLiteral("limit"), qBound(1, limit, 100)},
+    };
+    if (!projectId.isEmpty()) params.insert(QStringLiteral("project_id"), projectId);
+    return sendRequest(QStringLiteral("session/search"), params);
+}
+
 QString AgentRuntimeClient::renameSession(const QString &sessionId, const QString &title)
 {
     return sendRequest(QStringLiteral("session/title"), {
@@ -1079,6 +1091,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
     } else if (pendingMethod == QStringLiteral("session/fork")) {
         emit sessionForked(id, result);
     } else if (pendingMethod == QStringLiteral("session/list")) {
+        emit sessionsListed(id, result);
+    } else if (pendingMethod == QStringLiteral("session/search")) {
         emit sessionsListed(id, result);
     } else if (pendingMethod == QStringLiteral("session/title")
                || pendingMethod == QStringLiteral("session/archive")

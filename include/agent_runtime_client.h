@@ -53,6 +53,8 @@ public:
     QString listSessions(const QString &projectId = QString(),
                          const QString &mode = QString(),
                          bool includeArchived = false, int limit = 50);
+    QString searchSessions(const QString &query, const QString &projectId = QString(),
+                           bool includeArchived = true, int limit = 100);
     QString renameSession(const QString &sessionId, const QString &title);
     QString archiveSession(const QString &sessionId);
     QString unarchiveSession(const QString &sessionId);

@@ -442,6 +442,86 @@ fn lists_sessions_with_mode_project_and_limit_filters() {
 }
 
 #[test]
+fn searches_sessions_by_title_runtime_model_and_approved_transcript_text() {
+    let mut runtime = ready_runtime();
+    let first = runtime.handle_line(&request(
+        "search-start-a",
+        "session/start",
+        json!({ "mode": "chat", "title": "TLS repair" }),
+    ));
+    let session_id = first[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    runtime.handle_line(&request(
+        "search-turn-a",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "investigate stream disconnect",
+            "idempotency_key": "search-turn-a"
+        }),
+    ));
+    runtime.handle_line(&request(
+        "search-start-b",
+        "session/start",
+        json!({ "mode": "chat", "title": "Unrelated" }),
+    ));
+
+    let title = runtime.handle_line(&request(
+        "search-title",
+        "session/search",
+        json!({ "title": "tls", "limit": 10 }),
+    ));
+    assert_eq!(title[0]["result"]["schema_version"], "session-search/0.1");
+    assert_eq!(title[0]["result"]["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(title[0]["result"]["sessions"][0]["session_id"], session_id);
+    assert_eq!(
+        title[0]["result"]["sessions"][0]["matched_fields"][0],
+        "title"
+    );
+
+    let transcript = runtime.handle_line(&request(
+        "search-text",
+        "session/search",
+        json!({
+            "text": "disconnect",
+            "runtime": "preview",
+            "model": "deterministic-echo"
+        }),
+    ));
+    assert_eq!(
+        transcript[0]["result"]["sessions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        transcript[0]["result"]["sessions"][0]["session_id"],
+        session_id
+    );
+    assert_eq!(
+        transcript[0]["result"]["sessions"][0]["matched_fields"],
+        json!(["text", "model", "runtime"])
+    );
+    assert!(transcript[0]["result"]["sessions"][0]["runtime"]["backend_session_id"].is_null());
+
+    let branch = runtime.handle_line(&request(
+        "search-branch",
+        "session/search",
+        json!({ "branch": "main" }),
+    ));
+    assert_eq!(branch[0]["error"]["code"], -32028);
+    let invalid = runtime.handle_line(&request(
+        "search-limit",
+        "session/search",
+        json!({ "limit": 101 }),
+    ));
+    assert_eq!(invalid[0]["error"]["code"], -32602);
+}
+
+#[test]
 fn project_trust_review_is_read_only_and_content_free() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1216,6 +1296,23 @@ fn durable_session_deletion_protocol_requires_preview_and_supports_undo() {
         .as_str()
         .unwrap()
         .to_owned();
+    let searched_pending = runtime.handle_line(&request(
+        "search-pending",
+        "session/search",
+        json!({"title": "Protocol deletion", "include_archived": true}),
+    ));
+    assert_eq!(
+        searched_pending[0]["result"]["sessions"][0]["deletion_pending"],
+        true
+    );
+    assert_eq!(
+        searched_pending[0]["result"]["sessions"][0]["deletion"]["deletion_id"],
+        deletion_id
+    );
+    assert_eq!(
+        searched_pending[0]["result"]["sessions"][0]["recovery_required"],
+        false
+    );
     let frozen = runtime.handle_line(&request(
         "frozen",
         "turn/start",

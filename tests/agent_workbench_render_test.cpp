@@ -226,6 +226,8 @@ int main(int argc, char *argv[])
         QStringLiteral("agentTerminalNewForegroundAction"));
     QListWidget *sessionList = workbench.findChild<QListWidget *>(
         QStringLiteral("agentSessionList"));
+    QLineEdit *sessionSearch = workbench.findChild<QLineEdit *>(
+        QStringLiteral("agentSessionSearchInput"));
     QPushButton *retentionSettings = workbench.findChild<QPushButton *>(
         QStringLiteral("agentRetentionSettingsButton"));
     QPushButton *importSession = workbench.findChild<QPushButton *>(
@@ -342,8 +344,10 @@ int main(int argc, char *argv[])
                        "read-only Git query workspace controls are missing")
             || !expect(terminalPicker && terminalStatus && terminalNew && terminalStop
                            && terminalRestart && terminalRemove && terminalContext
-                           && terminalNewForeground && sessionList && sessionHistoryMore
+                           && terminalNewForeground && sessionList && sessionSearch
+                           && sessionHistoryMore
                            && retentionSettings && importSession
+                           && sessionSearch->placeholderText() == QStringLiteral("搜索会话")
                            && !retentionSettings->isEnabled()
                            && !importSession->icon().isNull()
                            && terminalPicker->count() == 0
@@ -984,6 +988,32 @@ int main(int argc, char *argv[])
                             QStringLiteral("Review session"));
                 }),
                 "session rename did not refresh the Workbench list")) {
+        return 1;
+    }
+    sessionSearch->setText(QStringLiteral("Review"));
+    if (!expect(waitUntil(application, [sessionList]() {
+                    return sessionList->count() == 1
+                        && sessionList->item(0)->text().contains(
+                            QStringLiteral("Review session"));
+                }),
+                "session search did not return a title match")) {
+        return 1;
+    }
+    sessionSearch->setText(QStringLiteral("no-such-session"));
+    if (!expect(waitUntil(application, [sessionList]() {
+                    return sessionList->count() == 1
+                        && sessionList->item(0)->text() == QStringLiteral("暂无匹配会话");
+                }),
+                "session search did not render an explicit empty result")) {
+        return 1;
+    }
+    sessionSearch->clear();
+    if (!expect(waitUntil(application, [sessionList]() {
+                    return sessionList->count() > 0
+                        && sessionList->item(0)->text().contains(
+                            QStringLiteral("Review session"));
+                }),
+                "clearing session search did not restore recent sessions")) {
         return 1;
     }
     runtime->archiveSession(previewSessionId);

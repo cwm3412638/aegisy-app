@@ -474,6 +474,22 @@ Current editor evidence:
   load-more control, prepends older items, and restores the prior scroll anchor.
   Task `6.8` is complete; project relink and full event-projection rebuild remain
   separately unchecked under `6.4` and `5.4`.
+- AAP `session/search` now performs a bounded SQLite-side Session query by project,
+  exact model/runtime/status, title, or a combined title/approved-transcript query.
+  Transcript matching is restricted to `message` Items with `user`/`assistant` roles
+  and visible `text`/`content`/`output`/`diff` fields; diagnostic and command payloads
+  do not match, and the Runtime does not hydrate every transcript. Results carry
+  runtime binding metadata, matched-field evidence, purged-session exclusion, a
+  strict `after:<updated-at>:<session-id>` cursor, and a 100-result cap. Additive
+  SQLite schema v9 migration creates and verifies indexes for status/order, model/runtime
+  binding, and transcript ownership through the existing WAL-consistent backup gate.
+  The Qt left rail debounces title/transcript search, scopes Work to the current
+  project, renders explicit empty results, and restores the recent list when cleared.
+  Store, protocol, and render fixtures cover approved-field isolation, model/runtime
+  filtering, cursor canonicalization, UI matching, empty state, and clear-to-restore.
+  Task `6.6` remains unchecked because branch/worktree identity is not yet persisted,
+  branch requests are explicitly unavailable, and complete indexed-text scale and
+  cross-platform evidence remain open.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or

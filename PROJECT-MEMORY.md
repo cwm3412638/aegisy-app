@@ -134,6 +134,21 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   It never infers mutation success, probes the host, executes recovery, or exposes
   AAP/Qt mutation controls. Durable records, restart probes, user review, and
   recovery actions remain required before task completion.
+- Task `6.6` now has a bounded read-only Session search foundation. AAP
+  `session/search` filters durable Session projections by project, exact model,
+  runtime, status, title, or a combined title/approved-transcript query. Transcript
+  matching executes inside SQLite and is restricted to `message` Items with
+  `user`/`assistant` roles and visible `text`, `content`, `output`, or `diff` fields;
+  diagnostic, command, and other payloads are not searched, and Runtime does not
+  hydrate every transcript. Results exclude purged sessions, include matched-field
+  and runtime-binding metadata, cap one page at 100, and use a strict
+  `after:<updated-at>:<session-id>` cursor. Additive indexes cover status/order,
+  runtime/model binding, and transcript ownership. Qt exposes a debounced left-rail
+  search, scopes Work to the current project, searches all Chat sessions, and shows
+  explicit empty results. Branch/worktree identity is not yet persisted; branch
+  filters fail explicitly as unavailable. Keep `6.6` unchecked until branch search,
+  complete indexed-text/scale evidence, model control-plane integration, and final
+  cross-platform behavior are complete.
 - OpenSpec tasks `3.9`, `3.11`, `3.12`, `5.3` through `5.10`, `6.1`, `6.8`, `7.10`, `13.1` through `14.1`, tasks `14.3`, `14.4`, `14.6`,
   `14.8`, `15.1` through `15.9`, `16.1`, `16.2`, and `7.12` are complete. Task `14.2`
   awaits Windows runtime evidence.
@@ -324,14 +339,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user-gesture ID for explicit approvals; it refuses read-only or managed-denied
   Git actions before SQLite mutation. This remains an internal foundation, not an
   AAP/Qt approval bridge or native execution grant.
-- `WorkbenchStore` schema version 8 now persists canonical projects and roots plus
+- `WorkbenchStore` schema version 9 now persists canonical projects and roots plus
   Chat/Work sessions with project binding, environment identity, new/resume/fork
   lineage, and active/archived/failed/interrupted status. Work sessions require a
   project, lineage parents must match project and mode, archive/unarchive is
   timestamp-guarded, and reopen plus v1-to-v2 migration fixtures pass. Turns now
   have bounded idempotency/input hashes and terminal states; items have session
   sequences, turn binding, bounded redacted JSON payloads, and content hashes with
-  tamper/gap replay checks. Transactional v1/v2/v3/v4/v5/v6/v7-to-v8 migrations pass; the v3
+  tamper/gap replay checks. Transactional v1/v2/v3/v4/v5/v6/v7/v8-to-v9 migrations pass; the v3
   path preserves existing events while allowing projectless Chat event streams, and
   v4 adds only the durable Blob schema. Jobs, extensions, model profiles, and Git
   checkpoint projections are still future work. Runtime durable
@@ -352,8 +367,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   session counts, and live-turn counts without loading transcripts; `project/navigation`
   persists pin/unpin changes with a typed event. Qt consumes this list for project
   selection, fixed/unavailable/live badges, and explicit relink confirmation. Complete
-  approval/background active-state badges remain pending under task `6.4`. Schema v8
-  also persists a read-only session runtime binding with adapter/version and opaque
+  approval/background active-state badges remain pending under task `6.4`. The runtime
+  binding schema introduced in v8 persists adapter/version and opaque
   backend thread identity. `session/resume` reconstructs Preview sessions after
   restart and maps the pinned Codex 0.144.5 `thread/resume` contract when the exact
   binding is present; `session/fork` copies redacted history through the latest or a
@@ -527,7 +542,8 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 261 Rust sidecar unit tests, 38 Rust
+Current verified baseline: 16 desktop tests, 263 passed Rust sidecar unit tests plus
+one explicitly ignored live Codex fixture, 39 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -546,6 +562,30 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   anchor. This completes OpenSpec `6.8`, not project relink, event-projection rebuild,
   resume/fork, compaction, or complete runtime reconstruction. Scoped deletion is
   implemented separately under `5.8`.
+
+## Session Search Boundary
+
+- AAP `session/search` accepts bounded project, model, runtime, status, title, and
+  combined title/transcript filters. One page contains at most 100 Session rows and
+  durable pages use the canonical exclusive cursor
+  `after:<updated-at-ms>:<session-id>` ordered by update time descending and Session
+  ID ascending. Malformed and non-canonical cursors fail instead of restarting.
+- Durable search runs in SQLite and returns only Session metadata, runtime binding
+  metadata, and matched-field labels. It never hydrates all Session Items into the
+  Runtime. Purged tombstones are excluded. Schema v9 creates and verifies additive
+  indexes covering Session status/order, model/runtime binding, and transcript
+  ownership through the existing WAL-consistent migration-backup gate.
+- Transcript matching is restricted to `message` Items whose role is `user` or
+  `assistant`, and only the visible top-level `text`, `content`, `output`, or `diff`
+  field participates. Diagnostic, command, artifact, metadata, and arbitrary nested
+  fields are not approved search sources.
+- Qt debounces the left-rail query. Work mode binds search to the current project;
+  Chat mode searches all projects. Empty results are explicit and clearing the query
+  returns to the recent Session list.
+- Branch/worktree state has no durable Session projection yet. A requested branch
+  filter returns stable unavailable error `-32028`; it is never ignored or inferred
+  from current Git state. OpenSpec `6.6` remains incomplete until this projection,
+  complete text-index scale evidence, and final cross-platform behavior exist.
 
 ## Session Compaction Boundary
 
@@ -652,7 +692,8 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
 
 ## Migration Backup And Read-Only Recovery Boundary
 
-- OpenSpec `5.6` and `5.7` are complete. Every supported v1/v2/v3/v4/v5/v6/v7-to-v8
+- OpenSpec `5.6` and `5.7` are complete. Every supported
+  v1/v2/v3/v4/v5/v6/v7/v8-to-v9
   migration first uses SQLite Online Backup to capture a WAL-consistent logical
   snapshot, then normalizes it to a standalone `journal_mode=DELETE` database.
 - The private `migration-backups-v1` directory retains at most 16 bounded evidence
@@ -663,7 +704,7 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   SHA-256, timestamp, and integrity state. Inventory and manifest reads are bounded.
   Partial files, invalid/unmanifested backups, tampered evidence, and unknown entries
   are preserved and reported; recovery never deletes uncertain evidence.
-- Every migration validates all required v8 tables inside its transaction before
+- Every migration validates all required v9 tables and indexes inside its transaction before
   advancing `user_version` and committing. A newer schema is never downgraded.
   Stable content-free error codes distinguish backup, configuration, schema,
   integrity, migration, and newer-version failures.

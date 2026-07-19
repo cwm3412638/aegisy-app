@@ -33,6 +33,7 @@ or session methods are accepted.
 - `session/start`
 - `turn/start`
 - `turn/steer` (Codex only; same-turn, identity-scoped)
+- `session/search` (bounded local Session metadata and approved transcript fields)
 - `session/read`
 - `runtime/health`
 - `runtime/degradations`

@@ -70,10 +70,11 @@ use turn_context::{prepare_turn_context_scoped, TurnContextItem};
 use workbench_store::{
     durable_blob_reference_id, DurableBlobKind, DurableBlobWrite, PortableSessionImportCommand,
     PortableSessionPackage, RetentionPolicy, SessionDeletionScope, SessionProjectionConsistency,
-    StoredItem, StoredItemAppend, StoredProjectCreate, StoredProjectNavigationEntry,
-    StoredProjectTrustAcknowledge, StoredProjectTrustAcknowledgement, StoredSessionCreate,
-    StoredSessionLineage, StoredSessionMode, StoredSessionRuntimeBindingCreate, StoredTurnCreate,
-    WorkbenchRecoveryDiagnostic, WorkbenchStore, WorkbenchStoreOpen,
+    SessionSearchRequest, StoredItem, StoredItemAppend, StoredProjectCreate,
+    StoredProjectNavigationEntry, StoredProjectTrustAcknowledge, StoredProjectTrustAcknowledgement,
+    StoredSessionCreate, StoredSessionLineage, StoredSessionMode,
+    StoredSessionRuntimeBindingCreate, StoredTurnCreate, WorkbenchRecoveryDiagnostic,
+    WorkbenchStore, WorkbenchStoreOpen,
 };
 use workspace::{
     collect_search_candidates, list_directory, path_metadata, read_text_file, search_workspace,
@@ -649,6 +650,30 @@ struct SessionListParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct SessionSearchParams {
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    runtime: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    include_archived: bool,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default = "default_session_search_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
 struct SessionIdentityParams {
     session_id: String,
 }
@@ -1168,6 +1193,10 @@ const fn default_session_list_limit() -> usize {
     50
 }
 
+const fn default_session_search_limit() -> usize {
+    50
+}
+
 const fn default_provider_thread_list_limit() -> usize {
     50
 }
@@ -1178,6 +1207,12 @@ const fn default_session_history_limit() -> usize {
 
 const fn default_search_limit() -> usize {
     50
+}
+
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
 }
 
 const fn default_repository_map_tokens() -> usize {
@@ -2268,6 +2303,7 @@ impl Runtime {
             "session/import/preview" => self.session_import_preview(request),
             "session/import" => self.session_import(request),
             "session/list" => self.session_list(request),
+            "session/search" => self.session_search(request),
             "session/recovery/status" => self.session_recovery_status(request),
             "runtime/projection-recovery/status" => self.projection_recovery_status(request),
             "session/start" => self.session_start(request),
@@ -3623,6 +3659,290 @@ impl Runtime {
         });
         sessions.truncate(params.limit);
         self.success_for(&request, json!({ "sessions": sessions, "durable": false }))
+    }
+
+    fn session_search(&self, request: Request) -> Vec<Value> {
+        let params: SessionSearchParams = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        if params.limit == 0 || params.limit > 100 {
+            return self.error_for(
+                &request,
+                -32602,
+                "session search limit must be between 1 and 100",
+            );
+        }
+        if params
+            .branch
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
+            return self.error_for(
+                &request,
+                -32028,
+                "session search filter is unavailable: branch",
+            );
+        }
+        if let Some(project_id) = params.project_id.as_deref() {
+            if project_id.is_empty()
+                || project_id.len() > 128
+                || project_id
+                    .bytes()
+                    .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+            {
+                return self.error_for(
+                    &request,
+                    -32602,
+                    "session search project filter is invalid",
+                );
+            }
+        }
+        for value in [
+            params.model.as_deref(),
+            params.runtime.as_deref(),
+            params.status.as_deref(),
+            params.title.as_deref(),
+            params.text.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.is_empty()
+                || value.len() > 256
+                || value.bytes().any(|byte| byte.is_ascii_control())
+            {
+                return self.error_for(&request, -32602, "session search filter is invalid");
+            }
+        }
+        if params.status.as_deref().is_some_and(|status| {
+            !matches!(status, "active" | "archived" | "failed" | "interrupted")
+        }) {
+            return self.error_for(&request, -32602, "session search status filter is invalid");
+        }
+        if let Some(store) = self.workbench_store.as_ref() {
+            let page = match store.search_sessions(&SessionSearchRequest {
+                project_id: params.project_id.clone(),
+                model: params.model.clone(),
+                runtime: params.runtime.clone(),
+                status: params.status.clone(),
+                title: params.title.clone(),
+                text: params.text.clone(),
+                include_archived: params.include_archived,
+                cursor: params.cursor.clone(),
+                limit: params.limit,
+            }) {
+                Ok(page) => page,
+                Err(error) => {
+                    return self.error_for(
+                        &request,
+                        -32114,
+                        format!("cannot search durable sessions: {}", error.message),
+                    )
+                }
+            };
+            let next_cursor = page.next_cursor;
+            let truncated = page.truncated;
+            let mut sessions = Vec::with_capacity(page.results.len());
+            for result in page.results {
+                let recovery_required = store.session_requires_recovery(&result.session.session_id);
+                let deletion = match store.session_deletion_for_session(&result.session.session_id)
+                {
+                    Ok(deletion) => deletion,
+                    Err(error) => {
+                        return self.error_for(
+                            &request,
+                            -32114,
+                            format!(
+                                "cannot read session search deletion state: {}",
+                                error.message
+                            ),
+                        )
+                    }
+                };
+                let mut value = serde_json::to_value(result.session)
+                    .expect("session search session serialization");
+                let object = value
+                    .as_object_mut()
+                    .expect("session search session is an object");
+                object.insert(
+                    "runtime".into(),
+                    result
+                        .runtime
+                        .map(|runtime| {
+                            json!({
+                                "adapter": runtime.adapter,
+                                "adapter_version": runtime.adapter_version,
+                                "provider": runtime.provider,
+                                "model": runtime.model,
+                                "permission_profile": runtime.permission_profile
+                            })
+                        })
+                        .unwrap_or(Value::Null),
+                );
+                object.insert("matched_fields".into(), json!(result.matched_fields));
+                object.insert("recovery_required".into(), recovery_required.into());
+                object.insert(
+                    "deletion_pending".into(),
+                    deletion
+                        .as_ref()
+                        .is_some_and(|receipt| receipt.state == "pending")
+                        .into(),
+                );
+                object.insert(
+                    "deletion".into(),
+                    deletion
+                        .map(|receipt| {
+                            serde_json::to_value(receipt)
+                                .expect("session search deletion serialization")
+                        })
+                        .unwrap_or(Value::Null),
+                );
+                sessions.push(value);
+            }
+            return self.success_for(
+                &request,
+                json!({
+                    "schema_version": "session-search/0.1",
+                    "sessions": sessions,
+                    "durable": true,
+                    "next_cursor": next_cursor,
+                    "truncated": truncated,
+                    "unavailable_filters": []
+                }),
+            );
+        }
+
+        let query_matches = |state: &&SessionState| {
+            if !params.include_archived
+                && self.archived_sessions.contains(&state.session.id)
+                && params.status.as_deref() != Some("archived")
+            {
+                return false;
+            }
+            if let Some(project_id) = params.project_id.as_deref() {
+                if state.session.project_id.as_deref() != Some(project_id) {
+                    return false;
+                }
+            }
+            let status = if self.archived_sessions.contains(&state.session.id) {
+                "archived"
+            } else {
+                "active"
+            };
+            if params
+                .status
+                .as_deref()
+                .is_some_and(|value| value != status)
+            {
+                return false;
+            }
+            if params
+                .title
+                .as_deref()
+                .is_some_and(|value| !contains_case_insensitive(&state.session.title, value))
+            {
+                return false;
+            }
+            if params
+                .model
+                .as_deref()
+                .is_some_and(|value| state.backend_info.model.as_deref() != Some(value))
+            {
+                return false;
+            }
+            if params.runtime.as_deref().is_some_and(|value| {
+                state.backend_info.adapter != value
+                    && state.backend_info.version != value
+                    && state.backend_info.provider.as_deref() != Some(value)
+            }) {
+                return false;
+            }
+            if params.text.as_deref().is_some_and(|value| {
+                !contains_case_insensitive(&state.session.title, value)
+                    && !state.items.iter().any(|item| {
+                        item.kind == "message"
+                            && matches!(item.role.as_str(), "user" | "assistant")
+                            && contains_case_insensitive(&item.content, value)
+                    })
+            }) {
+                return false;
+            }
+            true
+        };
+        let mut sessions = self
+            .sessions
+            .values()
+            .filter(query_matches)
+            .map(|state| {
+                let status = if self.archived_sessions.contains(&state.session.id) {
+                    "archived"
+                } else {
+                    "active"
+                };
+                let mut matched_fields = Vec::new();
+                if params.title.is_some() {
+                    matched_fields.push("title");
+                }
+                if let Some(query) = params.text.as_deref() {
+                    if contains_case_insensitive(&state.session.title, query) {
+                        matched_fields.push("title");
+                    }
+                    if state.items.iter().any(|item| {
+                        item.kind == "message"
+                            && matches!(item.role.as_str(), "user" | "assistant")
+                            && contains_case_insensitive(&item.content, query)
+                    }) {
+                        matched_fields.push("text");
+                    }
+                }
+                if params.model.is_some() {
+                    matched_fields.push("model");
+                }
+                if params.runtime.is_some() {
+                    matched_fields.push("runtime");
+                }
+                json!({
+                    "session_id": state.session.id,
+                    "project_id": state.session.project_id,
+                    "mode": state.session.mode,
+                    "title": state.session.title,
+                    "parent_session_id": Value::Null,
+                    "lineage_kind": "new",
+                    "status": status,
+                    "environment_identity": state.environment.summary().environment_id,
+                    "runtime": json!({
+                        "adapter": &state.backend_info.adapter,
+                        "adapter_version": &state.backend_info.version,
+                        "provider": &state.backend_info.provider,
+                        "model": &state.backend_info.model,
+                        "permission_profile": &state.backend_info.permission_profile
+                    }),
+                    "matched_fields": matched_fields
+                })
+            })
+            .collect::<Vec<_>>();
+        sessions.sort_by(|left, right| {
+            left["session_id"]
+                .as_str()
+                .cmp(&right["session_id"].as_str())
+        });
+        let truncated = sessions.len() > params.limit;
+        sessions.truncate(params.limit);
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "session-search/0.1",
+                "sessions": sessions,
+                "durable": false,
+                "next_cursor": Value::Null,
+                "truncated": truncated,
+                "cursor_supported": false,
+                "unavailable_filters": []
+            }),
+        )
     }
 
     fn provider_project_cwd(

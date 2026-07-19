@@ -1657,7 +1657,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                    && requestId == m_retentionPolicyRequestId) {
             m_retentionPolicyRequestId.clear();
             addNotice(QStringLiteral("保留策略操作失败：%1").arg(message), true);
-        } else if (method == QStringLiteral("session/list")
+        } else if ((method == QStringLiteral("session/list")
+                    || method == QStringLiteral("session/search"))
                    && requestId == m_sessionListRequestId) {
             m_sessionListRequestId.clear();
             m_sessionListRefreshPending = false;
@@ -2149,6 +2150,24 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
     layout->addWidget(m_projectList);
 
     layout->addWidget(makeSectionLabel(QStringLiteral("最近会话"), rail));
+    m_sessionSearchInput = new QLineEdit(rail);
+    m_sessionSearchInput->setObjectName(QStringLiteral("agentSessionSearchInput"));
+    m_sessionSearchInput->setPlaceholderText(QStringLiteral("搜索会话"));
+    m_sessionSearchInput->setClearButtonEnabled(true);
+    m_sessionSearchInput->setMaxLength(256);
+    m_sessionSearchInput->addAction(
+        QIcon(QStringLiteral(":/icons/lucide/search.svg")), QLineEdit::LeadingPosition);
+    m_sessionSearchInput->setToolTip(QStringLiteral("搜索会话标题和本地对话记录"));
+    connect(m_sessionSearchInput, &QLineEdit::textChanged, this,
+            [this](const QString &text) {
+        const QString expected = text;
+        QTimer::singleShot(180, this, [this, expected]() {
+            if (!m_sessionSearchInput
+                    || m_sessionSearchInput->text() != expected) return;
+            requestSessionList();
+        });
+    });
+    layout->addWidget(m_sessionSearchInput);
     m_sessionList = new QListWidget(rail);
     m_sessionList->setObjectName(QStringLiteral("agentSessionList"));
     m_sessionList->setFrameShape(QFrame::NoFrame);
@@ -5852,7 +5871,16 @@ void AgentWorkbenchWidget::requestSessionList()
         m_sessionListRefreshPending = true;
         return;
     }
-    const QString requestId = m_runtime->listSessions(QString(), QString(), true, 100);
+    const QString query = m_sessionSearchInput
+        ? boundedUtf8Text(m_sessionSearchInput->text().trimmed(), 256)
+        : QString();
+    const QString requestId = query.isEmpty()
+        ? m_runtime->listSessions(QString(), QString(), true, 100)
+        : m_runtime->searchSessions(
+              query,
+              m_mode == QStringLiteral("work") ? m_projectId : QString(),
+              true,
+              100);
     if (!requestId.isEmpty()) m_sessionListRequestId = requestId;
 }
 
@@ -6385,6 +6413,8 @@ void AgentWorkbenchWidget::populateSessionList(const QJsonObject &result)
         const bool deletionPending = session.value(
             QStringLiteral("deletion_pending")).toBool();
         const QJsonObject deletion = session.value(QStringLiteral("deletion")).toObject();
+        const QJsonObject runtime = session.value(QStringLiteral("runtime")).toObject();
+        const QJsonArray matchedFields = session.value(QStringLiteral("matched_fields")).toArray();
         if (status == QStringLiteral("archived")) m_archivedSessionIds.insert(id);
         if (recoveryRequired) m_recoverySessionIds.insert(id);
         if (deletionPending) m_pendingDeletionSessionIds.insert(id);
@@ -6409,6 +6439,21 @@ void AgentWorkbenchWidget::populateSessionList(const QJsonObject &result)
         item->setData(kSessionDeletionUndoUntilRole, undoUntilMs);
         QString tooltip = QStringLiteral("%1\n状态：%2%3")
             .arg(id, status, recoveryRequired ? QStringLiteral("\n需要恢复检查") : QString());
+        const QString adapter = runtime.value(QStringLiteral("adapter")).toString();
+        const QString model = runtime.value(QStringLiteral("model")).toString();
+        if (!adapter.isEmpty()) tooltip += QStringLiteral("\n运行时：%1").arg(adapter);
+        if (!model.isEmpty()) tooltip += QStringLiteral("\n模型：%1").arg(model);
+        if (!matchedFields.isEmpty()) {
+            QStringList labels;
+            for (const QJsonValue &field : matchedFields) {
+                const QString value = field.toString();
+                if (value == QStringLiteral("title")) labels.append(QStringLiteral("标题"));
+                else if (value == QStringLiteral("text")) labels.append(QStringLiteral("对话"));
+                else if (value == QStringLiteral("model")) labels.append(QStringLiteral("模型"));
+                else if (value == QStringLiteral("runtime")) labels.append(QStringLiteral("运行时"));
+            }
+            if (!labels.isEmpty()) tooltip += QStringLiteral("\n匹配：%1").arg(labels.join(QStringLiteral("、")));
+        }
         if (deletionPending) {
             tooltip += QStringLiteral("\n删除待执行 · 可撤销至 %1")
                 .arg(QDateTime::fromMSecsSinceEpoch(undoUntilMs)
@@ -6437,7 +6482,10 @@ void AgentWorkbenchWidget::populateSessionList(const QJsonObject &result)
         }
     }
     if (m_sessionList->count() == 0) {
-        m_sessionList->addItem(QStringLiteral("暂无可恢复会话"));
+        m_sessionList->addItem(m_sessionSearchInput
+                && !m_sessionSearchInput->text().trimmed().isEmpty()
+            ? QStringLiteral("暂无匹配会话")
+            : QStringLiteral("暂无可恢复会话"));
     } else if (selectedRow >= 0) {
         m_sessionList->setCurrentRow(selectedRow);
     }
