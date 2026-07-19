@@ -64,9 +64,10 @@ workflow. It resolves only registered project roots through the Work session,
 hashes bounded workspace metadata and read-only Git status, and observes only
 runtime-owned turn or terminal state. It returns hashes and state labels, never
 file contents, command output, arbitrary host paths, or caller-selected PIDs.
-The event state is explicitly caller-supplied until durable operation discovery
-and startup reconciliation are implemented; the probe does not approve, mutate,
-or recover an operation.
+When an event state is supplied it remains explicitly caller-labelled; when it is
+omitted, a durable Runtime may derive only the latest registered `turn.*` state
+from the session event stream. The probe does not infer success for other event
+families, approve, mutate, or recover an operation.
 
 When the Workbench store is available, Runtime startup preloads the latest
 validated reconciliation record for each session/operation pair. The SQLite

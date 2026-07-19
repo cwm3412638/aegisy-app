@@ -159,6 +159,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   over-limit startup scan never implies that an operation is safe. This is only
   partial startup discovery; automatic operation source registration, Qt review,
   and recovery actions remain incomplete.
+- If `operation/probe` omits `event`, durable Runtime derives only the latest
+  registered `turn.*` state from the session event stream. Explicit event values
+  remain caller-labelled; workspace-edit, terminal, background-job, and Git event
+  sources are not inferred. The probe still requires a later `operation/reconcile`
+  review and never exposes prompt/content data.
 - Task `6.6` now has a bounded read-only Session search foundation. AAP
   `session/search` filters durable Session projections by project, exact model,
   runtime, status, title, or a combined title/approved-transcript query. Transcript
@@ -568,7 +573,7 @@ git diff --check
 ```
 
 Current verified baseline: 16 desktop tests, 267 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 42 Rust
+one explicitly ignored live Codex fixture, 43 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -670,6 +675,10 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   latest event for each session/operation pair, validates the content-hashed
   evidence and identity, and hydrates the Runtime cache with a 10,000-record
   bound. Per-request store checks remain authoritative when the cache is absent.
+- `WorkbenchStore::latest_operation_event_state` maps only validated session
+  `turn.created`, `turn.completed`, `turn.failed`, and `turn.interrupted/cancelled`
+  events to reconciliation evidence. Unknown operation event kinds return no
+  authority rather than being treated as success.
 
 ## Project And Session Projection Consistency And Rebuild Boundary
 

@@ -9,7 +9,7 @@ use crate::git_workflow_authorization::{
 };
 use crate::git_workflow_state::{validate_record, GitWorkflowRecord};
 use crate::operation_reconciliation::{
-    reconcile as reconcile_operation, ReconciliationInput, ReconciliationResult,
+    reconcile as reconcile_operation, EventState, ReconciliationInput, ReconciliationResult,
 };
 use crate::session_compaction::{activate_review, CompactionCheckpointReview};
 use crate::session_compaction_store::{
@@ -7712,6 +7712,45 @@ impl WorkbenchStore {
             .next()
             .ok_or_else(|| error("operation reconciliation event is unavailable"))?;
         Ok(Some(parse_operation_reconciliation_event(&event)?))
+    }
+
+    pub fn latest_operation_event_state(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<EventState>, WorkbenchStoreError> {
+        validate_identifier(session_id, "operation event session ID")?;
+        validate_identifier(operation_id, "operation event ID")?;
+        let event = self
+            .connection
+            .query_row(
+                "SELECT sequence FROM events
+                 WHERE session_id = ?1 AND operation_id = ?2
+                 ORDER BY sequence DESC LIMIT 1",
+                params![session_id, operation_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot inspect operation event state"))?;
+        let Some(sequence) = event else {
+            return Ok(None);
+        };
+        let sequence = to_u64(sequence, "operation event sequence")?;
+        let event = self
+            .read_session_events(session_id, sequence.saturating_sub(1), 1)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| error("operation event is unavailable"))?;
+        if event.operation_id != operation_id {
+            return Err(error("operation event identity is invalid"));
+        }
+        Ok(match event.event_kind.as_str() {
+            "turn.completed" => Some(EventState::Completed),
+            "turn.failed" => Some(EventState::Failed),
+            "turn.interrupted" | "turn.cancelled" => Some(EventState::Interrupted),
+            "turn.created" => Some(EventState::Running),
+            _ => None,
+        })
     }
 
     pub fn session_blocked_operation(

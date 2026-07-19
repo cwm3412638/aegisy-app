@@ -126,9 +126,11 @@ Capability `operation.reconciliation.probe` exposes the separate read-only
 session, hashes bounded visible workspace metadata, reads the existing Git
 status query, and observes only runtime-owned turn or terminal state. A probe
 returns state labels plus optional snapshot hashes; it never returns source
-content, command output, arbitrary paths, or caller-selected PIDs. The event
-state remains explicitly caller-supplied, so a probe result must still be sent
-through `operation/reconcile` for durable review and mutation gating.
+content, command output, arbitrary paths, or caller-selected PIDs. A supplied
+event state remains caller-labelled; when omitted, a durable Runtime may derive
+only the latest registered `turn.*` state from the session event stream. The
+probe result must still be sent through `operation/reconcile` for durable review
+and mutation gating.
 
 With durable storage, Runtime startup scans the latest event for each
 session/operation pair, validates the event identity and evidence hash, and

@@ -819,8 +819,8 @@ struct OperationProbeParams {
     operation_id: String,
     session_id: String,
     kind: OperationKind,
-    #[serde(default = "default_operation_event_state")]
-    event: EventState,
+    #[serde(default)]
+    event: Option<EventState>,
     #[serde(default)]
     root_id: Option<String>,
     #[serde(default)]
@@ -1491,10 +1491,6 @@ fn default_terminal_kind() -> String {
 
 fn default_primary_root_id() -> String {
     "root-1".into()
-}
-
-fn default_operation_event_state() -> EventState {
-    EventState::None
 }
 
 fn parse_session_history_cursor(cursor: Option<&str>) -> Result<Option<u64>, String> {
@@ -4066,7 +4062,7 @@ impl Runtime {
             session_id: params.session_id.clone(),
             kind: params.kind,
             evidence: ReconciliationEvidence {
-                event: params.event,
+                event: params.event.unwrap_or(EventState::None),
                 process: ProcessState::NotObserved,
                 workspace: WorkspaceState::NotRequired,
                 git: GitState::NotRequired,
@@ -4199,8 +4195,19 @@ impl Runtime {
                 }
             }
         }
+        let (event, event_source) = if let Some(event) = params.event {
+            (event, "caller-supplied")
+        } else if let Some(store) = self.workbench_store.as_ref() {
+            match store.latest_operation_event_state(&params.session_id, &params.operation_id) {
+                Ok(Some(event)) => (event, "durable-event-stream"),
+                Ok(None) => (EventState::None, "no-authoritative-event"),
+                Err(error) => return self.error_for(&request, -32114, error.message),
+            }
+        } else {
+            (EventState::None, "no-authoritative-event")
+        };
         let evidence = ReconciliationEvidence {
-            event: params.event,
+            event,
             process,
             workspace: workspace_state,
             git: git_state,
@@ -4217,7 +4224,7 @@ impl Runtime {
                 "git_snapshot_hash": git_hash,
                 "workspace_truncated": workspace_truncated,
                 "git_truncated": git_truncated,
-                "event_source": "caller-supplied",
+                "event_source": event_source,
                 "process_source": match params.kind {
                     OperationKind::Turn => "runtime-control.active-turn",
                     OperationKind::Terminal | OperationKind::BackgroundJob => "runtime-terminal-record",

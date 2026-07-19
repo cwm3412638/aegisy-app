@@ -775,6 +775,72 @@ fn durable_operation_reconciliation_survives_runtime_restart() {
 }
 
 #[test]
+fn operation_probe_uses_durable_terminal_event_when_event_is_omitted() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-operation-event-probe-{unique}"));
+    let data_root = root.join("data");
+    let project_root = root.join("project");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "operation-event-probe", "version": "1"}
+        }),
+    ));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    let opened = runtime.handle_line(&request(
+        "project",
+        "project/open",
+        json!({"root": project_root}),
+    ));
+    let project_id = opened[0]["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let started = runtime.handle_line(&request(
+        "session",
+        "session/start",
+        json!({"mode": "work", "project_id": project_id}),
+    ));
+    let session_id = started[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let turn = runtime.handle_line(&request(
+        "turn",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "probe terminal event",
+            "idempotency_key": "probe-terminal-event"
+        }),
+    ));
+    let turn_id = turn[0]["result"]["turn"]["id"].as_str().unwrap().to_owned();
+    let probed = runtime.handle_line(&request(
+        "probe",
+        "operation/probe",
+        json!({
+            "operation_id": turn_id,
+            "session_id": session_id,
+            "kind": "turn"
+        }),
+    ));
+    assert_eq!(probed[0]["result"]["event_source"], "durable-event-stream");
+    assert_eq!(probed[0]["result"]["evidence"]["event"], "completed");
+    assert_eq!(probed[0]["result"]["evidence"]["process"], "not-running");
+    let serialized = serde_json::to_string(&probed).unwrap();
+    assert!(!serialized.contains("probe terminal event"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn project_trust_review_is_read_only_and_content_free() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

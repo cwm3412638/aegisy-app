@@ -516,6 +516,13 @@ Current editor evidence:
   A malformed, missing, or over-limit scan cannot be interpreted as a safe
   operation result. This is partial startup discovery and does not complete task
   `6.9` without automatic operation source registration, Qt review, or recovery.
+- When `operation/probe` omits `event`, durable Runtime now derives only the latest
+  registered `turn.created`, `turn.completed`, `turn.failed`, or
+  `turn.interrupted/cancelled` state from the session event stream; explicit event
+  values remain caller-labelled. A protocol fixture proves a completed durable
+  Turn is reported as `durable-event-stream` without exposing the prompt. Other
+  operation event families remain unknown until their authoritative sources are
+  registered.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or
