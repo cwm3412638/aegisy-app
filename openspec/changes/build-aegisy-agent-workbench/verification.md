@@ -767,12 +767,12 @@ Known limitations:
   only bounded metadata line/column ranges while keeping inspection metadata-only.
   Duplicate/missing IDs, stale set identity, cross-session selection, and image/
   diagnostic/terminal/Git/artifact/child-handoff kinds fail explicitly. Qt now
-  loads project pins and covers authoritative file pin creation, CAS persistence,
-  per-turn inclusion, bounded order changes, and unpin in the Workbench render
-  fixture. Remaining non-file assembly, cross-resource atomicity, automatic invalidation,
+  loads project pins and covers authoritative file and editor-selection pin creation,
+  CAS persistence, range metadata, per-turn inclusion, bounded order changes, and
+  unpin in the Workbench render fixture. Remaining non-file assembly, cross-resource atomicity, automatic invalidation,
   orphan GC, and complete cross-platform pin evidence remain incomplete; task
   17.3 remains unchecked. Qt workspace-watch and user-save callbacks also mark
-  loaded matching file pins stale locally without rewriting durable metadata; the
+  loaded matching file and selection pins stale locally without rewriting durable metadata; the
   sidecar reread remains authoritative.
 - `pinned-context-store/0.1` persists metadata-only sets using private immutable
   content-addressed objects and atomic project-pointer replacement. Store fixtures

@@ -267,6 +267,8 @@ int main(int argc, char *argv[])
         QStringLiteral("agentFileTreeContextAction"));
     QAction *pinFileContextAction = workbench.findChild<QAction *>(
         QStringLiteral("agentPinFileContextAction"));
+    QAction *pinSelectionContextAction = workbench.findChild<QAction *>(
+        QStringLiteral("agentPinSelectionContextAction"));
     QAction *searchContextAction = workbench.findChild<QAction *>(
         QStringLiteral("agentSearchResultContextAction"));
     QAction *diagnosticContextAction = workbench.findChild<QAction *>(
@@ -341,6 +343,7 @@ int main(int argc, char *argv[])
                            && editorContext && terminalExcerpt && gitDiff
                            && fileContextAction && searchContextAction
                            && pinFileContextAction
+                           && pinSelectionContextAction
                            && diagnosticContextAction && terminalContextAction
                            && gitContextAction && contextList->count() == 0
                            && contextPanel->isHidden() && !contextInspect->isEnabled()
@@ -1601,8 +1604,39 @@ int main(int argc, char *argv[])
                 "fixed context unpin did not remove the persisted row")) {
         return 1;
     }
+    if (!expect(pinSelectionContextAction->isEnabled(),
+                "selection pin action was not enabled for the editor selection")) {
+        return 1;
+    }
+    pinSelectionContextAction->trigger();
+    if (!expect(waitUntil(application, [&workbench, contextSummary]() {
+                    const QList<QLabel *> labels = workbench.findChildren<QLabel *>();
+                    return workbench.findChildren<QPushButton *>(
+                               QStringLiteral("agentPinnedContextRemoveButton")).size() == 1
+                        && contextSummary->text().contains(QStringLiteral("固定 1"))
+                        && std::any_of(labels.cbegin(), labels.cend(), [](QLabel *label) {
+                            return label->text().contains(QStringLiteral("editable.txt:1:1-1:9"));
+                        });
+                }),
+                "selection pin action did not persist and render its range")) {
+        return 1;
+    }
+    const QList<QPushButton *> selectionPinRemoveButtons = workbench.findChildren<QPushButton *>(
+        QStringLiteral("agentPinnedContextRemoveButton"));
+    selectionPinRemoveButtons.first()->click();
+    if (!expect(waitUntil(application, [&workbench]() {
+                    return workbench.findChildren<QPushButton *>(
+                               QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
+                }),
+                "selection pin unpin did not remove the persisted row")) {
+        return 1;
+    }
     editor->selectAll();
     editor->insertPlainText(QStringLiteral("saved\ncontent\n"));
+    if (!expect(!pinSelectionContextAction->isEnabled(),
+                "selection pin action stayed enabled for unsaved editor content")) {
+        return 1;
+    }
     QMetaObject::invokeMethod(fileTree, "itemActivated", Qt::DirectConnection,
                               Q_ARG(QTreeWidgetItem *, secondItem), Q_ARG(int, 0));
     if (!expect(waitUntil(application, [editor, editorTabs, recentFiles]() {

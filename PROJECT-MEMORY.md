@@ -309,11 +309,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   project pins into the composer, creates or refreshes file descriptors from
   authoritative workspace reads with reconstructed raw UTF-8/BOM/newline bytes,
   saves through CAS, and supports explicit per-turn inclusion, deterministic
-  order changes, and unpin. It passes selected IDs and set identity separately
-  to inspect/start and never turns persisted pins into implicit model context.
-  Qt workspace watcher and user-save events mark matching loaded file pins stale
-  in the composer without rewriting their durable descriptor or hash; sidecar
-  reread remains the final authority at inspect/start.
+  order changes, and unpin. The editor context menu also creates a range-bound
+  clean, conflict-free selection pin after the same authoritative reread;
+  transient inline selections remain available for unsaved buffers. It passes selected IDs and set identity separately to
+  inspect/start and never turns persisted pins into implicit model context.
+  Qt workspace watcher and user-save events mark matching loaded file and
+  selection pins stale in the composer without rewriting their durable descriptor
+  or hash; sidecar reread remains the final authority at inspect/start.
   Transient inline `selection` context with client-provided content remains on
   the existing bounded inline path; only selection items without inline content
   are resolved from the authoritative file range.
@@ -1153,9 +1155,9 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   ranges are extracted only after that validation. Image/diagnostic/terminal/
   Git/artifact/child-handoff kinds, cross-resource Workbench event/Blob
   authority, automatic invalidation, and orphan GC remain unavailable; the
-  composer queue is otherwise transient. Qt
-  render evidence covers file pin persistence, inclusion, order boundaries, and
-  unpin. Watch/save changes also project stale state locally without mutating
+  composer queue is otherwise transient. Qt render evidence covers file and
+  editor-selection pin persistence, range labels, inclusion, order boundaries,
+  and unpin. Watch/save changes also project stale state locally without mutating
   durable pin metadata; non-file pin producers and complete cross-platform pin
   behavior remain open.
 

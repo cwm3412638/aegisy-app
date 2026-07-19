@@ -823,6 +823,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_pinnedContextListRequestId.clear();
         m_pinnedContextMutationRequestId.clear();
         m_pinnedFileReadRequestId.clear();
+        m_pendingPinnedSelection = {};
         m_pendingPinnedIncludeId.clear();
         m_pendingContext = {};
         m_pendingPinnedContextSetIdentity.clear();
@@ -849,6 +850,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         if (m_pinFileContextAction) {
             m_pinFileContextAction->setEnabled(
                 m_pinnedContextAvailable && !m_runtimeRecoveryMode);
+        }
+        if (m_pinSelectionContextAction) {
+            m_pinSelectionContextAction->setEnabled(false);
         }
     });
     connect(m_runtime, &AgentRuntimeClient::projectRelinkRequired,
@@ -1934,6 +1938,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         } else if (method == QStringLiteral("workspace/read")
                    && requestId == m_pinnedFileReadRequestId) {
             m_pinnedFileReadRequestId.clear();
+            m_pendingPinnedSelection = {};
             addNotice(QStringLiteral("读取待固定文件失败：%1").arg(message), true);
         } else if (method == QStringLiteral("runtime/degradations")) {
             m_runtimeDegradationsAvailable = false;
@@ -2839,6 +2844,13 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
             this, &AgentWorkbenchWidget::addDiagnosticContext);
     connect(m_pinFileContextAction, &QAction::triggered,
             this, &AgentWorkbenchWidget::pinSelectedFileContext);
+    m_pinSelectionContextAction = contextMenu->addAction(
+        QIcon(QStringLiteral(":/icons/lucide/paperclip.svg")),
+        QStringLiteral("固定编辑器选区"));
+    m_pinSelectionContextAction->setObjectName(
+        QStringLiteral("agentPinSelectionContextAction"));
+    connect(m_pinSelectionContextAction, &QAction::triggered,
+            this, &AgentWorkbenchWidget::pinEditorSelectionContext);
     connect(contextMenu, &QMenu::aboutToShow, this,
             [this, fileContext, selectionContext, searchContext, diagnosticContext]() {
         QTreeWidgetItem *file = m_fileTree ? m_fileTree->currentItem() : nullptr;
@@ -2858,6 +2870,16 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
                 && !currentOperationStatusBlocked()
                 && m_pinnedContextMutationRequestId.isEmpty()
                 && m_pinnedFileReadRequestId.isEmpty() && fileContext->isEnabled());
+        }
+        if (m_pinSelectionContextAction) {
+            const EditorBuffer buffer = m_editorBuffers.value(m_openEditorPath);
+            m_pinSelectionContextAction->setEnabled(m_pinnedContextAvailable
+                && !m_runtimeRecoveryMode && !m_projectId.isEmpty()
+                && !currentSessionRecoveryRequired() && !currentSessionDeletionPending()
+                && !currentOperationStatusBlocked()
+                && m_pinnedContextMutationRequestId.isEmpty()
+                && m_pinnedFileReadRequestId.isEmpty() && selectionContext->isEnabled()
+                && !buffer.modified && !buffer.conflict);
         }
     });
     m_attachContextButton->setMenu(contextMenu);
@@ -5829,6 +5851,18 @@ void AgentWorkbenchWidget::updateEditorActions()
         m_editorContextButton->setEnabled(!m_openEditorPath.isEmpty()
             && buffer.cursorPosition != buffer.anchorPosition);
     }
+    if (m_pinSelectionContextAction) {
+        const EditorBuffer buffer = m_editorBuffers.value(m_openEditorPath);
+        m_pinSelectionContextAction->setEnabled(m_pinnedContextAvailable
+            && !m_runtimeRecoveryMode && !m_projectId.isEmpty()
+            && !currentSessionRecoveryRequired() && !currentSessionDeletionPending()
+            && !currentOperationStatusBlocked()
+            && m_pinnedContextMutationRequestId.isEmpty()
+            && m_pinnedFileReadRequestId.isEmpty()
+            && !m_openEditorPath.isEmpty()
+            && buffer.cursorPosition != buffer.anchorPosition
+            && !buffer.modified && !buffer.conflict);
+    }
     if (m_languageStopButton
             && (!languageSupported || m_openEditorPath.isEmpty()
                 || m_editorBuffers.value(m_openEditorPath).fallback
@@ -6389,6 +6423,9 @@ void AgentWorkbenchWidget::updateRecoveryUi()
         m_pinFileContextAction->setEnabled(m_pinnedContextAvailable && !blocking
             && !m_projectId.isEmpty() && m_pinnedContextMutationRequestId.isEmpty()
             && m_pinnedFileReadRequestId.isEmpty());
+    }
+    if (m_pinSelectionContextAction) {
+        m_pinSelectionContextAction->setEnabled(false);
     }
     if (m_workspaceTabs) m_workspaceTabs->setEnabled(!m_runtimeRecoveryMode);
     updateContextStrip();
@@ -7695,15 +7732,90 @@ void AgentWorkbenchWidget::pinSelectedFileContext()
     }
 }
 
+void AgentWorkbenchWidget::pinEditorSelectionContext()
+{
+    if (!m_pinnedContextAvailable || m_runtimeRecoveryMode || m_projectId.isEmpty()) {
+        addNotice(QStringLiteral("当前运行时未提供固定上下文能力。"), true);
+        return;
+    }
+    if (currentSessionRecoveryRequired() || currentSessionDeletionPending()
+            || currentOperationStatusBlocked()) {
+        addNotice(QStringLiteral("当前会话状态不允许更新固定上下文。"), true);
+        return;
+    }
+    if (!m_pinnedContextMutationRequestId.isEmpty()
+            || !m_pinnedFileReadRequestId.isEmpty()) {
+        addNotice(QStringLiteral("固定上下文正在更新，请稍候。"));
+        return;
+    }
+    if (m_openEditorPath.isEmpty() || !m_editorBuffers.contains(m_openEditorPath)) {
+        addNotice(QStringLiteral("请先打开文件并选择代码。"), true);
+        return;
+    }
+    const EditorBuffer &buffer = m_editorBuffers[m_openEditorPath];
+    if (buffer.modified || buffer.conflict) {
+        addNotice(QStringLiteral("请先保存并解决冲突后再固定编辑器选区。"), true);
+        return;
+    }
+    const int start = qMin(buffer.cursorPosition, buffer.anchorPosition);
+    const int end = qMax(buffer.cursorPosition, buffer.anchorPosition);
+    if (start == end) {
+        addNotice(QStringLiteral("编辑器中没有选中的文本。"), true);
+        return;
+    }
+    const auto position = [&buffer](int offset) {
+        const int bounded = qBound(0, offset, buffer.content.size());
+        const int line = buffer.content.left(bounded).count(QLatin1Char('\n')) + 1;
+        const int previousBreak = buffer.content.lastIndexOf(QLatin1Char('\n'), bounded - 1);
+        const QString linePrefix = buffer.content.mid(
+            previousBreak + 1, bounded - previousBreak - 1);
+        return QPair<int, int>{line, linePrefix.toUcs4().size() + 1};
+    };
+    const auto startPosition = position(start);
+    const auto endPosition = position(end);
+    const QJsonObject metadata{
+        {QStringLiteral("line"), QString::number(startPosition.first)},
+        {QStringLiteral("column"), QString::number(startPosition.second)},
+        {QStringLiteral("end_line"), QString::number(endPosition.first)},
+        {QStringLiteral("end_column"), QString::number(endPosition.second)},
+    };
+    m_pendingPinnedSelection = QJsonObject{
+        {QStringLiteral("path"), m_openEditorPath},
+        {QStringLiteral("label"), QStringLiteral("%1:%2:%3-%4:%5")
+            .arg(m_openEditorPath)
+            .arg(startPosition.first)
+            .arg(startPosition.second)
+            .arg(endPosition.first)
+            .arg(endPosition.second)},
+        {QStringLiteral("metadata"), metadata},
+    };
+    m_pinnedFileReadRequestId = m_runtime->readWorkspaceFile(
+        m_projectId, m_openEditorPath, m_workspaceRootId);
+    if (m_pinnedFileReadRequestId.isEmpty()) {
+        m_pendingPinnedSelection = {};
+        addNotice(QStringLiteral("无法读取待固定选区的文件。"), true);
+    }
+}
+
 void AgentWorkbenchWidget::finishPinnedFileRead(const QJsonObject &file)
 {
+    const QJsonObject pendingSelection = m_pendingPinnedSelection;
+    const bool selection = !pendingSelection.isEmpty();
+    const auto reject = [this](const QString &message) {
+        m_pendingPinnedSelection = {};
+        addNotice(message, true);
+    };
     const QString path = file.value(QStringLiteral("path")).toString();
     const QString encoding = file.value(QStringLiteral("encoding")).toString();
     const QString newline = file.value(QStringLiteral("newline")).toString();
     if (path.isEmpty()
             || (newline != QStringLiteral("lf") && newline != QStringLiteral("crlf")
                 && newline != QStringLiteral("none"))) {
-        addNotice(QStringLiteral("混合或未知换行文件暂不能固定；请先规范化并保存。"), true);
+        reject(QStringLiteral("混合或未知换行文件暂不能固定；请先规范化并保存。"));
+        return;
+    }
+    if (selection && path != pendingSelection.value(QStringLiteral("path")).toString()) {
+        reject(QStringLiteral("待固定选区的文件已变化，未写入固定上下文。"));
         return;
     }
     QString rawText = file.value(QStringLiteral("content")).toString();
@@ -7713,25 +7825,38 @@ void AgentWorkbenchWidget::finishPinnedFileRead(const QJsonObject &file)
     QByteArray raw = rawText.toUtf8();
     if (encoding == QStringLiteral("utf-8-bom")) raw.prepend("\xef\xbb\xbf", 3);
     else if (encoding != QStringLiteral("utf-8")) {
-        addNotice(QStringLiteral("该文件编码暂不支持固定上下文。"), true);
+        reject(QStringLiteral("该文件编码暂不支持固定上下文。"));
         return;
     }
     const qint64 expectedBytes = file.value(QStringLiteral("size")).toVariant().toLongLong();
     if (raw.size() != expectedBytes) {
-        addNotice(QStringLiteral("文件字节身份无法重建，未写入固定上下文。"), true);
+        reject(QStringLiteral("文件字节身份无法重建，未写入固定上下文。"));
         return;
     }
+    const QString kind = selection ? QStringLiteral("selection") : QStringLiteral("file");
+    const QString source = selection ? QStringLiteral("editor-selection")
+                                     : QStringLiteral("file-tree");
+    const QJsonObject metadata = selection
+        ? pendingSelection.value(QStringLiteral("metadata")).toObject()
+        : QJsonObject{};
+    const QString descriptorLabel = selection
+        ? pendingSelection.value(QStringLiteral("label")).toString(path)
+        : path;
     const QByteArray idDigest = QCryptographicHash::hash(
-        QStringLiteral("%1\n%2\n%3").arg(m_projectId, m_workspaceRootId, path).toUtf8(),
+        QStringLiteral("%1\n%2\n%3\n%4\n%5")
+            .arg(m_projectId, m_workspaceRootId, kind, path,
+                 QString::fromUtf8(QJsonDocument(metadata).toJson(QJsonDocument::Compact)))
+            .toUtf8(),
         QCryptographicHash::Sha256).toHex();
-    const QString id = QStringLiteral("pin-file-%1").arg(QString::fromLatin1(idDigest));
+    const QString id = QStringLiteral("pin-%1-%2").arg(
+        kind, QString::fromLatin1(idDigest));
     QJsonObject descriptor{
         {QStringLiteral("id"), id},
         {QStringLiteral("project_id"), m_projectId},
         {QStringLiteral("root_id"), m_workspaceRootId},
-        {QStringLiteral("kind"), QStringLiteral("file")},
-        {QStringLiteral("source"), QStringLiteral("file-tree")},
-        {QStringLiteral("label"), path},
+        {QStringLiteral("kind"), kind},
+        {QStringLiteral("source"), source},
+        {QStringLiteral("label"), descriptorLabel},
         {QStringLiteral("reference"), path},
         {QStringLiteral("content_hash"), QStringLiteral("sha256:%1").arg(
              QString::fromLatin1(QCryptographicHash::hash(raw, QCryptographicHash::Sha256)
@@ -7739,8 +7864,8 @@ void AgentWorkbenchWidget::finishPinnedFileRead(const QJsonObject &file)
         {QStringLiteral("bytes"), static_cast<double>(raw.size())},
         {QStringLiteral("revision"), file.value(QStringLiteral("revision"))},
         {QStringLiteral("freshness"), QStringLiteral("fresh")},
-        {QStringLiteral("priority"), 850},
-        {QStringLiteral("metadata"), QJsonObject{}},
+        {QStringLiteral("priority"), selection ? 800 : 850},
+        {QStringLiteral("metadata"), metadata},
     };
     QJsonArray items;
     bool replaced = false;
@@ -7754,6 +7879,7 @@ void AgentWorkbenchWidget::finishPinnedFileRead(const QJsonObject &file)
         }
     }
     if (!replaced) items.append(descriptor);
+    m_pendingPinnedSelection = {};
     m_pendingPinnedIncludeId = id;
     m_pinnedContextMutationRequestId = m_runtime->savePinnedContext(
         m_projectId, items, m_pinnedContextSetIdentity);
@@ -7910,7 +8036,8 @@ void AgentWorkbenchWidget::markPinnedContextStale(const QSet<QString> &paths)
     if (paths.isEmpty() || m_pinnedContextItems.isEmpty()) return;
     bool changed = false;
     for (QJsonObject &item : m_pinnedContextItems) {
-        if (item.value(QStringLiteral("kind")).toString() != QStringLiteral("file")
+        const QString kind = item.value(QStringLiteral("kind")).toString();
+        if ((kind != QStringLiteral("file") && kind != QStringLiteral("selection"))
                 || !paths.contains(item.value(QStringLiteral("reference")).toString())
                 || item.value(QStringLiteral("freshness")).toString() == QStringLiteral("stale")) {
             continue;

@@ -101,6 +101,7 @@ private:
     void addContextItem(QJsonObject item);
     void addSelectedFileContext();
     void pinSelectedFileContext();
+    void pinEditorSelectionContext();
     void finishPinnedFileRead(const QJsonObject &file);
     void requestPinnedContext();
     void applyPinnedContextResult(const QJsonObject &result);
@@ -242,6 +243,7 @@ private:
     QPushButton *m_attachContextButton = nullptr;
     QPushButton *m_contextInspectButton = nullptr;
     QAction *m_pinFileContextAction = nullptr;
+    QAction *m_pinSelectionContextAction = nullptr;
     QPushButton *m_sendButton = nullptr;
     QTabWidget *m_workspaceTabs = nullptr;
     QTreeWidget *m_fileTree = nullptr;
@@ -429,6 +431,7 @@ private:
     QString m_pinnedContextListRequestId;
     QString m_pinnedContextMutationRequestId;
     QString m_pinnedFileReadRequestId;
+    QJsonObject m_pendingPinnedSelection;
     QString m_pendingPinnedIncludeId;
     QString m_pinnedContextSetIdentity;
     QJsonArray m_pendingContext;

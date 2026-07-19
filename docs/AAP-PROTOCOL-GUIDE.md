@@ -256,12 +256,12 @@ checks active SQLite metadata for exact project/session ownership, hash, and
 byte count without reading Blob bytes or updating access time. File and selection
 pins now have explicit selected turn assembly and authoritative reread/stale
 detection.
-Qt loads project pins into the composer and exposes CAS-protected file pin
-creation, per-turn inclusion, deterministic order changes, and unpin without
-turning persisted pins into implicit model context. Image/diagnostic/
+Qt loads project pins into the composer and exposes CAS-protected file and
+clean, conflict-free editor-selection pin creation, per-turn inclusion, deterministic
+order changes, and unpin without turning persisted pins into implicit model context. Image/diagnostic/
 terminal/Git/artifact/child-handoff assembly, durable automatic invalidation,
 orphan GC, cross-resource atomicity, and Windows runtime evidence remain open.
-Qt watch/save callbacks may mark loaded file pins stale locally, but never rewrite
+Qt watch/save callbacks may mark loaded file and selection pins stale locally, but never rewrite
 the durable descriptor; inspect/start remains authoritative. Agent/Codex remains
 read-only.
 
