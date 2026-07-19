@@ -521,6 +521,32 @@ QString AgentRuntimeClient::operationReconcile(const QJsonObject &params)
     return sendRequest(QStringLiteral("operation/reconcile"), params);
 }
 
+QString AgentRuntimeClient::createCompactionCheckpoint(
+    const QString &sessionId, const QString &checkpointId,
+    const QString &preservationInstructions, const QJsonObject &summary)
+{
+    if (sessionId.isEmpty() || checkpointId.isEmpty()) return {};
+    QJsonObject params{
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("checkpoint_id"), checkpointId},
+        {QStringLiteral("summary"), summary},
+    };
+    if (!preservationInstructions.isEmpty()) {
+        params.insert(QStringLiteral("preservation_instructions"), preservationInstructions);
+    }
+    return sendRequest(QStringLiteral("session/compaction/checkpoint/create"), params);
+}
+
+QString AgentRuntimeClient::readCompactionCheckpoint(const QString &sessionId,
+                                                     const QString &checkpointId)
+{
+    if (sessionId.isEmpty() || checkpointId.isEmpty()) return {};
+    return sendRequest(QStringLiteral("session/compaction/checkpoint/read"), {
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("checkpoint_id"), checkpointId},
+    });
+}
+
 QString AgentRuntimeClient::runtimeRecoveryStatus()
 {
     return sendRequest(QStringLiteral("runtime/recovery/status"));
@@ -1156,6 +1182,10 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit operationProbeRead(id, result);
     } else if (pendingMethod == QStringLiteral("operation/reconcile")) {
         emit operationReconciled(id, result);
+    } else if (pendingMethod == QStringLiteral("session/compaction/checkpoint/create")) {
+        emit compactionCheckpointCreated(id, result);
+    } else if (pendingMethod == QStringLiteral("session/compaction/checkpoint/read")) {
+        emit compactionCheckpointRead(id, result);
     } else if (pendingMethod == QStringLiteral("runtime/recovery/status")) {
         emit runtimeRecoveryStatusRead(result);
     } else if (pendingMethod == QStringLiteral("turn/cancel")) {

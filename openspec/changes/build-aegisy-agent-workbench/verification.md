@@ -536,6 +536,14 @@ Current editor evidence:
   `operation/reconcile`; malformed, stale, or unsupported operation responses
   remain fail-closed. Render coverage verifies the blocked, review, and cleared
   transitions.
+- The manual session-compaction checkpoint AAP methods are now reachable from the
+  Qt session context menu. Create collects bounded user-authored summary fields
+  and optional preservation instructions; read accepts an explicit checkpoint ID.
+  Both results render in a plain-text read-only dialog and require
+  `activation_available:false`, `provider_compact_invoked:false`, matching session
+  identity, and a non-empty review ID before display. No activation, provider
+  compact, startup compensation, or model-generated summary producer is exposed;
+  task `6.10` remains unchecked.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or

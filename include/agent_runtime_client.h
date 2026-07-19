@@ -86,6 +86,10 @@ public:
     QString operationStatus(const QString &sessionId);
     QString operationProbe(const QJsonObject &params);
     QString operationReconcile(const QJsonObject &params);
+    QString createCompactionCheckpoint(const QString &sessionId, const QString &checkpointId,
+                                       const QString &preservationInstructions,
+                                       const QJsonObject &summary);
+    QString readCompactionCheckpoint(const QString &sessionId, const QString &checkpointId);
     QString runtimeRecoveryStatus();
     QString listWorkspace(const QString &projectId, const QString &path = QString(),
                           const QString &rootId = QString());
@@ -210,6 +214,8 @@ signals:
     void operationStatusRead(const QString &requestId, const QJsonObject &status);
     void operationProbeRead(const QString &requestId, const QJsonObject &result);
     void operationReconciled(const QString &requestId, const QJsonObject &result);
+    void compactionCheckpointCreated(const QString &requestId, const QJsonObject &result);
+    void compactionCheckpointRead(const QString &requestId, const QJsonObject &result);
     void runtimeRecoveryStatusRead(const QJsonObject &status);
     void timelineEvent(const QJsonObject &event);
     void turnCancellationRequested(const QString &requestId, const QJsonObject &result);

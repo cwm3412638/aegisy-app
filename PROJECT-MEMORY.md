@@ -121,10 +121,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   and context hash from the complete verified event stream, blocks active turns,
   and is content-idempotent; read requires a matching object and event after
   restart. Both responses state that activation and provider compact are
-  unavailable. Startup compensation, Qt review/activation, model-generated
-  summaries, editable preservation instructions, and Codex `thread/compact/start`
-  remain unavailable. Original event history remains authoritative and must never
-  be discarded.
+  unavailable. Qt now exposes session-menu actions to create a bounded manual
+  review or read a persisted checkpoint in a plain-text, read-only dialog; startup
+  compensation, model-generated summaries, editable activation, and Codex
+  `thread/compact/start` remain unavailable. Original event history remains
+  authoritative and must never be discarded.
 - Task `6.9` now has an internal `operation-reconciliation/0.1` contract
   foundation. It accepts content-free event, process, workspace, and Git evidence
   and emits a bounded state/decision, blockers, observed domains, and a
@@ -655,8 +656,9 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   active turns, persists before event registration, and treats an identical retry
   as the same review/event. `read` requires the exact validated object and matching
   event after restart. Neither method activates the review or calls a provider.
-- No Qt control or model/provider summary producer consumes this review yet. Codex
-  `thread/compact/start` remains unavailable until
+- The Qt manual create/read review does not activate the review or call a provider;
+  no model/provider summary producer consumes it yet. Codex `thread/compact/start`
+  remains unavailable until
   preservation instructions and summaries are editable and event-backed before
   activation, failure compensation/recovery is complete, and permission/provider
   gates pass.

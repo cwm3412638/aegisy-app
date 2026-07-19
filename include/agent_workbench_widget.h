@@ -78,6 +78,9 @@ private:
     void reviewOperationStatus();
     void updateOperationReviewButton();
     void showOperationReviewFailure(const QString &message);
+    void beginCompactionCheckpoint(const QString &sessionId);
+    void beginCompactionCheckpointRead(const QString &sessionId);
+    void showCompactionReview(const QJsonObject &result, bool replayed);
     bool currentOperationStatusBlocked() const;
     bool currentSessionRecoveryRequired() const;
     bool currentSessionDeletionPending() const;
@@ -375,6 +378,9 @@ private:
     QString m_operationProbeRequestId;
     QString m_operationReconcileRequestId;
     QJsonObject m_operationReview;
+    QString m_compactionRequestId;
+    QString m_compactionSessionId;
+    QString m_compactionOperation;
     QString m_sessionMutationRequestId;
     QString m_sessionDeletionRequestId;
     QString m_portableSessionRequestId;
@@ -413,6 +419,7 @@ private:
     bool m_runtimeRecoveryMode = false;
     bool m_operationStatusKnown = true;
     bool m_operationStatusBlocked = false;
+    bool m_compactionAvailable = false;
     bool m_runtimeDegradationsAvailable = false;
     QHash<QString, QString> m_runtimeDegradationStates;
     quint64 m_startupRebuiltSessionCount = 0;
