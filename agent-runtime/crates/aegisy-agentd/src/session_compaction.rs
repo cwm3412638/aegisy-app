@@ -246,7 +246,11 @@ fn validate_identifier(value: &str, label: &str) -> Result<(), CompactionError> 
 }
 
 fn validate_hash(value: &str, label: &str) -> Result<(), CompactionError> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
         return Err(error(format!("{} is invalid", label)));
     }
     Ok(())

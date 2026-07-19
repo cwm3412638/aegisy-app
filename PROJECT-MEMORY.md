@@ -112,10 +112,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   completion. An internal `session-compaction-checkpoint-store/0.1` now persists
   the exact validated review under the Workbench data root using bounded content-
   addressed objects, hashed pointers, no-clobber publication, private Unix
-  permissions, and restart/tamper validation. It is not connected to SQLite
-  session events, startup recovery, AAP/Qt review or activation, model-generated
-  summaries, editable preservation instructions, or Codex `thread/compact/start`.
-  Original event history remains authoritative and must never be discarded.
+  permissions, and restart/tamper validation. `WorkbenchStore` can append an
+  idempotent metadata-only `session.compaction-checkpointed/0.1` event and validates
+  it during projection replay; the event never copies summary/instruction content.
+  The filesystem object and SQLite event are not one cross-resource transaction.
+  Startup compaction recovery, AAP/Qt review or activation, model-generated
+  summaries, editable preservation instructions, and Codex `thread/compact/start`
+  remain unavailable. Original event history remains authoritative and must never
+  be discarded.
 - Task `6.9` now has an internal `operation-reconciliation/0.1` contract
   foundation. It accepts content-free event, process, workspace, and Git evidence
   and emits a bounded state/decision, blockers, observed domains, and a
@@ -518,7 +522,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 259 Rust sidecar unit tests, 36 Rust
+Current verified baseline: 16 desktop tests, 261 Rust sidecar unit tests, 36 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 
@@ -550,11 +554,15 @@ denied. The latest unit count includes the structured stderr diagnostic invarian
   the Workbench data root. Content-addressed objects and hashed session/checkpoint
   pointers are bounded, privately permissioned on Unix, published without clobber,
   revalidated after restart, and preserved unchanged when tampering is detected.
-- The internal store is not part of the SQLite event stream or startup recovery,
-  and no AAP method, Qt control, or model/provider summary producer consumes it.
-  Codex `thread/compact/start` remains unavailable until preservation instructions
-  and summaries are event-backed and editable before activation, failure
-  compensation/recovery is complete, and permission/provider gates pass.
+- `WorkbenchStore` can append an idempotent metadata-only
+  `session.compaction-checkpointed/0.1` event and rejects malformed/tampered event
+  metadata during projection replay. The external object and event are not one
+  cross-resource transaction, and startup does not activate or recover compaction.
+- No AAP method, Qt control, or model/provider summary producer consumes this
+  internal store. Codex `thread/compact/start` remains unavailable until
+  preservation instructions and summaries are editable and event-backed before
+  activation, failure compensation/recovery is complete, and permission/provider
+  gates pass.
 
 ## Operation Reconciliation Boundary
 

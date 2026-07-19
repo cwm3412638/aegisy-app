@@ -8,6 +8,10 @@ use crate::git_workflow_authorization::{
     GitWorkflowDecisionReference,
 };
 use crate::git_workflow_state::{validate_record, GitWorkflowRecord};
+use crate::session_compaction::{activate_review, CompactionCheckpointReview};
+use crate::session_compaction_store::{
+    CompactionCheckpointDescriptor, STORE_SCHEMA_VERSION as COMPACTION_STORE_SCHEMA_VERSION,
+};
 pub use crate::workbench_migration::WorkbenchRecoveryDiagnostic;
 use crate::workbench_migration::{create_pre_upgrade_backup, inspect_recovery};
 use crate::workspace_edit::ContentHash;
@@ -6233,6 +6237,92 @@ impl WorkbenchStore {
                         push_projection_issue(&mut issues, "session-imported-event-invalid");
                     }
                 }
+                "session.compaction-checkpointed" => {
+                    let checkpoint_id = event
+                        .payload
+                        .get("checkpoint_id")
+                        .and_then(serde_json::Value::as_str);
+                    let review_id = event
+                        .payload
+                        .get("review_id")
+                        .and_then(serde_json::Value::as_str);
+                    let object_reference = event
+                        .payload
+                        .get("object_reference")
+                        .and_then(serde_json::Value::as_str);
+                    let through_sequence = event
+                        .payload
+                        .get("through_sequence")
+                        .and_then(serde_json::Value::as_u64);
+                    let source_context_hash = event
+                        .payload
+                        .get("source_context_hash")
+                        .and_then(serde_json::Value::as_str);
+                    let valid = match (
+                        session.as_ref(),
+                        checkpoint_id,
+                        review_id,
+                        object_reference,
+                        through_sequence,
+                        source_context_hash,
+                    ) {
+                        (
+                            Some(session),
+                            Some(checkpoint_id),
+                            Some(review_id),
+                            Some(object_reference),
+                            Some(through_sequence),
+                            Some(source_context_hash),
+                        ) => {
+                            projection_event_schema(event)
+                                == Some("session.compaction-checkpointed/0.1")
+                                && event
+                                    .payload
+                                    .get("session_id")
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some(session_id)
+                                && event
+                                    .payload
+                                    .get("state")
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some("review-persisted")
+                                && event
+                                    .payload
+                                    .get("original_event_history_authoritative")
+                                    .and_then(serde_json::Value::as_bool)
+                                    == Some(true)
+                                && validate_identifier(checkpoint_id, "compaction checkpoint ID")
+                                    .is_ok()
+                                && validate_compaction_review_id(review_id).is_ok()
+                                && validate_content_reference(object_reference, None).is_ok()
+                                && object_reference
+                                    .starts_with("session-compaction-checkpoint:sha256:")
+                                && through_sequence > 0
+                                && validate_lower_sha256(
+                                    source_context_hash,
+                                    "compaction source context hash",
+                                )
+                                .is_ok()
+                                && event.event_id
+                                    == derived_event_id(
+                                        "session-compaction-checkpoint",
+                                        review_id.as_bytes(),
+                                    )
+                                && event.correlation_id == review_id
+                                && event.operation_id == checkpoint_id
+                                && event.generation == through_sequence
+                                && event.project_id == session.project_id
+                                && event.timestamp_ms >= session.created_at_ms
+                        }
+                        _ => false,
+                    };
+                    if !valid {
+                        push_projection_issue(
+                            &mut issues,
+                            "session-compaction-checkpoint-event-invalid",
+                        );
+                    }
+                }
                 "turn.completed" | "turn.failed" | "turn.interrupted" | "turn.cancelled" => {
                     if projection_event_schema(event) != Some("turn.terminal/0.1") {
                         push_projection_issue(&mut issues, "turn-terminal-event-invalid");
@@ -7184,6 +7274,80 @@ impl WorkbenchStore {
         transaction
             .commit()
             .map_err(|_| error("cannot commit Git workflow event"))?;
+        Ok(event)
+    }
+
+    pub fn append_session_compaction_checkpoint_event(
+        &mut self,
+        descriptor: &CompactionCheckpointDescriptor,
+        review: &CompactionCheckpointReview,
+        persisted_at_ms: u64,
+    ) -> Result<WorkbenchEvent, WorkbenchStoreError> {
+        validate_compaction_checkpoint_binding(descriptor, review)?;
+        self.ensure_session_writable(&review.session_id)?;
+        let session = self.load_session(&review.session_id)?;
+        if session.status != "active" || persisted_at_ms < session.created_at_ms {
+            return Err(error("compaction checkpoint session state is invalid"));
+        }
+        let event_id =
+            derived_event_id("session-compaction-checkpoint", review.review_id.as_bytes());
+        let payload = json!({
+            "schema_version": "session.compaction-checkpointed/0.1",
+            "session_id": review.session_id,
+            "checkpoint_id": review.checkpoint_id,
+            "review_id": review.review_id,
+            "object_reference": descriptor.object_reference,
+            "through_sequence": review.through_sequence,
+            "source_context_hash": review.source_context_hash,
+            "state": "review-persisted",
+            "original_event_history_authoritative": true,
+        });
+        let existing_sequence = self
+            .connection
+            .query_row(
+                "SELECT sequence FROM events WHERE session_id = ?1 AND event_id = ?2",
+                params![review.session_id, event_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot inspect compaction checkpoint event"))?;
+        if let Some(sequence) = existing_sequence {
+            let sequence = to_u64(sequence, "compaction checkpoint event sequence")?;
+            let event = self
+                .read_session_events(&review.session_id, sequence.saturating_sub(1), 1)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| error("compaction checkpoint event is unavailable"))?;
+            if event.event_kind == "session.compaction-checkpointed"
+                && event.correlation_id == review.review_id
+                && event.project_id == session.project_id
+                && event.operation_id == review.checkpoint_id
+                && event.generation == review.through_sequence
+                && event.payload == payload
+            {
+                return Ok(event);
+            }
+            return Err(error("compaction checkpoint event identity conflicts"));
+        }
+        let transaction =
+            self.begin_database_write("cannot start compaction checkpoint event transaction")?;
+        let event = append_event_tx(
+            &transaction,
+            EventInput {
+                session_id: &review.session_id,
+                event_id: &event_id,
+                timestamp_ms: persisted_at_ms,
+                correlation_id: &review.review_id,
+                event_kind: "session.compaction-checkpointed",
+                project_id: session.project_id.as_deref(),
+                operation_id: &review.checkpoint_id,
+                generation: review.through_sequence,
+                payload,
+            },
+        )?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit compaction checkpoint event"))?;
         Ok(event)
     }
 
@@ -9507,6 +9671,53 @@ fn blob_file_error(cause: BlobFileError) -> WorkbenchStoreError {
     ))
 }
 
+fn validate_compaction_checkpoint_binding(
+    descriptor: &CompactionCheckpointDescriptor,
+    review: &CompactionCheckpointReview,
+) -> Result<(), WorkbenchStoreError> {
+    activate_review(review, review.through_sequence, &review.source_context_hash)
+        .map_err(|_| error("compaction checkpoint review is invalid"))?;
+    validate_identifier(&review.session_id, "compaction session ID")?;
+    validate_identifier(&review.checkpoint_id, "compaction checkpoint ID")?;
+    validate_compaction_review_id(&review.review_id)?;
+    validate_lower_sha256(
+        &review.source_context_hash,
+        "compaction source context hash",
+    )?;
+    validate_content_reference(&descriptor.object_reference, None)?;
+    if !descriptor
+        .object_reference
+        .starts_with("session-compaction-checkpoint:sha256:")
+        || descriptor.schema_version != COMPACTION_STORE_SCHEMA_VERSION
+        || descriptor.session_id != review.session_id
+        || descriptor.checkpoint_id != review.checkpoint_id
+        || descriptor.review_id != review.review_id
+        || descriptor.state != "review-persisted"
+        || !descriptor.original_event_history_authoritative
+    {
+        return Err(error("compaction checkpoint descriptor is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_compaction_review_id(value: &str) -> Result<(), WorkbenchStoreError> {
+    let Some(hash) = value.strip_prefix("compaction-review:sha256:") else {
+        return Err(error("compaction review ID is invalid"));
+    };
+    validate_lower_sha256(hash, "compaction review hash")
+}
+
+fn validate_lower_sha256(value: &str, label: &str) -> Result<(), WorkbenchStoreError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(error(format!("{label} is invalid")));
+    }
+    Ok(())
+}
+
 fn validate_identifier(value: &str, label: &str) -> Result<(), WorkbenchStoreError> {
     if value.is_empty()
         || value.len() > 128
@@ -10129,6 +10340,8 @@ mod tests {
         GitMergeMode, GitWorkflowCommitMetadata, GitWorkflowExecutionAttempt, GitWorkflowHazards,
         GitWorkflowPlan, GitWorkflowRequest, GitWorkflowRisk,
     };
+    use crate::session_compaction::{create_review, CompactionSummary};
+    use crate::session_compaction_store::CompactionCheckpointStore;
     use crate::workbench_migration::{
         create_pre_upgrade_backup_with_available_bytes, migration_backup_manifests,
     };
@@ -10296,6 +10509,130 @@ mod tests {
     fn rehash_portable_package(package: &mut PortableSessionPackage) {
         package.content_hash =
             ContentHash::for_bytes(&serde_json::to_vec(&package.content).unwrap());
+    }
+
+    fn create_compaction_event_fixture(
+        store: &mut WorkbenchStore,
+        root: &Root,
+    ) -> (CompactionCheckpointReview, CompactionCheckpointDescriptor) {
+        let project_root = root.parent.join("compaction-project");
+        fs::create_dir(&project_root).unwrap();
+        let project_root = project_root.canonicalize().unwrap();
+        store
+            .create_project(StoredProjectCreate {
+                project_id: "compaction-project".into(),
+                root_id: "root-1".into(),
+                canonical_root: project_root.to_string_lossy().into_owned(),
+                root_identity: "root:sha256:compaction-project".into(),
+                display_name: "Compaction project".into(),
+                root_access: "write".into(),
+                created_at_ms: 1_000,
+            })
+            .unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "compaction-session".into(),
+                project_id: Some("compaction-project".into()),
+                mode: StoredSessionMode::Work,
+                title: "Compaction session".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: Some("environment:sha256:compaction".into()),
+                created_at_ms: 1_100,
+            })
+            .unwrap();
+        let review = create_review(
+            "checkpoint-1",
+            "compaction-session",
+            7,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some("Preserve open tasks"),
+            CompactionSummary {
+                decisions: vec!["Keep history authoritative".into()],
+                unresolved_tasks: vec!["Add Qt review".into()],
+                next_actions: vec!["Integrate recovery".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let descriptor = CompactionCheckpointStore::open(&root.path)
+            .unwrap()
+            .persist(&review)
+            .unwrap();
+        (review, descriptor)
+    }
+
+    #[test]
+    fn compaction_checkpoint_event_is_idempotent_and_replay_validated() {
+        let root = Root::new("compaction-event");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (review, descriptor) = create_compaction_event_fixture(&mut store, &root);
+        let event = store
+            .append_session_compaction_checkpoint_event(&descriptor, &review, 1_200)
+            .unwrap();
+        let duplicate = store
+            .append_session_compaction_checkpoint_event(&descriptor, &review, 1_200)
+            .unwrap();
+        assert_eq!(duplicate, event);
+        assert_eq!(event.event_kind, "session.compaction-checkpointed");
+        assert_eq!(event.payload["original_event_history_authoritative"], true);
+
+        drop(store);
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        let events = reopened
+            .read_session_events("compaction-session", 0, MAX_EVENT_PAGE)
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|candidate| candidate.event_kind == "session.compaction-checkpointed")
+                .count(),
+            1
+        );
+        let candidate = reopened
+            .rebuild_session_projection_candidate("compaction-session")
+            .unwrap();
+        assert!(candidate.source_complete);
+        assert!(CompactionCheckpointStore::open(&root.path)
+            .unwrap()
+            .load("compaction-session", "checkpoint-1")
+            .is_ok());
+    }
+
+    #[test]
+    fn malformed_compaction_event_invalidates_projection_authority() {
+        let root = Root::new("compaction-event-tamper");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (review, descriptor) = create_compaction_event_fixture(&mut store, &root);
+        let event = store
+            .append_session_compaction_checkpoint_event(&descriptor, &review, 1_200)
+            .unwrap();
+        let mut payload = event.payload.clone();
+        payload["original_event_history_authoritative"] = json!(false);
+        let payload_json = serde_json::to_string(&payload).unwrap();
+        let payload_hash = ContentHash::for_bytes(payload_json.as_bytes());
+        store
+            .connection
+            .execute(
+                "UPDATE events
+                 SET payload_json = ?1, payload_sha256 = ?2, payload_bytes = ?3
+                 WHERE session_id = ?4 AND event_id = ?5",
+                params![
+                    payload_json,
+                    payload_hash.sha256,
+                    payload_hash.bytes as i64,
+                    "compaction-session",
+                    event.event_id,
+                ],
+            )
+            .unwrap();
+        let candidate = store
+            .rebuild_session_projection_candidate("compaction-session")
+            .unwrap();
+        assert!(!candidate.source_complete);
+        assert!(candidate
+            .issues
+            .contains(&"session-compaction-checkpoint-event-invalid".into()));
     }
 
     #[test]
