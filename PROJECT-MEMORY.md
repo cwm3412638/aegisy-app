@@ -344,7 +344,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   They bind both the bounded 16 KiB content hash and the complete normalized source
   hash/byte count/truncation state. Worktree/staged drift fails stale; commit and
   commit-diff context remains valid only while the exact Git object is available.
-  Child-handoff kinds still fail closed. Qt now loads
+  Child-handoff descriptors now have a read-only `child-handoff/0.1` assembly
+  foundation: they must be parent-session bound, reference a session-owned text
+  Artifact Blob with matching owner/handoff metadata, and name an existing
+  same-project source session. Assembly rereads bounded UTF-8 content and checks
+  hash/bytes; inspection remains metadata-only. The Rust unit and protocol
+  fixtures cover valid authority, metadata-only inspection, and invalid identity
+  rejection. Child-task production, parent/
+  child lineage/handoff persistence, approvals, and multi-agent execution remain
+  unavailable. Qt now loads
   project pins into the composer, creates or refreshes file descriptors from
   authoritative workspace reads with reconstructed raw UTF-8/BOM/newline bytes,
   saves through CAS, and supports explicit per-turn inclusion, deterministic
@@ -405,7 +413,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   the existing bounded inline path; only selection items without inline content
   are resolved from the authoritative file range.
   This foundation still has no atomic boundary across the external pin object/pointer
-  and SQLite event/release transaction, or child-handoff assembly. Runtime now
+  and SQLite event/release transaction, or child-task handoff production. Runtime now
   propagates workspace watch/save changes, diagnostic re-observation, and terminal
   restart/removal into a durable `pinned-context-source-invalidation/0.1` metadata
   publication. The sidecar marks matching file/selection/diagnostic/terminal
@@ -414,7 +422,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   authoritative source reread. Qt advances its local CAS identity only when the
   schema, old/new hashes, and previous identity match; otherwise it reloads the
   complete durable set before another mutation. Complete image/Git lifecycle, cross-platform
-  evidence, and child-handoff assembly remain open, so keep `17.3` unchecked.
+  evidence, and child-task handoff production remain open, so keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
   auto-discovered instructions. Instruction precedence ranks and pinned priority
@@ -797,11 +805,11 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 306 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 51 Rust
-protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
-denied. The latest unit count includes diagnostic, terminal, and Git pinned-context
-authority, strict Git references, complete-source drift detection, terminal
+Current verified baseline: 16 desktop tests, 314 passed Rust sidecar unit tests plus
+one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
+sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
+and protocol counts include diagnostic, terminal, Git, and child-handoff pinned-
+context authority, strict Git references, complete-source drift detection, terminal
 normalization, image import/preview/assembly/release rollback, and source-loss
 fail-closed invariants.
 
@@ -1262,9 +1270,9 @@ fail-closed invariants.
   available. Session-owned image pins reread the durable Blob under exact project/
   session scope, revalidate PNG/JPEG/WebP hash, bytes, media, dimensions, and decode
   limits, and enter the manifest/budget without entering prompt text. Included images
-  become temporary verified `localImage` paths only for the Codex turn. Child-handoff
-  kinds, cross-resource external-object/SQLite compensation, and orphan GC remain
-  unavailable; the
+  become temporary verified `localImage` paths only for the Codex turn. Child-task
+  production, parent/child handoff persistence, cross-resource external-object/
+  SQLite compensation, and orphan GC remain unavailable; the
   composer queue is otherwise transient. Qt render evidence covers file and
   editor-selection pin persistence, range labels, inclusion, order boundaries,
   and unpin. The diagnostic, terminal, and Git surfaces provide explicit authority-read,

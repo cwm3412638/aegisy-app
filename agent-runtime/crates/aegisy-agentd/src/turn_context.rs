@@ -453,6 +453,7 @@ fn validate_item(item: &TurnContextItem) -> Result<(), TurnContextError> {
             | "selection"
             | "diagnostic"
             | "artifact"
+            | "child_handoff"
             | "search"
             | "terminal_excerpt"
             | "git_commit"
@@ -483,7 +484,8 @@ fn validate_item(item: &TurnContextItem) -> Result<(), TurnContextError> {
         }
     }
     if let Some(reference) = &item.raw_output_ref {
-        let valid = (item.kind == "artifact" && reference.starts_with("command-output:sha256:"))
+        let valid = ((item.kind == "artifact" && reference.starts_with("command-output:sha256:"))
+            || (item.kind == "child_handoff" && reference.starts_with("artifact:sha256:")))
             || (item.kind != "artifact" && reference.starts_with("diagnostic-raw:sha256:"));
         if !valid || reference.len() > 128 {
             return Err(error("invalid raw artifact reference"));

@@ -3167,6 +3167,34 @@ fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() 
         .unwrap()
         .to_owned();
     let original_hash = format!("sha256:{:x}", Sha256::digest(original.as_bytes()));
+    let handoff_id = "handoff-1";
+    let handoff_content = b"child handoff body\n".to_vec();
+    let handoff_hash = format!("{:x}", Sha256::digest(&handoff_content));
+    let handoff_reference = format!("artifact:sha256:{handoff_hash}");
+    let mut store = WorkbenchStore::open(&data_root).unwrap();
+    store
+        .put_durable_blob(DurableBlobWrite {
+            reference_id: durable_blob_reference_id(
+                Some(&session_id),
+                Some(&project_id),
+                "item",
+                handoff_id,
+                &handoff_reference,
+            ),
+            content_reference: handoff_reference.clone(),
+            session_id: Some(session_id.clone()),
+            project_id: Some(project_id.clone()),
+            kind: DurableBlobKind::Artifact,
+            media_type: "text/plain; charset=utf-8".into(),
+            owner_kind: "item".into(),
+            owner_id: handoff_id.into(),
+            metadata: json!({"schema_version": "child-handoff/0.1"}),
+            content: handoff_content.clone(),
+            created_at_ms: 2_000_000_000_000,
+            retain_until_ms: 2_000_086_400_000,
+        })
+        .unwrap();
+    drop(store);
     let set = json!({
         "schema_version": "pinned-context/0.1",
         "project_id": project_id,
@@ -3210,12 +3238,17 @@ fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() 
             "kind": "child_handoff",
             "source": "child-session",
             "label": "handoff",
-            "reference": "handoff:sha256:abc",
-            "content_hash": format!("sha256:{}", "0".repeat(64)),
-            "bytes": 4,
+            "reference": handoff_reference,
+            "content_hash": format!("sha256:{handoff_hash}"),
+            "bytes": handoff_content.len(),
             "freshness": "fresh",
             "priority": 700,
-            "metadata": {}
+            "metadata": {
+                "schema_version": "child-handoff/0.1",
+                "source_session_id": second_session_id,
+                "parent_session_id": session_id,
+                "handoff_id": handoff_id
+            }
         }]
     });
     let saved = runtime.handle_line(&request(
@@ -3305,8 +3338,8 @@ fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() 
         selection[0]["result"]["context"]["manifest"]["entries"][0]["freshness"],
         "fresh"
     );
-    let unsupported = runtime.handle_line(&request(
-        "inspect-selection",
+    let handoff_inspected = runtime.handle_line(&request(
+        "inspect-handoff",
         "turn/context/inspect",
         json!({
             "session_id": session_id,
@@ -3314,7 +3347,13 @@ fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() 
             "pinned_context_ids": ["pin-handoff"]
         }),
     ));
-    assert_eq!(unsupported[0]["error"]["code"], -32048);
+    assert_eq!(
+        handoff_inspected[0]["result"]["context"]["manifest"]["entries"][0]["kind"],
+        "child_handoff"
+    );
+    assert!(!serde_json::to_string(&handoff_inspected)
+        .unwrap()
+        .contains("child handoff body"));
     let cross_session = runtime.handle_line(&request(
         "inspect-cross-session",
         "turn/context/inspect",

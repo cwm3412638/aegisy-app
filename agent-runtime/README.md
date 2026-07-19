@@ -174,9 +174,12 @@ are passed to pinned Codex 0.144.5 as `localImage` inputs through verified priva
 temporary hard links. Normal turn completion removes the links; runtime startup
 removes only safely named crash leftovers and preserves unknown entries. Image
 paths and bodies are not stored in turn history or returned by context inspection.
-Final unpin releases the active reference through the event transaction. Cross-resource
-atomicity, child-handoff assembly, and the remaining pin/Blob GC lifecycle remain
-open under OpenSpec task 17.3.
+Final unpin releases the active reference through the event transaction. A read-only
+`child-handoff/0.1` foundation can assemble a parent-session-scoped text Artifact
+Blob only after same-project source-session, owner, media type, UTF-8, hash, and
+byte checks; inspection never returns its body. Cross-resource atomicity,
+child-task/lineage production, and the remaining pin/Blob GC lifecycle remain open
+under OpenSpec task 17.3 and 21.*.
 
 `operation/probe` is a read-only evidence collector for the reconciliation
 workflow. It resolves only registered project roots through the Work session,

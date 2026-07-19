@@ -782,7 +782,7 @@ Known limitations:
   complete normalized source hash/byte count/truncation state. Worktree/staged drift
   fails stale, while commit-backed context remains valid only while its exact object
   is available. Duplicate/missing IDs, stale set identity, cross-session selection,
-  and image/child-handoff kinds fail explicitly. Qt now
+  and invalid image/child-handoff identities fail explicitly. Qt now
   loads project pins and covers authoritative file and editor-selection pin creation,
   CAS persistence, range metadata, per-turn inclusion, bounded order changes, and
   unpin in the Workbench render fixture. The Structure diagnostics surface also
@@ -801,8 +801,12 @@ Known limitations:
   Runtime and verifies every stale marker remains durable. The Qt render flow
   consumes the sidecar-advanced identity and proves a stale terminal/selection pin
   can still be explicitly unpinned without weakening stale-CAS rejection. Remaining image/
-  child-handoff assembly, cross-resource atomicity, and complete cross-platform
-  pin evidence remain incomplete; task 17.3 remains unchecked. Qt workspace-watch and user-save callbacks mark loaded
+  child-task production/lineage handoff, cross-resource atomicity, and complete cross-platform
+  pin evidence remain incomplete; task 17.3 remains unchecked. The child-handoff
+  fixture proves a parent-session-scoped text Artifact Blob is revalidated by
+  owner, source-session, media type, UTF-8, hash, and byte count before assembly;
+  inspection remains metadata-only; invalid source identity remains a bounded error.
+  Qt workspace-watch and user-save callbacks mark loaded
   matching file, selection, and diagnostic pins stale locally; terminal
   restart/removal marks matching terminal-excerpt pins stale. None of these local
   indicators rewrite durable metadata; the sidecar reread remains authoritative.

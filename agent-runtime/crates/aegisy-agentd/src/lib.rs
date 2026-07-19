@@ -7665,6 +7665,69 @@ impl Runtime {
         Ok(content)
     }
 
+    fn read_pinned_child_handoff_text(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        item: &pinned_context::PinnedContextItem,
+    ) -> Result<String, (i64, String)> {
+        let (source_session_id, handoff_id) = Self::validate_child_handoff_descriptor(item)?;
+        if item.session_id.as_deref() != Some(session_id) {
+            return Err((
+                -32095,
+                "child handoff is bound to another parent session".into(),
+            ));
+        }
+        let source_project = self
+            .sessions
+            .get(&source_session_id)
+            .and_then(|state| state.session.project_id.clone())
+            .or_else(|| {
+                self.workbench_store
+                    .as_ref()
+                    .and_then(|store| store.load_readable_session(&source_session_id).ok())
+                    .and_then(|session| session.project_id)
+            });
+        if source_project.as_deref() != Some(project_id) {
+            return Err((-32095, "child handoff source session is unavailable".into()));
+        }
+        let Some(store) = self.workbench_store.as_ref() else {
+            return Err((-32079, "child handoff content is unavailable".into()));
+        };
+        let durable = store
+            .read_durable_blob_for_pinned_context(project_id, Some(session_id), &item.reference)
+            .map_err(|_| (-32079, "child handoff content is unavailable".into()))?;
+        if durable.reference.kind != DurableBlobKind::Artifact
+            || durable.reference.owner_kind != "item"
+            || durable.reference.owner_id != handoff_id
+            || durable.reference.media_type != "text/plain; charset=utf-8"
+            || durable
+                .reference
+                .metadata
+                .get("schema_version")
+                .and_then(Value::as_str)
+                != Some("child-handoff/0.1")
+        {
+            return Err((-32079, "child handoff Blob authority is invalid".into()));
+        }
+        if durable.content.len() > 16 * 1024 {
+            return Err((
+                -32079,
+                "child handoff content exceeds the bounded limit".into(),
+            ));
+        }
+        let content = String::from_utf8(durable.content)
+            .map_err(|_| (-32079, "child handoff content is not valid UTF-8".into()))?;
+        let Some(expected_hash) = item.content_hash.strip_prefix("sha256:") else {
+            return Err((-32048, "child handoff content hash is invalid".into()));
+        };
+        let actual_hash = ContentHash::for_bytes(content.as_bytes()).sha256;
+        if expected_hash != actual_hash || item.bytes != content.len() as u64 {
+            return Err((-32048, "child handoff content identity changed".into()));
+        }
+        Ok(content)
+    }
+
     fn read_pinned_image_context(
         &self,
         project_id: &str,
@@ -8038,6 +8101,7 @@ impl Runtime {
                 && item.kind != "git_commit"
                 && item.kind != "git_diff"
                 && item.kind != "artifact"
+                && item.kind != "child_handoff"
                 && item.kind != "image"
             {
                 return Err((
@@ -8051,6 +8115,9 @@ impl Runtime {
                     -32095,
                     "artifact pinned context must be bound to the current session".into(),
                 ));
+            }
+            if item.kind == "child_handoff" {
+                Self::validate_child_handoff_descriptor(&item)?;
             }
             if item.kind == "image" && item.session_id.as_deref() != Some(session_id) {
                 return Err((
@@ -8225,6 +8292,31 @@ impl Runtime {
                     raw_output_ref: Some(item.reference),
                     priority: Some(format!("pinned-priority-{}", item.priority)),
                     inclusion_reason: Some("pinned-context".into()),
+                    exclusion_reason: None,
+                });
+                continue;
+            }
+            if item.kind == "child_handoff" {
+                let content =
+                    self.read_pinned_child_handoff_text(&project_id, session_id, &item)?;
+                context_items.push(TurnContextItem {
+                    id: item.id,
+                    kind: item.kind,
+                    label: item.label,
+                    origin: "pinned-context".into(),
+                    root_id: Some(root_id),
+                    path: None,
+                    content: Some(content),
+                    revision: item.revision,
+                    expected_content_hash: None,
+                    line: None,
+                    column: None,
+                    end_line: None,
+                    end_column: None,
+                    freshness: Some(item.freshness),
+                    raw_output_ref: Some(item.reference),
+                    priority: Some(format!("pinned-priority-{}", item.priority)),
+                    inclusion_reason: Some("pinned-context-child-handoff".into()),
                     exclusion_reason: None,
                 });
                 continue;
@@ -10068,6 +10160,25 @@ impl Runtime {
             return Err((-32022, "project not found".into()));
         }
         for item in &set.items {
+            if item.kind == "child_handoff" {
+                let (source_session_id, _) = Self::validate_child_handoff_descriptor(item)?;
+                let source_project = self
+                    .sessions
+                    .get(&source_session_id)
+                    .and_then(|state| state.session.project_id.clone())
+                    .or_else(|| {
+                        self.workbench_store
+                            .as_ref()
+                            .and_then(|store| store.load_readable_session(&source_session_id).ok())
+                            .and_then(|session| session.project_id)
+                    });
+                if source_project.as_deref() != Some(set.project_id.as_str()) {
+                    return Err((
+                        -32095,
+                        "child handoff source session project mismatch".into(),
+                    ));
+                }
+            }
             if let Some(root_id) = item.root_id.as_deref() {
                 self.workspace_root_binding(&set.project_id, Some(root_id), false)?;
             }
@@ -10142,9 +10253,80 @@ impl Runtime {
                         return Err((-32044, "pinned image metadata scope is invalid".into()));
                     }
                 }
+                if item.kind == "child_handoff" {
+                    let (_, handoff_id) = Self::validate_child_handoff_descriptor(item)?;
+                    if reference.kind != DurableBlobKind::Artifact
+                        || reference.owner_kind != "item"
+                        || reference.owner_id != handoff_id
+                        || reference.media_type != "text/plain; charset=utf-8"
+                        || reference
+                            .metadata
+                            .get("schema_version")
+                            .and_then(Value::as_str)
+                            != Some("child-handoff/0.1")
+                    {
+                        return Err((-32048, "child handoff Blob identity is invalid".into()));
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    fn validate_child_handoff_descriptor(
+        item: &pinned_context::PinnedContextItem,
+    ) -> Result<(String, String), (i64, String)> {
+        if item.kind != "child_handoff" || item.session_id.is_none() {
+            return Err((
+                -32095,
+                "child handoff must be bound to a parent session".into(),
+            ));
+        }
+        if !item.reference.starts_with("artifact:sha256:")
+            || item.reference.len() != "artifact:sha256:".len() + 64
+            || !item
+                .reference
+                .strip_prefix("artifact:sha256:")
+                .is_some_and(|hash| {
+                    hash.len() == 64
+                        && hash
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+        {
+            return Err((
+                -32048,
+                "child handoff must use an artifact Blob reference".into(),
+            ));
+        }
+        if item.metadata.get("schema_version").map(String::as_str) != Some("child-handoff/0.1") {
+            return Err((-32048, "child handoff metadata schema is invalid".into()));
+        }
+        let source_session_id = item
+            .metadata
+            .get("source_session_id")
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+            .cloned()
+            .ok_or_else(|| (-32048, "child handoff source session is missing".into()))?;
+        let handoff_id = item
+            .metadata
+            .get("handoff_id")
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 128
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+            .cloned()
+            .ok_or_else(|| (-32048, "child handoff identity is missing".into()))?;
+        if source_session_id == item.session_id.as_deref().unwrap_or_default() {
+            return Err((
+                -32095,
+                "child handoff source and parent sessions must differ".into(),
+            ));
+        }
+        Ok((source_session_id, handoff_id))
     }
 
     fn workspace_image_import_user(&mut self, request: Request) -> Vec<Value> {
@@ -12927,6 +13109,165 @@ mod pinned_context_assembly_tests {
             .unwrap()
             .iter()
             .all(|item| item["freshness"] == "stale"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn assembles_validated_child_handoff_artifact_without_exposing_body_in_inspection() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("aegisy-child-handoff-{unique}"));
+        let data_root = root.join("data");
+        let project_root = root.join("project");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+        let mut runtime = Runtime::with_store(&data_root).unwrap();
+        runtime.handle_line(&request(
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": {"name": "child-handoff", "version": "1"}
+            }),
+        ));
+        runtime.handle_line(&request("initialized", json!({})));
+        let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
+        let project_id = opened[0]["result"]["project"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let parent = runtime.handle_line(&request(
+            "session/start",
+            json!({"mode": "work", "project_id": project_id}),
+        ));
+        let parent_id = parent[0]["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let child = runtime.handle_line(&request_with_id(
+            "child-start",
+            "session/start",
+            json!({"mode": "work", "project_id": project_id}),
+        ));
+        assert!(
+            child[0]["result"].is_object(),
+            "child session failed: {child:?}"
+        );
+        let child_id = child[0]["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let handoff_id = "handoff-1";
+        let content = b"child completed: tests passed\n".to_vec();
+        let content_hash = ContentHash::for_bytes(&content).sha256;
+        let content_reference = format!("artifact:sha256:{content_hash}");
+        let created_at_ms = now_ms();
+        let metadata = json!({
+            "schema_version": "child-handoff/0.1",
+            "source_session_id": child_id,
+            "parent_session_id": parent_id,
+            "handoff_id": handoff_id,
+            "content_included": true
+        });
+        let reference_id = durable_blob_reference_id(
+            Some(&parent_id),
+            Some(&project_id),
+            "item",
+            handoff_id,
+            &content_reference,
+        );
+        runtime
+            .workbench_store
+            .as_mut()
+            .unwrap()
+            .put_durable_blob(DurableBlobWrite {
+                reference_id,
+                content_reference: content_reference.clone(),
+                session_id: Some(parent_id.clone()),
+                project_id: Some(project_id.clone()),
+                kind: DurableBlobKind::Artifact,
+                media_type: "text/plain; charset=utf-8".into(),
+                owner_kind: "item".into(),
+                owner_id: handoff_id.into(),
+                metadata,
+                content: content.clone(),
+                created_at_ms,
+                retain_until_ms: created_at_ms + 24 * 60 * 60 * 1_000,
+            })
+            .unwrap();
+        let set = json!({
+            "schema_version": pinned_context::SCHEMA_VERSION,
+            "project_id": project_id,
+            "items": [{
+                "id": "pin-handoff",
+                "project_id": project_id,
+                "session_id": parent_id,
+                "root_id": "root-1",
+                "kind": "child_handoff",
+                "source": "child-session",
+                "label": "Child result",
+                "reference": content_reference,
+                "content_hash": format!("sha256:{content_hash}"),
+                "bytes": content.len(),
+                "revision": "handoff-revision:1",
+                "freshness": "fresh",
+                "priority": 900,
+                "metadata": {
+                    "schema_version": "child-handoff/0.1",
+                    "source_session_id": child_id,
+                    "parent_session_id": parent_id,
+                    "handoff_id": handoff_id
+                }
+            }]
+        });
+        let saved = runtime.handle_line(&request_with_id(
+            "save-handoff",
+            "workspace/pinned-context/save",
+            json!({"project_id": project_id, "set": set}),
+        ));
+        assert!(
+            saved[0]["result"].is_object(),
+            "handoff save failed: {saved:?}"
+        );
+        let identity = saved[0]["result"]["set_identity"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let inspected = runtime.handle_line(&request(
+            "turn/context/inspect",
+            json!({
+                "session_id": parent_id,
+                "pinned_context_set_identity": identity,
+                "pinned_context_ids": ["pin-handoff"]
+            }),
+        ));
+        assert!(
+            inspected[0]["result"].is_object(),
+            "handoff inspect failed: {inspected:?}"
+        );
+        assert_eq!(
+            inspected[0]["result"]["context"]["manifest"]["entries"][0]["kind"],
+            "child_handoff"
+        );
+        assert!(!serde_json::to_string(&inspected)
+            .unwrap()
+            .contains("child completed: tests passed"));
+        let mut context = Vec::new();
+        runtime
+            .append_pinned_context(
+                &parent_id,
+                Some(&identity),
+                &["pin-handoff".into()],
+                &mut context,
+                &mut HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(context[0].kind, "child_handoff");
+        assert_eq!(
+            context[0].content.as_deref(),
+            Some("child completed: tests passed\n")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

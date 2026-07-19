@@ -271,9 +271,14 @@ implicitly. A non-empty selection requires the exact current set identity,
 contains at most 16 unique IDs, and is revalidated against the current project,
 session, and registered root. The first assembly phase accepts `file`, `selection`,
 project/root-bound `diagnostic`, session-owned `terminal_excerpt`, primary-root
-`git_commit`/`git_diff`, session-owned `artifact`, and session-owned `image` pins;
-child-handoff descriptors fail explicitly instead of becoming unverified inline
-content. Artifact assembly accepts only validated `command-output:sha256:`
+`git_commit`/`git_diff`, session-owned `artifact`, session-owned `image`, and the
+read-only `child_handoff` foundation. A child handoff must use an
+`artifact:sha256:` reference for a text Artifact Blob owned by the current parent
+session, with `child-handoff/0.1` metadata naming a distinct same-project source
+session and bounded handoff ID. Assembly rereads and validates UTF-8, owner,
+media type, byte count, and SHA-256; invalid or missing authority fails closed.
+Child-task creation, lineage handoff persistence, approvals, and multi-agent
+execution remain outside this foundation. Artifact assembly accepts only validated `command-output:sha256:`
 text references and rechecks UTF-8, byte count, and SHA-256 before adding content.
 The durable command-output path is reloaded through session-scoped Blob ownership
 after Runtime restart; inspection remains metadata-only while turn assembly may
@@ -378,8 +383,8 @@ source identity, bytes, and truncation. Worktree/staged changes therefore invali
 their pins; commit and commit-diff pins survive unrelated worktree changes but fail
 if the exact Git object is no longer available. No Git mutation is added.
 
-Child-handoff assembly, full cross-resource atomicity, and Windows runtime evidence
-remain open. Startup also runs the bounded
+Child-task production, lineage handoff persistence, full cross-resource atomicity,
+and Windows runtime evidence remain open. Startup also runs the bounded
 `pinned-context-object-gc/0.1` sweep after publication compensation: it protects
 pointer/journal objects, applies a 24-hour grace period, rechecks hash/schema and
 file metadata, and preserves uncertain entries.
