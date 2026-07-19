@@ -16,6 +16,7 @@ pub mod git_workflow_authorization;
 pub mod git_workflow_execution;
 pub mod git_workflow_state;
 pub mod git_worktree_lifecycle;
+mod image_context;
 mod instruction_discovery;
 mod language_server;
 pub mod non_git_checkpoint;
@@ -55,13 +56,16 @@ use aegisy_aap::stable::v0_1::{
 use aegisy_aap::{Notification, Request, Response, JSONRPC_VERSION, PROTOCOL_VERSION};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use codex_adapter::{BackendInfo, CodexAdapter, CodexEvent, CodexSession, CommandItem};
+use codex_adapter::{
+    BackendInfo, CodexAdapter, CodexEvent, CodexSession, CodexTurnRequest, CommandItem,
+};
 use diagnostic_store::DiagnosticStore;
 use git_query::{
     commit as git_commit, diff as git_diff, log as git_log, overview as git_overview,
     GitCommitDetail,
 };
 use git_status::{ignored_paths, status as git_status};
+use image_context::{thumbnail_png, validate_image, MAX_IMAGE_BYTES};
 use instruction_discovery::{discover as discover_instructions, roots_from_environment};
 use language_server::LanguageServerManager;
 use operation_reconciliation::{
@@ -79,7 +83,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use terminal::{TerminalError, TerminalManager, TerminalOpenContext};
-use turn_context::{prepare_turn_context_scoped, TurnContextItem};
+use turn_context::{prepare_turn_context_scoped_with_images, TurnContextItem, TurnImageContext};
 use workbench_store::{
     durable_blob_reference_id, DurableBlobKind, DurableBlobWrite, PortableSessionImportCommand,
     PortableSessionPackage, RetentionPolicy, SessionDeletionScope, SessionProjectionConsistency,
@@ -110,6 +114,8 @@ const MAX_TERMINAL_EXCERPT_BYTES: usize = 16 * 1024;
 const TERMINAL_EXCERPT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 const MAX_PINNED_GIT_CONTEXT_BYTES: usize = 16 * 1024;
 const GIT_CONTEXT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
+const IMAGE_CONTEXT_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
+const MAX_IMAGE_BASE64_CHARS: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 
 const TRUST_INSTRUCTION_NAMES: &[&str] = &[
     "AGENTS.md",
@@ -613,6 +619,22 @@ struct PinnedContextRemoveParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct WorkspaceImageImportParams {
+    session_id: String,
+    #[serde(default)]
+    root_id: Option<String>,
+    label: String,
+    media_type: String,
+    data_base64: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceImageReadParams {
+    session_id: String,
+    reference: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ProjectOpenParams {
     root: String,
 }
@@ -874,6 +896,15 @@ struct TurnStartParams {
     pinned_context_set_identity: Option<String>,
     #[serde(default)]
     pinned_context_ids: Vec<String>,
+}
+
+struct PreviewTurn {
+    request: Request,
+    params: TurnStartParams,
+    backend_input: String,
+    persistence_input: String,
+    prepared_context: turn_context::PreparedTurnContext,
+    user_item: TimelineItem,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2732,6 +2763,7 @@ impl Runtime {
                     | "turn/steer"
                     | "turn/context/inspect"
                     | "workspace/pinned-context/list"
+                    | "workspace/image/read"
                     | "terminal/stop-user"
                     | "terminal/close-user"
                     | "terminal/remove-user"
@@ -2821,6 +2853,7 @@ impl Runtime {
                     | "turn/steer"
                     | "turn/context/inspect"
                     | "workspace/pinned-context/list"
+                    | "workspace/image/read"
                     | "terminal/list"
                     | "terminal/read"
                     | "terminal/excerpt/read"
@@ -2856,6 +2889,7 @@ impl Runtime {
                 | "turn/steer"
                 | "turn/context/inspect"
                 | "workspace/pinned-context/list"
+                | "workspace/image/read"
                 | "terminal/list"
                 | "terminal/read"
                 | "terminal/excerpt/read"
@@ -2970,6 +3004,8 @@ impl Runtime {
             "workspace/pinned-context/list" => self.pinned_context_list(request),
             "workspace/pinned-context/save" => self.pinned_context_save(request),
             "workspace/pinned-context/remove" => self.pinned_context_remove(request),
+            "workspace/image/import-user" => self.workspace_image_import_user(request),
+            "workspace/image/read" => self.workspace_image_read(request),
             "workspace/save-user-text" => self.workspace_save_user_text(request),
             "workspace/metadata" => self.workspace_metadata(request),
             "workspace/watch" => self.workspace_watch(request),
@@ -3356,6 +3392,12 @@ impl Runtime {
                     "workspace.pinned-context.store".into(),
                     "workspace.pinned-context.manage".into(),
                     "turn.context.pinned-selected".into(),
+                ]);
+            }
+            if self.workbench_store.is_some() {
+                capabilities.extend([
+                    "workspace.image.import-user".into(),
+                    "workspace.image.preview".into(),
                 ]);
             }
         }
@@ -7454,6 +7496,114 @@ impl Runtime {
         Ok(content)
     }
 
+    fn read_pinned_image_context(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        item: &pinned_context::PinnedContextItem,
+    ) -> Result<TurnImageContext, (i64, String)> {
+        if item.session_id.as_deref() != Some(session_id) {
+            return Err((
+                -32095,
+                "image pinned context must be bound to the current session".into(),
+            ));
+        }
+        let Some(store) = self.workbench_store.as_ref() else {
+            return Err((-32125, "durable image authority is unavailable".into()));
+        };
+        let durable = store
+            .read_durable_blob_for_pinned_context(project_id, Some(session_id), &item.reference)
+            .map_err(|_| (-32125, "durable image authority is unavailable".into()))?;
+        if durable.reference.kind != DurableBlobKind::Image
+            || durable.reference.owner_kind != "session"
+            || durable.reference.owner_id != session_id
+        {
+            return Err((-32095, "pinned image authority scope is invalid".into()));
+        }
+        let expected_media_type = item
+            .metadata
+            .get("media_type")
+            .ok_or_else(|| (-32048, "pinned image media type is missing".to_owned()))?;
+        let metadata = validate_image(&durable.content, Some(expected_media_type))
+            .map_err(|cause| (-32048, cause.code.to_owned()))?;
+        let expected_width = item
+            .metadata
+            .get("width")
+            .and_then(|value| value.parse::<u32>().ok());
+        let expected_height = item
+            .metadata
+            .get("height")
+            .and_then(|value| value.parse::<u32>().ok());
+        if item.reference != durable.reference.content_reference
+            || item.content_hash != format!("sha256:{}", metadata.sha256)
+            || item.bytes != metadata.bytes
+            || durable.reference.content_hash.sha256 != metadata.sha256
+            || durable.reference.content_hash.bytes != metadata.bytes
+            || expected_width != Some(metadata.width)
+            || expected_height != Some(metadata.height)
+            || durable
+                .reference
+                .metadata
+                .get("width")
+                .and_then(Value::as_u64)
+                != Some(u64::from(metadata.width))
+            || durable
+                .reference
+                .metadata
+                .get("height")
+                .and_then(Value::as_u64)
+                != Some(u64::from(metadata.height))
+        {
+            return Err((-32048, "pinned image content identity changed".into()));
+        }
+        Ok(TurnImageContext {
+            project_id: project_id.into(),
+            session_id: session_id.into(),
+            reference: item.reference.clone(),
+            media_type: metadata.media_type.into(),
+            extension: metadata.extension.into(),
+            content_hash: format!("sha256:{}", metadata.sha256),
+            bytes: metadata.bytes,
+            width: metadata.width,
+            height: metadata.height,
+        })
+    }
+
+    fn materialize_turn_images(
+        &self,
+        session_id: &str,
+        images: &[turn_context::PreparedImageContext],
+    ) -> Result<Vec<durable_blob::DurableBlobLocalFile>, (i64, String)> {
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(state) = self.sessions.get(session_id) else {
+            return Err((-32023, "session not found".into()));
+        };
+        let Some(project_id) = state.session.project_id.as_deref() else {
+            return Err((-32095, "image context requires a project session".into()));
+        };
+        let Some(store) = self.workbench_store.as_ref() else {
+            return Err((-32125, "durable image storage is unavailable".into()));
+        };
+        let mut leases = Vec::with_capacity(images.len());
+        for image in images {
+            if image.project_id != project_id || image.session_id != session_id {
+                return Err((-32095, "prepared image scope is invalid".into()));
+            }
+            let lease = store
+                .materialize_durable_image_for_turn(
+                    project_id,
+                    session_id,
+                    &image.reference,
+                    &image.extension,
+                )
+                .map_err(|_| (-32125, "cannot materialize image context".into()))?;
+            leases.push(lease);
+        }
+        Ok(leases)
+    }
+
     fn read_pinned_diagnostic_text(
         &self,
         project_id: &str,
@@ -7623,6 +7773,7 @@ impl Runtime {
         set_identity: Option<&str>,
         ids: &[String],
         context_items: &mut Vec<TurnContextItem>,
+        image_contexts: &mut HashMap<String, TurnImageContext>,
     ) -> Result<(), (i64, String)> {
         if ids.is_empty() {
             if set_identity.is_some() {
@@ -7718,10 +7869,11 @@ impl Runtime {
                 && item.kind != "git_commit"
                 && item.kind != "git_diff"
                 && item.kind != "artifact"
+                && item.kind != "image"
             {
                 return Err((
                     -32048,
-                    "only file, selection, diagnostic, terminal excerpt, Git, and artifact pinned context are available in turn assembly"
+                    "only file, selection, image, diagnostic, terminal excerpt, Git, and artifact pinned context are available in turn assembly"
                         .into(),
                 ));
             }
@@ -7729,6 +7881,12 @@ impl Runtime {
                 return Err((
                     -32095,
                     "artifact pinned context must be bound to the current session".into(),
+                ));
+            }
+            if item.kind == "image" && item.session_id.as_deref() != Some(session_id) {
+                return Err((
+                    -32095,
+                    "image pinned context must be bound to the current session".into(),
                 ));
             }
             let root_id = item.root_id.clone().unwrap_or_else(|| "root-1".into());
@@ -7767,6 +7925,33 @@ impl Runtime {
             selected.push((item, root_id));
         }
         for (item, root_id) in selected {
+            if item.kind == "image" {
+                let image = self.read_pinned_image_context(&project_id, session_id, &item)?;
+                if image_contexts.insert(item.id.clone(), image).is_some() {
+                    return Err((-32602, "duplicate image context authority".into()));
+                }
+                context_items.push(TurnContextItem {
+                    id: item.id,
+                    kind: item.kind,
+                    label: item.label,
+                    origin: "pinned-context".into(),
+                    root_id: Some(root_id),
+                    path: None,
+                    content: None,
+                    revision: item.revision,
+                    expected_content_hash: None,
+                    line: None,
+                    column: None,
+                    end_line: None,
+                    end_column: None,
+                    freshness: Some(item.freshness),
+                    raw_output_ref: None,
+                    priority: Some(format!("pinned-priority-{}", item.priority)),
+                    inclusion_reason: Some("pinned-context".into()),
+                    exclusion_reason: None,
+                });
+                continue;
+            }
             if item.kind == "git_commit" || item.kind == "git_diff" {
                 let content = self.read_pinned_git_context_text(&project_id, &root_id, &item)?;
                 context_items.push(TurnContextItem {
@@ -7951,11 +8136,13 @@ impl Runtime {
                 .collect::<HashMap<_, _>>()
         });
         let mut context_items = params.context;
+        let mut image_contexts = HashMap::new();
         if let Err((code, message)) = self.append_pinned_context(
             &params.session_id,
             params.pinned_context_set_identity.as_deref(),
             &params.pinned_context_ids,
             &mut context_items,
+            &mut image_contexts,
         ) {
             return self.error_for(&request, code, message);
         }
@@ -7966,7 +8153,11 @@ impl Runtime {
                 return self.error_for(&request, code, message);
             }
         }
-        let prepared = match prepare_turn_context_scoped(&context_items, context_roots.as_ref()) {
+        let prepared = match prepare_turn_context_scoped_with_images(
+            &context_items,
+            context_roots.as_ref(),
+            &image_contexts,
+        ) {
             Ok(prepared) => prepared,
             Err(error) => return self.error_for(&request, error.code, error.message),
         };
@@ -8061,11 +8252,13 @@ impl Runtime {
                 .collect::<HashMap<_, _>>()
         });
         let mut context_items = params.context.clone();
+        let mut image_contexts = HashMap::new();
         if let Err((code, message)) = self.append_pinned_context(
             &params.session_id,
             params.pinned_context_set_identity.as_deref(),
             &params.pinned_context_ids,
             &mut context_items,
+            &mut image_contexts,
         ) {
             self.emit_all(self.error_for(&request, code, message), emit);
             return;
@@ -8078,19 +8271,29 @@ impl Runtime {
                 return;
             }
         }
-        let prepared_context =
-            match prepare_turn_context_scoped(&context_items, context_roots.as_ref()) {
-                Ok(context) => context,
-                Err(error) => {
-                    self.emit_all(self.error_for(&request, error.code, error.message), emit);
-                    return;
-                }
-            };
+        let prepared_context = match prepare_turn_context_scoped_with_images(
+            &context_items,
+            context_roots.as_ref(),
+            &image_contexts,
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                self.emit_all(self.error_for(&request, error.code, error.message), emit);
+                return;
+            }
+        };
         let backend_input = if prepared_context.text.is_empty() {
             params.input.clone()
         } else {
             format!("{}\n\n{}", params.input.trim(), prepared_context.text)
         };
+        let manifest_bytes =
+            serde_json::to_vec(&prepared_context.manifest).expect("context manifest serialization");
+        let persistence_input = format!(
+            "{}\0context-manifest:{}",
+            backend_input,
+            ContentHash::for_bytes(&manifest_bytes).sha256
+        );
         let user_item = TimelineItem {
             id: self.allocate_id("item"),
             kind: "message".into(),
@@ -8103,11 +8306,14 @@ impl Runtime {
         match &self.backend {
             Backend::Preview => {
                 self.preview_turn(
-                    request,
-                    params,
-                    backend_input,
-                    prepared_context,
-                    user_item,
+                    PreviewTurn {
+                        request,
+                        params,
+                        backend_input,
+                        persistence_input,
+                        prepared_context,
+                        user_item,
+                    },
                     emit,
                 );
                 return;
@@ -8133,6 +8339,19 @@ impl Runtime {
             return;
         };
 
+        let image_leases =
+            match self.materialize_turn_images(&params.session_id, &prepared_context.images) {
+                Ok(leases) => leases,
+                Err((code, message)) => {
+                    self.emit_all(self.error_for(&request, code, message), emit);
+                    return;
+                }
+            };
+        let image_paths = image_leases
+            .iter()
+            .map(|lease| lease.path().to_path_buf())
+            .collect::<Vec<_>>();
+
         let mut backend = std::mem::replace(
             &mut self.backend,
             Backend::Unavailable("Codex turn is already running".into()),
@@ -8148,9 +8367,12 @@ impl Runtime {
         let mut metadata_truncation_notified = HashSet::<String>::new();
         let result = match &mut backend {
             Backend::Codex(adapter) => adapter.run_turn(
-                &codex_thread_id,
-                &backend_input,
-                &params.idempotency_key,
+                CodexTurnRequest {
+                    thread_id: &codex_thread_id,
+                    input: &backend_input,
+                    local_images: &image_paths,
+                    idempotency_key: &params.idempotency_key,
+                },
                 &cancellation,
                 &steering,
                 |event| match event {
@@ -8158,7 +8380,7 @@ impl Runtime {
                         if let Err(error) = self.persist_turn(
                             &params.session_id,
                             &turn_id,
-                            &backend_input,
+                            &persistence_input,
                             &params.idempotency_key,
                         ) {
                             persistence_error = Some(format!("cannot persist turn: {error}"));
@@ -8677,17 +8899,18 @@ impl Runtime {
         }
     }
 
-    fn preview_turn<F>(
-        &mut self,
-        request: Request,
-        params: TurnStartParams,
-        backend_input: String,
-        prepared_context: turn_context::PreparedTurnContext,
-        user_item: TimelineItem,
-        emit: &mut F,
-    ) where
+    fn preview_turn<F>(&mut self, turn: PreviewTurn, emit: &mut F)
+    where
         F: FnMut(Value),
     {
+        let PreviewTurn {
+            request,
+            params,
+            backend_input,
+            persistence_input,
+            prepared_context,
+            user_item,
+        } = turn;
         let turn_id = self.allocate_id("turn");
         let agent_item = TimelineItem {
             id: self.allocate_id("item"),
@@ -8700,7 +8923,7 @@ impl Runtime {
         if let Err(error) = self.persist_turn(
             &params.session_id,
             &turn_id,
-            &backend_input,
+            &persistence_input,
             &params.idempotency_key,
         ) {
             self.emit_all(
@@ -9695,9 +9918,221 @@ impl Runtime {
                         "pinned context Blob identity does not match its descriptor".into(),
                     ));
                 }
+                if item.kind == "image" {
+                    let media_type = item.metadata.get("media_type").map(String::as_str);
+                    let width = item
+                        .metadata
+                        .get("width")
+                        .and_then(|value| value.parse::<u64>().ok());
+                    let height = item
+                        .metadata
+                        .get("height")
+                        .and_then(|value| value.parse::<u64>().ok());
+                    if item.session_id.is_none()
+                        || reference.kind != DurableBlobKind::Image
+                        || reference.owner_kind != "session"
+                        || reference.owner_id != item.session_id.as_deref().unwrap_or_default()
+                        || media_type != Some(reference.media_type.as_str())
+                        || width.is_none()
+                        || height.is_none()
+                        || reference.metadata.get("width").and_then(Value::as_u64) != width
+                        || reference.metadata.get("height").and_then(Value::as_u64) != height
+                    {
+                        return Err((-32044, "pinned image metadata scope is invalid".into()));
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    fn workspace_image_import_user(&mut self, request: Request) -> Vec<Value> {
+        let params: WorkspaceImageImportParams =
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => params,
+                Err(cause) => {
+                    return self.error_for(&request, -32602, format!("invalid params: {cause}"))
+                }
+            };
+        if !valid_image_label(&params.label) {
+            return self.error_for(&request, -32602, "image label is invalid");
+        }
+        if params.data_base64.is_empty()
+            || params.data_base64.len() > MAX_IMAGE_BASE64_CHARS
+            || params
+                .data_base64
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace())
+        {
+            return self.error_for(
+                &request,
+                -32602,
+                "image Base64 input is invalid or too large",
+            );
+        }
+        let Some(state) = self.sessions.get(&params.session_id) else {
+            return self.error_for(&request, -32023, "session not found");
+        };
+        if !matches!(state.session.mode, SessionMode::Work) {
+            return self.error_for(&request, -32095, "image import requires a Work session");
+        }
+        let Some(project_id) = state.session.project_id.clone() else {
+            return self.error_for(&request, -32095, "image import requires a project session");
+        };
+        let (root_binding, _) =
+            match self.workspace_root_binding(&project_id, params.root_id.as_deref(), false) {
+                Ok(binding) => binding,
+                Err((code, message)) => return self.error_for(&request, code, message),
+            };
+        let content = match BASE64_STANDARD.decode(params.data_base64.as_bytes()) {
+            Ok(content) if !content.is_empty() && content.len() <= MAX_IMAGE_BYTES => content,
+            _ => return self.error_for(&request, -32602, "image Base64 payload is invalid"),
+        };
+        let metadata = match validate_image(&content, Some(&params.media_type)) {
+            Ok(metadata) => metadata,
+            Err(cause) => return self.error_for(&request, -32048, cause.code),
+        };
+        let content_reference = format!("image:sha256:{}", metadata.sha256);
+        let reference_id = durable_blob_reference_id(
+            Some(&params.session_id),
+            Some(&project_id),
+            "session",
+            &params.session_id,
+            &content_reference,
+        );
+        let created_at_ms = now_ms();
+        let retain_until_ms = match created_at_ms.checked_add(IMAGE_CONTEXT_RETENTION_MS) {
+            Some(retain_until_ms) => retain_until_ms,
+            None => return self.error_for(&request, -32113, "image retention is out of range"),
+        };
+        let Some(store) = self.workbench_store.as_mut() else {
+            return self.error_for(&request, -32125, "durable image storage is unavailable");
+        };
+        let stored = match store.put_durable_blob(DurableBlobWrite {
+            reference_id,
+            content_reference: content_reference.clone(),
+            session_id: Some(params.session_id.clone()),
+            project_id: Some(project_id.clone()),
+            kind: DurableBlobKind::Image,
+            media_type: metadata.media_type.into(),
+            owner_kind: "session".into(),
+            owner_id: params.session_id.clone(),
+            metadata: json!({
+                "schema_version": "pinned-image/0.1",
+                "source": "user-image-import",
+                "width": metadata.width,
+                "height": metadata.height
+            }),
+            content,
+            created_at_ms,
+            retain_until_ms,
+        }) {
+            Ok(stored) => stored,
+            Err(_) => return self.error_for(&request, -32113, "cannot persist imported image"),
+        };
+        if stored.kind != DurableBlobKind::Image
+            || stored.session_id.as_deref() != Some(params.session_id.as_str())
+            || stored.project_id.as_deref() != Some(project_id.as_str())
+            || stored.content_reference != content_reference
+            || stored.content_hash.sha256 != metadata.sha256
+            || stored.content_hash.bytes != metadata.bytes
+            || stored.media_type != metadata.media_type
+        {
+            return self.error_for(&request, -32125, "imported image identity is invalid");
+        }
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "pinned-image/0.1",
+                "project_id": project_id,
+                "session_id": params.session_id,
+                "root_id": root_binding.root_id,
+                "label": params.label,
+                "reference": content_reference,
+                "content_hash": format!("sha256:{}", metadata.sha256),
+                "bytes": metadata.bytes,
+                "media_type": metadata.media_type,
+                "width": metadata.width,
+                "height": metadata.height,
+                "preview_available": true,
+                "content_included": false
+            }),
+        )
+    }
+
+    fn workspace_image_read(&self, request: Request) -> Vec<Value> {
+        let params: WorkspaceImageReadParams = match serde_json::from_value(request.params.clone())
+        {
+            Ok(params) => params,
+            Err(cause) => {
+                return self.error_for(&request, -32602, format!("invalid params: {cause}"))
+            }
+        };
+        let Some(state) = self.sessions.get(&params.session_id) else {
+            return self.error_for(&request, -32023, "session not found");
+        };
+        let Some(project_id) = state.session.project_id.as_deref() else {
+            return self.error_for(&request, -32095, "image preview requires a project session");
+        };
+        let Some(store) = self.workbench_store.as_ref() else {
+            return self.error_for(&request, -32125, "durable image storage is unavailable");
+        };
+        let durable = match store.read_durable_blob_for_pinned_context(
+            project_id,
+            Some(&params.session_id),
+            &params.reference,
+        ) {
+            Ok(durable) => durable,
+            Err(_) => return self.error_for(&request, -32125, "image authority is unavailable"),
+        };
+        if durable.reference.kind != DurableBlobKind::Image
+            || durable.reference.owner_kind != "session"
+            || durable.reference.owner_id != params.session_id
+        {
+            return self.error_for(&request, -32095, "image authority scope is invalid");
+        }
+        let metadata = match validate_image(&durable.content, Some(&durable.reference.media_type)) {
+            Ok(metadata) => metadata,
+            Err(cause) => return self.error_for(&request, -32048, cause.code),
+        };
+        if durable.reference.content_hash.sha256 != metadata.sha256
+            || durable.reference.content_hash.bytes != metadata.bytes
+            || durable
+                .reference
+                .metadata
+                .get("width")
+                .and_then(Value::as_u64)
+                != Some(u64::from(metadata.width))
+            || durable
+                .reference
+                .metadata
+                .get("height")
+                .and_then(Value::as_u64)
+                != Some(u64::from(metadata.height))
+        {
+            return self.error_for(&request, -32048, "image metadata identity changed");
+        }
+        let thumbnail = match thumbnail_png(&durable.content, metadata.media_type) {
+            Ok(thumbnail) => thumbnail,
+            Err(cause) => return self.error_for(&request, -32048, cause.code),
+        };
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "pinned-image-preview/0.1",
+                "project_id": project_id,
+                "session_id": params.session_id,
+                "reference": params.reference,
+                "content_hash": format!("sha256:{}", metadata.sha256),
+                "bytes": metadata.bytes,
+                "media_type": metadata.media_type,
+                "width": metadata.width,
+                "height": metadata.height,
+                "thumbnail_media_type": "image/png",
+                "thumbnail_data_base64": BASE64_STANDARD.encode(thumbnail),
+                "original_content_included": false
+            }),
+        )
     }
 
     fn pinned_context_list(&self, request: Request) -> Vec<Value> {
@@ -11682,6 +12117,16 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn valid_image_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= 256
+        && !matches!(value, "." | "..")
+        && !value
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+        && crate::output_redaction::redact_complete(value) == value
+}
+
 fn session_deletion_error_code(code: &str) -> i64 {
     match code {
         "session-deletion-plan-stale" => -32130,
@@ -11773,6 +12218,8 @@ fn capture_watch_snapshot(
 #[cfg(test)]
 mod pinned_context_assembly_tests {
     use super::*;
+    use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
+    use std::io::Cursor;
 
     fn request(method: &str, params: Value) -> String {
         request_with_id(method, method, params)
@@ -11786,6 +12233,169 @@ mod pinned_context_assembly_tests {
             "params": params
         })
         .to_string()
+    }
+
+    fn test_png() -> Vec<u8> {
+        let image =
+            DynamicImage::ImageRgba8(ImageBuffer::from_pixel(64, 48, Rgba([22, 93, 255, 255])));
+        let mut output = Cursor::new(Vec::new());
+        image.write_to(&mut output, ImageFormat::Png).unwrap();
+        output.into_inner()
+    }
+
+    #[test]
+    fn imports_previews_and_selects_session_owned_image_without_persisting_body() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("aegisy-pinned-image-{unique}"));
+        let data_root = root.join("data");
+        let project_root = root.join("project");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+        let mut runtime = Runtime::with_store(&data_root).unwrap();
+        runtime.handle_line(&request(
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": {"name": "image-pin", "version": "1"}
+            }),
+        ));
+        runtime.handle_line(&request("initialized", json!({})));
+        let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
+        let project_id = opened[0]["result"]["project"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let session = runtime.handle_line(&request(
+            "session/start",
+            json!({"mode": "work", "project_id": project_id}),
+        ));
+        let session_id = session[0]["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let png = test_png();
+        let imported = runtime.handle_line(&request_with_id(
+            "import-image",
+            "workspace/image/import-user",
+            json!({
+                "session_id": session_id,
+                "root_id": "root-1",
+                "label": "screen.png",
+                "media_type": "image/png",
+                "data_base64": BASE64_STANDARD.encode(&png)
+            }),
+        ));
+        assert_eq!(imported[0]["result"]["schema_version"], "pinned-image/0.1");
+        assert_eq!(imported[0]["result"]["width"], 64);
+        assert_eq!(imported[0]["result"]["height"], 48);
+        assert_eq!(imported[0]["result"]["content_included"], false);
+        let reference = imported[0]["result"]["reference"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let content_hash = imported[0]["result"]["content_hash"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!serde_json::to_string(&imported)
+            .unwrap()
+            .contains(&BASE64_STANDARD.encode(&png)));
+
+        let preview = runtime.handle_line(&request_with_id(
+            "preview-image",
+            "workspace/image/read",
+            json!({"session_id": session_id, "reference": reference}),
+        ));
+        assert_eq!(preview[0]["result"]["thumbnail_media_type"], "image/png");
+        assert_eq!(preview[0]["result"]["original_content_included"], false);
+        let thumbnail = BASE64_STANDARD
+            .decode(
+                preview[0]["result"]["thumbnail_data_base64"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            validate_image(&thumbnail, Some("image/png")).unwrap().width,
+            64
+        );
+
+        let saved = runtime.handle_line(&request_with_id(
+            "save-image-pin",
+            "workspace/pinned-context/save",
+            json!({
+                "project_id": project_id,
+                "set": {
+                    "schema_version": pinned_context::SCHEMA_VERSION,
+                    "project_id": project_id,
+                    "items": [{
+                        "id": "pin-image",
+                        "project_id": project_id,
+                        "session_id": session_id,
+                        "root_id": "root-1",
+                        "kind": "image",
+                        "source": "user-image-import",
+                        "label": "screen.png",
+                        "reference": reference,
+                        "content_hash": content_hash,
+                        "bytes": png.len(),
+                        "freshness": "fresh",
+                        "priority": 800,
+                        "metadata": {"media_type": "image/png", "width": "64", "height": "48"}
+                    }]
+                }
+            }),
+        ));
+        let set_identity = saved[0]["result"]["set_identity"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let inspected = runtime.handle_line(&request_with_id(
+            "inspect-image-pin",
+            "turn/context/inspect",
+            json!({
+                "session_id": session_id,
+                "pinned_context_set_identity": set_identity,
+                "pinned_context_ids": ["pin-image"]
+            }),
+        ));
+        assert_eq!(inspected[0]["result"]["context"]["item_count"], 1);
+        assert_eq!(
+            inspected[0]["result"]["context"]["manifest"]["entries"][0]["kind"],
+            "image"
+        );
+        assert_eq!(inspected[0]["result"]["content_included"], false);
+        assert!(!serde_json::to_string(&inspected)
+            .unwrap()
+            .contains("thumbnail_data_base64"));
+
+        let mut context = Vec::new();
+        let mut images = HashMap::new();
+        runtime
+            .append_pinned_context(
+                &session_id,
+                Some(&set_identity),
+                &["pin-image".into()],
+                &mut context,
+                &mut images,
+            )
+            .unwrap();
+        let prepared = prepare_turn_context_scoped_with_images(&context, None, &images).unwrap();
+        let leases = runtime
+            .materialize_turn_images(&session_id, &prepared.images)
+            .unwrap();
+        let path = leases[0].path().to_path_buf();
+        assert!(path.is_file());
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("png")
+        );
+        drop(leases);
+        assert!(!path.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "macos")]
@@ -12002,6 +12612,7 @@ mod pinned_context_assembly_tests {
                 Some(&identity),
                 &["pin-diagnostic".into()],
                 &mut context,
+                &mut HashMap::new(),
             )
             .unwrap();
         assert_eq!(context[0].kind, "diagnostic");
@@ -12208,6 +12819,7 @@ mod pinned_context_assembly_tests {
                 Some(&identity),
                 &["pin-terminal".into()],
                 &mut context,
+                &mut HashMap::new(),
             )
             .unwrap();
         assert_eq!(context[0].kind, "terminal_excerpt");
@@ -12245,6 +12857,7 @@ mod pinned_context_assembly_tests {
                 Some(&identity),
                 &["pin-terminal".into()],
                 &mut Vec::new(),
+                &mut HashMap::new(),
             )
             .unwrap_err();
         assert_eq!(error.0, -32078);
@@ -12399,6 +13012,7 @@ mod pinned_context_assembly_tests {
                 Some(&identity),
                 &["pin-git-commit".into(), "pin-git-diff".into()],
                 &mut assembled,
+                &mut HashMap::new(),
             )
             .unwrap();
         assert_eq!(assembled[0].kind, "git_commit");
@@ -12447,6 +13061,7 @@ mod pinned_context_assembly_tests {
                 Some(&identity),
                 &["pin-git-commit".into()],
                 &mut commit_only,
+                &mut HashMap::new(),
             )
             .unwrap();
         assert!(commit_only[0]
@@ -12460,6 +13075,7 @@ mod pinned_context_assembly_tests {
                 Some(&identity),
                 &["pin-git-diff".into()],
                 &mut Vec::new(),
+                &mut HashMap::new(),
             )
             .unwrap_err();
         assert_eq!(error.0, -32048);

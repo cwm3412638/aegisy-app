@@ -105,6 +105,10 @@ private:
     bool canPinCommandArtifact(const QJsonObject &artifact, QString *reason = nullptr) const;
     void pinCommandArtifact(const QJsonObject &artifact);
     void finishPinnedFileRead(const QJsonObject &file);
+    void pinImageContext();
+    void finishPinnedImageImport(const QJsonObject &image);
+    void previewPinnedImage(const QJsonObject &item);
+    void showPinnedImagePreview(const QJsonObject &preview);
     void requestPinnedContext();
     void applyPinnedContextResult(const QJsonObject &result);
     void savePinnedContextOrder();
@@ -255,6 +259,7 @@ private:
     QAction *m_pinFileContextAction = nullptr;
     QAction *m_pinSelectionContextAction = nullptr;
     QAction *m_pinDiagnosticContextAction = nullptr;
+    QAction *m_pinImageContextAction = nullptr;
     QPushButton *m_sendButton = nullptr;
     QTabWidget *m_workspaceTabs = nullptr;
     QTreeWidget *m_fileTree = nullptr;
@@ -452,6 +457,9 @@ private:
     QString m_pinnedContextListRequestId;
     QString m_pinnedContextMutationRequestId;
     QString m_pinnedFileReadRequestId;
+    QString m_pinnedImageImportRequestId;
+    QString m_pinnedImagePreviewRequestId;
+    QString m_pinnedImagePreviewReference;
     QJsonObject m_pendingPinnedSelection;
     QJsonObject m_pendingPinnedDiagnostic;
     QString m_pendingPinnedIncludeId;
@@ -472,6 +480,7 @@ private:
     bool m_operationStatusBlocked = false;
     bool m_compactionAvailable = false;
     bool m_pinnedContextAvailable = false;
+    bool m_imageContextAvailable = false;
     bool m_gitContextAvailable = false;
     bool m_runtimeDegradationsAvailable = false;
     QHash<QString, QString> m_runtimeDegradationStates;

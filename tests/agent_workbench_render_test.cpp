@@ -4,6 +4,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QBuffer>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCryptographicHash>
@@ -12,9 +13,11 @@
 #include <QImage>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileDialog>
 #include <QFrame>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QListWidget>
 #include <QPushButton>
 #include <QSplitter>
@@ -23,6 +26,7 @@
 #include <QTemporaryDir>
 #include <QTextEdit>
 #include <QThread>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QPlainTextEdit>
 #include <QProcess>
@@ -98,6 +102,7 @@ bool waitUntil(QApplication &application, Predicate predicate, int timeoutMs = 3
 
 int main(int argc, char *argv[])
 {
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication application(argc, argv);
     AppTheme::apply(application);
     QTemporaryDir workbenchData;
@@ -292,6 +297,8 @@ int main(int argc, char *argv[])
         QStringLiteral("agentPinFileContextAction"));
     QAction *pinSelectionContextAction = workbench.findChild<QAction *>(
         QStringLiteral("agentPinSelectionContextAction"));
+    QAction *pinImageContextAction = workbench.findChild<QAction *>(
+        QStringLiteral("agentPinImageContextAction"));
     QAction *searchContextAction = workbench.findChild<QAction *>(
         QStringLiteral("agentSearchResultContextAction"));
     QAction *diagnosticContextAction = workbench.findChild<QAction *>(
@@ -369,6 +376,7 @@ int main(int argc, char *argv[])
                            && fileContextAction && searchContextAction
                            && pinFileContextAction
                            && pinSelectionContextAction
+                           && pinImageContextAction
                            && diagnosticContextAction && terminalContextAction
                            && pinTerminalExcerptAction
                            && gitContextAction && contextList->count() == 0
@@ -458,6 +466,8 @@ int main(int argc, char *argv[])
             QStringLiteral("session.compaction.checkpoint-review"),
             QStringLiteral("turn.context.pinned-selected"),
             QStringLiteral("workspace.git-context.read-only"),
+            QStringLiteral("workspace.image.import-user"),
+            QStringLiteral("workspace.image.preview"),
         }},
     });
     runtimeClient->runtimeDegradationsRead(QStringLiteral("degradation-fixture"), QJsonObject{
@@ -1856,6 +1866,88 @@ int main(int argc, char *argv[])
                                QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
                 }),
                 "selection pin unpin did not remove the persisted row")) {
+        return 1;
+    }
+    QImage pinnedImageFixture(96, 64, QImage::Format_RGBA8888);
+    pinnedImageFixture.fill(QColor(QStringLiteral("#165DFF")));
+    QByteArray pinnedImageBytes;
+    QBuffer pinnedImageBuffer(&pinnedImageBytes);
+    pinnedImageBuffer.open(QIODevice::WriteOnly);
+    if (!expect(pinnedImageFixture.save(&pinnedImageBuffer, "PNG"),
+                "could not encode pinned image render fixture")) {
+        return 1;
+    }
+    const QString pinnedImagePath = project.filePath(QStringLiteral("layout.png"));
+    QFile pinnedImageFile(pinnedImagePath);
+    if (!expect(pinnedImageFile.open(QIODevice::WriteOnly)
+                    && pinnedImageFile.write(pinnedImageBytes) == pinnedImageBytes.size(),
+                "could not write pinned image render fixture")) {
+        return 1;
+    }
+    pinnedImageFile.close();
+    QMenu *attachMenu = attachContext->menu();
+    attachMenu->popup(attachContext->mapToGlobal(QPoint(0, attachContext->height())));
+    if (!expect(waitUntil(application, [pinImageContextAction]() {
+                    return pinImageContextAction->isEnabled();
+                }),
+                "image pin action did not enable for the active Work session")) {
+        return 1;
+    }
+    attachMenu->hide();
+    QTimer::singleShot(0, &workbench, [&]() {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            QFileDialog *dialog = qobject_cast<QFileDialog *>(widget);
+            if (!dialog) continue;
+            dialog->selectFile(pinnedImagePath);
+            QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+        }
+    });
+    pinImageContextAction->trigger();
+    if (!expect(waitUntil(application, [&workbench]() {
+                        return workbench.findChildren<QPushButton *>(
+                                   QStringLiteral("agentPinnedImagePreviewButton")).size() == 1;
+                    }),
+                "image import did not persist and render a previewable fixed row")) {
+        return 1;
+    }
+    const QList<QLabel *> imageLabels = workbench.findChildren<QLabel *>();
+    if (!expect(std::any_of(imageLabels.cbegin(), imageLabels.cend(), [](QLabel *label) {
+                    return label->text().contains(QStringLiteral("layout.png"))
+                        && label->text().contains(QStringLiteral("96 × 64"))
+                        && label->text().contains(QStringLiteral("image/png"));
+                }),
+                "fixed image row did not show label, dimensions, and media type")) {
+        return 1;
+    }
+    bool imagePreviewSeen = false;
+    QTimer previewCloser;
+    previewCloser.setInterval(10);
+    QObject::connect(&previewCloser, &QTimer::timeout, &workbench, [&]() {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            QDialog *dialog = qobject_cast<QDialog *>(widget);
+            if (!dialog || dialog->windowTitle() != QStringLiteral("固定图片预览")) continue;
+            const QList<QLabel *> labels = dialog->findChildren<QLabel *>();
+            imagePreviewSeen = std::any_of(labels.cbegin(), labels.cend(), [](QLabel *label) {
+                return label->text().contains(QStringLiteral("96 × 64"));
+            });
+            dialog->accept();
+        }
+    });
+    previewCloser.start();
+    workbench.findChildren<QPushButton *>(
+        QStringLiteral("agentPinnedImagePreviewButton")).first()->click();
+    if (!expect(waitUntil(application, [&imagePreviewSeen]() { return imagePreviewSeen; }),
+                "fixed image preview did not render the scoped thumbnail")) {
+        return 1;
+    }
+    previewCloser.stop();
+    workbench.findChildren<QPushButton *>(
+        QStringLiteral("agentPinnedContextRemoveButton")).first()->click();
+    if (!expect(waitUntil(application, [&workbench]() {
+                    return workbench.findChildren<QPushButton *>(
+                               QStringLiteral("agentPinnedContextRemoveButton")).isEmpty();
+                }),
+                "fixed image unpin did not remove the persisted descriptor")) {
         return 1;
     }
     editor->selectAll();

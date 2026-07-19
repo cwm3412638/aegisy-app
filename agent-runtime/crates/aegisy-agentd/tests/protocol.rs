@@ -4,14 +4,27 @@ use aegisy_agentd::workbench_store::{
 use aegisy_agentd::Runtime;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Cursor;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn request(id: &str, method: &str, params: Value) -> String {
     json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string()
+}
+
+fn image_png(width: u32, height: u32) -> Vec<u8> {
+    let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+        width,
+        height,
+        Rgba([22, 93, 255, 255]),
+    ));
+    let mut output = Cursor::new(Vec::new());
+    image.write_to(&mut output, ImageFormat::Png).unwrap();
+    output.into_inner()
 }
 
 fn ready_runtime() -> Runtime {
@@ -1597,6 +1610,175 @@ fn pinned_context_aap_validates_project_blob_metadata_without_reading_body() {
 }
 
 #[test]
+fn pinned_image_import_preview_selection_and_restart_are_scope_bound() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-pinned-image-{unique}"));
+    let data_root = root.join("data");
+    let project_root = root.join("project");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    let initialized = runtime.handle_line(&request(
+        "initialize-image",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "pinned-image", "version": "1"}
+        }),
+    ));
+    for capability in ["workspace.image.import-user", "workspace.image.preview"] {
+        assert!(initialized[0]["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == capability));
+    }
+    runtime.handle_line(&request("initialized-image", "initialized", json!({})));
+    let opened = runtime.handle_line(&request(
+        "open-image-project",
+        "project/open",
+        json!({"root": project_root}),
+    ));
+    let project_id = opened[0]["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let session = runtime.handle_line(&request(
+        "start-image-session",
+        "session/start",
+        json!({"mode": "work", "project_id": project_id}),
+    ));
+    let session_id = session[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let other = runtime.handle_line(&request(
+        "start-other-image-session",
+        "session/start",
+        json!({"mode": "work", "project_id": project_id}),
+    ));
+    let other_session_id = other[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let content = image_png(96, 64);
+    let imported = runtime.handle_line(&request(
+        "import-pinned-image",
+        "workspace/image/import-user",
+        json!({
+            "session_id": session_id,
+            "root_id": "root-1",
+            "label": "layout.png",
+            "media_type": "image/png",
+            "data_base64": BASE64_STANDARD.encode(&content)
+        }),
+    ));
+    assert_eq!(imported[0]["result"]["schema_version"], "pinned-image/0.1");
+    assert_eq!(imported[0]["result"]["content_included"], false);
+    let reference = imported[0]["result"]["reference"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let content_hash = imported[0]["result"]["content_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let cross_session = runtime.handle_line(&request(
+        "read-cross-session-image",
+        "workspace/image/read",
+        json!({"session_id": other_session_id, "reference": reference}),
+    ));
+    assert_eq!(cross_session[0]["error"]["code"], -32125);
+    let saved = runtime.handle_line(&request(
+        "save-pinned-image",
+        "workspace/pinned-context/save",
+        json!({
+            "project_id": project_id,
+            "set": {
+                "schema_version": "pinned-context/0.1",
+                "project_id": project_id,
+                "items": [{
+                    "id": "pin-image",
+                    "project_id": project_id,
+                    "session_id": session_id,
+                    "root_id": "root-1",
+                    "kind": "image",
+                    "source": "user-image-import",
+                    "label": "layout.png",
+                    "reference": reference,
+                    "content_hash": content_hash,
+                    "bytes": content.len(),
+                    "freshness": "fresh",
+                    "priority": 800,
+                    "metadata": {"media_type": "image/png", "width": "96", "height": "64"}
+                }]
+            }
+        }),
+    ));
+    assert_eq!(saved[0]["result"]["content_bodies_included"], false);
+    let set_identity = saved[0]["result"]["set_identity"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let inspected = runtime.handle_line(&request(
+        "inspect-pinned-image",
+        "turn/context/inspect",
+        json!({
+            "session_id": session_id,
+            "pinned_context_set_identity": set_identity,
+            "pinned_context_ids": ["pin-image"]
+        }),
+    ));
+    assert_eq!(
+        inspected[0]["result"]["context"]["manifest"]["entries"][0]["kind"],
+        "image"
+    );
+    assert_eq!(inspected[0]["result"]["content_included"], false);
+    drop(runtime);
+
+    let mut restarted = Runtime::with_store(&data_root).unwrap();
+    restarted.handle_line(&request(
+        "initialize-image-restart",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "pinned-image", "version": "1"}
+        }),
+    ));
+    restarted.handle_line(&request(
+        "initialized-image-restart",
+        "initialized",
+        json!({}),
+    ));
+    let resumed = restarted.handle_line(&request(
+        "resume-image-session",
+        "session/resume",
+        json!({"session_id": session_id}),
+    ));
+    assert_eq!(resumed[0]["result"]["session"]["id"], session_id);
+    let preview = restarted.handle_line(&request(
+        "preview-pinned-image-restart",
+        "workspace/image/read",
+        json!({"session_id": session_id, "reference": reference}),
+    ));
+    assert_eq!(preview[0]["result"]["width"], 96);
+    assert_eq!(preview[0]["result"]["height"], 64);
+    assert_eq!(preview[0]["result"]["original_content_included"], false);
+    let thumbnail = BASE64_STANDARD
+        .decode(
+            preview[0]["result"]["thumbnail_data_base64"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(!thumbnail.is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn project_relink_requires_reviewed_identity_and_survives_restart() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2688,13 +2870,13 @@ fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() 
                 "end_column": "4"
             }
         }, {
-            "id": "pin-image",
+            "id": "pin-handoff",
             "project_id": project_id,
             "session_id": session_id,
-            "kind": "image",
-            "source": "image-store",
-            "label": "screenshot",
-            "reference": "screenshots/one.png",
+            "kind": "child_handoff",
+            "source": "child-session",
+            "label": "handoff",
+            "reference": "handoff:sha256:abc",
             "content_hash": format!("sha256:{}", "0".repeat(64)),
             "bytes": 4,
             "freshness": "fresh",
@@ -2795,7 +2977,7 @@ fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() 
         json!({
             "session_id": session_id,
             "pinned_context_set_identity": set_identity,
-            "pinned_context_ids": ["pin-image"]
+            "pinned_context_ids": ["pin-handoff"]
         }),
     ));
     assert_eq!(unsupported[0]["error"]["code"], -32048);

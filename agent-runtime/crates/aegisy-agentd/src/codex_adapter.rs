@@ -168,6 +168,13 @@ pub struct CodexAdapter {
     stderr: Arc<Mutex<StderrDiagnostics>>,
 }
 
+pub(crate) struct CodexTurnRequest<'a> {
+    pub thread_id: &'a str,
+    pub input: &'a str,
+    pub local_images: &'a [PathBuf],
+    pub idempotency_key: &'a str,
+}
+
 impl CodexAdapter {
     pub fn start() -> Result<Self, String> {
         let mut attempts = 0;
@@ -424,11 +431,9 @@ fn parse_codex_session(result: Value, method: &str) -> Result<CodexSession, Stri
 }
 
 impl CodexAdapter {
-    pub fn run_turn<F>(
+    pub(crate) fn run_turn<F>(
         &mut self,
-        thread_id: &str,
-        input: &str,
-        idempotency_key: &str,
+        request: CodexTurnRequest<'_>,
         cancellation: &TurnCancellationHandle,
         steering: &TurnSteeringHandle,
         mut emit: F,
@@ -436,10 +441,7 @@ impl CodexAdapter {
     where
         F: FnMut(CodexEvent),
     {
-        let request_id = self.write_request(
-            "turn/start",
-            turn_start_params(thread_id, input, idempotency_key),
-        )?;
+        let request_id = self.write_request("turn/start", turn_start_params(&request))?;
         let response = self.wait_for_response(request_id, REQUEST_TIMEOUT)?;
         let turn_id = response
             .pointer("/turn/id")
@@ -458,16 +460,17 @@ impl CodexAdapter {
         let mut pending_steers = HashMap::<i64, TurnSteerRequest>::new();
         loop {
             if cancellation.is_requested() && !interrupt_sent {
-                interrupt_request_id =
-                    Some(self.write_request(
-                        "turn/interrupt",
-                        turn_interrupt_params(thread_id, &turn_id),
-                    )?);
+                interrupt_request_id = Some(self.write_request(
+                    "turn/interrupt",
+                    turn_interrupt_params(request.thread_id, &turn_id),
+                )?);
                 interrupt_sent = true;
             }
             for steer in steering.drain() {
-                let request_id = self
-                    .write_request("turn/steer", turn_steer_params(thread_id, &turn_id, &steer))?;
+                let request_id = self.write_request(
+                    "turn/steer",
+                    turn_steer_params(request.thread_id, &turn_id, &steer),
+                )?;
                 emit(CodexEvent::TurnSteeringRequested {
                     turn_id: turn_id.clone(),
                     input: steer.input.clone(),
@@ -536,7 +539,7 @@ impl CodexAdapter {
             }
             let method = message.get("method").and_then(Value::as_str).unwrap_or("");
             let params = message.get("params").cloned().unwrap_or(Value::Null);
-            if params.get("threadId").and_then(Value::as_str) != Some(thread_id) {
+            if params.get("threadId").and_then(Value::as_str) != Some(request.thread_id) {
                 continue;
             }
             if matches!(
@@ -1128,11 +1131,18 @@ fn thread_compact_start_params(thread_id: &str) -> Value {
     json!({ "threadId": thread_id })
 }
 
-fn turn_start_params(thread_id: &str, input: &str, idempotency_key: &str) -> Value {
+fn turn_start_params(request: &CodexTurnRequest<'_>) -> Value {
+    let mut turn_input = vec![json!({ "type": "text", "text": request.input })];
+    turn_input.extend(request.local_images.iter().map(|path| {
+        json!({
+            "type": "localImage",
+            "path": path.to_string_lossy()
+        })
+    }));
     json!({
-        "threadId": thread_id,
-        "input": [{ "type": "text", "text": input }],
-        "clientUserMessageId": idempotency_key
+        "threadId": request.thread_id,
+        "input": turn_input,
+        "clientUserMessageId": request.idempotency_key
     })
 }
 
@@ -1388,10 +1398,18 @@ mod tests {
 
     #[test]
     fn turn_start_preserves_client_idempotency_key() {
-        let params = turn_start_params("thread-1", "hello", "client-turn-1");
+        let local_images = [PathBuf::from("/tmp/aegisy-image.png")];
+        let params = turn_start_params(&CodexTurnRequest {
+            thread_id: "thread-1",
+            input: "hello",
+            local_images: &local_images,
+            idempotency_key: "client-turn-1",
+        });
         assert_eq!(params["threadId"], "thread-1");
         assert_eq!(params["input"][0]["type"], "text");
         assert_eq!(params["input"][0]["text"], "hello");
+        assert_eq!(params["input"][1]["type"], "localImage");
+        assert_eq!(params["input"][1]["path"], "/tmp/aegisy-image.png");
         assert_eq!(params["clientUserMessageId"], "client-turn-1");
     }
 

@@ -32,6 +32,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QIcon>
+#include <QImageReader>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -41,6 +42,7 @@
 #include <QPalette>
 #include <QPushButton>
 #include <QPlainTextEdit>
+#include <QPixmap>
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -446,7 +448,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             == QStringLiteral("read-only-recovery");
         m_compactionAvailable = false;
         m_pinnedContextAvailable = false;
+        m_imageContextAvailable = false;
         m_gitContextAvailable = false;
+        bool imageImportAvailable = false;
+        bool imagePreviewAvailable = false;
         for (const QJsonValue &capability : result.value(QStringLiteral("capabilities")).toArray()) {
             const QString name = capability.toString();
             if (name == QStringLiteral("session.compaction.checkpoint-review")) {
@@ -455,12 +460,22 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 m_pinnedContextAvailable = true;
             } else if (name == QStringLiteral("workspace.git-context.read-only")) {
                 m_gitContextAvailable = true;
+            } else if (name == QStringLiteral("workspace.image.import-user")) {
+                imageImportAvailable = true;
+            } else if (name == QStringLiteral("workspace.image.preview")) {
+                imagePreviewAvailable = true;
             }
         }
+        m_imageContextAvailable = imageImportAvailable && imagePreviewAvailable;
         if (m_pinnedContextAvailable && !m_projectId.isEmpty()) requestPinnedContext();
         if (m_pinFileContextAction) {
             m_pinFileContextAction->setEnabled(
                 m_pinnedContextAvailable && !m_runtimeRecoveryMode && !m_projectId.isEmpty());
+        }
+        if (m_pinImageContextAction) {
+            m_pinImageContextAction->setEnabled(m_pinnedContextAvailable
+                && m_imageContextAvailable && !m_runtimeRecoveryMode
+                && !m_projectId.isEmpty() && !m_workSessionId.isEmpty());
         }
         m_runtimeRestartRequired = false;
         m_runtimeDegradationsAvailable = false;
@@ -843,6 +858,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_pinnedContextListRequestId.clear();
         m_pinnedContextMutationRequestId.clear();
         m_pinnedFileReadRequestId.clear();
+        m_pinnedImageImportRequestId.clear();
+        m_pinnedImagePreviewRequestId.clear();
+        m_pinnedImagePreviewReference.clear();
         m_pendingPinnedSelection = {};
         m_pendingPinnedDiagnostic = {};
         m_pendingPinnedIncludeId.clear();
@@ -1452,6 +1470,20 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             ? QStringLiteral("已解除固定上下文。")
             : QStringLiteral("固定上下文已保存。"));
     });
+    connect(m_runtime, &AgentRuntimeClient::pinnedImageImported,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        if (requestId != m_pinnedImageImportRequestId) return;
+        m_pinnedImageImportRequestId.clear();
+        finishPinnedImageImport(result);
+    });
+    connect(m_runtime, &AgentRuntimeClient::pinnedImageRead,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        if (requestId != m_pinnedImagePreviewRequestId) return;
+        m_pinnedImagePreviewRequestId.clear();
+        showPinnedImagePreview(result);
+        m_pinnedImagePreviewReference.clear();
+        rebuildContextPanel();
+    });
     connect(m_runtime, &AgentRuntimeClient::terminalsListed,
             this, [this](const QString &requestId, const QJsonObject &result) {
         if (requestId != m_terminalListRequestId
@@ -2009,6 +2041,16 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_pinnedFileReadRequestId.clear();
             m_pendingPinnedSelection = {};
             addNotice(QStringLiteral("读取待固定文件失败：%1").arg(message), true);
+        } else if (method == QStringLiteral("workspace/image/import-user")
+                   && requestId == m_pinnedImageImportRequestId) {
+            m_pinnedImageImportRequestId.clear();
+            addNotice(QStringLiteral("导入固定图片失败：%1").arg(message), true);
+        } else if (method == QStringLiteral("workspace/image/read")
+                   && requestId == m_pinnedImagePreviewRequestId) {
+            m_pinnedImagePreviewRequestId.clear();
+            m_pinnedImagePreviewReference.clear();
+            addNotice(QStringLiteral("读取固定图片预览失败：%1").arg(message), true);
+            rebuildContextPanel();
         } else if (method == QStringLiteral("runtime/degradations")) {
             m_runtimeDegradationsAvailable = false;
             m_runtimeDegradationStates.clear();
@@ -2946,6 +2988,13 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
         QStringLiteral("agentPinDiagnosticContextAction"));
     connect(m_pinDiagnosticContextAction, &QAction::triggered,
             this, &AgentWorkbenchWidget::pinSelectedDiagnosticContext);
+    m_pinImageContextAction = contextMenu->addAction(
+        QIcon(QStringLiteral(":/icons/lucide/paperclip.svg")),
+        QStringLiteral("固定图片"));
+    m_pinImageContextAction->setObjectName(
+        QStringLiteral("agentPinImageContextAction"));
+    connect(m_pinImageContextAction, &QAction::triggered,
+            this, &AgentWorkbenchWidget::pinImageContext);
     connect(contextMenu, &QMenu::aboutToShow, this,
             [this, fileContext, selectionContext, searchContext, diagnosticContext]() {
         QTreeWidgetItem *file = m_fileTree ? m_fileTree->currentItem() : nullptr;
@@ -2964,6 +3013,7 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
                 && !currentSessionRecoveryRequired() && !currentSessionDeletionPending()
                 && !currentOperationStatusBlocked()
                 && m_pinnedContextMutationRequestId.isEmpty()
+                && m_pinnedImageImportRequestId.isEmpty()
                 && m_pinnedFileReadRequestId.isEmpty() && fileContext->isEnabled());
         }
         if (m_pinSelectionContextAction) {
@@ -2973,6 +3023,7 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
                 && !currentSessionRecoveryRequired() && !currentSessionDeletionPending()
                 && !currentOperationStatusBlocked()
                 && m_pinnedContextMutationRequestId.isEmpty()
+                && m_pinnedImageImportRequestId.isEmpty()
                 && m_pinnedFileReadRequestId.isEmpty() && selectionContext->isEnabled()
                 && !buffer.modified && !buffer.conflict);
         }
@@ -2987,7 +3038,18 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
                 && !currentSessionRecoveryRequired() && !currentSessionDeletionPending()
                 && !currentOperationStatusBlocked()
                 && m_pinnedContextMutationRequestId.isEmpty()
+                && m_pinnedImageImportRequestId.isEmpty()
                 && m_pendingPinnedDiagnosticRequestId.isEmpty() && hasRaw);
+        }
+        if (m_pinImageContextAction) {
+            m_pinImageContextAction->setEnabled(m_pinnedContextAvailable
+                && m_imageContextAvailable && !m_runtimeRecoveryMode
+                && m_mode == QStringLiteral("work") && !m_projectId.isEmpty()
+                && !m_workSessionId.isEmpty() && !currentSessionRecoveryRequired()
+                && !currentSessionDeletionPending() && !currentOperationStatusBlocked()
+                && m_pinnedContextMutationRequestId.isEmpty()
+                && m_pinnedImageImportRequestId.isEmpty()
+                && m_pinnedImagePreviewRequestId.isEmpty());
         }
     });
     m_attachContextButton->setMenu(contextMenu);
@@ -8196,6 +8258,212 @@ QStringList AgentWorkbenchWidget::includedPinnedContextIds() const
     return ids;
 }
 
+void AgentWorkbenchWidget::pinImageContext()
+{
+    constexpr qint64 kMaxImageBytes = 8LL * 1024 * 1024;
+    if (!m_pinnedContextAvailable || !m_imageContextAvailable
+            || m_runtimeRecoveryMode || m_mode != QStringLiteral("work")
+            || m_projectId.isEmpty() || m_workSessionId.isEmpty()) {
+        addNotice(QStringLiteral("当前 Work 会话未提供固定图片能力。"), true);
+        return;
+    }
+    if (currentSessionRecoveryRequired() || currentSessionDeletionPending()
+            || currentOperationStatusBlocked() || !m_pinnedContextMutationRequestId.isEmpty()
+            || !m_pinnedImageImportRequestId.isEmpty()) {
+        addNotice(QStringLiteral("当前会话状态不允许导入固定图片。"), true);
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("固定图片"), QString(),
+        QStringLiteral("图片 (*.png *.jpg *.jpeg *.webp)"));
+    if (path.isEmpty()) return;
+    const QFileInfo info(path);
+    if (!info.isFile() || info.isSymLink() || info.size() <= 0
+            || info.size() > kMaxImageBytes) {
+        addNotice(QStringLiteral("图片必须是 8 MiB 以内的普通 PNG、JPEG 或 WebP 文件。"), true);
+        return;
+    }
+    QImageReader reader(path);
+    reader.setDecideFormatFromContent(true);
+    const QByteArray format = reader.format().toLower();
+    const QSize size = reader.size();
+    QString mediaType;
+    if (format == QByteArrayLiteral("png")) {
+        mediaType = QStringLiteral("image/png");
+    } else if (format == QByteArrayLiteral("jpeg") || format == QByteArrayLiteral("jpg")) {
+        mediaType = QStringLiteral("image/jpeg");
+    } else if (format == QByteArrayLiteral("webp")) {
+        mediaType = QStringLiteral("image/webp");
+    }
+    const qint64 pixels = static_cast<qint64>(size.width()) * size.height();
+    if (mediaType.isEmpty() || !size.isValid() || size.width() > 8192
+            || size.height() > 8192 || pixels <= 0 || pixels > 40000000) {
+        addNotice(QStringLiteral("图片格式或尺寸不受支持（最大 8192px、4000 万像素）。"), true);
+        return;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        addNotice(QStringLiteral("无法读取所选图片。"), true);
+        return;
+    }
+    const QByteArray content = file.read(kMaxImageBytes + 1);
+    if (content.size() != info.size() || content.size() > kMaxImageBytes) {
+        addNotice(QStringLiteral("图片读取不完整或超过大小限制。"), true);
+        return;
+    }
+    m_pinnedImageImportRequestId = m_runtime->importPinnedImage(
+        m_workSessionId, m_workspaceRootId, info.fileName(), mediaType, content);
+    if (m_pinnedImageImportRequestId.isEmpty()) {
+        addNotice(QStringLiteral("无法提交固定图片导入。"), true);
+    }
+}
+
+void AgentWorkbenchWidget::finishPinnedImageImport(const QJsonObject &image)
+{
+    const QString schema = image.value(QStringLiteral("schema_version")).toString();
+    const QString projectId = image.value(QStringLiteral("project_id")).toString();
+    const QString sessionId = image.value(QStringLiteral("session_id")).toString();
+    const QString rootId = image.value(QStringLiteral("root_id")).toString();
+    const QString label = image.value(QStringLiteral("label")).toString();
+    const QString reference = image.value(QStringLiteral("reference")).toString();
+    const QString contentHash = image.value(QStringLiteral("content_hash")).toString();
+    const QString mediaType = image.value(QStringLiteral("media_type")).toString();
+    const qint64 bytes = image.value(QStringLiteral("bytes")).toVariant().toLongLong();
+    const int width = image.value(QStringLiteral("width")).toInt();
+    const int height = image.value(QStringLiteral("height")).toInt();
+    const QString referencePrefix = QStringLiteral("image:sha256:");
+    const QString hashPrefix = QStringLiteral("sha256:");
+    const QString digest = contentHash.mid(hashPrefix.size());
+    const bool lowerHex = digest.size() == 64
+        && std::all_of(digest.cbegin(), digest.cend(), [](QChar character) {
+            return (character >= QLatin1Char('0') && character <= QLatin1Char('9'))
+                || (character >= QLatin1Char('a') && character <= QLatin1Char('f'));
+        });
+    if (schema != QStringLiteral("pinned-image/0.1") || projectId != m_projectId
+            || sessionId != m_workSessionId || rootId != m_workspaceRootId
+            || label.isEmpty() || !contentHash.startsWith(hashPrefix) || !lowerHex
+            || reference != referencePrefix + digest || bytes <= 0
+            || bytes > 8LL * 1024 * 1024 || width <= 0 || width > 8192
+            || height <= 0 || height > 8192
+            || (mediaType != QStringLiteral("image/png")
+                && mediaType != QStringLiteral("image/jpeg")
+                && mediaType != QStringLiteral("image/webp"))
+            || image.value(QStringLiteral("content_included")).toBool(true)) {
+        addNotice(QStringLiteral("固定图片返回的身份或作用域无效，未保存描述符。"), true);
+        return;
+    }
+    const QString id = QStringLiteral("pin-image-%1").arg(digest);
+    QJsonObject descriptor{
+        {QStringLiteral("id"), id},
+        {QStringLiteral("project_id"), projectId},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("root_id"), rootId},
+        {QStringLiteral("kind"), QStringLiteral("image")},
+        {QStringLiteral("source"), QStringLiteral("user-image-import")},
+        {QStringLiteral("label"), label},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("content_hash"), contentHash},
+        {QStringLiteral("bytes"), static_cast<double>(bytes)},
+        {QStringLiteral("freshness"), QStringLiteral("fresh")},
+        {QStringLiteral("priority"), 800},
+        {QStringLiteral("metadata"), QJsonObject{
+            {QStringLiteral("media_type"), mediaType},
+            {QStringLiteral("width"), QString::number(width)},
+            {QStringLiteral("height"), QString::number(height)},
+        }},
+    };
+    QJsonArray items;
+    bool replaced = false;
+    for (QJsonObject existing : m_pinnedContextItems) {
+        existing.remove(QStringLiteral("included"));
+        if (existing.value(QStringLiteral("id")).toString() == id) {
+            items.append(descriptor);
+            replaced = true;
+        } else {
+            items.append(existing);
+        }
+    }
+    if (!replaced) {
+        if (items.size() >= 128) {
+            addNotice(QStringLiteral("固定上下文已达到 128 项上限。"), true);
+            return;
+        }
+        items.append(descriptor);
+    }
+    m_pendingPinnedIncludeId = id;
+    m_pinnedContextMutationRequestId = m_runtime->savePinnedContext(
+        m_projectId, items, m_pinnedContextSetIdentity);
+    if (m_pinnedContextMutationRequestId.isEmpty()) {
+        m_pendingPinnedIncludeId.clear();
+        addNotice(QStringLiteral("无法保存固定图片描述符。"), true);
+    }
+}
+
+void AgentWorkbenchWidget::previewPinnedImage(const QJsonObject &item)
+{
+    const QString sessionId = item.value(QStringLiteral("session_id")).toString();
+    const QString reference = item.value(QStringLiteral("reference")).toString();
+    if (!m_imageContextAvailable || sessionId != m_workSessionId || reference.isEmpty()) {
+        addNotice(QStringLiteral("该图片属于其他会话或预览能力不可用。"), true);
+        return;
+    }
+    if (!m_pinnedImagePreviewRequestId.isEmpty()) return;
+    m_pinnedImagePreviewReference = reference;
+    m_pinnedImagePreviewRequestId = m_runtime->readPinnedImage(sessionId, reference);
+    if (m_pinnedImagePreviewRequestId.isEmpty()) {
+        m_pinnedImagePreviewReference.clear();
+        addNotice(QStringLiteral("无法请求固定图片预览。"), true);
+    }
+    rebuildContextPanel();
+}
+
+void AgentWorkbenchWidget::showPinnedImagePreview(const QJsonObject &preview)
+{
+    const QString reference = preview.value(QStringLiteral("reference")).toString();
+    const QString sessionId = preview.value(QStringLiteral("session_id")).toString();
+    const QByteArray thumbnail = QByteArray::fromBase64(
+        preview.value(QStringLiteral("thumbnail_data_base64")).toString().toLatin1(),
+        QByteArray::AbortOnBase64DecodingErrors);
+    QPixmap pixmap;
+    const bool valid = preview.value(QStringLiteral("schema_version")).toString()
+            == QStringLiteral("pinned-image-preview/0.1")
+        && reference == m_pinnedImagePreviewReference && sessionId == m_workSessionId
+        && preview.value(QStringLiteral("project_id")).toString() == m_projectId
+        && preview.value(QStringLiteral("thumbnail_media_type")).toString()
+            == QStringLiteral("image/png")
+        && !preview.value(QStringLiteral("original_content_included")).toBool(true)
+        && !thumbnail.isEmpty() && thumbnail.size() <= 2 * 1024 * 1024
+        && pixmap.loadFromData(thumbnail, "PNG") && pixmap.width() <= 320
+        && pixmap.height() <= 180;
+    if (!valid) {
+        addNotice(QStringLiteral("固定图片预览身份校验失败。"), true);
+        return;
+    }
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("固定图片预览"));
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(16, 16, 16, 12);
+    layout->setSpacing(10);
+    auto *image = new QLabel(&dialog);
+    image->setAlignment(Qt::AlignCenter);
+    image->setPixmap(pixmap);
+    image->setMinimumSize(320, 180);
+    image->setStyleSheet(QStringLiteral("background:#f2f4f7; border:1px solid #e4e7ec; border-radius:6px;"));
+    layout->addWidget(image);
+    auto *metadata = new QLabel(QStringLiteral("%1 × %2 · %3 · %4 B")
+        .arg(preview.value(QStringLiteral("width")).toInt())
+        .arg(preview.value(QStringLiteral("height")).toInt())
+        .arg(preview.value(QStringLiteral("media_type")).toString())
+        .arg(preview.value(QStringLiteral("bytes")).toVariant().toLongLong()), &dialog);
+    metadata->setAlignment(Qt::AlignCenter);
+    metadata->setStyleSheet(QStringLiteral("color:#475467; border:none;"));
+    layout->addWidget(metadata);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    dialog.exec();
+}
+
 void AgentWorkbenchWidget::pinSelectedFileContext()
 {
     if (!m_pinnedContextAvailable || m_runtimeRecoveryMode || m_projectId.isEmpty()) {
@@ -8203,6 +8471,7 @@ void AgentWorkbenchWidget::pinSelectedFileContext()
         return;
     }
     if (!m_pinnedContextMutationRequestId.isEmpty()
+            || !m_pinnedImageImportRequestId.isEmpty()
             || !m_pinnedFileReadRequestId.isEmpty()) {
         addNotice(QStringLiteral("固定上下文正在更新，请稍候。"));
         return;
@@ -8232,6 +8501,7 @@ void AgentWorkbenchWidget::pinEditorSelectionContext()
         return;
     }
     if (!m_pinnedContextMutationRequestId.isEmpty()
+            || !m_pinnedImageImportRequestId.isEmpty()
             || !m_pinnedFileReadRequestId.isEmpty()) {
         addNotice(QStringLiteral("固定上下文正在更新，请稍候。"));
         return;
@@ -8308,6 +8578,7 @@ bool AgentWorkbenchWidget::canPinCommandArtifact(const QJsonObject &artifact,
         return reject(QStringLiteral("当前会话状态不允许更新固定上下文"));
     }
     if (!m_pinnedContextMutationRequestId.isEmpty()
+            || !m_pinnedImageImportRequestId.isEmpty()
             || !m_pinnedFileReadRequestId.isEmpty()) {
         return reject(QStringLiteral("固定上下文正在更新，请稍候"));
     }
@@ -8810,6 +9081,8 @@ void AgentWorkbenchWidget::rebuildContextPanel()
                                     : QStringLiteral("包含在下一次发送中"));
         layout->addWidget(included);
         const QString label = context.value(QStringLiteral("label")).toString();
+        const QString kind = context.value(QStringLiteral("kind")).toString();
+        const QJsonObject metadataObject = context.value(QStringLiteral("metadata")).toObject();
         const qint64 size = pinned
             ? context.value(QStringLiteral("bytes")).toVariant().toLongLong()
             : context.value(QStringLiteral("size")).toVariant().toLongLong();
@@ -8820,27 +9093,53 @@ void AgentWorkbenchWidget::rebuildContextPanel()
             suffix += QStringLiteral(" · stale");
         }
         const QString prefix = pinned ? QStringLiteral("固定 · ") : QString();
-        auto *text = new QLabel(QStringLiteral("%1%2 · %3 B%4")
-                                    .arg(prefix, label).arg(size).arg(suffix), row);
+        QString detail = QStringLiteral("%1 B").arg(size);
+        if (kind == QStringLiteral("image")) {
+            detail = QStringLiteral("%1 × %2 · %3 · %4 B")
+                .arg(metadataObject.value(QStringLiteral("width")).toString())
+                .arg(metadataObject.value(QStringLiteral("height")).toString())
+                .arg(metadataObject.value(QStringLiteral("media_type")).toString())
+                .arg(size);
+        }
+        auto *text = new QLabel(QStringLiteral("%1%2 · %3%4")
+                                    .arg(prefix, label, detail, suffix), row);
         text->setToolTip(QStringLiteral("来源：%1\n类型：%2\n%3")
             .arg(context.value(QStringLiteral("origin")).toString(),
-                 context.value(QStringLiteral("kind")).toString(), label));
+                 kind, label));
         text->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         text->setStyleSheet(QStringLiteral("color:#475467; font-size:9px; border:none;"));
         layout->addWidget(text, 1);
+        QPushButton *previewImage = nullptr;
+        if (pinned && kind == QStringLiteral("image")) {
+            previewImage = new QPushButton(row);
+            previewImage->setObjectName(QStringLiteral("agentPinnedImagePreviewButton"));
+            previewImage->setIcon(QIcon(QStringLiteral(":/icons/lucide/search.svg")));
+            previewImage->setToolTip(QStringLiteral("预览固定图片"));
+            previewImage->setFixedSize(22, 22);
+            previewImage->setEnabled(m_imageContextAvailable
+                && context.value(QStringLiteral("session_id")).toString() == m_workSessionId
+                && m_pinnedImagePreviewRequestId.isEmpty());
+            previewImage->setStyleSheet(QStringLiteral(
+                "QPushButton { background:transparent; border:none; border-radius:4px; padding:4px; }"
+                "QPushButton:hover { background:#eaecf0; }"
+                "QPushButton:disabled { opacity:0.45; }"));
+            layout->addWidget(previewImage);
+        }
         QPushButton *moveUp = nullptr;
         QPushButton *moveDown = nullptr;
         if (pinned) {
             moveUp = new QPushButton(QStringLiteral("↑"), row);
             moveUp->setObjectName(QStringLiteral("agentPinnedContextMoveUpButton"));
             moveUp->setToolTip(QStringLiteral("提高固定上下文优先顺序"));
-            moveUp->setEnabled(pinnedIndex > 0 && m_pinnedContextMutationRequestId.isEmpty());
+            moveUp->setEnabled(pinnedIndex > 0 && m_pinnedContextMutationRequestId.isEmpty()
+                && m_pinnedImageImportRequestId.isEmpty());
             moveUp->setFixedSize(22, 22);
             moveDown = new QPushButton(QStringLiteral("↓"), row);
             moveDown->setObjectName(QStringLiteral("agentPinnedContextMoveDownButton"));
             moveDown->setToolTip(QStringLiteral("降低固定上下文优先顺序"));
             moveDown->setEnabled(pinnedIndex + 1 < m_pinnedContextItems.size()
-                && m_pinnedContextMutationRequestId.isEmpty());
+                && m_pinnedContextMutationRequestId.isEmpty()
+                && m_pinnedImageImportRequestId.isEmpty());
             moveDown->setFixedSize(22, 22);
             for (QPushButton *button : {moveUp, moveDown}) {
                 button->setStyleSheet(QStringLiteral(
@@ -8863,6 +9162,10 @@ void AgentWorkbenchWidget::rebuildContextPanel()
             "QPushButton:hover { background:#eaecf0; }"));
         layout->addWidget(remove);
         const QString id = context.value(QStringLiteral("id")).toString();
+        if (previewImage) {
+            connect(previewImage, &QPushButton::clicked, this,
+                    [this, context]() { previewPinnedImage(context); });
+        }
         connect(included, &QCheckBox::toggled, this, [this, id, pinned, included](bool checked) {
             if (checked && includedTurnContext().size() + includedPinnedContextIds().size()
                     >= kMaxTurnContextItems) {
@@ -8883,7 +9186,9 @@ void AgentWorkbenchWidget::rebuildContextPanel()
         });
         connect(remove, &QPushButton::clicked, this, [this, id, pinned]() {
             if (pinned) {
-                if (!m_pinnedContextMutationRequestId.isEmpty() || m_projectId.isEmpty()) return;
+                if (!m_pinnedContextMutationRequestId.isEmpty()
+                        || !m_pinnedImageImportRequestId.isEmpty()
+                        || m_projectId.isEmpty()) return;
                 m_pinnedContextMutationRequestId = m_runtime->removePinnedContext(
                     m_projectId, id, m_pinnedContextSetIdentity);
                 return;
@@ -8895,13 +9200,15 @@ void AgentWorkbenchWidget::rebuildContextPanel()
         });
         if (pinned) {
             connect(moveUp, &QPushButton::clicked, this, [this, pinnedIndex]() {
-                if (pinnedIndex <= 0 || !m_pinnedContextMutationRequestId.isEmpty()) return;
+                if (pinnedIndex <= 0 || !m_pinnedContextMutationRequestId.isEmpty()
+                        || !m_pinnedImageImportRequestId.isEmpty()) return;
                 m_pinnedContextItems.swapItemsAt(pinnedIndex, pinnedIndex - 1);
                 savePinnedContextOrder();
             });
             connect(moveDown, &QPushButton::clicked, this, [this, pinnedIndex]() {
                 if (pinnedIndex + 1 >= m_pinnedContextItems.size()
-                        || !m_pinnedContextMutationRequestId.isEmpty()) return;
+                        || !m_pinnedContextMutationRequestId.isEmpty()
+                        || !m_pinnedImageImportRequestId.isEmpty()) return;
                 m_pinnedContextItems.swapItemsAt(pinnedIndex, pinnedIndex + 1);
                 savePinnedContextOrder();
             });

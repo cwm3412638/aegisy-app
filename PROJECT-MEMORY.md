@@ -299,7 +299,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   object publication; the two resources are deliberately not one transaction,
   and event failure is reported as an incomplete save. Capability
   `turn.context.pinned-selected` now lets `turn/context/inspect` and `turn/start`
-  consume only explicit selected file/selection/diagnostic/terminal/Git/artifact pin IDs
+  consume only explicit selected file/selection/image/diagnostic/terminal/Git/artifact pin IDs
   together with the exact current set identity. Selection is capped at 16 unique IDs; project/session/
   root bindings and file policy are rechecked. Both paths share authoritative
   file reread, raw-byte SHA-256/revision stale detection, bounded untrusted
@@ -320,7 +320,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   They bind both the bounded 16 KiB content hash and the complete normalized source
   hash/byte count/truncation state. Worktree/staged drift fails stale; commit and
   commit-diff context remains valid only while the exact Git object is available.
-  Image and child-handoff kinds still fail closed. Qt now loads
+  Child-handoff kinds still fail closed. Qt now loads
   project pins into the composer, creates or refreshes file descriptors from
   authoritative workspace reads with reconstructed raw UTF-8/BOM/newline bytes,
   saves through CAS, and supports explicit per-turn inclusion, deterministic
@@ -358,12 +358,28 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   project/root/kind/scope/OID/media/hash/bytes/full-source/truncation identity, and
   persists only the descriptor through CAS. The real Git render fixture clicks both
   actions, verifies their persisted rows, and unpins them.
+  Capabilities `workspace.image.import-user` and `workspace.image.preview` provide
+  the explicit user image path. Import is bound to the current project Work
+  session/root and rejects encoded input before Base64 decode. Pinned `image`
+  0.25.10 independently decodes only PNG/JPEG/WebP under 8 MiB, 8192px-edge,
+  40M-pixel, and 192 MiB decode-allocation limits before writing a session/project-
+  owned `image:sha256:` durable Blob. Descriptors persist only reference, hash,
+  bytes, media type, and dimensions. Read-only preview revalidates the authority
+  and returns only a 320x180 PNG thumbnail. Inspect/start reread and decode again;
+  inspection remains metadata-only and each selected image uses a conservative
+  all-or-nothing 16 KiB/4096-token budget entry outside prompt text. The pinned
+  Codex 0.144.5 adapter sends included images as `localImage` paths through verified
+  private temporary hard links. Normal turn completion drops the links and Blob-
+  store startup removes only safely named crash leftovers, preserving unknown
+  entries. Qt exposes `固定图片`, client preflight, dimension/media/size display,
+  explicit thumbnail preview, inclusion/order, and unpin. Image unpin removes the
+  descriptor but does not yet atomically release its active Blob reference.
   Transient inline `selection` context with client-provided content remains on
   the existing bounded inline path; only selection items without inline content
   are resolved from the authoritative file range.
   This foundation still has no cross-resource atomicity, Blob body/reference
   lifecycle binding, durable diagnostic/terminal authority and invalidation, orphan
-  GC, or image and child-handoff assembly; complete Git lifecycle and cross-platform
+  GC, or child-handoff assembly; complete image/Git lifecycle and cross-platform
   evidence also remain open, so keep `17.3` unchecked.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
@@ -747,12 +763,12 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 298 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 50 Rust
+Current verified baseline: 16 desktop tests, 305 passed Rust sidecar unit tests plus
+one explicitly ignored live Codex fixture, 51 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes diagnostic, terminal, and Git pinned-context
 authority, strict Git references, complete-source drift detection, terminal
-normalization, and source-loss fail-closed invariants.
+normalization, image import/preview/assembly, and source-loss fail-closed invariants.
 
 ## Session History Boundary
 
@@ -1193,7 +1209,7 @@ normalization, and source-loss fail-closed invariants.
   standard `*:sha256:` Blob references receive a read-only SQLite metadata
   ownership/hash/byte check, and save records the separate metadata-only
   project event. `turn/context/inspect` and `turn/start` can consume only an
-  explicit reviewed list of file/selection/diagnostic/terminal/Git/artifact pin IDs plus
+  explicit reviewed list of file/selection/image/diagnostic/terminal/Git/artifact pin IDs plus
   the exact current set identity; they never include every persisted pin automatically. Files are
   reread through the normal root/policy resolver and raw-byte hash or revision
   drift is marked stale before the same budget/manifest path is used; selection
@@ -1208,14 +1224,18 @@ normalization, and source-loss fail-closed invariants.
   Git commit/diff pins re-run the filtered primary-root query and validate strict
   references, bounded plus complete source identity, bytes, and truncation; mutable
   diffs fail on drift and commit-backed context depends on the exact object remaining
-  available. Image/child-handoff kinds, cross-resource Workbench
-  event/Blob authority, automatic invalidation, and orphan GC remain unavailable; the
+  available. Session-owned image pins reread the durable Blob under exact project/
+  session scope, revalidate PNG/JPEG/WebP hash, bytes, media, dimensions, and decode
+  limits, and enter the manifest/budget without entering prompt text. Included images
+  become temporary verified `localImage` paths only for the Codex turn. Child-handoff
+  kinds, cross-resource Workbench event/Blob authority, automatic invalidation, and
+  orphan GC remain unavailable; the
   composer queue is otherwise transient. Qt render evidence covers file and
   editor-selection pin persistence, range labels, inclusion, order boundaries,
   and unpin. The diagnostic, terminal, and Git surfaces provide explicit authority-read,
   validate, CAS pin, include, and unpin behavior without persisting their bodies.
   Watch/save changes also project stale state locally without mutating durable pin metadata;
-  remaining non-file pin producers and complete cross-platform pin behavior remain
+  child-handoff production and complete cross-platform pin behavior remain
   open.
 
 ## Workspace Edit Boundary

@@ -541,6 +541,35 @@ QString AgentRuntimeClient::removePinnedContext(const QString &projectId,
     return sendRequest(QStringLiteral("workspace/pinned-context/remove"), params);
 }
 
+QString AgentRuntimeClient::importPinnedImage(const QString &sessionId,
+                                               const QString &rootId,
+                                               const QString &label,
+                                               const QString &mediaType,
+                                               const QByteArray &content)
+{
+    if (sessionId.isEmpty() || label.isEmpty() || mediaType.isEmpty() || content.isEmpty()) {
+        return {};
+    }
+    QJsonObject params{
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("label"), label},
+        {QStringLiteral("media_type"), mediaType},
+        {QStringLiteral("data_base64"), QString::fromLatin1(content.toBase64())},
+    };
+    if (!rootId.isEmpty()) params.insert(QStringLiteral("root_id"), rootId);
+    return sendRequest(QStringLiteral("workspace/image/import-user"), params);
+}
+
+QString AgentRuntimeClient::readPinnedImage(const QString &sessionId,
+                                             const QString &reference)
+{
+    if (sessionId.isEmpty() || reference.isEmpty()) return {};
+    return sendRequest(QStringLiteral("workspace/image/read"), {
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("reference"), reference},
+    });
+}
+
 QString AgentRuntimeClient::cancelTurn(const QString &sessionId, const QString &turnId)
 {
     if (sessionId.isEmpty() || turnId.isEmpty()) return {};
@@ -1312,6 +1341,10 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
     } else if (pendingMethod == QStringLiteral("workspace/pinned-context/save")
                || pendingMethod == QStringLiteral("workspace/pinned-context/remove")) {
         emit pinnedContextChanged(id, pendingMethod, result);
+    } else if (pendingMethod == QStringLiteral("workspace/image/import-user")) {
+        emit pinnedImageImported(id, result);
+    } else if (pendingMethod == QStringLiteral("workspace/image/read")) {
+        emit pinnedImageRead(id, result);
     } else if (pendingMethod == QStringLiteral("workspace/list")) {
         emit workspaceListed(id, result);
     } else if (pendingMethod == QStringLiteral("workspace/read")) {

@@ -108,6 +108,10 @@ public:
                               const QString &expectedSetIdentity = QString());
     QString removePinnedContext(const QString &projectId, const QString &itemId,
                                 const QString &expectedSetIdentity = QString());
+    QString importPinnedImage(const QString &sessionId, const QString &rootId,
+                              const QString &label, const QString &mediaType,
+                              const QByteArray &content);
+    QString readPinnedImage(const QString &sessionId, const QString &reference);
     QString listWorkspace(const QString &projectId, const QString &path = QString(),
                           const QString &rootId = QString());
     QString readWorkspaceFile(const QString &projectId, const QString &path,
@@ -244,6 +248,8 @@ signals:
     void pinnedContextListed(const QString &requestId, const QJsonObject &result);
     void pinnedContextChanged(const QString &requestId, const QString &method,
                               const QJsonObject &result);
+    void pinnedImageImported(const QString &requestId, const QJsonObject &result);
+    void pinnedImageRead(const QString &requestId, const QJsonObject &result);
     void turnCancellationRequested(const QString &requestId, const QJsonObject &result);
     void workspaceListed(const QString &requestId, const QJsonObject &listing);
     void workspaceFileRead(const QString &requestId, const QJsonObject &file);

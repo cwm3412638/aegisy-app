@@ -240,6 +240,16 @@ fn validate_reference(value: &str, kind: &str) -> Result<(), PinnedContextError>
     if kind == "diagnostic" && value.contains(':') && !value.starts_with("diagnostic-raw:sha256:") {
         return Err(error("pinned-context-reference-path-invalid"));
     }
+    if kind == "image" {
+        let digest = value.strip_prefix("image:sha256:").unwrap_or_default();
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(error("pinned-context-reference-path-invalid"));
+        }
+    }
     if kind == "terminal_excerpt" && !value.starts_with("terminal-excerpt:terminal-") {
         return Err(error("pinned-context-reference-path-invalid"));
     }
@@ -349,7 +359,10 @@ mod tests {
                 "diagnostic",
                 "diagnostic-raw:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),
-            ("image", "blob:sha256:abc"),
+            (
+                "image",
+                "image:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             ("diagnostic", "src/main.rs"),
             ("terminal_excerpt", "terminal-excerpt:terminal-1:1:0:12"),
             (

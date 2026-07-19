@@ -13,6 +13,7 @@ pub const MAX_SCAN_ENTRIES: usize = 100_000;
 
 const STORE_DIRECTORY: &str = "durable-blobs-v1";
 const OBJECT_DIRECTORY: &str = "objects";
+const LOCAL_IMAGE_DIRECTORY: &str = "local-images";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +37,24 @@ pub struct BlobDiskInventory {
 pub struct DurableBlobFileStore {
     root: PathBuf,
     objects: PathBuf,
+    local_images: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct DurableBlobLocalFile {
+    path: PathBuf,
+}
+
+impl DurableBlobLocalFile {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for DurableBlobLocalFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 impl DurableBlobFileStore {
@@ -56,9 +75,21 @@ impl DurableBlobFileStore {
         if canonical_objects != objects || !canonical_objects.starts_with(&canonical_root) {
             return Err(file_error("blob-store-unsafe"));
         }
+        let local_images = canonical_root.join(LOCAL_IMAGE_DIRECTORY);
+        create_private_directory(&local_images)?;
+        let canonical_local_images = local_images
+            .canonicalize()
+            .map_err(|_| file_error("blob-local-image-directory-unavailable"))?;
+        if canonical_local_images != local_images
+            || !canonical_local_images.starts_with(&canonical_root)
+        {
+            return Err(file_error("blob-local-image-directory-unsafe"));
+        }
+        clean_stale_local_images(&canonical_local_images)?;
         Ok(Self {
             root: canonical_root,
             objects: canonical_objects,
+            local_images: canonical_local_images,
         })
     }
 
@@ -144,6 +175,41 @@ impl DurableBlobFileStore {
             return Err(file_error("blob-integrity-mismatch"));
         }
         Ok(content)
+    }
+
+    pub fn link_verified_local_image(
+        &self,
+        sha256: &str,
+        expected_bytes: u64,
+        extension: &str,
+    ) -> Result<DurableBlobLocalFile, BlobFileError> {
+        if extension.is_empty()
+            || extension.len() > 8
+            || !extension.bytes().all(|byte| byte.is_ascii_lowercase())
+        {
+            return Err(file_error("blob-local-image-extension-invalid"));
+        }
+        self.read(sha256, expected_bytes)?;
+        let source = self.object_path(sha256)?;
+        for _ in 0..32 {
+            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let target = self.local_images.join(format!(
+                "image-{}-{sequence}.{extension}",
+                std::process::id()
+            ));
+            match fs::hard_link(&source, &target) {
+                Ok(()) => {
+                    if let Err(cause) = secure_file(&target) {
+                        let _ = fs::remove_file(&target);
+                        return Err(cause);
+                    }
+                    return Ok(DurableBlobLocalFile { path: target });
+                }
+                Err(cause) if cause.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(file_error("blob-local-image-link-failed")),
+            }
+        }
+        Err(file_error("blob-local-image-link-exhausted"))
     }
 
     pub fn remove_verified(&self, sha256: &str, expected_bytes: u64) -> Result<(), BlobFileError> {
@@ -242,6 +308,41 @@ impl DurableBlobFileStore {
     fn object_path(&self, sha256: &str) -> Result<PathBuf, BlobFileError> {
         Ok(self.object_parent(sha256)?.join(sha256))
     }
+}
+
+fn clean_stale_local_images(directory: &Path) -> Result<(), BlobFileError> {
+    for entry in fs::read_dir(directory)
+        .map_err(|_| file_error("blob-local-image-cleanup-failed"))?
+        .take(MAX_SCAN_ENTRIES)
+    {
+        let entry = entry.map_err(|_| file_error("blob-local-image-cleanup-failed"))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let metadata = fs::symlink_metadata(entry.path())
+            .map_err(|_| file_error("blob-local-image-cleanup-failed"))?;
+        if metadata.is_file() && !metadata.file_type().is_symlink() && valid_local_image_name(&name)
+        {
+            fs::remove_file(entry.path())
+                .map_err(|_| file_error("blob-local-image-cleanup-failed"))?;
+        }
+    }
+    Ok(())
+}
+
+fn valid_local_image_name(value: &str) -> bool {
+    let Some((stem, extension)) = value.rsplit_once('.') else {
+        return false;
+    };
+    let Some((process_id, sequence)) = stem
+        .strip_prefix("image-")
+        .and_then(|suffix| suffix.split_once('-'))
+    else {
+        return false;
+    };
+    !process_id.is_empty()
+        && !sequence.is_empty()
+        && process_id.bytes().all(|byte| byte.is_ascii_digit())
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
+        && matches!(extension, "png" | "jpg" | "webp")
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -360,4 +461,48 @@ pub(crate) fn available_space(_path: &Path) -> Option<u64> {
 
 fn file_error(code: &'static str) -> BlobFileError {
     BlobFileError { code }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn local_image_links_drop_normally_and_known_crash_leftovers_are_cleaned_on_open() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let data_root = std::env::temp_dir().join(format!("aegisy-blob-image-{unique}"));
+        fs::create_dir_all(&data_root).unwrap();
+        let data_root = data_root.canonicalize().unwrap();
+        let content = b"verified-image-placeholder";
+        let sha256 = sha256_hex(content);
+        let store = DurableBlobFileStore::open(&data_root).unwrap();
+        store.put(&sha256, content, Some(u64::MAX)).unwrap();
+        let lease = store
+            .link_verified_local_image(&sha256, content.len() as u64, "png")
+            .unwrap();
+        let normal_path = lease.path().to_path_buf();
+        assert!(normal_path.is_file());
+        drop(lease);
+        assert!(!normal_path.exists());
+
+        let leaked = store
+            .link_verified_local_image(&sha256, content.len() as u64, "png")
+            .unwrap();
+        let leaked_path = leaked.path().to_path_buf();
+        std::mem::forget(leaked);
+        let unknown = store.local_images.join("unknown.keep");
+        fs::write(&unknown, b"preserve").unwrap();
+        let unknown_image_name = store.local_images.join("image--.png");
+        fs::write(&unknown_image_name, b"preserve").unwrap();
+        drop(store);
+        let _reopened = DurableBlobFileStore::open(&data_root).unwrap();
+        assert!(!leaked_path.exists());
+        assert!(unknown.exists());
+        assert!(unknown_image_name.exists());
+        fs::remove_dir_all(data_root).unwrap();
+    }
 }

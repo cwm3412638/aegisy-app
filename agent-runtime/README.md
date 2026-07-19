@@ -129,8 +129,22 @@ publication, and a failed event append is reported as an incomplete save. For
 standard `*:sha256:` Blob references, save performs a read-only SQLite metadata
 check for active project/session ownership plus exact hash/byte identity; it
 does not read Blob bytes or update access timestamps. It does not reread or
-invalidate source references and has no orphan GC, turn assembly, or Qt
-pin/unpin/order surface.
+invalidate source references and has no orphan GC.
+
+Capabilities `workspace.image.import-user` and `workspace.image.preview` add the
+session/project-scoped image authority used by pinned context. Import accepts
+only an explicit user-labelled Base64 payload, rejects encoded input above the
+8 MiB decoded limit before allocation, and independently decodes PNG, JPEG, or
+WebP under 8192-pixel-edge, 40-million-pixel, and 192 MiB allocation limits.
+Only `image:sha256:` identity plus media type and dimensions enter the descriptor.
+Preview returns a bounded PNG thumbnail and never the original image body.
+Selected image pins reserve a conservative 16 KiB/4096-token budget entry and
+are passed to pinned Codex 0.144.5 as `localImage` inputs through verified private
+temporary hard links. Normal turn completion removes the links; runtime startup
+removes only safely named crash leftovers and preserves unknown entries. Image
+paths and bodies are not stored in turn history or returned by context inspection.
+Unpin does not yet atomically release the durable Blob reference, so full pin/Blob
+GC lifecycle remains open under OpenSpec task 17.3.
 
 `operation/probe` is a read-only evidence collector for the reconciliation
 workflow. It resolves only registered project roots through the Work session,

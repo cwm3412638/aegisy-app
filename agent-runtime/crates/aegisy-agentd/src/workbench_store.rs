@@ -1,6 +1,6 @@
 use crate::durable_blob::{
-    available_space, sha256_hex, BlobFileError, DurableBlobFileStore, MAX_BLOB_BYTES,
-    MAX_BLOB_OBJECTS, MAX_SCAN_ENTRIES, MAX_STORE_BYTES, MIN_FREE_BYTES,
+    available_space, sha256_hex, BlobFileError, DurableBlobFileStore, DurableBlobLocalFile,
+    MAX_BLOB_BYTES, MAX_BLOB_OBJECTS, MAX_SCAN_ENTRIES, MAX_STORE_BYTES, MIN_FREE_BYTES,
 };
 use crate::git_workflow_authorization::{
     GitWorkflowAuthorizationAuthority, GitWorkflowAuthorizationError,
@@ -1667,6 +1667,42 @@ impl WorkbenchStore {
             return Err(error("durable Blob metadata scope is invalid"));
         }
         Ok(reference)
+    }
+
+    pub(crate) fn read_durable_blob_for_pinned_context(
+        &self,
+        project_id: &str,
+        session_id: Option<&str>,
+        content_reference: &str,
+    ) -> Result<DurableBlobRead, WorkbenchStoreError> {
+        let reference =
+            self.inspect_durable_blob_reference(project_id, session_id, content_reference)?;
+        let content = self
+            .blob_files
+            .read(&reference.content_hash.sha256, reference.content_hash.bytes)
+            .map_err(blob_file_error)?;
+        Ok(DurableBlobRead { reference, content })
+    }
+
+    pub(crate) fn materialize_durable_image_for_turn(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        content_reference: &str,
+        extension: &str,
+    ) -> Result<DurableBlobLocalFile, WorkbenchStoreError> {
+        let reference =
+            self.inspect_durable_blob_reference(project_id, Some(session_id), content_reference)?;
+        if reference.kind != DurableBlobKind::Image {
+            return Err(error("durable Blob is not an image"));
+        }
+        self.blob_files
+            .link_verified_local_image(
+                &reference.content_hash.sha256,
+                reference.content_hash.bytes,
+                extension,
+            )
+            .map_err(blob_file_error)
     }
 
     pub fn release_durable_blob_reference(

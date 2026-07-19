@@ -240,8 +240,9 @@ implicitly. A non-empty selection requires the exact current set identity,
 contains at most 16 unique IDs, and is revalidated against the current project,
 session, and registered root. The first assembly phase accepts `file`, `selection`,
 project/root-bound `diagnostic`, session-owned `terminal_excerpt`, primary-root
-`git_commit`/`git_diff`, and session-owned `artifact` pins; image and child-handoff
-descriptors fail explicitly instead of becoming unverified inline content. Artifact assembly accepts only validated `command-output:sha256:`
+`git_commit`/`git_diff`, session-owned `artifact`, and session-owned `image` pins;
+child-handoff descriptors fail explicitly instead of becoming unverified inline
+content. Artifact assembly accepts only validated `command-output:sha256:`
 text references and rechecks UTF-8, byte count, and SHA-256 before adding content.
 The durable command-output path is reloaded through session-scoped Blob ownership
 after Runtime restart; inspection remains metadata-only while turn assembly may
@@ -266,12 +267,38 @@ revision change `stale`, and only then extracts the selection range. Only
 normalized UTF-8 text enters the bounded untrusted context envelope, and the
 inspector still returns metadata only.
 
+Capabilities `workspace.image.import-user` and `workspace.image.preview` are
+advertised only with the durable Workbench store. `workspace/image/import-user`
+is an explicit user operation bound to a current project Work session and
+registered root. The request carries a basename, declared media type, and
+standard Base64 bytes. Encoded size is rejected before decode; decoded content
+is limited to 8 MiB and must independently decode as PNG, JPEG, or WebP with
+edges no larger than 8192 pixels, at most 40 million pixels, and a 192 MiB decode
+allocation ceiling. The response contains `image:sha256:` identity, bytes, media
+type, width, and height, never the body or original local path.
+
+`workspace/image/read` is read-only and requires the exact owning session and
+`image:sha256:` reference. It revalidates Blob scope, bytes, SHA-256, media type,
+dimensions, and decode limits, then returns only a PNG thumbnail bounded to
+320x180 plus original metadata. A saved image descriptor must bind that exact
+session/project/root/reference/hash/byte/media/dimension tuple. Inspect/start
+rereads and decodes the Blob again; inspection exposes only manifest/budget
+metadata. An included image reserves a conservative all-or-nothing 16 KiB budget
+entry (4096 estimated tokens), while the binary body stays outside prompt text.
+For Codex 0.144.5 the runtime creates a verified private hard link with a safe
+format extension and sends it as a `localImage` input. The link is dropped after
+the turn, and safely named crash leftovers are removed at Blob-store startup.
+Neither the temporary path nor image bytes enter durable session history.
+
 ```jsonl
 {"jsonrpc":"2.0","id":"30","method":"workspace/pinned-context/list","params":{"project_id":"project-1"}}
 {"jsonrpc":"2.0","id":"30","result":{"schema_version":"pinned-context/0.1","project_id":"project-1","set_identity":null,"items":[],"persisted":false,"content_bodies_included":false}}
 {"jsonrpc":"2.0","id":"31","method":"workspace/pinned-context/save","params":{"project_id":"project-1","set":{"schema_version":"pinned-context/0.1","project_id":"project-1","items":[{"id":"pin-file","project_id":"project-1","root_id":"root-1","kind":"file","source":"file-tree","label":"src/main.rs","reference":"src/main.rs","content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":32,"freshness":"fresh","priority":850,"metadata":{}}]},"expected_set_identity":null}}
 {"jsonrpc":"2.0","id":"31","result":{"schema_version":"pinned-context/0.1","project_id":"project-1","set_identity":"pinned-context:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","items":[{"id":"pin-file","project_id":"project-1","root_id":"root-1","kind":"file","source":"file-tree","label":"src/main.rs","reference":"src/main.rs","content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":32,"freshness":"fresh","priority":850,"metadata":{}}],"persisted":true,"content_bodies_included":false}}
 {"jsonrpc":"2.0","id":"32","method":"turn/context/inspect","params":{"session_id":"session-1","pinned_context_set_identity":"pinned-context:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pinned_context_ids":["pin-file"]}}
+{"jsonrpc":"2.0","id":"33","method":"workspace/image/import-user","params":{"session_id":"session-1","root_id":"root-1","label":"layout.png","media_type":"image/png","data_base64":"<bounded-base64>"}}
+{"jsonrpc":"2.0","id":"33","result":{"schema_version":"pinned-image/0.1","project_id":"project-1","session_id":"session-1","root_id":"root-1","label":"layout.png","reference":"image:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","content_hash":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","bytes":1024,"media_type":"image/png","width":640,"height":480,"preview_available":true,"content_included":false}}
+{"jsonrpc":"2.0","id":"34","method":"workspace/image/read","params":{"session_id":"session-1","reference":"image:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}
 ```
 
 The project pointer, immutable object, and Workbench SQLite event are separate
@@ -310,9 +337,8 @@ source identity, bytes, and truncation. Worktree/staged changes therefore invali
 their pins; commit and commit-diff pins survive unrelated worktree changes but fail
 if the exact Git object is no longer available. No Git mutation is added.
 
-Image/child-handoff assembly, durable automatic
-invalidation,
-orphan GC, cross-resource atomicity, and Windows runtime evidence remain open.
+Child-handoff assembly, durable automatic invalidation, image Blob release on
+unpin, orphan GC, cross-resource atomicity, and Windows runtime evidence remain open.
 Qt watch/save callbacks may mark loaded file and selection pins stale locally, but never rewrite
 the durable descriptor; inspect/start remains authoritative. Agent/Codex remains
 read-only.

@@ -17,6 +17,10 @@ The Aegisy Agent Runtime uses the following third-party components:
 - base64, version 0.22.1 (MIT OR Apache-2.0), used to preserve PTY byte output
   across JSON-RPC:
   https://github.com/marshallpierce/rust-base64
+- image, version 0.25.10 (MIT OR Apache-2.0), used to validate and bound
+  explicitly user-imported PNG, JPEG, and WebP pinned context and to create
+  local UI thumbnails:
+  https://github.com/image-rs/image
 - libc, version 0.2.174 (MIT OR Apache-2.0), used for macOS process-group
   signal delivery:
   https://github.com/rust-lang/libc
