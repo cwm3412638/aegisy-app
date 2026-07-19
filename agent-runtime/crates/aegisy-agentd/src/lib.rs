@@ -31,6 +31,7 @@ mod repository_index;
 pub mod session_compaction;
 pub mod session_compaction_store;
 mod session_environment;
+pub mod structured_plan;
 #[cfg(target_os = "macos")]
 mod terminal;
 #[cfg(target_os = "windows")]

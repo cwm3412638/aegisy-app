@@ -47,6 +47,16 @@ Autonomy release-gate evidence:
   scheduling, child execution, Agent write, or unattended mode is enabled by
   this gate.
 
+Structured-plan foundation evidence:
+
+- An internal `structured-plan/0.1` contract validates bounded step IDs,
+  statuses, owners, dependency references/cycles, content-free SHA-256
+  evidence, and required completion evidence. Base/evidence revision changes
+  mark affected steps stale without silently changing their status. Four unit
+  fixtures cover valid graphs, cycle/unknown dependency rejection, revision
+  drift, and secret/non-hash rejection. AAP/UI persistence, plan questions,
+  durable job state, and execution remain unavailable under task `21.2`.
+
 Current editor evidence:
 
 - The macOS Qt build and all 15 desktop tests pass.

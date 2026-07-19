@@ -448,6 +448,7 @@
 - [x] 21.1 Keep background and multi-agent feature flags unavailable in stable builds until prerequisite gates are recorded complete
   - `runtime/degradations` now reports content-free `background-jobs`, `multi-agent`, and `unattended-writes` release gates with bounded missing-task IDs, `availability=not-advertised`, `stable_enabled=false`, and `override_available=false`. The initialize capability list does not advertise any of these autonomy methods, and an unknown background dispatch remains method-not-found. Protocol tests lock the no-hidden-switch boundary. This does not enable scheduling, child execution, Agent writes, or unattended work; tasks `21.2+` and the permission/sandbox/recovery gates remain required.
 - [ ] 21.2 Implement structured plan steps with IDs, dependencies, owners, evidence, and stale-state revalidation
+  - Partial internal `structured-plan/0.1` foundation validates bounded step IDs/statuses/owners, dependency references and cycles, content-free SHA-256 evidence, and completion evidence. Revalidation compares plan/base/evidence revisions and marks affected steps stale without resetting status. It has unit coverage but no AAP/UI persistence, plan question flow, or executor integration yet; keep this task unchecked.
 - [ ] 21.3 Define child-task contract for goal, context, worktree, tools, model profile, permissions, budgets, and handoff
 - [ ] 21.4 Implement parent/child session lineage, navigation, status, cancellation, and bounded result handoff
 - [ ] 21.5 Enforce dedicated worktree for every concurrent write-capable child

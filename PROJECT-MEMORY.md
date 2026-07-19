@@ -111,6 +111,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   security, recovery, budget, evaluation, and release gates are recorded. The
   runtime exposes only a bounded degradation report and no dispatch capability;
   tasks `21.2+` remain future work.
+- Task `21.2` now has a partial internal `structured-plan/0.1` contract. It
+  validates bounded step IDs/statuses/owners, dependency references and cycles,
+  content-free SHA-256 evidence, and completion evidence. Base or evidence
+  revision drift marks affected steps `stale` without resetting their status.
+  The contract is unit-tested but is not persisted, exposed through AAP/Qt, or
+  connected to an executor; keep `21.2` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is
@@ -814,13 +820,14 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 314 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 318 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
-and protocol counts include diagnostic, terminal, Git, and child-handoff pinned-
-context authority, strict Git references, complete-source drift detection, terminal
-normalization, image import/preview/assembly/release rollback, and source-loss
-fail-closed invariants.
+and protocol counts include the structured-plan dependency/evidence/stale contract
+alongside diagnostic, terminal, Git, and child-handoff pinned-context authority,
+strict Git references, complete-source drift detection, terminal normalization,
+image import/preview/assembly/release rollback, and source-loss fail-closed
+invariants.
 
 ## Session History Boundary
 

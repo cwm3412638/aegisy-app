@@ -94,6 +94,17 @@ No degradation response grants write, command, Hook, network, deletion, or
 compaction authority. The Qt host displays the state and does not expose an
 action that would simulate a blocked provider operation.
 
+## Structured Plan Boundary
+
+The sidecar contains an internal `structured-plan/0.1` data contract for the
+future plan/child-task flow. It validates bounded stable step IDs, statuses,
+owners, dependency references and cycles, content-free SHA-256 evidence, and
+completion evidence. A reviewed plan or evidence revision marks affected steps
+`stale` without silently resetting their status. The contract is not currently
+exposed through AAP, persisted as a job, or connected to an executor; clients
+must not infer plan authority or write permission from Codex `turn/plan/updated`
+notifications.
+
 ## Replay And Reconnect
 
 The durable session stream is ordered by a session-local sequence. After a
