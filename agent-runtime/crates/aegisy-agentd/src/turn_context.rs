@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const MAX_CONTEXT_ITEMS: usize = 16;
+pub(crate) const MAX_CONTEXT_ITEMS: usize = 16;
 const MAX_CONTEXT_ITEM_BYTES: usize = 16 * 1024;
 const MAX_CONTEXT_TOTAL_BYTES: usize = 64 * 1024;
 const MAX_ID_CHARS: usize = 128;
@@ -63,6 +63,10 @@ pub struct TurnContextItem {
     pub freshness: Option<String>,
     #[serde(default)]
     pub raw_output_ref: Option<String>,
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub inclusion_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -251,9 +255,29 @@ fn validate_item(item: &TurnContextItem) -> Result<(), TurnContextError> {
     }
     if !matches!(
         item.kind.as_str(),
-        "file" | "selection" | "diagnostic" | "search" | "terminal_excerpt" | "git_diff"
+        "file"
+            | "selection"
+            | "diagnostic"
+            | "search"
+            | "terminal_excerpt"
+            | "git_diff"
+            | "instruction"
     ) {
         return Err(error("unsupported turn context kind"));
+    }
+    if let Some(priority) = item.priority.as_deref() {
+        if priority.is_empty()
+            || priority.chars().count() > 64
+            || priority.chars().any(char::is_control)
+        {
+            return Err(error("context priority is invalid"));
+        }
+    }
+    if let Some(reason) = item.inclusion_reason.as_deref() {
+        if reason.is_empty() || reason.chars().count() > 128 || reason.chars().any(char::is_control)
+        {
+            return Err(error("context inclusion reason is invalid"));
+        }
     }
     if let Some(reference) = &item.raw_output_ref {
         if !reference.starts_with("diagnostic-raw:sha256:") || reference.len() > 128 {
@@ -289,12 +313,16 @@ fn manifest_entry(
         id: item.id.clone(),
         kind: item.kind.clone(),
         source: item.origin.clone(),
-        priority: "pinned".into(),
+        priority: item.priority.as_deref().unwrap_or("pinned").into(),
         trust: "untrusted-data".into(),
         content_hash,
         token_size: conservative_token_size(content.len()),
         freshness,
-        inclusion_reason: "user-selected".into(),
+        inclusion_reason: item
+            .inclusion_reason
+            .as_deref()
+            .unwrap_or("user-selected")
+            .into(),
         included: true,
     })
 }
@@ -420,6 +448,8 @@ mod tests {
             end_column: None,
             freshness: None,
             raw_output_ref: None,
+            priority: None,
+            inclusion_reason: None,
         }
     }
 

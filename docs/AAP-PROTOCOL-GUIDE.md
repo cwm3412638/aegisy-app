@@ -153,9 +153,14 @@ The discovery boundary rejects symlink components, sensitive and built-in
 ignored paths, Git-ignored project files, case-collision names, invalid UTF-8,
 control characters, secret-shaped content, and bounded file/count/byte
 overflows. A file is reread for metadata after capture; a changed revision is
-reported as `stale` and is not included. Instruction discovery is not yet
-automatically included in `turn/start`; task `17.2` remains partial until
-context budgeting, inspection, and managed-policy integration are complete.
+reported as `stale` and is not included. Work-mode `turn/start` automatically
+appends up to eight valid discovered instructions after explicit user context,
+using the same bounded context preparation and manifest. Secondary-root
+attachments do not select the primary-root instruction chain. Rejected or
+budget-excluded instructions remain visible through the explicit discovery
+method; task `17.2` remains partial until durable configuration, complete
+exclusion/budget reporting, inspection, and managed-policy integration are
+complete.
 
 ```jsonl
 {"jsonrpc":"2.0","id":"21","method":"workspace/instructions","params":{"project_id":"project-1","root_id":"root-1","target_path":"src/main.rs","include_content":false}}

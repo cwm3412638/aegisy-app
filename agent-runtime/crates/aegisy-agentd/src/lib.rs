@@ -98,6 +98,8 @@ const MAX_TRUST_REVIEW_HOOK_BYTES: usize = 256 * 1024;
 const MAX_RUNTIME_REPLAY_ITEMS: usize = 2_000;
 const RUNTIME_REPLAY_PAGE_SIZE: usize = 200;
 const MAX_TURN_METADATA_UPDATES_PER_KIND: usize = 32;
+const MAX_AUTO_INSTRUCTION_ITEMS: usize = 8;
+const MAX_AUTO_INSTRUCTION_BYTES: u64 = 32 * 1024;
 
 const TRUST_INSTRUCTION_NAMES: &[&str] = &[
     "AGENTS.md",
@@ -6795,6 +6797,75 @@ impl Runtime {
             .map_err(|cause| cause.message)
     }
 
+    fn append_instruction_context(
+        &self,
+        context_roots: &HashMap<String, PathBuf>,
+        context_items: &mut Vec<TurnContextItem>,
+    ) -> Result<(), (i64, String)> {
+        let Some(project_root) = context_roots.get("root-1").cloned() else {
+            return Ok(());
+        };
+        let target_path = context_items.iter().find_map(|item| {
+            if item
+                .root_id
+                .as_deref()
+                .is_some_and(|root_id| root_id != "root-1")
+            {
+                return None;
+            }
+            item.path
+                .as_deref()
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+        });
+        let result = discover_instructions(
+            &roots_from_environment(project_root),
+            &instruction_discovery::DiscoveryRequest {
+                target_path,
+                include_content: true,
+            },
+        )
+        .map_err(|error| (error.code, error.message))?;
+        let mut added = 0_usize;
+        let mut added_bytes = 0_u64;
+        for entry in result.entries {
+            if added >= MAX_AUTO_INSTRUCTION_ITEMS
+                || context_items.len() >= turn_context::MAX_CONTEXT_ITEMS
+            {
+                break;
+            }
+            let Some(content) = entry.content else {
+                continue;
+            };
+            if !entry.included
+                || added_bytes.saturating_add(entry.bytes) > MAX_AUTO_INSTRUCTION_BYTES
+            {
+                continue;
+            }
+            context_items.push(TurnContextItem {
+                id: format!("instruction-{added}"),
+                kind: "instruction".into(),
+                label: entry.relative_path,
+                origin: "instruction-discovery".into(),
+                root_id: Some("root-1".into()),
+                path: None,
+                content: Some(content),
+                revision: entry.revision,
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                freshness: Some(entry.freshness),
+                raw_output_ref: None,
+                priority: Some(format!("instruction-rank-{}", entry.precedence_rank)),
+                inclusion_reason: Some(format!("instruction-{}", entry.precedence_reason)),
+            });
+            added += 1;
+            added_bytes = added_bytes.saturating_add(entry.bytes);
+        }
+        Ok(())
+    }
+
     fn turn_start_stream<F>(&mut self, request: Request, emit: &mut F)
     where
         F: FnMut(Value),
@@ -6845,7 +6916,8 @@ impl Runtime {
                     "unverified-session-snapshot",
                 )
             };
-        let context_roots = state.session.project_id.as_ref().map(|project_id| {
+        let project_id = state.session.project_id.clone();
+        let context_roots = project_id.as_ref().map(|project_id| {
             let roots = self
                 .project_roots
                 .get(project_id)
@@ -6865,8 +6937,17 @@ impl Runtime {
                 })
                 .collect::<HashMap<_, _>>()
         });
+        let mut context_items = params.context.clone();
+        if let Some(context_roots) = context_roots.as_ref() {
+            if let Err((code, message)) =
+                self.append_instruction_context(context_roots, &mut context_items)
+            {
+                self.emit_all(self.error_for(&request, code, message), emit);
+                return;
+            }
+        }
         let prepared_context =
-            match prepare_turn_context_scoped(&params.context, context_roots.as_ref()) {
+            match prepare_turn_context_scoped(&context_items, context_roots.as_ref()) {
                 Ok(context) => context,
                 Err(error) => {
                     self.emit_all(self.error_for(&request, error.code, error.message), emit);

@@ -2181,6 +2181,64 @@ fn turn_context_is_bounded_project_scoped_and_authoritatively_read() {
 }
 
 #[test]
+fn work_turn_auto_includes_bounded_project_instructions_after_user_context() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-auto-instructions-{unique}"));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("AGENTS.md"), "project guidance stays untrusted\n").unwrap();
+    fs::write(root.join("visible.rs"), "fn visible() {}\n").unwrap();
+
+    let mut runtime = ready_runtime();
+    let opened = runtime.handle_line(&request("open", "project/open", json!({ "root": root })));
+    let project_id = opened[0]["result"]["project"]["id"].as_str().unwrap();
+    let session = runtime.handle_line(&request(
+        "session",
+        "session/start",
+        json!({ "mode": "work", "project_id": project_id }),
+    ));
+    let session_id = session[0]["result"]["session"]["id"].as_str().unwrap();
+    let messages = runtime.handle_line(&request(
+        "turn",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "use project guidance",
+            "idempotency_key": "auto-instruction-turn",
+            "context": [{
+                "id": "selected-file",
+                "kind": "file",
+                "label": "visible.rs",
+                "origin": "file-tree",
+                "path": "visible.rs"
+            }]
+        }),
+    ));
+    assert_eq!(messages[0]["result"]["context"]["item_count"], 2);
+    let manifest_entries = messages[0]["result"]["context"]["manifest"]["entries"]
+        .as_array()
+        .unwrap();
+    assert_eq!(manifest_entries.len(), 2);
+    assert_eq!(manifest_entries[1]["kind"], "instruction");
+    assert_eq!(manifest_entries[1]["source"], "instruction-discovery");
+    assert!(manifest_entries[1]["priority"]
+        .as_str()
+        .unwrap()
+        .starts_with("instruction-rank-"));
+    assert_eq!(
+        manifest_entries[1]["inclusion_reason"],
+        "instruction-project-root"
+    );
+    assert_eq!(manifest_entries[1]["trust"], "untrusted-data");
+    assert!(manifest_entries[1].get("content").is_none());
+    let serialized = serde_json::to_string(&messages).unwrap();
+    assert!(serialized.contains("project guidance stays untrusted"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn session_runtime_state_isolation_keeps_environment_context_and_history_scoped() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

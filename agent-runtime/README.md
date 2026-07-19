@@ -77,8 +77,12 @@ parameters. Content requires an explicit `include_content:true` and remains
 bounded `untrusted-data`; it cannot authorize permissions, commands, Hooks, or
 network. Secret-shaped/control-character content, sensitive/ignored/Git-ignored
 paths, symlinks, case collisions, stale reads, and limit overflows are rejected
-or reported without returning the body. This partial foundation is not yet
-automatically inserted into a model turn.
+or reported without returning the body. Work-mode `turn/start` automatically
+appends up to eight valid discovered instructions after explicit user context,
+using the same bounded context manifest; secondary-root attachments do not
+select the primary-root instruction chain. The explicit discovery response
+remains the source for rejected/budget-excluded diagnostics, and this is still
+a partial foundation rather than a complete managed-policy integration.
 
 `operation/probe` is a read-only evidence collector for the reconciliation
 workflow. It resolves only registered project roots through the Work session,

@@ -567,9 +567,13 @@ Current editor evidence:
   always marked untrusted-data and cannot authorize permissions, commands,
   Hooks, or network. Unit and protocol fixtures cover nested target selection,
   deterministic ordering, case collisions, secret/control/symlink denial,
-  stale-read checks, and size/count bounds. Task 17.2 remains unchecked until
-  durable managed/user configuration, turn-context assembly/budget integration,
-  policy/trust review, and cross-platform evidence are complete.
+  stale-read checks, and size/count bounds. Work-mode turn/start now appends up
+  to eight valid discovered instructions after explicit user context, through
+  the same bounded context preparation and manifest; secondary-root attachments
+  do not select a primary-root instruction chain. Task 17.2 remains unchecked
+  until durable managed/user configuration, complete exclusion/budget reporting,
+  policy/trust review, context inspection, and cross-platform evidence are
+  complete.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or

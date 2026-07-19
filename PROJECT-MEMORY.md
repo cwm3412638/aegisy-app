@@ -260,9 +260,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   control-character, secret-shaped, stale, file-count, directory, and byte-limit
   cases fail closed or are reported without the body. Unit and protocol fixtures
   cover precedence, nested targets, metadata-only output, rejection, and bounds.
-  Durable managed/user configuration, `turn/start` context assembly and budget
-  integration, trust/managed-policy intersection, and cross-platform evidence
-  remain open; keep `17.2` unchecked.
+  Work-mode `turn/start` now appends up to eight valid discovered instructions
+  after explicit user context through the same bounded context preparation and
+  manifest. Generated entries carry instruction precedence in priority and
+  inclusion metadata, remain untrusted, and secondary-root attachments do not
+  select the primary-root instruction chain. Durable managed/user configuration,
+  complete rejection/budget reporting, trust/managed-policy intersection,
+  context inspection, and cross-platform evidence remain open; keep `17.2`
+  unchecked.
 - User-initiated macOS PTY execution, the named lifecycle, and the Qt/xterm.js
   terminal frontend are verified; Windows ConPTY is implemented but not yet
   runtime-verified. Read-only Codex command events now have a partial structured
