@@ -24,6 +24,7 @@ pub mod operation_reconciliation;
 mod output_redaction;
 pub mod permission_issuer;
 pub mod permission_profile;
+pub mod pinned_context;
 mod repository_index;
 pub mod session_compaction;
 pub mod session_compaction_store;

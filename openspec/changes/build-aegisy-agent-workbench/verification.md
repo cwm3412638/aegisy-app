@@ -744,5 +744,11 @@ Known limitations:
   but awaits Windows execution. The current
   composer queue is transient turn input, not the durable pinned-context system
   planned in 17.3.
+- The internal `pinned-context/0.1` contract validates content-free descriptors for
+  every 17.3 source kind. Unit fixtures cover kind support, project/duplicate
+  binding, deterministic identity, unsafe absolute/parent/network references,
+  secret-shaped metadata, item size, and aggregate size bounds. It has no AAP,
+  durable event/Blob storage, source reread, turn assembly, or Qt pin/unpin surface;
+  task 17.3 remains unchecked.
 - Windows packaging, TLS runtime, scaling, IME, and accessibility evidence remain
   required before a Windows release claim.

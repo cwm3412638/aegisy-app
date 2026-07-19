@@ -102,6 +102,12 @@ select the primary-root instruction chain. The explicit discovery response
 remains the source for rejected/budget-excluded diagnostics, and this is still
 a partial foundation rather than a complete managed-policy integration.
 
+The internal `pinned-context/0.1` contract validates content-free descriptors for
+files, selections, images, diagnostics, terminal excerpts, Git commits/diffs,
+artifacts, and child handoffs. It binds project/session/root identity, source,
+reference, hash, size, freshness, priority, and bounded secret-free metadata. It
+does not persist pins, expose AAP methods, or add them to model context yet.
+
 `operation/probe` is a read-only evidence collector for the reconciliation
 workflow. It resolves only registered project roots through the Work session,
 hashes bounded workspace metadata and read-only Git status, and observes only
