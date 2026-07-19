@@ -1621,6 +1621,24 @@ int main(int argc, char *argv[])
                 "selection pin action did not persist and render its range")) {
         return 1;
     }
+    editor->selectAll();
+    editor->insertPlainText(QStringLiteral("saved\ncontent\n"));
+    if (!expect(!pinSelectionContextAction->isEnabled(),
+                "selection pin action stayed enabled for unsaved editor content")) {
+        return 1;
+    }
+    editorSave->click();
+    if (!expect(waitUntil(application, [&workbench, editor]() {
+                    const QList<QLabel *> labels = workbench.findChildren<QLabel *>();
+                    return !editor->document()->isModified()
+                        && std::any_of(labels.cbegin(), labels.cend(), [](QLabel *label) {
+                            return label->text().contains(QStringLiteral("editable.txt:1:1-1:9"))
+                                && label->text().contains(QStringLiteral("stale"));
+                        });
+                }),
+                "saving a pinned selection did not mark the local pin stale")) {
+        return 1;
+    }
     const QList<QPushButton *> selectionPinRemoveButtons = workbench.findChildren<QPushButton *>(
         QStringLiteral("agentPinnedContextRemoveButton"));
     selectionPinRemoveButtons.first()->click();
@@ -1633,10 +1651,6 @@ int main(int argc, char *argv[])
     }
     editor->selectAll();
     editor->insertPlainText(QStringLiteral("saved\ncontent\n"));
-    if (!expect(!pinSelectionContextAction->isEnabled(),
-                "selection pin action stayed enabled for unsaved editor content")) {
-        return 1;
-    }
     QMetaObject::invokeMethod(fileTree, "itemActivated", Qt::DirectConnection,
                               Q_ARG(QTreeWidgetItem *, secondItem), Q_ARG(int, 0));
     if (!expect(waitUntil(application, [editor, editorTabs, recentFiles]() {
