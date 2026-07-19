@@ -706,7 +706,7 @@ git diff --check
 ```
 
 Current verified baseline: 16 desktop tests, 293 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 49 Rust
+one explicitly ignored live Codex fixture, 50 Rust
 protocol tests, eleven macOS sidecar stdio/Codex contract tests, and Clippy with warnings
 denied. The latest unit count includes the structured stderr diagnostic invariant.
 

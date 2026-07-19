@@ -2830,6 +2830,163 @@ fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() 
 }
 
 #[test]
+fn durable_artifact_pin_reloads_after_restart_and_keeps_inspection_metadata_only() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-pinned-artifact-turn-{unique}"));
+    let data_root = root.join("data");
+    let project_root = root.join("project");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "durable-artifact-pin", "version": "1"}
+        }),
+    ));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    let opened = runtime.handle_line(&request(
+        "project-open",
+        "project/open",
+        json!({"root": project_root}),
+    ));
+    let project_id = opened[0]["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let session = runtime.handle_line(&request(
+        "session-start",
+        "session/start",
+        json!({"mode": "work", "project_id": project_id}),
+    ));
+    let session_id = session[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(runtime);
+
+    let content = b"durable artifact body\n".to_vec();
+    let content_hash = format!("{:x}", Sha256::digest(&content));
+    let content_reference = format!("command-output:sha256:{content_hash}");
+    let mut store = WorkbenchStore::open(&data_root).unwrap();
+    store
+        .put_durable_blob(DurableBlobWrite {
+            reference_id: durable_blob_reference_id(
+                Some(&session_id),
+                Some(&project_id),
+                "session",
+                &session_id,
+                &content_reference,
+            ),
+            content_reference: content_reference.clone(),
+            session_id: Some(session_id.clone()),
+            project_id: Some(project_id.clone()),
+            kind: DurableBlobKind::CommandOutput,
+            media_type: "text/plain; charset=utf-8".into(),
+            owner_kind: "session".into(),
+            owner_id: session_id.clone(),
+            metadata: json!({
+                "item_id": "artifact-item",
+                "source_bytes": content.len(),
+                "redacted_count": 0,
+                "total_bytes": content.len(),
+                "retained_bytes": content.len(),
+                "omitted_bytes": 0,
+                "redacted": false,
+                "truncated": false
+            }),
+            content,
+            created_at_ms: 2_000_000_000_000,
+            retain_until_ms: 2_000_086_400_000,
+        })
+        .unwrap();
+    drop(store);
+
+    let mut restarted = Runtime::with_store(&data_root).unwrap();
+    restarted.handle_line(&request(
+        "initialize-2",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "durable-artifact-pin", "version": "1"}
+        }),
+    ));
+    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    let resumed = restarted.handle_line(&request(
+        "session-resume",
+        "session/resume",
+        json!({"session_id": session_id}),
+    ));
+    assert_eq!(resumed[0]["result"]["resumed"], true);
+
+    let set = json!({
+        "schema_version": "pinned-context/0.1",
+        "project_id": project_id,
+        "items": [{
+            "id": "pin-artifact",
+            "project_id": project_id,
+            "session_id": session_id,
+            "kind": "artifact",
+            "source": "command-output",
+            "label": "durable command output",
+            "reference": content_reference,
+            "content_hash": format!("sha256:{content_hash}"),
+            "bytes": 22,
+            "freshness": "fresh",
+            "priority": 700,
+            "metadata": {}
+        }]
+    });
+    let saved = restarted.handle_line(&request(
+        "pins-save",
+        "workspace/pinned-context/save",
+        json!({"project_id": project_id, "set": set}),
+    ));
+    assert_eq!(saved[0]["result"]["persisted"], true);
+    let identity = saved[0]["result"]["set_identity"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let inspected = restarted.handle_line(&request(
+        "inspect-artifact",
+        "turn/context/inspect",
+        json!({
+            "session_id": session_id,
+            "pinned_context_set_identity": identity,
+            "pinned_context_ids": ["pin-artifact"]
+        }),
+    ));
+    assert_eq!(
+        inspected[0]["result"]["context"]["manifest"]["entries"][0]["kind"],
+        "artifact"
+    );
+    assert!(!serde_json::to_string(&inspected)
+        .unwrap()
+        .contains("durable artifact body"));
+    let turn = restarted.handle_line(&request(
+        "turn-artifact",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "review the artifact",
+            "idempotency_key": "artifact-turn-1",
+            "pinned_context_set_identity": identity,
+            "pinned_context_ids": ["pin-artifact"]
+        }),
+    ));
+    assert_eq!(turn[0]["result"]["context"]["item_count"], 1);
+    assert!(serde_json::to_string(&turn)
+        .unwrap()
+        .contains("durable artifact body"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn session_runtime_state_isolation_keeps_environment_context_and_history_scoped() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

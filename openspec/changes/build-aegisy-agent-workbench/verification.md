@@ -766,7 +766,9 @@ Known limitations:
   raw-byte SHA-256 and revision, marks drift stale, and for selections extracts
   only bounded metadata line/column ranges while keeping inspection metadata-only.
   Session-owned artifact pins additionally resolve only validated command-output
-  text references with matching UTF-8, byte count, and SHA-256. Duplicate/missing
+  text references with matching UTF-8, byte count, and SHA-256; the protocol
+  fixture verifies durable Blob reload after Runtime restart and turn assembly.
+  Duplicate/missing
   IDs, stale set identity, cross-session selection, and image/diagnostic/terminal/
   Git/child-handoff kinds fail explicitly. Qt now
   loads project pins and covers authoritative file and editor-selection pin creation,
