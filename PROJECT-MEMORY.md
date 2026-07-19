@@ -240,9 +240,29 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   content identity, conservative token estimates, freshness, inclusion reason,
   and included state. File attachments are hashed only after the existing root,
   ignore, symlink, and stale checks; truncation is explicit and the manifest never
-  contains attachment text. Instruction discovery, budget allocation, tokenizer
-  authority, context inspection, and provider-scale evidence remain open, so
+  contains attachment text. Instruction discovery now has a separate partial
+  AAP foundation, while budget allocation, tokenizer authority, context inspection,
+  and provider-scale evidence remain open, so
   `17.1` is not complete.
+- OpenSpec task `17.2` now has a partial `instruction-discovery/0.1`
+  foundation. Read-only AAP `workspace/instructions` binds a registered project
+  root and optional target path, and deterministically returns a weakest-first
+  merge list with precedence `managed > user > nested (closer depth wins) >
+  project`. Managed/user roots are accepted only through the path-only
+  environment overrides `AEGISY_MANAGED_INSTRUCTIONS_DIR` and
+  `AEGISY_USER_INSTRUCTIONS_DIR`; callers cannot provide arbitrary host paths.
+  Entries carry logical scope/path, depth, precedence, `untrusted-data` trust,
+  bounded bytes/token estimate, SHA-256, revision, freshness, inclusion, and
+  rejection state. Explicit `include_content:true` returns bounded instruction
+  text only as untrusted data; the response explicitly states that it cannot
+  grant permissions, execute commands, enable Hooks, or authorize network.
+  Symlink, sensitive/built-in/Git-ignored, case-collision, invalid UTF-8,
+  control-character, secret-shaped, stale, file-count, directory, and byte-limit
+  cases fail closed or are reported without the body. Unit and protocol fixtures
+  cover precedence, nested targets, metadata-only output, rejection, and bounds.
+  Durable managed/user configuration, `turn/start` context assembly and budget
+  integration, trust/managed-policy intersection, and cross-platform evidence
+  remain open; keep `17.2` unchecked.
 - User-initiated macOS PTY execution, the named lifecycle, and the Qt/xterm.js
   terminal frontend are verified; Windows ConPTY is implemented but not yet
   runtime-verified. Read-only Codex command events now have a partial structured

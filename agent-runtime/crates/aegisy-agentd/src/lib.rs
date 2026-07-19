@@ -15,6 +15,7 @@ pub mod git_workflow_authorization;
 pub mod git_workflow_execution;
 pub mod git_workflow_state;
 pub mod git_worktree_lifecycle;
+mod instruction_discovery;
 mod language_server;
 pub mod non_git_checkpoint;
 mod operation_probe;
@@ -55,6 +56,7 @@ use codex_adapter::{BackendInfo, CodexAdapter, CodexEvent, CodexSession, Command
 use diagnostic_store::DiagnosticStore;
 use git_query::{commit as git_commit, diff as git_diff, log as git_log, overview as git_overview};
 use git_status::{ignored_paths, status as git_status};
+use instruction_discovery::{discover as discover_instructions, roots_from_environment};
 use language_server::LanguageServerManager;
 use operation_reconciliation::{
     reconcile as reconcile_operation, EventState, GitState, OperationKind, ProcessState,
@@ -605,6 +607,17 @@ struct ProjectTrustAcknowledgeParams {
     root_id: String,
     root_identity: String,
     review_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceInstructionsParams {
+    project_id: String,
+    #[serde(default)]
+    root_id: Option<String>,
+    #[serde(default)]
+    target_path: Option<String>,
+    #[serde(default)]
+    include_content: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2460,6 +2473,7 @@ impl Runtime {
             "turn/steer" => self.control.steer_claimed(request),
             "workspace/list" => self.workspace_list(request),
             "workspace/read" => self.workspace_read(request),
+            "workspace/instructions" => self.workspace_instructions(request),
             "workspace/save-user-text" => self.workspace_save_user_text(request),
             "workspace/metadata" => self.workspace_metadata(request),
             "workspace/watch" => self.workspace_watch(request),
@@ -2808,6 +2822,7 @@ impl Runtime {
                 "permission.read-only".into(),
                 "workspace.list".into(),
                 "workspace.read-text".into(),
+                "workspace.instructions.discovery".into(),
                 "workspace.save-user-text".into(),
                 "workspace.metadata".into(),
                 "workspace.watch.poll".into(),
@@ -8351,6 +8366,46 @@ impl Runtime {
 
     fn workspace_scope_key(project_id: &str, root_id: &str) -> String {
         format!("{project_id}\0{root_id}")
+    }
+
+    fn workspace_instructions(&self, request: Request) -> Vec<Value> {
+        let params: WorkspaceInstructionsParams =
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => params,
+                Err(cause) => {
+                    return self.error_for(&request, -32602, format!("invalid params: {cause}"))
+                }
+            };
+        let (root_binding, root) =
+            match self.workspace_root_binding(&params.project_id, params.root_id.as_deref(), false)
+            {
+                Ok(binding) => binding,
+                Err((code, message)) => return self.error_for(&request, code, message),
+            };
+        let result = match discover_instructions(
+            &roots_from_environment(root.clone()),
+            &instruction_discovery::DiscoveryRequest {
+                target_path: params.target_path,
+                include_content: params.include_content,
+            },
+        ) {
+            Ok(result) => result,
+            Err(error) => return self.error_for(&request, error.code, error.message),
+        };
+        let mut value =
+            serde_json::to_value(result).expect("instruction discovery response serialization");
+        if let Some(object) = value.as_object_mut() {
+            object.insert("project_id".into(), params.project_id.into());
+            object.insert("root_id".into(), root_binding.root_id.into());
+            object.insert("root_access".into(), root_binding.access.into());
+            object.insert("content_trust".into(), "untrusted-data".into());
+            object.insert(
+                "authority_effect".into(),
+                "none; instructions cannot grant permissions, execute commands, enable hooks, or authorize network"
+                    .into(),
+            );
+        }
+        self.success_for(&request, value)
     }
 
     fn operation_reconciliation_key(session_id: &str, operation_id: &str) -> String {

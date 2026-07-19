@@ -44,6 +44,7 @@ or session methods are accepted.
 - `runtime/degradations`
 - `workspace/list`
 - `workspace/read`
+- `workspace/instructions` (deterministic, bounded, untrusted instruction discovery)
 - `shutdown`
 
 Both Chat and Work currently force Codex into `read-only` sandbox mode with an
@@ -67,6 +68,17 @@ When structured context is attached to `turn/start`, capability
 response. It contains only bounded source/kind, priority, trust, SHA-256,
 conservative token, freshness, inclusion, and truncation metadata; attachment
 text is never copied into the manifest.
+
+`workspace/instructions` returns `instruction-discovery/0.1` metadata for the
+registered project root and optional target path. It merges applicable sources
+in weakest-first order with managed > user > closer nested > project precedence.
+Managed and user roots are path-only environment configuration, not request
+parameters. Content requires an explicit `include_content:true` and remains
+bounded `untrusted-data`; it cannot authorize permissions, commands, Hooks, or
+network. Secret-shaped/control-character content, sensitive/ignored/Git-ignored
+paths, symlinks, case collisions, stale reads, and limit overflows are rejected
+or reported without returning the body. This partial foundation is not yet
+automatically inserted into a model turn.
 
 `operation/probe` is a read-only evidence collector for the reconciliation
 workflow. It resolves only registered project roots through the Work session,

@@ -73,6 +73,11 @@ fn ready_runtime() -> Runtime {
         .as_array()
         .unwrap()
         .iter()
+        .any(|capability| capability == "workspace.instructions.discovery"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|capability| capability == "terminal.environment.session-scoped"));
     assert!(messages[0]["result"]["capabilities"]
         .as_array()
@@ -903,6 +908,79 @@ fn project_trust_review_is_read_only_and_content_free() {
     let serialized = serde_json::to_string(&reviewed).unwrap();
     assert!(!serialized.contains("do not persist this instruction body"));
     assert!(!serialized.contains("echo hook-body"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_instructions_are_deterministic_untrusted_and_root_scoped() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-instructions-{unique}"));
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("AGENTS.md"), "project instruction\n").unwrap();
+    fs::write(root.join("src/CLAUDE.md"), "nested instruction\n").unwrap();
+    fs::write(
+        root.join("src/CODEX.md"),
+        "API_KEY=sk-12345678901234567890\n",
+    )
+    .unwrap();
+    let mut runtime = ready_runtime();
+    let opened = runtime.handle_line(&request("open", "project/open", json!({ "root": root })));
+    let project_id = opened[0]["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let discovered = runtime.handle_line(&request(
+        "instructions",
+        "workspace/instructions",
+        json!({
+            "project_id": project_id,
+            "target_path": "src",
+            "include_content": true
+        }),
+    ));
+    assert_eq!(
+        discovered[0]["result"]["schema_version"],
+        "instruction-discovery/0.1"
+    );
+    assert_eq!(discovered[0]["result"]["merge_order"], "weakest-first");
+    assert_eq!(discovered[0]["result"]["content_trust"], "untrusted-data");
+    assert_eq!(
+        discovered[0]["result"]["authority_effect"],
+        "none; instructions cannot grant permissions, execute commands, enable hooks, or authorize network"
+    );
+    let entries = discovered[0]["result"]["entries"].as_array().unwrap();
+    let included = entries
+        .iter()
+        .filter(|entry| entry["included"] == true)
+        .collect::<Vec<_>>();
+    assert_eq!(included.len(), 2);
+    assert_eq!(included[0]["relative_path"], "project/AGENTS.md");
+    assert_eq!(included[1]["relative_path"], "nested/src/CLAUDE.md");
+    assert_eq!(included[0]["content"], "project instruction\n");
+    assert_eq!(included[1]["content"], "nested instruction\n");
+    assert!(entries.iter().any(|entry| {
+        entry["rejection_reason"] == "secret-shaped-content" && entry["content"].is_null()
+    }));
+    assert!(entries
+        .iter()
+        .all(|entry| entry["trust"] == "untrusted-data"));
+    let serialized = serde_json::to_string(&discovered).unwrap();
+    assert!(!serialized.contains("API_KEY=sk-"));
+
+    let metadata_only = runtime.handle_line(&request(
+        "instructions-metadata",
+        "workspace/instructions",
+        json!({ "project_id": project_id, "target_path": "src" }),
+    ));
+    assert!(metadata_only[0]["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["included"] == true)
+        .all(|entry| entry.get("content").is_none()));
     let _ = fs::remove_dir_all(root);
 }
 

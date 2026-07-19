@@ -556,6 +556,20 @@ Current editor evidence:
   and protocol fixtures verify deterministic metadata, conservative token sizing,
   truncation, and absence of a `content` field; task `17.1` remains unchecked until
   instruction, budget, inspector, tokenizer, and provider-scale consumers exist.
+- The partial instruction-discovery/0.1 foundation exposes read-only
+  workspace/instructions. It binds a registered project root, applies the
+  deterministic weakest-first precedence managed > user > nested (closer depth
+  wins) > project, and returns only bounded provenance, precedence, hash,
+  revision, token, freshness, inclusion, truncation, and rejection metadata unless
+  the caller explicitly requests bounded content. Managed/user sources are
+  restricted to path-only environment configuration; project sources use the
+  existing sensitive, symlink, built-in-ignore, and Git-ignore policy. Content is
+  always marked untrusted-data and cannot authorize permissions, commands,
+  Hooks, or network. Unit and protocol fixtures cover nested target selection,
+  deterministic ordering, case collisions, secret/control/symlink denial,
+  stale-read checks, and size/count bounds. Task 17.2 remains unchecked until
+  durable managed/user configuration, turn-context assembly/budget integration,
+  policy/trust review, and cross-platform evidence are complete.
 - Session metadata management now has bounded `session/title`, `session/archive`,
   and `session/unarchive` AAP operations. Store timestamp guards prevent stale
   projection rewrites; Runtime checks reject archival during an active turn or

@@ -130,6 +130,38 @@ marked rather than silently treated as complete.
 This is metadata for later context budgeting and inspection, not an authority
 grant. It does not persist source content or activate compaction.
 
+## Instruction Discovery
+
+Capability `workspace.instructions.discovery` exposes the read-only
+`workspace/instructions` method. The request binds a registered project and
+optional root, and may provide an existing root-relative `target_path` so only
+the project-to-target ancestor chain is applicable. Managed and user sources
+come only from the sidecar's path-only environment configuration:
+`AEGISY_MANAGED_INSTRUCTIONS_DIR` and `AEGISY_USER_INSTRUCTIONS_DIR`.
+Callers cannot supply arbitrary host paths.
+
+The versioned response is `instruction-discovery/0.1`. Entries are sorted in
+`merge_order:"weakest-first"` order using the explicit precedence
+`managed > user > nested (closer depth wins) > project`. Each entry is bounded
+and carries scope, logical relative path, depth, precedence rank/reason,
+`untrusted-data` trust, byte/token estimates, SHA-256 content identity,
+revision, freshness, inclusion, and rejection state. Content is omitted unless
+`include_content:true`; even then it is bounded untrusted data and has no
+permission, command, Hook, or network effect.
+
+The discovery boundary rejects symlink components, sensitive and built-in
+ignored paths, Git-ignored project files, case-collision names, invalid UTF-8,
+control characters, secret-shaped content, and bounded file/count/byte
+overflows. A file is reread for metadata after capture; a changed revision is
+reported as `stale` and is not included. Instruction discovery is not yet
+automatically included in `turn/start`; task `17.2` remains partial until
+context budgeting, inspection, and managed-policy integration are complete.
+
+```jsonl
+{"jsonrpc":"2.0","id":"21","method":"workspace/instructions","params":{"project_id":"project-1","root_id":"root-1","target_path":"src/main.rs","include_content":false}}
+{"jsonrpc":"2.0","id":"21","result":{"schema_version":"instruction-discovery/0.1","project_id":"project-1","root_id":"root-1","merge_order":"weakest-first","precedence":"managed > user > nested (closer depth wins) > project","content_trust":"untrusted-data","authority_effect":"none; instructions cannot grant permissions, execute commands, enable hooks, or authorize network","entries":[{"scope":"nested","source":"project","relative_path":"nested/src/AGENTS.md","depth":1,"precedence_rank":401,"precedence_reason":"nested-project-depth","trust":"untrusted-data","bytes":128,"token_estimate":32,"content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","revision":"instruction-revision:128:1","freshness":"fresh","included":true,"content_state":"available"}],"included_files":1,"included_bytes":128,"truncated":false,"truncation_reasons":[],"rejection_reasons":[]}}
+```
+
 ## Operation Reconciliation
 
 `operation/reconcile` accepts only content-free event, process, workspace, and Git
