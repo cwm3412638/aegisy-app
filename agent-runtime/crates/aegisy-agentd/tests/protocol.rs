@@ -130,6 +130,16 @@ fn ready_runtime() -> Runtime {
         .as_array()
         .unwrap()
         .iter()
+        .any(|capability| capability == "session.workspace-binding.read-only"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "session.search.branch"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|capability| capability == "operation.reconciliation"));
     assert!(messages[0]["result"]["capabilities"]
         .as_array()
@@ -559,7 +569,7 @@ fn searches_sessions_by_title_runtime_model_and_approved_transcript_text() {
         "session/search",
         json!({ "title": "tls", "limit": 10 }),
     ));
-    assert_eq!(title[0]["result"]["schema_version"], "session-search/0.1");
+    assert_eq!(title[0]["result"]["schema_version"], "session-search/0.2");
     assert_eq!(title[0]["result"]["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(title[0]["result"]["sessions"][0]["session_id"], session_id);
     assert_eq!(
@@ -598,13 +608,187 @@ fn searches_sessions_by_title_runtime_model_and_approved_transcript_text() {
         "session/search",
         json!({ "branch": "main" }),
     ));
-    assert_eq!(branch[0]["error"]["code"], -32028);
+    assert_eq!(branch[0]["result"]["sessions"], json!([]));
     let invalid = runtime.handle_line(&request(
         "search-limit",
         "session/search",
         json!({ "limit": 101 }),
     ));
     assert_eq!(invalid[0]["error"]["code"], -32602);
+}
+
+#[test]
+fn durable_work_session_binds_and_searches_its_git_workspace() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let base = std::env::temp_dir().join(format!("aegisy-aap-workspace-binding-{unique}"));
+    let project_root = base.join("project");
+    let data_root = base.join("data");
+    fs::create_dir_all(&project_root).unwrap();
+    fs::create_dir_all(&data_root).unwrap();
+    assert!(Command::new("git")
+        .arg("init")
+        .arg(&project_root)
+        .status()
+        .unwrap()
+        .success());
+    for (key, value) in [
+        ("user.name", "Aegisy Test"),
+        ("user.email", "aegisy@example.invalid"),
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&project_root)
+            .args(["config", key, value])
+            .status()
+            .unwrap()
+            .success());
+    }
+    fs::write(project_root.join("README.md"), "workspace binding\n").unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&project_root)
+        .args(["add", "README.md"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&project_root)
+        .args(["commit", "-m", "initial"])
+        .status()
+        .unwrap()
+        .success());
+    let branch = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&project_root)
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    assert!(!branch.is_empty());
+
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    runtime.handle_line(&request(
+        "workspace-init",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "workspace-binding", "version": "1"}
+        }),
+    ));
+    runtime.handle_line(&request("workspace-ready", "initialized", json!({})));
+    let opened = runtime.handle_line(&request(
+        "workspace-open",
+        "project/open",
+        json!({"root": project_root}),
+    ));
+    let project_id = opened[0]["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let started = runtime.handle_line(&request(
+        "workspace-start",
+        "session/start",
+        json!({"mode": "work", "project_id": project_id, "title": "Bound branch"}),
+    ));
+    let session_id = started[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(started[0]["result"]["workspace"]["session_id"], session_id);
+    assert_eq!(started[0]["result"]["workspace"]["project_id"], project_id);
+    assert_eq!(started[0]["result"]["workspace"]["branch"], branch);
+    assert_eq!(started[0]["result"]["workspace"]["git_state"], "worktree");
+    assert_eq!(
+        started[0]["result"]["workspace"]["raw_paths_included"],
+        false
+    );
+    assert_eq!(
+        started[0]["result"]["workspace"]["permission_granted"],
+        false
+    );
+    drop(runtime);
+
+    let mut restarted = Runtime::with_store(&data_root).unwrap();
+    restarted.handle_line(&request(
+        "workspace-restart-init",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "workspace-binding", "version": "1"}
+        }),
+    ));
+    restarted.handle_line(&request(
+        "workspace-restart-ready",
+        "initialized",
+        json!({}),
+    ));
+    let search = restarted.handle_line(&request(
+        "workspace-search",
+        "session/search",
+        json!({"project_id": project_id, "branch": branch}),
+    ));
+    assert_eq!(search[0]["result"]["schema_version"], "session-search/0.2");
+    assert_eq!(search[0]["result"]["sessions"][0]["session_id"], session_id);
+    assert_eq!(
+        search[0]["result"]["sessions"][0]["matched_fields"],
+        json!(["branch"])
+    );
+    assert_eq!(
+        search[0]["result"]["sessions"][0]["workspace"]["branch"],
+        branch
+    );
+    let replay = restarted.handle_line(&request(
+        "workspace-read",
+        "session/read",
+        json!({"session_id": session_id}),
+    ));
+    assert_eq!(replay[0]["result"]["workspace"]["branch"], branch);
+    assert_eq!(replay[0]["result"]["runtime"]["adapter"], "preview");
+    let resumed = restarted.handle_line(&request(
+        "workspace-resume",
+        "session/resume",
+        json!({"session_id": session_id}),
+    ));
+    assert_eq!(resumed[0]["result"]["workspace"]["branch"], branch);
+    drop(restarted);
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&project_root)
+        .args(["switch", "-c", "workspace-drift"])
+        .status()
+        .unwrap()
+        .success());
+    let mut drifted = Runtime::with_store(&data_root).unwrap();
+    drifted.handle_line(&request(
+        "workspace-drift-init",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "workspace-binding", "version": "1"}
+        }),
+    ));
+    drifted.handle_line(&request("workspace-drift-ready", "initialized", json!({})));
+    let rejected = drifted.handle_line(&request(
+        "workspace-drift-resume",
+        "session/resume",
+        json!({"session_id": session_id}),
+    ));
+    assert_eq!(rejected[0]["error"]["code"], -32146);
+    assert!(rejected[0]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("workspace changed"));
+    drop(drifted);
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]

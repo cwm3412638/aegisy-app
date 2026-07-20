@@ -104,8 +104,9 @@ use workbench_store::{
     SessionProjectionConsistency, SessionSearchRequest, StoredItem, StoredItemAppend,
     StoredProjectCreate, StoredProjectNavigationEntry, StoredProjectTrustAcknowledge,
     StoredProjectTrustAcknowledgement, StoredSessionCreate, StoredSessionLineage,
-    StoredSessionMode, StoredSessionRuntimeBindingCreate, StoredTurnCreate,
-    WorkbenchRecoveryDiagnostic, WorkbenchStore, WorkbenchStoreOpen,
+    StoredSessionMode, StoredSessionRuntimeBindingCreate, StoredSessionWorkspaceBinding,
+    StoredSessionWorkspaceBindingCreate, StoredTurnCreate, WorkbenchRecoveryDiagnostic,
+    WorkbenchStore, WorkbenchStoreOpen,
 };
 use workspace::{
     collect_search_candidates, list_directory, path_metadata, read_text_file, search_workspace,
@@ -155,6 +156,7 @@ pub struct Runtime {
     project_navigation: HashMap<String, workbench_store::StoredProjectNavigation>,
     project_trust_acknowledgements: HashMap<String, StoredProjectTrustAcknowledgement>,
     sessions: HashMap<String, SessionState>,
+    session_workspace_bindings: HashMap<String, StoredSessionWorkspaceBinding>,
     workspace_watches: HashMap<String, WorkspaceWatch>,
     // Indexes and language/diagnostic state are scoped to one registered root.
     // A project may have several roots with different access and filesystem
@@ -2908,6 +2910,7 @@ impl Runtime {
             project_navigation,
             project_trust_acknowledgements: HashMap::new(),
             sessions: HashMap::new(),
+            session_workspace_bindings: HashMap::new(),
             workspace_watches: HashMap::new(),
             workspace_indexes: HashMap::new(),
             language_servers: LanguageServerManager::default(),
@@ -3596,6 +3599,8 @@ impl Runtime {
                 "session.resume".into(),
                 "session.fork".into(),
                 "session.history.paginated".into(),
+                "session.workspace-binding.read-only".into(),
+                "session.search.branch".into(),
                 "session.metadata.manage".into(),
                 "session.portable.export".into(),
                 "session.portable.import".into(),
@@ -4645,17 +4650,6 @@ impl Runtime {
                 "session search limit must be between 1 and 100",
             );
         }
-        if params
-            .branch
-            .as_deref()
-            .is_some_and(|value| !value.is_empty())
-        {
-            return self.error_for(
-                &request,
-                -32028,
-                "session search filter is unavailable: branch",
-            );
-        }
         if let Some(project_id) = params.project_id.as_deref() {
             if project_id.is_empty()
                 || project_id.len() > 128
@@ -4671,6 +4665,7 @@ impl Runtime {
             }
         }
         for value in [
+            params.branch.as_deref(),
             params.model.as_deref(),
             params.runtime.as_deref(),
             params.status.as_deref(),
@@ -4695,6 +4690,7 @@ impl Runtime {
         if let Some(store) = self.workbench_store.as_ref() {
             let page = match store.search_sessions(&SessionSearchRequest {
                 project_id: params.project_id.clone(),
+                branch: params.branch.clone(),
                 model: params.model.clone(),
                 runtime: params.runtime.clone(),
                 status: params.status.clone(),
@@ -4752,6 +4748,10 @@ impl Runtime {
                         })
                         .unwrap_or(Value::Null),
                 );
+                object.insert(
+                    "workspace".into(),
+                    Self::workspace_binding_value(result.workspace.as_ref()),
+                );
                 object.insert("matched_fields".into(), json!(result.matched_fields));
                 object.insert("recovery_required".into(), recovery_required.into());
                 object.insert(
@@ -4775,7 +4775,7 @@ impl Runtime {
             return self.success_for(
                 &request,
                 json!({
-                    "schema_version": "session-search/0.1",
+                    "schema_version": "session-search/0.2",
                     "sessions": sessions,
                     "durable": true,
                     "next_cursor": next_cursor,
@@ -4785,6 +4785,10 @@ impl Runtime {
             );
         }
 
+        let requested_branch_sha256 = params
+            .branch
+            .as_deref()
+            .map(|branch| ContentHash::for_bytes(branch.as_bytes()).sha256);
         let query_matches = |state: &&SessionState| {
             if !params.include_archived
                 && self.archived_sessions.contains(&state.session.id)
@@ -4820,6 +4824,17 @@ impl Runtime {
                 .model
                 .as_deref()
                 .is_some_and(|value| state.backend_info.model.as_deref() != Some(value))
+            {
+                return false;
+            }
+            if requested_branch_sha256
+                .as_deref()
+                .is_some_and(|branch_sha256| {
+                    self.session_workspace_bindings
+                        .get(&state.session.id)
+                        .and_then(|binding| binding.branch_sha256.as_deref())
+                        != Some(branch_sha256)
+                })
             {
                 return false;
             }
@@ -4871,6 +4886,9 @@ impl Runtime {
                 if params.model.is_some() {
                     matched_fields.push("model");
                 }
+                if params.branch.is_some() {
+                    matched_fields.push("branch");
+                }
                 if params.runtime.is_some() {
                     matched_fields.push("runtime");
                 }
@@ -4890,6 +4908,9 @@ impl Runtime {
                         "model": &state.backend_info.model,
                         "permission_profile": &state.backend_info.permission_profile
                     }),
+                    "workspace": Self::workspace_binding_value(
+                        self.session_workspace_bindings.get(&state.session.id)
+                    ),
                     "matched_fields": matched_fields
                 })
             })
@@ -4904,7 +4925,7 @@ impl Runtime {
         self.success_for(
             &request,
             json!({
-                "schema_version": "session-search/0.1",
+                "schema_version": "session-search/0.2",
                 "sessions": sessions,
                 "durable": false,
                 "next_cursor": Value::Null,
@@ -6572,6 +6593,21 @@ impl Runtime {
             &cwd,
         );
         let environment_identity = environment.summary().environment_id.clone();
+        let workspace_binding = match self.build_session_workspace_binding(
+            &target_session_id,
+            params.target_project_id.as_deref(),
+            &cwd,
+            imported_at_ms,
+        ) {
+            Ok(binding) => binding,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32146,
+                    format!("cannot bind imported session workspace: {error}"),
+                )
+            }
+        };
         let import_result = self
             .workbench_store
             .as_mut()
@@ -6585,6 +6621,7 @@ impl Runtime {
                     == PortableSessionCollisionStrategy::Reject,
                 target_environment_identity: Some(&environment_identity),
                 runtime_binding: None,
+                workspace_binding: workspace_binding.as_ref(),
                 imported_at_ms,
             });
         let receipt = match import_result {
@@ -6639,7 +6676,7 @@ impl Runtime {
             Backend::Recovery(_) => unreachable!("recovery mode blocks portable import"),
         };
         self.sessions.insert(
-            target_session_id,
+            target_session_id.clone(),
             SessionState {
                 session: session.clone(),
                 items: stored_items.into_iter().map(stored_timeline_item).collect(),
@@ -6648,6 +6685,12 @@ impl Runtime {
                 environment: environment.clone(),
             },
         );
+        if let Some(binding) = workspace_binding.as_ref() {
+            self.session_workspace_bindings.insert(
+                target_session_id.clone(),
+                Self::stored_workspace_binding(binding),
+            );
+        }
         self.success_for(
             &request,
             json!({
@@ -6655,6 +6698,9 @@ impl Runtime {
                 "receipt": receipt,
                 "session": session,
                 "runtime": backend_info,
+                "workspace": Self::workspace_binding_value(
+                    self.session_workspace_bindings.get(&target_session_id)
+                ),
                 "environment": environment.summary(),
                 "continuation": {
                     "portable_history_available": true,
@@ -7027,6 +7073,7 @@ impl Runtime {
             .unwrap_or_default();
         for session_id in purged_ids {
             self.sessions.remove(&session_id);
+            self.session_workspace_bindings.remove(&session_id);
             self.archived_sessions.remove(&session_id);
             self.command_artifacts.remove_session(&session_id);
             self.workspace_edit_previews.remove_session(&session_id);
@@ -7048,6 +7095,23 @@ impl Runtime {
         let cwd = match self.session_cwd(&params) {
             Ok(cwd) => cwd,
             Err((code, message)) => return self.error_for(&request, code, message),
+        };
+        let id = self.allocate_id("session");
+        let created_at_ms = now_ms();
+        let workspace_binding = match self.build_session_workspace_binding(
+            &id,
+            params.project_id.as_deref(),
+            &cwd,
+            created_at_ms,
+        ) {
+            Ok(binding) => binding,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32113,
+                    format!("cannot bind session workspace: {error}"),
+                )
+            }
         };
         let chat = params.mode == SessionMode::Chat;
         let backend_result: Result<(Option<String>, BackendInfo), (i64, String)> = match &mut self
@@ -7080,8 +7144,6 @@ impl Runtime {
             Ok(result) => result,
             Err((code, error)) => return self.error_for(&request, code, error),
         };
-
-        let id = self.allocate_id("session");
         let mode_name = if params.mode == SessionMode::Work {
             "work"
         } else {
@@ -7103,13 +7165,27 @@ impl Runtime {
             provider: backend_info.provider.clone(),
             model: backend_info.model.clone(),
             permission_profile: backend_info.permission_profile.clone(),
-            created_at_ms: now_ms(),
+            created_at_ms,
         };
-        if let Err(error) = self.persist_session(&session, &environment, runtime_binding) {
+        if let Err(error) = self.persist_session(
+            &session,
+            &environment,
+            runtime_binding,
+            workspace_binding.clone(),
+        ) {
+            if let (Some(thread_id), Backend::Codex(adapter)) =
+                (backend_session_id.as_deref(), &mut self.backend)
+            {
+                let _ = adapter.archive_session(thread_id);
+            }
             return self.error_for(&request, -32113, format!("cannot persist session: {error}"));
         }
+        if let Some(binding) = workspace_binding.as_ref() {
+            self.session_workspace_bindings
+                .insert(id.clone(), Self::stored_workspace_binding(binding));
+        }
         self.sessions.insert(
-            id,
+            id.clone(),
             SessionState {
                 session: session.clone(),
                 items: Vec::new(),
@@ -7123,6 +7199,9 @@ impl Runtime {
             json!({
                 "session": session,
                 "runtime": backend_info,
+                "workspace": Self::workspace_binding_value(
+                    self.session_workspace_bindings.get(&id)
+                ),
                 "environment": environment.summary()
             }),
         )
@@ -7148,6 +7227,9 @@ impl Runtime {
                     "resumed": false,
                     "already_active": true,
                     "runtime": state.backend_info,
+                    "workspace": Self::workspace_binding_value(
+                        self.session_workspace_bindings.get(&params.session_id)
+                    ),
                     "environment": state.environment.summary(),
                     "continuation": {
                         "provider_state_available": state.backend_session_id.is_some(),
@@ -7210,6 +7292,44 @@ impl Runtime {
             Ok(_) => return self.error_for(&request, -32020, "session workspace is unavailable"),
             Err((code, message)) => return self.error_for(&request, code, message),
         };
+        let stored_workspace = if mode == SessionMode::Work {
+            match self.workbench_store.as_ref().and_then(|store| {
+                store
+                    .load_session_workspace_binding(&params.session_id)
+                    .ok()
+            }) {
+                Some(binding) => Some(binding),
+                None => return self.error_for(
+                    &request,
+                    -32146,
+                    "session workspace binding is unavailable; explicit fork or rebind is required",
+                ),
+            }
+        } else {
+            None
+        };
+        if let Some(stored_workspace) = stored_workspace.as_ref() {
+            let current = match self.build_session_workspace_binding(
+                &params.session_id,
+                stored.project_id.as_deref(),
+                &cwd,
+                stored_workspace.captured_at_ms,
+            ) {
+                Ok(Some(binding)) => Self::stored_workspace_binding(&binding),
+                _ => return self.error_for(
+                    &request,
+                    -32146,
+                    "session workspace cannot be revalidated; explicit fork or rebind is required",
+                ),
+            };
+            if &current != stored_workspace {
+                return self.error_for(
+                    &request,
+                    -32146,
+                    "session workspace changed since it was bound; explicit fork or rebind is required",
+                );
+            }
+        }
         let chat = mode == SessionMode::Chat;
         let (backend_session_id, backend_info) = match &mut self.backend {
             Backend::Preview if binding.adapter == "preview" => (
@@ -7307,6 +7427,10 @@ impl Runtime {
                 environment: environment.clone(),
             },
         );
+        if let Some(binding) = stored_workspace {
+            self.session_workspace_bindings
+                .insert(session.id.clone(), binding);
+        }
         self.success_for(
             &request,
             json!({
@@ -7315,6 +7439,9 @@ impl Runtime {
                 "resumed": true,
                 "already_active": false,
                 "runtime": backend_info,
+                "workspace": Self::workspace_binding_value(
+                    self.session_workspace_bindings.get(&session.id)
+                ),
                 "environment": environment.summary(),
                 "environment_changed": environment_changed,
                 "continuation": {
@@ -7395,6 +7522,45 @@ impl Runtime {
             }
             Err((code, message)) => return self.error_for(&request, code, message),
         };
+        let created_at_ms = now_ms();
+        let workspace_binding = match self.build_session_workspace_binding(
+            &target_session_id,
+            source.project_id.as_deref(),
+            &cwd,
+            created_at_ms,
+        ) {
+            Ok(binding) => binding,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32146,
+                    format!("cannot bind fork workspace: {error}"),
+                )
+            }
+        };
+        let package = {
+            let store = self
+                .workbench_store
+                .as_ref()
+                .expect("fork store disappeared");
+            match params.last_turn_id.as_deref() {
+                Some(turn_id) => store.export_portable_session_through_turn(
+                    &params.session_id,
+                    turn_id,
+                    &preview.package_hash,
+                    now_ms(),
+                ),
+                None => store.export_portable_session(
+                    &params.session_id,
+                    &preview.package_hash,
+                    now_ms(),
+                ),
+            }
+        };
+        let package = match package {
+            Ok(package) => package,
+            Err(error) => return self.error_for(&request, -32144, error.message),
+        };
         let chat = mode == SessionMode::Chat;
         let (backend_session_id, backend_info, adapter_name) = match &mut self.backend {
             Backend::Preview => (
@@ -7469,30 +7635,7 @@ impl Runtime {
             provider: backend_info.provider.clone(),
             model: backend_info.model.clone(),
             permission_profile: backend_info.permission_profile.clone(),
-            created_at_ms: now_ms(),
-        };
-        let package = {
-            let store = self
-                .workbench_store
-                .as_ref()
-                .expect("fork store disappeared");
-            match params.last_turn_id.as_deref() {
-                Some(turn_id) => store.export_portable_session_through_turn(
-                    &params.session_id,
-                    turn_id,
-                    &preview.package_hash,
-                    now_ms(),
-                ),
-                None => store.export_portable_session(
-                    &params.session_id,
-                    &preview.package_hash,
-                    now_ms(),
-                ),
-            }
-        };
-        let package = match package {
-            Ok(package) => package,
-            Err(error) => return self.error_for(&request, -32144, error.message),
+            created_at_ms,
         };
         let mut receipt = match self
             .workbench_store
@@ -7506,6 +7649,7 @@ impl Runtime {
                 reject_source_collisions: false,
                 target_environment_identity: Some(&environment.summary().environment_id),
                 runtime_binding: Some(&binding),
+                workspace_binding: workspace_binding.as_ref(),
                 imported_at_ms: binding.created_at_ms,
             }) {
             Ok(receipt) => receipt,
@@ -7548,7 +7692,7 @@ impl Runtime {
             title: receipt.session.title.clone(),
         };
         self.sessions.insert(
-            target_session_id,
+            target_session_id.clone(),
             SessionState {
                 session: session.clone(),
                 items: stored_items.into_iter().map(stored_timeline_item).collect(),
@@ -7557,6 +7701,12 @@ impl Runtime {
                 environment: environment.clone(),
             },
         );
+        if let Some(binding) = workspace_binding.as_ref() {
+            self.session_workspace_bindings.insert(
+                target_session_id.clone(),
+                Self::stored_workspace_binding(binding),
+            );
+        }
         self.success_for(
             &request,
             json!({
@@ -7566,6 +7716,9 @@ impl Runtime {
                 "source_session_id": params.session_id,
                 "boundary_turn_id": params.last_turn_id,
                 "runtime": backend_info,
+                "workspace": Self::workspace_binding_value(
+                    self.session_workspace_bindings.get(&target_session_id)
+                ),
                 "environment": environment.summary(),
                 "continuation": {
                     "provider_state_available": adapter_name == "codex-app-server",
@@ -7606,6 +7759,140 @@ impl Runtime {
         Ok(root)
     }
 
+    fn build_session_workspace_binding(
+        &self,
+        session_id: &str,
+        project_id: Option<&str>,
+        cwd: &Path,
+        captured_at_ms: u64,
+    ) -> Result<Option<StoredSessionWorkspaceBindingCreate>, String> {
+        let Some(project_id) = project_id else {
+            return Ok(None);
+        };
+        let roots = self
+            .project_roots
+            .get(project_id)
+            .cloned()
+            .or_else(|| {
+                self.workbench_store
+                    .as_ref()
+                    .and_then(|store| store.load_project_roots(project_id).ok())
+            })
+            .ok_or_else(|| "session workspace roots are unavailable".to_owned())?;
+        let root = roots
+            .into_iter()
+            .find(|root| root.root_id == "root-1")
+            .ok_or_else(|| "session primary workspace root is unavailable".to_owned())?;
+        let current_root_identity = filesystem_root_identity(cwd)?;
+        if current_root_identity != root.root_identity {
+            return Err("session primary workspace root identity changed".into());
+        }
+
+        let mut binding = StoredSessionWorkspaceBindingCreate {
+            session_id: session_id.into(),
+            project_id: project_id.into(),
+            root_id: root.root_id,
+            root_identity: current_root_identity,
+            workspace_kind: "project-root".into(),
+            git_state: "unavailable".into(),
+            repository_root_identity: None,
+            worktree_root_identity: None,
+            branch: None,
+            branch_sha256: None,
+            branch_redacted: false,
+            head_oid: None,
+            detached: false,
+            unborn: false,
+            dedicated_worktree: false,
+            captured_at_ms,
+        };
+        let Ok(status) = git_status(cwd) else {
+            return Ok(Some(binding));
+        };
+        if !status.available {
+            return Ok(Some(binding));
+        }
+        if !status.repository {
+            binding.git_state = "not-repository".into();
+            return Ok(Some(binding));
+        }
+        if !status.worktree {
+            binding.git_state = "repository-only".into();
+            return Ok(Some(binding));
+        }
+        let Some(repository_root) = status.repository_root.as_deref() else {
+            return Ok(Some(binding));
+        };
+        let Ok(repository_root_identity) = filesystem_root_identity(Path::new(repository_root))
+        else {
+            return Ok(Some(binding));
+        };
+        binding.git_state = "worktree".into();
+        binding.repository_root_identity = Some(repository_root_identity.clone());
+        binding.worktree_root_identity = Some(repository_root_identity);
+        binding.head_oid = status.head_oid;
+        binding.detached = status.detached;
+        binding.unborn = status.unborn;
+        if let Some(branch) = status.branch {
+            binding.branch_sha256 = Some(ContentHash::for_bytes(branch.as_bytes()).sha256);
+            if branch.len() <= 512
+                && !branch.chars().any(char::is_control)
+                && output_redaction::redact_complete(&branch) == branch
+            {
+                binding.branch = Some(branch);
+            } else {
+                binding.branch_redacted = true;
+            }
+        }
+        Ok(Some(binding))
+    }
+
+    fn workspace_binding_value(binding: Option<&StoredSessionWorkspaceBinding>) -> Value {
+        binding.map_or(Value::Null, |binding| {
+            json!({
+                "schema_version": "session-workspace-binding/0.1",
+                "session_id": binding.session_id,
+                "project_id": binding.project_id,
+                "root_id": binding.root_id,
+                "workspace_kind": binding.workspace_kind,
+                "git_state": binding.git_state,
+                "branch": binding.branch,
+                "branch_redacted": binding.branch_redacted,
+                "head_oid": binding.head_oid,
+                "detached": binding.detached,
+                "unborn": binding.unborn,
+                "dedicated_worktree": binding.dedicated_worktree,
+                "captured_at_ms": binding.captured_at_ms,
+                "raw_paths_included": false,
+                "permission_granted": false
+            })
+        })
+    }
+
+    fn stored_workspace_binding(
+        binding: &StoredSessionWorkspaceBindingCreate,
+    ) -> StoredSessionWorkspaceBinding {
+        StoredSessionWorkspaceBinding {
+            session_id: binding.session_id.clone(),
+            project_id: binding.project_id.clone(),
+            root_id: binding.root_id.clone(),
+            root_identity: binding.root_identity.clone(),
+            workspace_kind: binding.workspace_kind.clone(),
+            git_state: binding.git_state.clone(),
+            repository_root_identity: binding.repository_root_identity.clone(),
+            worktree_root_identity: binding.worktree_root_identity.clone(),
+            branch: binding.branch.clone(),
+            branch_sha256: binding.branch_sha256.clone(),
+            branch_redacted: binding.branch_redacted,
+            head_oid: binding.head_oid.clone(),
+            detached: binding.detached,
+            unborn: binding.unborn,
+            dedicated_worktree: binding.dedicated_worktree,
+            captured_at_ms: binding.captured_at_ms,
+            updated_at_ms: binding.captured_at_ms,
+        }
+    }
+
     fn persist_project(&mut self, project: &Project) -> Result<(), String> {
         let Some(store) = self.workbench_store.as_mut() else {
             return Ok(());
@@ -7630,6 +7917,7 @@ impl Runtime {
         session: &Session,
         environment: &SessionEnvironment,
         runtime_binding: StoredSessionRuntimeBindingCreate,
+        workspace_binding: Option<StoredSessionWorkspaceBindingCreate>,
     ) -> Result<(), String> {
         let Some(store) = self.workbench_store.as_mut() else {
             return Ok(());
@@ -7639,7 +7927,7 @@ impl Runtime {
             SessionMode::Work => StoredSessionMode::Work,
         };
         store
-            .create_session_with_runtime_binding(
+            .create_session_with_bindings(
                 StoredSessionCreate {
                     session_id: session.id.clone(),
                     project_id: session.project_id.clone(),
@@ -7651,6 +7939,7 @@ impl Runtime {
                     created_at_ms: runtime_binding.created_at_ms,
                 },
                 Some(runtime_binding),
+                workspace_binding,
             )
             .map(|_| ())
             .map_err(|cause| cause.message)
@@ -9729,6 +10018,31 @@ impl Runtime {
                 Ok(session) => session,
                 Err(_) => return self.error_for(&request, -32023, "session not found"),
             };
+            let durable_runtime = store
+                .load_session_runtime_binding(&params.session_id)
+                .ok()
+                .map(|binding| {
+                    json!({
+                        "adapter": binding.adapter,
+                        "adapter_version": binding.adapter_version,
+                        "version": binding.adapter_version,
+                        "provider": binding.provider,
+                        "model": binding.model,
+                        "permission_profile": binding.permission_profile,
+                        "replayed": true
+                    })
+                })
+                .unwrap_or_else(|| {
+                    json!({
+                        "adapter": "durable-store-replay",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "permission_profile": "read-only",
+                        "replayed": true
+                    })
+                });
+            let durable_workspace = store
+                .load_session_workspace_binding(&params.session_id)
+                .ok();
             let mode = match stored.mode {
                 StoredSessionMode::Chat => SessionMode::Chat,
                 StoredSessionMode::Work => SessionMode::Work,
@@ -9811,12 +10125,10 @@ impl Runtime {
                         latest_sequence,
                         params.limit,
                     ),
-                    "runtime": {
-                        "adapter": "durable-store-replay",
-                        "version": env!("CARGO_PKG_VERSION"),
-                        "permission_profile": "read-only",
-                        "replayed": true
-                    },
+                    "runtime": durable_runtime,
+                    "workspace": Self::workspace_binding_value(
+                        durable_workspace.as_ref()
+                    ),
                     "environment": {
                         "environment_id": stored.environment_identity,
                         "replayed": true,
@@ -9877,6 +10189,9 @@ impl Runtime {
                     params.limit,
                 ),
                 "runtime": &state.backend_info,
+                "workspace": Self::workspace_binding_value(
+                    self.session_workspace_bindings.get(&state.session.id)
+                ),
                 "environment": state.environment.summary()
             }),
         )
@@ -15165,9 +15480,10 @@ mod durable_runtime_tests {
             replay[0]["result"]["consistency"]["event_projection_matches"],
             true
         );
+        assert_eq!(replay[0]["result"]["runtime"]["adapter"], "preview");
         assert_eq!(
-            replay[0]["result"]["runtime"]["adapter"],
-            "durable-store-replay"
+            replay[0]["result"]["runtime"]["permission_profile"],
+            "read-only"
         );
         let latest_page = restarted.handle_line(&request(
             "session-read-latest-page",

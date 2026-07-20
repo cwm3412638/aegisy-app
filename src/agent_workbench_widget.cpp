@@ -278,6 +278,15 @@ bool isBoundedRuntimeMetadata(const QString &value, int byteLimit, bool required
     });
 }
 
+bool isLowerHexIdentity(const QString &value, int firstLength, int secondLength = -1)
+{
+    if (value.size() != firstLength && value.size() != secondLength) return false;
+    return std::all_of(value.cbegin(), value.cend(), [](QChar character) {
+        const ushort code = character.unicode();
+        return (code >= '0' && code <= '9') || (code >= 'a' && code <= 'f');
+    });
+}
+
 QString runtimeMetadataLabel(const QJsonObject &binding, const QString &field)
 {
     const QString value = binding.value(field).toString();
@@ -1085,6 +1094,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_sessionList->setCurrentRow(0);
         const QJsonObject runtime = session.value(QStringLiteral("runtime")).toObject();
         storeSessionRuntimeBinding(id, runtime);
+        storeSessionWorkspaceBinding(
+            id, session.value(QStringLiteral("workspace")).toObject());
         const QJsonObject binding = m_sessionRuntimeBindings.value(id);
         const QString provider = runtimeMetadataLabel(
             binding, QStringLiteral("provider"));
@@ -1124,6 +1135,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         if (mode == m_mode) requestOperationStatus();
         const QJsonObject runtime = result.value(QStringLiteral("runtime")).toObject();
         storeSessionRuntimeBinding(id, runtime);
+        storeSessionWorkspaceBinding(
+            id, result.value(QStringLiteral("workspace")).toObject());
         resetSessionHistoryPagination();
         const QString readRequest = m_runtime->readSession(id);
         if (!readRequest.isEmpty()) m_sessionReadRequestId = readRequest;
@@ -1147,6 +1160,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         if (mode == m_mode) requestOperationStatus();
         storeSessionRuntimeBinding(
             id, result.value(QStringLiteral("runtime")).toObject());
+        storeSessionWorkspaceBinding(
+            id, result.value(QStringLiteral("workspace")).toObject());
         resetSessionHistoryPagination();
         const QString readRequest = m_runtime->readSession(id);
         if (!readRequest.isEmpty()) m_sessionReadRequestId = readRequest;
@@ -1339,6 +1354,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         }
         storeSessionRuntimeBinding(
             id, snapshot.value(QStringLiteral("runtime")).toObject());
+        storeSessionWorkspaceBinding(
+            id, snapshot.value(QStringLiteral("workspace")).toObject());
         if (!appendingHistory) {
             while (m_timelineLayout && m_timelineLayout->count() > 2) {
                 QLayoutItem *item = m_timelineLayout->takeAt(1);
@@ -8375,6 +8392,8 @@ void AgentWorkbenchWidget::populateSessionList(const QJsonObject &result)
         const QJsonObject deletion = session.value(QStringLiteral("deletion")).toObject();
         const QJsonObject runtime = session.value(QStringLiteral("runtime")).toObject();
         if (!runtime.isEmpty()) storeSessionRuntimeBinding(id, runtime);
+        const QJsonObject workspace = session.value(QStringLiteral("workspace")).toObject();
+        storeSessionWorkspaceBinding(id, workspace);
         const QJsonArray matchedFields = session.value(QStringLiteral("matched_fields")).toArray();
         if (status == QStringLiteral("archived")) m_archivedSessionIds.insert(id);
         if (recoveryRequired) m_recoverySessionIds.insert(id);
@@ -10044,11 +10063,86 @@ bool AgentWorkbenchWidget::storeSessionRuntimeBinding(
     return true;
 }
 
+bool AgentWorkbenchWidget::storeSessionWorkspaceBinding(
+    const QString &sessionId, const QJsonObject &workspace)
+{
+    if (sessionId.isEmpty()) return false;
+    if (workspace.isEmpty()) {
+        m_sessionWorkspaceBindings.remove(sessionId);
+        updateContextStrip();
+        return false;
+    }
+    const QString boundSessionId = workspace.value(
+        QStringLiteral("session_id")).toString();
+    const QString projectId = workspace.value(QStringLiteral("project_id")).toString();
+    const QString rootId = workspace.value(QStringLiteral("root_id")).toString();
+    const QString workspaceKind = workspace.value(
+        QStringLiteral("workspace_kind")).toString();
+    const QString gitState = workspace.value(QStringLiteral("git_state")).toString();
+    const QJsonValue branchValue = workspace.value(QStringLiteral("branch"));
+    const QString branch = branchValue.isString() ? branchValue.toString() : QString();
+    const bool branchRedacted = workspace.value(
+        QStringLiteral("branch_redacted")).toBool();
+    const QJsonValue headValue = workspace.value(QStringLiteral("head_oid"));
+    const QString head = headValue.isString() ? headValue.toString() : QString();
+    const bool detached = workspace.value(QStringLiteral("detached")).toBool();
+    const bool unborn = workspace.value(QStringLiteral("unborn")).toBool();
+    const bool dedicated = workspace.value(
+        QStringLiteral("dedicated_worktree")).toBool();
+    const QJsonValue capturedValue = workspace.value(QStringLiteral("captured_at_ms"));
+    const bool gitStateValid = gitState == QStringLiteral("unavailable")
+        || gitState == QStringLiteral("not-repository")
+        || gitState == QStringLiteral("repository-only")
+        || gitState == QStringLiteral("worktree");
+    const bool branchValid = branchValue.isNull()
+        || (branchValue.isString() && !branch.isEmpty()
+            && isBoundedRuntimeMetadata(branch, 512, true));
+    const bool headValid = headValue.isNull()
+        || (headValue.isString() && isLowerHexIdentity(head, 40, 64));
+    const bool booleansPresent = workspace.value(QStringLiteral("branch_redacted")).isBool()
+        && workspace.value(QStringLiteral("detached")).isBool()
+        && workspace.value(QStringLiteral("unborn")).isBool()
+        && workspace.value(QStringLiteral("dedicated_worktree")).isBool()
+        && workspace.value(QStringLiteral("raw_paths_included")).isBool()
+        && workspace.value(QStringLiteral("permission_granted")).isBool();
+    const bool branchStateValid = branchRedacted
+        ? branchValue.isNull()
+        : !(detached && branchValue.isString());
+    const bool valid = workspace.value(QStringLiteral("schema_version")).toString()
+            == QStringLiteral("session-workspace-binding/0.1")
+        && boundSessionId == sessionId
+        && isBoundedRuntimeMetadata(projectId, 128, true)
+        && isBoundedRuntimeMetadata(rootId, 128, true)
+        && workspaceKind == QStringLiteral("project-root")
+        && gitStateValid && branchValid && headValid && booleansPresent
+        && branchStateValid && !dedicated
+        && capturedValue.isDouble() && capturedValue.toDouble() >= 0
+        && !workspace.value(QStringLiteral("raw_paths_included")).toBool(true)
+        && !workspace.value(QStringLiteral("permission_granted")).toBool(true)
+        && (gitState == QStringLiteral("worktree")
+                || (branchValue.isNull() && headValue.isNull() && !detached && !unborn));
+    if (!valid) {
+        m_sessionWorkspaceBindings.remove(sessionId);
+        updateContextStrip();
+        return false;
+    }
+    m_sessionWorkspaceBindings.insert(sessionId, workspace);
+    updateContextStrip();
+    return true;
+}
+
 QJsonObject AgentWorkbenchWidget::activeSessionRuntimeBinding() const
 {
     const QString sessionId = m_mode == QStringLiteral("work")
         ? m_workSessionId : m_chatSessionId;
     return m_sessionRuntimeBindings.value(sessionId);
+}
+
+QJsonObject AgentWorkbenchWidget::activeSessionWorkspaceBinding() const
+{
+    const QString sessionId = m_mode == QStringLiteral("work")
+        ? m_workSessionId : m_chatSessionId;
+    return m_sessionWorkspaceBindings.value(sessionId);
 }
 
 void AgentWorkbenchWidget::updateSessionRuntimePresentation()
@@ -10105,6 +10199,7 @@ void AgentWorkbenchWidget::updateContextStrip()
         ? QStringLiteral("项目 --") : QStringLiteral("项目 %1").arg(QFileInfo(m_projectRoot).fileName());
     updateSessionRuntimePresentation();
     const QJsonObject binding = activeSessionRuntimeBinding();
+    const QJsonObject workspaceBinding = activeSessionWorkspaceBinding();
     const bool hasSession = !sessionId.isEmpty();
     const QString adapter = binding.value(QStringLiteral("adapter")).toString();
     const QString version = binding.value(QStringLiteral("version")).toString();
@@ -10124,17 +10219,52 @@ void AgentWorkbenchWidget::updateContextStrip()
         ? QStringLiteral("权限 只读")
         : (hasSession ? QStringLiteral("权限 未知（只读门控）")
                       : QStringLiteral("权限 只读默认"));
-    const QString branch = m_gitCurrentBranch.isEmpty()
-        ? QStringLiteral("分支 --") : QStringLiteral("分支 %1").arg(m_gitCurrentBranch);
+    const QString rootId = workspaceBinding.value(QStringLiteral("root_id")).toString();
+    const QString workspace = rootId.isEmpty()
+        ? (hasSession && m_mode == QStringLiteral("work")
+              ? QStringLiteral("工作区 未绑定") : QStringLiteral("工作区 --"))
+        : QStringLiteral("工作区 %1").arg(rootId);
+    const QString boundBranch = workspaceBinding.value(QStringLiteral("branch")).toString();
+    const QString gitState = workspaceBinding.value(QStringLiteral("git_state")).toString();
+    const bool branchRedacted = workspaceBinding.value(
+        QStringLiteral("branch_redacted")).toBool();
+    const bool detached = workspaceBinding.value(QStringLiteral("detached")).toBool();
+    const bool branchDrift = !boundBranch.isEmpty() && !m_gitCurrentBranch.isEmpty()
+        && boundBranch != m_gitCurrentBranch;
+    QString branch;
+    if (!hasSession) {
+        branch = m_gitCurrentBranch.isEmpty()
+            ? QStringLiteral("分支 --") : QStringLiteral("分支 %1").arg(m_gitCurrentBranch);
+    } else if (workspaceBinding.isEmpty()) {
+        branch = m_mode == QStringLiteral("work")
+            ? QStringLiteral("分支 未绑定") : QStringLiteral("分支 --");
+    } else if (gitState != QStringLiteral("worktree")) {
+        branch = gitState == QStringLiteral("not-repository")
+            ? QStringLiteral("分支 非 Git") : QStringLiteral("分支 不可用");
+    } else if (branchRedacted) {
+        branch = QStringLiteral("分支 已隐藏");
+    } else if (detached) {
+        branch = QStringLiteral("分支 分离 HEAD");
+    } else if (!boundBranch.isEmpty()) {
+        branch = branchDrift
+            ? QStringLiteral("分支 %1（已漂移）").arg(boundBranch)
+            : QStringLiteral("分支 %1").arg(boundBranch);
+    } else {
+        branch = QStringLiteral("分支 --");
+    }
     m_contextStrip->setText(QStringLiteral("%1 · %2 · %3 · 模型 %4 · %5 · %6 · %7")
         .arg(m_mode == QStringLiteral("chat") ? QStringLiteral("Chat") : QStringLiteral("Work"),
-             project, runtime, model, permission, branch, context));
+             QStringLiteral("%1 / %2").arg(project, workspace), runtime, model,
+             permission, branch, context));
     m_contextStrip->setToolTip(QStringLiteral(
-        "执行上下文：%1\n%2\n%3%4\nProvider/模型：%5 / %6\n%7\n%8\n%9")
+        "执行上下文：%1\n%2\n%3\n%4%5\nProvider/模型：%6 / %7\n%8\n%9%10\n%11")
         .arg(m_mode == QStringLiteral("chat") ? QStringLiteral("Chat") : QStringLiteral("Work"),
-             project, runtime,
+             project, workspace, runtime,
              version.isEmpty() ? QString() : QStringLiteral(" · %1").arg(version),
-             provider, model, permission, branch, context));
+             provider, model, permission, branch,
+             branchDrift ? QStringLiteral("；当前只读观测：%1").arg(m_gitCurrentBranch)
+                         : QString(),
+             context));
 }
 
 void AgentWorkbenchWidget::inspectContext()

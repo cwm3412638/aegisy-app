@@ -136,7 +136,9 @@ private:
     void addTimelineItem(const QJsonObject &item, bool prepend = false);
     void addNotice(const QString &text, bool error = false);
     bool storeSessionRuntimeBinding(const QString &sessionId, const QJsonObject &runtime);
+    bool storeSessionWorkspaceBinding(const QString &sessionId, const QJsonObject &workspace);
     QJsonObject activeSessionRuntimeBinding() const;
+    QJsonObject activeSessionWorkspaceBinding() const;
     void updateSessionRuntimePresentation();
     void updateContextStrip();
     void populateDirectory(const QJsonObject &listing);
@@ -493,6 +495,7 @@ private:
     QString m_pendingPinnedContextSetIdentity;
     QStringList m_pendingPinnedContextIds;
     QHash<QString, QJsonObject> m_sessionRuntimeBindings;
+    QHash<QString, QJsonObject> m_sessionWorkspaceBindings;
     QList<QJsonObject> m_contextItems;
     QList<QJsonObject> m_pinnedContextItems;
     bool m_gitStatusPending = false;

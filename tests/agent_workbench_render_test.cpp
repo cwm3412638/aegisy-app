@@ -1735,12 +1735,16 @@ int main(int argc, char *argv[])
         return 1;
     }
     work->click();
-    if (!expect(waitUntil(application, [executionContext, modelPicker]() {
+    if (!expect(waitUntil(application, [executionContext, modelPicker, &fixtureBranch]() {
                     return executionContext->text().contains(
                                QStringLiteral("Runtime preview"))
                         && executionContext->text().contains(
                             QStringLiteral("模型 deterministic-echo"))
                         && executionContext->text().contains(QStringLiteral("权限 只读"))
+                        && executionContext->text().contains(
+                            QStringLiteral("工作区 root-1"))
+                        && executionContext->text().contains(
+                            QStringLiteral("分支 %1").arg(fixtureBranch))
                         && modelPicker->currentText()
                             == QStringLiteral("local / deterministic-echo")
                         && modelPicker->toolTip().contains(QStringLiteral("preview"))

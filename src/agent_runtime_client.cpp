@@ -1293,6 +1293,7 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
     } else if (pendingMethod == QStringLiteral("session/start")) {
         QJsonObject session = result.value(QStringLiteral("session")).toObject();
         session.insert(QStringLiteral("runtime"), result.value(QStringLiteral("runtime")));
+        session.insert(QStringLiteral("workspace"), result.value(QStringLiteral("workspace")));
         emit sessionStarted(id, session);
     } else if (pendingMethod == QStringLiteral("session/resume")) {
         emit sessionResumed(id, result);

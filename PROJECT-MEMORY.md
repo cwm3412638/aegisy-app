@@ -359,20 +359,26 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   session/operation identities, never performs recovery, and leaves other
   operation kinds unavailable.
 - Task `6.6` now has a bounded read-only Session search foundation. AAP
-  `session/search` filters durable Session projections by project, exact model,
-  runtime, status, title, or a combined title/approved-transcript query. Transcript
+  `session/search` returns `session-search/0.2` and filters durable Session projections
+  by project, exact branch, model, runtime, status, title, or a combined
+  title/approved-transcript query. Transcript
   matching executes inside SQLite and is restricted to `message` Items with
   `user`/`assistant` roles and visible `text`, `content`, `output`, or `diff` fields;
   diagnostic, command, and other payloads are not searched, and Runtime does not
   hydrate every transcript. Results exclude purged sessions, include matched-field
-  and runtime-binding metadata, cap one page at 100, and use a strict
+  plus Runtime/Workspace binding metadata, cap one page at 100, and use a strict
   `after:<updated-at>:<session-id>` cursor. Additive indexes cover status/order,
-  runtime/model binding, and transcript ownership. Qt exposes a debounced left-rail
+  runtime/model binding, branch identity, and transcript ownership. Qt exposes a debounced left-rail
   search, scopes Work to the current project, searches all Chat sessions, and shows
-  explicit empty results. Branch/worktree identity is not yet persisted; branch
-  filters fail explicitly as unavailable. Keep `6.6` unchecked until branch search,
-  complete indexed-text/scale evidence, model control-plane integration, and final
-  cross-platform behavior are complete.
+  explicit empty results. Schema v13 now persists one event-backed
+  `session_workspace_bindings` row for newly created/imported/forked Work Sessions.
+  It binds the primary project root, Git availability, safe branch display plus exact
+  SHA-256, HEAD, repository/worktree filesystem identities, capture time, and explicit
+  `dedicated_worktree:false`/no-authority state without raw repository paths. Runtime
+  resume re-observes the root/branch/HEAD/worktree and fails with `-32146` on drift
+  instead of running against stale context. Keep `6.6` unchecked until complete
+  indexed-text/scale evidence, branch-filter UI, model control-plane and dedicated-
+  worktree integration, and final cross-platform behavior are complete.
 - OpenSpec tasks `3.9`, `3.11`, `3.12`, `5.3` through `5.10`, `6.1`, `6.8`, `7.10`, `13.1` through `14.1`, tasks `14.3`, `14.4`, `14.6`,
   `14.8`, `15.1` through `15.9`, `16.1`, `16.2`, and `7.12` are complete. Task `14.2`
   awaits Windows runtime evidence.
@@ -783,7 +789,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user-gesture ID for explicit approvals; it refuses read-only or managed-denied
   Git actions before SQLite mutation. This remains an internal foundation, not an
   AAP/Qt approval bridge or native execution grant.
-- `WorkbenchStore` schema version 12 now persists canonical projects and roots plus
+- `WorkbenchStore` schema version 13 now persists canonical projects and roots plus
   Chat/Work sessions with project binding, environment identity, new/resume/fork
   lineage, and active/archived/failed/interrupted status. Work sessions require a
   project, lineage parents must match project and mode, archive/unarchive is
@@ -791,14 +797,23 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   have bounded idempotency/input hashes and terminal states; items have session
   sequences, turn binding, bounded redacted JSON payloads, and content hashes with
   tamper/gap replay checks. Transactional
-  v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11-to-v12 migrations pass; the v3
+  v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12-to-v13 migrations pass; the v3
   path preserves existing events while allowing projectless Chat event streams, and
   v4 adds only the durable Blob schema. The v11 background-job and scheduler-lease
   projections plus the v12 notification outbox are
   internal, bounded, content-free canonical contract JSON, event-backed,
   generation-CAS protected, and startup-verified. The notification outbox is exposed
   only through the read-only session inspection capability described under `21.9`;
-  no producer or delivery authority is exposed through AAP/Qt. Extensions,
+  no producer or delivery authority is exposed through AAP/Qt. Schema v13 adds the
+  bounded `session_workspace_bindings` projection, branch index, semantic startup
+  validation, and `session.workspace-bound/0.1` event. New Work Session creation,
+  portable import, and fork commit this binding with their other Session projections;
+  Work Session observation occurs before provider thread creation, and a later Store
+  failure best-effort archives the newly created Codex thread. Event failure rolls
+  back all local rows. The normal WAL-consistent migration backup covers
+  v12-to-v13, and final two-phase Session purge removes the binding in the same
+  transaction as Turns, Items, and events. No repository absolute path, permission,
+  dedicated-worktree claim, or mutation authority enters the binding. Extensions,
   model profiles, Git checkpoint projections, and complete scheduler/recovery state
   are still future work. Runtime durable
   replay is now partially integrated: the Qt host's platform data root enables
@@ -828,6 +843,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   have bounded AAP metadata projections (`session/provider-list` and
   `session/provider-read`) with raw provider items omitted; provider delete/compact,
   complete lifecycle recovery, and full runtime reconstruction remain future work.
+  Legacy Work Sessions migrated from schema v12 have no fabricated Workspace binding;
+  direct resume fails with `-32146` and requires an explicit fork/rebind path. Fork can
+  capture the currently reviewed project workspace while preserving portable history.
   Resume now updates the durable session environment identity and the
   `session.resumed` projection replay applies the same identity, so a resume cannot
   leave SQLite rows and the event-derived candidate with different environment state.
@@ -993,8 +1011,8 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 392 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 56 Rust protocol tests, eleven macOS
+Current verified baseline: 16 desktop tests, 394 passed Rust sidecar unit tests plus
+one explicitly ignored live Codex fixture, 57 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
@@ -1007,7 +1025,19 @@ owned process-observation contract, the four-kind content-free notification-inte
 contract and semantic budget-snapshot validation, plus diagnostic, terminal, Git, and
 child-handoff pinned-context authority, strict Git references, complete-source drift
 detection, terminal normalization, image import/preview/assembly/release rollback,
-and source-loss fail-closed invariants.
+source-loss fail-closed invariants, and schema-v13 Session Workspace binding,
+branch-search, v12 migration, rollback, semantic-tamper, restart, and drift fixtures.
+
+On 2026-07-20 the schema-v13 Session Workspace binding and `session-search/0.2`
+stage passed 394 Rust unit tests with one ignored live fixture, 57 protocol tests,
+11 stdio/Codex tests, strict Clippy, formatting, the complete desktop build, and
+CTest `agent_runtime_protocol`. A real Git fixture proves atomic creation, restart
+read/search/resume, exact branch filtering, and fail-closed resume after branch
+drift; a store fixture proves event-failure rollback and startup rejection after
+semantic hash tampering. The Qt render fixture now also requires `root-1` and the
+bound branch, but this host killed the process at startup after 0.45s without any
+assertion output. Tasks `6.6` and `12.6` remain unchecked for the control-plane,
+turn-metadata, dedicated-worktree, scale, and cross-platform gates listed above.
 
 On 2026-07-20 the schema-v12 durable notification outbox and its read-only AAP/Qt
 inspection layer passed all Rust counts above, strict Clippy, formatting,
@@ -1052,13 +1082,15 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
 
 ## Session Search Boundary
 
-- AAP `session/search` accepts bounded project, model, runtime, status, title, and
+- AAP `session/search` accepts bounded project, branch, model, runtime, status, title, and
   combined title/transcript filters. One page contains at most 100 Session rows and
   durable pages use the canonical exclusive cursor
   `after:<updated-at-ms>:<session-id>` ordered by update time descending and Session
   ID ascending. Malformed and non-canonical cursors fail instead of restarting.
-- Durable search runs in SQLite and returns only Session metadata, runtime binding
-  metadata, and matched-field labels. It never hydrates all Session Items into the
+- Capabilities `session.workspace-binding.read-only` and `session.search.branch`
+  explicitly negotiate the additive Workspace projection and exact branch filter.
+- Durable search runs in SQLite and returns only Session metadata, Runtime/Workspace
+  binding metadata, and matched-field labels. It never hydrates all Session Items into the
   Runtime. Purged tombstones are excluded. Schema v9 creates and verifies additive
   indexes covering Session status/order, model/runtime binding, and transcript
   ownership through the existing WAL-consistent migration-backup gate.
@@ -1069,10 +1101,13 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
 - Qt debounces the left-rail query. Work mode binds search to the current project;
   Chat mode searches all projects. Empty results are explicit and clearing the query
   returns to the recent Session list.
-- Branch/worktree state has no durable Session projection yet. A requested branch
-  filter returns stable unavailable error `-32028`; it is never ignored or inferred
-  from current Git state. OpenSpec `6.6` remains incomplete until this projection,
-  complete text-index scale evidence, and final cross-platform behavior exist.
+- Branch search hashes the exact requested label and compares it with the immutable
+  Session Workspace binding. Sensitive-shaped branch labels are represented only by
+  their SHA-256 plus `branch_redacted:true` and are never returned as display text.
+  A live Git overview may identify drift but cannot overwrite the Session binding.
+  OpenSpec `6.6` remains incomplete until complete text-index scale, filter UI,
+  model/dedicated-worktree control-plane integration, and final cross-platform
+  behavior exist.
 
 ## Session Compaction Boundary
 
@@ -1217,7 +1252,7 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
 ## Migration Backup And Read-Only Recovery Boundary
 
 - OpenSpec `5.6` and `5.7` are complete. Every supported
-  v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11-to-v12
+  v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12-to-v13
   migration first uses SQLite Online Backup to capture a WAL-consistent logical
   snapshot, then normalizes it to a standalone `journal_mode=DELETE` database.
 - The private `migration-backups-v1` directory retains at most 16 bounded evidence
@@ -2089,18 +2124,22 @@ Implemented visual baseline:
   It reads 64-bit JSON values without claiming provider-window precision; the
   inspection remains content-free and model-free.
 - The Agent surface header now exposes a compact execution-context strip with
-  Chat/Work mode, project, Runtime readiness/recovery state, provider/model,
-  fixed read-only permission, current Git branch, and selected-context count.
-  Qt keeps a bounded Runtime binding per Session and consumes the binding from
+  Chat/Work mode, project, persisted workspace root, Runtime readiness/recovery
+  state, provider/model, fixed read-only permission, Session-bound Git branch, and
+  selected-context count. Qt keeps bounded Runtime and Workspace bindings per Session
+  and consumes the bindings from
   start, resume, fork, read, and search responses. Switching Chat/Work or replaying
   a Session updates the model display from that Session rather than a global last
   value. Adapter/version/provider/model metadata is bounded and control-free, and
   only exact `read-only` permission is accepted; missing or malformed data becomes
   `Runtime 未绑定` plus an explicit unknown/read-only gate instead of stale authority.
-  Branch text comes only from the existing read-only Git overview and is cleared
-  on project changes or Git-query failure, so stale branch state is never shown.
+  Workspace metadata must match `session-workspace-binding/0.1`, contain no raw paths,
+  and grant no permission. The live read-only Git overview is comparison-only: a
+  mismatch marks the persisted branch as drifted and never overwrites the Session
+  binding.
   The render fixture now locates the strip by a stable object name and asserts the
-  empty read-only state plus a real Git fixture branch; execution remains pending
+  empty read-only state plus a real Git fixture branch, `root-1`, and active Runtime/
+  Workspace binding; execution remains pending
   because this host kills the Qt process before the test body runs.
   The model control is still a binding display, not the model-profile picker or
   switching control required by OpenSpec `10.3` through `10.6`.

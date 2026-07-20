@@ -293,6 +293,25 @@ retry, approval, takeover, or delivery action is exposed.
 {"jsonrpc":"2.0","id":"recovery-1","result":{"schema_version":"background-recovery-page/0.1","session_id":"session-1","entries":[],"next_cursor":null,"content_included":false,"dispatch_available":false,"automatic_retry":false,"automatic_approval":false,"automatic_takeover":false,"mutation_authority":false}}
 ```
 
+## Session Workspace Binding And Search
+
+Capabilities `session.workspace-binding.read-only` and `session.search.branch`
+negotiate the additive `session-workspace-binding/0.1` projection and exact branch
+filter. New Work Sessions capture their registered primary root and read-only Git
+state before provider startup. The response includes no repository path and grants
+no permission or dedicated-worktree authority.
+
+```jsonl
+{"jsonrpc":"2.0","id":"workspace-1","method":"session/search","params":{"project_id":"project-1","branch":"main","limit":100}}
+{"jsonrpc":"2.0","id":"workspace-1","result":{"schema_version":"session-search/0.2","sessions":[{"session_id":"session-1","project_id":"project-1","mode":"work","workspace":{"schema_version":"session-workspace-binding/0.1","session_id":"session-1","project_id":"project-1","root_id":"root-1","workspace_kind":"project-root","git_state":"worktree","branch":"main","branch_redacted":false,"head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","detached":false,"unborn":false,"dedicated_worktree":false,"captured_at_ms":1,"raw_paths_included":false,"permission_granted":false},"matched_fields":["branch"]}],"durable":true,"next_cursor":null,"truncated":false,"unavailable_filters":[]}}
+```
+
+Branch matching uses the exact SHA-256 identity stored with the Session. A
+secret-shaped branch label is never persisted or returned as display text. Resume
+re-observes root, branch, HEAD, and worktree identity; drift returns `-32146` and
+requires explicit fork/rebind rather than silently changing the Session context.
+Schema-v12 Work Sessions are not backfilled from current Git state.
+
 ## Replay And Reconnect
 
 The durable session stream is ordered by a session-local sequence. After a
@@ -302,7 +321,7 @@ newer live item cannot duplicate an already rendered item.
 
 ```jsonl
 {"jsonrpc":"2.0","id":"7","method":"session/read","params":{"session_id":"session-1","limit":100}}
-{"jsonrpc":"2.0","id":"7","result":{"session":{"id":"session-1","mode":"chat"},"items":[],"history_page":{"limit":100,"first_sequence":null,"last_sequence":null,"latest_sequence":0,"has_older":false,"older_cursor":null},"runtime":{"adapter":"durable-store-replay","permission_profile":"read-only","replayed":true},"environment":{"replayed":true,"available":false}}}
+{"jsonrpc":"2.0","id":"7","result":{"session":{"id":"session-1","mode":"chat"},"items":[],"history_page":{"limit":100,"first_sequence":null,"last_sequence":null,"latest_sequence":0,"has_older":false,"older_cursor":null},"runtime":{"adapter":"preview","version":"0.1.0","permission_profile":"read-only","replayed":true},"workspace":null,"environment":{"replayed":true,"available":false}}}
 ```
 
 If the requested history is no longer retained, the runtime returns a bounded

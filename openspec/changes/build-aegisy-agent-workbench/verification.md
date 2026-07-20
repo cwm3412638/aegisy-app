@@ -723,21 +723,36 @@ Current editor evidence:
   Task `6.8` is complete; project relink and full event-projection rebuild remain
   separately unchecked under `6.4` and `5.4`.
 - AAP `session/search` now performs a bounded SQLite-side Session query by project,
-  exact model/runtime/status, title, or a combined title/approved-transcript query.
+  exact branch/model/runtime/status, title, or a combined title/approved-transcript query.
   Transcript matching is restricted to `message` Items with `user`/`assistant` roles
   and visible `text`/`content`/`output`/`diff` fields; diagnostic and command payloads
   do not match, and the Runtime does not hydrate every transcript. Results carry
-  runtime binding metadata, matched-field evidence, purged-session exclusion, a
+  Runtime and Workspace binding metadata, matched-field evidence, purged-session exclusion, a
   strict `after:<updated-at>:<session-id>` cursor, and a 100-result cap. Additive
-  SQLite schema v9 migration creates and verifies indexes for status/order, model/runtime
-  binding, and transcript ownership through the existing WAL-consistent backup gate.
+  SQLite schema v13 migration creates and verifies the indexed
+  `session_workspace_bindings` projection plus status/order, model/runtime binding,
+  branch identity, and transcript ownership indexes through the existing
+  WAL-consistent backup gate. Work creation commits the Runtime and Workspace rows
+  with `session.created`, `session.runtime-bound`, and `session.workspace-bound` in
+  one transaction. The Workspace event/table carries project/root identity, Git
+  state, safe branch display plus exact SHA-256, HEAD/worktree identities, and false
+  dedicated-worktree/permission flags without raw repository paths.
+  Capabilities `session.workspace-binding.read-only` and `session.search.branch`
+  negotiate the additive response and exact branch filter.
+  Workspace observation happens before provider Session creation; if the later
+  atomic Store transaction fails after Codex start, Runtime best-effort archives
+  that newly created provider thread rather than silently retaining an unbound
+  continuation.
+  Existing v12 Work Sessions are not backfilled from current Git state: resume fails
+  closed with `-32146` until an explicit fork/rebind captures reviewed workspace state.
   The Qt left rail debounces title/transcript search, scopes Work to the current
   project, renders explicit empty results, and restores the recent list when cleared.
-  Store, protocol, and render fixtures cover approved-field isolation, model/runtime
-  filtering, cursor canonicalization, UI matching, empty state, and clear-to-restore.
-  Task `6.6` remains unchecked because branch/worktree identity is not yet persisted,
-  branch requests are explicitly unavailable, and complete indexed-text scale and
-  cross-platform evidence remain open.
+  Store and protocol fixtures cover approved-field isolation, branch/model/runtime
+  filtering, cursor canonicalization, v12-to-v13 backup migration, event-failure
+  rollback, final-deletion purge, semantic tamper rejection, restart read/search/resume,
+  and branch-drift rejection against a real Git repository. Task `6.6` remains unchecked because
+  complete indexed-text scale, branch-filter UI, dedicated-worktree/model-control
+  integration, and cross-platform evidence remain open.
 - AAP `operation/reconcile` now validates content-free event/process/workspace/Git
   evidence through `operation-reconciliation/0.1` and appends a metadata-only
   `operation.reconciled/0.1` event to the session stream when durable storage is
@@ -844,22 +859,24 @@ Current editor evidence:
   The complete desktop build passes after this change. The focused
   `agent_workbench_render` CTest was killed by the host at startup (0.44s) without
   assertion output, so visual evidence remains pending a lower-resource runner.
-- The Agent header now renders Chat/Work mode, project name, Runtime readiness or
-  recovery state, provider/model, the fixed `read-only` permission profile, the
-  current branch obtained from the existing read-only Git overview, and selected
-  context count. Project changes and Git-query failures clear the cached branch
-  before the strip is refreshed. The complete desktop build passes; the focused
-  render fixture locates the strip by a stable object name and asserts both its
-  empty read-only state and a real Git fixture branch. The focused render process
-  was still killed by the host at startup (0.43s) without assertion output, so
-  executable visual evidence remains pending a lower-resource runner.
+- The Agent header now renders Chat/Work mode, project name, persisted primary-root
+  workspace, Runtime readiness or recovery state, provider/model, the fixed
+  `read-only` permission profile, the Session-bound branch, and selected context
+  count. Qt accepts only the content-free `session-workspace-binding/0.1` projection.
+  The live read-only Git overview is comparison evidence; a mismatch marks branch
+  drift instead of overwriting the Session binding. The complete desktop build and
+  CTest `agent_runtime_protocol` pass; the focused render fixture locates the strip
+  by a stable object name and asserts its empty state, real Git branch, `root-1`, and
+  active Runtime/Workspace binding. The focused render process was still killed by
+  the host at startup (0.45s) without assertion output, so executable visual evidence
+  remains pending a lower-resource runner.
 - Qt now caches one strictly bounded Runtime binding per Session from
   start/resume/fork/read/search responses. The active mode/session alone drives the
   model display and execution strip; adapter/version are required, provider/model
   are optional bounded labels, and permission must equal `read-only`. Invalid data
   removes the binding and produces an explicit unknown/read-only gate. The protocol
   fixture proves `session/read` returns the same Runtime binding created for each of
-  two isolated Sessions. All 56 protocol tests, strict Clippy, the complete desktop
+  two isolated Sessions. All 57 protocol tests, strict Clippy, the complete desktop
   build, and CTest `agent_runtime_protocol` pass. The render fixture additionally
   asserts `preview`, `local / deterministic-echo`, and `read-only`, but its process
   was killed by the host at startup (0.47s) before any assertion output.

@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = 72 * 1024;
@@ -92,6 +92,7 @@ const REQUIRED_RETENTION_TABLES: [&str; 3] = [
 ];
 const REQUIRED_NAVIGATION_TABLES: [&str; 1] = ["project_navigation"];
 const REQUIRED_RUNTIME_BINDING_TABLES: [&str; 1] = ["session_runtime_bindings"];
+const REQUIRED_WORKSPACE_BINDING_TABLES: [&str; 1] = ["session_workspace_bindings"];
 const REQUIRED_BACKGROUND_JOB_TABLES: [&str; 1] = ["background_jobs"];
 const REQUIRED_BACKGROUND_JOB_INDEXES: [&str; 2] = [
     "background_jobs_session_idx",
@@ -107,9 +108,10 @@ const REQUIRED_BACKGROUND_NOTIFICATION_INDEXES: [&str; 2] = [
     "background_notification_outbox_session_idx",
     "background_notification_outbox_job_idx",
 ];
-const REQUIRED_SESSION_SEARCH_INDEXES: [&str; 3] = [
+const REQUIRED_SESSION_SEARCH_INDEXES: [&str; 4] = [
     "sessions_status_updated_idx",
     "session_runtime_binding_model_idx",
+    "session_workspace_binding_branch_idx",
     "items_transcript_search_idx",
 ];
 const SESSION_SEARCH_INDEX_SCHEMA_SQL: &str = "
@@ -117,6 +119,8 @@ const SESSION_SEARCH_INDEX_SCHEMA_SQL: &str = "
         ON sessions(status, updated_at_ms DESC, session_id ASC);
     CREATE INDEX IF NOT EXISTS session_runtime_binding_model_idx
         ON session_runtime_bindings(model, adapter, adapter_version, session_id);
+    CREATE INDEX IF NOT EXISTS session_workspace_binding_branch_idx
+        ON session_workspace_bindings(branch_sha256, project_id, session_id);
     CREATE INDEX IF NOT EXISTS items_transcript_search_idx
         ON items(session_id, role, item_kind, item_sequence);
 ";
@@ -181,6 +185,30 @@ const SESSION_RUNTIME_BINDING_SCHEMA_SQL: &str = "
         created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
         updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= created_at_ms),
         FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+    ) STRICT;
+";
+const SESSION_WORKSPACE_BINDING_SCHEMA_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS session_workspace_bindings (
+        session_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        root_id TEXT NOT NULL,
+        root_identity TEXT NOT NULL,
+        workspace_kind TEXT NOT NULL CHECK(workspace_kind = 'project-root'),
+        git_state TEXT NOT NULL
+            CHECK(git_state IN ('unavailable','not-repository','repository-only','worktree')),
+        repository_root_identity TEXT,
+        worktree_root_identity TEXT,
+        branch TEXT,
+        branch_sha256 TEXT,
+        branch_redacted INTEGER NOT NULL CHECK(branch_redacted IN (0,1)),
+        head_oid TEXT,
+        detached INTEGER NOT NULL CHECK(detached IN (0,1)),
+        unborn INTEGER NOT NULL CHECK(unborn IN (0,1)),
+        dedicated_worktree INTEGER NOT NULL CHECK(dedicated_worktree = 0),
+        captured_at_ms INTEGER NOT NULL CHECK(captured_at_ms >= 0),
+        updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= captured_at_ms),
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+        FOREIGN KEY(project_id, root_id) REFERENCES project_roots(project_id, root_id)
     ) STRICT;
 ";
 const TURN_ITEM_SCHEMA_SQL: &str = "
@@ -735,6 +763,7 @@ pub struct StoredSession {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSearchRequest {
     pub project_id: Option<String>,
+    pub branch: Option<String>,
     pub model: Option<String>,
     pub runtime: Option<String>,
     pub status: Option<String>,
@@ -749,6 +778,7 @@ pub struct SessionSearchRequest {
 pub struct StoredSessionSearchResult {
     pub session: StoredSession,
     pub runtime: Option<StoredSessionRuntimeBinding>,
+    pub workspace: Option<StoredSessionWorkspaceBinding>,
     pub matched_fields: Vec<String>,
 }
 
@@ -782,6 +812,47 @@ pub struct StoredSessionRuntimeBindingCreate {
     pub model: Option<String>,
     pub permission_profile: String,
     pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredSessionWorkspaceBinding {
+    pub session_id: String,
+    pub project_id: String,
+    pub root_id: String,
+    pub root_identity: String,
+    pub workspace_kind: String,
+    pub git_state: String,
+    pub repository_root_identity: Option<String>,
+    pub worktree_root_identity: Option<String>,
+    pub branch: Option<String>,
+    pub branch_sha256: Option<String>,
+    pub branch_redacted: bool,
+    pub head_oid: Option<String>,
+    pub detached: bool,
+    pub unborn: bool,
+    pub dedicated_worktree: bool,
+    pub captured_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredSessionWorkspaceBindingCreate {
+    pub session_id: String,
+    pub project_id: String,
+    pub root_id: String,
+    pub root_identity: String,
+    pub workspace_kind: String,
+    pub git_state: String,
+    pub repository_root_identity: Option<String>,
+    pub worktree_root_identity: Option<String>,
+    pub branch: Option<String>,
+    pub branch_sha256: Option<String>,
+    pub branch_redacted: bool,
+    pub head_oid: Option<String>,
+    pub detached: bool,
+    pub unborn: bool,
+    pub dedicated_worktree: bool,
+    pub captured_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -989,6 +1060,7 @@ pub struct PortableSessionImportCommand<'a> {
     pub reject_source_collisions: bool,
     pub target_environment_identity: Option<&'a str>,
     pub runtime_binding: Option<&'a StoredSessionRuntimeBindingCreate>,
+    pub workspace_binding: Option<&'a StoredSessionWorkspaceBindingCreate>,
     pub imported_at_ms: u64,
 }
 
@@ -3053,13 +3125,22 @@ impl WorkbenchStore {
         &mut self,
         request: StoredSessionCreate,
     ) -> Result<StoredSession, WorkbenchStoreError> {
-        self.create_session_with_runtime_binding(request, None)
+        self.create_session_with_bindings(request, None, None)
     }
 
     pub fn create_session_with_runtime_binding(
         &mut self,
         request: StoredSessionCreate,
         runtime_binding: Option<StoredSessionRuntimeBindingCreate>,
+    ) -> Result<StoredSession, WorkbenchStoreError> {
+        self.create_session_with_bindings(request, runtime_binding, None)
+    }
+
+    pub fn create_session_with_bindings(
+        &mut self,
+        request: StoredSessionCreate,
+        runtime_binding: Option<StoredSessionRuntimeBindingCreate>,
+        workspace_binding: Option<StoredSessionWorkspaceBindingCreate>,
     ) -> Result<StoredSession, WorkbenchStoreError> {
         validate_identifier(&request.session_id, "session ID")?;
         if let Some(project_id) = &request.project_id {
@@ -3090,6 +3171,21 @@ impl WorkbenchStore {
                 ));
             }
         }
+        if let Some(binding) = workspace_binding.as_ref() {
+            validate_session_workspace_binding_create(
+                binding,
+                &request.session_id,
+                request.project_id.as_deref(),
+            )?;
+            if request.mode != StoredSessionMode::Work {
+                return Err(error("Chat session cannot own a workspace binding"));
+            }
+            if binding.captured_at_ms != request.created_at_ms {
+                return Err(error(
+                    "session workspace binding capture time does not match session",
+                ));
+            }
+        }
         let timestamp = to_i64(request.created_at_ms, "session creation time")?;
         let transaction = self.begin_database_write("cannot start session transaction")?;
         if let Some(project_id) = &request.project_id {
@@ -3103,6 +3199,20 @@ impl WorkbenchStore {
                 .map_err(|_| error("cannot validate session project"))?;
             if exists.is_none() {
                 return Err(error("session project does not exist or is archived"));
+            }
+        }
+        if let Some(binding) = workspace_binding.as_ref() {
+            let root_identity: Option<String> = transaction
+                .query_row(
+                    "SELECT root_identity FROM project_roots
+                     WHERE project_id = ?1 AND root_id = ?2",
+                    params![binding.project_id, binding.root_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|_| error("cannot validate session workspace root"))?;
+            if root_identity.as_deref() != Some(binding.root_identity.as_str()) {
+                return Err(error("session workspace root identity is stale"));
             }
         }
         if let Some(parent_session_id) = &request.parent_session_id {
@@ -3184,6 +3294,10 @@ impl WorkbenchStore {
                 &request.session_id,
                 request.project_id.as_deref(),
             )?;
+        }
+        if let Some(binding) = workspace_binding.as_ref() {
+            insert_session_workspace_binding_tx(&transaction, binding)?;
+            append_session_workspace_binding_event_tx(&transaction, binding)?;
         }
         transaction
             .commit()
@@ -4040,6 +4154,29 @@ impl WorkbenchStore {
             .ok_or_else(|| error("session runtime binding does not exist"))
     }
 
+    pub fn load_session_workspace_binding(
+        &self,
+        session_id: &str,
+    ) -> Result<StoredSessionWorkspaceBinding, WorkbenchStoreError> {
+        validate_identifier(session_id, "workspace binding session ID")?;
+        let binding = self
+            .connection
+            .query_row(
+                "SELECT session_id, project_id, root_id, root_identity, workspace_kind,
+                        git_state, repository_root_identity, worktree_root_identity,
+                        branch, branch_sha256, branch_redacted, head_oid, detached,
+                        unborn, dedicated_worktree, captured_at_ms, updated_at_ms
+                 FROM session_workspace_bindings WHERE session_id = ?1",
+                [session_id],
+                stored_session_workspace_binding_from_row,
+            )
+            .optional()
+            .map_err(|_| error("cannot read session workspace binding"))?
+            .ok_or_else(|| error("session workspace binding does not exist"))?;
+        validate_stored_session_workspace_binding(&binding)?;
+        Ok(binding)
+    }
+
     pub fn record_session_resume(
         &mut self,
         session_id: &str,
@@ -4176,6 +4313,7 @@ impl WorkbenchStore {
             validate_identifier(project_id, "session search project filter")?;
         }
         for (term, label) in [
+            (request.branch.as_deref(), "session search branch filter"),
             (request.model.as_deref(), "session search model filter"),
             (request.runtime.as_deref(), "session search runtime filter"),
             (request.status.as_deref(), "session search status filter"),
@@ -4204,6 +4342,10 @@ impl WorkbenchStore {
             });
         let title_pattern = request.title.as_deref().map(session_search_like_pattern);
         let text_pattern = request.text.as_deref().map(session_search_like_pattern);
+        let branch_sha256 = request
+            .branch
+            .as_deref()
+            .map(|branch| ContentHash::for_bytes(branch.as_bytes()).sha256);
         let limit = i64::try_from(request.limit.saturating_add(1))
             .map_err(|_| error("session search limit is invalid"))?;
         let mut statement = self
@@ -4215,32 +4357,40 @@ impl WorkbenchStore {
                         rb.session_id, rb.adapter, rb.adapter_version,
                         rb.backend_session_id, rb.provider, rb.model,
                         rb.permission_profile, rb.created_at_ms, rb.updated_at_ms,
-                        CASE WHEN ?6 IS NULL THEN 0 ELSE EXISTS(
+                        wb.session_id, wb.project_id, wb.root_id, wb.root_identity,
+                        wb.workspace_kind, wb.git_state, wb.repository_root_identity,
+                        wb.worktree_root_identity, wb.branch, wb.branch_sha256,
+                        wb.branch_redacted, wb.head_oid, wb.detached, wb.unborn,
+                        wb.dedicated_worktree, wb.captured_at_ms, wb.updated_at_ms,
+                        CASE WHEN ?7 IS NULL THEN 0 ELSE EXISTS(
                             SELECT 1 FROM items AS transcript
                             WHERE transcript.session_id = s.session_id
                               AND transcript.item_kind = 'message'
                               AND transcript.role IN ('user', 'assistant')
                               AND (
                                   lower(COALESCE(json_extract(transcript.payload_json, '$.text'), ''))
-                                      LIKE lower(?6) ESCAPE '\\'
+                                      LIKE lower(?7) ESCAPE '\\'
                                   OR lower(COALESCE(json_extract(transcript.payload_json, '$.content'), ''))
-                                      LIKE lower(?6) ESCAPE '\\'
+                                      LIKE lower(?7) ESCAPE '\\'
                                   OR lower(COALESCE(json_extract(transcript.payload_json, '$.output'), ''))
-                                      LIKE lower(?6) ESCAPE '\\'
+                                      LIKE lower(?7) ESCAPE '\\'
                                   OR lower(COALESCE(json_extract(transcript.payload_json, '$.diff'), ''))
-                                      LIKE lower(?6) ESCAPE '\\'
+                                      LIKE lower(?7) ESCAPE '\\'
                               )
                         ) END AS text_match
                  FROM sessions AS s
                  LEFT JOIN session_runtime_bindings AS rb
                    ON rb.session_id = s.session_id
+                 LEFT JOIN session_workspace_bindings AS wb
+                   ON wb.session_id = s.session_id
                  WHERE (?1 IS NULL OR s.project_id = ?1)
-                   AND (?2 IS NULL OR rb.model = ?2)
-                   AND (?3 IS NULL OR rb.adapter = ?3 OR rb.adapter_version = ?3
-                        OR rb.provider = ?3)
-                   AND (?4 IS NULL OR s.status = ?4)
-                   AND (?5 IS NULL OR lower(s.title) LIKE lower(?5) ESCAPE '\\')
-                   AND (?6 IS NULL OR lower(s.title) LIKE lower(?6) ESCAPE '\\'
+                   AND (?2 IS NULL OR wb.branch_sha256 = ?2)
+                   AND (?3 IS NULL OR rb.model = ?3)
+                   AND (?4 IS NULL OR rb.adapter = ?4 OR rb.adapter_version = ?4
+                        OR rb.provider = ?4)
+                   AND (?5 IS NULL OR s.status = ?5)
+                   AND (?6 IS NULL OR lower(s.title) LIKE lower(?6) ESCAPE '\\')
+                   AND (?7 IS NULL OR lower(s.title) LIKE lower(?7) ESCAPE '\\'
                         OR EXISTS(
                        SELECT 1 FROM items AS transcript_filter
                        WHERE transcript_filter.session_id = s.session_id
@@ -4248,18 +4398,18 @@ impl WorkbenchStore {
                          AND transcript_filter.role IN ('user', 'assistant')
                          AND (
                              lower(COALESCE(json_extract(transcript_filter.payload_json, '$.text'), ''))
-                                 LIKE lower(?6) ESCAPE '\\'
+                                 LIKE lower(?7) ESCAPE '\\'
                              OR lower(COALESCE(json_extract(transcript_filter.payload_json, '$.content'), ''))
-                                 LIKE lower(?6) ESCAPE '\\'
+                                 LIKE lower(?7) ESCAPE '\\'
                              OR lower(COALESCE(json_extract(transcript_filter.payload_json, '$.output'), ''))
-                                 LIKE lower(?6) ESCAPE '\\'
+                                 LIKE lower(?7) ESCAPE '\\'
                              OR lower(COALESCE(json_extract(transcript_filter.payload_json, '$.diff'), ''))
-                                 LIKE lower(?6) ESCAPE '\\'
+                                 LIKE lower(?7) ESCAPE '\\'
                          )
                    ))
-                   AND (?7 OR ?4 = 'archived' OR s.status != 'archived')
-                   AND (?8 IS NULL OR s.updated_at_ms < ?8
-                        OR (s.updated_at_ms = ?8 AND s.session_id > ?9))
+                   AND (?8 OR ?5 = 'archived' OR s.status != 'archived')
+                   AND (?9 IS NULL OR s.updated_at_ms < ?9
+                        OR (s.updated_at_ms = ?9 AND s.session_id > ?10))
                    AND NOT EXISTS (
                        SELECT 1
                        FROM session_deletion_members AS deletion_member
@@ -4269,13 +4419,14 @@ impl WorkbenchStore {
                          AND deletion.state = 'purged'
                    )
                  ORDER BY s.updated_at_ms DESC, s.session_id ASC
-                 LIMIT ?10",
+                 LIMIT ?11",
             )
             .map_err(|_| error("cannot prepare session search"))?;
         let rows = statement
             .query_map(
                 params![
                     request.project_id.as_deref(),
+                    branch_sha256.as_deref(),
                     request.model.as_deref(),
                     request.runtime.as_deref(),
                     request.status.as_deref(),
@@ -4323,7 +4474,39 @@ impl WorkbenchStore {
                             },
                         )
                         .transpose()?;
-                    let text_match = row.get::<_, i64>(19)? != 0;
+                    let workspace = row
+                        .get::<_, Option<String>>(19)?
+                        .map(
+                            |session_id| -> rusqlite::Result<StoredSessionWorkspaceBinding> {
+                                Ok(StoredSessionWorkspaceBinding {
+                                    session_id,
+                                    project_id: row.get(20)?,
+                                    root_id: row.get(21)?,
+                                    root_identity: row.get(22)?,
+                                    workspace_kind: row.get(23)?,
+                                    git_state: row.get(24)?,
+                                    repository_root_identity: row.get(25)?,
+                                    worktree_root_identity: row.get(26)?,
+                                    branch: row.get(27)?,
+                                    branch_sha256: row.get(28)?,
+                                    branch_redacted: row.get::<_, i64>(29)? != 0,
+                                    head_oid: row.get(30)?,
+                                    detached: row.get::<_, i64>(31)? != 0,
+                                    unborn: row.get::<_, i64>(32)? != 0,
+                                    dedicated_worktree: row.get::<_, i64>(33)? != 0,
+                                    captured_at_ms: to_u64_sql(
+                                        row.get(34)?,
+                                        "workspace binding capture time",
+                                    )?,
+                                    updated_at_ms: to_u64_sql(
+                                        row.get(35)?,
+                                        "workspace binding update time",
+                                    )?,
+                                })
+                            },
+                        )
+                        .transpose()?;
+                    let text_match = row.get::<_, i64>(36)? != 0;
                     let mut matched_fields = Vec::new();
                     if request
                         .title
@@ -4345,12 +4528,16 @@ impl WorkbenchStore {
                     if request.model.is_some() {
                         matched_fields.push("model".into());
                     }
+                    if request.branch.is_some() {
+                        matched_fields.push("branch".into());
+                    }
                     if request.runtime.is_some() {
                         matched_fields.push("runtime".into());
                     }
                     Ok(StoredSessionSearchResult {
                         session,
                         runtime,
+                        workspace,
                         matched_fields,
                     })
                 },
@@ -4522,6 +4709,7 @@ impl WorkbenchStore {
             reject_source_collisions,
             target_environment_identity,
             runtime_binding,
+            workspace_binding,
             imported_at_ms,
         } = command;
         validate_identifier(target_session_id, "portable import target session ID")?;
@@ -4538,6 +4726,18 @@ impl WorkbenchStore {
                 return Err(error(
                     "import runtime binding creation time does not match import",
                 ));
+            }
+        }
+        if let Some(binding) = workspace_binding.as_ref() {
+            validate_session_workspace_binding_create(
+                binding,
+                target_session_id,
+                target_project_id,
+            )?;
+            if package.content.mode != StoredSessionMode::Work
+                || binding.captured_at_ms != imported_at_ms
+            {
+                return Err(error("import workspace binding does not match import"));
             }
         }
         let preview = self.preview_portable_session_import(package, target_project_id)?;
@@ -4668,6 +4868,23 @@ impl WorkbenchStore {
                 ));
             }
         }
+        if let Some(binding) = workspace_binding.as_ref() {
+            let root_identity: Option<String> = transaction
+                .query_row(
+                    "SELECT root_identity FROM project_roots
+                     WHERE project_id = ?1 AND root_id = ?2",
+                    params![binding.project_id, binding.root_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|_| error("cannot revalidate import workspace root"))?;
+            if root_identity.as_deref() != Some(binding.root_identity.as_str()) {
+                return Err(coded_error(
+                    "portable-session-import-stale",
+                    "portable import workspace root changed before commit",
+                ));
+            }
+        }
         transaction
             .execute(
                 "INSERT INTO sessions (
@@ -4731,6 +4948,10 @@ impl WorkbenchStore {
                 target_session_id,
                 target_project_id,
             )?;
+        }
+        if let Some(binding) = workspace_binding.as_ref() {
+            insert_session_workspace_binding_tx(&transaction, binding)?;
+            append_session_workspace_binding_event_tx(&transaction, binding)?;
         }
         for (request, prepared) in &prepared_items {
             append_item_tx(&transaction, request, prepared)?;
@@ -5328,6 +5549,12 @@ impl WorkbenchStore {
                     [&member.session_id],
                 )
                 .map_err(|_| error("cannot purge deleted session authorizations"))?;
+            transaction
+                .execute(
+                    "DELETE FROM session_workspace_bindings WHERE session_id = ?1",
+                    [&member.session_id],
+                )
+                .map_err(|_| error("cannot purge deleted session workspace binding"))?;
             transaction
                 .execute(
                     "DELETE FROM background_jobs WHERE session_id = ?1",
@@ -7498,6 +7725,54 @@ impl WorkbenchStore {
                             .is_some();
                     if !valid {
                         push_projection_issue(&mut issues, "session-runtime-binding-event-invalid");
+                    }
+                }
+                "session.workspace-bound" => {
+                    let binding = event.payload.get("binding").cloned().and_then(|value| {
+                        serde_json::from_value::<StoredSessionWorkspaceBindingCreate>(value).ok()
+                    });
+                    let binding_hash = event
+                        .payload
+                        .get("binding_hash")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<ContentHash>(value).ok());
+                    let valid = binding.as_ref().is_some_and(|binding| {
+                        let serialized = serde_json::to_vec(binding).ok();
+                        projection_event_schema(event) == Some("session.workspace-bound/0.1")
+                            && validate_session_workspace_binding_create(
+                                binding,
+                                session_id,
+                                event.project_id.as_deref(),
+                            )
+                            .is_ok()
+                            && serialized.as_deref().is_some_and(|serialized| {
+                                binding_hash.as_ref() == Some(&ContentHash::for_bytes(serialized))
+                            })
+                            && event.event_id
+                                == derived_event_id(
+                                    "session-workspace-bound",
+                                    session_id.as_bytes(),
+                                )
+                            && event.correlation_id == session_id
+                            && event.operation_id == session_id
+                            && event.generation == 0
+                            && event.timestamp_ms == binding.captured_at_ms
+                            && event
+                                .payload
+                                .get("raw_paths_persisted")
+                                .and_then(Value::as_bool)
+                                == Some(false)
+                            && event
+                                .payload
+                                .get("permission_granted")
+                                .and_then(Value::as_bool)
+                                == Some(false)
+                    });
+                    if !valid {
+                        push_projection_issue(
+                            &mut issues,
+                            "session-workspace-binding-event-invalid",
+                        );
                     }
                 }
                 "session.resumed" => {
@@ -9691,6 +9966,20 @@ impl WorkbenchStore {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
+        if version == 12 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start session workspace binding migration"))?;
+            apply_session_search_indexes(&transaction)?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit session workspace binding migration"));
+        }
         if version == 11 {
             let transaction = self
                 .connection
@@ -9699,6 +9988,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(BACKGROUND_NOTIFICATION_OUTBOX_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply background notification schema migration"))?;
+            apply_session_search_indexes(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -9718,6 +10008,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(BACKGROUND_NOTIFICATION_OUTBOX_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply background notification schema migration"))?;
+            apply_session_search_indexes(&transaction)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -10048,7 +10339,8 @@ impl WorkbenchStore {
         verify_background_job_store(&self.connection)?;
         verify_background_scheduler_lease_store(&self.connection)?;
         verify_background_recovery_decision_store(&self.connection)?;
-        verify_background_notification_store(&self.connection)
+        verify_background_notification_store(&self.connection)?;
+        verify_session_workspace_binding_store(self)
     }
 
     fn load_decision(
@@ -12703,6 +12995,208 @@ fn append_session_runtime_binding_event_tx(
     .map(|_| ())
 }
 
+fn validate_session_workspace_binding_create(
+    binding: &StoredSessionWorkspaceBindingCreate,
+    expected_session_id: &str,
+    expected_project_id: Option<&str>,
+) -> Result<(), WorkbenchStoreError> {
+    validate_identifier(&binding.session_id, "workspace binding session ID")?;
+    validate_identifier(&binding.project_id, "workspace binding project ID")?;
+    validate_identifier(&binding.root_id, "workspace binding root ID")?;
+    validate_identity_text(&binding.root_identity, "workspace binding root identity")?;
+    if binding.session_id != expected_session_id
+        || expected_project_id != Some(binding.project_id.as_str())
+    {
+        return Err(error(
+            "session workspace binding owner does not match session",
+        ));
+    }
+    if binding.workspace_kind != "project-root"
+        || !matches!(
+            binding.git_state.as_str(),
+            "unavailable" | "not-repository" | "repository-only" | "worktree"
+        )
+        || binding.dedicated_worktree
+    {
+        return Err(error("session workspace binding state is invalid"));
+    }
+    if let Some(identity) = binding.repository_root_identity.as_deref() {
+        validate_identity_text(identity, "workspace repository root identity")?;
+    }
+    if let Some(identity) = binding.worktree_root_identity.as_deref() {
+        validate_identity_text(identity, "workspace worktree root identity")?;
+    }
+    if let Some(branch) = binding.branch.as_deref() {
+        validate_text(branch, 512, "workspace branch")?;
+    }
+    if let Some(branch_sha256) = binding.branch_sha256.as_deref() {
+        validate_lower_sha256(branch_sha256, "workspace branch identity")?;
+    }
+    if let Some(head_oid) = binding.head_oid.as_deref() {
+        if !matches!(head_oid.len(), 40 | 64)
+            || !head_oid
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(error("workspace HEAD identity is invalid"));
+        }
+    }
+    let branch_hash_matches = binding.branch.as_ref().is_none_or(|branch| {
+        binding.branch_sha256.as_deref()
+            == Some(ContentHash::for_bytes(branch.as_bytes()).sha256.as_str())
+    });
+    let branch_state_valid = matches!(
+        (
+            binding.branch.as_ref(),
+            binding.branch_sha256.as_ref(),
+            binding.branch_redacted,
+        ),
+        (Some(_), Some(_), false) | (None, Some(_), true) | (None, None, false)
+    );
+    let git_state_valid = if binding.git_state == "worktree" {
+        binding.repository_root_identity.is_some()
+            && binding.worktree_root_identity.is_some()
+            && (binding.unborn || binding.head_oid.is_some())
+            && !(binding.detached && binding.branch_sha256.is_some())
+    } else {
+        binding.repository_root_identity.is_none()
+            && binding.worktree_root_identity.is_none()
+            && binding.branch.is_none()
+            && binding.branch_sha256.is_none()
+            && !binding.branch_redacted
+            && binding.head_oid.is_none()
+            && !binding.detached
+            && !binding.unborn
+    };
+    if !branch_hash_matches || !branch_state_valid || !git_state_valid {
+        return Err(error("session workspace binding Git evidence is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_stored_session_workspace_binding(
+    binding: &StoredSessionWorkspaceBinding,
+) -> Result<(), WorkbenchStoreError> {
+    validate_session_workspace_binding_create(
+        &StoredSessionWorkspaceBindingCreate {
+            session_id: binding.session_id.clone(),
+            project_id: binding.project_id.clone(),
+            root_id: binding.root_id.clone(),
+            root_identity: binding.root_identity.clone(),
+            workspace_kind: binding.workspace_kind.clone(),
+            git_state: binding.git_state.clone(),
+            repository_root_identity: binding.repository_root_identity.clone(),
+            worktree_root_identity: binding.worktree_root_identity.clone(),
+            branch: binding.branch.clone(),
+            branch_sha256: binding.branch_sha256.clone(),
+            branch_redacted: binding.branch_redacted,
+            head_oid: binding.head_oid.clone(),
+            detached: binding.detached,
+            unborn: binding.unborn,
+            dedicated_worktree: binding.dedicated_worktree,
+            captured_at_ms: binding.captured_at_ms,
+        },
+        &binding.session_id,
+        Some(&binding.project_id),
+    )?;
+    if binding.updated_at_ms < binding.captured_at_ms {
+        return Err(error("session workspace binding timestamp is invalid"));
+    }
+    Ok(())
+}
+
+fn insert_session_workspace_binding_tx(
+    transaction: &Transaction<'_>,
+    binding: &StoredSessionWorkspaceBindingCreate,
+) -> Result<(), WorkbenchStoreError> {
+    let captured_at_ms = to_i64(binding.captured_at_ms, "workspace binding capture time")?;
+    transaction
+        .execute(
+            "INSERT INTO session_workspace_bindings (
+                session_id, project_id, root_id, root_identity, workspace_kind,
+                git_state, repository_root_identity, worktree_root_identity, branch,
+                branch_sha256, branch_redacted, head_oid, detached, unborn,
+                dedicated_worktree, captured_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                       ?13, ?14, ?15, ?16, ?16)",
+            params![
+                binding.session_id,
+                binding.project_id,
+                binding.root_id,
+                binding.root_identity,
+                binding.workspace_kind,
+                binding.git_state,
+                binding.repository_root_identity,
+                binding.worktree_root_identity,
+                binding.branch,
+                binding.branch_sha256,
+                binding.branch_redacted,
+                binding.head_oid,
+                binding.detached,
+                binding.unborn,
+                binding.dedicated_worktree,
+                captured_at_ms,
+            ],
+        )
+        .map_err(|_| error("session workspace binding already exists or is invalid"))?;
+    Ok(())
+}
+
+fn append_session_workspace_binding_event_tx(
+    transaction: &Transaction<'_>,
+    binding: &StoredSessionWorkspaceBindingCreate,
+) -> Result<(), WorkbenchStoreError> {
+    let binding_json = serde_json::to_vec(binding)
+        .map_err(|_| error("cannot serialize session workspace binding"))?;
+    let binding_hash = ContentHash::for_bytes(&binding_json);
+    let event_id = derived_event_id("session-workspace-bound", binding.session_id.as_bytes());
+    append_event_tx(
+        transaction,
+        EventInput {
+            session_id: &binding.session_id,
+            event_id: &event_id,
+            timestamp_ms: binding.captured_at_ms,
+            correlation_id: &binding.session_id,
+            event_kind: "session.workspace-bound",
+            project_id: Some(&binding.project_id),
+            operation_id: &binding.session_id,
+            generation: 0,
+            payload: json!({
+                "schema_version": "session.workspace-bound/0.1",
+                "binding": binding,
+                "binding_hash": binding_hash,
+                "raw_paths_persisted": false,
+                "permission_granted": false
+            }),
+        },
+    )
+    .map(|_| ())
+}
+
+fn stored_session_workspace_binding_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredSessionWorkspaceBinding> {
+    Ok(StoredSessionWorkspaceBinding {
+        session_id: row.get(0)?,
+        project_id: row.get(1)?,
+        root_id: row.get(2)?,
+        root_identity: row.get(3)?,
+        workspace_kind: row.get(4)?,
+        git_state: row.get(5)?,
+        repository_root_identity: row.get(6)?,
+        worktree_root_identity: row.get(7)?,
+        branch: row.get(8)?,
+        branch_sha256: row.get(9)?,
+        branch_redacted: row.get::<_, i64>(10)? != 0,
+        head_oid: row.get(11)?,
+        detached: row.get::<_, i64>(12)? != 0,
+        unborn: row.get::<_, i64>(13)? != 0,
+        dedicated_worktree: row.get::<_, i64>(14)? != 0,
+        captured_at_ms: to_u64_sql(row.get(15)?, "workspace binding capture time")?,
+        updated_at_ms: to_u64_sql(row.get(16)?, "workspace binding update time")?,
+    })
+}
+
 fn validate_rebuilt_session(session: &StoredSession) -> Result<(), WorkbenchStoreError> {
     validate_identifier(&session.session_id, "session ID")?;
     if let Some(project_id) = &session.project_id {
@@ -13259,6 +13753,9 @@ fn query_count(
 
 fn apply_session_search_indexes(connection: &Connection) -> Result<(), WorkbenchStoreError> {
     connection
+        .execute_batch(SESSION_WORKSPACE_BINDING_SCHEMA_SQL)
+        .map_err(|_| error("cannot apply session workspace binding migration"))?;
+    connection
         .execute_batch(SESSION_SEARCH_INDEX_SCHEMA_SQL)
         .map_err(|_| error("cannot apply session search index migration"))?;
     connection
@@ -13282,6 +13779,7 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         .chain(REQUIRED_RETENTION_TABLES)
         .chain(REQUIRED_NAVIGATION_TABLES)
         .chain(REQUIRED_RUNTIME_BINDING_TABLES)
+        .chain(REQUIRED_WORKSPACE_BINDING_TABLES)
         .chain(REQUIRED_BACKGROUND_JOB_TABLES)
         .chain(REQUIRED_BACKGROUND_LEASE_TABLES)
         .chain(REQUIRED_BACKGROUND_NOTIFICATION_TABLES)
@@ -13359,6 +13857,64 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             return Err(error(
                 "workbench database background notification indexes are incomplete",
             ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_session_workspace_binding_store(
+    store: &WorkbenchStore,
+) -> Result<(), WorkbenchStoreError> {
+    let mut statement = store
+        .connection
+        .prepare(
+            "SELECT session_id FROM session_workspace_bindings
+             ORDER BY session_id LIMIT ?1",
+        )
+        .map_err(|_| error("cannot prepare session workspace binding verification"))?;
+    let limit = i64::try_from(MAX_STARTUP_RECOVERY_SESSIONS.saturating_add(1))
+        .map_err(|_| error("session workspace binding verification limit is invalid"))?;
+    let session_ids = statement
+        .query_map([limit], |row| row.get::<_, String>(0))
+        .map_err(|_| error("cannot scan session workspace bindings"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("session workspace binding row is invalid"))?;
+    if session_ids.len() > MAX_STARTUP_RECOVERY_SESSIONS as usize {
+        return Err(error("session workspace binding limit is exceeded"));
+    }
+    drop(statement);
+    for session_id in session_ids {
+        let binding = store.load_session_workspace_binding(&session_id)?;
+        let owner = store
+            .connection
+            .query_row(
+                "SELECT s.project_id, s.mode, s.created_at_ms, r.root_identity
+                 FROM sessions AS s
+                 JOIN project_roots AS r
+                   ON r.project_id = s.project_id AND r.root_id = ?2
+                 WHERE s.session_id = ?1",
+                params![session_id, binding.root_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        to_u64_sql(row.get(2)?, "workspace owner session creation time")?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| error("cannot verify session workspace binding owner"))?;
+        if owner
+            .as_ref()
+            .is_none_or(|(project_id, mode, created_at_ms, root_identity)| {
+                project_id.as_deref() != Some(binding.project_id.as_str())
+                    || mode != "work"
+                    || *created_at_ms != binding.captured_at_ms
+                    || root_identity != &binding.root_identity
+            })
+        {
+            return Err(error("session workspace binding owner is invalid"));
         }
     }
     Ok(())
@@ -15382,6 +15938,7 @@ mod tests {
                 reject_source_collisions: true,
                 target_environment_identity: Some("environment:sha256:portable-rejected"),
                 runtime_binding: None,
+                workspace_binding: None,
                 imported_at_ms: 2_500,
             })
             .unwrap_err();
@@ -15397,6 +15954,7 @@ mod tests {
                 reject_source_collisions: false,
                 target_environment_identity: Some("environment:sha256:portable-imported"),
                 runtime_binding: None,
+                workspace_binding: None,
                 imported_at_ms: 3_000,
             })
             .unwrap();
@@ -15489,6 +16047,7 @@ mod tests {
                 reject_source_collisions: false,
                 target_environment_identity: Some("environment:sha256:portable-rollback"),
                 runtime_binding: None,
+                workspace_binding: None,
                 imported_at_ms: 3_000,
             })
             .is_err());
@@ -16937,6 +17496,62 @@ mod tests {
     }
 
     #[test]
+    fn upgrades_schema_v12_to_session_workspace_bindings_after_backup() {
+        let root = Root::new("schema-v12-session-workspace-bindings");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "session-v12".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Preserved from v12".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        drop(store);
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch(
+                "DROP INDEX session_workspace_binding_branch_idx;
+                 DROP TABLE session_workspace_bindings;
+                 PRAGMA user_version = 12;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        let version: i64 = reopened
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(
+            reopened.load_session("session-v12").unwrap().title,
+            "Preserved from v12"
+        );
+        for table in REQUIRED_WORKSPACE_BINDING_TABLES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                     )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing session workspace binding table {table}");
+        }
+        let manifests = migration_backup_manifests(&root.path).unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].source_schema_version, 12);
+        assert_eq!(manifests[0].target_schema_version, SCHEMA_VERSION as u64);
+    }
+
+    #[test]
     fn upgrades_schema_v11_to_background_notification_outbox_after_backup() {
         let root = Root::new("schema-v11-background-notifications");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
@@ -17624,8 +18239,28 @@ mod tests {
             permission_profile: "read-only".into(),
             created_at_ms: 10,
         };
+        let workspace_binding = StoredSessionWorkspaceBindingCreate {
+            session_id: "search-session-a".into(),
+            project_id: "search-project".into(),
+            root_id: "root-1".into(),
+            root_identity:
+                "root:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .into(),
+            workspace_kind: "project-root".into(),
+            git_state: "worktree".into(),
+            repository_root_identity: Some("fs:test:repository".into()),
+            worktree_root_identity: Some("fs:test:worktree".into()),
+            branch: Some("main".into()),
+            branch_sha256: Some(ContentHash::for_bytes(b"main").sha256),
+            branch_redacted: false,
+            head_oid: Some("a".repeat(40)),
+            detached: false,
+            unborn: false,
+            dedicated_worktree: false,
+            captured_at_ms: 10,
+        };
         store
-            .create_session_with_runtime_binding(
+            .create_session_with_bindings(
                 StoredSessionCreate {
                     session_id: "search-session-a".into(),
                     project_id: Some("search-project".into()),
@@ -17637,6 +18272,7 @@ mod tests {
                     created_at_ms: 10,
                 },
                 Some(runtime_binding),
+                Some(workspace_binding),
             )
             .unwrap();
         store
@@ -17679,6 +18315,7 @@ mod tests {
         let text_page = store
             .search_sessions(&SessionSearchRequest {
                 project_id: Some("search-project".into()),
+                branch: None,
                 model: None,
                 runtime: None,
                 status: None,
@@ -17701,10 +18338,35 @@ mod tests {
             Some("gpt-search")
         );
         assert_eq!(text_page.results[0].matched_fields, vec!["text"]);
+        assert_eq!(
+            text_page.results[0]
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.branch.as_deref()),
+            Some("main")
+        );
+
+        let branch_page = store
+            .search_sessions(&SessionSearchRequest {
+                project_id: Some("search-project".into()),
+                branch: Some("main".into()),
+                model: None,
+                runtime: None,
+                status: None,
+                title: None,
+                text: None,
+                include_archived: false,
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(branch_page.results.len(), 1);
+        assert_eq!(branch_page.results[0].matched_fields, vec!["branch"]);
 
         let model_page = store
             .search_sessions(&SessionSearchRequest {
                 project_id: None,
+                branch: None,
                 model: Some("gpt-search".into()),
                 runtime: Some("codex-app-server".into()),
                 status: None,
@@ -17724,6 +18386,7 @@ mod tests {
         let first_page = store
             .search_sessions(&SessionSearchRequest {
                 project_id: Some("search-project".into()),
+                branch: None,
                 model: None,
                 runtime: None,
                 status: None,
@@ -17743,6 +18406,7 @@ mod tests {
         let second_page = store
             .search_sessions(&SessionSearchRequest {
                 project_id: Some("search-project".into()),
+                branch: None,
                 model: None,
                 runtime: None,
                 status: None,
@@ -17762,6 +18426,7 @@ mod tests {
         let invalid_cursor = store
             .search_sessions(&SessionSearchRequest {
                 project_id: None,
+                branch: None,
                 model: None,
                 runtime: None,
                 status: None,
@@ -17773,6 +18438,169 @@ mod tests {
             })
             .unwrap_err();
         assert!(invalid_cursor.message.contains("non-canonical"));
+    }
+
+    #[test]
+    fn session_workspace_binding_is_atomic_and_semantic_tampering_fails_startup() {
+        let root = Root::new("session-workspace-binding-integrity");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let project_root = root.parent.canonicalize().unwrap();
+        let root_identity =
+            "root:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        store
+            .create_project(StoredProjectCreate {
+                project_id: "workspace-project".into(),
+                root_id: "root-1".into(),
+                canonical_root: project_root.to_string_lossy().into_owned(),
+                root_identity: root_identity.into(),
+                display_name: "Workspace project".into(),
+                root_access: "write".into(),
+                created_at_ms: 1,
+            })
+            .unwrap();
+        let session = StoredSessionCreate {
+            session_id: "workspace-session".into(),
+            project_id: Some("workspace-project".into()),
+            mode: StoredSessionMode::Work,
+            title: "Workspace session".into(),
+            parent_session_id: None,
+            lineage_kind: StoredSessionLineage::New,
+            environment_identity: None,
+            created_at_ms: 10,
+        };
+        let runtime = StoredSessionRuntimeBindingCreate {
+            session_id: "workspace-session".into(),
+            adapter: "preview".into(),
+            adapter_version: "0.1.0".into(),
+            backend_session_id: None,
+            provider: Some("local".into()),
+            model: Some("deterministic-echo".into()),
+            permission_profile: "read-only".into(),
+            created_at_ms: 10,
+        };
+        let workspace = StoredSessionWorkspaceBindingCreate {
+            session_id: "workspace-session".into(),
+            project_id: "workspace-project".into(),
+            root_id: "root-1".into(),
+            root_identity: root_identity.into(),
+            workspace_kind: "project-root".into(),
+            git_state: "worktree".into(),
+            repository_root_identity: Some("fs:test:repository".into()),
+            worktree_root_identity: Some("fs:test:worktree".into()),
+            branch: Some("feature/workspace".into()),
+            branch_sha256: Some(ContentHash::for_bytes(b"feature/workspace").sha256),
+            branch_redacted: false,
+            head_oid: Some("d".repeat(40)),
+            detached: false,
+            unborn: false,
+            dedicated_worktree: false,
+            captured_at_ms: 10,
+        };
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_workspace_binding_event
+                 BEFORE INSERT ON events
+                 WHEN NEW.event_kind = 'session.workspace-bound'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected workspace binding event failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(store
+            .create_session_with_bindings(
+                session.clone(),
+                Some(runtime.clone()),
+                Some(workspace.clone()),
+            )
+            .is_err());
+        for table in [
+            "sessions",
+            "session_runtime_bindings",
+            "session_workspace_bindings",
+            "session_projection_sources",
+        ] {
+            assert_eq!(
+                query_global_count(
+                    &store.connection,
+                    &format!("SELECT COUNT(*) FROM {table}"),
+                    "count",
+                )
+                .unwrap(),
+                0,
+            );
+        }
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_workspace_binding_event;")
+            .unwrap();
+        store
+            .create_session_with_bindings(
+                session.clone(),
+                Some(runtime.clone()),
+                Some(workspace.clone()),
+            )
+            .unwrap();
+        let loaded = store
+            .load_session_workspace_binding("workspace-session")
+            .unwrap();
+        assert_eq!(loaded.branch.as_deref(), Some("feature/workspace"));
+
+        let mut deleted_session = session;
+        deleted_session.session_id = "workspace-delete-session".into();
+        deleted_session.created_at_ms = 20;
+        let mut deleted_runtime = runtime;
+        deleted_runtime.session_id = deleted_session.session_id.clone();
+        deleted_runtime.created_at_ms = 20;
+        let mut deleted_workspace = workspace;
+        deleted_workspace.session_id = deleted_session.session_id.clone();
+        deleted_workspace.captured_at_ms = 20;
+        store
+            .create_session_with_bindings(
+                deleted_session,
+                Some(deleted_runtime),
+                Some(deleted_workspace),
+            )
+            .unwrap();
+        let preview = store
+            .preview_session_deletion(
+                "workspace-delete-session",
+                SessionDeletionScope::SessionOnly,
+            )
+            .unwrap();
+        store
+            .schedule_session_deletion(
+                "workspace-delete-plan",
+                "workspace-delete-session",
+                SessionDeletionScope::SessionOnly,
+                &preview.plan_hash,
+                30,
+                MIN_SESSION_DELETE_UNDO_MS,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .sweep_session_deletions(30 + MIN_SESSION_DELETE_UNDO_MS)
+                .unwrap()
+                .purged,
+            1
+        );
+        assert!(store
+            .load_session_workspace_binding("workspace-delete-session")
+            .is_err());
+        drop(store);
+
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute(
+                "UPDATE session_workspace_bindings SET branch_sha256 = ?1
+                 WHERE session_id = 'workspace-session'",
+                ["0".repeat(64)],
+            )
+            .unwrap();
+        drop(connection);
+        let rejected = WorkbenchStore::open(&root.path).unwrap_err();
+        assert!(rejected.message.contains("workspace binding"));
     }
 
     #[test]
