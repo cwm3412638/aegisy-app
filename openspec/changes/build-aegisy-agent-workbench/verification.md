@@ -79,6 +79,20 @@ Child-task lifecycle evidence:
   Durable child-session lineage, navigation, AAP status/cancel methods, and
   parent review are still unavailable under task `21.4`.
 
+Child worktree admission evidence:
+
+- Internal `child-worktree-admission/0.1` validates the exact child-task and
+  runnable lifecycle identities against the existing live Git worktree owner,
+  base revision, registration, lock, path, health, and clean admission state.
+  Five real-Git fixtures prove shared read-only behavior, healthy write-capable
+  admission, mandatory dedicated isolation, cross-child reuse denial, dirty
+  denial, and cancellation denial. The returned runtime proof is
+  non-serializable, while its content-free receipt explicitly grants neither
+  permission nor execution. Durable scheduling, project-root registry binding,
+  per-tool revalidation, production permission/approval/sandbox intersection,
+  executor integration, AAP/Qt controls, and Windows evidence remain open under
+  task `21.5`.
+
 Current editor evidence:
 
 - The macOS Qt build and all 16 desktop tests pass.

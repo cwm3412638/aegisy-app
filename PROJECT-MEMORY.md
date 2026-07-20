@@ -128,6 +128,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   completion races, generation exhaustion, and bounded handoff references/counts.
   It is unit-tested but is not persisted, exposed through AAP/Qt, or connected to
   parent review; keep `21.4` unchecked.
+- Task `21.5` now has a partial internal `child-worktree-admission/0.1` gate. It
+  binds the exact child request and runnable lifecycle identity to the existing
+  live dedicated-worktree descriptor/health check, exact parent/child owner and
+  base revision. A write request fails before admission when isolation is shared,
+  missing, reused by another child, dirty, conflicted, unhealthy, or cancelling.
+  Its non-serializable workspace proof and content-free receipt explicitly grant
+  no permission or execution authority. Scheduler persistence, project-root
+  registry binding, per-tool revalidation, permission/approval/sandbox
+  intersection, and executor integration remain absent; keep `21.5` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is
@@ -831,14 +840,14 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 328 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 333 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
-the child-task scope/budget/handoff and lifecycle contracts, and diagnostic,
-terminal, Git, and child-handoff pinned-context authority, strict Git references,
-complete-source drift detection, terminal normalization, image import/preview/
-assembly/release rollback, and source-loss fail-closed invariants.
+the child-task scope/budget/handoff, lifecycle, and dedicated-worktree admission
+contracts, and diagnostic, terminal, Git, and child-handoff pinned-context authority,
+strict Git references, complete-source drift detection, terminal normalization,
+image import/preview/assembly/release rollback, and source-loss fail-closed invariants.
 
 ## Session History Boundary
 

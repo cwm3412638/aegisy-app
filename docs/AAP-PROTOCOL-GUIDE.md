@@ -121,6 +121,16 @@ Generation exhaustion and invalid updates fail without leaving partial state.
 Handoffs contain only content references, source revision, counts, and truncation
 metadata. This state is not persisted or exposed through AAP yet.
 
+The internal `child-worktree-admission/0.1` gate connects a validated child-task
+request and runnable child lifecycle to the existing live dedicated-worktree
+descriptor and health verifier. A write request is rejected before admission if
+it uses shared isolation, lacks exact parent/child ownership and base revision,
+reuses another child's worktree, or finds missing, unlocked, prunable, dirty,
+conflicted, or otherwise unhealthy state. Its non-serializable workspace proof
+and content-free receipt set `permission_granted:false` and
+`execution_available:false`; they cannot replace permission, approval, sandbox,
+budget, recovery, or per-tool path checks. No AAP method exposes this gate.
+
 ## Replay And Reconnect
 
 The durable session stream is ordered by a session-local sequence. After a

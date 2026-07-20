@@ -51,6 +51,9 @@ or session methods are accepted.
   transactional status transitions, cancellation request/rejection/
   acknowledgement, generation exhaustion, and bounded handoff; no persistence
   or dispatch surface yet)
+- internal `child-worktree-admission/0.1` isolation gate (live worktree owner/base/
+  health binding and cross-child reuse denial; no permission, execution, or AAP
+  authority)
 - `workspace/list`
 - `workspace/read`
 - `workspace/instructions` (deterministic, bounded, untrusted instruction discovery)

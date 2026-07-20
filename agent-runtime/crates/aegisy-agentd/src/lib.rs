@@ -1,5 +1,6 @@
 pub mod child_task;
 pub mod child_task_state;
+pub mod child_worktree_gate;
 pub(crate) mod codex_adapter;
 mod command_action;
 mod command_artifact;
