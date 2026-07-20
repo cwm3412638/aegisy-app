@@ -3963,6 +3963,14 @@ fn session_runtime_state_isolation_keeps_environment_context_and_history_scoped(
         json!({ "session_id": second_id, "limit": 10 }),
     ));
     assert_eq!(second_history[0]["result"]["items"], json!([]));
+    assert_eq!(
+        second_history[0]["result"]["runtime"],
+        second[0]["result"]["runtime"]
+    );
+    assert_eq!(
+        second_history[0]["result"]["runtime"]["permission_profile"],
+        "read-only"
+    );
     let second_turn = runtime.handle_line(&request(
         "7",
         "turn/start",
@@ -3978,6 +3986,10 @@ fn session_runtime_state_isolation_keeps_environment_context_and_history_scoped(
         "session/read",
         json!({ "session_id": first_id, "limit": 10 }),
     ));
+    assert_eq!(
+        first_history[0]["result"]["runtime"],
+        first[0]["result"]["runtime"]
+    );
     assert!(first_history[0]["result"]["items"]
         .as_array()
         .unwrap()

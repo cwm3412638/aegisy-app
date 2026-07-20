@@ -2091,11 +2091,19 @@ Implemented visual baseline:
 - The Agent surface header now exposes a compact execution-context strip with
   Chat/Work mode, project, Runtime readiness/recovery state, provider/model,
   fixed read-only permission, current Git branch, and selected-context count.
+  Qt keeps a bounded Runtime binding per Session and consumes the binding from
+  start, resume, fork, read, and search responses. Switching Chat/Work or replaying
+  a Session updates the model display from that Session rather than a global last
+  value. Adapter/version/provider/model metadata is bounded and control-free, and
+  only exact `read-only` permission is accepted; missing or malformed data becomes
+  `Runtime 未绑定` plus an explicit unknown/read-only gate instead of stale authority.
   Branch text comes only from the existing read-only Git overview and is cleared
   on project changes or Git-query failure, so stale branch state is never shown.
   The render fixture now locates the strip by a stable object name and asserts the
   empty read-only state plus a real Git fixture branch; execution remains pending
   because this host kills the Qt process before the test body runs.
+  The model control is still a binding display, not the model-profile picker or
+  switching control required by OpenSpec `10.3` through `10.6`.
 - Primary workbench actions use a small vendored Lucide SVG set with accessible
   tooltips; its ISC/MIT license is stored under `assets/icons/lucide/LICENSE`.
 - Combo-box arrows use the shared Lucide `chevron-down` SVG resource. Do not build

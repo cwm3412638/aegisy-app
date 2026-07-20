@@ -853,6 +853,16 @@ Current editor evidence:
   empty read-only state and a real Git fixture branch. The focused render process
   was still killed by the host at startup (0.43s) without assertion output, so
   executable visual evidence remains pending a lower-resource runner.
+- Qt now caches one strictly bounded Runtime binding per Session from
+  start/resume/fork/read/search responses. The active mode/session alone drives the
+  model display and execution strip; adapter/version are required, provider/model
+  are optional bounded labels, and permission must equal `read-only`. Invalid data
+  removes the binding and produces an explicit unknown/read-only gate. The protocol
+  fixture proves `session/read` returns the same Runtime binding created for each of
+  two isolated Sessions. All 56 protocol tests, strict Clippy, the complete desktop
+  build, and CTest `agent_runtime_protocol` pass. The render fixture additionally
+  asserts `preview`, `local / deterministic-echo`, and `read-only`, but its process
+  was killed by the host at startup (0.47s) before any assertion output.
 - AAP turn/context/inspect is a read-only preflight that reuses the exact
   instruction discovery and budget preparation path for the bound session.
   It returns context-inspector/0.1, manifest/budget metadata, and explicit

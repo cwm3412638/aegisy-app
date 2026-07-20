@@ -268,6 +268,22 @@ QString boundedUtf8Text(const QString &text, int byteLimit, bool *truncated = nu
     return text.left(low);
 }
 
+bool isBoundedRuntimeMetadata(const QString &value, int byteLimit, bool required)
+{
+    const QByteArray utf8 = value.toUtf8();
+    if ((required && value.isEmpty()) || utf8.size() > byteLimit) return false;
+    return std::none_of(utf8.cbegin(), utf8.cend(), [](char byte) {
+        const auto value = static_cast<unsigned char>(byte);
+        return value < 0x20 || value == 0x7f;
+    });
+}
+
+QString runtimeMetadataLabel(const QJsonObject &binding, const QString &field)
+{
+    const QString value = binding.value(field).toString();
+    return value.isEmpty() ? QStringLiteral("--") : value;
+}
+
 QString safeProviderLifecycleFailure(const QString &method, const QString &message, int code)
 {
     const bool providerFailure = code == -32141 || code == -32143 || code == -32145
@@ -1068,16 +1084,13 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_sessionList->insertItem(0, sessionItem);
         m_sessionList->setCurrentRow(0);
         const QJsonObject runtime = session.value(QStringLiteral("runtime")).toObject();
-        m_provider = runtime.value(QStringLiteral("provider")).toString(m_provider);
-        m_model = runtime.value(QStringLiteral("model")).toString(m_model);
-        m_modelPicker->clear();
-        m_modelPicker->addItem(QStringLiteral("%1 / %2").arg(m_provider, m_model));
-        m_modelPicker->setToolTip(QStringLiteral("%1 · %2 · %3")
-            .arg(runtime.value(QStringLiteral("adapter")).toString(),
-                 runtime.value(QStringLiteral("version")).toString(),
-                 runtime.value(QStringLiteral("permission_profile")).toString()));
+        storeSessionRuntimeBinding(id, runtime);
+        const QJsonObject binding = m_sessionRuntimeBindings.value(id);
+        const QString provider = runtimeMetadataLabel(
+            binding, QStringLiteral("provider"));
+        const QString model = runtimeMetadataLabel(binding, QStringLiteral("model"));
         updateContextStrip();
-        addNotice(QStringLiteral("已连接 %1 / %2（只读）").arg(m_provider, m_model));
+        addNotice(QStringLiteral("已连接 %1 / %2（只读）").arg(provider, model));
         if (mode == QStringLiteral("work")) {
             if (!m_pendingTerminalKind.isEmpty()) {
                 const QString kind = m_pendingTerminalKind;
@@ -1110,8 +1123,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         }
         if (mode == m_mode) requestOperationStatus();
         const QJsonObject runtime = result.value(QStringLiteral("runtime")).toObject();
-        m_provider = runtime.value(QStringLiteral("provider")).toString(m_provider);
-        m_model = runtime.value(QStringLiteral("model")).toString(m_model);
+        storeSessionRuntimeBinding(id, runtime);
         resetSessionHistoryPagination();
         const QString readRequest = m_runtime->readSession(id);
         if (!readRequest.isEmpty()) m_sessionReadRequestId = readRequest;
@@ -1133,6 +1145,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_chatSessionProjectId = session.value(QStringLiteral("project_id")).toString();
         }
         if (mode == m_mode) requestOperationStatus();
+        storeSessionRuntimeBinding(
+            id, result.value(QStringLiteral("runtime")).toObject());
         resetSessionHistoryPagination();
         const QString readRequest = m_runtime->readSession(id);
         if (!readRequest.isEmpty()) m_sessionReadRequestId = readRequest;
@@ -1323,6 +1337,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_chatSessionId = id;
             m_chatSessionProjectId = session.value(QStringLiteral("project_id")).toString();
         }
+        storeSessionRuntimeBinding(
+            id, snapshot.value(QStringLiteral("runtime")).toObject());
         if (!appendingHistory) {
             while (m_timelineLayout && m_timelineLayout->count() > 2) {
                 QLayoutItem *item = m_timelineLayout->takeAt(1);
@@ -8358,6 +8374,7 @@ void AgentWorkbenchWidget::populateSessionList(const QJsonObject &result)
             QStringLiteral("deletion_pending")).toBool();
         const QJsonObject deletion = session.value(QStringLiteral("deletion")).toObject();
         const QJsonObject runtime = session.value(QStringLiteral("runtime")).toObject();
+        if (!runtime.isEmpty()) storeSessionRuntimeBinding(id, runtime);
         const QJsonArray matchedFields = session.value(QStringLiteral("matched_fields")).toArray();
         if (status == QStringLiteral("archived")) m_archivedSessionIds.insert(id);
         if (recoveryRequired) m_recoverySessionIds.insert(id);
@@ -9995,6 +10012,77 @@ void AgentWorkbenchWidget::addNotice(const QString &text, bool error)
     m_timelineLayout->insertWidget(qMax(0, m_timelineLayout->count() - 1), label);
 }
 
+bool AgentWorkbenchWidget::storeSessionRuntimeBinding(
+    const QString &sessionId, const QJsonObject &runtime)
+{
+    if (sessionId.isEmpty()) return false;
+    const QString adapter = runtime.value(QStringLiteral("adapter")).toString().trimmed();
+    const QString version = runtime.value(QStringLiteral("version"))
+        .toString(runtime.value(QStringLiteral("adapter_version")).toString()).trimmed();
+    const QString provider = runtime.value(QStringLiteral("provider")).toString().trimmed();
+    const QString model = runtime.value(QStringLiteral("model")).toString().trimmed();
+    const QString permission = runtime.value(
+        QStringLiteral("permission_profile")).toString().trimmed();
+    const bool valid = isBoundedRuntimeMetadata(adapter, 128, true)
+        && isBoundedRuntimeMetadata(version, 64, true)
+        && isBoundedRuntimeMetadata(provider, 128, false)
+        && isBoundedRuntimeMetadata(model, 128, false)
+        && permission == QStringLiteral("read-only");
+    if (!valid) {
+        m_sessionRuntimeBindings.remove(sessionId);
+        updateSessionRuntimePresentation();
+        return false;
+    }
+    m_sessionRuntimeBindings.insert(sessionId, QJsonObject{
+        {QStringLiteral("adapter"), adapter},
+        {QStringLiteral("version"), version},
+        {QStringLiteral("provider"), provider},
+        {QStringLiteral("model"), model},
+        {QStringLiteral("permission_profile"), permission},
+    });
+    updateSessionRuntimePresentation();
+    return true;
+}
+
+QJsonObject AgentWorkbenchWidget::activeSessionRuntimeBinding() const
+{
+    const QString sessionId = m_mode == QStringLiteral("work")
+        ? m_workSessionId : m_chatSessionId;
+    return m_sessionRuntimeBindings.value(sessionId);
+}
+
+void AgentWorkbenchWidget::updateSessionRuntimePresentation()
+{
+    if (!m_modelPicker) return;
+    const QString sessionId = m_mode == QStringLiteral("work")
+        ? m_workSessionId : m_chatSessionId;
+    const QJsonObject binding = m_sessionRuntimeBindings.value(sessionId);
+    QString display;
+    QString tooltip;
+    if (sessionId.isEmpty()) {
+        display = QStringLiteral("Aegisy / Codex Auto");
+        tooltip = QStringLiteral("会话创建后显示持久化 Runtime 与模型绑定");
+    } else if (binding.isEmpty()) {
+        display = QStringLiteral("Provider -- / Model --");
+        tooltip = QStringLiteral("当前会话的 Runtime binding 不可用；权限保持只读门控");
+    } else {
+        const QString provider = runtimeMetadataLabel(
+            binding, QStringLiteral("provider"));
+        const QString model = runtimeMetadataLabel(binding, QStringLiteral("model"));
+        display = QStringLiteral("%1 / %2").arg(provider, model);
+        tooltip = QStringLiteral("%1 · %2 · %3")
+            .arg(binding.value(QStringLiteral("adapter")).toString(),
+                 binding.value(QStringLiteral("version")).toString(),
+                 binding.value(QStringLiteral("permission_profile")).toString());
+    }
+    if (m_modelPicker->count() != 1 || m_modelPicker->itemText(0) != display) {
+        const QSignalBlocker blocker(m_modelPicker);
+        m_modelPicker->clear();
+        m_modelPicker->addItem(display);
+    }
+    m_modelPicker->setToolTip(tooltip);
+}
+
 void AgentWorkbenchWidget::updateContextStrip()
 {
     if (!m_contextStrip) return;
@@ -10015,20 +10103,38 @@ void AgentWorkbenchWidget::updateContextStrip()
         ? QStringLiteral("上下文 0") : QStringLiteral("上下文 %1").arg(selectedCount);
     const QString project = m_projectRoot.isEmpty()
         ? QStringLiteral("项目 --") : QStringLiteral("项目 %1").arg(QFileInfo(m_projectRoot).fileName());
+    updateSessionRuntimePresentation();
+    const QJsonObject binding = activeSessionRuntimeBinding();
+    const bool hasSession = !sessionId.isEmpty();
+    const QString adapter = binding.value(QStringLiteral("adapter")).toString();
+    const QString version = binding.value(QStringLiteral("version")).toString();
+    const QString provider = runtimeMetadataLabel(
+        binding, QStringLiteral("provider"));
+    const QString model = runtimeMetadataLabel(binding, QStringLiteral("model"));
     const QString runtime = m_runtimeRecoveryMode
         ? QStringLiteral("Runtime 恢复")
-        : (m_runtime && m_runtime->isReady()
-               ? QStringLiteral("Runtime 就绪") : QStringLiteral("Runtime 连接中"));
+        : !adapter.isEmpty()
+            ? QStringLiteral("Runtime %1").arg(adapter)
+            : (m_runtime && m_runtime->isReady()
+                   ? (hasSession ? QStringLiteral("Runtime 未绑定")
+                                 : QStringLiteral("Runtime 就绪"))
+                   : QStringLiteral("Runtime 连接中"));
+    const QString permission = binding.value(QStringLiteral("permission_profile")).toString()
+            == QStringLiteral("read-only")
+        ? QStringLiteral("权限 只读")
+        : (hasSession ? QStringLiteral("权限 未知（只读门控）")
+                      : QStringLiteral("权限 只读默认"));
     const QString branch = m_gitCurrentBranch.isEmpty()
         ? QStringLiteral("分支 --") : QStringLiteral("分支 %1").arg(m_gitCurrentBranch);
-    m_contextStrip->setText(QStringLiteral("%1 · %2 · %3 / %4 · 权限 只读 · %5 · %6")
+    m_contextStrip->setText(QStringLiteral("%1 · %2 · %3 · 模型 %4 · %5 · %6 · %7")
         .arg(m_mode == QStringLiteral("chat") ? QStringLiteral("Chat") : QStringLiteral("Work"),
-             project, runtime, QStringLiteral("%1 / %2").arg(m_provider, m_model), branch,
-             context));
+             project, runtime, model, permission, branch, context));
     m_contextStrip->setToolTip(QStringLiteral(
-        "执行上下文：%1\n%2\n%3\n模型：%4 / %5\n权限：只读\n%6\n%7")
+        "执行上下文：%1\n%2\n%3%4\nProvider/模型：%5 / %6\n%7\n%8\n%9")
         .arg(m_mode == QStringLiteral("chat") ? QStringLiteral("Chat") : QStringLiteral("Work"),
-             project, runtime, m_provider, m_model, branch, context));
+             project, runtime,
+             version.isEmpty() ? QString() : QStringLiteral(" · %1").arg(version),
+             provider, model, permission, branch, context));
 }
 
 void AgentWorkbenchWidget::inspectContext()

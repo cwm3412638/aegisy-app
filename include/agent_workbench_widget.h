@@ -135,6 +135,9 @@ private:
     QJsonArray includedTurnContext() const;
     void addTimelineItem(const QJsonObject &item, bool prepend = false);
     void addNotice(const QString &text, bool error = false);
+    bool storeSessionRuntimeBinding(const QString &sessionId, const QJsonObject &runtime);
+    QJsonObject activeSessionRuntimeBinding() const;
+    void updateSessionRuntimePresentation();
     void updateContextStrip();
     void populateDirectory(const QJsonObject &listing);
     void removeTreeItemMappings(QTreeWidgetItem *item);
@@ -489,10 +492,9 @@ private:
     QJsonArray m_pendingContext;
     QString m_pendingPinnedContextSetIdentity;
     QStringList m_pendingPinnedContextIds;
+    QHash<QString, QJsonObject> m_sessionRuntimeBindings;
     QList<QJsonObject> m_contextItems;
     QList<QJsonObject> m_pinnedContextItems;
-    QString m_provider = QStringLiteral("aegisy");
-    QString m_model = QStringLiteral("Codex Auto");
     bool m_gitStatusPending = false;
     bool m_sessionListRefreshPending = false;
     bool m_sessionHistoryAppending = false;

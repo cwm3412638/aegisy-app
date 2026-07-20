@@ -1735,6 +1735,20 @@ int main(int argc, char *argv[])
         return 1;
     }
     work->click();
+    if (!expect(waitUntil(application, [executionContext, modelPicker]() {
+                    return executionContext->text().contains(
+                               QStringLiteral("Runtime preview"))
+                        && executionContext->text().contains(
+                            QStringLiteral("模型 deterministic-echo"))
+                        && executionContext->text().contains(QStringLiteral("权限 只读"))
+                        && modelPicker->currentText()
+                            == QStringLiteral("local / deterministic-echo")
+                        && modelPicker->toolTip().contains(QStringLiteral("preview"))
+                        && modelPicker->toolTip().contains(QStringLiteral("read-only"));
+                }),
+                "active Work session did not project its persisted Runtime binding")) {
+        return 1;
+    }
     composer->setPlainText(QStringLiteral("检查选定上下文"));
     sendButton->click();
     if (!expect(waitUntil(application, [&workbench, contextPanel, contextList]() {
