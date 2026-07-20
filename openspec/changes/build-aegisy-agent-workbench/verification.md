@@ -126,6 +126,23 @@ Unified execution pipeline evidence:
   durable job/session events and recovery, budget/provider settlement, AAP/Qt mode
   status, and cross-platform evidence remain open under task `21.7`.
 
+Background job lifecycle evidence:
+
+- Internal `background-job-request/0.1` and `background-job-state/0.1` validate a
+  content-free, persistence-ready job record with project/session/root, unified
+  execution plan, optional child, idempotency, manual/one-shot schedule, bounded
+  attempts/backoff, and optional safe retry boundary. Transactional transitions
+  separate pause/cancel requests from acknowledgement, preserve waiting approval,
+  bind every terminal attempt to evidence, and allow completion to win a cancel
+  race. Restart marks active work interrupted rather than successful; only a
+  pre-bound safe boundary can make it retry-eligible, and decisions never auto
+  retry or approve. Schedule/retry backoff and cancellation cannot be bypassed by
+  pause/resume/start. Six fixtures cover completion, pause/approval, cancellation
+  race, idempotent bounded retry, queued/running restart, invalid schedule, and
+  generation fail-closed behavior. Workbench persistence/events, scheduler/process
+  ownership, authoritative approval, notification, AAP/Qt control, and endurance/
+  cross-platform evidence remain open under task `21.8`.
+
 Current editor evidence:
 
 - The macOS Qt build and all 16 desktop tests pass.

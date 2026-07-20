@@ -1,3 +1,4 @@
+pub mod background_job;
 pub mod child_budget;
 pub mod child_task;
 pub mod child_task_state;

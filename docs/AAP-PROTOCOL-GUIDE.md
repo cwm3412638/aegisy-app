@@ -157,6 +157,20 @@ blocked/unadvertised. Plan output is content-free and always sets
 an authorization or executor ticket. Typed proof composition, generic dispatch,
 durable lifecycle, AAP/Qt mode status, and cross-platform evidence remain open.
 
+Internal `background-job-request/0.1` and `background-job-state/0.1` contracts
+define the future durable queue record without enabling it. A request binds the
+project/session/root, unified plan identity, optional child, idempotency identity,
+manual or one-shot schedule, bounded attempts/backoff, and optional safe retry
+boundary. The transactional lifecycle separates pause request/acknowledgement,
+waiting approval, cancel request/acknowledgement, terminal attempt evidence, and
+bounded result references. Completion may win a cancellation race. Restart never
+infers success: active work becomes interrupted, queued/paused/waiting states are
+preserved, and retry is only eligible when the exact request pre-bound a safe
+boundary and has capacity. Decisions always set `automatic_retry:false` and
+`automatic_approval:false`; pause/resume cannot bypass schedule or retry backoff.
+No Workbench table/event, scheduler, process probe, notification, AAP method, or Qt
+control consumes these contracts yet.
+
 ## Replay And Reconnect
 
 The durable session stream is ordered by a session-local sequence. After a

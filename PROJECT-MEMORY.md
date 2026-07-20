@@ -160,6 +160,20 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   generic executor ownership, durable events/recovery, provider/tool budget
   settlement, AAP/Qt mode status, and cross-platform evidence remain incomplete;
   keep `21.7` unchecked.
+- Task `21.8` now has partial internal `background-job-request/0.1` and
+  `background-job-state/0.1` contracts. They bind project/session/root, unified
+  plan, child, idempotency, one-shot schedule, bounded attempts/backoff, and an
+  optional safe retry boundary. Transactional lifecycle updates cover queued,
+  running, pause-requested/paused, waiting approval, cancelling, terminal states,
+  bounded result references, and exact attempt evidence. Cancel request and
+  acknowledgement remain distinct; completion can win the race. Restart never
+  infers success: active work becomes interrupted, waiting approval stays waiting,
+  and retry eligibility requires the pre-bound safe boundary and attempt capacity;
+  no automatic retry or approval is emitted. Pause/resume cannot bypass schedule or
+  retry backoff. The contract is not persisted or exposed; Workbench schema/jobs,
+  typed session events, scheduler ownership, process recovery probes, notification,
+  AAP/Qt controls, and cross-platform endurance remain absent; keep `21.8`
+  unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is
@@ -863,15 +877,15 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 345 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 351 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
-runtime budget-ledger, and unified-execution-plan contracts, and diagnostic,
-terminal, Git, and child-handoff pinned-context authority, strict Git references,
-complete-source drift detection, terminal normalization, image import/preview/
-assembly/release rollback, and source-loss fail-closed invariants.
+runtime budget-ledger, unified-execution-plan, and durable-job lifecycle contracts,
+and diagnostic, terminal, Git, and child-handoff pinned-context authority, strict
+Git references, complete-source drift detection, terminal normalization, image
+import/preview/assembly/release rollback, and source-loss fail-closed invariants.
 
 ## Session History Boundary
 

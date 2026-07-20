@@ -60,6 +60,9 @@ or session methods are accepted.
 - internal `unified-execution-plan/0.1` pipeline invariant (one ordered stage list
   for interactive/child/background modes; current read-only interactive dispatch
   is checked, while child/background dispatch and execution authority remain absent)
+- internal `background-job-request/0.1` and `background-job-state/0.1` lifecycle
+  contracts (schedule, pause, approval wait, cancellation, attempts, bounded retry,
+  and fail-closed restart decisions; no durable queue, scheduler, AAP, or execution)
 - `workspace/list`
 - `workspace/read`
 - `workspace/instructions` (deterministic, bounded, untrusted instruction discovery)
