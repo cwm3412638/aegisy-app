@@ -50,6 +50,7 @@ mod terminal;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[path = "terminal_unsupported.rs"]
 mod terminal;
+mod tokenizer;
 mod turn_context;
 mod unified_execution;
 mod workbench_migration;

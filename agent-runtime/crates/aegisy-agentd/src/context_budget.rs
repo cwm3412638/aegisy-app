@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::tokenizer::{estimate_bytes, summary as tokenizer_summary, TokenizerSummary};
+
 pub const SCHEMA_VERSION: &str = "context-budget/0.1";
 
 #[derive(Debug, Clone, Copy)]
@@ -18,6 +20,7 @@ pub struct BudgetEntry {
     pub priority_score: u32,
     pub requested_bytes: usize,
     pub allocated_bytes: usize,
+    pub estimated_tokens: u64,
     pub included: bool,
     pub reason: String,
 }
@@ -30,6 +33,8 @@ pub struct BudgetPlan {
     pub requested_bytes: usize,
     pub allocated_bytes: usize,
     pub truncated: bool,
+    pub estimated_tokens: u64,
+    pub tokenizer: TokenizerSummary,
     pub entries: Vec<BudgetEntry>,
 }
 
@@ -46,6 +51,7 @@ pub fn allocate(
             priority_score: priority_score(input.priority),
             requested_bytes: input.requested_bytes,
             allocated_bytes: 0,
+            estimated_tokens: 0,
             included: false,
             reason: if input.excluded {
                 "excluded".into()
@@ -87,6 +93,13 @@ pub fn allocate(
         .iter()
         .map(|entry| entry.allocated_bytes)
         .fold(0_usize, usize::saturating_add);
+    for entry in &mut entries {
+        entry.estimated_tokens = estimate_bytes(entry.allocated_bytes).tokens;
+    }
+    let estimated_tokens = entries
+        .iter()
+        .map(|entry| entry.estimated_tokens)
+        .fold(0_u64, u64::saturating_add);
     let truncated = entries
         .iter()
         .any(|entry| entry.requested_bytes > entry.allocated_bytes);
@@ -97,6 +110,8 @@ pub fn allocate(
         requested_bytes,
         allocated_bytes,
         truncated,
+        estimated_tokens,
+        tokenizer: tokenizer_summary(),
         entries,
     }
 }
@@ -179,6 +194,8 @@ mod tests {
         assert_eq!(plan.entries[2].allocated_bytes, 0);
         assert_eq!(plan.entries[2].reason, "context-budget");
         assert!(plan.truncated);
+        assert_eq!(plan.estimated_tokens, 4);
+        assert_eq!(plan.tokenizer.authority, "conservative-unknown");
     }
 
     #[test]
@@ -289,5 +306,8 @@ mod tests {
         assert_eq!(plan.entries[1].allocated_bytes, 4);
         assert_eq!(plan.entries[0].allocated_bytes, 4);
         assert_eq!(plan.entries[2].allocated_bytes, 0);
+        assert_eq!(plan.entries[0].estimated_tokens, 1);
+        assert_eq!(plan.entries[1].estimated_tokens, 1);
+        assert_eq!(plan.entries[2].estimated_tokens, 0);
     }
 }

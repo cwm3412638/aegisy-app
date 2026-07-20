@@ -269,7 +269,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   empty/error states, and strict validation of schema, session, kind, lifecycle
   identity, timestamps, delivery state, zero attempts, false authority, and forbidden
   content-field absence. No delivery action, platform permission, retry, or background
-  producer exists. The latest Rust run passes 390 tests with one ignored fixture, 56
+  producer exists. The latest Rust run passes 392 tests with one ignored fixture, 56
   protocol tests, 11 stdio/Codex tests, and strict Clippy; the complete Qt build and
   `agent_runtime_protocol` pass. The `agent_workbench_render` process was killed by
   host resource pressure at startup (0.56s) without assertion output, so it is not
@@ -605,6 +605,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   bytes, class, score, inclusion, and exclusion reason. Tokenizer and provider-window
   authority, complete source producers, scale, and cross-platform evidence remain
   open; keep `17.4` unchecked.
+- OpenSpec task `17.5` now has a partial `tokenizer/0.1` fallback contract. The
+  current estimate is explicitly identified as `unknown-utf8-four-byte` with
+  `authority=conservative-unknown`, `exact=false`, and
+  `provider_window_authoritative=false`. Each budget entry and aggregate plan
+  reports overflow-safe conservative estimated token counts. No provider-specific
+  tokenizer, model context window, or fit guarantee is claimed; keep `17.5`
+  unchecked.
 - OpenSpec task `17.6` now has a partial read-only
   `turn/context/inspect` preflight. It reuses the exact session-root,
   instruction discovery, stale, and `context-budget/0.1` preparation path
@@ -986,7 +993,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 390 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 392 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 56 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,

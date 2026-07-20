@@ -233,7 +233,7 @@ Background job lifecycle evidence:
   accounting/identity/authority tampering, dedup stability, durable restart, paging,
   cursor forgery, progressed-state idempotency, event/projection rollback, canonical
   projection and lifecycle tampering, migration, and purge. The complete batch passes
-  390 Rust unit tests with one ignored live fixture, 56 protocol tests, 11 stdio/Codex
+  392 Rust unit tests with one ignored live fixture, 56 protocol tests, 11 stdio/Codex
   tests, strict Clippy, formatting, `git diff --check`, the complete desktop build, and
   CTest `agent_runtime_protocol`. Strict OpenSpec validation was attempted but the
   Node process was killed by the host with exit 137 and emitted no schema diagnostic.
@@ -248,7 +248,7 @@ Background job lifecycle evidence:
   storage, forged cursors, cross-session anchors, and invalid limits fail explicitly.
   Two protocol fixtures cover unavailable storage plus two-kind paging, false authority,
   forbidden content-field absence, cursor forgery, and restart replay. The complete
-  Rust baseline now passes 390 unit tests with one ignored live fixture, 56 protocol
+  Rust baseline now passes 392 unit tests with one ignored live fixture, 56 protocol
   tests, 11 stdio/Codex tests, and strict Clippy.
 - Qt `AgentRuntimeClient` exposes only the structured read request/result signal. The
   Session context menu enables a metadata-only viewer from negotiated capability;
@@ -832,6 +832,13 @@ Current editor evidence:
   fixture verifies the budget schema. Task 17.4 remains unchecked until these classes have
   authoritative producers, tokenizer/provider window authority, and scale evidence use
   this allocator.
+- The partial `tokenizer/0.1` contract makes the current byte estimate explicit as
+  `unknown-utf8-four-byte` with `authority: conservative-unknown`, `exact:false`,
+  and `provider_window_authoritative:false`. Budget entries and the aggregate plan
+  now expose conservative estimated token counts without returning source text or
+  asserting provider-window fit. Unit fixtures cover metadata and overflow-safe
+  rounding; model-specific tokenizer adapters remain unavailable, so task 17.5 stays
+  unchecked.
 - AAP turn/context/inspect is a read-only preflight that reuses the exact
   instruction discovery and budget preparation path for the bound session.
   It returns context-inspector/0.1, manifest/budget metadata, and explicit
