@@ -333,6 +333,7 @@ private:
     QAction *m_terminalSelectionContextAction = nullptr;
     QAction *m_pinTerminalExcerptAction = nullptr;
     QLabel *m_gitSummary = nullptr;
+    QString m_gitCurrentBranch;
     QTreeWidget *m_gitHistory = nullptr;
     QComboBox *m_gitDiffScope = nullptr;
     QPushButton *m_gitRefreshButton = nullptr;

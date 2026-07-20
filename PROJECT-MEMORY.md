@@ -2088,6 +2088,11 @@ Implemented visual baseline:
   and each budget entry's conservative estimated token count alongside byte size.
   It reads 64-bit JSON values without claiming provider-window precision; the
   inspection remains content-free and model-free.
+- The Agent surface header now exposes a compact execution-context strip with
+  Chat/Work mode, project, Runtime readiness/recovery state, provider/model,
+  fixed read-only permission, current Git branch, and selected-context count.
+  Branch text comes only from the existing read-only Git overview and is cleared
+  on project changes or Git-query failure, so stale branch state is never shown.
 - Primary workbench actions use a small vendored Lucide SVG set with accessible
   tooltips; its ISC/MIT license is stored under `assets/icons/lucide/LICENSE`.
 - Combo-box arrows use the shared Lucide `chevron-down` SVG resource. Do not build

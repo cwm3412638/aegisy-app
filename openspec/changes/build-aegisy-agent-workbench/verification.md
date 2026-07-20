@@ -844,6 +844,13 @@ Current editor evidence:
   The complete desktop build passes after this change. The focused
   `agent_workbench_render` CTest was killed by the host at startup (0.44s) without
   assertion output, so visual evidence remains pending a lower-resource runner.
+- The Agent header now renders Chat/Work mode, project name, Runtime readiness or
+  recovery state, provider/model, the fixed `read-only` permission profile, the
+  current branch obtained from the existing read-only Git overview, and selected
+  context count. Project changes and Git-query failures clear the cached branch
+  before the strip is refreshed. The complete desktop build passes; the focused
+  render process remains host-resource-killed without assertion output, so final
+  visual evidence is still pending a lower-resource runner.
 - AAP turn/context/inspect is a read-only preflight that reuses the exact
   instruction discovery and budget preparation path for the bound session.
   It returns context-inspector/0.1, manifest/budget metadata, and explicit

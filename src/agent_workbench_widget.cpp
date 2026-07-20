@@ -851,6 +851,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_gitContextRequestedOid.clear();
         m_gitContextRequestedLabel.clear();
         m_selectedGitOid.clear();
+        m_gitCurrentBranch.clear();
         if (m_gitHistory) m_gitHistory->clear();
         if (m_gitDiffPreview) m_gitDiffPreview->clear();
         if (m_gitSummary) m_gitSummary->setText(QStringLiteral("未检测到仓库"));
@@ -2275,6 +2276,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 m_gitDiffRequestedOid.clear();
             }
             if (m_gitSummary) m_gitSummary->setText(QStringLiteral("Git 查询失败"));
+            m_gitCurrentBranch.clear();
+            updateContextStrip();
             updateGitPinControls();
         } else if (method == QStringLiteral("workspace/search")
                    && requestId == m_workspaceSearchRequestId) {
@@ -4850,17 +4853,20 @@ void AgentWorkbenchWidget::populateGitOverview(const QJsonObject &overview)
     for (const QJsonValue &value : branches) {
         const QJsonObject branch = value.toObject();
         if (branch.value(QStringLiteral("current")).toBool()) {
-            currentBranch = branch.value(QStringLiteral("name")).toString();
+            m_gitCurrentBranch = branch.value(QStringLiteral("name")).toString();
+            currentBranch = m_gitCurrentBranch;
             const QString upstream = branch.value(QStringLiteral("upstream")).toString();
             if (!upstream.isEmpty()) currentBranch += QStringLiteral(" → %1").arg(upstream);
             break;
         }
     }
+    if (m_gitCurrentBranch.isEmpty()) m_gitCurrentBranch = QStringLiteral("detached");
     const int tags = overview.value(QStringLiteral("tags")).toArray().size();
     const int remotes = overview.value(QStringLiteral("remotes")).toArray().size();
     const int worktrees = overview.value(QStringLiteral("worktrees")).toArray().size();
     m_gitSummary->setText(QStringLiteral("%1 · %2 tags · %3 remotes · %4 worktrees")
         .arg(currentBranch).arg(tags).arg(remotes).arg(worktrees));
+    updateContextStrip();
 }
 
 void AgentWorkbenchWidget::populateGitLog(const QJsonObject &log)
@@ -10005,16 +10011,23 @@ void AgentWorkbenchWidget::updateContextStrip()
     }
     const int selectedCount = includedTurnContext().size() + includedPinnedContextIds().size();
     const QString context = selectedCount == 0
-        ? QString() : QStringLiteral(" · 上下文 %1").arg(selectedCount);
-    if (m_mode == QStringLiteral("chat")) {
-        m_contextStrip->setText(QStringLiteral("Chat · Agent 只读 · %1 / %2%3")
-            .arg(m_provider, m_model, context));
-    } else {
-        m_contextStrip->setText(QStringLiteral("Work · %1 · Agent 只读 · %2 / %3%4")
-            .arg(m_projectRoot.isEmpty() ? QStringLiteral("未绑定项目")
-                                         : QFileInfo(m_projectRoot).fileName(),
-                 m_provider, m_model, context));
-    }
+        ? QStringLiteral("上下文 0") : QStringLiteral("上下文 %1").arg(selectedCount);
+    const QString project = m_projectRoot.isEmpty()
+        ? QStringLiteral("项目 --") : QStringLiteral("项目 %1").arg(QFileInfo(m_projectRoot).fileName());
+    const QString runtime = m_runtimeRecoveryMode
+        ? QStringLiteral("Runtime 恢复")
+        : (m_runtime && m_runtime->isReady()
+               ? QStringLiteral("Runtime 就绪") : QStringLiteral("Runtime 连接中"));
+    const QString branch = m_gitCurrentBranch.isEmpty()
+        ? QStringLiteral("分支 --") : QStringLiteral("分支 %1").arg(m_gitCurrentBranch);
+    m_contextStrip->setText(QStringLiteral("%1 · %2 · %3 / %4 · 权限 只读 · %5 · %6")
+        .arg(m_mode == QStringLiteral("chat") ? QStringLiteral("Chat") : QStringLiteral("Work"),
+             project, runtime, QStringLiteral("%1 / %2").arg(m_provider, m_model), branch,
+             context));
+    m_contextStrip->setToolTip(QStringLiteral(
+        "执行上下文：%1\n%2\n%3\n模型：%4 / %5\n权限：只读\n%6\n%7")
+        .arg(m_mode == QStringLiteral("chat") ? QStringLiteral("Chat") : QStringLiteral("Work"),
+             project, runtime, m_provider, m_model, branch, context));
 }
 
 void AgentWorkbenchWidget::inspectContext()
