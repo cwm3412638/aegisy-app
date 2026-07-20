@@ -2084,6 +2084,10 @@ Implemented visual baseline:
 - Monaco loading overlays must define an explicit `[hidden] { display: none; }`
   rule; an author `display` rule can otherwise override WebEngine's default hidden
   behavior and cover a ready editor. Render tests verify both split regions.
+- The read-only context preflight now displays the negotiated tokenizer authority
+  and each budget entry's conservative estimated token count alongside byte size.
+  It reads 64-bit JSON values without claiming provider-window precision; the
+  inspection remains content-free and model-free.
 - Primary workbench actions use a small vendored Lucide SVG set with accessible
   tooltips; its ISC/MIT license is stored under `assets/icons/lucide/LICENSE`.
 - Combo-box arrows use the shared Lucide `chevron-down` SVG resource. Do not build
@@ -2098,6 +2102,8 @@ Implemented visual baseline:
 2. Reproduce and correlate any remaining streaming disconnect with redacted logs.
 3. Continue consolidating widget-local QSS and replace remaining Qt stock icons;
    the Codex health/restart toolbar state is now covered by the render suite.
+   The context-inspection render target remains subject to host resource pressure
+   and must be rerun on a machine that can keep the Qt process alive.
 4. Run the Windows packaging workflow or a clean Windows VM to validate ConPTY,
    Unicode, resize, Ctrl+C, exit status, and Job Object process-tree cleanup, then
    close `14.2` without exposing Agent execution permissions.

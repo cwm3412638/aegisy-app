@@ -839,6 +839,11 @@ Current editor evidence:
   asserting provider-window fit. Unit fixtures cover metadata and overflow-safe
   rounding; model-specific tokenizer adapters remain unavailable, so task 17.5 stays
   unchecked.
+- The Qt context-inspection dialog renders the tokenizer authority label and one
+  conservative estimated-token value per budget entry, using 64-bit JSON conversion.
+  The complete desktop build passes after this change. The focused
+  `agent_workbench_render` CTest was killed by the host at startup (0.44s) without
+  assertion output, so visual evidence remains pending a lower-resource runner.
 - AAP turn/context/inspect is a read-only preflight that reuses the exact
   instruction discovery and budget preparation path for the bound session.
   It returns context-inspector/0.1, manifest/budget metadata, and explicit

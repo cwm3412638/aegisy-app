@@ -10073,15 +10073,21 @@ void AgentWorkbenchWidget::showContextInspection(const QJsonObject &result)
     auto *title = new QLabel(QStringLiteral("上下文将如何进入下一次 turn"), dialog);
     title->setStyleSheet(QStringLiteral("font-size:14px; font-weight:700; color:#101828;"));
     layout->addWidget(title);
+    const QJsonObject tokenizer = budget.value(QStringLiteral("tokenizer")).toObject();
+    const QString tokenizerAuthority = tokenizer.value(QStringLiteral("authority")).toString();
+    const QString tokenizerLabel = tokenizerAuthority.isEmpty()
+        ? QStringLiteral("tokenizer 状态未知")
+        : QStringLiteral("tokenizer：%1").arg(tokenizerAuthority);
     const QString summary = QStringLiteral(
-        "%1 项 · %2 · 预算 %3/%4 · 估算 %5 tokens · %6")
+        "%1 项 · %2 · 预算 %3/%4 · 估算 %5 tokens · %6 · %7")
         .arg(context.value(QStringLiteral("item_count")).toInt())
         .arg(formatByteCount(context.value(QStringLiteral("bytes")).toVariant().toLongLong()))
         .arg(formatByteCount(budget.value(QStringLiteral("allocated_bytes"))
                             .toVariant().toLongLong()))
         .arg(formatByteCount(budget.value(QStringLiteral("max_total_bytes"))
                             .toVariant().toLongLong()))
-        .arg(manifest.value(QStringLiteral("estimated_tokens")).toInt())
+        .arg(manifest.value(QStringLiteral("estimated_tokens")).toVariant().toLongLong())
+        .arg(tokenizerLabel)
         .arg(context.value(QStringLiteral("truncated")).toBool()
                  ? QStringLiteral("已截断") : QStringLiteral("未截断"));
     auto *summaryLabel = new QLabel(summary, dialog);
@@ -10092,10 +10098,11 @@ void AgentWorkbenchWidget::showContextInspection(const QJsonObject &result)
     layout->addWidget(summaryLabel);
     auto *table = new QTreeWidget(dialog);
     table->setObjectName(QStringLiteral("agentContextInspectionTable"));
-    table->setColumnCount(6);
+    table->setColumnCount(7);
     table->setHeaderLabels({QStringLiteral("来源"), QStringLiteral("类型"),
                             QStringLiteral("信任"), QStringLiteral("大小"),
-                            QStringLiteral("状态"), QStringLiteral("原因")});
+                            QStringLiteral("估算"), QStringLiteral("状态"),
+                            QStringLiteral("原因")});
     table->setRootIsDecorated(false);
     table->setUniformRowHeights(true);
     table->setAlternatingRowColors(true);
@@ -10106,6 +10113,7 @@ void AgentWorkbenchWidget::showContextInspection(const QJsonObject &result)
     table->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     table->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     table->header()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    table->header()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
     const QJsonArray budgetEntries = budget.value(QStringLiteral("entries")).toArray();
     QHash<QString, QJsonObject> budgetById;
     for (const QJsonValue &value : budgetEntries) {
@@ -10131,9 +10139,12 @@ void AgentWorkbenchWidget::showContextInspection(const QJsonObject &result)
         row->setText(2, entry.value(QStringLiteral("trust")).toString());
         row->setText(3, formatByteCount(budgetEntry.value(QStringLiteral("requested_bytes"))
                                         .toVariant().toLongLong()));
+        row->setText(4, QStringLiteral("%1 tokens")
+                         .arg(budgetEntry.value(QStringLiteral("estimated_tokens"))
+                                  .toVariant().toLongLong()));
         const bool included = entry.value(QStringLiteral("included")).toBool();
-        row->setText(4, included ? QStringLiteral("包含") : QStringLiteral("排除"));
-        row->setText(5, entry.value(QStringLiteral("inclusion_reason")).toString());
+        row->setText(5, included ? QStringLiteral("包含") : QStringLiteral("排除"));
+        row->setText(6, entry.value(QStringLiteral("inclusion_reason")).toString());
         row->setToolTip(0, QStringLiteral("新鲜度：%1")
                             .arg(entry.value(QStringLiteral("freshness")).toString()));
     }
