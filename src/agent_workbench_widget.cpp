@@ -449,6 +449,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             == QStringLiteral("read-only-recovery");
         m_compactionAvailable = false;
         m_backgroundNotificationInspectionAvailable = false;
+        m_backgroundRecoveryInspectionAvailable = false;
         m_pinnedContextAvailable = false;
         m_imageContextAvailable = false;
         m_gitContextAvailable = false;
@@ -460,6 +461,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 m_compactionAvailable = true;
             } else if (name == QStringLiteral("background-notification.outbox.read-only")) {
                 m_backgroundNotificationInspectionAvailable = true;
+            } else if (name == QStringLiteral("background-job.recovery.inspect")) {
+                m_backgroundRecoveryInspectionAvailable = true;
             } else if (name == QStringLiteral("turn.context.pinned-selected")) {
                 m_pinnedContextAvailable = true;
             } else if (name == QStringLiteral("workspace.git-context.read-only")) {
@@ -665,6 +668,12 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_backgroundNotificationRequestId.clear();
         showBackgroundNotificationPage(result);
     });
+    connect(m_runtime, &AgentRuntimeClient::backgroundRecoveryRead,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        if (requestId != m_backgroundRecoveryRequestId) return;
+        m_backgroundRecoveryRequestId.clear();
+        showBackgroundRecoveryPage(result);
+    });
     connect(m_runtime, &AgentRuntimeClient::connectionStateChanged,
             this, [this](bool ready, const QString &detail) {
         m_runtimeStatus->setText(
@@ -744,6 +753,16 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                     !m_backgroundNotificationCursor.isEmpty());
             }
             addNotice(QStringLiteral("后台通知记录读取失败（错误码 %1）。").arg(code), true);
+            return;
+        }
+        if (method == QStringLiteral("session/background-recovery")) {
+            if (requestId.isEmpty() || requestId != m_backgroundRecoveryRequestId) return;
+            m_backgroundRecoveryRequestId.clear();
+            if (m_backgroundRecoveryMoreButton) {
+                m_backgroundRecoveryMoreButton->setEnabled(
+                    !m_backgroundRecoveryCursor.isEmpty());
+            }
+            addNotice(QStringLiteral("后台恢复状态读取失败（错误码 %1）。").arg(code), true);
             return;
         }
         if (method != QStringLiteral("runtime/restart")) return;
@@ -2711,6 +2730,7 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
         QAction *createCompaction = menu.addAction(QStringLiteral("创建压缩审查…"));
         QAction *readCompaction = menu.addAction(QStringLiteral("查看压缩审查…"));
         QAction *backgroundNotifications = menu.addAction(QStringLiteral("后台通知记录…"));
+        QAction *backgroundRecovery = menu.addAction(QStringLiteral("后台恢复状态…"));
         rename->setEnabled(!recoveryRequired && !deletionPending);
         resume->setEnabled(!archived && !recoveryRequired && !deletionPending
             && !m_turnRunning && m_sessionResumeRequestId.isEmpty());
@@ -2728,6 +2748,8 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
             && m_compactionRequestId.isEmpty());
         backgroundNotifications->setEnabled(m_backgroundNotificationInspectionAvailable
             && m_backgroundNotificationRequestId.isEmpty());
+        backgroundRecovery->setEnabled(m_backgroundRecoveryInspectionAvailable
+            && m_backgroundRecoveryRequestId.isEmpty());
         menu.addSeparator();
         QAction *deletion = menu.addAction(
             deletionPending ? QStringLiteral("撤销删除") : QStringLiteral("删除会话…"));
@@ -2768,6 +2790,8 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
             beginCompactionCheckpointRead(sessionId);
         } else if (selected == backgroundNotifications) {
             beginBackgroundNotificationInspection(sessionId);
+        } else if (selected == backgroundRecovery) {
+            beginBackgroundRecoveryInspection(sessionId);
         } else if (selected == deletion) {
             if (deletionPending) {
                 const QString deletionId = item->data(kSessionDeletionIdRole).toString();
@@ -6904,6 +6928,255 @@ void AgentWorkbenchWidget::showBackgroundNotificationPage(const QJsonObject &res
     m_backgroundNotificationDialog->show();
     m_backgroundNotificationDialog->raise();
     m_backgroundNotificationDialog->activateWindow();
+}
+
+void AgentWorkbenchWidget::beginBackgroundRecoveryInspection(const QString &sessionId)
+{
+    if (sessionId.isEmpty() || !m_runtime || !m_runtime->isReady()
+            || m_runtimeRecoveryMode || !m_backgroundRecoveryInspectionAvailable
+            || !m_backgroundRecoveryRequestId.isEmpty()) {
+        return;
+    }
+    if (m_backgroundRecoveryDialog) delete m_backgroundRecoveryDialog;
+    m_backgroundRecoverySessionId = sessionId;
+    m_backgroundRecoveryCursor = {};
+    m_backgroundRecoveryRequestId = m_runtime->backgroundRecovery(sessionId, {}, 100);
+    if (m_backgroundRecoveryRequestId.isEmpty()) {
+        m_backgroundRecoverySessionId.clear();
+        addNotice(QStringLiteral("无法发起后台恢复状态查询。"), true);
+        return;
+    }
+    addNotice(QStringLiteral("正在读取后台恢复状态…"));
+}
+
+void AgentWorkbenchWidget::showBackgroundRecoveryPage(const QJsonObject &result)
+{
+    const QJsonValue nextCursorValue = result.value(QStringLiteral("next_cursor"));
+    const QJsonArray entries = result.value(QStringLiteral("entries")).toArray();
+    const QRegularExpression snapshotPattern(QStringLiteral(
+        "^background-job-scheduler-snapshot:sha256:[0-9a-f]{64}$"));
+    const QRegularExpression entryPattern(QStringLiteral(
+        "^background-job-scheduler-entry:sha256:[0-9a-f]{64}$"));
+    const QRegularExpression decisionPattern(QStringLiteral(
+        "^background-job-recovery-decision:sha256:[0-9a-f]{64}$"));
+    const QStringList statuses{
+        QStringLiteral("queued"), QStringLiteral("running"),
+        QStringLiteral("pause_requested"), QStringLiteral("paused"),
+        QStringLiteral("waiting_approval"), QStringLiteral("cancelling"),
+        QStringLiteral("completed"), QStringLiteral("failed"),
+        QStringLiteral("cancelled"), QStringLiteral("interrupted"),
+    };
+    const QStringList actions{
+        QStringLiteral("await_schedule"), QStringLiteral("admission_review"),
+        QStringLiteral("keep_paused"), QStringLiteral("keep_waiting_approval"),
+        QStringLiteral("retry_review_required"), QStringLiteral("monitor_owned_process"),
+        QStringLiteral("manual_reconciliation"), QStringLiteral("terminal_review"),
+    };
+    const QStringList leaseStates{
+        QStringLiteral("missing"), QStringLiteral("current"),
+        QStringLiteral("expired"), QStringLiteral("released"),
+        QStringLiteral("state_stale"), QStringLiteral("owner_mismatch"),
+    };
+    const QStringList processStates{
+        QStringLiteral("not_required"), QStringLiteral("missing_lease"),
+        QStringLiteral("missing_registration"), QStringLiteral("observation_unavailable"),
+        QStringLiteral("observed_not_running"), QStringLiteral("mismatched"),
+        QStringLiteral("current"),
+    };
+    bool valid = result.value(QStringLiteral("schema_version")).toString()
+            == QStringLiteral("background-recovery-page/0.1")
+        && result.value(QStringLiteral("session_id")).toString()
+            == m_backgroundRecoverySessionId
+        && snapshotPattern.match(result.value(QStringLiteral("snapshot_identity")).toString())
+            .hasMatch()
+        && result.value(QStringLiteral("scheduler_generation")).toVariant().toULongLong() > 0
+        && result.value(QStringLiteral("observed_at_ms")).toVariant().toULongLong() > 0
+        && result.value(QStringLiteral("entries")).isArray()
+        && result.value(QStringLiteral("content_included")).isBool()
+        && !result.value(QStringLiteral("content_included")).toBool()
+        && result.value(QStringLiteral("dispatch_available")).isBool()
+        && !result.value(QStringLiteral("dispatch_available")).toBool()
+        && result.value(QStringLiteral("automatic_retry")).isBool()
+        && !result.value(QStringLiteral("automatic_retry")).toBool()
+        && result.value(QStringLiteral("automatic_approval")).isBool()
+        && !result.value(QStringLiteral("automatic_approval")).toBool()
+        && result.value(QStringLiteral("automatic_takeover")).isBool()
+        && !result.value(QStringLiteral("automatic_takeover")).toBool()
+        && result.value(QStringLiteral("mutation_authority")).isBool()
+        && !result.value(QStringLiteral("mutation_authority")).toBool()
+        && (nextCursorValue.isNull() || nextCursorValue.isObject());
+    if (nextCursorValue.isObject()) {
+        const QJsonObject cursor = nextCursorValue.toObject();
+        valid = valid && !cursor.value(QStringLiteral("job_id")).toString().isEmpty()
+            && entryPattern.match(cursor.value(QStringLiteral("entry_identity")).toString())
+                .hasMatch();
+    }
+    for (const QJsonValue &value : entries) {
+        const QJsonObject wrapper = value.toObject();
+        const QJsonObject entry = wrapper.value(QStringLiteral("entry")).toObject();
+        const QJsonValue reviewValue = wrapper.value(QStringLiteral("review"));
+        const QJsonObject review = reviewValue.toObject();
+        valid = valid && value.isObject()
+            && entryPattern.match(wrapper.value(QStringLiteral("entry_identity")).toString())
+                .hasMatch()
+            && !entry.value(QStringLiteral("job_id")).toString().isEmpty()
+            && entry.value(QStringLiteral("session_id")).toString()
+                == m_backgroundRecoverySessionId
+            && !entry.value(QStringLiteral("project_id")).toString().isEmpty()
+            && !entry.value(QStringLiteral("root_id")).toString().isEmpty()
+            && statuses.contains(entry.value(QStringLiteral("status")).toString())
+            && actions.contains(entry.value(QStringLiteral("action")).toString())
+            && leaseStates.contains(entry.value(QStringLiteral("lease_state")).toString())
+            && processStates.contains(
+                entry.value(QStringLiteral("process_ownership_state")).toString())
+            && entry.value(QStringLiteral("job_generation")).toVariant().toULongLong() >= 0
+            && entry.value(QStringLiteral("blockers")).isArray()
+            && !entry.value(QStringLiteral("dispatch_available")).toBool()
+            && !entry.value(QStringLiteral("automatic_retry")).toBool()
+            && !entry.value(QStringLiteral("automatic_approval")).toBool()
+            && !entry.value(QStringLiteral("automatic_takeover")).toBool()
+            && !entry.contains(QStringLiteral("prompt"))
+            && !entry.contains(QStringLiteral("body"))
+            && !entry.contains(QStringLiteral("result_content"))
+            && !entry.contains(QStringLiteral("platform_payload"));
+        if (!reviewValue.isNull()) {
+            valid = valid && reviewValue.isObject()
+                && review.value(QStringLiteral("schema_version")).toString()
+                    == QStringLiteral("background-recovery-review/0.1")
+                && decisionPattern.match(
+                    review.value(QStringLiteral("decision_identity")).toString()).hasMatch()
+                && review.value(QStringLiteral("event_sequence")).toVariant().toULongLong() > 0
+                && !review.value(QStringLiteral("automatic_retry")).toBool()
+                && !review.value(QStringLiteral("automatic_approval")).toBool()
+                && !review.value(QStringLiteral("automatic_takeover")).toBool()
+                && !review.value(QStringLiteral("dispatch_authority")).toBool()
+                && !review.value(QStringLiteral("mutation_authority")).toBool();
+        }
+    }
+    if (!valid) {
+        if (m_backgroundRecoveryMoreButton) {
+            m_backgroundRecoveryMoreButton->setEnabled(!m_backgroundRecoveryCursor.isEmpty());
+        }
+        addNotice(QStringLiteral("后台恢复状态未通过版本、会话或只读权限校验。"), true);
+        return;
+    }
+
+    if (!m_backgroundRecoveryDialog) {
+        auto *dialog = new QDialog(this);
+        dialog->setObjectName(QStringLiteral("agentBackgroundRecoveryDialog"));
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(QStringLiteral("后台恢复状态"));
+        auto *layout = new QVBoxLayout(dialog);
+        layout->setContentsMargins(16, 16, 16, 16);
+        layout->setSpacing(10);
+        auto *table = new QTableWidget(0, 6, dialog);
+        table->setObjectName(QStringLiteral("agentBackgroundRecoveryTable"));
+        table->setHorizontalHeaderLabels({
+            QStringLiteral("作业"), QStringLiteral("恢复结论"), QStringLiteral("状态"),
+            QStringLiteral("租约"), QStringLiteral("进程归属"), QStringLiteral("阻塞原因"),
+        });
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setAlternatingRowColors(true);
+        table->verticalHeader()->hide();
+        table->horizontalHeader()->setStretchLastSection(true);
+        table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+        table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+        layout->addWidget(table, 1);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+        auto *more = buttons->addButton(QStringLiteral("加载更多"), QDialogButtonBox::ActionRole);
+        more->setObjectName(QStringLiteral("agentBackgroundRecoveryMoreButton"));
+        connect(more, &QPushButton::clicked, dialog, [this]() {
+            if (!m_runtime || !m_runtime->isReady() || m_backgroundRecoveryCursor.isEmpty()
+                    || !m_backgroundRecoveryRequestId.isEmpty()) return;
+            m_backgroundRecoveryRequestId = m_runtime->backgroundRecovery(
+                m_backgroundRecoverySessionId, m_backgroundRecoveryCursor, 100);
+            if (m_backgroundRecoveryRequestId.isEmpty()) {
+                addNotice(QStringLiteral("无法加载更多后台恢复状态。"), true);
+                return;
+            }
+            if (m_backgroundRecoveryMoreButton) m_backgroundRecoveryMoreButton->setEnabled(false);
+        });
+        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+        connect(dialog, &QObject::destroyed, this, [this]() {
+            m_backgroundRecoveryDialog = nullptr;
+            m_backgroundRecoveryTable = nullptr;
+            m_backgroundRecoveryMoreButton = nullptr;
+            m_backgroundRecoveryRequestId.clear();
+            m_backgroundRecoverySessionId.clear();
+            m_backgroundRecoveryCursor = {};
+        });
+        m_backgroundRecoveryDialog = dialog;
+        m_backgroundRecoveryTable = table;
+        m_backgroundRecoveryMoreButton = more;
+        dialog->resize(980, 440);
+    }
+
+    if (m_backgroundRecoveryTable->rowCount() == 1
+            && m_backgroundRecoveryTable->item(0, 0)
+            && m_backgroundRecoveryTable->item(0, 0)->data(Qt::UserRole).toBool()) {
+        m_backgroundRecoveryTable->removeRow(0);
+    }
+    const QHash<QString, QString> actionLabels{
+        {QStringLiteral("await_schedule"), QStringLiteral("等待计划")},
+        {QStringLiteral("admission_review"), QStringLiteral("需要准入复核")},
+        {QStringLiteral("keep_paused"), QStringLiteral("保持暂停")},
+        {QStringLiteral("keep_waiting_approval"), QStringLiteral("等待审批")},
+        {QStringLiteral("retry_review_required"), QStringLiteral("需要重试复核")},
+        {QStringLiteral("monitor_owned_process"), QStringLiteral("仅监视归属进程")},
+        {QStringLiteral("manual_reconciliation"), QStringLiteral("需要人工对账")},
+        {QStringLiteral("terminal_review"), QStringLiteral("终态复核")},
+    };
+    for (const QJsonValue &value : entries) {
+        const QJsonObject wrapper = value.toObject();
+        const QJsonObject entry = wrapper.value(QStringLiteral("entry")).toObject();
+        const QJsonObject review = wrapper.value(QStringLiteral("review")).toObject();
+        const int row = m_backgroundRecoveryTable->rowCount();
+        m_backgroundRecoveryTable->insertRow(row);
+        QStringList blockers;
+        for (const QJsonValue &blocker : entry.value(QStringLiteral("blockers")).toArray()) {
+            blockers.append(blocker.toString());
+        }
+        const QString tooltip = QStringLiteral("项目：%1\n根：%2\n作业代次：%3\n快照：%4")
+            .arg(entry.value(QStringLiteral("project_id")).toString())
+            .arg(entry.value(QStringLiteral("root_id")).toString())
+            .arg(entry.value(QStringLiteral("job_generation")).toVariant().toULongLong())
+            .arg(result.value(QStringLiteral("snapshot_identity")).toString());
+        const QString reviewText = review.isEmpty()
+            ? QStringLiteral("未记录审查")
+            : QStringLiteral("已记录：%1").arg(
+                actionLabels.value(review.value(QStringLiteral("disposition")).toString()));
+        const QStringList cells{
+            entry.value(QStringLiteral("job_id")).toString(),
+            reviewText,
+            entry.value(QStringLiteral("status")).toString(),
+            entry.value(QStringLiteral("lease_state")).toString(),
+            entry.value(QStringLiteral("process_ownership_state")).toString(),
+            blockers.join(QStringLiteral(", ")),
+        };
+        for (int column = 0; column < cells.size(); ++column) {
+            auto *item = new QTableWidgetItem(cells.at(column));
+            item->setToolTip(tooltip);
+            m_backgroundRecoveryTable->setItem(row, column, item);
+        }
+    }
+    if (m_backgroundRecoveryTable->rowCount() == 0) {
+        m_backgroundRecoveryTable->insertRow(0);
+        auto *empty = new QTableWidgetItem(QStringLiteral("暂无后台恢复记录"));
+        empty->setData(Qt::UserRole, true);
+        empty->setTextAlignment(Qt::AlignCenter);
+        m_backgroundRecoveryTable->setItem(0, 0, empty);
+        m_backgroundRecoveryTable->setSpan(0, 0, 1, 6);
+    }
+    m_backgroundRecoveryCursor = nextCursorValue.toObject();
+    m_backgroundRecoveryMoreButton->setVisible(!m_backgroundRecoveryCursor.isEmpty());
+    m_backgroundRecoveryMoreButton->setEnabled(!m_backgroundRecoveryCursor.isEmpty());
+    m_backgroundRecoveryDialog->show();
+    m_backgroundRecoveryDialog->raise();
+    m_backgroundRecoveryDialog->activateWindow();
 }
 
 void AgentWorkbenchWidget::beginCompactionCheckpoint(const QString &sessionId)

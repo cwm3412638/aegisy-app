@@ -273,6 +273,26 @@ content-bearing or mismatched records before rendering. No scheduler producer,
 delivery retry, operating-system permission request, or macOS/Windows notification
 call consumes the outbox yet.
 
+Background recovery inspection is a separate read-only surface. Capability
+`background-job.recovery.inspect` is advertised only with writable durable storage;
+`session/background-recovery` accepts one session ID, an optional `{job_id,
+entry_identity}` cursor, and a 1-100 limit. Runtime rebuilds the bounded internal
+`background-job-scheduler/0.2` snapshot without acquiring leases, observing caller
+PIDs, dispatching work, or changing job state. The response
+`background-recovery-page/0.1` contains only metadata for each job's recovery action,
+status, cancellation, schedule, lease/process ownership, blockers, and an optional
+matching `background-recovery-review/0.1` journal summary. It fixes
+`dispatch_available`, `automatic_retry`, `automatic_approval`,
+`automatic_takeover`, and `mutation_authority` to false. Cursor anchors bind the current
+entry identity; forged or changed entries fail closed. Qt renders the page from the
+Session context menu with an empty state and keyset `加载更多` control; no recovery,
+retry, approval, takeover, or delivery action is exposed.
+
+```jsonl
+{"jsonrpc":"2.0","id":"recovery-1","method":"session/background-recovery","params":{"session_id":"session-1","limit":100}}
+{"jsonrpc":"2.0","id":"recovery-1","result":{"schema_version":"background-recovery-page/0.1","session_id":"session-1","entries":[],"next_cursor":null,"content_included":false,"dispatch_available":false,"automatic_retry":false,"automatic_approval":false,"automatic_takeover":false,"mutation_authority":false}}
+```
+
 ## Replay And Reconnect
 
 The durable session stream is ordered by a session-local sequence. After a

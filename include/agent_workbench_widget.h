@@ -87,6 +87,8 @@ private:
     void showCompactionReview(const QJsonObject &result, bool replayed);
     Q_INVOKABLE void beginBackgroundNotificationInspection(const QString &sessionId);
     void showBackgroundNotificationPage(const QJsonObject &result);
+    Q_INVOKABLE void beginBackgroundRecoveryInspection(const QString &sessionId);
+    void showBackgroundRecoveryPage(const QJsonObject &result);
     bool currentOperationStatusBlocked() const;
     bool currentSessionRecoveryRequired() const;
     bool currentSessionDeletionPending() const;
@@ -436,6 +438,12 @@ private:
     QDialog *m_backgroundNotificationDialog = nullptr;
     QTableWidget *m_backgroundNotificationTable = nullptr;
     QPushButton *m_backgroundNotificationMoreButton = nullptr;
+    QString m_backgroundRecoveryRequestId;
+    QString m_backgroundRecoverySessionId;
+    QJsonObject m_backgroundRecoveryCursor;
+    QDialog *m_backgroundRecoveryDialog = nullptr;
+    QTableWidget *m_backgroundRecoveryTable = nullptr;
+    QPushButton *m_backgroundRecoveryMoreButton = nullptr;
     QString m_sessionMutationRequestId;
     QString m_sessionDeletionRequestId;
     QString m_portableSessionRequestId;
@@ -492,6 +500,7 @@ private:
     bool m_operationStatusBlocked = false;
     bool m_compactionAvailable = false;
     bool m_backgroundNotificationInspectionAvailable = false;
+    bool m_backgroundRecoveryInspectionAvailable = false;
     bool m_pinnedContextAvailable = false;
     bool m_imageContextAvailable = false;
     bool m_gitContextAvailable = false;

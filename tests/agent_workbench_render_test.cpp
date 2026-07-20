@@ -1099,6 +1099,36 @@ int main(int argc, char *argv[])
     }
     notificationDialog->close();
     application.processEvents();
+    if (!expect(QMetaObject::invokeMethod(
+                    &workbench, "beginBackgroundRecoveryInspection",
+                    Qt::DirectConnection, Q_ARG(QString, previewSessionId)),
+                "background recovery inspection entry is not invokable")) {
+        return 1;
+    }
+    QDialog *recoveryDialog = nullptr;
+    if (!expect(waitUntil(application, [&workbench, &recoveryDialog]() {
+                    recoveryDialog = workbench.findChild<QDialog *>(
+                        QStringLiteral("agentBackgroundRecoveryDialog"));
+                    return recoveryDialog != nullptr;
+                }),
+                "background recovery dialog did not open from the durable AAP query")) {
+        return 1;
+    }
+    QTableWidget *recoveryTable = recoveryDialog->findChild<QTableWidget *>(
+        QStringLiteral("agentBackgroundRecoveryTable"));
+    QPushButton *recoveryMore = recoveryDialog->findChild<QPushButton *>(
+        QStringLiteral("agentBackgroundRecoveryMoreButton"));
+    if (!expect(recoveryTable && recoveryMore
+                    && recoveryTable->rowCount() == 1
+                    && recoveryTable->item(0, 0)
+                    && recoveryTable->item(0, 0)->text()
+                        == QStringLiteral("暂无后台恢复记录")
+                    && recoveryMore->isHidden(),
+                "background recovery empty state or pagination gate is invalid")) {
+        return 1;
+    }
+    recoveryDialog->close();
+    application.processEvents();
     int gitTabIndex = -1;
     for (int index = 0; index < tabs->count(); ++index) {
         if (tabs->tabText(index) == QStringLiteral("Git")) {

@@ -224,8 +224,17 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   is semantically revalidated at startup; event failure rolls back sequence allocation
   and hash-consistent semantic tampering fails startup. Decisions fix retry, approval,
   takeover, dispatch, and mutation authority to false and never change job or lease
-  state. Automatic decision production/consumption, recovery mutation, notifications,
-  AAP/Qt inspection, and cross-platform endurance remain absent; keep `21.8` unchecked.
+  state. AAP capability `background-job.recovery.inspect` and method
+  `session/background-recovery` now expose a session-bound, metadata-only page built
+  from a fresh owner-bound scheduler snapshot. Keyset anchors bind the current
+  scheduler entry identity; the page may include only a matching recorded-decision
+  summary. Qt exposes `后台恢复状态…` from the Session menu with strict page/entry/
+  cursor/review validation, empty state, and keyset loading. The page fixes dispatch,
+  automatic retry/approval/takeover, and mutation authority to false and never acquires
+  leases, observes caller PIDs, changes job/lease/process state, or performs recovery.
+  Missing storage, missing sessions, forged cursors, whole-store recovery, and invalid
+  evidence fail closed. Automatic decision production/consumption, recovery mutation,
+  notifications, and cross-platform endurance remain absent; keep `21.8` unchecked.
 - Task `21.9` now has a partial internal
   `background-job-notification-intent/0.1` contract. Completed, failed,
   approval-needed, and budget-exhausted intents bind exact project/session/root,
@@ -260,10 +269,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   empty/error states, and strict validation of schema, session, kind, lifecycle
   identity, timestamps, delivery state, zero attempts, false authority, and forbidden
   content-field absence. No delivery action, platform permission, retry, or background
-  producer exists. The latest Rust run passes 389 tests with one ignored fixture, 55
+  producer exists. The latest Rust run passes 389 tests with one ignored fixture, 56
   protocol tests, 11 stdio/Codex tests, and strict Clippy; the complete Qt build and
   `agent_runtime_protocol` pass. The `agent_workbench_render` process was killed by
-  host resource pressure at startup (0.46s) without assertion output, so it is not
+  host resource pressure at startup (0.56s) without assertion output, so it is not
   treated as a render assertion failure. Keep `21.9` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
@@ -976,7 +985,7 @@ git diff --check
 ```
 
 Current verified baseline: 16 desktop tests, 389 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 55 Rust protocol tests, eleven macOS
+one explicitly ignored live Codex fixture, 56 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
@@ -2099,11 +2108,11 @@ Implemented visual baseline:
    permission policy and the production approval ledger. A trust acknowledgement must
    never become an implicit write, command, Hook, or network grant.
 10. Continue `21.9` by adding reviewed platform permission/delivery settings only
-   after scheduler and approval gates are complete. Continue `21.8` with
-   read-only recovery inspection controls over the durable decision journal. Keep
-   automatic lease acquisition/renewal, process adoption, retry, approval, recovery
-   mutation, and dispatch unavailable until their permission, sandbox, budget, and
-   release gates pass.
+   after scheduler and approval gates are complete. Continue `21.8` with durable
+   decision production/consumption and reviewed recovery transitions only after the
+   permission, sandbox, budget, and release gates pass. Keep automatic lease
+   acquisition/renewal, process adoption, retry, approval, recovery mutation, and
+   dispatch unavailable until those gates pass.
 11. Continue with the next unchecked database/event, durable project/session, typed
    timeline, permission/approval, structured patch/checkpoint, terminal, and Git
    milestones in dependency order.

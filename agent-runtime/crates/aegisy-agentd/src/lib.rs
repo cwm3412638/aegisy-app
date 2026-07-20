@@ -66,6 +66,7 @@ use aegisy_aap::stable::v0_1::{
     Session, SessionMode, TimelineItem,
 };
 use aegisy_aap::{Notification, Request, Response, JSONRPC_VERSION, PROTOCOL_VERSION};
+use background_scheduler::{recovery_entry_identity, BackgroundJobScheduler};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use codex_adapter::{
@@ -122,6 +123,8 @@ const RUNTIME_REPLAY_PAGE_SIZE: usize = 200;
 const MAX_TURN_METADATA_UPDATES_PER_KIND: usize = 32;
 const MAX_AUTO_INSTRUCTION_ITEMS: usize = 8;
 const MAX_AUTO_INSTRUCTION_BYTES: u64 = 32 * 1024;
+const BACKGROUND_SCHEDULER_OWNER_IDENTITY: &str =
+    "scheduler-owner:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const MAX_TERMINAL_EXCERPT_BYTES: usize = 16 * 1024;
 const TERMINAL_EXCERPT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 const MAX_PINNED_GIT_CONTEXT_BYTES: usize = 16 * 1024;
@@ -768,6 +771,21 @@ struct BackgroundNotificationInspectParams {
     cursor: Option<BackgroundNotificationCursor>,
     #[serde(default = "default_background_notification_limit")]
     limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct BackgroundRecoveryInspectParams {
+    session_id: String,
+    #[serde(default)]
+    cursor: Option<BackgroundRecoveryCursor>,
+    #[serde(default = "default_background_recovery_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct BackgroundRecoveryCursor {
+    job_id: String,
+    entry_identity: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1779,6 +1797,10 @@ const fn default_session_search_limit() -> usize {
 }
 
 const fn default_background_notification_limit() -> usize {
+    50
+}
+
+const fn default_background_recovery_limit() -> usize {
     50
 }
 
@@ -2950,6 +2972,7 @@ impl Runtime {
                 request.method.as_str(),
                 "session/read"
                     | "session/background-notifications"
+                    | "session/background-recovery"
                     | "session/recovery/status"
                     | "runtime/projection-recovery/status"
                     | "operation/probe"
@@ -3043,6 +3066,7 @@ impl Runtime {
                 request.method.as_str(),
                 "session/read"
                     | "session/background-notifications"
+                    | "session/background-recovery"
                     | "session/recovery/status"
                     | "session/deletion/status"
                     | "turn/cancel"
@@ -3075,6 +3099,7 @@ impl Runtime {
             request.method.as_str(),
             "session/read"
                 | "session/background-notifications"
+                | "session/background-recovery"
                 | "session/deletion/status"
                 | "operation/status"
                 | "session/delete/preview"
@@ -3176,6 +3201,7 @@ impl Runtime {
             "session/list" => self.session_list(request),
             "session/search" => self.session_search(request),
             "session/background-notifications" => self.background_notification_inspect(request),
+            "session/background-recovery" => self.background_recovery_inspect(request),
             "operation/probe" => self.operation_probe(request),
             "operation/status" => self.operation_status(request),
             "operation/reconcile" => self.operation_reconcile(request),
@@ -3631,6 +3657,7 @@ impl Runtime {
             if self.workbench_store.is_some() {
                 capabilities.extend([
                     "background-notification.outbox.read-only".into(),
+                    "background-job.recovery.inspect".into(),
                     "workspace.image.import-user".into(),
                     "workspace.image.preview".into(),
                 ]);
@@ -4924,6 +4951,209 @@ impl Runtime {
                 format!("cannot inspect background notifications: {}", error.message),
             ),
         }
+    }
+
+    fn background_recovery_inspect(&self, request: Request) -> Vec<Value> {
+        let params: BackgroundRecoveryInspectParams =
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => params,
+                Err(error) => {
+                    return self.error_for(&request, -32602, format!("invalid params: {error}"))
+                }
+            };
+        if params.limit == 0 || params.limit > 100 {
+            return self.error_for(
+                &request,
+                -32602,
+                "background recovery limit must be between 1 and 100",
+            );
+        }
+        let Some(store) = self.workbench_store.as_ref() else {
+            return self.error_for(
+                &request,
+                -32024,
+                "background recovery inspection requires durable workbench storage",
+            );
+        };
+        if store.load_session(&params.session_id).is_err() {
+            return self.error_for(&request, -32023, "session not found");
+        }
+        let scheduler = match BackgroundJobScheduler::load(
+            store,
+            BACKGROUND_SCHEDULER_OWNER_IDENTITY,
+            now_ms(),
+            1_000,
+        ) {
+            Ok(scheduler) => scheduler,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32114,
+                    format!("cannot inspect background recovery: {}", error.message),
+                )
+            }
+        };
+        let snapshot = match scheduler.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32114,
+                    format!(
+                        "cannot validate background recovery snapshot: {}",
+                        error.message
+                    ),
+                )
+            }
+        };
+        let mut entries = snapshot
+            .entries
+            .iter()
+            .filter(|entry| entry.session_id == params.session_id)
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.job_id.cmp(&right.job_id));
+        let entry_identities = entries
+            .iter()
+            .map(|entry| recovery_entry_identity(entry))
+            .collect::<Result<Vec<_>, _>>();
+        let entry_identities = match entry_identities {
+            Ok(identities) => identities,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32114,
+                    format!(
+                        "cannot identify background recovery entry: {}",
+                        error.message
+                    ),
+                )
+            }
+        };
+        let start = if let Some(cursor) = &params.cursor {
+            if cursor.job_id.is_empty()
+                || !cursor
+                    .entry_identity
+                    .strip_prefix("background-job-scheduler-entry:sha256:")
+                    .is_some_and(|hex| {
+                        hex.len() == 64
+                            && hex
+                                .bytes()
+                                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    })
+            {
+                return self.error_for(&request, -32114, "background recovery cursor is invalid");
+            }
+            let Some(anchor) = entries
+                .iter()
+                .position(|entry| entry.job_id == cursor.job_id)
+            else {
+                return self.error_for(
+                    &request,
+                    -32114,
+                    "background recovery cursor is stale or forged",
+                );
+            };
+            if entry_identities[anchor] != cursor.entry_identity {
+                return self.error_for(
+                    &request,
+                    -32114,
+                    "background recovery cursor is stale or forged",
+                );
+            }
+            anchor + 1
+        } else {
+            0
+        };
+        let page_end = (start + params.limit + 1).min(entries.len());
+        let has_more = page_end > start + params.limit;
+        let selected = &entries[start..page_end.min(start + params.limit)];
+        let decisions = match store.load_background_recovery_decisions() {
+            Ok(decisions) => decisions,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32114,
+                    format!(
+                        "cannot inspect background recovery journal: {}",
+                        error.message
+                    ),
+                )
+            }
+        };
+        let mut serialized_entries = Vec::with_capacity(selected.len());
+        for entry in selected {
+            let entry_identity = match recovery_entry_identity(entry) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    return self.error_for(
+                        &request,
+                        -32114,
+                        format!(
+                            "cannot identify background recovery entry: {}",
+                            error.message
+                        ),
+                    )
+                }
+            };
+            let review = decisions
+                .iter()
+                .filter(|record| {
+                    record.decision.session_id == params.session_id
+                        && record.decision.job_id == entry.job_id
+                        && record.decision.state_identity == entry.state_identity
+                        && record.decision.job_generation == entry.job_generation
+                })
+                .max_by_key(|record| record.event_sequence)
+                .map(|record| {
+                    json!({
+                        "schema_version": "background-recovery-review/0.1",
+                        "decision_identity": record.decision.decision_identity,
+                        "disposition": record.decision.disposition,
+                        "event_sequence": record.event_sequence,
+                        "recorded_at_ms": record.decision.recorded_at_ms,
+                        "automatic_retry": false,
+                        "automatic_approval": false,
+                        "automatic_takeover": false,
+                        "dispatch_authority": false,
+                        "mutation_authority": false
+                    })
+                })
+                .unwrap_or(Value::Null);
+            serialized_entries.push(json!({
+                "entry_identity": entry_identity,
+                "entry": entry,
+                "review": review
+            }));
+        }
+        let next_cursor = if has_more {
+            let last = selected
+                .last()
+                .expect("a truncated recovery page cannot be empty");
+            Some(json!({
+                "job_id": last.job_id,
+                "entry_identity": entry_identities[start + selected.len() - 1]
+            }))
+        } else {
+            None
+        };
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "background-recovery-page/0.1",
+                "session_id": params.session_id,
+                "snapshot_identity": snapshot.snapshot_identity,
+                "scheduler_generation": snapshot.generation,
+                "observed_at_ms": snapshot.observed_at_ms,
+                "entries": serialized_entries,
+                "next_cursor": next_cursor,
+                "content_included": false,
+                "dispatch_available": false,
+                "automatic_retry": false,
+                "automatic_approval": false,
+                "automatic_takeover": false,
+                "mutation_authority": false
+            }),
+        )
     }
 
     fn operation_status(&self, request: Request) -> Vec<Value> {

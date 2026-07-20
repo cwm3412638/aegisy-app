@@ -619,6 +619,17 @@ fn background_notification_inspection_requires_durable_storage() {
 }
 
 #[test]
+fn background_recovery_inspection_requires_durable_storage() {
+    let mut runtime = ready_runtime();
+    let result = runtime.handle_line(&request(
+        "recovery-no-store",
+        "session/background-recovery",
+        json!({"session_id": "missing-session"}),
+    ));
+    assert_eq!(result[0]["error"]["code"], -32024);
+}
+
+#[test]
 fn durable_background_notification_outbox_is_read_only_paged_and_restart_safe() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -692,6 +703,41 @@ fn durable_background_notification_outbox_is_read_only_paged_and_restart_safe() 
     store
         .enqueue_background_notification(&approval_intent, 1_500)
         .unwrap();
+    let mut recovery_runtime = Runtime::with_store(&data_root).unwrap();
+    let recovery_initialized = recovery_runtime.handle_line(&request(
+        "notification-recovery-initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "notification-recovery", "version": "1"}
+        }),
+    ));
+    assert!(recovery_initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "background-job.recovery.inspect"));
+    recovery_runtime.handle_line(&request(
+        "notification-recovery-ready",
+        "initialized",
+        json!({}),
+    ));
+    let recovery_page = recovery_runtime.handle_line(&request(
+        "notification-recovery-page",
+        "session/background-recovery",
+        json!({"session_id": "notification-session", "limit": 10}),
+    ));
+    assert_eq!(
+        recovery_page[0]["result"]["entries"][0]["entry"]["action"],
+        "keep_waiting_approval"
+    );
+    assert_eq!(
+        recovery_page[0]["result"]["entries"][0]["entry"]["status"],
+        "waiting_approval"
+    );
+    assert_eq!(recovery_page[0]["result"]["dispatch_available"], false);
+    assert_eq!(recovery_page[0]["result"]["automatic_approval"], false);
+    drop(recovery_runtime);
     let waiting = state.clone();
     state.resume_after_approval(&job, &approval, 1_600).unwrap();
     store
@@ -730,7 +776,35 @@ fn durable_background_notification_outbox_is_read_only_paged_and_restart_safe() 
         .unwrap()
         .iter()
         .any(|capability| capability == "background-notification.outbox.read-only"));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "background-job.recovery.inspect"));
     runtime.handle_line(&request("notification-ready", "initialized", json!({})));
+    let recovery = runtime.handle_line(&request(
+        "notification-recovery-empty",
+        "session/background-recovery",
+        json!({"session_id": "notification-session", "limit": 10}),
+    ));
+    assert_eq!(
+        recovery[0]["result"]["schema_version"],
+        "background-recovery-page/0.1"
+    );
+    assert_eq!(recovery[0]["result"]["session_id"], "notification-session");
+    assert!(recovery[0]["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    for field in [
+        "dispatch_available",
+        "automatic_retry",
+        "automatic_approval",
+        "automatic_takeover",
+        "mutation_authority",
+    ] {
+        assert_eq!(recovery[0]["result"][field], false, "{field} must be false");
+    }
     let first = runtime.handle_line(&request(
         "notification-first",
         "session/background-notifications",

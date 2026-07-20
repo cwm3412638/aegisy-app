@@ -90,6 +90,9 @@ public:
     QString backgroundNotifications(const QString &sessionId,
                                     const QJsonObject &cursor = QJsonObject(),
                                     int limit = 100);
+    QString backgroundRecovery(const QString &sessionId,
+                               const QJsonObject &cursor = QJsonObject(),
+                               int limit = 100);
     QString projectionRecoveryStatus();
     QString sessionRecoveryStatus(const QString &sessionId);
     QString operationStatus(const QString &sessionId);
@@ -238,6 +241,7 @@ signals:
     void retentionMaintenanceCompleted(const QString &requestId, const QJsonObject &result);
     void sessionRead(const QString &requestId, const QJsonObject &snapshot);
     void backgroundNotificationsRead(const QString &requestId, const QJsonObject &result);
+    void backgroundRecoveryRead(const QString &requestId, const QJsonObject &result);
     void projectionRecoveryStatusRead(const QJsonObject &status);
     void sessionRecoveryStatusRead(const QJsonObject &status);
     void operationStatusRead(const QString &requestId, const QJsonObject &status);

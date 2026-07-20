@@ -233,7 +233,7 @@ Background job lifecycle evidence:
   accounting/identity/authority tampering, dedup stability, durable restart, paging,
   cursor forgery, progressed-state idempotency, event/projection rollback, canonical
   projection and lifecycle tampering, migration, and purge. The complete batch passes
-  389 Rust unit tests with one ignored live fixture, 53 protocol tests, 11 stdio/Codex
+  389 Rust unit tests with one ignored live fixture, 56 protocol tests, 11 stdio/Codex
   tests, strict Clippy, formatting, `git diff --check`, the complete desktop build, and
   CTest `agent_runtime_protocol`. Strict OpenSpec validation was attempted but the
   Node process was killed by the host with exit 137 and emitted no schema diagnostic.
@@ -248,7 +248,7 @@ Background job lifecycle evidence:
   storage, forged cursors, cross-session anchors, and invalid limits fail explicitly.
   Two protocol fixtures cover unavailable storage plus two-kind paging, false authority,
   forbidden content-field absence, cursor forgery, and restart replay. The complete
-  Rust baseline now passes 389 unit tests with one ignored live fixture, 55 protocol
+  Rust baseline now passes 389 unit tests with one ignored live fixture, 56 protocol
   tests, 11 stdio/Codex tests, and strict Clippy.
 - Qt `AgentRuntimeClient` exposes only the structured read request/result signal. The
   Session context menu enables a metadata-only viewer from negotiated capability;
@@ -261,6 +261,28 @@ Background job lifecycle evidence:
   output; a later lightweight Qt environment test was also killed at 0.42s, while
   `agent_runtime_protocol` continued to pass. Rerun Qt CTest when host memory is
   available. This is not evidence of platform notification delivery.
+
+Background recovery inspection evidence:
+
+- Capability `background-job.recovery.inspect` advertises only with writable durable
+  Workbench storage. AAP `session/background-recovery` rebuilds a bounded read-only
+  scheduler snapshot, filters it to one session, orders entries by job ID, and pages
+  with an entry-identity cursor. Forged or stale anchors fail explicitly. The page
+  carries only job/request/state identities, status, cancellation, schedule, lease and
+  process ownership labels, blockers, and a matching metadata-only journal review;
+  content, process paths, PIDs, commands, and result bodies are absent. Dispatch,
+  automatic retry/approval/takeover, and mutation authority are fixed false. Missing
+  durable storage returns `-32024`; whole-store recovery does not advertise the
+  capability. Protocol coverage includes missing-storage and empty-page authority
+  checks, while the scheduler and recovery-decision unit suites cover populated entry
+  and tamper cases.
+- Qt adds `后台恢复状态…` to the Session context menu when the capability is
+  negotiated. Its dialog validates page/entry/cursor/review identities, allowed
+  status/action/lease/process enums, blockers, timestamps, content exclusion, and all
+  false-authority flags before rendering keyset pages. It has an explicit empty state
+  and `加载更多` control and exposes no mutation or delivery action. The full Qt build
+  passes; the host-killed render process remains an environment limitation rather than
+  a passing render assertion.
 
 Current editor evidence:
 
