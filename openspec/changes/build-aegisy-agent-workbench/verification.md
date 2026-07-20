@@ -233,7 +233,7 @@ Background job lifecycle evidence:
   accounting/identity/authority tampering, dedup stability, durable restart, paging,
   cursor forgery, progressed-state idempotency, event/projection rollback, canonical
   projection and lifecycle tampering, migration, and purge. The complete batch passes
-  389 Rust unit tests with one ignored live fixture, 56 protocol tests, 11 stdio/Codex
+  390 Rust unit tests with one ignored live fixture, 56 protocol tests, 11 stdio/Codex
   tests, strict Clippy, formatting, `git diff --check`, the complete desktop build, and
   CTest `agent_runtime_protocol`. Strict OpenSpec validation was attempted but the
   Node process was killed by the host with exit 137 and emitted no schema diagnostic.
@@ -248,7 +248,7 @@ Background job lifecycle evidence:
   storage, forged cursors, cross-session anchors, and invalid limits fail explicitly.
   Two protocol fixtures cover unavailable storage plus two-kind paging, false authority,
   forbidden content-field absence, cursor forgery, and restart replay. The complete
-  Rust baseline now passes 389 unit tests with one ignored live fixture, 56 protocol
+  Rust baseline now passes 390 unit tests with one ignored live fixture, 56 protocol
   tests, 11 stdio/Codex tests, and strict Clippy.
 - Qt `AgentRuntimeClient` exposes only the structured read request/result signal. The
   Session context menu enables a metadata-only viewer from negotiated capability;
@@ -824,12 +824,13 @@ Current editor evidence:
   complete.
 - The partial context-budget/0.1 allocator is emitted with each prepared
   turn context. It deterministically scores instruction precedence and pinned
-  context, allocates within a 64 KiB total/16 KiB per-item hard bound without
-  reordering rendered context, and returns requested/allocated bytes, class,
-  priority score, inclusion, and content-free reason metadata. Unit fixtures
-  cover priority ordering, excluded entries, and hard bounds; the protocol
-  fixture verifies the budget schema. Task 17.4 remains unchecked until all
-  context classes, tokenizer/provider window authority, and scale evidence use
+  context, classifies existing task-state/recent-turn/tool-result/search and
+  repository-map consumers, allocates within a 64 KiB total/16 KiB per-item hard
+  bound without reordering rendered context, and returns requested/allocated bytes,
+  class, priority score, inclusion, and content-free reason metadata. Unit fixtures
+  cover priority ordering, consumer classes, excluded entries, and hard bounds; the protocol
+  fixture verifies the budget schema. Task 17.4 remains unchecked until these classes have
+  authoritative producers, tokenizer/provider window authority, and scale evidence use
   this allocator.
 - AAP turn/context/inspect is a read-only preflight that reuses the exact
   instruction discovery and budget preparation path for the bound session.

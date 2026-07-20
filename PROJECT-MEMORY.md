@@ -269,7 +269,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   empty/error states, and strict validation of schema, session, kind, lifecycle
   identity, timestamps, delivery state, zero attempts, false authority, and forbidden
   content-field absence. No delivery action, platform permission, retry, or background
-  producer exists. The latest Rust run passes 389 tests with one ignored fixture, 56
+  producer exists. The latest Rust run passes 390 tests with one ignored fixture, 56
   protocol tests, 11 stdio/Codex tests, and strict Clippy; the complete Qt build and
   `agent_runtime_protocol` pass. The `agent_workbench_render` process was killed by
   host resource pressure at startup (0.56s) without assertion output, so it is not
@@ -598,11 +598,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 - OpenSpec task `17.4` now has a partial `context-budget/0.1` allocator.
   Prepared turn responses include a content-free plan for explicit context and
   auto-discovered instructions. Instruction precedence ranks and pinned priority
-  determine deterministic allocation order without reordering rendered text;
-  a 64 KiB total and 16 KiB per-item hard bound report requested/allocated bytes,
-  class, score, inclusion, and exclusion reason. Task-state, recent-turn,
-  tool-result, search, repository-map, tokenizer, and provider-window consumers
-  remain open; keep `17.4` unchecked.
+  determine deterministic allocation order without reordering rendered text. Existing
+  task-state, recent-turn, tool-result, search/search-result, and repository-map item
+  kinds now receive explicit class labels in the same allocator; no implicit context
+  is added. A 64 KiB total and 16 KiB per-item hard bound report requested/allocated
+  bytes, class, score, inclusion, and exclusion reason. Tokenizer and provider-window
+  authority, complete source producers, scale, and cross-platform evidence remain
+  open; keep `17.4` unchecked.
 - OpenSpec task `17.6` now has a partial read-only
   `turn/context/inspect` preflight. It reuses the exact session-root,
   instruction discovery, stale, and `context-budget/0.1` preparation path
@@ -984,7 +986,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 389 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 390 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 56 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
@@ -1431,8 +1433,9 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
 - The same prepared response carries `context-budget/0.1`. It allocates current
   explicit context and instruction items by deterministic priority score under
   the existing 64 KiB total/16 KiB per-item boundary, while preserving input
-  order in rendered text. The plan is metadata-only and does not imply tokenizer
-  or provider-window authority.
+  order in rendered text. It labels existing task-state, recent-turn, tool-result,
+  search, and repository-map classes when those items are explicitly supplied. The
+  plan is metadata-only and does not imply tokenizer or provider-window authority.
 - `turn/context/inspect` exposes that same plan and manifest before sending,
   with no model call, persistence, or source body in the response. The Qt Work
   composer exposes this as a read-only preflight dialog for an existing

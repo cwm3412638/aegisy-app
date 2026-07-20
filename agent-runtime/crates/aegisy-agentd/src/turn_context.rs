@@ -204,6 +204,7 @@ pub fn prepare_turn_context_scoped_with_images(
         .zip(resolved.iter())
         .map(|(item, resolved)| BudgetInput {
             id: &item.id,
+            kind: Some(item.kind.as_str()),
             priority: item.priority.as_deref(),
             requested_bytes: resolved.as_ref().map_or(0, ResolvedContext::budget_bytes),
             excluded: item.exclusion_reason.is_some(),

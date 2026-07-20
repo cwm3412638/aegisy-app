@@ -5,6 +5,7 @@ pub const SCHEMA_VERSION: &str = "context-budget/0.1";
 #[derive(Debug, Clone, Copy)]
 pub struct BudgetInput<'a> {
     pub id: &'a str,
+    pub kind: Option<&'a str>,
     pub priority: Option<&'a str>,
     pub requested_bytes: usize,
     pub excluded: bool,
@@ -41,7 +42,7 @@ pub fn allocate(
         .iter()
         .map(|input| BudgetEntry {
             id: input.id.to_owned(),
-            class: context_class(input.priority),
+            class: context_class(input.kind, input.priority),
             priority_score: priority_score(input.priority),
             requested_bytes: input.requested_bytes,
             allocated_bytes: 0,
@@ -100,7 +101,15 @@ pub fn allocate(
     }
 }
 
-fn context_class(priority: Option<&str>) -> String {
+fn context_class(kind: Option<&str>, priority: Option<&str>) -> String {
+    match kind {
+        Some("task-state") => return "task-state".into(),
+        Some("recent-turn") => return "recent-turn".into(),
+        Some("tool-result") => return "tool-result".into(),
+        Some("search") | Some("search-result") => return "search".into(),
+        Some("repository-map") => return "repository-map".into(),
+        _ => {}
+    }
     if priority.is_some_and(|value| value.starts_with("instruction-rank-")) {
         "instruction".into()
     } else if priority == Some("pinned")
@@ -137,18 +146,21 @@ mod tests {
         let inputs = [
             BudgetInput {
                 id: "user",
+                kind: None,
                 priority: Some("pinned"),
                 requested_bytes: 8,
                 excluded: false,
             },
             BudgetInput {
                 id: "managed",
+                kind: None,
                 priority: Some("instruction-rank-1000"),
                 requested_bytes: 8,
                 excluded: false,
             },
             BudgetInput {
                 id: "nested",
+                kind: None,
                 priority: Some("instruction-rank-401"),
                 requested_bytes: 8,
                 excluded: false,
@@ -175,12 +187,14 @@ mod tests {
             &[
                 BudgetInput {
                     id: "ordinary",
+                    kind: None,
                     priority: None,
                     requested_bytes: 8,
                     excluded: false,
                 },
                 BudgetInput {
                     id: "selected-pin",
+                    kind: None,
                     priority: Some("pinned-priority-900"),
                     requested_bytes: 8,
                     excluded: false,
@@ -200,6 +214,7 @@ mod tests {
         let plan = allocate(
             &[BudgetInput {
                 id: "excluded",
+                kind: None,
                 priority: Some("instruction-rank-1000"),
                 requested_bytes: 64,
                 excluded: true,
@@ -218,12 +233,14 @@ mod tests {
             &[
                 BudgetInput {
                     id: "one",
+                    kind: None,
                     priority: None,
                     requested_bytes: 100,
                     excluded: false,
                 },
                 BudgetInput {
                     id: "two",
+                    kind: None,
                     priority: None,
                     requested_bytes: 100,
                     excluded: false,
@@ -235,5 +252,42 @@ mod tests {
         assert_eq!(plan.allocated_bytes, 150);
         assert!(plan.entries.iter().all(|entry| entry.allocated_bytes <= 80));
         assert!(plan.truncated);
+    }
+
+    #[test]
+    fn classifies_existing_context_consumers_without_changing_priority_order() {
+        let plan = allocate(
+            &[
+                BudgetInput {
+                    id: "search-item",
+                    kind: Some("search-result"),
+                    priority: None,
+                    requested_bytes: 4,
+                    excluded: false,
+                },
+                BudgetInput {
+                    id: "tool-item",
+                    kind: Some("tool-result"),
+                    priority: Some("pinned-priority-900"),
+                    requested_bytes: 4,
+                    excluded: false,
+                },
+                BudgetInput {
+                    id: "repo-map",
+                    kind: Some("repository-map"),
+                    priority: None,
+                    requested_bytes: 4,
+                    excluded: false,
+                },
+            ],
+            8,
+            8,
+        );
+        assert_eq!(plan.entries[0].class, "search");
+        assert_eq!(plan.entries[1].class, "tool-result");
+        assert_eq!(plan.entries[2].class, "repository-map");
+        assert_eq!(plan.entries[1].allocated_bytes, 4);
+        assert_eq!(plan.entries[0].allocated_bytes, 4);
+        assert_eq!(plan.entries[2].allocated_bytes, 0);
     }
 }
