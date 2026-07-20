@@ -215,9 +215,31 @@ Background job lifecycle evidence:
   cover completion, failure, approval wait, budget exhaustion, unsupported state,
   identity and delivery-authority tampering, forged accounting, task drift, and stable
   deduplication. Intent fields fix content inclusion, delivery availability/attempt,
-  and platform authority to false. Durable outbox/events, scheduler production,
-  platform permission/delivery APIs, Qt settings, restart behavior, localization,
-  and macOS/Windows evidence remain absent, so task `21.9` stays unchecked.
+  and platform authority to false.
+- Workbench schema v12 persists one canonical intent per deduplication identity in
+  `background_notification_outbox` and appends the exact
+  `background-job.notification-recorded/0.1` session event in the same `IMMEDIATE`
+  transaction. Projection rows bind the job/request/state/generation, canonical
+  JSON/hash, event sequence, creation/record time, `recorded` state, zero attempts,
+  and false content/delivery/platform authority. Identical retries return the original
+  record even after the job advances; stale first writes and dedup conflicts fail.
+  A bounded session-scoped keyset page is ordered by record time descending and intent
+  identity ascending, and validates its anchor before use. Startup semantically checks
+  at most 10,000 outbox records against both exact job lifecycle evidence and their
+  session events. The v11-to-v12 migration creates a WAL-consistent backup, preserves
+  existing sessions, and creates the empty outbox/indexes. Terminal session purge
+  removes jobs, outbox rows, and notification events together.
+- Six intent fixtures plus five store/migration/deletion fixtures cover all four kinds,
+  accounting/identity/authority tampering, dedup stability, durable restart, paging,
+  cursor forgery, progressed-state idempotency, event/projection rollback, canonical
+  projection and lifecycle tampering, migration, and purge. The complete batch passes
+  389 Rust unit tests with one ignored live fixture, 53 protocol tests, 11 stdio/Codex
+  tests, strict Clippy, formatting, `git diff --check`, the complete desktop build, and
+  CTest `agent_runtime_protocol`. Strict OpenSpec validation was attempted but the
+  Node process was killed by the host with exit 137 and emitted no schema diagnostic.
+  Scheduler production, AAP/Qt inspection/settings, delivery state transitions,
+  platform permission/delivery APIs, localization/privacy review, and macOS/Windows
+  evidence remain absent, so task `21.9` stays unchecked.
 
 Current editor evidence:
 
@@ -516,8 +538,8 @@ Current editor evidence:
   bounded user-gesture ID; read-only profiles and managed denials fail before any
   SQLite row is written. This remains an internal policy/issuer foundation and is
   not connected to AAP, Qt, native execution, or a production user-gesture bridge.
-- The SQLite store now carries schema version 11 project/session/Blob/retention/job/lease metadata
-  and turn/item projections:
+- The SQLite store now carries schema version 12 project/session/Blob/retention/job/
+  lease/notification-outbox metadata and turn/item projections:
   canonical project roots and access, Chat/Work session mode, project binding,
   environment identity, `new`/`resume`/`fork` lineage, active/archived/failed/
   interrupted status, and archive/unarchive transitions. Turns bind to an active
@@ -527,7 +549,7 @@ Current editor evidence:
   sequence gaps and payload tampering; terminal turns reject late items. Work sessions cannot be
   created without a project; lineage parents must match project and mode; invalid
   rows are rejected before insertion. Reopen tests verify metadata durability and
-  transactional v1→v11 through v10→v11 migrations. The v3 path rebuilds the event table
+  transactional v1→v12 through v11→v12 migrations. The v3 path rebuilds the event table
   with nullable project binding while preserving every existing event field, hash,
   and sequence; a new Chat session then proves a typed event can carry no project.
   The complete

@@ -35,11 +35,31 @@ pub enum BackgroundNotificationKind {
     BudgetExhausted,
 }
 
+impl BackgroundNotificationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::ApprovalNeeded => "approval_needed",
+            Self::BudgetExhausted => "budget_exhausted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundNotificationUrgency {
     Normal,
     High,
+}
+
+impl BackgroundNotificationUrgency {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

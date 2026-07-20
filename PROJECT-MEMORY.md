@@ -236,10 +236,20 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   accounting, remaining values, counters, usage provenance, classifications, scope,
   and false authority flags; generation zero is allowed when the complete snapshot is
   otherwise valid. Intents always set content inclusion, delivery availability,
-  delivery attempt, and platform delivery authority to false. Durable outbox/event
-  persistence, scheduler production, retry/delivery state, platform APIs and
-  permissions, Qt settings/inspection, restart behavior, localization/privacy review,
-  and cross-platform evidence remain absent; keep `21.9` unchecked.
+  delivery attempt, and platform delivery authority to false. Workbench schema v12
+  persists one canonical intent per deduplication identity in a bounded
+  `background_notification_outbox` and appends the exact
+  `background-job.notification-recorded/0.1` session event in the same transaction.
+  Rows bind exact job/request/state/generation, lifecycle event sequence, canonical
+  JSON/hash, creation/record times, and fixed `recorded`/zero-attempt/false-authority
+  delivery state. Identical retries remain idempotent after later job transitions;
+  stale first writes, conflicts, event failure, projection/event/lifecycle tampering,
+  and more than 10,000 records fail closed. Internal session-scoped keyset inspection
+  is read-only, v11-to-v12 uses the WAL-consistent backup, and terminal session purge
+  removes jobs, outbox rows, and events together. Scheduler production, AAP/Qt
+  inspection and settings, delivery transitions/retry/confirmation, platform APIs and
+  permissions, localization/privacy review, and cross-platform evidence remain absent;
+  keep `21.9` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is
@@ -740,7 +750,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user-gesture ID for explicit approvals; it refuses read-only or managed-denied
   Git actions before SQLite mutation. This remains an internal foundation, not an
   AAP/Qt approval bridge or native execution grant.
-- `WorkbenchStore` schema version 11 now persists canonical projects and roots plus
+- `WorkbenchStore` schema version 12 now persists canonical projects and roots plus
   Chat/Work sessions with project binding, environment identity, new/resume/fork
   lineage, and active/archived/failed/interrupted status. Work sessions require a
   project, lineage parents must match project and mode, archive/unarchive is
@@ -748,9 +758,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   have bounded idempotency/input hashes and terminal states; items have session
   sequences, turn binding, bounded redacted JSON payloads, and content hashes with
   tamper/gap replay checks. Transactional
-  v1/v2/v3/v4/v5/v6/v7/v8/v9/v10-to-v11 migrations pass; the v3
+  v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11-to-v12 migrations pass; the v3
   path preserves existing events while allowing projectless Chat event streams, and
-  v4 adds only the durable Blob schema. The v11 background-job and scheduler-lease projections are
+  v4 adds only the durable Blob schema. The v11 background-job and scheduler-lease
+  projections plus the v12 notification outbox are
   internal, bounded, content-free canonical contract JSON, event-backed,
   generation-CAS protected, startup-verified, and unreachable from AAP/Qt. Extensions,
   model profiles, Git checkpoint projections, and complete scheduler/recovery state
@@ -947,13 +958,14 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 385 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 389 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
 runtime budget-ledger, unified-execution-plan, durable-job lifecycle contracts, and
-schema-v11 job/lease persistence/CAS/migration/integrity fixtures, the owner-bound
+schema-v11 job/lease persistence/CAS/migration/integrity fixtures, the schema-v12
+notification outbox/event/paging/migration/purge fixtures, the owner-bound
 read-only scheduler recovery snapshot, durable lease/process-identity classification,
 the event-backed recovery-decision journal and semantic tamper checks, and Runtime-
 owned process-observation contract, the four-kind content-free notification-intent
@@ -962,10 +974,13 @@ child-handoff pinned-context authority, strict Git references, complete-source d
 detection, terminal normalization, image import/preview/assembly/release rollback,
 and source-loss fail-closed invariants.
 
-On 2026-07-20 the schema-v11 lease, recovery-decision, and notification-intent changes
-passed `agent_runtime_protocol`, all Rust counts above, strict Clippy, formatting,
-and `git diff --check`; the lease/recovery-decision changes also rebuilt the complete
-desktop target. The same full CTest attempt could not
+On 2026-07-20 the schema-v12 durable notification outbox passed all Rust counts above,
+strict Clippy, formatting, `git diff --check`, the complete desktop build, and CTest
+`agent_runtime_protocol`. Its focused evidence covers progressed-state idempotency,
+durable restart, stable paging/cursor validation, event/projection rollback, semantic
+tampering, v11-to-v12 backup migration, and session-purge cleanup. Task `21.9` remains
+unchecked because scheduler production, AAP/Qt and platform delivery are absent. The
+earlier full CTest attempt could not
 re-establish the 16-test desktop baseline because the remaining 15 test processes
 were killed at startup by the host under memory pressure; they produced no test
 assertion failure.
@@ -1164,7 +1179,7 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
 ## Migration Backup And Read-Only Recovery Boundary
 
 - OpenSpec `5.6` and `5.7` are complete. Every supported
-  v1/v2/v3/v4/v5/v6/v7/v8/v9/v10-to-v11
+  v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11-to-v12
   migration first uses SQLite Online Backup to capture a WAL-consistent logical
   snapshot, then normalizes it to a standalone `journal_mode=DELETE` database.
 - The private `migration-backups-v1` directory retains at most 16 bounded evidence
@@ -1175,7 +1190,7 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
   SHA-256, timestamp, and integrity state. Inventory and manifest reads are bounded.
   Partial files, invalid/unmanifested backups, tampered evidence, and unknown entries
   are preserved and reported; recovery never deletes uncertain evidence.
-- Every migration validates all required v9 tables and indexes inside its transaction before
+- Every migration validates all required v12 tables and indexes inside its transaction before
   advancing `user_version` and committing. A newer schema is never downgraded.
   Stable content-free error codes distinguish backup, configuration, schema,
   integrity, migration, and newer-version failures.
@@ -2063,8 +2078,8 @@ Implemented visual baseline:
 9. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
    permission policy and the production approval ledger. A trust acknowledgement must
    never become an implicit write, command, Hook, or network grant.
-10. Continue `21.9` with a durable notification outbox and read-only inspection,
-   then add reviewed platform permission/delivery settings. Continue `21.8` with
+10. Continue `21.9` with an AAP/Qt read-only outbox inspection surface, then add
+   reviewed platform permission/delivery settings. Continue `21.8` with
    read-only recovery inspection controls over the durable decision journal. Keep
    automatic lease acquisition/renewal, process adoption, retry, approval, recovery
    mutation, and dispatch unavailable until their permission, sandbox, budget, and

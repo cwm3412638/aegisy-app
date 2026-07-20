@@ -170,12 +170,12 @@ infers success: active work becomes interrupted, queued/paused/waiting states ar
 preserved, and retry is only eligible when the exact request pre-bound a safe
 boundary and has capacity. Decisions always set `automatic_retry:false` and
 `automatic_approval:false`; pause/resume cannot bypass schedule or retry backoff.
-Workbench schema v11 persists exact canonical request/state JSON, hashes, schedule
+Workbench schema v12 retains the v11 exact canonical request/state JSON, hashes, schedule
 metadata, generation, cancellation, attempts, and recovery ordering. Creation and
 generation-CAS updates commit with typed `background-job.*` session events; identical
 retries are idempotent, stale writers fail, event failure rolls back the projection,
 and startup performs a bounded integrity scan before the store becomes writable.
-Active jobs protect session deletion/retention. Schema v11 additionally persists one
+Active jobs protect session deletion/retention. The v11 foundation additionally persists one
 optional `background-job-scheduler-lease/0.1` per job. Its canonical JSON and
 redundant metadata bind the exact job/request/state generation, scheduler owner,
 lease generation, bounded acquire/renew/expiry times, optional verified process
@@ -244,8 +244,19 @@ creation time, while the full intent identity includes it.
 The record has no title, body, prompt, result body, or platform payload. It fixes
 `content_included:false`, `delivery_available:false`, `delivery_attempted:false`,
 and `platform_delivery_authority:false`; changing any delivery flag or bound identity
-invalidates the record. No AAP method, durable outbox, Qt setting, operating-system
-permission request, or macOS/Windows notification call consumes it yet.
+invalidates the record. Workbench schema v12 persists one canonical record per stable
+deduplication identity in `background_notification_outbox` and appends the matching
+`background-job.notification-recorded/0.1` session event in the same transaction.
+The projection binds the exact lifecycle event sequence, request/state/generation,
+canonical JSON/hash, creation/record times, and fixed `recorded`/zero-attempt/false-
+authority delivery state. Identical retries remain idempotent after the job advances;
+conflicting evidence, stale first writes, event failure, projection/event mismatch, or
+missing lifecycle evidence fail closed. Startup validates at most 10,000 records, and
+session purge removes the job, outbox record, and event atomically. An internal
+session-scoped cursor inspection is read-only and ordered by record time descending;
+it is not advertised through AAP. No Qt setting, scheduler producer, delivery retry,
+operating-system permission request, or macOS/Windows notification call consumes the
+outbox yet.
 
 ## Replay And Reconnect
 

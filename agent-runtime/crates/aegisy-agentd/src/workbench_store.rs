@@ -1,6 +1,9 @@
 use crate::background_job::{
     BackgroundJobRequest, BackgroundJobState, BackgroundJobStatus, JobCancellationState,
 };
+use crate::background_notification::{
+    BackgroundNotificationIntent, SCHEMA_VERSION as BACKGROUND_NOTIFICATION_SCHEMA_VERSION,
+};
 use crate::background_recovery_decision::{
     BackgroundRecoveryDecision, SCHEMA_VERSION as BACKGROUND_RECOVERY_DECISION_SCHEMA_VERSION,
 };
@@ -38,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = 72 * 1024;
@@ -55,6 +58,9 @@ const MAX_SESSION_SEARCH_TERM_BYTES: usize = 256;
 const MAX_OPERATION_RECONCILIATIONS: usize = 10_000;
 const MAX_BACKGROUND_JOBS: usize = 10_000;
 const MAX_BACKGROUND_RECOVERY_DECISIONS: usize = 10_000;
+const MAX_BACKGROUND_NOTIFICATIONS: usize = 10_000;
+const MAX_BACKGROUND_NOTIFICATION_PAGE: usize = 100;
+const MAX_BACKGROUND_NOTIFICATION_JSON_BYTES: usize = 32 * 1024;
 const MAX_BACKGROUND_JOB_PAGE: usize = 1_000;
 const MAX_BACKGROUND_JOB_JSON_BYTES: usize = 64 * 1024;
 const MAX_BACKGROUND_LEASE_JSON_BYTES: usize = 32 * 1024;
@@ -95,6 +101,11 @@ const REQUIRED_BACKGROUND_LEASE_TABLES: [&str; 1] = ["background_job_leases"];
 const REQUIRED_BACKGROUND_LEASE_INDEXES: [&str; 2] = [
     "background_job_leases_recovery_idx",
     "background_job_leases_owner_idx",
+];
+const REQUIRED_BACKGROUND_NOTIFICATION_TABLES: [&str; 1] = ["background_notification_outbox"];
+const REQUIRED_BACKGROUND_NOTIFICATION_INDEXES: [&str; 2] = [
+    "background_notification_outbox_session_idx",
+    "background_notification_outbox_job_idx",
 ];
 const REQUIRED_SESSION_SEARCH_INDEXES: [&str; 3] = [
     "sessions_status_updated_idx",
@@ -411,6 +422,50 @@ const BACKGROUND_LEASE_SCHEMA_SQL: &str = "
     CREATE INDEX IF NOT EXISTS background_job_leases_owner_idx
         ON background_job_leases(owner_identity, status, expires_at_ms, job_id);
 ";
+const BACKGROUND_NOTIFICATION_OUTBOX_SCHEMA_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS background_notification_outbox (
+        intent_identity TEXT PRIMARY KEY,
+        deduplication_identity TEXT NOT NULL UNIQUE,
+        job_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        root_id TEXT NOT NULL,
+        request_identity TEXT NOT NULL,
+        state_identity TEXT NOT NULL,
+        job_generation INTEGER NOT NULL CHECK(job_generation >= 0),
+        kind TEXT NOT NULL CHECK(kind IN (
+            'completed','failed','approval_needed','budget_exhausted'
+        )),
+        job_status TEXT NOT NULL CHECK(job_status IN (
+            'queued','running','pause_requested','paused','waiting_approval',
+            'cancelling','completed','failed','cancelled','interrupted'
+        )),
+        intent_json TEXT NOT NULL,
+        intent_sha256 TEXT NOT NULL CHECK(length(intent_sha256) = 64),
+        intent_bytes INTEGER NOT NULL CHECK(intent_bytes > 0),
+        event_sequence INTEGER NOT NULL CHECK(event_sequence >= 1),
+        delivery_state TEXT NOT NULL CHECK(delivery_state = 'recorded'),
+        delivery_attempt_count INTEGER NOT NULL CHECK(delivery_attempt_count = 0),
+        content_included INTEGER NOT NULL CHECK(content_included = 0),
+        delivery_available INTEGER NOT NULL CHECK(delivery_available = 0),
+        delivery_attempted INTEGER NOT NULL CHECK(delivery_attempted = 0),
+        platform_delivery_authority INTEGER NOT NULL CHECK(platform_delivery_authority = 0),
+        created_at_ms INTEGER NOT NULL CHECK(created_at_ms > 0),
+        recorded_at_ms INTEGER NOT NULL CHECK(recorded_at_ms >= created_at_ms),
+        UNIQUE(session_id, event_sequence),
+        FOREIGN KEY(job_id) REFERENCES background_jobs(job_id) ON DELETE CASCADE,
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+        FOREIGN KEY(project_id, root_id) REFERENCES project_roots(project_id, root_id),
+        FOREIGN KEY(session_id, event_sequence)
+            REFERENCES events(session_id, sequence) ON DELETE CASCADE
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS background_notification_outbox_session_idx
+        ON background_notification_outbox(
+            session_id, recorded_at_ms DESC, intent_identity ASC
+        );
+    CREATE INDEX IF NOT EXISTS background_notification_outbox_job_idx
+        ON background_notification_outbox(job_id, recorded_at_ms, intent_identity);
+";
 
 #[derive(Debug)]
 pub struct WorkbenchStore {
@@ -475,6 +530,47 @@ pub struct StoredBackgroundRecoveryDecision {
     pub schema_version: String,
     pub decision: BackgroundRecoveryDecision,
     pub event_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundNotificationDeliveryState {
+    Recorded,
+}
+
+impl BackgroundNotificationDeliveryState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Recorded => "recorded",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredBackgroundNotification {
+    pub schema_version: String,
+    pub intent: BackgroundNotificationIntent,
+    pub intent_hash: ContentHash,
+    pub event_sequence: u64,
+    pub delivery_state: BackgroundNotificationDeliveryState,
+    pub delivery_attempt_count: u32,
+    pub recorded_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackgroundNotificationCursor {
+    pub recorded_at_ms: u64,
+    pub intent_identity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackgroundNotificationPage {
+    pub schema_version: String,
+    pub notifications: Vec<StoredBackgroundNotification>,
+    pub next_cursor: Option<BackgroundNotificationCursor>,
+    pub content_included: bool,
+    pub delivery_mutation_available: bool,
+    pub platform_delivery_authority: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3697,6 +3793,219 @@ impl WorkbenchStore {
                 Ok(stored)
             })
             .collect()
+    }
+
+    pub fn enqueue_background_notification(
+        &mut self,
+        intent: &BackgroundNotificationIntent,
+        recorded_at_ms: u64,
+    ) -> Result<StoredBackgroundNotification, WorkbenchStoreError> {
+        intent
+            .validate()
+            .map_err(|cause| coded_error(cause.code, cause.message))?;
+        if recorded_at_ms == 0 || recorded_at_ms < intent.created_at_ms {
+            return Err(coded_error(
+                "background-notification-record-time-invalid",
+                "background notification record time precedes its intent",
+            ));
+        }
+        self.ensure_session_writable(&intent.session_id)?;
+        if let Some(existing) = query_background_notification_by_dedup_optional(
+            &self.connection,
+            &intent.deduplication_identity,
+        )? {
+            if same_background_notification_evidence(&existing.intent, intent) {
+                return Ok(existing);
+            }
+            return Err(coded_error(
+                "background-notification-dedup-conflict",
+                "background notification deduplication identity conflicts",
+            ));
+        }
+        validate_current_background_notification_binding(&self.connection, intent)?;
+
+        let (intent_json, intent_hash) = background_notification_json(intent)?;
+        let transaction =
+            self.begin_database_write("cannot start background notification transaction")?;
+        if let Some(existing) = query_background_notification_by_dedup_optional(
+            &transaction,
+            &intent.deduplication_identity,
+        )? {
+            if same_background_notification_evidence(&existing.intent, intent) {
+                transaction
+                    .commit()
+                    .map_err(|_| error("cannot commit idempotent background notification"))?;
+                return Ok(existing);
+            }
+            return Err(coded_error(
+                "background-notification-dedup-conflict",
+                "background notification deduplication identity conflicts under the write lock",
+            ));
+        }
+        validate_current_background_notification_binding(&transaction, intent)?;
+        let count = query_global_count(
+            &transaction,
+            "SELECT COUNT(*) FROM background_notification_outbox",
+            "cannot count background notification outbox",
+        )?;
+        if count >= MAX_BACKGROUND_NOTIFICATIONS as u64 {
+            return Err(coded_error(
+                "background-notification-outbox-limit",
+                "background notification outbox reached its durable limit",
+            ));
+        }
+        let event_id = derived_event_id(
+            "background-job-notification-recorded",
+            intent.deduplication_identity.as_bytes(),
+        );
+        let event = append_event_tx(
+            &transaction,
+            EventInput {
+                session_id: &intent.session_id,
+                event_id: &event_id,
+                timestamp_ms: recorded_at_ms,
+                correlation_id: &intent.deduplication_identity,
+                event_kind: "background-job.notification-recorded",
+                project_id: Some(&intent.project_id),
+                operation_id: &intent.job_id,
+                generation: intent.job_generation,
+                payload: json!({
+                    "schema_version": "background-job.notification-recorded/0.1",
+                    "intent": intent,
+                    "intent_hash": intent_hash,
+                    "delivery_state": "recorded",
+                    "delivery_attempt_count": 0,
+                    "content_included": false,
+                    "delivery_available": false,
+                    "delivery_attempted": false,
+                    "platform_delivery_authority": false,
+                    "recorded_at_ms": recorded_at_ms,
+                }),
+            },
+        )?;
+        insert_background_notification_tx(
+            &transaction,
+            intent,
+            &intent_json,
+            &intent_hash,
+            event.sequence,
+            recorded_at_ms,
+        )?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit background notification"))?;
+        self.load_background_notification(&intent.intent_identity)
+    }
+
+    pub fn load_background_notification(
+        &self,
+        intent_identity: &str,
+    ) -> Result<StoredBackgroundNotification, WorkbenchStoreError> {
+        query_background_notification_optional(&self.connection, intent_identity)?.ok_or_else(
+            || {
+                coded_error(
+                    "background-notification-not-found",
+                    "background notification does not exist",
+                )
+            },
+        )
+    }
+
+    pub fn inspect_background_notifications(
+        &self,
+        session_id: &str,
+        cursor: Option<&BackgroundNotificationCursor>,
+        limit: usize,
+    ) -> Result<BackgroundNotificationPage, WorkbenchStoreError> {
+        validate_identifier(session_id, "background notification session ID")?;
+        self.load_session(session_id)?;
+        if limit == 0 || limit > MAX_BACKGROUND_NOTIFICATION_PAGE {
+            return Err(coded_error(
+                "background-notification-page-limit",
+                "background notification page limit is invalid",
+            ));
+        }
+        if let Some(cursor) = cursor {
+            validate_background_notification_cursor(cursor)?;
+            let anchor = self.load_background_notification(&cursor.intent_identity)?;
+            if anchor.intent.session_id != session_id
+                || anchor.recorded_at_ms != cursor.recorded_at_ms
+            {
+                return Err(coded_error(
+                    "background-notification-cursor-invalid",
+                    "background notification cursor does not bind this session",
+                ));
+            }
+        }
+
+        let mut intent_ids = if let Some(cursor) = cursor {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT intent_identity FROM background_notification_outbox
+                     WHERE session_id = ?1
+                       AND (
+                           recorded_at_ms < ?2 OR
+                           (recorded_at_ms = ?2 AND intent_identity > ?3)
+                       )
+                     ORDER BY recorded_at_ms DESC, intent_identity ASC LIMIT ?4",
+                )
+                .map_err(|_| error("cannot prepare background notification page"))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        session_id,
+                        to_i64(cursor.recorded_at_ms, "background notification cursor time")?,
+                        cursor.intent_identity,
+                        limit as i64 + 1,
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|_| error("cannot read background notification page"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|_| error("background notification page row is invalid"))?
+        } else {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT intent_identity FROM background_notification_outbox
+                     WHERE session_id = ?1
+                     ORDER BY recorded_at_ms DESC, intent_identity ASC LIMIT ?2",
+                )
+                .map_err(|_| error("cannot prepare background notification page"))?;
+            let rows = statement
+                .query_map(params![session_id, limit as i64 + 1], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(|_| error("cannot read background notification page"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|_| error("background notification page row is invalid"))?
+        };
+        let has_more = intent_ids.len() > limit;
+        if has_more {
+            intent_ids.truncate(limit);
+        }
+        let notifications = intent_ids
+            .iter()
+            .map(|intent_identity| self.load_background_notification(intent_identity))
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_cursor = has_more.then(|| {
+            let last = notifications
+                .last()
+                .expect("a truncated notification page cannot be empty");
+            BackgroundNotificationCursor {
+                recorded_at_ms: last.recorded_at_ms,
+                intent_identity: last.intent.intent_identity.clone(),
+            }
+        });
+        Ok(BackgroundNotificationPage {
+            schema_version: "background-notification-page/0.1".into(),
+            notifications,
+            next_cursor,
+            content_included: false,
+            delivery_mutation_available: false,
+            platform_delivery_authority: false,
+        })
     }
 
     pub fn load_session_runtime_binding(
@@ -9380,6 +9689,22 @@ impl WorkbenchStore {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
+        if version == 11 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start background notification schema migration"))?;
+            transaction
+                .execute_batch(BACKGROUND_NOTIFICATION_OUTBOX_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply background notification schema migration"))?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit background notification schema migration"));
+        }
         if version == 10 {
             let transaction = self
                 .connection
@@ -9388,6 +9713,9 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(BACKGROUND_LEASE_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply background lease schema migration"))?;
+            transaction
+                .execute_batch(BACKGROUND_NOTIFICATION_OUTBOX_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply background notification schema migration"))?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -9717,7 +10045,8 @@ impl WorkbenchStore {
         verify_required_schema(&self.connection)?;
         verify_background_job_store(&self.connection)?;
         verify_background_scheduler_lease_store(&self.connection)?;
-        verify_background_recovery_decision_store(&self.connection)
+        verify_background_recovery_decision_store(&self.connection)?;
+        verify_background_notification_store(&self.connection)
     }
 
     fn load_decision(
@@ -10891,6 +11220,600 @@ fn verify_background_recovery_decision_store(
         validate_historical_background_recovery_binding(connection, &stored.decision)?;
     }
     Ok(())
+}
+
+fn background_notification_json(
+    intent: &BackgroundNotificationIntent,
+) -> Result<(String, ContentHash), WorkbenchStoreError> {
+    intent
+        .validate()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    let json = serde_json::to_string(intent)
+        .map_err(|_| error("cannot serialize background notification intent"))?;
+    if json.is_empty() || json.len() > MAX_BACKGROUND_NOTIFICATION_JSON_BYTES {
+        return Err(coded_error(
+            "background-notification-json-limit",
+            "background notification intent JSON exceeds its durable bound",
+        ));
+    }
+    validate_persisted_text(&json, "background notification intent JSON")?;
+    let hash = ContentHash::for_bytes(json.as_bytes());
+    Ok((json, hash))
+}
+
+fn same_background_notification_evidence(
+    previous: &BackgroundNotificationIntent,
+    next: &BackgroundNotificationIntent,
+) -> bool {
+    previous.deduplication_identity == next.deduplication_identity
+        && previous.kind == next.kind
+        && previous.job_id == next.job_id
+        && previous.session_id == next.session_id
+        && previous.project_id == next.project_id
+        && previous.root_id == next.root_id
+        && previous.request_identity == next.request_identity
+        && previous.state_identity == next.state_identity
+        && previous.job_generation == next.job_generation
+        && previous.job_status == next.job_status
+        && previous.evidence_identity == next.evidence_identity
+        && previous.budget_snapshot_identity == next.budget_snapshot_identity
+        && previous.exhausted_dimensions == next.exhausted_dimensions
+}
+
+fn validate_current_background_notification_binding(
+    connection: &Connection,
+    intent: &BackgroundNotificationIntent,
+) -> Result<(), WorkbenchStoreError> {
+    intent
+        .validate()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    let job = query_background_job_optional(connection, &intent.job_id)?.ok_or_else(|| {
+        coded_error(
+            "background-notification-job-missing",
+            "background notification job is missing",
+        )
+    })?;
+    let request_identity = job
+        .request
+        .identity()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    let state_identity = job
+        .state
+        .identity(&job.request)
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    if job.request.session_id != intent.session_id
+        || job.request.project_id != intent.project_id
+        || job.request.root_id != intent.root_id
+        || request_identity != intent.request_identity
+        || state_identity != intent.state_identity
+        || job.state.generation != intent.job_generation
+        || job.state.status != intent.job_status
+        || intent.created_at_ms < job.state.updated_at_ms
+    {
+        return Err(coded_error(
+            "background-notification-job-state-stale",
+            "background notification does not bind the current durable job state",
+        ));
+    }
+    validate_background_notification_lifecycle_binding(connection, intent)
+}
+
+fn validate_historical_background_notification_binding(
+    connection: &Connection,
+    intent: &BackgroundNotificationIntent,
+) -> Result<(), WorkbenchStoreError> {
+    intent
+        .validate()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    let job = query_background_job_optional(connection, &intent.job_id)?.ok_or_else(|| {
+        coded_error(
+            "background-notification-job-missing",
+            "background notification job is missing",
+        )
+    })?;
+    let request_identity = job
+        .request
+        .identity()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    if job.request.session_id != intent.session_id
+        || job.request.project_id != intent.project_id
+        || job.request.root_id != intent.root_id
+        || request_identity != intent.request_identity
+        || intent.created_at_ms < job.request.created_at_ms
+    {
+        return Err(coded_error(
+            "background-notification-history-binding-invalid",
+            "background notification history does not bind its durable job",
+        ));
+    }
+    validate_background_notification_lifecycle_binding(connection, intent)
+}
+
+fn validate_background_notification_lifecycle_binding(
+    connection: &Connection,
+    intent: &BackgroundNotificationIntent,
+) -> Result<(), WorkbenchStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT sequence FROM events
+             WHERE session_id = ?1 AND operation_id = ?2 AND generation = ?3
+               AND event_kind GLOB 'background-job.*'
+             ORDER BY sequence ASC LIMIT 65",
+        )
+        .map_err(|_| error("cannot prepare background notification lifecycle binding"))?;
+    let sequences = statement
+        .query_map(
+            params![
+                intent.session_id,
+                intent.job_id,
+                to_i64(
+                    intent.job_generation,
+                    "background notification job generation"
+                )?,
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|_| error("cannot read background notification lifecycle binding"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("background notification lifecycle row is invalid"))?;
+    drop(statement);
+    if sequences.len() > 64 {
+        return Err(coded_error(
+            "background-notification-lifecycle-limit",
+            "background notification lifecycle evidence exceeds its bound",
+        ));
+    }
+    for sequence in sequences {
+        let event = query_event_at_sequence(
+            connection,
+            &intent.session_id,
+            to_u64(sequence, "background notification lifecycle sequence")?,
+        )?;
+        if event.payload.get("schema_version").and_then(Value::as_str)
+            != Some("background-job-lifecycle-event/0.1")
+        {
+            continue;
+        }
+        let job_id = event.payload.get("job_id").and_then(Value::as_str);
+        let request_identity = event
+            .payload
+            .get("request_identity")
+            .and_then(Value::as_str);
+        let state_identity = event.payload.get("state_identity").and_then(Value::as_str);
+        let status = event.payload.get("status").and_then(Value::as_str);
+        let generation = event.payload.get("generation").and_then(Value::as_u64);
+        if job_id.is_none()
+            || request_identity.is_none()
+            || state_identity.is_none()
+            || status.is_none()
+            || generation.is_none()
+        {
+            return Err(coded_error(
+                "background-notification-lifecycle-event-invalid",
+                "background notification lifecycle event is invalid",
+            ));
+        }
+        if job_id == Some(intent.job_id.as_str())
+            && request_identity == Some(intent.request_identity.as_str())
+            && state_identity == Some(intent.state_identity.as_str())
+            && status == Some(intent.job_status.as_str())
+            && generation == Some(intent.job_generation)
+        {
+            return Ok(());
+        }
+    }
+    Err(coded_error(
+        "background-notification-lifecycle-evidence-missing",
+        "background notification has no matching durable job lifecycle evidence",
+    ))
+}
+
+fn insert_background_notification_tx(
+    transaction: &Transaction<'_>,
+    intent: &BackgroundNotificationIntent,
+    intent_json: &str,
+    intent_hash: &ContentHash,
+    event_sequence: u64,
+    recorded_at_ms: u64,
+) -> Result<(), WorkbenchStoreError> {
+    let (canonical_json, canonical_hash) = background_notification_json(intent)?;
+    if canonical_json != intent_json || &canonical_hash != intent_hash {
+        return Err(error(
+            "background notification durable hash changed before insertion",
+        ));
+    }
+    transaction
+        .execute(
+            "INSERT INTO background_notification_outbox (
+                intent_identity, deduplication_identity, job_id, session_id,
+                project_id, root_id, request_identity, state_identity,
+                job_generation, kind, job_status, intent_json, intent_sha256,
+                intent_bytes, event_sequence, delivery_state,
+                delivery_attempt_count, content_included, delivery_available,
+                delivery_attempted, platform_delivery_authority,
+                created_at_ms, recorded_at_ms
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                ?12, ?13, ?14, ?15, 'recorded', 0, 0, 0, 0, 0, ?16, ?17
+             )",
+            params![
+                intent.intent_identity,
+                intent.deduplication_identity,
+                intent.job_id,
+                intent.session_id,
+                intent.project_id,
+                intent.root_id,
+                intent.request_identity,
+                intent.state_identity,
+                to_i64(
+                    intent.job_generation,
+                    "background notification job generation"
+                )?,
+                intent.kind.as_str(),
+                intent.job_status.as_str(),
+                intent_json,
+                intent_hash.sha256,
+                to_i64(intent_hash.bytes, "background notification intent bytes")?,
+                to_i64(event_sequence, "background notification event sequence")?,
+                to_i64(
+                    intent.created_at_ms,
+                    "background notification creation time"
+                )?,
+                to_i64(recorded_at_ms, "background notification record time")?,
+            ],
+        )
+        .map_err(|_| error("cannot insert durable background notification"))?;
+    Ok(())
+}
+
+fn query_background_notification_by_dedup_optional(
+    connection: &Connection,
+    deduplication_identity: &str,
+) -> Result<Option<StoredBackgroundNotification>, WorkbenchStoreError> {
+    validate_identity_text(
+        deduplication_identity,
+        "background notification deduplication identity",
+    )?;
+    let intent_identity = connection
+        .query_row(
+            "SELECT intent_identity FROM background_notification_outbox
+             WHERE deduplication_identity = ?1",
+            [deduplication_identity],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| error("cannot read background notification deduplication binding"))?;
+    intent_identity
+        .map(|identity| query_background_notification_optional(connection, &identity))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn query_background_notification_optional(
+    connection: &Connection,
+    intent_identity: &str,
+) -> Result<Option<StoredBackgroundNotification>, WorkbenchStoreError> {
+    validate_background_notification_identity(intent_identity)?;
+    let row = connection
+        .query_row(
+            "SELECT deduplication_identity, job_id, session_id, project_id, root_id,
+                    request_identity, state_identity, job_generation, kind, job_status,
+                    intent_json, intent_sha256, intent_bytes, event_sequence,
+                    delivery_state, delivery_attempt_count, content_included,
+                    delivery_available, delivery_attempted, platform_delivery_authority,
+                    created_at_ms, recorded_at_ms
+             FROM background_notification_outbox WHERE intent_identity = ?1",
+            [intent_identity],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, i64>(13)?,
+                    row.get::<_, String>(14)?,
+                    row.get::<_, i64>(15)?,
+                    row.get::<_, i64>(16)?,
+                    row.get::<_, i64>(17)?,
+                    row.get::<_, i64>(18)?,
+                    row.get::<_, i64>(19)?,
+                    row.get::<_, i64>(20)?,
+                    row.get::<_, i64>(21)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot read durable background notification"))?;
+    let Some((
+        deduplication_identity,
+        job_id,
+        session_id,
+        project_id,
+        root_id,
+        request_identity,
+        state_identity,
+        job_generation,
+        kind,
+        job_status,
+        intent_json,
+        intent_sha256,
+        intent_bytes,
+        event_sequence,
+        delivery_state,
+        delivery_attempt_count,
+        content_included,
+        delivery_available,
+        delivery_attempted,
+        platform_delivery_authority,
+        created_at_ms,
+        recorded_at_ms,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    if intent_json.is_empty() || intent_json.len() > MAX_BACKGROUND_NOTIFICATION_JSON_BYTES {
+        return Err(coded_error(
+            "background-notification-durable-json-invalid",
+            "durable background notification JSON is outside its bounds",
+        ));
+    }
+    let intent: BackgroundNotificationIntent = serde_json::from_str(&intent_json)
+        .map_err(|_| error("durable background notification intent is invalid"))?;
+    intent
+        .validate()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    let (canonical_json, canonical_hash) = background_notification_json(&intent)?;
+    let stored_hash = ContentHash {
+        sha256: intent_sha256,
+        bytes: to_u64(intent_bytes, "background notification intent bytes")?,
+    };
+    let event_sequence = to_u64(event_sequence, "background notification event sequence")?;
+    let recorded_at_ms = to_u64(recorded_at_ms, "background notification record time")?;
+    if intent.intent_identity != intent_identity
+        || intent.deduplication_identity != deduplication_identity
+        || intent.job_id != job_id
+        || intent.session_id != session_id
+        || intent.project_id != project_id
+        || intent.root_id != root_id
+        || intent.request_identity != request_identity
+        || intent.state_identity != state_identity
+        || intent.job_generation
+            != to_u64(job_generation, "background notification job generation")?
+        || intent.kind.as_str() != kind
+        || intent.job_status.as_str() != job_status
+        || canonical_json != intent_json
+        || canonical_hash != stored_hash
+        || delivery_state != BackgroundNotificationDeliveryState::Recorded.as_str()
+        || delivery_attempt_count != 0
+        || content_included != 0
+        || delivery_available != 0
+        || delivery_attempted != 0
+        || platform_delivery_authority != 0
+        || intent.created_at_ms != to_u64(created_at_ms, "background notification creation time")?
+        || recorded_at_ms < intent.created_at_ms
+    {
+        return Err(coded_error(
+            "background-notification-durable-integrity-invalid",
+            "durable background notification metadata failed integrity validation",
+        ));
+    }
+    let stored = StoredBackgroundNotification {
+        schema_version: "stored-background-notification/0.1".into(),
+        intent,
+        intent_hash: stored_hash,
+        event_sequence,
+        delivery_state: BackgroundNotificationDeliveryState::Recorded,
+        delivery_attempt_count: 0,
+        recorded_at_ms,
+    };
+    let event = query_event_at_sequence(connection, &session_id, event_sequence)?;
+    let event_stored = parse_background_notification_event(&event)?;
+    if event_stored != stored {
+        return Err(coded_error(
+            "background-notification-event-projection-mismatch",
+            "background notification event and outbox projection do not match",
+        ));
+    }
+    validate_historical_background_notification_binding(connection, &stored.intent)?;
+    Ok(Some(stored))
+}
+
+fn parse_background_notification_event(
+    event: &WorkbenchEvent,
+) -> Result<StoredBackgroundNotification, WorkbenchStoreError> {
+    if event.event_kind != "background-job.notification-recorded"
+        || event.payload.get("schema_version").and_then(Value::as_str)
+            != Some("background-job.notification-recorded/0.1")
+    {
+        return Err(coded_error(
+            "background-notification-event-schema-invalid",
+            "background notification event schema is invalid",
+        ));
+    }
+    let intent = event
+        .payload
+        .get("intent")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<BackgroundNotificationIntent>(value).ok())
+        .ok_or_else(|| {
+            coded_error(
+                "background-notification-event-intent-invalid",
+                "background notification event intent is invalid",
+            )
+        })?;
+    intent
+        .validate()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    let intent_hash = event
+        .payload
+        .get("intent_hash")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ContentHash>(value).ok())
+        .ok_or_else(|| {
+            coded_error(
+                "background-notification-event-hash-invalid",
+                "background notification event hash is invalid",
+            )
+        })?;
+    let (_, canonical_hash) = background_notification_json(&intent)?;
+    let recorded_at_ms = event
+        .payload
+        .get("recorded_at_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            coded_error(
+                "background-notification-event-time-invalid",
+                "background notification event time is invalid",
+            )
+        })?;
+    let expected_event_id = derived_event_id(
+        "background-job-notification-recorded",
+        intent.deduplication_identity.as_bytes(),
+    );
+    if intent.schema_version != BACKGROUND_NOTIFICATION_SCHEMA_VERSION
+        || canonical_hash != intent_hash
+        || event.session_id != intent.session_id
+        || event.project_id.as_deref() != Some(intent.project_id.as_str())
+        || event.operation_id != intent.job_id
+        || event.correlation_id != intent.deduplication_identity
+        || event.generation != intent.job_generation
+        || event.timestamp_ms != recorded_at_ms
+        || event.event_id != expected_event_id
+        || recorded_at_ms < intent.created_at_ms
+        || event.payload.get("delivery_state").and_then(Value::as_str) != Some("recorded")
+        || event
+            .payload
+            .get("delivery_attempt_count")
+            .and_then(Value::as_u64)
+            != Some(0)
+        || event
+            .payload
+            .get("content_included")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || event
+            .payload
+            .get("delivery_available")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || event
+            .payload
+            .get("delivery_attempted")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || event
+            .payload
+            .get("platform_delivery_authority")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err(coded_error(
+            "background-notification-event-identity-invalid",
+            "background notification event identity is invalid",
+        ));
+    }
+    Ok(StoredBackgroundNotification {
+        schema_version: "stored-background-notification/0.1".into(),
+        intent,
+        intent_hash,
+        event_sequence: event.sequence,
+        delivery_state: BackgroundNotificationDeliveryState::Recorded,
+        delivery_attempt_count: 0,
+        recorded_at_ms,
+    })
+}
+
+fn verify_background_notification_store(
+    connection: &Connection,
+) -> Result<(), WorkbenchStoreError> {
+    let outbox_count = query_global_count(
+        connection,
+        "SELECT COUNT(*) FROM background_notification_outbox",
+        "cannot count background notification outbox during integrity verification",
+    )?;
+    let event_count = query_global_count(
+        connection,
+        "SELECT COUNT(*) FROM events
+         WHERE event_kind = 'background-job.notification-recorded'",
+        "cannot count background notification events during integrity verification",
+    )?;
+    if outbox_count > MAX_BACKGROUND_NOTIFICATIONS as u64
+        || event_count > MAX_BACKGROUND_NOTIFICATIONS as u64
+        || outbox_count != event_count
+    {
+        return Err(coded_error(
+            "background-notification-outbox-limit",
+            "background notification outbox or event count is invalid",
+        ));
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT intent_identity FROM background_notification_outbox
+             ORDER BY intent_identity LIMIT ?1",
+        )
+        .map_err(|_| error("cannot prepare background notification verification"))?;
+    let intent_ids = statement
+        .query_map([MAX_BACKGROUND_NOTIFICATIONS as i64 + 1], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|_| error("cannot read background notification verification"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("background notification verification row is invalid"))?;
+    drop(statement);
+    if intent_ids.len() > MAX_BACKGROUND_NOTIFICATIONS {
+        return Err(coded_error(
+            "background-notification-outbox-limit",
+            "background notification verification exceeds its bound",
+        ));
+    }
+    for intent_identity in intent_ids {
+        query_background_notification_optional(connection, &intent_identity)?.ok_or_else(|| {
+            coded_error(
+                "background-notification-integrity-race",
+                "background notification disappeared during verification",
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_background_notification_identity(value: &str) -> Result<(), WorkbenchStoreError> {
+    let valid = value
+        .strip_prefix("background-job-notification-intent:sha256:")
+        .is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        });
+    if !valid {
+        return Err(coded_error(
+            "background-notification-identity-invalid",
+            "background notification intent identity is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_background_notification_cursor(
+    cursor: &BackgroundNotificationCursor,
+) -> Result<(), WorkbenchStoreError> {
+    if cursor.recorded_at_ms == 0 {
+        return Err(coded_error(
+            "background-notification-cursor-invalid",
+            "background notification cursor time is invalid",
+        ));
+    }
+    validate_background_notification_identity(&cursor.intent_identity)
 }
 
 fn background_scheduler_lease_event_kind(
@@ -12341,7 +13264,10 @@ fn apply_session_search_indexes(connection: &Connection) -> Result<(), Workbench
         .map_err(|_| error("cannot apply background job schema migration"))?;
     connection
         .execute_batch(BACKGROUND_LEASE_SCHEMA_SQL)
-        .map_err(|_| error("cannot apply background lease schema migration"))
+        .map_err(|_| error("cannot apply background lease schema migration"))?;
+    connection
+        .execute_batch(BACKGROUND_NOTIFICATION_OUTBOX_SCHEMA_SQL)
+        .map_err(|_| error("cannot apply background notification schema migration"))
 }
 
 fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreError> {
@@ -12356,6 +13282,7 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         .chain(REQUIRED_RUNTIME_BINDING_TABLES)
         .chain(REQUIRED_BACKGROUND_JOB_TABLES)
         .chain(REQUIRED_BACKGROUND_LEASE_TABLES)
+        .chain(REQUIRED_BACKGROUND_NOTIFICATION_TABLES)
     {
         let exists: Option<String> = connection
             .query_row(
@@ -12413,6 +13340,22 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         if exists.as_deref() != Some(index) {
             return Err(error(
                 "workbench database background lease indexes are incomplete",
+            ));
+        }
+    }
+    for index in REQUIRED_BACKGROUND_NOTIFICATION_INDEXES {
+        let exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot verify workbench background notification indexes"))?;
+        if exists.as_deref() != Some(index) {
+            return Err(error(
+                "workbench database background notification indexes are incomplete",
             ));
         }
     }
@@ -13808,6 +14751,9 @@ fn coded_error(code: impl Into<String>, message: impl Into<String>) -> Workbench
 mod tests {
     use super::*;
     use crate::background_job::{JobRetryPolicy, JobSchedule, JobScheduleKind};
+    use crate::background_notification::{
+        BackgroundNotificationIntent, BackgroundNotificationKind,
+    };
     use crate::background_recovery_decision::BackgroundRecoveryDecision;
     use crate::background_scheduler::BackgroundJobScheduler;
     use crate::background_scheduler_lease::{
@@ -14972,6 +15918,371 @@ mod tests {
     }
 
     #[test]
+    fn background_notification_outbox_is_durable_idempotent_and_paged() {
+        let root = Root::new("background-notification-durable");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (request, mut state) =
+            create_background_job_fixture(&mut store, &root, "notification-durable-job");
+        store.create_background_job(&request, &state).unwrap();
+
+        let queued = state.clone();
+        state.start(&request, 1_300).unwrap();
+        store
+            .update_background_job_state(&request, &queued, &state)
+            .unwrap();
+        let running = state.clone();
+        let approval = background_job_identity("approval:sha256:", 'f');
+        state.wait_for_approval(&request, &approval, 1_400).unwrap();
+        store
+            .update_background_job_state(&request, &running, &state)
+            .unwrap();
+        let approval_intent =
+            BackgroundNotificationIntent::from_job_state(&request, &state, 1_450).unwrap();
+        let approval_record = store
+            .enqueue_background_notification(&approval_intent, 1_500)
+            .unwrap();
+        assert_eq!(
+            approval_record.intent.kind,
+            BackgroundNotificationKind::ApprovalNeeded
+        );
+
+        let waiting = state.clone();
+        state
+            .resume_after_approval(&request, &approval, 1_600)
+            .unwrap();
+        store
+            .update_background_job_state(&request, &waiting, &state)
+            .unwrap();
+        let running = state.clone();
+        state
+            .complete(
+                &request,
+                &background_job_identity("artifact:sha256:", 'a'),
+                &background_job_identity("job-evidence:sha256:", 'b'),
+                1_700,
+            )
+            .unwrap();
+        store
+            .update_background_job_state(&request, &running, &state)
+            .unwrap();
+        let completed_intent =
+            BackgroundNotificationIntent::from_job_state(&request, &state, 1_750).unwrap();
+        let completed_record = store
+            .enqueue_background_notification(&completed_intent, 1_800)
+            .unwrap();
+        assert_eq!(
+            store
+                .enqueue_background_notification(&approval_intent, 1_850)
+                .unwrap(),
+            approval_record
+        );
+        let later_intent =
+            BackgroundNotificationIntent::from_job_state(&request, &state, 1_875).unwrap();
+        assert_ne!(
+            later_intent.intent_identity,
+            completed_intent.intent_identity
+        );
+        assert_eq!(
+            later_intent.deduplication_identity,
+            completed_intent.deduplication_identity
+        );
+        assert_eq!(
+            store
+                .enqueue_background_notification(&later_intent, 1_900)
+                .unwrap(),
+            completed_record
+        );
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM background_notification_outbox",
+                "count",
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM events
+                 WHERE event_kind = 'background-job.notification-recorded'",
+                "count",
+            )
+            .unwrap(),
+            2
+        );
+
+        let first = store
+            .inspect_background_notifications(&request.session_id, None, 1)
+            .unwrap();
+        assert_eq!(
+            first.notifications.as_slice(),
+            std::slice::from_ref(&completed_record)
+        );
+        assert!(!first.content_included);
+        assert!(!first.delivery_mutation_available);
+        assert!(!first.platform_delivery_authority);
+        let second = store
+            .inspect_background_notifications(&request.session_id, first.next_cursor.as_ref(), 1)
+            .unwrap();
+        assert_eq!(
+            second.notifications.as_slice(),
+            std::slice::from_ref(&approval_record)
+        );
+        assert!(second.next_cursor.is_none());
+        let mut forged_cursor = first.next_cursor.unwrap();
+        forged_cursor.recorded_at_ms += 1;
+        assert_eq!(
+            store
+                .inspect_background_notifications(&request.session_id, Some(&forged_cursor), 1)
+                .unwrap_err()
+                .code,
+            "background-notification-cursor-invalid"
+        );
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .load_background_notification(&completed_record.intent.intent_identity)
+                .unwrap(),
+            completed_record
+        );
+        assert_eq!(
+            reopened
+                .load_background_notification(&approval_record.intent.intent_identity)
+                .unwrap(),
+            approval_record
+        );
+    }
+
+    #[test]
+    fn background_notification_rejects_stale_state_and_rolls_back_event_sequence() {
+        let root = Root::new("background-notification-rollback");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (request, mut state) =
+            create_background_job_fixture(&mut store, &root, "notification-rollback-job");
+        store.create_background_job(&request, &state).unwrap();
+        let queued = state.clone();
+        state.start(&request, 1_300).unwrap();
+        store
+            .update_background_job_state(&request, &queued, &state)
+            .unwrap();
+        let running = state.clone();
+        let approval = background_job_identity("approval:sha256:", 'c');
+        state.wait_for_approval(&request, &approval, 1_400).unwrap();
+        store
+            .update_background_job_state(&request, &running, &state)
+            .unwrap();
+        let stale_intent =
+            BackgroundNotificationIntent::from_job_state(&request, &state, 1_450).unwrap();
+        let waiting = state.clone();
+        state
+            .resume_after_approval(&request, &approval, 1_500)
+            .unwrap();
+        store
+            .update_background_job_state(&request, &waiting, &state)
+            .unwrap();
+        assert_eq!(
+            store
+                .enqueue_background_notification(&stale_intent, 1_600)
+                .unwrap_err()
+                .code,
+            "background-notification-job-state-stale"
+        );
+
+        let running = state.clone();
+        state
+            .complete(
+                &request,
+                &background_job_identity("artifact:sha256:", 'd'),
+                &background_job_identity("job-evidence:sha256:", 'e'),
+                1_700,
+            )
+            .unwrap();
+        store
+            .update_background_job_state(&request, &running, &state)
+            .unwrap();
+        let intent = BackgroundNotificationIntent::from_job_state(&request, &state, 1_750).unwrap();
+        let next_sequence_before: i64 = store
+            .connection
+            .query_row(
+                "SELECT next_sequence FROM session_sequences WHERE session_id = ?1",
+                [&request.session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_background_notification_outbox
+                 BEFORE INSERT ON background_notification_outbox
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .enqueue_background_notification(&intent, 1_800)
+            .is_err());
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM background_notification_outbox",
+                "count",
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM events
+                 WHERE event_kind = 'background-job.notification-recorded'",
+                "count",
+            )
+            .unwrap(),
+            0
+        );
+        let next_sequence_after: i64 = store
+            .connection
+            .query_row(
+                "SELECT next_sequence FROM session_sequences WHERE session_id = ?1",
+                [&request.session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(next_sequence_after, next_sequence_before);
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_background_notification_outbox;")
+            .unwrap();
+        store
+            .enqueue_background_notification(&intent, 1_800)
+            .unwrap();
+    }
+
+    #[test]
+    fn background_notification_projection_and_lifecycle_tampering_fail_startup() {
+        let projection_root = Root::new("background-notification-projection-tamper");
+        let mut store = WorkbenchStore::open(&projection_root.path).unwrap();
+        let (request, mut state) = create_background_job_fixture(
+            &mut store,
+            &projection_root,
+            "notification-projection-job",
+        );
+        store.create_background_job(&request, &state).unwrap();
+        let queued = state.clone();
+        state.start(&request, 1_300).unwrap();
+        store
+            .update_background_job_state(&request, &queued, &state)
+            .unwrap();
+        let running = state.clone();
+        state
+            .complete(
+                &request,
+                &background_job_identity("artifact:sha256:", 'f'),
+                &background_job_identity("job-evidence:sha256:", 'a'),
+                1_400,
+            )
+            .unwrap();
+        store
+            .update_background_job_state(&request, &running, &state)
+            .unwrap();
+        let intent = BackgroundNotificationIntent::from_job_state(&request, &state, 1_450).unwrap();
+        store
+            .enqueue_background_notification(&intent, 1_500)
+            .unwrap();
+        let later_intent =
+            BackgroundNotificationIntent::from_job_state(&request, &state, 1_475).unwrap();
+        let later_json = serde_json::to_string(&later_intent).unwrap();
+        let later_hash = ContentHash::for_bytes(later_json.as_bytes());
+        store
+            .connection
+            .execute(
+                "UPDATE background_notification_outbox SET
+                    intent_identity = ?1, intent_json = ?2, intent_sha256 = ?3,
+                    intent_bytes = ?4, created_at_ms = ?5
+                 WHERE deduplication_identity = ?6",
+                params![
+                    later_intent.intent_identity,
+                    later_json,
+                    later_hash.sha256,
+                    later_hash.bytes as i64,
+                    later_intent.created_at_ms as i64,
+                    later_intent.deduplication_identity,
+                ],
+            )
+            .unwrap();
+        drop(store);
+        assert_eq!(
+            WorkbenchStore::open(&projection_root.path)
+                .unwrap_err()
+                .code,
+            "workbench-database-integrity-failed"
+        );
+
+        let lifecycle_root = Root::new("background-notification-lifecycle-tamper");
+        let mut store = WorkbenchStore::open(&lifecycle_root.path).unwrap();
+        let (request, mut state) = create_background_job_fixture(
+            &mut store,
+            &lifecycle_root,
+            "notification-lifecycle-job",
+        );
+        store.create_background_job(&request, &state).unwrap();
+        let queued = state.clone();
+        state.start(&request, 1_300).unwrap();
+        store
+            .update_background_job_state(&request, &queued, &state)
+            .unwrap();
+        let running = state.clone();
+        state
+            .complete(
+                &request,
+                &background_job_identity("artifact:sha256:", 'b'),
+                &background_job_identity("job-evidence:sha256:", 'c'),
+                1_400,
+            )
+            .unwrap();
+        store
+            .update_background_job_state(&request, &running, &state)
+            .unwrap();
+        let intent = BackgroundNotificationIntent::from_job_state(&request, &state, 1_450).unwrap();
+        store
+            .enqueue_background_notification(&intent, 1_500)
+            .unwrap();
+        let lifecycle_json: String = store
+            .connection
+            .query_row(
+                "SELECT payload_json FROM events
+                 WHERE event_kind = 'background-job.completed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut lifecycle: Value = serde_json::from_str(&lifecycle_json).unwrap();
+        lifecycle["state_identity"] =
+            Value::String(background_job_identity("background-job-state:sha256:", 'd'));
+        let tampered_json = serde_json::to_string(&lifecycle).unwrap();
+        let tampered_hash = ContentHash::for_bytes(tampered_json.as_bytes());
+        store
+            .connection
+            .execute(
+                "UPDATE events SET payload_json = ?1, payload_sha256 = ?2,
+                    payload_bytes = ?3 WHERE event_kind = 'background-job.completed'",
+                params![
+                    tampered_json,
+                    tampered_hash.sha256,
+                    tampered_hash.bytes as i64,
+                ],
+            )
+            .unwrap();
+        drop(store);
+        assert_eq!(
+            WorkbenchStore::open(&lifecycle_root.path).unwrap_err().code,
+            "workbench-database-integrity-failed"
+        );
+    }
+
+    #[test]
     fn background_scheduler_lease_is_atomic_generation_cas_and_durable() {
         let root = Root::new("background-lease-durable");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
@@ -15529,12 +16840,33 @@ mod tests {
         );
 
         let queued = state.clone();
-        state.request_cancel(&request, 1_300).unwrap();
+        state.start(&request, 1_300).unwrap();
+        store
+            .update_background_job_state(&request, &queued, &state)
+            .unwrap();
+        let running = state.clone();
+        let approval = background_job_identity("approval:sha256:", 'f');
+        state.wait_for_approval(&request, &approval, 1_400).unwrap();
+        store
+            .update_background_job_state(&request, &running, &state)
+            .unwrap();
+        let intent = BackgroundNotificationIntent::from_job_state(&request, &state, 1_450).unwrap();
+        store
+            .enqueue_background_notification(&intent, 1_500)
+            .unwrap();
+        let waiting = state.clone();
+        state.request_cancel(&request, 1_600).unwrap();
         let cancelling = state.clone();
         store
-            .update_background_job_state(&request, &queued, &cancelling)
+            .update_background_job_state(&request, &waiting, &cancelling)
             .unwrap();
-        state.acknowledge_cancel(&request, None, 1_400).unwrap();
+        state
+            .acknowledge_cancel(
+                &request,
+                Some(&background_job_identity("job-evidence:sha256:", 'a')),
+                1_700,
+            )
+            .unwrap();
         store
             .update_background_job_state(&request, &cancelling, &state)
             .unwrap();
@@ -15545,6 +16877,138 @@ mod tests {
         assert!(!terminal
             .blocking_reasons
             .contains(&"session-background-job-active".into()));
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM background_notification_outbox",
+                "count",
+            )
+            .unwrap(),
+            1
+        );
+        let undo_window_ms = MIN_SESSION_DELETE_UNDO_MS;
+        store
+            .schedule_session_deletion(
+                "background-job-deletion-purge",
+                &request.session_id,
+                SessionDeletionScope::SessionOnly,
+                &terminal.plan_hash,
+                1_800,
+                undo_window_ms,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .sweep_session_deletions(1_800 + undo_window_ms)
+                .unwrap()
+                .purged,
+            1
+        );
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM background_jobs",
+                "count",
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM background_notification_outbox",
+                "count",
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM events
+                 WHERE event_kind = 'background-job.notification-recorded'",
+                "count",
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn upgrades_schema_v11_to_background_notification_outbox_after_backup() {
+        let root = Root::new("schema-v11-background-notifications");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "session-v11".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Preserved from v11".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        drop(store);
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE background_notification_outbox;
+                 PRAGMA user_version = 11;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        let version: i64 = reopened
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(
+            reopened.load_session("session-v11").unwrap().title,
+            "Preserved from v11"
+        );
+        for table in REQUIRED_BACKGROUND_NOTIFICATION_TABLES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                     )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing background notification table {table}");
+        }
+        for index in REQUIRED_BACKGROUND_NOTIFICATION_INDEXES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1
+                     )",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing background notification index {index}");
+        }
+        assert_eq!(
+            query_global_count(
+                &reopened.connection,
+                "SELECT COUNT(*) FROM background_notification_outbox",
+                "count",
+            )
+            .unwrap(),
+            0
+        );
+        let manifests = migration_backup_manifests(&root.path).unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].source_schema_version, 11);
+        assert_eq!(manifests[0].target_schema_version, SCHEMA_VERSION as u64);
     }
 
     #[test]

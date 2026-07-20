@@ -72,8 +72,11 @@ Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账�
 后台完成、失败、等待审批和预算耗尽现在另有内部
 `background-job-notification-intent/0.1` 证据契约。它只保存作业/预算身份、状态、
 耗尽维度和稳定去重键，不保存通知标题、正文或任务内容，并固定声明平台投递不可用、
-未尝试且无投递权限。当前尚无持久通知 outbox、macOS/Windows 通知调用、权限设置、
-Qt 管理界面或重启投递，因此这不代表系统通知功能已经可用。
+未尝试且无投递权限。Workbench schema v12 已把 intent 与
+`background-job.notification-recorded` 事件原子写入持久 outbox，同一去重身份只记录
+一次，并在重启时校验最多 10,000 条；内部只读分页检查不会发送通知。当前仍无 AAP/Qt
+入口、调度器自动生产、macOS/Windows 通知调用、权限设置、投递重试或确认状态，因此
+这不代表系统通知功能已经可用。
 
 ## 系统要求
 
