@@ -213,7 +213,19 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   a process handle: after Runtime restart the in-memory registry is absent and the job
   remains manual rather than being adopted. Automatic lease acquisition/renewal,
   authoritative approval, automatic recovery transitions, notification, AAP/Qt
-  controls, and cross-platform endurance remain absent; keep `21.8` unchecked.
+  controls, and cross-platform endurance remain absent. Internal
+  `background-job-recovery-decision/0.1` now converts one fully revalidated scheduler
+  snapshot entry into a content-free decision bound to exact job status/cancellation,
+  request/state generation, scheduler owner/generation/snapshot, lease, process
+  observation, bounded blocker codes/hash, and timing identities. `WorkbenchStore`
+  rechecks the current job and lease before and under its write transaction, then
+  appends an idempotent
+  `background-job.recovery-reviewed` session event. The bounded 10,000-event journal
+  is semantically revalidated at startup; event failure rolls back sequence allocation
+  and hash-consistent semantic tampering fails startup. Decisions fix retry, approval,
+  takeover, dispatch, and mutation authority to false and never change job or lease
+  state. Automatic decision production/consumption, recovery mutation, notifications,
+  AAP/Qt inspection, and cross-platform endurance remain absent; keep `21.8` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is
@@ -921,7 +933,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 375 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 378 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
@@ -929,17 +941,18 @@ the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
 runtime budget-ledger, unified-execution-plan, durable-job lifecycle contracts, and
 schema-v11 job/lease persistence/CAS/migration/integrity fixtures, the owner-bound
 read-only scheduler recovery snapshot, durable lease/process-identity classification,
-and Runtime-owned process-observation
-contract, plus diagnostic, terminal, Git, and
+the event-backed recovery-decision journal and semantic tamper checks, and Runtime-
+owned process-observation contract, plus diagnostic, terminal, Git, and
 child-handoff pinned-context authority, strict Git references, complete-source drift
 detection, terminal normalization, image import/preview/assembly/release rollback,
 and source-loss fail-closed invariants.
 
-On 2026-07-20 the schema-v11 lease change rebuilt the complete desktop target and
-passed `agent_runtime_protocol`, all Rust counts above, strict Clippy, formatting,
-and `git diff --check`. The same full CTest attempt could not re-establish the
-16-test desktop baseline because the remaining 15 test processes were killed at
-startup by the host under memory pressure; they produced no test assertion failure.
+On 2026-07-20 the schema-v11 lease and recovery-decision changes rebuilt the complete
+desktop target and passed `agent_runtime_protocol`, all Rust counts above, strict
+Clippy, formatting, and `git diff --check`. The same full CTest attempt could not
+re-establish the 16-test desktop baseline because the remaining 15 test processes
+were killed at startup by the host under memory pressure; they produced no test
+assertion failure.
 The Node-backed OpenSpec CLI was likewise killed with exit 137 before validation.
 Treat the earlier 16-test run as the last complete desktop baseline and rerun CTest
 and strict OpenSpec validation when host memory is available.
@@ -2034,8 +2047,8 @@ Implemented visual baseline:
 9. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
    permission policy and the production approval ledger. A trust acknowledgement must
    never become an implicit write, command, Hook, or network grant.
-10. Continue `21.8` with explicit recovery-decision journaling, notification
-   contracts, and read-only inspection controls. Keep automatic lease acquisition/
+10. Continue `21.8` with notification contracts and read-only recovery inspection
+   controls over the durable decision journal. Keep automatic lease acquisition/
    renewal, process adoption, retry, approval, recovery mutation, and dispatch
    unavailable until their permission, sandbox, budget, and release gates pass.
 11. Continue with the next unchecked database/event, durable project/session, typed

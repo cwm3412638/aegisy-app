@@ -189,6 +189,20 @@ Background job lifecycle evidence:
   host lacks Windows SDK headers; a Windows runner is still required. Automatic
   lease acquisition/renewal, restart process adoption, recovery mutation,
   dispatch, notifications, AAP, and Qt remain absent.
+- Internal `background-job-recovery-decision/0.1` converts one fully validated
+  scheduler snapshot entry into a content-free audit record. It binds exact job
+  status/cancellation and generation, scheduler owner/generation/snapshot/entry,
+  lease and optional process-observation evidence, bounded blocker codes/hash/count,
+  and timing.
+  Store append rechecks current job and lease evidence before and under the write
+  transaction, is idempotent for the same snapshot entry, and emits only
+  `background-job.recovery-reviewed`. The journal is capped at 10,000 events and
+  semantically revalidated on startup. Three fixtures prove durable restart replay
+  and idempotency, forged-snapshot/stale-job rejection, event/sequence rollback,
+  and startup rejection of hash-consistent semantic tampering. Every decision keeps
+  automatic retry/approval/takeover, dispatch, and mutation authority false and
+  never changes job, lease, or process state. Automatic production/consumption,
+  recovery actions, notifications, AAP, and Qt remain absent.
 
 Current editor evidence:
 

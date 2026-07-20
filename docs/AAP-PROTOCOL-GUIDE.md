@@ -214,6 +214,21 @@ handle after restart, so restart remains manual rather than automatically adopti
 PID. No AAP method, Qt control, scheduler loop, notification, automatic lease
 acquisition/renewal, recovery mutation, or dispatch path consumes these records yet.
 
+Internal `background-job-recovery-decision/0.1` turns one validated scheduler entry
+into a content-free audit decision. It binds exact job status/cancellation and
+generation, scheduler owner/generation/snapshot/entry, lease evidence, optional
+process-observation identity, bounded blocker codes/hash/count, and
+observation/record times.
+`WorkbenchStore` rechecks the current durable job and lease before and under the
+write transaction, then appends an idempotent
+`background-job.recovery-reviewed` session event. At most 10,000 decision events are
+accepted and all are semantically revalidated on store open; event failure rolls back
+the sequence allocation and hash-consistent semantic tampering fails startup. Every
+decision fixes retry, approval, takeover, dispatch, and mutation authority to false.
+The journal does not transition a job, renew/release a lease, signal a process,
+notify a user, or authorize a later recovery action. Automatic decision production or
+consumption and AAP/Qt inspection remain unavailable.
+
 ## Replay And Reconnect
 
 The durable session stream is ordered by a session-local sequence. After a

@@ -1,6 +1,10 @@
 use crate::background_job::{
     BackgroundJobRequest, BackgroundJobState, BackgroundJobStatus, JobCancellationState,
 };
+use crate::background_recovery_decision::{
+    BackgroundRecoveryDecision, SCHEMA_VERSION as BACKGROUND_RECOVERY_DECISION_SCHEMA_VERSION,
+};
+use crate::background_scheduler::{BackgroundSchedulerSnapshot, SchedulerLeaseState};
 use crate::background_scheduler_lease::{BackgroundSchedulerLease, BackgroundSchedulerLeaseStatus};
 use crate::durable_blob::{
     available_space, sha256_hex, BlobFileError, DurableBlobFileStore, DurableBlobLocalFile,
@@ -50,6 +54,7 @@ const MAX_SESSION_SEARCH_LIMIT: usize = 100;
 const MAX_SESSION_SEARCH_TERM_BYTES: usize = 256;
 const MAX_OPERATION_RECONCILIATIONS: usize = 10_000;
 const MAX_BACKGROUND_JOBS: usize = 10_000;
+const MAX_BACKGROUND_RECOVERY_DECISIONS: usize = 10_000;
 const MAX_BACKGROUND_JOB_PAGE: usize = 1_000;
 const MAX_BACKGROUND_JOB_JSON_BYTES: usize = 64 * 1024;
 const MAX_BACKGROUND_LEASE_JSON_BYTES: usize = 32 * 1024;
@@ -463,6 +468,13 @@ pub struct StoredBackgroundSchedulerLease {
     pub schema_version: String,
     pub lease: BackgroundSchedulerLease,
     pub lease_hash: ContentHash,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredBackgroundRecoveryDecision {
+    pub schema_version: String,
+    pub decision: BackgroundRecoveryDecision,
+    pub event_sequence: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3549,6 +3561,142 @@ impl WorkbenchStore {
         job_id: &str,
     ) -> Result<Option<StoredBackgroundSchedulerLease>, WorkbenchStoreError> {
         query_background_scheduler_lease_optional(&self.connection, job_id)
+    }
+
+    pub fn append_background_recovery_decision(
+        &mut self,
+        snapshot: &BackgroundSchedulerSnapshot,
+        job_id: &str,
+        recorded_at_ms: u64,
+    ) -> Result<StoredBackgroundRecoveryDecision, WorkbenchStoreError> {
+        let decision = BackgroundRecoveryDecision::from_snapshot(snapshot, job_id, recorded_at_ms)
+            .map_err(|cause| coded_error(cause.code, cause.message))?;
+        self.ensure_session_writable(&decision.session_id)?;
+        validate_current_background_recovery_evidence(&self.connection, &decision)?;
+        if let Some(existing) = self.latest_background_recovery_decision(job_id)? {
+            if same_background_recovery_evidence(&existing.decision, &decision) {
+                return Ok(existing);
+            }
+        }
+
+        let transaction =
+            self.begin_database_write("cannot start background recovery decision transaction")?;
+        validate_current_background_recovery_evidence(&transaction, &decision)?;
+        let count = query_global_count(
+            &transaction,
+            "SELECT COUNT(*) FROM events
+             WHERE event_kind = 'background-job.recovery-reviewed'",
+            "cannot count background recovery decisions",
+        )?;
+        if count >= MAX_BACKGROUND_RECOVERY_DECISIONS as u64 {
+            return Err(coded_error(
+                "background-recovery-decision-limit",
+                "background recovery decision journal reached its durable limit",
+            ));
+        }
+        if let Some(existing) = query_latest_background_recovery_decision(&transaction, job_id)? {
+            if same_background_recovery_evidence(&existing.decision, &decision) {
+                transaction
+                    .commit()
+                    .map_err(|_| error("cannot commit idempotent background recovery decision"))?;
+                return Ok(existing);
+            }
+        }
+        let event_id = derived_event_id(
+            "background-job-recovery-reviewed",
+            decision.decision_identity.as_bytes(),
+        );
+        let event = append_event_tx(
+            &transaction,
+            EventInput {
+                session_id: &decision.session_id,
+                event_id: &event_id,
+                timestamp_ms: decision.recorded_at_ms,
+                correlation_id: &decision.decision_identity,
+                event_kind: "background-job.recovery-reviewed",
+                project_id: Some(&decision.project_id),
+                operation_id: &decision.job_id,
+                generation: decision.scheduler_generation,
+                payload: json!({
+                    "schema_version": "background-job.recovery-reviewed/0.1",
+                    "decision": decision,
+                }),
+            },
+        )?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit background recovery decision"))?;
+        Ok(StoredBackgroundRecoveryDecision {
+            schema_version: "stored-background-recovery-decision/0.1".into(),
+            decision,
+            event_sequence: event.sequence,
+        })
+    }
+
+    pub fn latest_background_recovery_decision(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<StoredBackgroundRecoveryDecision>, WorkbenchStoreError> {
+        query_latest_background_recovery_decision(&self.connection, job_id)
+    }
+
+    pub fn load_background_recovery_decisions(
+        &self,
+    ) -> Result<Vec<StoredBackgroundRecoveryDecision>, WorkbenchStoreError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT event.session_id, event.sequence
+                 FROM events AS event
+                 WHERE event.event_kind = 'background-job.recovery-reviewed'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM events AS newer
+                       WHERE newer.session_id = event.session_id
+                         AND newer.event_kind = 'background-job.recovery-reviewed'
+                         AND newer.operation_id = event.operation_id
+                         AND newer.sequence > event.sequence
+                   )
+                 ORDER BY event.sequence ASC
+                 LIMIT ?1",
+            )
+            .map_err(|_| error("cannot prepare background recovery decision scan"))?;
+        let rows = statement
+            .query_map([MAX_BACKGROUND_RECOVERY_DECISIONS as i64 + 1], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|_| error("cannot read background recovery decision scan"))?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (session_id, sequence) =
+                row.map_err(|_| error("background recovery decision row is invalid"))?;
+            events.push((
+                session_id,
+                to_u64(sequence, "background recovery decision event sequence")?,
+            ));
+        }
+        drop(statement);
+        if events.len() > MAX_BACKGROUND_RECOVERY_DECISIONS {
+            return Err(coded_error(
+                "background-recovery-decision-limit",
+                "background recovery decision scan exceeds its bound",
+            ));
+        }
+        events
+            .into_iter()
+            .map(|(session_id, sequence)| {
+                let event = self
+                    .read_session_events(&session_id, sequence.saturating_sub(1), 1)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| error("background recovery decision event is unavailable"))?;
+                let stored = parse_background_recovery_decision_event(&event)?;
+                validate_historical_background_recovery_binding(
+                    &self.connection,
+                    &stored.decision,
+                )?;
+                Ok(stored)
+            })
+            .collect()
     }
 
     pub fn load_session_runtime_binding(
@@ -9568,7 +9716,8 @@ impl WorkbenchStore {
         }
         verify_required_schema(&self.connection)?;
         verify_background_job_store(&self.connection)?;
-        verify_background_scheduler_lease_store(&self.connection)
+        verify_background_scheduler_lease_store(&self.connection)?;
+        verify_background_recovery_decision_store(&self.connection)
     }
 
     fn load_decision(
@@ -10438,6 +10587,308 @@ fn verify_background_scheduler_lease_store(
                 "durable background scheduler lease disappeared during verification",
             )
         })?;
+    }
+    Ok(())
+}
+
+fn validate_current_background_recovery_evidence(
+    connection: &Connection,
+    decision: &BackgroundRecoveryDecision,
+) -> Result<(), WorkbenchStoreError> {
+    decision
+        .validate()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    let job = query_background_job_optional(connection, &decision.job_id)?.ok_or_else(|| {
+        coded_error(
+            "background-recovery-job-missing",
+            "background recovery decision job is missing",
+        )
+    })?;
+    let request_identity = job
+        .request
+        .identity()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    let state_identity = job
+        .state
+        .identity(&job.request)
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    if job.request.session_id != decision.session_id
+        || job.request.project_id != decision.project_id
+        || job.request.root_id != decision.root_id
+        || request_identity != decision.request_identity
+        || state_identity != decision.state_identity
+        || job.state.generation != decision.job_generation
+        || job.state.status != decision.job_status
+        || job.state.cancellation != decision.cancellation
+        || (decision.next_eligible_at_ms.is_some()
+            && decision.next_eligible_at_ms != Some(job.state.next_eligible_at_ms))
+        || job.state.updated_at_ms > decision.observed_at_ms
+    {
+        return Err(coded_error(
+            "background-recovery-evidence-stale",
+            "background recovery decision no longer matches the durable job",
+        ));
+    }
+    let lease = query_background_scheduler_lease_optional(connection, &decision.job_id)?;
+    match (decision.lease_state, lease.as_ref()) {
+        (SchedulerLeaseState::Missing, None) => {}
+        (SchedulerLeaseState::Missing, Some(_)) | (_, None) => {
+            return Err(coded_error(
+                "background-recovery-lease-stale",
+                "background recovery decision lease evidence is stale",
+            ));
+        }
+        (_, Some(lease))
+            if decision.lease_identity.as_deref() == Some(lease.lease.lease_identity.as_str())
+                && decision.lease_generation == Some(lease.lease.lease_generation) => {}
+        _ => {
+            return Err(coded_error(
+                "background-recovery-lease-stale",
+                "background recovery decision lease evidence is stale",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_historical_background_recovery_binding(
+    connection: &Connection,
+    decision: &BackgroundRecoveryDecision,
+) -> Result<(), WorkbenchStoreError> {
+    decision
+        .validate()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    let job = query_background_job_optional(connection, &decision.job_id)?.ok_or_else(|| {
+        coded_error(
+            "background-recovery-job-missing",
+            "background recovery decision job is missing",
+        )
+    })?;
+    let request_identity = job
+        .request
+        .identity()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    if job.request.session_id != decision.session_id
+        || job.request.project_id != decision.project_id
+        || job.request.root_id != decision.root_id
+        || request_identity != decision.request_identity
+        || decision.observed_at_ms < job.state.created_at_ms
+        || decision.recorded_at_ms < job.request.created_at_ms
+    {
+        return Err(coded_error(
+            "background-recovery-history-binding-invalid",
+            "background recovery decision history does not bind its durable job",
+        ));
+    }
+    Ok(())
+}
+
+fn same_background_recovery_evidence(
+    previous: &BackgroundRecoveryDecision,
+    next: &BackgroundRecoveryDecision,
+) -> bool {
+    previous.job_id == next.job_id
+        && previous.scheduler_snapshot_identity == next.scheduler_snapshot_identity
+        && previous.scheduler_entry_identity == next.scheduler_entry_identity
+        && previous.disposition == next.disposition
+}
+
+fn query_latest_background_recovery_decision(
+    connection: &Connection,
+    job_id: &str,
+) -> Result<Option<StoredBackgroundRecoveryDecision>, WorkbenchStoreError> {
+    validate_identifier(job_id, "background recovery job ID")?;
+    let location = connection
+        .query_row(
+            "SELECT session_id, sequence FROM events
+             WHERE event_kind = 'background-job.recovery-reviewed'
+               AND operation_id = ?1
+             ORDER BY sequence DESC LIMIT 1",
+            [job_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(|_| error("cannot inspect background recovery decision"))?;
+    let Some((session_id, sequence)) = location else {
+        return Ok(None);
+    };
+    let event = query_event_at_sequence(
+        connection,
+        &session_id,
+        to_u64(sequence, "background recovery event sequence")?,
+    )?;
+    let stored = parse_background_recovery_decision_event(&event)?;
+    validate_historical_background_recovery_binding(connection, &stored.decision)?;
+    Ok(Some(stored))
+}
+
+fn parse_background_recovery_decision_event(
+    event: &WorkbenchEvent,
+) -> Result<StoredBackgroundRecoveryDecision, WorkbenchStoreError> {
+    if event.event_kind != "background-job.recovery-reviewed"
+        || event.payload.get("schema_version").and_then(Value::as_str)
+            != Some("background-job.recovery-reviewed/0.1")
+    {
+        return Err(coded_error(
+            "background-recovery-event-schema-invalid",
+            "background recovery decision event schema is invalid",
+        ));
+    }
+    let decision = event
+        .payload
+        .get("decision")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<BackgroundRecoveryDecision>(value).ok())
+        .ok_or_else(|| {
+            coded_error(
+                "background-recovery-event-decision-invalid",
+                "background recovery decision event payload is invalid",
+            )
+        })?;
+    decision
+        .validate()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    let expected_event_id = derived_event_id(
+        "background-job-recovery-reviewed",
+        decision.decision_identity.as_bytes(),
+    );
+    if decision.schema_version != BACKGROUND_RECOVERY_DECISION_SCHEMA_VERSION
+        || event.session_id != decision.session_id
+        || event.project_id.as_deref() != Some(decision.project_id.as_str())
+        || event.operation_id != decision.job_id
+        || event.correlation_id != decision.decision_identity
+        || event.generation != decision.scheduler_generation
+        || event.timestamp_ms != decision.recorded_at_ms
+        || event.event_id != expected_event_id
+    {
+        return Err(coded_error(
+            "background-recovery-event-identity-invalid",
+            "background recovery decision event identity is invalid",
+        ));
+    }
+    Ok(StoredBackgroundRecoveryDecision {
+        schema_version: "stored-background-recovery-decision/0.1".into(),
+        decision,
+        event_sequence: event.sequence,
+    })
+}
+
+fn query_event_at_sequence(
+    connection: &Connection,
+    session_id: &str,
+    sequence: u64,
+) -> Result<WorkbenchEvent, WorkbenchStoreError> {
+    validate_identifier(session_id, "event session ID")?;
+    let row = connection
+        .query_row(
+            "SELECT event_id, timestamp_ms, correlation_id, event_kind,
+                    project_id, operation_id, generation, payload_json,
+                    payload_sha256, payload_bytes
+             FROM events WHERE session_id = ?1 AND sequence = ?2",
+            params![session_id, to_i64(sequence, "event sequence")?],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot read event by sequence"))?
+        .ok_or_else(|| error("event does not exist at sequence"))?;
+    let (
+        event_id,
+        timestamp_ms,
+        correlation_id,
+        event_kind,
+        project_id,
+        operation_id,
+        generation,
+        payload_json,
+        payload_sha256,
+        payload_bytes,
+    ) = row;
+    let payload =
+        serde_json::from_str(&payload_json).map_err(|_| error("event payload JSON is invalid"))?;
+    validate_persisted_payload(&payload, "event payload")?;
+    let payload_hash = ContentHash {
+        sha256: payload_sha256,
+        bytes: to_u64(payload_bytes, "event payload byte count")?,
+    };
+    if ContentHash::for_bytes(payload_json.as_bytes()) != payload_hash {
+        return Err(error("event payload integrity check failed"));
+    }
+    Ok(WorkbenchEvent {
+        schema_version: "workbench-event/0.1".into(),
+        session_id: session_id.into(),
+        sequence,
+        event_id,
+        timestamp_ms: to_u64(timestamp_ms, "event timestamp")?,
+        correlation_id,
+        event_kind,
+        project_id,
+        operation_id,
+        generation: to_u64(generation, "event generation")?,
+        payload,
+        payload_hash,
+    })
+}
+
+fn verify_background_recovery_decision_store(
+    connection: &Connection,
+) -> Result<(), WorkbenchStoreError> {
+    let count = query_global_count(
+        connection,
+        "SELECT COUNT(*) FROM events
+         WHERE event_kind = 'background-job.recovery-reviewed'",
+        "cannot count background recovery decisions during integrity verification",
+    )?;
+    if count > MAX_BACKGROUND_RECOVERY_DECISIONS as u64 {
+        return Err(coded_error(
+            "background-recovery-decision-limit",
+            "background recovery decision journal exceeds its startup bound",
+        ));
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT session_id, sequence FROM events
+             WHERE event_kind = 'background-job.recovery-reviewed'
+             ORDER BY session_id, sequence LIMIT ?1",
+        )
+        .map_err(|_| error("cannot prepare background recovery decision verification"))?;
+    let rows = statement
+        .query_map([MAX_BACKGROUND_RECOVERY_DECISIONS as i64 + 1], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|_| error("cannot read background recovery decision verification"))?;
+    let mut locations = Vec::new();
+    for row in rows {
+        let (session_id, sequence) =
+            row.map_err(|_| error("background recovery decision location is invalid"))?;
+        locations.push((
+            session_id,
+            to_u64(sequence, "background recovery event sequence")?,
+        ));
+    }
+    drop(statement);
+    if locations.len() > MAX_BACKGROUND_RECOVERY_DECISIONS {
+        return Err(coded_error(
+            "background-recovery-decision-limit",
+            "background recovery decision verification exceeds its bound",
+        ));
+    }
+    for (session_id, sequence) in locations {
+        let event = query_event_at_sequence(connection, &session_id, sequence)?;
+        let stored = parse_background_recovery_decision_event(&event)?;
+        validate_historical_background_recovery_binding(connection, &stored.decision)?;
     }
     Ok(())
 }
@@ -13357,6 +13808,8 @@ fn coded_error(code: impl Into<String>, message: impl Into<String>) -> Workbench
 mod tests {
     use super::*;
     use crate::background_job::{JobRetryPolicy, JobSchedule, JobScheduleKind};
+    use crate::background_recovery_decision::BackgroundRecoveryDecision;
+    use crate::background_scheduler::BackgroundJobScheduler;
     use crate::background_scheduler_lease::{
         BackgroundSchedulerLeaseRebind, BackgroundSchedulerLeaseReleaseReason,
     };
@@ -14338,6 +14791,184 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn background_recovery_decision_is_event_backed_idempotent_and_durable() {
+        let root = Root::new("background-recovery-decision");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (request, state) =
+            create_background_job_fixture(&mut store, &root, "recovery-decision-job");
+        store.create_background_job(&request, &state).unwrap();
+        let owner = background_job_identity("scheduler-owner:sha256:", 'f');
+        let scheduler = BackgroundJobScheduler::load(&store, owner, 1_250, 10).unwrap();
+        let snapshot = scheduler.snapshot().unwrap();
+
+        let stored = store
+            .append_background_recovery_decision(&snapshot, &request.job_id, 1_300)
+            .unwrap();
+        assert_eq!(
+            stored.decision.disposition,
+            crate::background_recovery_decision::BackgroundRecoveryDisposition::AdmissionReviewRequired
+        );
+        assert!(!stored.decision.dispatch_authority);
+        assert!(!stored.decision.mutation_authority);
+        assert!(!stored.decision.automatic_retry);
+        assert!(!stored.decision.automatic_approval);
+        assert!(!stored.decision.automatic_takeover);
+        assert_eq!(stored.decision.lease_state, SchedulerLeaseState::Missing);
+        let mut semantic_tamper = stored.decision.clone();
+        semantic_tamper.disposition =
+            crate::background_recovery_decision::BackgroundRecoveryDisposition::MonitorOwnedProcess;
+        assert_eq!(
+            semantic_tamper.validate().unwrap_err().code,
+            "background-recovery-disposition-invalid"
+        );
+
+        let retried = store
+            .append_background_recovery_decision(&snapshot, &request.job_id, 1_400)
+            .unwrap();
+        assert_eq!(retried, stored);
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM events
+                 WHERE event_kind = 'background-job.recovery-reviewed'",
+                "count"
+            )
+            .unwrap(),
+            1
+        );
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .latest_background_recovery_decision(&request.job_id)
+                .unwrap()
+                .unwrap(),
+            stored
+        );
+        assert_eq!(
+            reopened.load_background_recovery_decisions().unwrap(),
+            [stored]
+        );
+    }
+
+    #[test]
+    fn background_recovery_decision_rejects_forged_snapshot_and_stale_job() {
+        let root = Root::new("background-recovery-stale");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (request, mut state) =
+            create_background_job_fixture(&mut store, &root, "recovery-stale-job");
+        store.create_background_job(&request, &state).unwrap();
+        let owner = background_job_identity("scheduler-owner:sha256:", 'f');
+        let scheduler = BackgroundJobScheduler::load(&store, owner, 1_250, 10).unwrap();
+        let snapshot = scheduler.snapshot().unwrap();
+
+        let mut forged = snapshot.clone();
+        forged.entries[0].dispatch_available = true;
+        assert_eq!(
+            BackgroundRecoveryDecision::from_snapshot(&forged, &request.job_id, 1_300)
+                .unwrap_err()
+                .code,
+            "background-recovery-snapshot-invalid"
+        );
+
+        let queued = state.clone();
+        state.start(&request, 1_300).unwrap();
+        store
+            .update_background_job_state(&request, &queued, &state)
+            .unwrap();
+        assert_eq!(
+            store
+                .append_background_recovery_decision(&snapshot, &request.job_id, 1_310)
+                .unwrap_err()
+                .code,
+            "background-recovery-evidence-stale"
+        );
+        assert!(store
+            .latest_background_recovery_decision(&request.job_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn background_recovery_event_failure_rolls_back_and_tamper_fails_startup() {
+        let root = Root::new("background-recovery-rollback");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (request, state) =
+            create_background_job_fixture(&mut store, &root, "recovery-rollback-job");
+        store.create_background_job(&request, &state).unwrap();
+        let scheduler = BackgroundJobScheduler::load(
+            &store,
+            background_job_identity("scheduler-owner:sha256:", 'f'),
+            1_250,
+            10,
+        )
+        .unwrap();
+        let snapshot = scheduler.snapshot().unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_background_recovery_event
+                 BEFORE INSERT ON events
+                 WHEN NEW.event_kind = 'background-job.recovery-reviewed'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .append_background_recovery_decision(&snapshot, &request.job_id, 1_300)
+            .is_err());
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM events
+                 WHERE event_kind = 'background-job.recovery-reviewed'",
+                "count"
+            )
+            .unwrap(),
+            0
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_background_recovery_event;")
+            .unwrap();
+        store
+            .append_background_recovery_decision(&snapshot, &request.job_id, 1_300)
+            .unwrap();
+
+        let payload_json: String = store
+            .connection
+            .query_row(
+                "SELECT payload_json FROM events
+                 WHERE event_kind = 'background-job.recovery-reviewed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut payload: Value = serde_json::from_str(&payload_json).unwrap();
+        payload["decision"]["automatic_retry"] = Value::Bool(true);
+        let tampered_json = serde_json::to_string(&payload).unwrap();
+        let tampered_hash = ContentHash::for_bytes(tampered_json.as_bytes());
+        store
+            .connection
+            .execute(
+                "UPDATE events SET payload_json = ?1, payload_sha256 = ?2,
+                    payload_bytes = ?3
+                 WHERE event_kind = 'background-job.recovery-reviewed'",
+                params![
+                    tampered_json,
+                    tampered_hash.sha256,
+                    tampered_hash.bytes as i64
+                ],
+            )
+            .unwrap();
+        drop(store);
+        assert_eq!(
+            WorkbenchStore::open(&root.path).unwrap_err().code,
+            "workbench-database-integrity-failed"
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::workbench_store::{StoredBackgroundJob, StoredBackgroundSchedulerLease
 use serde::{Deserialize, Serialize};
 use serde_json::to_vec;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const SCHEMA_VERSION: &str = "background-job-scheduler/0.2";
 const MAX_RECOVERY_JOBS: usize = 1_000;
@@ -140,6 +140,26 @@ pub struct BackgroundSchedulerSnapshot {
     pub dispatch_available: bool,
     pub entries: Vec<SchedulerRecoveryEntry>,
     pub snapshot_identity: String,
+}
+
+impl BackgroundSchedulerSnapshot {
+    pub fn validate(&self) -> Result<(), BackgroundSchedulerError> {
+        let expected = snapshot(
+            &self.owner_identity,
+            self.generation,
+            self.observed_at_ms,
+            self.process_observation_available,
+            self.durable_lease_available,
+            self.entries.clone(),
+        )?;
+        if expected != *self {
+            return Err(error(
+                "background-scheduler-snapshot-identity-invalid",
+                "scheduler snapshot identity is invalid",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -624,6 +644,41 @@ fn snapshot(
             "scheduler snapshot invariant is invalid",
         ));
     }
+    let mut job_ids = BTreeSet::new();
+    if entries.iter().any(|entry| {
+        !job_ids.insert(entry.job_id.as_str())
+            || [
+                &entry.job_id,
+                &entry.session_id,
+                &entry.project_id,
+                &entry.root_id,
+            ]
+            .into_iter()
+            .any(|value| !valid_identifier(value))
+            || !valid_identity(&entry.request_identity, "background-job:sha256:")
+            || !valid_identity(&entry.state_identity, "background-job-state:sha256:")
+            || entry.blockers.len() > 16
+            || entry
+                .blockers
+                .iter()
+                .any(|blocker| !valid_identifier(blocker))
+            || entry.lease_required != (entry.action != SchedulerRecoveryAction::TerminalReview)
+            || entry.approval_required != (entry.status == BackgroundJobStatus::WaitingApproval)
+            || entry.cancellation_acknowledgement_required
+                != (entry.cancellation == JobCancellationState::Requested)
+            || entry.next_eligible_at_ms.is_some()
+                != (entry.action == SchedulerRecoveryAction::AwaitSchedule)
+            || entry.lease_identity.as_deref().is_some_and(|value| {
+                !valid_identity(value, "background-job-scheduler-lease:sha256:")
+            })
+            || entry.lease_generation == Some(0)
+            || entry.lease_expires_at_ms == Some(0)
+    }) {
+        return Err(error(
+            "background-scheduler-entry-invalid",
+            "scheduler recovery entry invariant is invalid",
+        ));
+    }
     if entries.iter().any(|entry| {
         entry.dispatch_available
             || entry.automatic_retry
@@ -642,6 +697,13 @@ fn snapshot(
             !process_observation_available
                 || value.owner_identity != owner_identity
                 || value.observed_at_ms != observed_at_ms
+                || value.job_id != entry.job_id
+                || value.session_id != entry.session_id
+                || value.project_id != entry.project_id
+                || value.root_id != entry.root_id
+                || value.request_identity != entry.request_identity
+                || value.state_identity != entry.state_identity
+                || value.job_generation != entry.job_generation
                 || value.validate().is_err()
         }) || (process_observation_available
             && entry.process_observation_required
@@ -716,22 +778,46 @@ fn snapshot(
     })
 }
 
+pub fn recovery_entry_identity(
+    entry: &SchedulerRecoveryEntry,
+) -> Result<String, BackgroundSchedulerError> {
+    let bytes = to_vec(entry).map_err(|_| {
+        error(
+            "background-scheduler-entry-serialize-failed",
+            "scheduler recovery entry could not be serialized",
+        )
+    })?;
+    Ok(format!(
+        "background-job-scheduler-entry:sha256:{:x}",
+        Sha256::digest(bytes)
+    ))
+}
+
 fn validate_owner_identity(value: &str) -> Result<(), BackgroundSchedulerError> {
-    if value
-        .strip_prefix("scheduler-owner:sha256:")
-        .is_none_or(|hex| {
-            hex.len() != 64
-                || hex
-                    .bytes()
-                    .any(|byte| !byte.is_ascii_hexdigit() || byte.is_ascii_uppercase())
-        })
-    {
+    if !valid_identity(value, "scheduler-owner:sha256:") {
         return Err(error(
             "background-scheduler-owner-invalid",
             "scheduler owner identity is invalid",
         ));
     }
     Ok(())
+}
+
+fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
+}
+
+fn valid_identity(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
 }
 
 fn error(code: &'static str, message: &'static str) -> BackgroundSchedulerError {
@@ -895,6 +981,19 @@ mod tests {
         assert!(snapshot.entries[0]
             .blockers
             .contains(&"scheduler-lease-missing".into()));
+        assert_eq!(
+            super::snapshot(
+                &owner(),
+                2,
+                200,
+                false,
+                true,
+                vec![snapshot.entries[0].clone(), snapshot.entries[0].clone()],
+            )
+            .unwrap_err()
+            .code,
+            "background-scheduler-entry-invalid"
+        );
     }
 
     #[test]
@@ -1279,6 +1378,14 @@ mod tests {
         assert!(!observation.completion_inferred);
         assert!(!observation.dispatch_authority);
         assert!(!entry.dispatch_available);
+        let mut cross_job_entry = entry.clone();
+        cross_job_entry.job_id = "other-job".into();
+        assert_eq!(
+            super::snapshot(&owner(), 2, 220, true, true, vec![cross_job_entry])
+                .unwrap_err()
+                .code,
+            "background-scheduler-process-snapshot-invalid"
+        );
         let stored_lease = fixture
             .store
             .load_background_scheduler_lease(&request.job_id)
