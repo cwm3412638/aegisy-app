@@ -168,8 +168,13 @@ infers success: active work becomes interrupted, queued/paused/waiting states ar
 preserved, and retry is only eligible when the exact request pre-bound a safe
 boundary and has capacity. Decisions always set `automatic_retry:false` and
 `automatic_approval:false`; pause/resume cannot bypass schedule or retry backoff.
-No Workbench table/event, scheduler, process probe, notification, AAP method, or Qt
-control consumes these contracts yet.
+Workbench schema v10 persists exact canonical request/state JSON, hashes, schedule
+metadata, generation, cancellation, attempts, and recovery ordering. Creation and
+generation-CAS updates commit with typed `background-job.*` session events; identical
+retries are idempotent, stale writers fail, event failure rolls back the projection,
+and startup performs a bounded integrity scan before the store becomes writable.
+Active jobs protect session deletion/retention. No scheduler, process probe,
+notification, AAP method, Qt control, or execution path consumes these records yet.
 
 ## Replay And Reconnect
 

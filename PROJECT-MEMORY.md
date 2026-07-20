@@ -170,10 +170,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   infers success: active work becomes interrupted, waiting approval stays waiting,
   and retry eligibility requires the pre-bound safe boundary and attempt capacity;
   no automatic retry or approval is emitted. Pause/resume cannot bypass schedule or
-  retry backoff. The contract is not persisted or exposed; Workbench schema/jobs,
-  typed session events, scheduler ownership, process recovery probes, notification,
-  AAP/Qt controls, and cross-platform endurance remain absent; keep `21.8`
-  unchecked.
+  retry backoff. Workbench schema v10 now persists canonical request/state JSON,
+  SHA-256 identities, generation, schedule/recovery metadata, cancellation, and
+  attempts in a bounded `background_jobs` projection. Create and generation-CAS
+  updates commit with typed `background-job.*` session events; identical retries
+  are idempotent, stale writers fail, event failure rolls back the projection, and
+  startup revalidates at most 10,000 records before the store becomes writable.
+  Active jobs block session deletion/retention and terminal records purge with the
+  session. Scheduler/process ownership, authoritative approval, automatic recovery,
+  notification, AAP/Qt controls, and cross-platform endurance remain absent; keep
+  `21.8` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is
@@ -674,17 +680,20 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user-gesture ID for explicit approvals; it refuses read-only or managed-denied
   Git actions before SQLite mutation. This remains an internal foundation, not an
   AAP/Qt approval bridge or native execution grant.
-- `WorkbenchStore` schema version 9 now persists canonical projects and roots plus
+- `WorkbenchStore` schema version 10 now persists canonical projects and roots plus
   Chat/Work sessions with project binding, environment identity, new/resume/fork
   lineage, and active/archived/failed/interrupted status. Work sessions require a
   project, lineage parents must match project and mode, archive/unarchive is
   timestamp-guarded, and reopen plus v1-to-v2 migration fixtures pass. Turns now
   have bounded idempotency/input hashes and terminal states; items have session
   sequences, turn binding, bounded redacted JSON payloads, and content hashes with
-  tamper/gap replay checks. Transactional v1/v2/v3/v4/v5/v6/v7/v8-to-v9 migrations pass; the v3
+  tamper/gap replay checks. Transactional v1/v2/v3/v4/v5/v6/v7/v8/v9-to-v10 migrations pass; the v3
   path preserves existing events while allowing projectless Chat event streams, and
-  v4 adds only the durable Blob schema. Jobs, extensions, model profiles, and Git
-  checkpoint projections are still future work. Runtime durable
+  v4 adds only the durable Blob schema. The v10 background-job projection is
+  internal, bounded, content-free canonical contract JSON, event-backed,
+  generation-CAS protected, startup-verified, and unreachable from AAP/Qt. Extensions,
+  model profiles, Git checkpoint projections, and complete scheduler/recovery state
+  are still future work. Runtime durable
   replay is now partially integrated: the Qt host's platform data root enables
   SQLite persistence for project/session creation, Preview turns, and completed
   Codex items/terminal states; `session/list` exposes bounded metadata filters and
@@ -877,15 +886,16 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 351 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 355 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
-runtime budget-ledger, unified-execution-plan, and durable-job lifecycle contracts,
-and diagnostic, terminal, Git, and child-handoff pinned-context authority, strict
-Git references, complete-source drift detection, terminal normalization, image
-import/preview/assembly/release rollback, and source-loss fail-closed invariants.
+runtime budget-ledger, unified-execution-plan, durable-job lifecycle contracts, and
+schema-v10 job persistence/CAS/migration/integrity fixtures, plus diagnostic,
+terminal, Git, and child-handoff pinned-context authority, strict Git references,
+complete-source drift detection, terminal normalization, image import/preview/
+assembly/release rollback, and source-loss fail-closed invariants.
 
 ## Session History Boundary
 
@@ -1070,7 +1080,7 @@ import/preview/assembly/release rollback, and source-loss fail-closed invariants
 ## Migration Backup And Read-Only Recovery Boundary
 
 - OpenSpec `5.6` and `5.7` are complete. Every supported
-  v1/v2/v3/v4/v5/v6/v7/v8-to-v9
+  v1/v2/v3/v4/v5/v6/v7/v8/v9-to-v10
   migration first uses SQLite Online Backup to capture a WAL-consistent logical
   snapshot, then normalizes it to a standalone `journal_mode=DELETE` database.
 - The private `migration-backups-v1` directory retains at most 16 bounded evidence

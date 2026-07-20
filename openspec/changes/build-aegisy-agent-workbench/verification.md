@@ -139,9 +139,20 @@ Background job lifecycle evidence:
   retry or approve. Schedule/retry backoff and cancellation cannot be bypassed by
   pause/resume/start. Six fixtures cover completion, pause/approval, cancellation
   race, idempotent bounded retry, queued/running restart, invalid schedule, and
-  generation fail-closed behavior. Workbench persistence/events, scheduler/process
-  ownership, authoritative approval, notification, AAP/Qt control, and endurance/
-  cross-platform evidence remain open under task `21.8`.
+  generation fail-closed behavior. Scheduler/process ownership, authoritative
+  approval, notification, AAP/Qt control, and endurance/cross-platform evidence
+  remain open under task `21.8`.
+- Workbench schema v10 adds a bounded `background_jobs` projection whose canonical
+  request/state JSON, SHA-256, request/state identity, generation, status,
+  cancellation, attempt count, schedule, and timestamps are revalidated on every
+  read and during a 10,000-row startup scan. Create and generation-CAS update commit
+  with typed `background-job.*` events in one database transaction; identical
+  retries are idempotent, stale state fails, and an injected event failure leaves no
+  projection row. Active records block deletion/retention and terminal records are
+  purged with their session. Four store fixtures cover reopen/event replay, rollback,
+  tamper-triggered read-only startup recovery, deletion protection, and WAL-consistent
+  v9-to-v10 backup migration. This is durable metadata only: no scheduler, process
+  observation, automatic recovery, AAP/Qt control, notification, or execution exists.
 
 Current editor evidence:
 
@@ -440,7 +451,7 @@ Current editor evidence:
   bounded user-gesture ID; read-only profiles and managed denials fail before any
   SQLite row is written. This remains an internal policy/issuer foundation and is
   not connected to AAP, Qt, native execution, or a production user-gesture bridge.
-- The SQLite store now carries schema version 6 project/session/Blob/retention metadata and
+- The SQLite store now carries schema version 10 project/session/Blob/retention/job metadata and
   turn/item projections:
   canonical project roots and access, Chat/Work session mode, project binding,
   environment identity, `new`/`resume`/`fork` lineage, active/archived/failed/
@@ -451,11 +462,11 @@ Current editor evidence:
   sequence gaps and payload tampering; terminal turns reject late items. Work sessions cannot be
   created without a project; lineage parents must match project and mode; invalid
   rows are rejected before insertion. Reopen tests verify metadata durability and
-  transactional v1→v6, v2→v6, v3→v6, v4→v6, and v5→v6 migrations. The v3 path rebuilds the event table
+  transactional v1→v10 through v9→v10 migrations. The v3 path rebuilds the event table
   with nullable project binding while preserving every existing event field, hash,
   and sequence; a new Chat session then proves a typed event can carry no project.
   The complete
-  jobs/extensions/model-profile/checkpoint schema remains unchecked. Runtime
+  extensions/model-profile/checkpoint and complete scheduler/job recovery schema remains unchecked. Runtime
   integration now persists project/session metadata, Preview turns, and completed
   Codex timeline items under the Qt host's platform application-data Workbench root;
   `AEGISY_WORKBENCH_DATA_ROOT` remains an explicit developer/test override;

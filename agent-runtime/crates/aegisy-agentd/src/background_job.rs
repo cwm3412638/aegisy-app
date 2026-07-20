@@ -162,7 +162,22 @@ pub enum BackgroundJobStatus {
 }
 
 impl BackgroundJobStatus {
-    fn terminal(self) -> bool {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::PauseRequested => "pause_requested",
+            Self::Paused => "paused",
+            Self::WaitingApproval => "waiting_approval",
+            Self::Cancelling => "cancelling",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
         matches!(
             self,
             Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
@@ -178,6 +193,18 @@ pub enum JobCancellationState {
     Acknowledged,
     Failed,
     SupersededByCompletion,
+}
+
+impl JobCancellationState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not_requested",
+            Self::Requested => "requested",
+            Self::Acknowledged => "acknowledged",
+            Self::Failed => "failed",
+            Self::SupersededByCompletion => "superseded_by_completion",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -580,7 +607,7 @@ impl BackgroundJobState {
         now_ms: u64,
     ) -> Result<bool, BackgroundJobError> {
         self.validate(request)?;
-        if self.status.terminal() {
+        if self.status.is_terminal() {
             return Err(error(
                 "background-job-cancel-terminal",
                 "terminal background job cannot be cancelled",
@@ -821,7 +848,7 @@ impl BackgroundJobState {
                 {
                     JobRecoveryDisposition::RetryEligible
                 }
-                status if status.terminal() => JobRecoveryDisposition::Terminal,
+                status if status.is_terminal() => JobRecoveryDisposition::Terminal,
                 _ => JobRecoveryDisposition::ManualReconciliation,
             }
         };

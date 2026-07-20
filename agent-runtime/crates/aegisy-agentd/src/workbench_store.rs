@@ -1,3 +1,6 @@
+use crate::background_job::{
+    BackgroundJobRequest, BackgroundJobState, BackgroundJobStatus, JobCancellationState,
+};
 use crate::durable_blob::{
     available_space, sha256_hex, BlobFileError, DurableBlobFileStore, DurableBlobLocalFile,
     MAX_BLOB_BYTES, MAX_BLOB_OBJECTS, MAX_SCAN_ENTRIES, MAX_STORE_BYTES, MIN_FREE_BYTES,
@@ -30,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = 72 * 1024;
@@ -45,6 +48,9 @@ const MAX_SESSION_DELETE_SWEEP: usize = 32;
 const MAX_SESSION_SEARCH_LIMIT: usize = 100;
 const MAX_SESSION_SEARCH_TERM_BYTES: usize = 256;
 const MAX_OPERATION_RECONCILIATIONS: usize = 10_000;
+const MAX_BACKGROUND_JOBS: usize = 10_000;
+const MAX_BACKGROUND_JOB_PAGE: usize = 1_000;
+const MAX_BACKGROUND_JOB_JSON_BYTES: usize = 64 * 1024;
 const MAX_PORTABLE_SESSION_ITEMS: usize = 2_000;
 const MAX_PORTABLE_SESSION_BYTES: usize = 4 * 1024 * 1024;
 const DATABASE_WRITE_HEADROOM_BYTES: u64 = 8 * 1024 * 1024;
@@ -73,6 +79,11 @@ const REQUIRED_RETENTION_TABLES: [&str; 3] = [
 ];
 const REQUIRED_NAVIGATION_TABLES: [&str; 1] = ["project_navigation"];
 const REQUIRED_RUNTIME_BINDING_TABLES: [&str; 1] = ["session_runtime_bindings"];
+const REQUIRED_BACKGROUND_JOB_TABLES: [&str; 1] = ["background_jobs"];
+const REQUIRED_BACKGROUND_JOB_INDEXES: [&str; 2] = [
+    "background_jobs_session_idx",
+    "background_jobs_recovery_idx",
+];
 const REQUIRED_SESSION_SEARCH_INDEXES: [&str; 3] = [
     "sessions_status_updated_idx",
     "session_runtime_binding_model_idx",
@@ -312,6 +323,43 @@ const RETENTION_SCHEMA_SQL: &str = "
     CREATE INDEX IF NOT EXISTS session_deletion_members_session_idx
         ON session_deletion_members(session_id, deletion_id);
 ";
+const BACKGROUND_JOB_SCHEMA_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS background_jobs (
+        job_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        root_id TEXT NOT NULL,
+        request_identity TEXT NOT NULL UNIQUE,
+        idempotency_identity TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        request_sha256 TEXT NOT NULL CHECK(length(request_sha256) = 64),
+        request_bytes INTEGER NOT NULL CHECK(request_bytes > 0),
+        state_identity TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        state_sha256 TEXT NOT NULL CHECK(length(state_sha256) = 64),
+        state_bytes INTEGER NOT NULL CHECK(state_bytes > 0),
+        status TEXT NOT NULL CHECK(status IN (
+            'queued','running','pause_requested','paused','waiting_approval',
+            'cancelling','completed','failed','cancelled','interrupted'
+        )),
+        cancellation_state TEXT NOT NULL CHECK(cancellation_state IN (
+            'not_requested','requested','acknowledged','failed',
+            'superseded_by_completion'
+        )),
+        generation INTEGER NOT NULL CHECK(generation >= 0),
+        attempt_count INTEGER NOT NULL CHECK(attempt_count BETWEEN 0 AND 16),
+        next_eligible_at_ms INTEGER NOT NULL CHECK(next_eligible_at_ms >= 0),
+        created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+        updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= created_at_ms),
+        UNIQUE(session_id, idempotency_identity),
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+        FOREIGN KEY(project_id, root_id) REFERENCES project_roots(project_id, root_id)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS background_jobs_session_idx
+        ON background_jobs(session_id, updated_at_ms DESC, job_id ASC);
+    CREATE INDEX IF NOT EXISTS background_jobs_recovery_idx
+        ON background_jobs(status, next_eligible_at_ms, updated_at_ms, job_id);
+";
 
 #[derive(Debug)]
 pub struct WorkbenchStore {
@@ -353,6 +401,15 @@ pub struct WorkbenchEvent {
     pub generation: u64,
     pub payload: serde_json::Value,
     pub payload_hash: ContentHash,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredBackgroundJob {
+    pub schema_version: String,
+    pub request: BackgroundJobRequest,
+    pub state: BackgroundJobState,
+    pub request_hash: ContentHash,
+    pub state_hash: ContentHash,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -627,6 +684,7 @@ pub struct SessionDeletionPreview {
     pub turn_count: u64,
     pub item_count: u64,
     pub event_count: u64,
+    pub background_job_count: u64,
     pub artifact_reference_count: u64,
     pub artifact_bytes: u64,
     pub affected_sessions: Vec<SessionDeletionAffectedSession>,
@@ -3007,6 +3065,245 @@ impl WorkbenchStore {
         self.load_session(session_id)
     }
 
+    pub fn create_background_job(
+        &mut self,
+        request: &BackgroundJobRequest,
+        state: &BackgroundJobState,
+    ) -> Result<StoredBackgroundJob, WorkbenchStoreError> {
+        validate_background_job_contract(request, state)?;
+        if state.status != BackgroundJobStatus::Queued
+            || state.cancellation != JobCancellationState::NotRequested
+            || state.generation != 0
+            || !state.attempts.is_empty()
+        {
+            return Err(coded_error(
+                "background-job-initial-state-invalid",
+                "new background job is not in its initial queued state",
+            ));
+        }
+        self.ensure_session_writable(&request.session_id)?;
+        validate_background_job_relational_binding(&self.connection, request)?;
+        let candidate = stored_background_job(request, state)?;
+        if let Some(existing) = query_background_job_optional(&self.connection, &request.job_id)? {
+            if existing == candidate {
+                return Ok(existing);
+            }
+            return Err(coded_error(
+                "background-job-idempotency-conflict",
+                "background job identity already has different durable state",
+            ));
+        }
+        if query_background_job_by_idempotency_optional(
+            &self.connection,
+            &request.session_id,
+            &request.idempotency_identity,
+        )?
+        .is_some()
+        {
+            return Err(coded_error(
+                "background-job-idempotency-conflict",
+                "background job idempotency identity is already bound",
+            ));
+        }
+
+        let transaction =
+            self.begin_database_write("cannot start background job creation transaction")?;
+        validate_background_job_relational_binding(&transaction, request)?;
+        if let Some(existing) = query_background_job_optional(&transaction, &request.job_id)? {
+            if existing == candidate {
+                transaction
+                    .commit()
+                    .map_err(|_| error("cannot commit idempotent background job creation"))?;
+                return Ok(existing);
+            }
+            return Err(coded_error(
+                "background-job-idempotency-conflict",
+                "background job identity changed under the write lock",
+            ));
+        }
+        if query_background_job_by_idempotency_optional(
+            &transaction,
+            &request.session_id,
+            &request.idempotency_identity,
+        )?
+        .is_some()
+        {
+            return Err(coded_error(
+                "background-job-idempotency-conflict",
+                "background job idempotency identity changed under the write lock",
+            ));
+        }
+        let count = query_global_count(
+            &transaction,
+            "SELECT COUNT(*) FROM background_jobs",
+            "cannot count durable background jobs",
+        )?;
+        if count >= MAX_BACKGROUND_JOBS as u64 {
+            return Err(coded_error(
+                "background-job-store-limit",
+                "durable background job limit is exhausted",
+            ));
+        }
+        insert_background_job_tx(&transaction, &candidate)?;
+        append_background_job_event_tx(&transaction, None, &candidate)?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit background job creation"))?;
+        self.load_background_job(&request.job_id)
+    }
+
+    pub fn update_background_job_state(
+        &mut self,
+        request: &BackgroundJobRequest,
+        previous: &BackgroundJobState,
+        next: &BackgroundJobState,
+    ) -> Result<StoredBackgroundJob, WorkbenchStoreError> {
+        validate_background_job_contract(request, previous)?;
+        validate_background_job_contract(request, next)?;
+        if next.created_at_ms != previous.created_at_ms
+            || next.generation
+                != previous.generation.checked_add(1).ok_or_else(|| {
+                    coded_error(
+                        "background-job-generation-exhausted",
+                        "background job generation is exhausted",
+                    )
+                })?
+            || next.updated_at_ms < previous.updated_at_ms
+        {
+            return Err(coded_error(
+                "background-job-state-cas-invalid",
+                "background job state update is not the next generation",
+            ));
+        }
+        let event_kind = background_job_event_kind(previous, next)?;
+        self.ensure_session_writable(&request.session_id)?;
+        validate_background_job_relational_binding(&self.connection, request)?;
+        let previous_record = stored_background_job(request, previous)?;
+        let next_record = stored_background_job(request, next)?;
+        let existing = query_background_job_optional(&self.connection, &request.job_id)?
+            .ok_or_else(|| {
+                coded_error(
+                    "background-job-not-found",
+                    "durable background job does not exist",
+                )
+            })?;
+        if existing == next_record {
+            return Ok(existing);
+        }
+        if existing != previous_record {
+            return Err(coded_error(
+                "background-job-state-stale",
+                "durable background job state changed before update",
+            ));
+        }
+
+        let transaction =
+            self.begin_database_write("cannot start background job state transaction")?;
+        validate_background_job_relational_binding(&transaction, request)?;
+        let current =
+            query_background_job_optional(&transaction, &request.job_id)?.ok_or_else(|| {
+                coded_error(
+                    "background-job-not-found",
+                    "durable background job disappeared under the write lock",
+                )
+            })?;
+        if current == next_record {
+            transaction
+                .commit()
+                .map_err(|_| error("cannot commit idempotent background job update"))?;
+            return Ok(current);
+        }
+        if current != previous_record {
+            return Err(coded_error(
+                "background-job-state-stale",
+                "durable background job state changed under the write lock",
+            ));
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE background_jobs SET
+                    state_identity = ?2, state_json = ?3, state_sha256 = ?4,
+                    state_bytes = ?5, status = ?6, cancellation_state = ?7,
+                    generation = ?8, attempt_count = ?9, next_eligible_at_ms = ?10,
+                    updated_at_ms = ?11
+                 WHERE job_id = ?1 AND generation = ?12 AND state_sha256 = ?13",
+                params![
+                    request.job_id,
+                    next.identity(request)
+                        .map_err(|cause| coded_error(cause.code, cause.message))?,
+                    next_record_json(&next_record)?,
+                    next_record.state_hash.sha256,
+                    to_i64(next_record.state_hash.bytes, "background job state bytes")?,
+                    next.status.as_str(),
+                    next.cancellation.as_str(),
+                    to_i64(next.generation, "background job generation")?,
+                    to_i64(next.attempts.len() as u64, "background job attempt count")?,
+                    to_i64(next.next_eligible_at_ms, "background job eligibility time")?,
+                    to_i64(next.updated_at_ms, "background job update time")?,
+                    to_i64(previous.generation, "previous background job generation")?,
+                    previous_record.state_hash.sha256,
+                ],
+            )
+            .map_err(|_| error("cannot update durable background job state"))?;
+        if changed != 1 {
+            return Err(coded_error(
+                "background-job-state-stale",
+                "durable background job state changed during update",
+            ));
+        }
+        append_background_job_event_tx(&transaction, Some((previous, event_kind)), &next_record)?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit background job state update"))?;
+        self.load_background_job(&request.job_id)
+    }
+
+    pub fn load_background_job(
+        &self,
+        job_id: &str,
+    ) -> Result<StoredBackgroundJob, WorkbenchStoreError> {
+        validate_identifier(job_id, "background job ID")?;
+        query_background_job_optional(&self.connection, job_id)?.ok_or_else(|| {
+            coded_error(
+                "background-job-not-found",
+                "durable background job does not exist",
+            )
+        })
+    }
+
+    pub fn load_background_jobs_for_recovery(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredBackgroundJob>, WorkbenchStoreError> {
+        if limit == 0 || limit > MAX_BACKGROUND_JOB_PAGE {
+            return Err(coded_error(
+                "background-job-page-limit",
+                "background job recovery page limit is invalid",
+            ));
+        }
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT job_id FROM background_jobs
+                 WHERE status IN (
+                    'queued','running','pause_requested','paused','waiting_approval',
+                    'cancelling','failed','interrupted'
+                 )
+                 ORDER BY next_eligible_at_ms, updated_at_ms, job_id LIMIT ?1",
+            )
+            .map_err(|_| error("cannot prepare background job recovery listing"))?;
+        let job_ids = statement
+            .query_map([limit as i64], |row| row.get::<_, String>(0))
+            .map_err(|_| error("cannot read background job recovery listing"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| error("background job recovery listing row is invalid"))?;
+        drop(statement);
+        job_ids
+            .iter()
+            .map(|job_id| self.load_background_job(job_id))
+            .collect()
+    }
+
     pub fn load_session_runtime_binding(
         &self,
         session_id: &str,
@@ -4327,6 +4624,12 @@ impl WorkbenchStore {
                 .map_err(|_| error("cannot purge deleted session authorizations"))?;
             transaction
                 .execute(
+                    "DELETE FROM background_jobs WHERE session_id = ?1",
+                    [&member.session_id],
+                )
+                .map_err(|_| error("cannot purge deleted session background jobs"))?;
+            transaction
+                .execute(
                     "DELETE FROM items WHERE session_id = ?1",
                     [&member.session_id],
                 )
@@ -4679,9 +4982,19 @@ impl WorkbenchStore {
                     |row| row.get::<_, i64>(0),
                 )
                 .map_err(|_| error("cannot inspect retention live approvals"))?;
+            let live_background_jobs = query_count(
+                &self.connection,
+                "SELECT COUNT(*) FROM background_jobs
+                 WHERE session_id = ?1 AND status NOT IN (
+                    'completed','failed','cancelled','interrupted'
+                 )",
+                &session.session_id,
+                "cannot inspect retention live background jobs",
+            )?;
             let protected = protected_session_ids.contains(&session.session_id)
                 || live_turns > 0
-                || live_approvals > 0;
+                || live_approvals > 0
+                || live_background_jobs > 0;
             if protected {
                 report.protected_sessions = report.protected_sessions.saturating_add(1);
                 continue;
@@ -8672,6 +8985,20 @@ impl WorkbenchStore {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
+        if version == 9 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start background job schema migration"))?;
+            apply_session_search_indexes(&transaction)?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit background job schema migration"));
+        }
         if version == 8 {
             let transaction = self
                 .connection
@@ -8973,11 +9300,11 @@ impl WorkbenchStore {
             .connection
             .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
             .map_err(|_| error("cannot verify workbench database integrity"))?;
-        if result == "ok" {
-            verify_required_schema(&self.connection)
-        } else {
-            Err(error("workbench database integrity check failed"))
+        if result != "ok" {
+            return Err(error("workbench database integrity check failed"));
         }
+        verify_required_schema(&self.connection)?;
+        verify_background_job_store(&self.connection)
     }
 
     fn load_decision(
@@ -9142,6 +9469,497 @@ fn validate_decision_reference(
         return Err(error("authorization decision is invalid or expired"));
     }
     Ok(())
+}
+
+fn validate_background_job_contract(
+    request: &BackgroundJobRequest,
+    state: &BackgroundJobState,
+) -> Result<(), WorkbenchStoreError> {
+    request
+        .validate()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    state
+        .validate(request)
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    Ok(())
+}
+
+fn background_job_json<T: Serialize>(
+    value: &T,
+    label: &str,
+) -> Result<(String, ContentHash), WorkbenchStoreError> {
+    let persisted =
+        serde_json::to_value(value).map_err(|_| error(format!("cannot serialize {label}")))?;
+    validate_persisted_payload(&persisted, label)?;
+    let json =
+        serde_json::to_string(&persisted).map_err(|_| error(format!("cannot encode {label}")))?;
+    if json.is_empty() || json.len() > MAX_BACKGROUND_JOB_JSON_BYTES {
+        return Err(coded_error(
+            "background-job-json-limit",
+            format!("{label} exceeds its durable size limit"),
+        ));
+    }
+    let hash = ContentHash::for_bytes(json.as_bytes());
+    Ok((json, hash))
+}
+
+fn stored_background_job(
+    request: &BackgroundJobRequest,
+    state: &BackgroundJobState,
+) -> Result<StoredBackgroundJob, WorkbenchStoreError> {
+    validate_background_job_contract(request, state)?;
+    let (_, request_hash) = background_job_json(request, "background job request")?;
+    let (_, state_hash) = background_job_json(state, "background job state")?;
+    Ok(StoredBackgroundJob {
+        schema_version: "stored-background-job/0.1".into(),
+        request: request.clone(),
+        state: state.clone(),
+        request_hash,
+        state_hash,
+    })
+}
+
+fn next_record_json(record: &StoredBackgroundJob) -> Result<String, WorkbenchStoreError> {
+    background_job_json(&record.state, "background job state").map(|(json, _)| json)
+}
+
+fn validate_background_job_relational_binding(
+    connection: &Connection,
+    request: &BackgroundJobRequest,
+) -> Result<(), WorkbenchStoreError> {
+    let binding = connection
+        .query_row(
+            "SELECT session.project_id, session.mode, session.status, root.access
+             FROM sessions AS session
+             JOIN project_roots AS root
+               ON root.project_id = ?2 AND root.root_id = ?3
+             WHERE session.session_id = ?1",
+            params![request.session_id, request.project_id, request.root_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot validate background job relational binding"))?;
+    let Some((project_id, mode, status, access)) = binding else {
+        return Err(coded_error(
+            "background-job-binding-missing",
+            "background job session or project root does not exist",
+        ));
+    };
+    if project_id.as_deref() != Some(request.project_id.as_str())
+        || mode != "work"
+        || status != "active"
+        || !matches!(access.as_str(), "read" | "write")
+    {
+        return Err(coded_error(
+            "background-job-binding-invalid",
+            "background job is not bound to an active Work session and root",
+        ));
+    }
+    let deletion_state = connection
+        .query_row(
+            "SELECT deletion.state
+             FROM session_deletion_members AS member
+             JOIN session_deletions AS deletion
+               ON deletion.deletion_id = member.deletion_id
+             WHERE member.session_id = ?1",
+            [&request.session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| error("cannot validate background job deletion binding"))?;
+    if deletion_state.is_some() {
+        return Err(coded_error(
+            "background-job-session-unavailable",
+            "background job session is pending deletion or purged",
+        ));
+    }
+    Ok(())
+}
+
+fn insert_background_job_tx(
+    transaction: &Transaction<'_>,
+    record: &StoredBackgroundJob,
+) -> Result<(), WorkbenchStoreError> {
+    let (request_json, request_hash) =
+        background_job_json(&record.request, "background job request")?;
+    let (state_json, state_hash) = background_job_json(&record.state, "background job state")?;
+    if request_hash != record.request_hash || state_hash != record.state_hash {
+        return Err(error(
+            "background job durable hash changed before insertion",
+        ));
+    }
+    transaction
+        .execute(
+            "INSERT INTO background_jobs (
+                job_id, session_id, project_id, root_id, request_identity,
+                idempotency_identity,
+                request_json, request_sha256, request_bytes,
+                state_identity, state_json, state_sha256, state_bytes,
+                status, cancellation_state, generation, attempt_count,
+                next_eligible_at_ms, created_at_ms, updated_at_ms
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+             )",
+            params![
+                record.request.job_id,
+                record.request.session_id,
+                record.request.project_id,
+                record.request.root_id,
+                record
+                    .request
+                    .identity()
+                    .map_err(|cause| { coded_error(cause.code, cause.message) })?,
+                record.request.idempotency_identity,
+                request_json,
+                record.request_hash.sha256,
+                to_i64(record.request_hash.bytes, "background job request bytes")?,
+                record
+                    .state
+                    .identity(&record.request)
+                    .map_err(|cause| { coded_error(cause.code, cause.message) })?,
+                state_json,
+                record.state_hash.sha256,
+                to_i64(record.state_hash.bytes, "background job state bytes")?,
+                record.state.status.as_str(),
+                record.state.cancellation.as_str(),
+                to_i64(record.state.generation, "background job generation")?,
+                to_i64(
+                    record.state.attempts.len() as u64,
+                    "background job attempt count"
+                )?,
+                to_i64(
+                    record.state.next_eligible_at_ms,
+                    "background job eligibility time"
+                )?,
+                to_i64(record.state.created_at_ms, "background job creation time")?,
+                to_i64(record.state.updated_at_ms, "background job update time")?,
+            ],
+        )
+        .map_err(|_| error("cannot insert durable background job"))?;
+    Ok(())
+}
+
+fn query_background_job_optional(
+    connection: &Connection,
+    job_id: &str,
+) -> Result<Option<StoredBackgroundJob>, WorkbenchStoreError> {
+    validate_identifier(job_id, "background job ID")?;
+    let row = connection
+        .query_row(
+            "SELECT session_id, project_id, root_id, request_identity,
+                    idempotency_identity,
+                    request_json, request_sha256, request_bytes,
+                    state_identity, state_json, state_sha256, state_bytes,
+                    status, cancellation_state, generation, attempt_count,
+                    next_eligible_at_ms, created_at_ms, updated_at_ms
+             FROM background_jobs WHERE job_id = ?1",
+            [job_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, i64>(15)?,
+                    row.get::<_, i64>(16)?,
+                    row.get::<_, i64>(17)?,
+                    row.get::<_, i64>(18)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot read durable background job"))?;
+    let Some((
+        session_id,
+        project_id,
+        root_id,
+        request_identity,
+        idempotency_identity,
+        request_json,
+        request_sha256,
+        request_bytes,
+        state_identity,
+        state_json,
+        state_sha256,
+        state_bytes,
+        status,
+        cancellation_state,
+        generation,
+        attempt_count,
+        next_eligible_at_ms,
+        created_at_ms,
+        updated_at_ms,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    if request_json.is_empty()
+        || request_json.len() > MAX_BACKGROUND_JOB_JSON_BYTES
+        || state_json.is_empty()
+        || state_json.len() > MAX_BACKGROUND_JOB_JSON_BYTES
+    {
+        return Err(coded_error(
+            "background-job-durable-json-invalid",
+            "durable background job JSON is outside its bounds",
+        ));
+    }
+    let request: BackgroundJobRequest = serde_json::from_str(&request_json)
+        .map_err(|_| error("durable background job request is invalid"))?;
+    let state: BackgroundJobState = serde_json::from_str(&state_json)
+        .map_err(|_| error("durable background job state is invalid"))?;
+    validate_background_job_contract(&request, &state)?;
+    let (canonical_request_json, canonical_request_hash) =
+        background_job_json(&request, "background job request")?;
+    let (canonical_state_json, canonical_state_hash) =
+        background_job_json(&state, "background job state")?;
+    let stored_request_hash = ContentHash {
+        sha256: request_sha256,
+        bytes: to_u64(request_bytes, "background job request bytes")?,
+    };
+    let stored_state_hash = ContentHash {
+        sha256: state_sha256,
+        bytes: to_u64(state_bytes, "background job state bytes")?,
+    };
+    let identity_matches = request
+        .identity()
+        .map_err(|cause| coded_error(cause.code, cause.message))?
+        == request_identity
+        && state
+            .identity(&request)
+            .map_err(|cause| coded_error(cause.code, cause.message))?
+            == state_identity;
+    if request.job_id != job_id
+        || request.session_id != session_id
+        || request.project_id != project_id
+        || request.root_id != root_id
+        || request.idempotency_identity != idempotency_identity
+        || canonical_request_json != request_json
+        || canonical_state_json != state_json
+        || canonical_request_hash != stored_request_hash
+        || canonical_state_hash != stored_state_hash
+        || !identity_matches
+        || status != state.status.as_str()
+        || cancellation_state != state.cancellation.as_str()
+        || to_u64(generation, "background job generation")? != state.generation
+        || to_u64(attempt_count, "background job attempt count")? != state.attempts.len() as u64
+        || to_u64(next_eligible_at_ms, "background job eligibility time")?
+            != state.next_eligible_at_ms
+        || to_u64(created_at_ms, "background job creation time")? != state.created_at_ms
+        || to_u64(updated_at_ms, "background job update time")? != state.updated_at_ms
+    {
+        return Err(coded_error(
+            "background-job-durable-integrity-invalid",
+            "durable background job metadata failed integrity validation",
+        ));
+    }
+    Ok(Some(StoredBackgroundJob {
+        schema_version: "stored-background-job/0.1".into(),
+        request,
+        state,
+        request_hash: stored_request_hash,
+        state_hash: stored_state_hash,
+    }))
+}
+
+fn query_background_job_by_idempotency_optional(
+    connection: &Connection,
+    session_id: &str,
+    idempotency_identity: &str,
+) -> Result<Option<StoredBackgroundJob>, WorkbenchStoreError> {
+    validate_identifier(session_id, "background job idempotency session ID")?;
+    validate_identity_text(idempotency_identity, "background job idempotency identity")?;
+    let job_id = connection
+        .query_row(
+            "SELECT job_id FROM background_jobs
+             WHERE session_id = ?1 AND idempotency_identity = ?2",
+            params![session_id, idempotency_identity],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| error("cannot read background job idempotency binding"))?;
+    job_id
+        .map(|job_id| query_background_job_optional(connection, &job_id))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn verify_background_job_store(connection: &Connection) -> Result<(), WorkbenchStoreError> {
+    let count = query_global_count(
+        connection,
+        "SELECT COUNT(*) FROM background_jobs",
+        "cannot count background jobs during integrity verification",
+    )?;
+    if count > MAX_BACKGROUND_JOBS as u64 {
+        return Err(coded_error(
+            "background-job-store-limit",
+            "durable background job count exceeds its startup limit",
+        ));
+    }
+    let mut statement = connection
+        .prepare("SELECT job_id FROM background_jobs ORDER BY job_id LIMIT ?1")
+        .map_err(|_| error("cannot prepare background job integrity verification"))?;
+    let job_ids = statement
+        .query_map([MAX_BACKGROUND_JOBS as i64 + 1], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|_| error("cannot read background job integrity verification"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("background job integrity row is invalid"))?;
+    drop(statement);
+    if job_ids.len() > MAX_BACKGROUND_JOBS {
+        return Err(coded_error(
+            "background-job-store-limit",
+            "durable background job count exceeds its startup limit",
+        ));
+    }
+    for job_id in job_ids {
+        query_background_job_optional(connection, &job_id)?.ok_or_else(|| {
+            coded_error(
+                "background-job-integrity-race",
+                "durable background job disappeared during verification",
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn background_job_event_kind(
+    previous: &BackgroundJobState,
+    next: &BackgroundJobState,
+) -> Result<&'static str, WorkbenchStoreError> {
+    let kind = match next.status {
+        BackgroundJobStatus::Completed => "background-job.completed",
+        BackgroundJobStatus::Failed => "background-job.failed",
+        BackgroundJobStatus::Cancelled => "background-job.cancelled",
+        BackgroundJobStatus::Interrupted => "background-job.interrupted",
+        _ if next.cancellation == JobCancellationState::Requested
+            && previous.cancellation != JobCancellationState::Requested =>
+        {
+            "background-job.cancellation-requested"
+        }
+        BackgroundJobStatus::Running
+            if previous.status == BackgroundJobStatus::Cancelling
+                && next.cancellation == JobCancellationState::Failed =>
+        {
+            "background-job.cancellation-rejected"
+        }
+        BackgroundJobStatus::Running if previous.status == BackgroundJobStatus::Queued => {
+            "background-job.started"
+        }
+        BackgroundJobStatus::Running if previous.status == BackgroundJobStatus::WaitingApproval => {
+            "background-job.approval-resumed"
+        }
+        BackgroundJobStatus::PauseRequested if previous.status == BackgroundJobStatus::Running => {
+            "background-job.pause-requested"
+        }
+        BackgroundJobStatus::Paused
+            if matches!(
+                previous.status,
+                BackgroundJobStatus::Queued | BackgroundJobStatus::PauseRequested
+            ) =>
+        {
+            "background-job.paused"
+        }
+        BackgroundJobStatus::WaitingApproval if previous.status == BackgroundJobStatus::Running => {
+            "background-job.approval-needed"
+        }
+        BackgroundJobStatus::Queued if previous.status == BackgroundJobStatus::Paused => {
+            "background-job.resumed"
+        }
+        BackgroundJobStatus::Queued
+            if matches!(
+                previous.status,
+                BackgroundJobStatus::Failed | BackgroundJobStatus::Interrupted
+            ) =>
+        {
+            "background-job.retry-queued"
+        }
+        _ => {
+            return Err(coded_error(
+                "background-job-transition-unrecognized",
+                "background job durable transition has no typed event",
+            ));
+        }
+    };
+    Ok(kind)
+}
+
+fn append_background_job_event_tx(
+    transaction: &Transaction<'_>,
+    previous: Option<(&BackgroundJobState, &str)>,
+    record: &StoredBackgroundJob,
+) -> Result<WorkbenchEvent, WorkbenchStoreError> {
+    let event_kind = previous
+        .as_ref()
+        .map(|(_, event_kind)| *event_kind)
+        .unwrap_or("background-job.queued");
+    let request_identity = record
+        .request
+        .identity()
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    let state_identity = record
+        .state
+        .identity(&record.request)
+        .map_err(|cause| coded_error(cause.code, cause.message))?;
+    let event_id = derived_event_id(
+        "background-job-lifecycle",
+        format!(
+            "{}\0{}\0{}",
+            record.request.job_id, record.state.generation, state_identity
+        )
+        .as_bytes(),
+    );
+    append_event_tx(
+        transaction,
+        EventInput {
+            session_id: &record.request.session_id,
+            event_id: &event_id,
+            timestamp_ms: record.state.updated_at_ms,
+            correlation_id: &record.request.job_id,
+            event_kind,
+            project_id: Some(&record.request.project_id),
+            operation_id: &record.request.job_id,
+            generation: record.state.generation,
+            payload: json!({
+                "schema_version": "background-job-lifecycle-event/0.1",
+                "job_id": record.request.job_id,
+                "request_identity": request_identity,
+                "request_hash": record.request_hash,
+                "previous_status": previous.as_ref().map(|(state, _)| state.status.as_str()),
+                "previous_cancellation_state": previous
+                    .as_ref()
+                    .map(|(state, _)| state.cancellation.as_str()),
+                "state_identity": state_identity,
+                "state_hash": record.state_hash,
+                "status": record.state.status.as_str(),
+                "cancellation_state": record.state.cancellation.as_str(),
+                "generation": record.state.generation,
+                "attempt_count": record.state.attempts.len(),
+                "next_eligible_at_ms": record.state.next_eligible_at_ms,
+                "automatic_retry": false,
+                "automatic_approval": false
+            }),
+        },
+    )
 }
 
 struct EventInput<'a> {
@@ -9936,6 +10754,7 @@ fn build_session_deletion_plan(
     let mut turn_count = 0_u64;
     let mut item_count = 0_u64;
     let mut event_count = 0_u64;
+    let mut background_job_count = 0_u64;
     let mut artifact_reference_count = 0_u64;
     let mut artifact_bytes = 0_u64;
     let mut blocking_reasons = Vec::new();
@@ -9958,6 +10777,25 @@ fn build_session_deletion_plan(
             &member.session.session_id,
             "cannot count session deletion events",
         )?);
+        let member_background_jobs = query_count(
+            connection,
+            "SELECT COUNT(*) FROM background_jobs WHERE session_id = ?1",
+            &member.session.session_id,
+            "cannot count session deletion background jobs",
+        )?;
+        background_job_count = background_job_count.saturating_add(member_background_jobs);
+        let active_background_jobs = query_count(
+            connection,
+            "SELECT COUNT(*) FROM background_jobs
+             WHERE session_id = ?1 AND status NOT IN (
+                'completed','failed','cancelled','interrupted'
+             )",
+            &member.session.session_id,
+            "cannot inspect session deletion active background jobs",
+        )?;
+        if active_background_jobs > 0 {
+            push_projection_issue(&mut blocking_reasons, "session-background-job-active");
+        }
         let (references, bytes): (i64, i64) = connection
             .query_row(
                 "SELECT COUNT(*), COALESCE(SUM(blob.bytes), 0)
@@ -10026,6 +10864,7 @@ fn build_session_deletion_plan(
         "turn_count": turn_count,
         "item_count": item_count,
         "event_count": event_count,
+        "background_job_count": background_job_count,
         "artifact_reference_count": artifact_reference_count,
         "artifact_bytes": artifact_bytes
     });
@@ -10041,6 +10880,7 @@ fn build_session_deletion_plan(
         turn_count,
         item_count,
         event_count,
+        background_job_count,
         artifact_reference_count,
         artifact_bytes,
         affected_sessions,
@@ -10318,7 +11158,10 @@ fn query_count(
 fn apply_session_search_indexes(connection: &Connection) -> Result<(), WorkbenchStoreError> {
     connection
         .execute_batch(SESSION_SEARCH_INDEX_SCHEMA_SQL)
-        .map_err(|_| error("cannot apply session search index migration"))
+        .map_err(|_| error("cannot apply session search index migration"))?;
+    connection
+        .execute_batch(BACKGROUND_JOB_SCHEMA_SQL)
+        .map_err(|_| error("cannot apply background job schema migration"))
 }
 
 fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreError> {
@@ -10331,6 +11174,7 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         .chain(REQUIRED_RETENTION_TABLES)
         .chain(REQUIRED_NAVIGATION_TABLES)
         .chain(REQUIRED_RUNTIME_BINDING_TABLES)
+        .chain(REQUIRED_BACKGROUND_JOB_TABLES)
     {
         let exists: Option<String> = connection
             .query_row(
@@ -10357,6 +11201,22 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             .map_err(|_| error("cannot verify workbench search indexes"))?;
         if exists.as_deref() != Some(index) {
             return Err(error("workbench database search indexes are incomplete"));
+        }
+    }
+    for index in REQUIRED_BACKGROUND_JOB_INDEXES {
+        let exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot verify workbench background job indexes"))?;
+        if exists.as_deref() != Some(index) {
+            return Err(error(
+                "workbench database background job indexes are incomplete",
+            ));
         }
     }
     Ok(())
@@ -11750,6 +12610,7 @@ fn coded_error(code: impl Into<String>, message: impl Into<String>) -> Workbench
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::background_job::{JobRetryPolicy, JobSchedule, JobScheduleKind};
     use crate::git_commit_transaction::{
         GitCommitHookPolicy, GitCommitIdentity, GitCommitMessageSource, GitCommitSigningPolicy,
     };
@@ -11795,6 +12656,70 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.parent);
         }
+    }
+
+    fn background_job_identity(prefix: &str, byte: char) -> String {
+        format!("{prefix}{}", byte.to_string().repeat(64))
+    }
+
+    fn create_background_job_fixture(
+        store: &mut WorkbenchStore,
+        root: &Root,
+        job_id: &str,
+    ) -> (BackgroundJobRequest, BackgroundJobState) {
+        let project_root = root.parent.join(format!("{job_id}-project"));
+        fs::create_dir(&project_root).unwrap();
+        let project_root = project_root.canonicalize().unwrap();
+        let project_id = format!("{job_id}-project");
+        let session_id = format!("{job_id}-session");
+        store
+            .create_project(StoredProjectCreate {
+                project_id: project_id.clone(),
+                root_id: "root-1".into(),
+                canonical_root: project_root.to_string_lossy().into_owned(),
+                root_identity: background_job_identity("root:sha256:", 'a'),
+                display_name: "Background job project".into(),
+                root_access: "write".into(),
+                created_at_ms: 1_000,
+            })
+            .unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: session_id.clone(),
+                project_id: Some(project_id.clone()),
+                mode: StoredSessionMode::Work,
+                title: "Background job session".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: Some(background_job_identity("environment:sha256:", 'b')),
+                created_at_ms: 1_100,
+            })
+            .unwrap();
+        let request = BackgroundJobRequest {
+            schema_version: crate::background_job::REQUEST_SCHEMA_VERSION.into(),
+            job_id: job_id.into(),
+            session_id,
+            project_id,
+            root_id: "root-1".into(),
+            execution_plan_identity: background_job_identity("unified-execution-plan:sha256:", 'c'),
+            idempotency_identity: background_job_identity("idempotency:sha256:", 'd'),
+            child_task_identity: None,
+            schedule: JobSchedule {
+                kind: JobScheduleKind::Manual,
+                scheduled_for_ms: None,
+            },
+            retry: JobRetryPolicy {
+                max_attempts: 2,
+                backoff_ms: 100,
+                safe_retry_boundary_identity: Some(background_job_identity(
+                    "retry-boundary:sha256:",
+                    'e',
+                )),
+            },
+            created_at_ms: 1_200,
+        };
+        let state = BackgroundJobState::new(&request, 1_200).unwrap();
+        (request, state)
     }
 
     fn create_blob_owners(store: &mut WorkbenchStore, root: &Root) {
@@ -12664,6 +13589,275 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn background_job_state_and_typed_events_are_atomic_idempotent_and_durable() {
+        let root = Root::new("background-job-durable");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (request, mut state) = create_background_job_fixture(&mut store, &root, "durable-job");
+        let created = store.create_background_job(&request, &state).unwrap();
+        assert_eq!(
+            store.create_background_job(&request, &state).unwrap(),
+            created
+        );
+        let mut duplicate_request = request.clone();
+        duplicate_request.job_id = "durable-job-duplicate".into();
+        let duplicate_state = BackgroundJobState::new(&duplicate_request, 1_200).unwrap();
+        assert_eq!(
+            store
+                .create_background_job(&duplicate_request, &duplicate_state)
+                .unwrap_err()
+                .code,
+            "background-job-idempotency-conflict"
+        );
+
+        let queued = state.clone();
+        state.start(&request, 1_300).unwrap();
+        let running = state.clone();
+        store
+            .update_background_job_state(&request, &queued, &running)
+            .unwrap();
+        assert_eq!(
+            store
+                .update_background_job_state(&request, &queued, &running)
+                .unwrap()
+                .state,
+            running
+        );
+
+        let approval = background_job_identity("approval:sha256:", 'f');
+        state.wait_for_approval(&request, &approval, 1_400).unwrap();
+        let waiting = state.clone();
+        store
+            .update_background_job_state(&request, &running, &waiting)
+            .unwrap();
+        state
+            .resume_after_approval(&request, &approval, 1_500)
+            .unwrap();
+        let resumed = state.clone();
+        store
+            .update_background_job_state(&request, &waiting, &resumed)
+            .unwrap();
+        state
+            .complete(
+                &request,
+                &background_job_identity("artifact:sha256:", 'a'),
+                &background_job_identity("job-evidence:sha256:", 'b'),
+                1_600,
+            )
+            .unwrap();
+        let completed = store
+            .update_background_job_state(&request, &resumed, &state)
+            .unwrap();
+        assert_eq!(completed.state.status, BackgroundJobStatus::Completed);
+        assert!(store
+            .load_background_jobs_for_recovery(10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .update_background_job_state(&request, &running, &waiting)
+                .unwrap_err()
+                .code,
+            "background-job-state-stale"
+        );
+
+        let events = store
+            .read_session_events(&request.session_id, 0, MAX_EVENT_PAGE)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_kind.starts_with("background-job."))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_kind.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "background-job.queued",
+                "background-job.started",
+                "background-job.approval-needed",
+                "background-job.approval-resumed",
+                "background-job.completed",
+            ]
+        );
+        assert!(events.iter().all(|event| {
+            event.payload.get("automatic_retry") == Some(&json!(false))
+                && event.payload.get("automatic_approval") == Some(&json!(false))
+        }));
+        assert!(
+            store
+                .verify_session_projection(&request.session_id)
+                .unwrap()
+                .consistent
+        );
+
+        drop(store);
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened.load_background_job("durable-job").unwrap(),
+            completed
+        );
+    }
+
+    #[test]
+    fn background_job_event_failure_rolls_back_projection_and_tampering_fails_closed() {
+        let root = Root::new("background-job-rollback");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (request, state) = create_background_job_fixture(&mut store, &root, "rollback-job");
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_background_job_event
+                 BEFORE INSERT ON events
+                 WHEN NEW.event_kind = 'background-job.queued'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        assert!(store.create_background_job(&request, &state).is_err());
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM background_jobs",
+                "count"
+            )
+            .unwrap(),
+            0
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_background_job_event;")
+            .unwrap();
+        store.create_background_job(&request, &state).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE background_jobs SET state_sha256 = ?1 WHERE job_id = ?2",
+                params!["0".repeat(64), request.job_id],
+            )
+            .unwrap();
+        assert_eq!(
+            store.load_background_job(&request.job_id).unwrap_err().code,
+            "background-job-durable-integrity-invalid"
+        );
+        drop(store);
+        assert_eq!(
+            WorkbenchStore::open(&root.path).unwrap_err().code,
+            "workbench-database-integrity-failed"
+        );
+    }
+
+    #[test]
+    fn active_background_job_blocks_session_deletion_until_terminal() {
+        let root = Root::new("background-job-deletion");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (request, mut state) = create_background_job_fixture(&mut store, &root, "deletion-job");
+        store.create_background_job(&request, &state).unwrap();
+        let active = store
+            .preview_session_deletion(&request.session_id, SessionDeletionScope::SessionOnly)
+            .unwrap();
+        assert_eq!(active.background_job_count, 1);
+        assert!(active
+            .blocking_reasons
+            .contains(&"session-background-job-active".into()));
+        store
+            .set_retention_policy(RetentionPolicy {
+                scope_kind: "session".into(),
+                scope_id: request.session_id.clone(),
+                archive_after_ms: Some(86_400_000),
+                delete_after_ms: None,
+                undo_window_ms: MIN_SESSION_DELETE_UNDO_MS,
+                delete_scope: SessionDeletionScope::SessionOnly,
+                updated_at_ms: 1_201,
+            })
+            .unwrap();
+        let retention = store
+            .apply_retention_policies(86_401_201, &BTreeSet::new())
+            .unwrap();
+        assert_eq!(retention.protected_sessions, 1);
+        assert_eq!(
+            store.load_session(&request.session_id).unwrap().status,
+            "active"
+        );
+
+        let queued = state.clone();
+        state.request_cancel(&request, 1_300).unwrap();
+        let cancelling = state.clone();
+        store
+            .update_background_job_state(&request, &queued, &cancelling)
+            .unwrap();
+        state.acknowledge_cancel(&request, None, 1_400).unwrap();
+        store
+            .update_background_job_state(&request, &cancelling, &state)
+            .unwrap();
+        let terminal = store
+            .preview_session_deletion(&request.session_id, SessionDeletionScope::SessionOnly)
+            .unwrap();
+        assert_eq!(terminal.background_job_count, 1);
+        assert!(!terminal
+            .blocking_reasons
+            .contains(&"session-background-job-active".into()));
+    }
+
+    #[test]
+    fn upgrades_schema_v9_to_background_jobs_after_backup() {
+        let root = Root::new("schema-v9-background-jobs");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "session-v9".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Preserved from v9".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        drop(store);
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch("DROP TABLE background_jobs; PRAGMA user_version = 9;")
+            .unwrap();
+        drop(connection);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened.load_session("session-v9").unwrap().title,
+            "Preserved from v9"
+        );
+        for table in REQUIRED_BACKGROUND_JOB_TABLES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                     )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing background job table {table}");
+        }
+        for index in REQUIRED_BACKGROUND_JOB_INDEXES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1
+                     )",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing background job index {index}");
+        }
+        let manifests = migration_backup_manifests(&root.path).unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].source_schema_version, 9);
+        assert_eq!(manifests[0].target_schema_version, SCHEMA_VERSION as u64);
     }
 
     #[test]

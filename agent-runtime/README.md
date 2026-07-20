@@ -62,7 +62,8 @@ or session methods are accepted.
   is checked, while child/background dispatch and execution authority remain absent)
 - internal `background-job-request/0.1` and `background-job-state/0.1` lifecycle
   contracts (schedule, pause, approval wait, cancellation, attempts, bounded retry,
-  and fail-closed restart decisions; no durable queue, scheduler, AAP, or execution)
+  and fail-closed restart decisions), plus a schema-v10 internal durable projection
+  and typed session events (no scheduler, process recovery, AAP, or execution)
 - `workspace/list`
 - `workspace/read`
 - `workspace/instructions` (deterministic, bounded, untrusted instruction discovery)
