@@ -142,7 +142,7 @@ Background job lifecycle evidence:
   generation fail-closed behavior. Scheduler/process ownership, authoritative
   approval, notification, AAP/Qt control, and endurance/cross-platform evidence
   remain open under task `21.8`.
-- Workbench schema v10 adds a bounded `background_jobs` projection whose canonical
+- Workbench schema v11 retains the bounded `background_jobs` projection whose canonical
   request/state JSON, SHA-256, request/state identity, generation, status,
   cancellation, attempt count, schedule, and timestamps are revalidated on every
   read and during a 10,000-row startup scan. Create and generation-CAS update commit
@@ -151,29 +151,44 @@ Background job lifecycle evidence:
   projection row. Active records block deletion/retention and terminal records are
   purged with their session. Four store fixtures cover reopen/event replay, rollback,
   tamper-triggered read-only startup recovery, deletion protection, and WAL-consistent
-  v9-to-v10 backup migration. This is durable metadata only: no durable scheduler
-  lease, process observation, automatic recovery, AAP/Qt control, notification, or
-  execution exists.
-- Internal `background-job-scheduler/0.1` loads only a complete 1,000-record-or-less
+  v9-to-v11 backup migration.
+- Schema v11 adds a bounded `background_job_leases` projection with exact
+  job/request/state generation, scheduler owner, lease generation, bounded
+  acquire/renew/expiry times, optional verified process registration/process hashes,
+  canonical JSON/hash, and fixed false dispatch/takeover authority. Generation-CAS
+  acquire, renew, state rebind, process bind, release, and expiry commit with typed
+  `background-job.lease-*` events. Event failure rolls back, startup tampering enters
+  read-only recovery, and v10-to-v11 uses the WAL-consistent backup. Active leases
+  protect deletion after terminal job state; a stale lease can expire without
+  adopting the newer generation. Four contract fixtures cover bounded acquisition/
+  renewal, expiry/release, state drift/tampering, and verified process binding. Five
+  store/migration fixtures cover CAS/idempotency, event rollback/tampering, explicit
+  state rebind and terminal deletion protection, stale expiry, and v10 migration.
+- Internal `background-job-scheduler/0.2` loads only a complete 1,000-record-or-less
   recovery set and atomically replaces one owner-identity/generation-bound snapshot.
   Schedule/admission, pause, approval wait, retry review, terminal review,
-  monitor-owned-process, and manual reconciliation are explicit. Internal
+  monitor-owned-process, and manual reconciliation are explicit. Lease states expose
+  missing, current, expired, released, stale-job, and owner-mismatch evidence;
+  process ownership separately exposes missing lease/registration, unavailable or
+  non-running observation, mismatch, and exact current ownership. Internal
   `background-job-process-observation/0.1` accepts only an owned `Child` handle and
   binds exact owner/job/request/state/generation/attempt/time evidence without
   returning a PID, command, path, environment, or output. Owned-running, owned-exited,
-  absent, inaccessible, mismatched, and unknown are distinct. Only exact running
-  ownership is monitor-only; every other active result is manual, and process exit
+  absent, inaccessible, mismatched, and unknown are distinct. Exact running
+  ownership becomes monitor-only only when a current durable lease carries matching
+  verified process-registration and process identities; every other active result is manual, and process exit
   requires a terminal job event without implying completion. Pending cancellation
   separately requires acknowledgement. Every entry denies dispatch and automatic
-  retry/approval. Invalid owner, time, limit, observation, store failure, or
-  truncation preserves the previous snapshot. Nine scheduler/process fixtures cover
+  retry/approval/takeover. Invalid owner, time, limit, lease, observation, store
+  failure, or truncation preserves the previous snapshot. Eleven scheduler/process fixtures cover
   due/future queue review, active/cancel handling, approval/retry behavior, absent
-  ownership, exact-generation rebinding, real macOS running/exited observation, and
-  transactional refresh. A cfg-gated Windows fixture is present, but target
+  ownership, lease expiry/staleness, terminal release review, exact-generation
+  rebinding, real macOS running/exited observation, and transactional refresh. A
+  cfg-gated Windows fixture is present, but target
   compilation currently stops in bundled SQLite C before this module because this
-  host lacks Windows SDK headers; a Windows runner is still required. Durable
-  leases/restart ownership, mutation, dispatch, notifications, AAP, and Qt remain
-  absent.
+  host lacks Windows SDK headers; a Windows runner is still required. Automatic
+  lease acquisition/renewal, restart process adoption, recovery mutation,
+  dispatch, notifications, AAP, and Qt remain absent.
 
 Current editor evidence:
 
@@ -472,8 +487,8 @@ Current editor evidence:
   bounded user-gesture ID; read-only profiles and managed denials fail before any
   SQLite row is written. This remains an internal policy/issuer foundation and is
   not connected to AAP, Qt, native execution, or a production user-gesture bridge.
-- The SQLite store now carries schema version 10 project/session/Blob/retention/job metadata and
-  turn/item projections:
+- The SQLite store now carries schema version 11 project/session/Blob/retention/job/lease metadata
+  and turn/item projections:
   canonical project roots and access, Chat/Work session mode, project binding,
   environment identity, `new`/`resume`/`fork` lineage, active/archived/failed/
   interrupted status, and archive/unarchive transitions. Turns bind to an active
@@ -483,7 +498,7 @@ Current editor evidence:
   sequence gaps and payload tampering; terminal turns reject late items. Work sessions cannot be
   created without a project; lineage parents must match project and mode; invalid
   rows are rejected before insertion. Reopen tests verify metadata durability and
-  transactional v1→v10 through v9→v10 migrations. The v3 path rebuilds the event table
+  transactional v1→v11 through v10→v11 migrations. The v3 path rebuilds the event table
   with nullable project binding while preserving every existing event field, hash,
   and sequence; a new Chat session then proves a typed event can carry no project.
   The complete
@@ -499,7 +514,7 @@ Current editor evidence:
   event-source version 1; v3-migrated sessions have no marker and remain explicitly
   legacy/non-rebuildable. Richer runtime/environment reconstruction and future
   mutation event coverage remain unchecked.
-- Every supported v1/v2/v3/v4/v5 source now receives a WAL-consistent SQLite Online
+- Every supported v1/v2/v3/v4/v5/v6/v7/v8/v9/v10 source receives a WAL-consistent SQLite Online
   Backup before migration. The standalone DELETE-journal backup and bounded JSON
   manifest bind source/target schema, application ID, exact bytes, SHA-256,
   creation time, and integrity state under a private no-clobber directory. Admission
@@ -507,7 +522,7 @@ Current editor evidence:
   reserve, and bounded inventory/manifest reads. Valid backups, unmanifested files,
   invalid manifests, interrupted temporary files, and tampered evidence are all
   handled conservatively; uncertain evidence is reported and never deleted.
-- Migration fixtures prove v1/v2/v3/v4/v5 state preservation, full required-schema
+- Migration fixtures prove v1/v2/v3/v4/v5/v6/v7/v8/v9/v10 state preservation, full required-schema
   validation before `user_version` commit, schema-collision rollback with the
   original v4 state and backup intact, safe re-entry after an uncommitted migration,
   exact preservation of random corrupt database bytes, low-space rejection, backup

@@ -1,6 +1,7 @@
 pub mod background_job;
 pub mod background_process_observation;
 pub mod background_scheduler;
+pub mod background_scheduler_lease;
 pub mod child_budget;
 pub mod child_task;
 pub mod child_task_state;

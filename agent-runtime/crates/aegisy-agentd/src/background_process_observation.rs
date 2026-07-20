@@ -68,6 +68,17 @@ pub struct BackgroundProcessRegistration {
     pub registration_identity: String,
 }
 
+#[derive(Debug)]
+pub struct VerifiedBackgroundProcessRegistration {
+    registration: BackgroundProcessRegistration,
+}
+
+impl VerifiedBackgroundProcessRegistration {
+    pub fn registration(&self) -> &BackgroundProcessRegistration {
+        &self.registration
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundProcessObservation {
     pub schema_version: String,
@@ -80,6 +91,7 @@ pub struct BackgroundProcessObservation {
     pub state_identity: String,
     pub job_generation: u64,
     pub attempt_number: Option<u16>,
+    pub process_registration_identity: Option<String>,
     pub process_identity: Option<String>,
     pub state: BackgroundProcessObservationState,
     pub registered_at_ms: Option<u64>,
@@ -107,6 +119,12 @@ impl BackgroundProcessObservation {
             || !valid_identity(&self.request_identity, "background-job:sha256:")
             || !valid_identity(&self.state_identity, "background-job-state:sha256:")
             || self
+                .process_registration_identity
+                .as_deref()
+                .is_some_and(|value| {
+                    !valid_identity(value, "background-job-process-registration:sha256:")
+                })
+            || self
                 .process_identity
                 .as_deref()
                 .is_some_and(|value| !valid_identity(value, "background-job-process:sha256:"))
@@ -123,14 +141,16 @@ impl BackgroundProcessObservation {
                 "background process observation invariant is invalid",
             ));
         }
-        let process_registration_bound =
-            self.process_identity.is_some() && self.registered_at_ms.is_some();
+        let process_registration_bound = self.process_registration_identity.is_some()
+            && self.process_identity.is_some()
+            && self.registered_at_ms.is_some();
         let process_bound = process_registration_bound && self.attempt_number.is_some();
         let expected_manual = self.state != BackgroundProcessObservationState::OwnedRunning;
         let expected_terminal = self.state == BackgroundProcessObservationState::OwnedExited;
         if self.manual_reconciliation_required != expected_manual
             || self.terminal_job_event_required != expected_terminal
             || self.process_identity.is_some() != self.registered_at_ms.is_some()
+            || self.process_registration_identity.is_some() != self.process_identity.is_some()
             || (matches!(
                 self.state,
                 BackgroundProcessObservationState::OwnedRunning
@@ -182,6 +202,7 @@ struct OwnedBackgroundProcess {
     job_generation: u64,
     attempt_number: u16,
     process_identity: String,
+    process_registration_identity: String,
     registered_at_ms: u64,
 }
 
@@ -218,7 +239,7 @@ impl BackgroundProcessRegistry {
         state: &BackgroundJobState,
         child: Child,
         registered_at_ms: u64,
-    ) -> Result<BackgroundProcessRegistration, BackgroundProcessObservationError> {
+    ) -> Result<VerifiedBackgroundProcessRegistration, BackgroundProcessObservationError> {
         let binding = process_binding(request, state)?;
         if !process_observation_required(state.status)
             || registered_at_ms == 0
@@ -242,6 +263,14 @@ impl BackgroundProcessRegistry {
             child.id(),
             registered_at_ms,
         )?;
+        let registration = registration(
+            &self.owner_identity,
+            request,
+            state,
+            &binding,
+            process_identity.clone(),
+            registered_at_ms,
+        )?;
         let owned = OwnedBackgroundProcess {
             child,
             job_id: request.job_id.clone(),
@@ -253,17 +282,11 @@ impl BackgroundProcessRegistry {
             job_generation: state.generation,
             attempt_number: binding.attempt_number,
             process_identity: process_identity.clone(),
+            process_registration_identity: registration.registration_identity.clone(),
             registered_at_ms,
         };
         self.processes.insert(request.job_id.clone(), owned);
-        registration(
-            &self.owner_identity,
-            request,
-            state,
-            &binding,
-            process_identity,
-            registered_at_ms,
-        )
+        verified_registration(registration)
     }
 
     pub fn rebind_active_state(
@@ -272,7 +295,7 @@ impl BackgroundProcessRegistry {
         previous: &BackgroundJobState,
         next: &BackgroundJobState,
         rebound_at_ms: u64,
-    ) -> Result<BackgroundProcessRegistration, BackgroundProcessObservationError> {
+    ) -> Result<VerifiedBackgroundProcessRegistration, BackgroundProcessObservationError> {
         let previous_binding = process_binding(request, previous)?;
         let next_binding = process_binding(request, next)?;
         if !process_observation_required(previous.status)
@@ -303,16 +326,18 @@ impl BackgroundProcessRegistry {
                 "background process ownership does not match the previous state",
             ));
         }
-        owned.state_identity = next_binding.state_identity.clone();
-        owned.job_generation = next.generation;
-        registration(
+        let registration = registration(
             &self.owner_identity,
             request,
             next,
             &next_binding,
             owned.process_identity.clone(),
             owned.registered_at_ms,
-        )
+        )?;
+        owned.state_identity = next_binding.state_identity.clone();
+        owned.job_generation = next.generation;
+        owned.process_registration_identity = registration.registration_identity.clone();
+        verified_registration(registration)
     }
 
     pub fn observe_for_scheduler(
@@ -340,6 +365,7 @@ impl BackgroundProcessRegistry {
                 request,
                 &binding,
                 BackgroundProcessObservationState::Mismatched,
+                owned.map(|process| process.process_registration_identity.as_str()),
                 owned.map(|process| process.process_identity.as_str()),
                 owned.map(|process| process.registered_at_ms),
                 observed_at_ms,
@@ -359,6 +385,7 @@ impl BackgroundProcessRegistry {
                 state,
                 None,
                 None,
+                None,
                 observed_at_ms,
                 None,
             )?);
@@ -373,6 +400,7 @@ impl BackgroundProcessRegistry {
                 } else {
                     BackgroundProcessObservationState::Unknown
                 },
+                Some(&owned.process_registration_identity),
                 Some(&owned.process_identity),
                 Some(owned.registered_at_ms),
                 observed_at_ms,
@@ -399,6 +427,7 @@ impl BackgroundProcessRegistry {
             request,
             &binding,
             observation_state,
+            Some(&owned.process_registration_identity),
             Some(&owned.process_identity),
             Some(owned.registered_at_ms),
             observed_at_ms,
@@ -497,6 +526,7 @@ struct ObservationIdentityBinding<'a> {
     state_identity: &'a str,
     job_generation: u64,
     attempt_number: Option<u16>,
+    process_registration_identity: Option<&'a str>,
     process_identity: Option<&'a str>,
     state: BackgroundProcessObservationState,
     registered_at_ms: Option<u64>,
@@ -643,6 +673,7 @@ fn build_observation(
     request: &BackgroundJobRequest,
     binding: &ProcessBinding,
     state: BackgroundProcessObservationState,
+    process_registration_identity: Option<&str>,
     process_identity: Option<&str>,
     registered_at_ms: Option<u64>,
     observed_at_ms: u64,
@@ -659,6 +690,7 @@ fn build_observation(
         state_identity: binding.state_identity.clone(),
         job_generation: binding.job_generation,
         attempt_number: (binding.attempt_number != 0).then_some(binding.attempt_number),
+        process_registration_identity: process_registration_identity.map(str::to_owned),
         process_identity: process_identity.map(str::to_owned),
         state,
         registered_at_ms,
@@ -682,6 +714,34 @@ fn verified_observation(
     Ok(VerifiedBackgroundProcessObservation { observation })
 }
 
+fn verified_registration(
+    registration: BackgroundProcessRegistration,
+) -> Result<VerifiedBackgroundProcessRegistration, BackgroundProcessObservationError> {
+    if registration.schema_version != SCHEMA_VERSION
+        || !valid_owner_identity(&registration.owner_identity)
+        || !valid_identifier(&registration.job_id)
+        || !valid_identity(&registration.request_identity, "background-job:sha256:")
+        || !valid_identity(&registration.state_identity, "background-job-state:sha256:")
+        || registration.job_generation == 0
+        || registration.attempt_number == 0
+        || !valid_identity(
+            &registration.process_identity,
+            "background-job-process:sha256:",
+        )
+        || registration.registered_at_ms == 0
+        || !valid_identity(
+            &registration.registration_identity,
+            "background-job-process-registration:sha256:",
+        )
+    {
+        return Err(error(
+            "background-process-registration-invalid",
+            "background process registration invariant is invalid",
+        ));
+    }
+    Ok(VerifiedBackgroundProcessRegistration { registration })
+}
+
 fn observation_identity(
     observation: &BackgroundProcessObservation,
 ) -> Result<String, BackgroundProcessObservationError> {
@@ -696,6 +756,7 @@ fn observation_identity(
         state_identity: &observation.state_identity,
         job_generation: observation.job_generation,
         attempt_number: observation.attempt_number,
+        process_registration_identity: observation.process_registration_identity.as_deref(),
         process_identity: observation.process_identity.as_deref(),
         state: observation.state,
         registered_at_ms: observation.registered_at_ms,
@@ -823,12 +884,14 @@ mod tests {
         let mut state = BackgroundJobState::new(&request, 100).unwrap();
         state.start(&request, 120).unwrap();
         let binding = process_binding(&request, &state).unwrap();
+        let registration_identity = identity("background-job-process-registration:sha256:", 'e');
         let process_identity = identity("background-job-process:sha256:", 'f');
         let inaccessible = build_observation(
             &owner('d'),
             &request,
             &binding,
             BackgroundProcessObservationState::Inaccessible,
+            Some(&registration_identity),
             Some(&process_identity),
             Some(120),
             130,
@@ -844,6 +907,7 @@ mod tests {
             &request,
             &binding,
             BackgroundProcessObservationState::Mismatched,
+            Some(&registration_identity),
             Some(&process_identity),
             Some(120),
             135,
@@ -857,6 +921,7 @@ mod tests {
             &request,
             &binding,
             BackgroundProcessObservationState::OwnedExited,
+            Some(&registration_identity),
             Some(&process_identity),
             Some(120),
             140,
@@ -901,7 +966,7 @@ mod tests {
         let registration = registry
             .register_spawned_child(&request, &state, child, 120)
             .unwrap();
-        assert_eq!(registration.job_generation, state.generation);
+        assert_eq!(registration.registration().job_generation, state.generation);
         let running = registry
             .observe_for_scheduler(&request, &state, &owner('d'), 130)
             .unwrap();
@@ -910,6 +975,13 @@ mod tests {
             BackgroundProcessObservationState::OwnedRunning
         );
         assert!(!running.observation().manual_reconciliation_required);
+        assert_eq!(
+            running
+                .observation()
+                .process_registration_identity
+                .as_deref(),
+            Some(registration.registration().registration_identity.as_str())
+        );
         let visible = serde_json::to_string(running.observation()).unwrap();
         assert!(!visible.contains("\"process_id\":"));
         assert!(!visible.contains("runtime_process_id"));
@@ -926,14 +998,28 @@ mod tests {
         let rebound = registry
             .rebind_active_state(&request, &previous, &state, 136)
             .unwrap();
-        assert_eq!(rebound.job_generation, state.generation);
-        assert_eq!(rebound.process_identity, registration.process_identity);
+        assert_eq!(rebound.registration().job_generation, state.generation);
+        assert_ne!(
+            rebound.registration().registration_identity,
+            registration.registration().registration_identity
+        );
+        assert_eq!(
+            rebound.registration().process_identity,
+            registration.registration().process_identity
+        );
         let rebound_running = registry
             .observe_for_scheduler(&request, &state, &owner('d'), 137)
             .unwrap();
         assert_eq!(
             rebound_running.observation().state,
             BackgroundProcessObservationState::OwnedRunning
+        );
+        assert_eq!(
+            rebound_running
+                .observation()
+                .process_registration_identity
+                .as_deref(),
+            Some(rebound.registration().registration_identity.as_str())
         );
 
         drop(input);

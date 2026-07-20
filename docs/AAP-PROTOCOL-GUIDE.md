@@ -168,36 +168,51 @@ infers success: active work becomes interrupted, queued/paused/waiting states ar
 preserved, and retry is only eligible when the exact request pre-bound a safe
 boundary and has capacity. Decisions always set `automatic_retry:false` and
 `automatic_approval:false`; pause/resume cannot bypass schedule or retry backoff.
-Workbench schema v10 persists exact canonical request/state JSON, hashes, schedule
+Workbench schema v11 persists exact canonical request/state JSON, hashes, schedule
 metadata, generation, cancellation, attempts, and recovery ordering. Creation and
 generation-CAS updates commit with typed `background-job.*` session events; identical
 retries are idempotent, stale writers fail, event failure rolls back the projection,
 and startup performs a bounded integrity scan before the store becomes writable.
-Active jobs protect session deletion/retention. No durable scheduler lease,
-notification, AAP method, Qt control, or execution path consumes these records yet.
+Active jobs protect session deletion/retention. Schema v11 additionally persists one
+optional `background-job-scheduler-lease/0.1` per job. Its canonical JSON and
+redundant metadata bind the exact job/request/state generation, scheduler owner,
+lease generation, bounded acquire/renew/expiry times, optional verified process
+registration/process identities, terminal reason, and fixed false dispatch/takeover
+authority. Acquire, renew, state-rebind, process-bind, release, and expiry use
+generation CAS and typed `background-job.lease-*` events in the same transaction.
+Active leases protect deletion even for a terminal job. A stale lease can be marked
+expired without adopting the newer job state. Schema v10 upgrades through the normal
+WAL-consistent backup and startup revalidates every bounded lease row.
 
-Internal `background-job-scheduler/0.1` is the first scheduler ownership boundary,
+Internal `background-job-scheduler/0.2` is the scheduler recovery boundary,
 but it owns only a content-free inspection snapshot. It loads one complete bounded
 recovery set from the verified store and binds it to a scheduler owner identity and
 generation. Entries classify schedule wait, admission review, paused, approval wait,
-retry review, terminal review, monitor-owned-process, or manual reconciliation. Each
-entry fixes dispatch and automatic retry/approval to false. Without the internal
-Runtime process registry, snapshots continue to report
+retry review, terminal review, monitor-owned-process, or manual reconciliation. Lease
+states distinguish missing, current, expired, released, stale job state, and owner
+mismatch. Process ownership separately distinguishes missing lease/registration,
+unavailable or non-running observation, mismatch, and exact current ownership. Each
+entry fixes dispatch, automatic retry/approval, and automatic takeover to false.
+Without the internal Runtime process registry, snapshots continue to report
 `process_observation_available:false` and active state remains manual review.
 
 Internal `background-job-process-observation/0.1` consumes an actual Runtime-owned
 `std::process::Child`; it has no PID registration API and serialized evidence includes
 no PID, command, path, environment, or output. Evidence binds scheduler owner,
 project/session/root/job, exact request/state identities and generation, attempt,
-opaque process identity, registration time, and observation time. States are
+opaque process-registration/process identities, registration time, and observation time. States are
 `owned_running`, `owned_exited`, `absent`, `inaccessible`, `mismatched`, and
-`unknown`. Only exact `owned_running` evidence becomes monitor-only. Every other
-active result requires manual reconciliation, and `owned_exited` additionally
+`unknown`. Only a current durable lease whose persisted process-registration and
+process identities both match an exact `owned_running` observation becomes
+monitor-only. Every other active result
+requires manual reconciliation, and `owned_exited` additionally
 requires a terminal job event; process exit never implies completion. Pending
 cancellation separately requires acknowledgement. Truncation, invalid time/limit,
 observation failure, or store failure leaves the prior scheduler snapshot unchanged.
-The registry is in-memory and cannot adopt a process after restart, so this is not a
-durable lease, restart owner, mutation path, or dispatch loop.
+The registry is in-memory. Persisted lease/process hashes cannot recreate its Child
+handle after restart, so restart remains manual rather than automatically adopting a
+PID. No AAP method, Qt control, scheduler loop, notification, automatic lease
+acquisition/renewal, recovery mutation, or dispatch path consumes these records yet.
 
 ## Replay And Reconnect
 

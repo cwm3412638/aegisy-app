@@ -1,6 +1,7 @@
 use crate::background_job::{
     BackgroundJobRequest, BackgroundJobState, BackgroundJobStatus, JobCancellationState,
 };
+use crate::background_scheduler_lease::{BackgroundSchedulerLease, BackgroundSchedulerLeaseStatus};
 use crate::durable_blob::{
     available_space, sha256_hex, BlobFileError, DurableBlobFileStore, DurableBlobLocalFile,
     MAX_BLOB_BYTES, MAX_BLOB_OBJECTS, MAX_SCAN_ENTRIES, MAX_STORE_BYTES, MIN_FREE_BYTES,
@@ -33,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = 72 * 1024;
@@ -51,6 +52,7 @@ const MAX_OPERATION_RECONCILIATIONS: usize = 10_000;
 const MAX_BACKGROUND_JOBS: usize = 10_000;
 const MAX_BACKGROUND_JOB_PAGE: usize = 1_000;
 const MAX_BACKGROUND_JOB_JSON_BYTES: usize = 64 * 1024;
+const MAX_BACKGROUND_LEASE_JSON_BYTES: usize = 32 * 1024;
 const MAX_PORTABLE_SESSION_ITEMS: usize = 2_000;
 const MAX_PORTABLE_SESSION_BYTES: usize = 4 * 1024 * 1024;
 const DATABASE_WRITE_HEADROOM_BYTES: u64 = 8 * 1024 * 1024;
@@ -83,6 +85,11 @@ const REQUIRED_BACKGROUND_JOB_TABLES: [&str; 1] = ["background_jobs"];
 const REQUIRED_BACKGROUND_JOB_INDEXES: [&str; 2] = [
     "background_jobs_session_idx",
     "background_jobs_recovery_idx",
+];
+const REQUIRED_BACKGROUND_LEASE_TABLES: [&str; 1] = ["background_job_leases"];
+const REQUIRED_BACKGROUND_LEASE_INDEXES: [&str; 2] = [
+    "background_job_leases_recovery_idx",
+    "background_job_leases_owner_idx",
 ];
 const REQUIRED_SESSION_SEARCH_INDEXES: [&str; 3] = [
     "sessions_status_updated_idx",
@@ -360,6 +367,45 @@ const BACKGROUND_JOB_SCHEMA_SQL: &str = "
     CREATE INDEX IF NOT EXISTS background_jobs_recovery_idx
         ON background_jobs(status, next_eligible_at_ms, updated_at_ms, job_id);
 ";
+const BACKGROUND_LEASE_SCHEMA_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS background_job_leases (
+        job_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        root_id TEXT NOT NULL,
+        request_identity TEXT NOT NULL,
+        state_identity TEXT NOT NULL,
+        job_generation INTEGER NOT NULL CHECK(job_generation >= 0),
+        owner_identity TEXT NOT NULL,
+        lease_generation INTEGER NOT NULL CHECK(lease_generation >= 1),
+        status TEXT NOT NULL CHECK(status IN ('active','released','expired')),
+        acquired_at_ms INTEGER NOT NULL CHECK(acquired_at_ms > 0),
+        renewed_at_ms INTEGER NOT NULL CHECK(renewed_at_ms >= acquired_at_ms),
+        expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms > renewed_at_ms),
+        updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= renewed_at_ms),
+        process_registration_identity TEXT,
+        process_identity TEXT,
+        released_at_ms INTEGER,
+        release_reason TEXT CHECK(release_reason IS NULL OR release_reason IN (
+            'job_terminal','ownership_yielded','recovery_abandoned','lease_expired'
+        )),
+        lease_identity TEXT NOT NULL UNIQUE,
+        lease_json TEXT NOT NULL,
+        lease_sha256 TEXT NOT NULL CHECK(length(lease_sha256) = 64),
+        lease_bytes INTEGER NOT NULL CHECK(lease_bytes > 0),
+        dispatch_authority INTEGER NOT NULL CHECK(dispatch_authority = 0),
+        automatic_takeover INTEGER NOT NULL CHECK(automatic_takeover = 0),
+        CHECK((process_registration_identity IS NULL) = (process_identity IS NULL)),
+        CHECK((released_at_ms IS NULL) = (release_reason IS NULL)),
+        FOREIGN KEY(job_id) REFERENCES background_jobs(job_id) ON DELETE CASCADE,
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+        FOREIGN KEY(project_id, root_id) REFERENCES project_roots(project_id, root_id)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS background_job_leases_recovery_idx
+        ON background_job_leases(status, expires_at_ms, job_id);
+    CREATE INDEX IF NOT EXISTS background_job_leases_owner_idx
+        ON background_job_leases(owner_identity, status, expires_at_ms, job_id);
+";
 
 #[derive(Debug)]
 pub struct WorkbenchStore {
@@ -410,6 +456,13 @@ pub struct StoredBackgroundJob {
     pub state: BackgroundJobState,
     pub request_hash: ContentHash,
     pub state_hash: ContentHash,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredBackgroundSchedulerLease {
+    pub schema_version: String,
+    pub lease: BackgroundSchedulerLease,
+    pub lease_hash: ContentHash,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3289,6 +3342,11 @@ impl WorkbenchStore {
                     'queued','running','pause_requested','paused','waiting_approval',
                     'cancelling','failed','interrupted'
                  )
+                 OR EXISTS (
+                    SELECT 1 FROM background_job_leases AS lease
+                    WHERE lease.job_id = background_jobs.job_id
+                      AND lease.status = 'active'
+                 )
                  ORDER BY next_eligible_at_ms, updated_at_ms, job_id LIMIT ?1",
             )
             .map_err(|_| error("cannot prepare background job recovery listing"))?;
@@ -3308,6 +3366,189 @@ impl WorkbenchStore {
             .iter()
             .map(|job_id| self.load_background_job(job_id))
             .collect()
+    }
+
+    pub fn create_background_scheduler_lease(
+        &mut self,
+        request: &BackgroundJobRequest,
+        state: &BackgroundJobState,
+        lease: &BackgroundSchedulerLease,
+    ) -> Result<StoredBackgroundSchedulerLease, WorkbenchStoreError> {
+        validate_background_scheduler_lease_contract(request, lease)?;
+        lease
+            .validate_for_state(request, state)
+            .map_err(|cause| coded_error(cause.code, cause.message))?;
+        if lease.lease_generation != 1 || lease.status != BackgroundSchedulerLeaseStatus::Active {
+            return Err(coded_error(
+                "background-lease-initial-state-invalid",
+                "new background scheduler lease is not in its initial active state",
+            ));
+        }
+        self.ensure_session_writable(&request.session_id)?;
+        let expected_job = stored_background_job(request, state)?;
+        if query_background_job_optional(&self.connection, &request.job_id)?.as_ref()
+            != Some(&expected_job)
+        {
+            return Err(coded_error(
+                "background-lease-job-state-stale",
+                "background scheduler lease job state is stale",
+            ));
+        }
+        let candidate = stored_background_scheduler_lease(lease)?;
+        if let Some(existing) =
+            query_background_scheduler_lease_optional(&self.connection, &request.job_id)?
+        {
+            if existing == candidate {
+                return Ok(existing);
+            }
+            return Err(coded_error(
+                "background-lease-conflict",
+                "background job already has a different scheduler lease",
+            ));
+        }
+
+        let transaction =
+            self.begin_database_write("cannot start background lease creation transaction")?;
+        if query_background_job_optional(&transaction, &request.job_id)?.as_ref()
+            != Some(&expected_job)
+        {
+            return Err(coded_error(
+                "background-lease-job-state-stale",
+                "background scheduler lease job state changed under the write lock",
+            ));
+        }
+        if let Some(existing) =
+            query_background_scheduler_lease_optional(&transaction, &request.job_id)?
+        {
+            if existing == candidate {
+                transaction
+                    .commit()
+                    .map_err(|_| error("cannot commit idempotent background lease creation"))?;
+                return Ok(existing);
+            }
+            return Err(coded_error(
+                "background-lease-conflict",
+                "background scheduler lease changed under the write lock",
+            ));
+        }
+        insert_background_scheduler_lease_tx(&transaction, &candidate)?;
+        append_background_scheduler_lease_event_tx(&transaction, None, &candidate)?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit background lease creation"))?;
+        self.load_background_scheduler_lease(&request.job_id)?
+            .ok_or_else(|| error("background scheduler lease disappeared after creation"))
+    }
+
+    pub fn update_background_scheduler_lease(
+        &mut self,
+        request: &BackgroundJobRequest,
+        current_state: &BackgroundJobState,
+        previous: &BackgroundSchedulerLease,
+        next: &BackgroundSchedulerLease,
+    ) -> Result<StoredBackgroundSchedulerLease, WorkbenchStoreError> {
+        validate_background_scheduler_lease_contract(request, previous)?;
+        validate_background_scheduler_lease_contract(request, next)?;
+        if next.status == BackgroundSchedulerLeaseStatus::Active {
+            next.validate_for_state(request, current_state)
+                .map_err(|cause| coded_error(cause.code, cause.message))?;
+        }
+        if next.lease_generation
+            != previous.lease_generation.checked_add(1).ok_or_else(|| {
+                coded_error(
+                    "background-lease-generation-exhausted",
+                    "background scheduler lease generation is exhausted",
+                )
+            })?
+            || next.acquired_at_ms != previous.acquired_at_ms
+            || next.owner_identity != previous.owner_identity
+            || next.job_id != previous.job_id
+            || next.request_identity != previous.request_identity
+            || next.updated_at_ms < previous.updated_at_ms
+        {
+            return Err(coded_error(
+                "background-lease-cas-invalid",
+                "background scheduler lease update is not the next generation",
+            ));
+        }
+        let event_kind = background_scheduler_lease_event_kind(previous, next)?;
+        self.ensure_session_writable(&request.session_id)?;
+        let expected_job = stored_background_job(request, current_state)?;
+        if query_background_job_optional(&self.connection, &request.job_id)?.as_ref()
+            != Some(&expected_job)
+        {
+            return Err(coded_error(
+                "background-lease-job-state-stale",
+                "background scheduler lease job state is stale",
+            ));
+        }
+        let previous_record = stored_background_scheduler_lease(previous)?;
+        let next_record = stored_background_scheduler_lease(next)?;
+        let existing =
+            query_background_scheduler_lease_optional(&self.connection, &request.job_id)?
+                .ok_or_else(|| {
+                    coded_error(
+                        "background-lease-not-found",
+                        "durable background scheduler lease does not exist",
+                    )
+                })?;
+        if existing == next_record {
+            return Ok(existing);
+        }
+        if existing != previous_record {
+            return Err(coded_error(
+                "background-lease-stale",
+                "durable background scheduler lease changed before update",
+            ));
+        }
+
+        let transaction =
+            self.begin_database_write("cannot start background lease update transaction")?;
+        if query_background_job_optional(&transaction, &request.job_id)?.as_ref()
+            != Some(&expected_job)
+        {
+            return Err(coded_error(
+                "background-lease-job-state-stale",
+                "background scheduler lease job state changed under the write lock",
+            ));
+        }
+        let current = query_background_scheduler_lease_optional(&transaction, &request.job_id)?
+            .ok_or_else(|| {
+                coded_error(
+                    "background-lease-not-found",
+                    "durable background scheduler lease disappeared under the write lock",
+                )
+            })?;
+        if current == next_record {
+            transaction
+                .commit()
+                .map_err(|_| error("cannot commit idempotent background lease update"))?;
+            return Ok(current);
+        }
+        if current != previous_record {
+            return Err(coded_error(
+                "background-lease-stale",
+                "durable background scheduler lease changed under the write lock",
+            ));
+        }
+        update_background_scheduler_lease_tx(&transaction, &previous_record, &next_record)?;
+        append_background_scheduler_lease_event_tx(
+            &transaction,
+            Some((previous, event_kind)),
+            &next_record,
+        )?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit background lease update"))?;
+        self.load_background_scheduler_lease(&request.job_id)?
+            .ok_or_else(|| error("background scheduler lease disappeared after update"))
+    }
+
+    pub fn load_background_scheduler_lease(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<StoredBackgroundSchedulerLease>, WorkbenchStoreError> {
+        query_background_scheduler_lease_optional(&self.connection, job_id)
     }
 
     pub fn load_session_runtime_binding(
@@ -8991,6 +9232,22 @@ impl WorkbenchStore {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
+        if version == 10 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start background lease schema migration"))?;
+            transaction
+                .execute_batch(BACKGROUND_LEASE_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply background lease schema migration"))?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit background lease schema migration"));
+        }
         if version == 9 {
             let transaction = self
                 .connection
@@ -9310,7 +9567,8 @@ impl WorkbenchStore {
             return Err(error("workbench database integrity check failed"));
         }
         verify_required_schema(&self.connection)?;
-        verify_background_job_store(&self.connection)
+        verify_background_job_store(&self.connection)?;
+        verify_background_scheduler_lease_store(&self.connection)
     }
 
     fn load_decision(
@@ -9846,6 +10104,458 @@ fn verify_background_job_store(connection: &Connection) -> Result<(), WorkbenchS
         })?;
     }
     Ok(())
+}
+
+fn validate_background_scheduler_lease_contract(
+    request: &BackgroundJobRequest,
+    lease: &BackgroundSchedulerLease,
+) -> Result<(), WorkbenchStoreError> {
+    lease
+        .validate(request)
+        .map_err(|cause| coded_error(cause.code, cause.message))
+}
+
+fn stored_background_scheduler_lease(
+    lease: &BackgroundSchedulerLease,
+) -> Result<StoredBackgroundSchedulerLease, WorkbenchStoreError> {
+    let (lease_json, lease_hash) = background_scheduler_lease_json(lease)?;
+    let _ = lease_json;
+    Ok(StoredBackgroundSchedulerLease {
+        schema_version: "stored-background-scheduler-lease/0.1".into(),
+        lease: lease.clone(),
+        lease_hash,
+    })
+}
+
+fn background_scheduler_lease_json(
+    lease: &BackgroundSchedulerLease,
+) -> Result<(String, ContentHash), WorkbenchStoreError> {
+    let json = serde_json::to_string(lease)
+        .map_err(|_| error("cannot serialize background scheduler lease"))?;
+    if json.is_empty() || json.len() > MAX_BACKGROUND_LEASE_JSON_BYTES {
+        return Err(coded_error(
+            "background-lease-json-limit",
+            "background scheduler lease JSON exceeds its durable bound",
+        ));
+    }
+    validate_persisted_text(&json, "background scheduler lease JSON")?;
+    let hash = ContentHash::for_bytes(json.as_bytes());
+    Ok((json, hash))
+}
+
+fn insert_background_scheduler_lease_tx(
+    transaction: &Transaction<'_>,
+    record: &StoredBackgroundSchedulerLease,
+) -> Result<(), WorkbenchStoreError> {
+    let lease = &record.lease;
+    let (lease_json, lease_hash) = background_scheduler_lease_json(lease)?;
+    if lease_hash != record.lease_hash {
+        return Err(error(
+            "background scheduler lease hash changed before insertion",
+        ));
+    }
+    transaction
+        .execute(
+            "INSERT INTO background_job_leases (
+                job_id, session_id, project_id, root_id, request_identity,
+                state_identity, job_generation, owner_identity, lease_generation,
+                status, acquired_at_ms, renewed_at_ms, expires_at_ms, updated_at_ms,
+                process_registration_identity, process_identity,
+                released_at_ms, release_reason, lease_identity,
+                lease_json, lease_sha256, lease_bytes,
+                dispatch_authority, automatic_takeover
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, 0, 0
+             )",
+            params![
+                lease.job_id,
+                lease.session_id,
+                lease.project_id,
+                lease.root_id,
+                lease.request_identity,
+                lease.state_identity,
+                to_i64(lease.job_generation, "background lease job generation")?,
+                lease.owner_identity,
+                to_i64(lease.lease_generation, "background lease generation")?,
+                lease.status.as_str(),
+                to_i64(lease.acquired_at_ms, "background lease acquisition time")?,
+                to_i64(lease.renewed_at_ms, "background lease renewal time")?,
+                to_i64(lease.expires_at_ms, "background lease expiry time")?,
+                to_i64(lease.updated_at_ms, "background lease update time")?,
+                lease.process_registration_identity,
+                lease.process_identity,
+                lease
+                    .released_at_ms
+                    .map(|value| to_i64(value, "background lease release time"))
+                    .transpose()?,
+                lease.release_reason.map(|reason| reason.as_str()),
+                lease.lease_identity,
+                lease_json,
+                lease_hash.sha256,
+                to_i64(lease_hash.bytes, "background lease bytes")?,
+            ],
+        )
+        .map_err(|_| error("cannot insert durable background scheduler lease"))?;
+    Ok(())
+}
+
+fn update_background_scheduler_lease_tx(
+    transaction: &Transaction<'_>,
+    previous: &StoredBackgroundSchedulerLease,
+    next: &StoredBackgroundSchedulerLease,
+) -> Result<(), WorkbenchStoreError> {
+    let lease = &next.lease;
+    let (lease_json, lease_hash) = background_scheduler_lease_json(lease)?;
+    if lease_hash != next.lease_hash {
+        return Err(error(
+            "background scheduler lease hash changed before update",
+        ));
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE background_job_leases SET
+                session_id = ?2, project_id = ?3, root_id = ?4,
+                request_identity = ?5, state_identity = ?6, job_generation = ?7,
+                owner_identity = ?8, lease_generation = ?9, status = ?10,
+                acquired_at_ms = ?11, renewed_at_ms = ?12, expires_at_ms = ?13,
+                updated_at_ms = ?14, process_registration_identity = ?15,
+                process_identity = ?16, released_at_ms = ?17, release_reason = ?18,
+                lease_identity = ?19, lease_json = ?20, lease_sha256 = ?21,
+                lease_bytes = ?22, dispatch_authority = 0, automatic_takeover = 0
+             WHERE job_id = ?1 AND lease_generation = ?23 AND lease_sha256 = ?24",
+            params![
+                lease.job_id,
+                lease.session_id,
+                lease.project_id,
+                lease.root_id,
+                lease.request_identity,
+                lease.state_identity,
+                to_i64(lease.job_generation, "background lease job generation")?,
+                lease.owner_identity,
+                to_i64(lease.lease_generation, "background lease generation")?,
+                lease.status.as_str(),
+                to_i64(lease.acquired_at_ms, "background lease acquisition time")?,
+                to_i64(lease.renewed_at_ms, "background lease renewal time")?,
+                to_i64(lease.expires_at_ms, "background lease expiry time")?,
+                to_i64(lease.updated_at_ms, "background lease update time")?,
+                lease.process_registration_identity,
+                lease.process_identity,
+                lease
+                    .released_at_ms
+                    .map(|value| to_i64(value, "background lease release time"))
+                    .transpose()?,
+                lease.release_reason.map(|reason| reason.as_str()),
+                lease.lease_identity,
+                lease_json,
+                lease_hash.sha256,
+                to_i64(lease_hash.bytes, "background lease bytes")?,
+                to_i64(
+                    previous.lease.lease_generation,
+                    "previous background lease generation"
+                )?,
+                previous.lease_hash.sha256,
+            ],
+        )
+        .map_err(|_| error("cannot update durable background scheduler lease"))?;
+    if changed != 1 {
+        return Err(coded_error(
+            "background-lease-stale",
+            "durable background scheduler lease changed during update",
+        ));
+    }
+    Ok(())
+}
+
+fn query_background_scheduler_lease_optional(
+    connection: &Connection,
+    job_id: &str,
+) -> Result<Option<StoredBackgroundSchedulerLease>, WorkbenchStoreError> {
+    validate_identifier(job_id, "background lease job ID")?;
+    let row = connection
+        .query_row(
+            "SELECT session_id, project_id, root_id, request_identity,
+                    state_identity, job_generation, owner_identity, lease_generation,
+                    status, acquired_at_ms, renewed_at_ms, expires_at_ms, updated_at_ms,
+                    process_registration_identity, process_identity,
+                    released_at_ms, release_reason, lease_identity,
+                    lease_json, lease_sha256, lease_bytes,
+                    dispatch_authority, automatic_takeover
+             FROM background_job_leases WHERE job_id = ?1",
+            [job_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(14)?,
+                    row.get::<_, Option<i64>>(15)?,
+                    row.get::<_, Option<String>>(16)?,
+                    row.get::<_, String>(17)?,
+                    row.get::<_, String>(18)?,
+                    row.get::<_, String>(19)?,
+                    row.get::<_, i64>(20)?,
+                    row.get::<_, i64>(21)?,
+                    row.get::<_, i64>(22)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot read durable background scheduler lease"))?;
+    let Some((
+        session_id,
+        project_id,
+        root_id,
+        request_identity,
+        state_identity,
+        job_generation,
+        owner_identity,
+        lease_generation,
+        status,
+        acquired_at_ms,
+        renewed_at_ms,
+        expires_at_ms,
+        updated_at_ms,
+        process_registration_identity,
+        process_identity,
+        released_at_ms,
+        release_reason,
+        lease_identity,
+        lease_json,
+        lease_sha256,
+        lease_bytes,
+        dispatch_authority,
+        automatic_takeover,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    if lease_json.is_empty() || lease_json.len() > MAX_BACKGROUND_LEASE_JSON_BYTES {
+        return Err(coded_error(
+            "background-lease-durable-json-invalid",
+            "durable background scheduler lease JSON is outside its bounds",
+        ));
+    }
+    let lease: BackgroundSchedulerLease = serde_json::from_str(&lease_json)
+        .map_err(|_| error("durable background scheduler lease JSON is invalid"))?;
+    let job = query_background_job_optional(connection, job_id)?.ok_or_else(|| {
+        coded_error(
+            "background-lease-job-missing",
+            "durable background scheduler lease job is missing",
+        )
+    })?;
+    validate_background_scheduler_lease_contract(&job.request, &lease)?;
+    let (canonical_json, canonical_hash) = background_scheduler_lease_json(&lease)?;
+    let stored_hash = ContentHash {
+        sha256: lease_sha256,
+        bytes: to_u64(lease_bytes, "background lease bytes")?,
+    };
+    if lease.job_id != job_id
+        || lease.session_id != session_id
+        || lease.project_id != project_id
+        || lease.root_id != root_id
+        || lease.request_identity != request_identity
+        || lease.state_identity != state_identity
+        || lease.job_generation != to_u64(job_generation, "background lease job generation")?
+        || lease.owner_identity != owner_identity
+        || lease.lease_generation != to_u64(lease_generation, "background lease generation")?
+        || lease.status.as_str() != status
+        || lease.acquired_at_ms != to_u64(acquired_at_ms, "background lease acquisition time")?
+        || lease.renewed_at_ms != to_u64(renewed_at_ms, "background lease renewal time")?
+        || lease.expires_at_ms != to_u64(expires_at_ms, "background lease expiry time")?
+        || lease.updated_at_ms != to_u64(updated_at_ms, "background lease update time")?
+        || lease.process_registration_identity != process_registration_identity
+        || lease.process_identity != process_identity
+        || lease.released_at_ms
+            != released_at_ms
+                .map(|value| to_u64(value, "background lease release time"))
+                .transpose()?
+        || lease.release_reason.map(|reason| reason.as_str()) != release_reason.as_deref()
+        || lease.lease_identity != lease_identity
+        || canonical_json != lease_json
+        || canonical_hash != stored_hash
+        || dispatch_authority != 0
+        || automatic_takeover != 0
+    {
+        return Err(coded_error(
+            "background-lease-durable-integrity-invalid",
+            "durable background scheduler lease metadata failed integrity validation",
+        ));
+    }
+    Ok(Some(StoredBackgroundSchedulerLease {
+        schema_version: "stored-background-scheduler-lease/0.1".into(),
+        lease,
+        lease_hash: stored_hash,
+    }))
+}
+
+fn verify_background_scheduler_lease_store(
+    connection: &Connection,
+) -> Result<(), WorkbenchStoreError> {
+    let count = query_global_count(
+        connection,
+        "SELECT COUNT(*) FROM background_job_leases",
+        "cannot count background scheduler leases during integrity verification",
+    )?;
+    if count > MAX_BACKGROUND_JOBS as u64 {
+        return Err(coded_error(
+            "background-lease-store-limit",
+            "durable background scheduler lease count exceeds its startup limit",
+        ));
+    }
+    let mut statement = connection
+        .prepare("SELECT job_id FROM background_job_leases ORDER BY job_id LIMIT ?1")
+        .map_err(|_| error("cannot prepare background scheduler lease verification"))?;
+    let job_ids = statement
+        .query_map([MAX_BACKGROUND_JOBS as i64 + 1], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|_| error("cannot read background scheduler lease verification"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("background scheduler lease verification row is invalid"))?;
+    drop(statement);
+    if job_ids.len() > MAX_BACKGROUND_JOBS {
+        return Err(coded_error(
+            "background-lease-store-limit",
+            "durable background scheduler lease count exceeds its startup limit",
+        ));
+    }
+    for job_id in job_ids {
+        query_background_scheduler_lease_optional(connection, &job_id)?.ok_or_else(|| {
+            coded_error(
+                "background-lease-integrity-race",
+                "durable background scheduler lease disappeared during verification",
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn background_scheduler_lease_event_kind(
+    previous: &BackgroundSchedulerLease,
+    next: &BackgroundSchedulerLease,
+) -> Result<&'static str, WorkbenchStoreError> {
+    let kind = match (previous.status, next.status) {
+        (BackgroundSchedulerLeaseStatus::Active, BackgroundSchedulerLeaseStatus::Released)
+            if previous.state_identity == next.state_identity
+                && previous.job_generation == next.job_generation
+                && previous.process_registration_identity == next.process_registration_identity
+                && previous.process_identity == next.process_identity =>
+        {
+            "background-job.lease-released"
+        }
+        (BackgroundSchedulerLeaseStatus::Active, BackgroundSchedulerLeaseStatus::Expired)
+            if previous.state_identity == next.state_identity
+                && previous.job_generation == next.job_generation
+                && previous.process_registration_identity == next.process_registration_identity
+                && previous.process_identity == next.process_identity =>
+        {
+            "background-job.lease-expired"
+        }
+        (BackgroundSchedulerLeaseStatus::Active, BackgroundSchedulerLeaseStatus::Active)
+            if previous.state_identity != next.state_identity
+                || previous.job_generation != next.job_generation =>
+        {
+            if previous.job_generation.checked_add(1) != Some(next.job_generation) {
+                return Err(coded_error(
+                    "background-lease-state-generation-invalid",
+                    "background scheduler lease state rebind skipped a job generation",
+                ));
+            }
+            "background-job.lease-state-rebound"
+        }
+        (BackgroundSchedulerLeaseStatus::Active, BackgroundSchedulerLeaseStatus::Active)
+            if previous.process_registration_identity.is_none()
+                && previous.process_identity.is_none()
+                && next.process_registration_identity.is_some()
+                && next.process_identity.is_some() =>
+        {
+            "background-job.lease-process-bound"
+        }
+        (BackgroundSchedulerLeaseStatus::Active, BackgroundSchedulerLeaseStatus::Active)
+            if next.renewed_at_ms > previous.renewed_at_ms
+                && next.expires_at_ms > next.renewed_at_ms
+                && previous.state_identity == next.state_identity
+                && previous.job_generation == next.job_generation
+                && previous.process_registration_identity == next.process_registration_identity
+                && previous.process_identity == next.process_identity =>
+        {
+            "background-job.lease-renewed"
+        }
+        _ => {
+            return Err(coded_error(
+                "background-lease-transition-unrecognized",
+                "background scheduler lease transition has no typed event",
+            ));
+        }
+    };
+    Ok(kind)
+}
+
+fn append_background_scheduler_lease_event_tx(
+    transaction: &Transaction<'_>,
+    previous: Option<(&BackgroundSchedulerLease, &str)>,
+    record: &StoredBackgroundSchedulerLease,
+) -> Result<WorkbenchEvent, WorkbenchStoreError> {
+    let lease = &record.lease;
+    let event_kind = previous
+        .as_ref()
+        .map(|(_, kind)| *kind)
+        .unwrap_or("background-job.lease-acquired");
+    let event_id = derived_event_id(
+        "background-job-scheduler-lease",
+        format!(
+            "{}\0{}\0{}",
+            lease.job_id, lease.lease_generation, lease.lease_identity
+        )
+        .as_bytes(),
+    );
+    append_event_tx(
+        transaction,
+        EventInput {
+            session_id: &lease.session_id,
+            event_id: &event_id,
+            timestamp_ms: lease.updated_at_ms,
+            correlation_id: &lease.job_id,
+            event_kind,
+            project_id: Some(&lease.project_id),
+            operation_id: &lease.job_id,
+            generation: lease.lease_generation,
+            payload: json!({
+                "schema_version": "background-job-scheduler-lease-event/0.1",
+                "job_id": lease.job_id,
+                "request_identity": lease.request_identity,
+                "state_identity": lease.state_identity,
+                "job_generation": lease.job_generation,
+                "owner_identity": lease.owner_identity,
+                "lease_generation": lease.lease_generation,
+                "lease_identity": lease.lease_identity,
+                "lease_hash": record.lease_hash,
+                "previous_lease_identity": previous.as_ref().map(|(value, _)| &value.lease_identity),
+                "status": lease.status.as_str(),
+                "acquired_at_ms": lease.acquired_at_ms,
+                "renewed_at_ms": lease.renewed_at_ms,
+                "expires_at_ms": lease.expires_at_ms,
+                "process_registration_identity": lease.process_registration_identity,
+                "process_identity": lease.process_identity,
+                "released_at_ms": lease.released_at_ms,
+                "release_reason": lease.release_reason.map(|reason| reason.as_str()),
+                "dispatch_authority": false,
+                "automatic_takeover": false
+            }),
+        },
+    )
 }
 
 fn background_job_event_kind(
@@ -10802,6 +11512,16 @@ fn build_session_deletion_plan(
         if active_background_jobs > 0 {
             push_projection_issue(&mut blocking_reasons, "session-background-job-active");
         }
+        let active_background_leases = query_count(
+            connection,
+            "SELECT COUNT(*) FROM background_job_leases
+             WHERE session_id = ?1 AND status = 'active'",
+            &member.session.session_id,
+            "cannot inspect session deletion active background leases",
+        )?;
+        if active_background_leases > 0 {
+            push_projection_issue(&mut blocking_reasons, "session-background-lease-active");
+        }
         let (references, bytes): (i64, i64) = connection
             .query_row(
                 "SELECT COUNT(*), COALESCE(SUM(blob.bytes), 0)
@@ -11167,7 +11887,10 @@ fn apply_session_search_indexes(connection: &Connection) -> Result<(), Workbench
         .map_err(|_| error("cannot apply session search index migration"))?;
     connection
         .execute_batch(BACKGROUND_JOB_SCHEMA_SQL)
-        .map_err(|_| error("cannot apply background job schema migration"))
+        .map_err(|_| error("cannot apply background job schema migration"))?;
+    connection
+        .execute_batch(BACKGROUND_LEASE_SCHEMA_SQL)
+        .map_err(|_| error("cannot apply background lease schema migration"))
 }
 
 fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreError> {
@@ -11181,6 +11904,7 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         .chain(REQUIRED_NAVIGATION_TABLES)
         .chain(REQUIRED_RUNTIME_BINDING_TABLES)
         .chain(REQUIRED_BACKGROUND_JOB_TABLES)
+        .chain(REQUIRED_BACKGROUND_LEASE_TABLES)
     {
         let exists: Option<String> = connection
             .query_row(
@@ -11222,6 +11946,22 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         if exists.as_deref() != Some(index) {
             return Err(error(
                 "workbench database background job indexes are incomplete",
+            ));
+        }
+    }
+    for index in REQUIRED_BACKGROUND_LEASE_INDEXES {
+        let exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot verify workbench background lease indexes"))?;
+        if exists.as_deref() != Some(index) {
+            return Err(error(
+                "workbench database background lease indexes are incomplete",
             ));
         }
     }
@@ -12617,6 +13357,9 @@ fn coded_error(code: impl Into<String>, message: impl Into<String>) -> Workbench
 mod tests {
     use super::*;
     use crate::background_job::{JobRetryPolicy, JobSchedule, JobScheduleKind};
+    use crate::background_scheduler_lease::{
+        BackgroundSchedulerLeaseRebind, BackgroundSchedulerLeaseReleaseReason,
+    };
     use crate::git_commit_transaction::{
         GitCommitHookPolicy, GitCommitIdentity, GitCommitMessageSource, GitCommitSigningPolicy,
     };
@@ -13598,6 +14341,373 @@ mod tests {
     }
 
     #[test]
+    fn background_scheduler_lease_is_atomic_generation_cas_and_durable() {
+        let root = Root::new("background-lease-durable");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (request, state) =
+            create_background_job_fixture(&mut store, &root, "durable-lease-job");
+        store.create_background_job(&request, &state).unwrap();
+        let lease = BackgroundSchedulerLease::acquire(
+            &request,
+            &state,
+            background_job_identity("scheduler-owner:sha256:", 'f'),
+            1_250,
+            2_000,
+        )
+        .unwrap();
+        let created = store
+            .create_background_scheduler_lease(&request, &state, &lease)
+            .unwrap();
+        assert_eq!(
+            store
+                .create_background_scheduler_lease(&request, &state, &lease)
+                .unwrap(),
+            created
+        );
+
+        let previous = lease.clone();
+        let mut renewed = lease;
+        renewed
+            .renew(
+                &request,
+                &state,
+                &background_job_identity("scheduler-owner:sha256:", 'f'),
+                1_500,
+                2_000,
+            )
+            .unwrap();
+        let renewed_record = store
+            .update_background_scheduler_lease(&request, &state, &previous, &renewed)
+            .unwrap();
+        assert_eq!(renewed_record.lease, renewed);
+        assert_eq!(
+            store
+                .update_background_scheduler_lease(&request, &state, &previous, &renewed)
+                .unwrap(),
+            renewed_record
+        );
+
+        let mut stale_alternative = previous.clone();
+        stale_alternative
+            .renew(
+                &request,
+                &state,
+                &background_job_identity("scheduler-owner:sha256:", 'f'),
+                1_600,
+                2_000,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .update_background_scheduler_lease(&request, &state, &previous, &stale_alternative,)
+                .unwrap_err()
+                .code,
+            "background-lease-stale"
+        );
+
+        let before_release = renewed.clone();
+        renewed
+            .release(
+                &request,
+                &state,
+                &background_job_identity("scheduler-owner:sha256:", 'f'),
+                BackgroundSchedulerLeaseReleaseReason::OwnershipYielded,
+                1_700,
+            )
+            .unwrap();
+        let released = store
+            .update_background_scheduler_lease(&request, &state, &before_release, &renewed)
+            .unwrap();
+        assert_eq!(
+            released.lease.status,
+            BackgroundSchedulerLeaseStatus::Released
+        );
+        let events = store
+            .read_session_events(&request.session_id, 0, MAX_EVENT_PAGE)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_kind.starts_with("background-job.lease-"))
+            .map(|event| event.event_kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events,
+            [
+                "background-job.lease-acquired",
+                "background-job.lease-renewed",
+                "background-job.lease-released",
+            ]
+        );
+        drop(store);
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .load_background_scheduler_lease(&request.job_id)
+                .unwrap()
+                .unwrap(),
+            released
+        );
+    }
+
+    #[test]
+    fn background_scheduler_lease_event_failure_rolls_back_and_tamper_fails_startup() {
+        let root = Root::new("background-lease-rollback");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (request, state) =
+            create_background_job_fixture(&mut store, &root, "rollback-lease-job");
+        store.create_background_job(&request, &state).unwrap();
+        let lease = BackgroundSchedulerLease::acquire(
+            &request,
+            &state,
+            background_job_identity("scheduler-owner:sha256:", 'f'),
+            1_250,
+            2_000,
+        )
+        .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_background_lease_event
+                 BEFORE INSERT ON events
+                 WHEN NEW.event_kind = 'background-job.lease-acquired'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .create_background_scheduler_lease(&request, &state, &lease)
+            .is_err());
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM background_job_leases",
+                "count"
+            )
+            .unwrap(),
+            0
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_background_lease_event;")
+            .unwrap();
+        store
+            .create_background_scheduler_lease(&request, &state, &lease)
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_background_lease_renew_event
+                 BEFORE INSERT ON events
+                 WHEN NEW.event_kind = 'background-job.lease-renewed'
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+        let mut renewed = lease.clone();
+        renewed
+            .renew(
+                &request,
+                &state,
+                &background_job_identity("scheduler-owner:sha256:", 'f'),
+                1_400,
+                2_000,
+            )
+            .unwrap();
+        assert!(store
+            .update_background_scheduler_lease(&request, &state, &lease, &renewed)
+            .is_err());
+        assert_eq!(
+            store
+                .load_background_scheduler_lease(&request.job_id)
+                .unwrap()
+                .unwrap()
+                .lease,
+            lease
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_background_lease_renew_event;")
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE background_job_leases SET lease_sha256 = ?1 WHERE job_id = ?2",
+                params!["0".repeat(64), request.job_id],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_background_scheduler_lease(&request.job_id)
+                .unwrap_err()
+                .code,
+            "background-lease-durable-integrity-invalid"
+        );
+        drop(store);
+        assert_eq!(
+            WorkbenchStore::open(&root.path).unwrap_err().code,
+            "workbench-database-integrity-failed"
+        );
+    }
+
+    #[test]
+    fn background_scheduler_lease_rebinds_explicitly_and_terminal_lease_blocks_deletion() {
+        let root = Root::new("background-lease-rebind");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (request, mut state) =
+            create_background_job_fixture(&mut store, &root, "rebind-lease-job");
+        store.create_background_job(&request, &state).unwrap();
+        let owner = background_job_identity("scheduler-owner:sha256:", 'f');
+        let mut lease =
+            BackgroundSchedulerLease::acquire(&request, &state, owner.clone(), 1_250, 5_000)
+                .unwrap();
+        store
+            .create_background_scheduler_lease(&request, &state, &lease)
+            .unwrap();
+
+        let queued_state = state.clone();
+        state.start(&request, 1_300).unwrap();
+        store
+            .update_background_job_state(&request, &queued_state, &state)
+            .unwrap();
+        let queued_lease = lease.clone();
+        lease
+            .rebind_job_state(
+                &request,
+                BackgroundSchedulerLeaseRebind {
+                    previous: &queued_state,
+                    next: &state,
+                    owner_identity: &owner,
+                    process_registration: None,
+                    now_ms: 1_310,
+                    ttl_ms: 5_000,
+                },
+            )
+            .unwrap();
+        store
+            .update_background_scheduler_lease(&request, &state, &queued_lease, &lease)
+            .unwrap();
+
+        let running_state = state.clone();
+        state
+            .complete(
+                &request,
+                &background_job_identity("artifact:sha256:", 'a'),
+                &background_job_identity("job-evidence:sha256:", 'b'),
+                1_400,
+            )
+            .unwrap();
+        store
+            .update_background_job_state(&request, &running_state, &state)
+            .unwrap();
+        let running_lease = lease.clone();
+        lease
+            .rebind_job_state(
+                &request,
+                BackgroundSchedulerLeaseRebind {
+                    previous: &running_state,
+                    next: &state,
+                    owner_identity: &owner,
+                    process_registration: None,
+                    now_ms: 1_410,
+                    ttl_ms: 5_000,
+                },
+            )
+            .unwrap();
+        store
+            .update_background_scheduler_lease(&request, &state, &running_lease, &lease)
+            .unwrap();
+        let recovery = store.load_background_jobs_for_recovery(10).unwrap();
+        assert_eq!(recovery.len(), 1);
+        assert_eq!(recovery[0].state.status, BackgroundJobStatus::Completed);
+
+        let blocked = store
+            .preview_session_deletion(&request.session_id, SessionDeletionScope::SessionOnly)
+            .unwrap();
+        assert!(!blocked
+            .blocking_reasons
+            .contains(&"session-background-job-active".into()));
+        assert!(blocked
+            .blocking_reasons
+            .contains(&"session-background-lease-active".into()));
+
+        let terminal_lease = lease.clone();
+        lease
+            .release(
+                &request,
+                &state,
+                &owner,
+                BackgroundSchedulerLeaseReleaseReason::JobTerminal,
+                1_420,
+            )
+            .unwrap();
+        store
+            .update_background_scheduler_lease(&request, &state, &terminal_lease, &lease)
+            .unwrap();
+        assert!(store
+            .load_background_jobs_for_recovery(10)
+            .unwrap()
+            .is_empty());
+        let unblocked = store
+            .preview_session_deletion(&request.session_id, SessionDeletionScope::SessionOnly)
+            .unwrap();
+        assert!(!unblocked
+            .blocking_reasons
+            .contains(&"session-background-lease-active".into()));
+        let lease_events = store
+            .read_session_events(&request.session_id, 0, MAX_EVENT_PAGE)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_kind.starts_with("background-job.lease-"))
+            .map(|event| event.event_kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lease_events,
+            [
+                "background-job.lease-acquired",
+                "background-job.lease-state-rebound",
+                "background-job.lease-state-rebound",
+                "background-job.lease-released",
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_background_scheduler_lease_can_only_expire_without_state_adoption() {
+        let root = Root::new("background-lease-stale-expiry");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (request, mut state) =
+            create_background_job_fixture(&mut store, &root, "stale-expiry-lease-job");
+        store.create_background_job(&request, &state).unwrap();
+        let mut lease = BackgroundSchedulerLease::acquire(
+            &request,
+            &state,
+            background_job_identity("scheduler-owner:sha256:", 'f'),
+            1_250,
+            1_000,
+        )
+        .unwrap();
+        store
+            .create_background_scheduler_lease(&request, &state, &lease)
+            .unwrap();
+        let queued = state.clone();
+        state.start(&request, 1_300).unwrap();
+        store
+            .update_background_job_state(&request, &queued, &state)
+            .unwrap();
+
+        let active_stale = lease.clone();
+        lease.expire(&request, 2_250).unwrap();
+        let expired = store
+            .update_background_scheduler_lease(&request, &state, &active_stale, &lease)
+            .unwrap();
+        assert_eq!(
+            expired.lease.status,
+            BackgroundSchedulerLeaseStatus::Expired
+        );
+        assert_eq!(expired.lease.job_generation, queued.generation);
+        assert_ne!(expired.lease.job_generation, state.generation);
+        assert!(!expired.lease.automatic_takeover);
+        assert!(!expired.lease.dispatch_authority);
+    }
+
+    #[test]
     fn background_job_state_and_typed_events_are_atomic_idempotent_and_durable() {
         let root = Root::new("background-job-durable");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
@@ -13807,6 +14917,66 @@ mod tests {
     }
 
     #[test]
+    fn upgrades_schema_v10_to_background_scheduler_leases_after_backup() {
+        let root = Root::new("schema-v10-background-leases");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "session-v10".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Preserved from v10".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        drop(store);
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch("DROP TABLE background_job_leases; PRAGMA user_version = 10;")
+            .unwrap();
+        drop(connection);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened.load_session("session-v10").unwrap().title,
+            "Preserved from v10"
+        );
+        for table in REQUIRED_BACKGROUND_LEASE_TABLES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                     )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing background lease table {table}");
+        }
+        for index in REQUIRED_BACKGROUND_LEASE_INDEXES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1
+                     )",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing background lease index {index}");
+        }
+        let manifests = migration_backup_manifests(&root.path).unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].source_schema_version, 10);
+        assert_eq!(manifests[0].target_schema_version, SCHEMA_VERSION as u64);
+    }
+
+    #[test]
     fn upgrades_schema_v9_to_background_jobs_after_backup() {
         let root = Root::new("schema-v9-background-jobs");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
@@ -13825,7 +14995,11 @@ mod tests {
         drop(store);
         let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
         connection
-            .execute_batch("DROP TABLE background_jobs; PRAGMA user_version = 9;")
+            .execute_batch(
+                "DROP TABLE background_job_leases;
+                 DROP TABLE background_jobs;
+                 PRAGMA user_version = 9;",
+            )
             .unwrap();
         drop(connection);
 

@@ -170,19 +170,34 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   infers success: active work becomes interrupted, waiting approval stays waiting,
   and retry eligibility requires the pre-bound safe boundary and attempt capacity;
   no automatic retry or approval is emitted. Pause/resume cannot bypass schedule or
-  retry backoff. Workbench schema v10 now persists canonical request/state JSON,
+  retry backoff. Workbench schema v11 persists canonical request/state JSON,
   SHA-256 identities, generation, schedule/recovery metadata, cancellation, and
   attempts in a bounded `background_jobs` projection. Create and generation-CAS
   updates commit with typed `background-job.*` session events; identical retries
   are idempotent, stale writers fail, event failure rolls back the projection, and
   startup revalidates at most 10,000 records before the store becomes writable.
   Active jobs block session deletion/retention and terminal records purge with the
-  session. Internal `background-job-scheduler/0.1` now loads a complete bounded
+  session. Schema v11 also persists one optional
+  `background-job-scheduler-lease/0.1` per job. Leases bind exact job/request/state
+  generation, scheduler owner, bounded acquisition/renewal/expiry, optional verified
+  process-registration/process identities, and generation-CAS updates. Acquire,
+  renew, state-rebind, process-bind, release, and expire commit with typed
+  `background-job.lease-*` events; event failure rolls back the projection, startup
+  revalidates canonical JSON/hashes, and v10-to-v11 uses the normal WAL-consistent
+  migration backup. Active leases protect deletion even after a job becomes terminal,
+  and stale leases may only expire without adopting the newer job generation.
+  Internal `background-job-scheduler/0.2` now loads a complete bounded
   recovery set into one owner-identity/generation-bound, content-hashed inspection
   snapshot. It classifies schedule wait, admission review, paused, approval wait,
   retry review, terminal review, and manual reconciliation while always reporting
   `dispatch_available:false`, `automatic_retry:false`, and
-  `automatic_approval:false`. Internal
+  `automatic_approval:false` and `automatic_takeover:false`. Lease recovery states
+  distinguish missing, current, expired, released, stale-job, and owner mismatch.
+  Process ownership separately distinguishes missing lease/registration,
+  unavailable/non-running observation, mismatch, and exact current ownership. Only
+  the conjunction of a current durable lease, matching process registration hash,
+  and a live Runtime-owned handle becomes monitor-only; terminal jobs with an active
+  lease remain visible until explicit release. Internal
   `background-job-process-observation/0.1` now accepts only a Runtime-owned
   `std::process::Child` handle, never a caller-selected PID. Its content-free
   evidence binds scheduler owner, project/session/root/job, exact request/state
@@ -194,11 +209,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   The scheduler can consume the non-serializable verified observation and classify
   exact owned-running work as monitor-only while keeping dispatch disabled. Missing
   ownership remains manual, pending cancellation separately reports acknowledgement,
-  and failed refresh retains the previous snapshot. The in-memory registry is not a
-  durable lease and cannot adopt a process after Runtime restart. Durable scheduler
-  leases/process ownership, authoritative
-  approval, automatic recovery, notification, AAP/Qt controls, and cross-platform
-  endurance remain absent; keep `21.8` unchecked.
+  and failed refresh retains the previous snapshot. Persisted process hashes are not
+  a process handle: after Runtime restart the in-memory registry is absent and the job
+  remains manual rather than being adopted. Automatic lease acquisition/renewal,
+  authoritative approval, automatic recovery transitions, notification, AAP/Qt
+  controls, and cross-platform endurance remain absent; keep `21.8` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is
@@ -699,16 +714,17 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user-gesture ID for explicit approvals; it refuses read-only or managed-denied
   Git actions before SQLite mutation. This remains an internal foundation, not an
   AAP/Qt approval bridge or native execution grant.
-- `WorkbenchStore` schema version 10 now persists canonical projects and roots plus
+- `WorkbenchStore` schema version 11 now persists canonical projects and roots plus
   Chat/Work sessions with project binding, environment identity, new/resume/fork
   lineage, and active/archived/failed/interrupted status. Work sessions require a
   project, lineage parents must match project and mode, archive/unarchive is
   timestamp-guarded, and reopen plus v1-to-v2 migration fixtures pass. Turns now
   have bounded idempotency/input hashes and terminal states; items have session
   sequences, turn binding, bounded redacted JSON payloads, and content hashes with
-  tamper/gap replay checks. Transactional v1/v2/v3/v4/v5/v6/v7/v8/v9-to-v10 migrations pass; the v3
+  tamper/gap replay checks. Transactional
+  v1/v2/v3/v4/v5/v6/v7/v8/v9/v10-to-v11 migrations pass; the v3
   path preserves existing events while allowing projectless Chat event streams, and
-  v4 adds only the durable Blob schema. The v10 background-job projection is
+  v4 adds only the durable Blob schema. The v11 background-job and scheduler-lease projections are
   internal, bounded, content-free canonical contract JSON, event-backed,
   generation-CAS protected, startup-verified, and unreachable from AAP/Qt. Extensions,
   model profiles, Git checkpoint projections, and complete scheduler/recovery state
@@ -905,18 +921,28 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 364 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 375 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
 runtime budget-ledger, unified-execution-plan, durable-job lifecycle contracts, and
-schema-v10 job persistence/CAS/migration/integrity fixtures, the owner-bound
-read-only scheduler recovery snapshot, and Runtime-owned process-observation
+schema-v11 job/lease persistence/CAS/migration/integrity fixtures, the owner-bound
+read-only scheduler recovery snapshot, durable lease/process-identity classification,
+and Runtime-owned process-observation
 contract, plus diagnostic, terminal, Git, and
 child-handoff pinned-context authority, strict Git references, complete-source drift
 detection, terminal normalization, image import/preview/assembly/release rollback,
 and source-loss fail-closed invariants.
+
+On 2026-07-20 the schema-v11 lease change rebuilt the complete desktop target and
+passed `agent_runtime_protocol`, all Rust counts above, strict Clippy, formatting,
+and `git diff --check`. The same full CTest attempt could not re-establish the
+16-test desktop baseline because the remaining 15 test processes were killed at
+startup by the host under memory pressure; they produced no test assertion failure.
+The Node-backed OpenSpec CLI was likewise killed with exit 137 before validation.
+Treat the earlier 16-test run as the last complete desktop baseline and rerun CTest
+and strict OpenSpec validation when host memory is available.
 
 The process-observation fixtures use a real owned child on macOS and prove exact
 generation rebinding, running/exited observation, no PID in serialized evidence, and
@@ -1109,7 +1135,7 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
 ## Migration Backup And Read-Only Recovery Boundary
 
 - OpenSpec `5.6` and `5.7` are complete. Every supported
-  v1/v2/v3/v4/v5/v6/v7/v8/v9-to-v10
+  v1/v2/v3/v4/v5/v6/v7/v8/v9/v10-to-v11
   migration first uses SQLite Online Backup to capture a WAL-consistent logical
   snapshot, then normalizes it to a standalone `journal_mode=DELETE` database.
 - The private `migration-backups-v1` directory retains at most 16 bounded evidence
@@ -2008,6 +2034,10 @@ Implemented visual baseline:
 9. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
    permission policy and the production approval ledger. A trust acknowledgement must
    never become an implicit write, command, Hook, or network grant.
-10. Continue with the next unchecked database/event, durable project/session, typed
-   timeline, permission/approval, structured patch/
-   checkpoint, terminal, and Git milestones in dependency order.
+10. Continue `21.8` with explicit recovery-decision journaling, notification
+   contracts, and read-only inspection controls. Keep automatic lease acquisition/
+   renewal, process adoption, retry, approval, recovery mutation, and dispatch
+   unavailable until their permission, sandbox, budget, and release gates pass.
+11. Continue with the next unchecked database/event, durable project/session, typed
+   timeline, permission/approval, structured patch/checkpoint, terminal, and Git
+   milestones in dependency order.

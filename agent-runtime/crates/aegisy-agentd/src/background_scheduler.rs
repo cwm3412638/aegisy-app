@@ -9,13 +9,16 @@ use crate::background_process_observation::{
     process_observation_required, BackgroundProcessObservation, BackgroundProcessObservationState,
     BackgroundProcessRegistry, VerifiedBackgroundProcessObservation,
 };
-use crate::workbench_store::{StoredBackgroundJob, WorkbenchStore};
+use crate::background_scheduler_lease::{
+    BackgroundSchedulerLeaseStatus, SCHEMA_VERSION as LEASE_SCHEMA_VERSION,
+};
+use crate::workbench_store::{StoredBackgroundJob, StoredBackgroundSchedulerLease, WorkbenchStore};
 use serde::{Deserialize, Serialize};
 use serde_json::to_vec;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: &str = "background-job-scheduler/0.1";
+pub const SCHEMA_VERSION: &str = "background-job-scheduler/0.2";
 const MAX_RECOVERY_JOBS: usize = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +46,56 @@ pub enum SchedulerRecoveryAction {
     TerminalReview,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchedulerLeaseState {
+    Missing,
+    Current,
+    Expired,
+    Released,
+    StateStale,
+    OwnerMismatch,
+}
+
+impl SchedulerLeaseState {
+    fn blocker_code(self) -> &'static str {
+        match self {
+            Self::Missing => "scheduler-lease-missing",
+            Self::Current => "scheduler-lease-current",
+            Self::Expired => "scheduler-lease-expired",
+            Self::Released => "scheduler-lease-released",
+            Self::StateStale => "scheduler-lease-state-stale",
+            Self::OwnerMismatch => "scheduler-lease-owner-mismatch",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchedulerProcessOwnershipState {
+    NotRequired,
+    MissingLease,
+    MissingRegistration,
+    ObservationUnavailable,
+    ObservedNotRunning,
+    Mismatched,
+    Current,
+}
+
+impl SchedulerProcessOwnershipState {
+    fn blocker_code(self) -> &'static str {
+        match self {
+            Self::NotRequired => "process-ownership-not-required",
+            Self::MissingLease => "process-ownership-lease-missing",
+            Self::MissingRegistration => "process-ownership-registration-missing",
+            Self::ObservationUnavailable => "process-ownership-observation-unavailable",
+            Self::ObservedNotRunning => "process-ownership-observed-not-running",
+            Self::Mismatched => "process-ownership-mismatched",
+            Self::Current => "process-ownership-current",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchedulerRecoveryEntry {
     pub job_id: String,
@@ -56,12 +109,20 @@ pub struct SchedulerRecoveryEntry {
     pub job_generation: u64,
     pub action: SchedulerRecoveryAction,
     pub next_eligible_at_ms: Option<u64>,
+    pub lease_required: bool,
+    pub lease_state: SchedulerLeaseState,
+    pub lease_schema_version: Option<String>,
+    pub lease_identity: Option<String>,
+    pub lease_generation: Option<u64>,
+    pub lease_expires_at_ms: Option<u64>,
+    pub process_ownership_state: SchedulerProcessOwnershipState,
     pub process_observation_required: bool,
     pub process_observation: Option<BackgroundProcessObservation>,
     pub approval_required: bool,
     pub cancellation_acknowledgement_required: bool,
     pub automatic_retry: bool,
     pub automatic_approval: bool,
+    pub automatic_takeover: bool,
     pub dispatch_available: bool,
     pub blockers: Vec<String>,
 }
@@ -74,6 +135,7 @@ pub struct BackgroundSchedulerSnapshot {
     pub observed_at_ms: u64,
     pub job_count: usize,
     pub process_observation_available: bool,
+    pub durable_lease_available: bool,
     pub notification_available: bool,
     pub dispatch_available: bool,
     pub entries: Vec<SchedulerRecoveryEntry>,
@@ -86,6 +148,7 @@ pub struct BackgroundJobScheduler {
     generation: u64,
     observed_at_ms: u64,
     process_observation_available: bool,
+    durable_lease_available: bool,
     entries: BTreeMap<String, SchedulerRecoveryEntry>,
 }
 
@@ -96,6 +159,7 @@ struct SnapshotBinding<'a> {
     generation: u64,
     observed_at_ms: u64,
     process_observation_available: bool,
+    durable_lease_available: bool,
     notification_available: bool,
     dispatch_available: bool,
     entries: &'a [SchedulerRecoveryEntry],
@@ -133,6 +197,7 @@ impl BackgroundJobScheduler {
             generation: 0,
             observed_at_ms: 0,
             process_observation_available: false,
+            durable_lease_available: true,
             entries: BTreeMap::new(),
         })
     }
@@ -192,6 +257,14 @@ impl BackgroundJobScheduler {
         let process_observation_available = process_registry.is_some();
         let mut next_entries = BTreeMap::new();
         for record in records {
+            let lease = store
+                .load_background_scheduler_lease(&record.request.job_id)
+                .map_err(|_| {
+                    error(
+                        "background-scheduler-lease-store-unavailable",
+                        "scheduler could not load verified durable lease evidence",
+                    )
+                })?;
             let observation = if process_observation_required(record.state.status) {
                 process_registry
                     .as_deref_mut()
@@ -213,7 +286,13 @@ impl BackgroundJobScheduler {
             } else {
                 None
             };
-            let entry = recovery_entry(&record, now_ms, observation.as_ref())?;
+            let entry = recovery_entry(
+                &record,
+                lease.as_ref(),
+                &self.owner_identity,
+                now_ms,
+                observation.as_ref(),
+            )?;
             if next_entries.insert(entry.job_id.clone(), entry).is_some() {
                 return Err(error(
                     "background-scheduler-duplicate-job",
@@ -226,6 +305,7 @@ impl BackgroundJobScheduler {
             next_generation,
             now_ms,
             process_observation_available,
+            self.durable_lease_available,
             next_entries.values().cloned().collect(),
         )?;
         self.generation = next_generation;
@@ -241,6 +321,7 @@ impl BackgroundJobScheduler {
             self.generation,
             self.observed_at_ms,
             self.process_observation_available,
+            self.durable_lease_available,
             self.entries.values().cloned().collect(),
         )
     }
@@ -248,6 +329,8 @@ impl BackgroundJobScheduler {
 
 fn recovery_entry(
     record: &StoredBackgroundJob,
+    stored_lease: Option<&StoredBackgroundSchedulerLease>,
+    scheduler_owner_identity: &str,
     now_ms: u64,
     verified_observation: Option<&VerifiedBackgroundProcessObservation>,
 ) -> Result<SchedulerRecoveryEntry, BackgroundSchedulerError> {
@@ -289,6 +372,15 @@ fn recovery_entry(
         }
         JobRecoveryDisposition::Terminal => SchedulerRecoveryAction::TerminalReview,
     };
+    let lease_required = action != SchedulerRecoveryAction::TerminalReview;
+    let lease_state = classify_lease(
+        record,
+        stored_lease,
+        scheduler_owner_identity,
+        now_ms,
+        &request_identity,
+        &state_identity,
+    )?;
     let requires_process_observation = process_observation_required(record.state.status);
     let process_observation = verified_observation.map(|verified| verified.observation().clone());
     if let Some(observation) = &process_observation {
@@ -312,12 +404,19 @@ fn recovery_entry(
             ));
         }
     }
+    let process_ownership_state = classify_process_ownership(
+        requires_process_observation,
+        lease_state,
+        stored_lease,
+        process_observation.as_ref(),
+    );
     if requires_process_observation {
-        action = match process_observation.as_ref().map(|value| value.state) {
-            Some(BackgroundProcessObservationState::OwnedRunning) => {
-                SchedulerRecoveryAction::MonitorOwnedProcess
-            }
-            _ => SchedulerRecoveryAction::ManualReconciliation,
+        action = if lease_state == SchedulerLeaseState::Current
+            && process_ownership_state == SchedulerProcessOwnershipState::Current
+        {
+            SchedulerRecoveryAction::MonitorOwnedProcess
+        } else {
+            SchedulerRecoveryAction::ManualReconciliation
         };
     }
     let approval_required = record.state.status == BackgroundJobStatus::WaitingApproval;
@@ -362,6 +461,20 @@ fn recovery_entry(
     if record.state.status == BackgroundJobStatus::PauseRequested {
         blockers.push("pause-acknowledgement-required".into());
     }
+    if lease_required && lease_state != SchedulerLeaseState::Current {
+        blockers.push(lease_state.blocker_code().into());
+    }
+    if requires_process_observation
+        && process_ownership_state != SchedulerProcessOwnershipState::Current
+    {
+        blockers.push(process_ownership_state.blocker_code().into());
+    }
+    if !lease_required
+        && stored_lease
+            .is_some_and(|stored| stored.lease.status == BackgroundSchedulerLeaseStatus::Active)
+    {
+        blockers.push("terminal-lease-release-required".into());
+    }
     Ok(SchedulerRecoveryEntry {
         job_id: record.request.job_id.clone(),
         session_id: record.request.session_id.clone(),
@@ -375,15 +488,121 @@ fn recovery_entry(
         action,
         next_eligible_at_ms: (action == SchedulerRecoveryAction::AwaitSchedule)
             .then_some(record.state.next_eligible_at_ms),
+        lease_required,
+        lease_state,
+        lease_schema_version: stored_lease.map(|stored| stored.lease.schema_version.clone()),
+        lease_identity: stored_lease.map(|stored| stored.lease.lease_identity.clone()),
+        lease_generation: stored_lease.map(|stored| stored.lease.lease_generation),
+        lease_expires_at_ms: stored_lease.map(|stored| stored.lease.expires_at_ms),
+        process_ownership_state,
         process_observation_required: requires_process_observation,
         process_observation,
         approval_required,
         cancellation_acknowledgement_required,
         automatic_retry: false,
         automatic_approval: false,
+        automatic_takeover: false,
         dispatch_available: false,
         blockers,
     })
+}
+
+fn classify_lease(
+    record: &StoredBackgroundJob,
+    stored_lease: Option<&StoredBackgroundSchedulerLease>,
+    scheduler_owner_identity: &str,
+    now_ms: u64,
+    request_identity: &str,
+    state_identity: &str,
+) -> Result<SchedulerLeaseState, BackgroundSchedulerError> {
+    let Some(stored) = stored_lease else {
+        return Ok(SchedulerLeaseState::Missing);
+    };
+    if stored.schema_version != "stored-background-scheduler-lease/0.1"
+        || stored.lease.schema_version != LEASE_SCHEMA_VERSION
+        || stored.lease.validate(&record.request).is_err()
+    {
+        return Err(error(
+            "background-scheduler-lease-invalid",
+            "scheduler received invalid durable lease evidence",
+        ));
+    }
+    let lease = &stored.lease;
+    Ok(match lease.status {
+        BackgroundSchedulerLeaseStatus::Released => SchedulerLeaseState::Released,
+        BackgroundSchedulerLeaseStatus::Expired => SchedulerLeaseState::Expired,
+        BackgroundSchedulerLeaseStatus::Active if now_ms >= lease.expires_at_ms => {
+            SchedulerLeaseState::Expired
+        }
+        BackgroundSchedulerLeaseStatus::Active
+            if lease.owner_identity != scheduler_owner_identity =>
+        {
+            SchedulerLeaseState::OwnerMismatch
+        }
+        BackgroundSchedulerLeaseStatus::Active
+            if lease.job_id != record.request.job_id
+                || lease.session_id != record.request.session_id
+                || lease.project_id != record.request.project_id
+                || lease.root_id != record.request.root_id
+                || lease.request_identity != request_identity
+                || lease.state_identity != state_identity
+                || lease.job_generation != record.state.generation =>
+        {
+            SchedulerLeaseState::StateStale
+        }
+        BackgroundSchedulerLeaseStatus::Active => SchedulerLeaseState::Current,
+    })
+}
+
+fn classify_process_ownership(
+    required: bool,
+    lease_state: SchedulerLeaseState,
+    stored_lease: Option<&StoredBackgroundSchedulerLease>,
+    observation: Option<&BackgroundProcessObservation>,
+) -> SchedulerProcessOwnershipState {
+    if !required {
+        return SchedulerProcessOwnershipState::NotRequired;
+    }
+    if lease_state == SchedulerLeaseState::Missing {
+        return SchedulerProcessOwnershipState::MissingLease;
+    }
+    if lease_state != SchedulerLeaseState::Current {
+        return SchedulerProcessOwnershipState::Mismatched;
+    }
+    let Some(lease) = stored_lease.map(|stored| &stored.lease) else {
+        return SchedulerProcessOwnershipState::MissingLease;
+    };
+    let (Some(leased_registration_identity), Some(leased_process_identity)) = (
+        lease.process_registration_identity.as_deref(),
+        lease.process_identity.as_deref(),
+    ) else {
+        return SchedulerProcessOwnershipState::MissingRegistration;
+    };
+    let Some(observation) = observation else {
+        return SchedulerProcessOwnershipState::ObservationUnavailable;
+    };
+    match observation.state {
+        BackgroundProcessObservationState::OwnedRunning
+            if observation.process_registration_identity.as_deref()
+                == Some(leased_registration_identity)
+                && observation.process_identity.as_deref() == Some(leased_process_identity) =>
+        {
+            SchedulerProcessOwnershipState::Current
+        }
+        BackgroundProcessObservationState::OwnedExited
+            if observation.process_registration_identity.as_deref()
+                == Some(leased_registration_identity)
+                && observation.process_identity.as_deref() == Some(leased_process_identity) =>
+        {
+            SchedulerProcessOwnershipState::ObservedNotRunning
+        }
+        BackgroundProcessObservationState::Absent
+        | BackgroundProcessObservationState::Inaccessible
+        | BackgroundProcessObservationState::Unknown => {
+            SchedulerProcessOwnershipState::ObservationUnavailable
+        }
+        _ => SchedulerProcessOwnershipState::Mismatched,
+    }
 }
 
 fn snapshot(
@@ -391,10 +610,15 @@ fn snapshot(
     generation: u64,
     observed_at_ms: u64,
     process_observation_available: bool,
+    durable_lease_available: bool,
     entries: Vec<SchedulerRecoveryEntry>,
 ) -> Result<BackgroundSchedulerSnapshot, BackgroundSchedulerError> {
     validate_owner_identity(owner_identity)?;
-    if generation == 0 || observed_at_ms == 0 || entries.len() > MAX_RECOVERY_JOBS {
+    if generation == 0
+        || observed_at_ms == 0
+        || !durable_lease_available
+        || entries.len() > MAX_RECOVERY_JOBS
+    {
         return Err(error(
             "background-scheduler-snapshot-invalid",
             "scheduler snapshot invariant is invalid",
@@ -404,6 +628,7 @@ fn snapshot(
         entry.dispatch_available
             || entry.automatic_retry
             || entry.automatic_approval
+            || entry.automatic_takeover
             || entry.blockers.is_empty()
     }) {
         return Err(error(
@@ -423,16 +648,37 @@ fn snapshot(
             && observation.is_none())
             || (!entry.process_observation_required && observation.is_some())
             || (entry.action == SchedulerRecoveryAction::MonitorOwnedProcess
-                && observation.is_none_or(|value| {
+                && (observation.is_none_or(|value| {
                     value.state != BackgroundProcessObservationState::OwnedRunning
-                }))
-            || (observation.is_some_and(|value| {
-                value.state == BackgroundProcessObservationState::OwnedRunning
-            }) && entry.action != SchedulerRecoveryAction::MonitorOwnedProcess)
+                }) || entry.lease_state != SchedulerLeaseState::Current
+                    || entry.process_ownership_state != SchedulerProcessOwnershipState::Current))
     }) {
         return Err(error(
             "background-scheduler-process-snapshot-invalid",
             "scheduler snapshot process evidence is invalid",
+        ));
+    }
+    if entries.iter().any(|entry| {
+        let has_lease = entry.lease_schema_version.is_some()
+            && entry.lease_identity.is_some()
+            && entry.lease_generation.is_some()
+            && entry.lease_expires_at_ms.is_some();
+        (entry.lease_state == SchedulerLeaseState::Missing && has_lease)
+            || (entry.lease_state != SchedulerLeaseState::Missing && !has_lease)
+            || entry
+                .lease_schema_version
+                .as_deref()
+                .is_some_and(|value| value != LEASE_SCHEMA_VERSION)
+            || (entry.lease_required
+                && entry.lease_state != SchedulerLeaseState::Current
+                && !entry
+                    .blockers
+                    .iter()
+                    .any(|blocker| blocker == entry.lease_state.blocker_code()))
+    }) {
+        return Err(error(
+            "background-scheduler-lease-snapshot-invalid",
+            "scheduler snapshot durable lease evidence is invalid",
         ));
     }
     let binding = SnapshotBinding {
@@ -441,6 +687,7 @@ fn snapshot(
         generation,
         observed_at_ms,
         process_observation_available,
+        durable_lease_available,
         notification_available: false,
         dispatch_available: false,
         entries: &entries,
@@ -458,6 +705,7 @@ fn snapshot(
         observed_at_ms,
         job_count: entries.len(),
         process_observation_available,
+        durable_lease_available,
         notification_available: false,
         dispatch_available: false,
         entries,
@@ -499,6 +747,9 @@ mod tests {
     };
     use crate::background_process_observation::{
         BackgroundProcessObservationState, BackgroundProcessRegistry,
+    };
+    use crate::background_scheduler_lease::{
+        BackgroundSchedulerLease, BackgroundSchedulerLeaseRebind,
     };
     use crate::workbench_store::{
         StoredProjectCreate, StoredSessionCreate, StoredSessionLineage, StoredSessionMode,
@@ -626,6 +877,7 @@ mod tests {
         let snapshot = scheduler.snapshot().unwrap();
         assert_eq!(snapshot.job_count, 1);
         assert!(!snapshot.dispatch_available);
+        assert!(snapshot.durable_lease_available);
         assert!(!snapshot.process_observation_available);
         assert!(!snapshot.notification_available);
         assert_eq!(
@@ -635,6 +887,14 @@ mod tests {
         assert_eq!(snapshot.entries[0].next_eligible_at_ms, Some(500));
         assert!(!snapshot.entries[0].automatic_retry);
         assert!(!snapshot.entries[0].automatic_approval);
+        assert!(!snapshot.entries[0].automatic_takeover);
+        assert_eq!(
+            snapshot.entries[0].lease_state,
+            SchedulerLeaseState::Missing
+        );
+        assert!(snapshot.entries[0]
+            .blockers
+            .contains(&"scheduler-lease-missing".into()));
     }
 
     #[test]
@@ -783,11 +1043,173 @@ mod tests {
         let entry = &snapshot.entries[0];
         assert!(snapshot.process_observation_available);
         assert_eq!(entry.action, SchedulerRecoveryAction::ManualReconciliation);
+        assert_eq!(entry.lease_state, SchedulerLeaseState::Missing);
+        assert_eq!(
+            entry.process_ownership_state,
+            SchedulerProcessOwnershipState::MissingLease
+        );
         assert_eq!(
             entry.process_observation.as_ref().unwrap().state,
             BackgroundProcessObservationState::Absent
         );
         assert!(entry.blockers.contains(&"owned-process-absent".into()));
+        assert!(!entry.dispatch_available);
+    }
+
+    #[test]
+    fn expired_and_state_stale_leases_never_enable_automatic_takeover() {
+        let mut fixture = Fixture::new("lease-recovery");
+        let expired_request = job_request("cafe", None, true);
+        let expired_state = BackgroundJobState::new(&expired_request, 120).unwrap();
+        fixture
+            .store
+            .create_background_job(&expired_request, &expired_state)
+            .unwrap();
+        let expired_lease = crate::background_scheduler_lease::BackgroundSchedulerLease::acquire(
+            &expired_request,
+            &expired_state,
+            owner(),
+            130,
+            1_000,
+        )
+        .unwrap();
+        fixture
+            .store
+            .create_background_scheduler_lease(&expired_request, &expired_state, &expired_lease)
+            .unwrap();
+
+        let stale_request = job_request("dead", None, true);
+        let mut stale_state = BackgroundJobState::new(&stale_request, 120).unwrap();
+        fixture
+            .store
+            .create_background_job(&stale_request, &stale_state)
+            .unwrap();
+        let stale_lease = crate::background_scheduler_lease::BackgroundSchedulerLease::acquire(
+            &stale_request,
+            &stale_state,
+            owner(),
+            130,
+            2_000,
+        )
+        .unwrap();
+        fixture
+            .store
+            .create_background_scheduler_lease(&stale_request, &stale_state, &stale_lease)
+            .unwrap();
+        let queued = stale_state.clone();
+        stale_state.start(&stale_request, 200).unwrap();
+        fixture
+            .store
+            .update_background_job_state(&stale_request, &queued, &stale_state)
+            .unwrap();
+
+        let scheduler = BackgroundJobScheduler::load(&fixture.store, owner(), 1_200, 10).unwrap();
+        let snapshot = scheduler.snapshot().unwrap();
+        let expired = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.job_id == "cafe")
+            .unwrap();
+        assert_eq!(expired.lease_state, SchedulerLeaseState::Expired);
+        assert!(expired.blockers.contains(&"scheduler-lease-expired".into()));
+        assert!(!expired.automatic_takeover);
+
+        let stale = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.job_id == "dead")
+            .unwrap();
+        assert_eq!(stale.lease_state, SchedulerLeaseState::StateStale);
+        assert_eq!(stale.action, SchedulerRecoveryAction::ManualReconciliation);
+        assert!(stale
+            .blockers
+            .contains(&"scheduler-lease-state-stale".into()));
+        assert!(!stale.automatic_takeover);
+        assert!(!stale.dispatch_available);
+    }
+
+    #[test]
+    fn terminal_job_with_active_lease_remains_visible_until_explicit_release() {
+        let mut fixture = Fixture::new("terminal-lease");
+        let request = job_request("face", None, true);
+        let mut state = BackgroundJobState::new(&request, 120).unwrap();
+        fixture
+            .store
+            .create_background_job(&request, &state)
+            .unwrap();
+        let mut lease =
+            BackgroundSchedulerLease::acquire(&request, &state, owner(), 130, 2_000).unwrap();
+        fixture
+            .store
+            .create_background_scheduler_lease(&request, &state, &lease)
+            .unwrap();
+
+        let queued_state = state.clone();
+        state.start(&request, 200).unwrap();
+        fixture
+            .store
+            .update_background_job_state(&request, &queued_state, &state)
+            .unwrap();
+        let queued_lease = lease.clone();
+        lease
+            .rebind_job_state(
+                &request,
+                BackgroundSchedulerLeaseRebind {
+                    previous: &queued_state,
+                    next: &state,
+                    owner_identity: &owner(),
+                    process_registration: None,
+                    now_ms: 210,
+                    ttl_ms: 2_000,
+                },
+            )
+            .unwrap();
+        fixture
+            .store
+            .update_background_scheduler_lease(&request, &state, &queued_lease, &lease)
+            .unwrap();
+
+        let running_state = state.clone();
+        state
+            .complete(
+                &request,
+                &identity("artifact:sha256:", 'a'),
+                &identity("job-evidence:sha256:", 'b'),
+                300,
+            )
+            .unwrap();
+        fixture
+            .store
+            .update_background_job_state(&request, &running_state, &state)
+            .unwrap();
+        let running_lease = lease.clone();
+        lease
+            .rebind_job_state(
+                &request,
+                BackgroundSchedulerLeaseRebind {
+                    previous: &running_state,
+                    next: &state,
+                    owner_identity: &owner(),
+                    process_registration: None,
+                    now_ms: 310,
+                    ttl_ms: 2_000,
+                },
+            )
+            .unwrap();
+        fixture
+            .store
+            .update_background_scheduler_lease(&request, &state, &running_lease, &lease)
+            .unwrap();
+
+        let scheduler = BackgroundJobScheduler::load(&fixture.store, owner(), 320, 10).unwrap();
+        let entry = &scheduler.snapshot().unwrap().entries[0];
+        assert_eq!(entry.action, SchedulerRecoveryAction::TerminalReview);
+        assert_eq!(entry.lease_state, SchedulerLeaseState::Current);
+        assert!(!entry.lease_required);
+        assert!(entry
+            .blockers
+            .contains(&"terminal-lease-release-required".into()));
+        assert!(!entry.automatic_takeover);
         assert!(!entry.dispatch_available);
     }
 
@@ -817,8 +1239,22 @@ mod tests {
             .unwrap();
         let input = child.stdin.take().unwrap();
         let mut registry = BackgroundProcessRegistry::new(owner()).unwrap();
-        registry
+        let registration = registry
             .register_spawned_child(&request, &state, child, 200)
+            .unwrap();
+        let mut lease =
+            BackgroundSchedulerLease::acquire(&request, &state, owner(), 205, 2_000).unwrap();
+        fixture
+            .store
+            .create_background_scheduler_lease(&request, &state, &lease)
+            .unwrap();
+        let unbound_lease = lease.clone();
+        lease
+            .bind_process(&request, &state, &owner(), &registration, 210)
+            .unwrap();
+        fixture
+            .store
+            .update_background_scheduler_lease(&request, &state, &unbound_lease, &lease)
             .unwrap();
         let scheduler = BackgroundJobScheduler::load_with_process_registry(
             &fixture.store,
@@ -830,6 +1266,11 @@ mod tests {
         .unwrap();
         let entry = &scheduler.snapshot().unwrap().entries[0];
         assert_eq!(entry.action, SchedulerRecoveryAction::MonitorOwnedProcess);
+        assert_eq!(entry.lease_state, SchedulerLeaseState::Current);
+        assert_eq!(
+            entry.process_ownership_state,
+            SchedulerProcessOwnershipState::Current
+        );
         let observation = entry.process_observation.as_ref().unwrap();
         assert_eq!(
             observation.state,
@@ -838,6 +1279,23 @@ mod tests {
         assert!(!observation.completion_inferred);
         assert!(!observation.dispatch_authority);
         assert!(!entry.dispatch_available);
+        let stored_lease = fixture
+            .store
+            .load_background_scheduler_lease(&request.job_id)
+            .unwrap()
+            .unwrap();
+        let mut mismatched_registration = observation.clone();
+        mismatched_registration.process_registration_identity =
+            Some(identity("background-job-process-registration:sha256:", 'f'));
+        assert_eq!(
+            classify_process_ownership(
+                true,
+                SchedulerLeaseState::Current,
+                Some(&stored_lease),
+                Some(&mismatched_registration),
+            ),
+            SchedulerProcessOwnershipState::Mismatched
+        );
         drop(input);
     }
 
