@@ -131,6 +131,19 @@ and content-free receipt set `permission_granted:false` and
 `execution_available:false`; they cannot replace permission, approval, sandbox,
 budget, recovery, or per-tool path checks. No AAP method exposes this gate.
 
+The internal `child-runtime-budget/0.1` ledger is the first runtime budget
+enforcement primitive. Model work reserves non-zero token and cost ceilings before
+admission, then settles authoritative or estimated usage. If provider usage is
+unknown, the ledger charges the full reservation rather than zero. Wall-clock,
+turn, tool-call, active-concurrency, and policy-bound network-request limits fail
+before new matching work is admitted; existing reservations may still settle or
+finish so exhaustion cannot strand an operation. Every transactional update
+returns a content-free snapshot with limits, used/reserved/remaining amounts,
+usage-source counts, and warning/saturated/exhausted dimensions. Snapshots set
+`permission_granted:false` and `execution_available:false`. Provider usage and a
+Runtime-owned monotonic clock, persistence, scheduling, cancellation/refund policy,
+and AAP/Qt budget events remain unavailable.
+
 ## Replay And Reconnect
 
 The durable session stream is ordered by a session-local sequence. After a

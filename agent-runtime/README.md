@@ -54,6 +54,9 @@ or session methods are accepted.
 - internal `child-worktree-admission/0.1` isolation gate (live worktree owner/base/
   health binding and cross-child reuse denial; no permission, execution, or AAP
   authority)
+- internal `child-runtime-budget/0.1` ledger (pre-admission token/cost reservation,
+  conservative unknown-usage settlement, wall/turn/tool/concurrency/network limits,
+  and content-free warning/remaining snapshots; no scheduler or execution authority)
 - `workspace/list`
 - `workspace/read`
 - `workspace/instructions` (deterministic, bounded, untrusted instruction discovery)

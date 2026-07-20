@@ -93,6 +93,22 @@ Child worktree admission evidence:
   executor integration, AAP/Qt controls, and Windows evidence remain open under
   task `21.5`.
 
+Child runtime budget evidence:
+
+- Internal `child-runtime-budget/0.1` reserves non-zero token/cost ceilings before
+  model admission and transactionally tracks wall time, turns, tools, active
+  concurrency, and policy-bound network requests. Authoritative and estimated
+  usage retain provenance; unknown token or cost usage consumes the full
+  reservation rather than becoming zero. Content-free snapshots return limits,
+  used/reserved/remaining values and warning/saturated/exhausted dimensions but
+  no operation IDs, content, permission, or execution authority. Six unit fixtures
+  cover warnings, conservative unknown settlement, overcommit with no partial
+  state, concurrency saturation/recovery, independent tool/network limits,
+  network-policy mismatch, wall exhaustion, clock regression, and generation
+  exhaustion. Provider usage, Runtime monotonic-clock integration, durable
+  scheduler/session events, cancellation/refund rules, executor admission, AAP/Qt
+  events, and endurance/cross-platform evidence remain open under task `21.6`.
+
 Current editor evidence:
 
 - The macOS Qt build and all 16 desktop tests pass.
