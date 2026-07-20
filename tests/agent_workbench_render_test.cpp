@@ -121,6 +121,8 @@ int main(int argc, char *argv[])
     QLabel *runtimeStatus = workbench.findChild<QLabel *>(QStringLiteral("agentRuntimeStatus"));
     QLabel *runtimeCapability = workbench.findChild<QLabel *>(
         QStringLiteral("agentRuntimeCapabilityStatus"));
+    QLabel *executionContext = workbench.findChild<QLabel *>(
+        QStringLiteral("agentExecutionContextStrip"));
 
 #ifdef AEGISY_EXPECT_AGENTD
     if (!expect(runtimeStatus
@@ -337,6 +339,10 @@ int main(int argc, char *argv[])
                        "combo boxes must use the shared SVG down arrow")
             || !expect(nonTransparentPixels(image) > pixels * 9 / 10,
                        "workbench rendered mostly transparent")
+            || !expect(executionContext
+                           && executionContext->text().contains(QStringLiteral("权限 只读"))
+                           && executionContext->text().contains(QStringLiteral("上下文 0")),
+                       "execution-context strip did not expose the read-only empty state")
             || !expect(splitter && splitter->count() == 3,
                        "workbench must keep three primary panes")
             || !expect(tabs && tabs->count() == 7,
@@ -1056,6 +1062,23 @@ int main(int argc, char *argv[])
                                                Qt::MatchExactly | Qt::MatchRecursive).isEmpty();
                 }),
                 "workspace fixture did not populate the file tree")) {
+        return 1;
+    }
+    QString fixtureBranch;
+    if (!expect(runGit(gitExecutable, project.path(), {QStringLiteral("branch"),
+                                                       QStringLiteral("--show-current")},
+                       &fixtureBranch)
+                    && !fixtureBranch.isEmpty(),
+                "could not read the Git fixture branch")) {
+        return 1;
+    }
+    runtime->gitOverview(openedProjectId);
+    if (!expect(waitUntil(application, [executionContext, &fixtureBranch]() {
+                    return executionContext->text().contains(QStringLiteral("项目 "))
+                        && executionContext->text().contains(
+                            QStringLiteral("分支 %1").arg(fixtureBranch));
+                }),
+                "execution-context strip did not project the read-only Git branch")) {
         return 1;
     }
     if (!expect(retentionSettings->isEnabled(),

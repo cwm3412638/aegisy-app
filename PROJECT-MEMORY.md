@@ -2093,6 +2093,9 @@ Implemented visual baseline:
   fixed read-only permission, current Git branch, and selected-context count.
   Branch text comes only from the existing read-only Git overview and is cleared
   on project changes or Git-query failure, so stale branch state is never shown.
+  The render fixture now locates the strip by a stable object name and asserts the
+  empty read-only state plus a real Git fixture branch; execution remains pending
+  because this host kills the Qt process before the test body runs.
 - Primary workbench actions use a small vendored Lucide SVG set with accessible
   tooltips; its ISC/MIT license is stored under `assets/icons/lucide/LICENSE`.
 - Combo-box arrows use the shared Lucide `chevron-down` SVG resource. Do not build

@@ -849,8 +849,10 @@ Current editor evidence:
   current branch obtained from the existing read-only Git overview, and selected
   context count. Project changes and Git-query failures clear the cached branch
   before the strip is refreshed. The complete desktop build passes; the focused
-  render process remains host-resource-killed without assertion output, so final
-  visual evidence is still pending a lower-resource runner.
+  render fixture locates the strip by a stable object name and asserts both its
+  empty read-only state and a real Git fixture branch. The focused render process
+  was still killed by the host at startup (0.43s) without assertion output, so
+  executable visual evidence remains pending a lower-resource runner.
 - AAP turn/context/inspect is a read-only preflight that reuses the exact
   instruction discovery and budget preparation path for the bound session.
   It returns context-inspector/0.1, manifest/budget metadata, and explicit

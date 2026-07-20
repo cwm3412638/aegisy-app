@@ -2866,6 +2866,7 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
     auto *title = new QLabel(QStringLiteral("AI 对话"), header);
     title->setStyleSheet(QStringLiteral("color:#101828; font-size:13px; font-weight:700;"));
     m_contextStrip = new QLabel(header);
+    m_contextStrip->setObjectName(QStringLiteral("agentExecutionContextStrip"));
     m_contextStrip->setStyleSheet(QStringLiteral("color:#667085; font-size:10px;"));
     headerLayout->addWidget(title);
     headerLayout->addWidget(m_contextStrip);

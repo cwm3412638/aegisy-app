@@ -219,7 +219,7 @@
 - [ ] 12.4 Implement inline approvals showing command/diff/scope/risk/reason and exact available decision scopes
 - [ ] 12.5 Implement structured user questions, option selection, cancellation, and resolved-request cleanup
 - [ ] 12.6 Implement composer execution-context strip for project, runtime, model profile, permission profile, branch, and context state
-  - Partial execution-context strip: the Agent header shows Chat/Work mode, project, Runtime readiness/recovery state, provider/model, fixed read-only permission, current Git branch from the read-only overview, and selected-context count. Branch state is cleared on project changes or Git-query failure; complete model-profile, permission-profile, branch/worktree persistence, and final cross-platform/UI evidence remain required.
+  - Partial execution-context strip: the Agent header shows Chat/Work mode, project, Runtime readiness/recovery state, provider/model, fixed read-only permission, current Git branch from the read-only overview, and selected-context count. Branch state is cleared on project changes or Git-query failure. The render fixture asserts the empty read-only state and a real Git fixture branch, but this host kills the Qt process before execution; complete model-profile, permission-profile, branch/worktree persistence, and final cross-platform/UI evidence remain required.
 - [ ] 12.7 Implement file/image/diagnostic/terminal/Git attachment preview with provenance, size, inclusion, and removal
 - [ ] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
 - [ ] 12.9 Implement Chat-to-Work conversion preserving non-mutating source history and explicit new Work bindings
