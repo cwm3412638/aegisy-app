@@ -17,12 +17,12 @@ const MAX_TEXT_CHARS: usize = 2_048;
 const MAX_CONTEXT_REFS: usize = 16;
 const MAX_TOOLS: usize = 32;
 const MAX_RESULT_SECTIONS: usize = 16;
-const MAX_TOKENS: u64 = 10_000_000;
-const MAX_COST_MICROS: u64 = 10_000_000_000;
-const MAX_WALL_TIME_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
-const MAX_TURNS: u32 = 1_000;
-const MAX_TOOL_CALLS: u32 = 10_000;
-const MAX_CONCURRENCY: u16 = 16;
+pub(crate) const MAX_TOKENS: u64 = 10_000_000;
+pub(crate) const MAX_COST_MICROS: u64 = 10_000_000_000;
+pub(crate) const MAX_WALL_TIME_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+pub(crate) const MAX_TURNS: u32 = 1_000;
+pub(crate) const MAX_TOOL_CALLS: u32 = 10_000;
+pub(crate) const MAX_CONCURRENCY: u16 = 16;
 const MAX_HANDOFF_SUMMARY_BYTES: u64 = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

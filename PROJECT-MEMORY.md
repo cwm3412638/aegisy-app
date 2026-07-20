@@ -226,6 +226,20 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   takeover, dispatch, and mutation authority to false and never change job or lease
   state. Automatic decision production/consumption, recovery mutation, notifications,
   AAP/Qt inspection, and cross-platform endurance remain absent; keep `21.8` unchecked.
+- Task `21.9` now has a partial internal
+  `background-job-notification-intent/0.1` contract. Completed, failed,
+  approval-needed, and budget-exhausted intents bind exact project/session/root,
+  request/state identities, job generation/status, terminal/result/approval evidence,
+  optional child-budget snapshot evidence, exhausted dimensions, creation time,
+  stable deduplication identity, and full intent identity without title, body, prompt,
+  result content, or platform payload. `ChildBudgetSnapshot::validate` rechecks
+  accounting, remaining values, counters, usage provenance, classifications, scope,
+  and false authority flags; generation zero is allowed when the complete snapshot is
+  otherwise valid. Intents always set content inclusion, delivery availability,
+  delivery attempt, and platform delivery authority to false. Durable outbox/event
+  persistence, scheduler production, retry/delivery state, platform APIs and
+  permissions, Qt settings/inspection, restart behavior, localization/privacy review,
+  and cross-platform evidence remain absent; keep `21.9` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is
@@ -933,7 +947,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 378 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 385 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
@@ -942,14 +956,16 @@ runtime budget-ledger, unified-execution-plan, durable-job lifecycle contracts, 
 schema-v11 job/lease persistence/CAS/migration/integrity fixtures, the owner-bound
 read-only scheduler recovery snapshot, durable lease/process-identity classification,
 the event-backed recovery-decision journal and semantic tamper checks, and Runtime-
-owned process-observation contract, plus diagnostic, terminal, Git, and
+owned process-observation contract, the four-kind content-free notification-intent
+contract and semantic budget-snapshot validation, plus diagnostic, terminal, Git, and
 child-handoff pinned-context authority, strict Git references, complete-source drift
 detection, terminal normalization, image import/preview/assembly/release rollback,
 and source-loss fail-closed invariants.
 
-On 2026-07-20 the schema-v11 lease and recovery-decision changes rebuilt the complete
-desktop target and passed `agent_runtime_protocol`, all Rust counts above, strict
-Clippy, formatting, and `git diff --check`. The same full CTest attempt could not
+On 2026-07-20 the schema-v11 lease, recovery-decision, and notification-intent changes
+passed `agent_runtime_protocol`, all Rust counts above, strict Clippy, formatting,
+and `git diff --check`; the lease/recovery-decision changes also rebuilt the complete
+desktop target. The same full CTest attempt could not
 re-establish the 16-test desktop baseline because the remaining 15 test processes
 were killed at startup by the host under memory pressure; they produced no test
 assertion failure.
@@ -2047,10 +2063,12 @@ Implemented visual baseline:
 9. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
    permission policy and the production approval ledger. A trust acknowledgement must
    never become an implicit write, command, Hook, or network grant.
-10. Continue `21.8` with notification contracts and read-only recovery inspection
-   controls over the durable decision journal. Keep automatic lease acquisition/
-   renewal, process adoption, retry, approval, recovery mutation, and dispatch
-   unavailable until their permission, sandbox, budget, and release gates pass.
+10. Continue `21.9` with a durable notification outbox and read-only inspection,
+   then add reviewed platform permission/delivery settings. Continue `21.8` with
+   read-only recovery inspection controls over the durable decision journal. Keep
+   automatic lease acquisition/renewal, process adoption, retry, approval, recovery
+   mutation, and dispatch unavailable until their permission, sandbox, budget, and
+   release gates pass.
 11. Continue with the next unchecked database/event, durable project/session, typed
    timeline, permission/approval, structured patch/checkpoint, terminal, and Git
    milestones in dependency order.

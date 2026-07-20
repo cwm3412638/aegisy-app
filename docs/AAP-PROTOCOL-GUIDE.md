@@ -140,7 +140,9 @@ before new matching work is admitted; existing reservations may still settle or
 finish so exhaustion cannot strand an operation. Every transactional update
 returns a content-free snapshot with limits, used/reserved/remaining amounts,
 usage-source counts, and warning/saturated/exhausted dimensions. Snapshots set
-`permission_granted:false` and `execution_available:false`. Provider usage and a
+`permission_granted:false` and `execution_available:false`. Their reusable semantic
+validator rejects out-of-contract limits, impossible reservation/source accounting,
+inconsistent remaining values, forged classifications, and authority flags. Provider usage and a
 Runtime-owned monotonic clock, persistence, scheduling, cancellation/refund policy,
 and AAP/Qt budget events remain unavailable.
 
@@ -228,6 +230,22 @@ decision fixes retry, approval, takeover, dispatch, and mutation authority to fa
 The journal does not transition a job, renew/release a lease, signal a process,
 notify a user, or authorize a later recovery action. Automatic decision production or
 consumption and AAP/Qt inspection remain unavailable.
+
+Internal `background-job-notification-intent/0.1` defines content-free evidence for
+future completion, failure, approval-needed, and budget-exhausted notifications. An
+intent binds the exact job request/state identities, job generation/status, project,
+session, root, terminal/result/approval evidence, and optional validated
+`child-runtime-budget/0.1` snapshot identity plus exhausted dimensions. Budget
+snapshots are checked for accounting, remaining-value, classification, provenance,
+scope, and authority invariants; generation zero is not rejected merely for being
+the initial generation. The deduplication identity deliberately excludes notification
+creation time, while the full intent identity includes it.
+
+The record has no title, body, prompt, result body, or platform payload. It fixes
+`content_included:false`, `delivery_available:false`, `delivery_attempted:false`,
+and `platform_delivery_authority:false`; changing any delivery flag or bound identity
+invalidates the record. No AAP method, durable outbox, Qt setting, operating-system
+permission request, or macOS/Windows notification call consumes it yet.
 
 ## Replay And Reconnect
 

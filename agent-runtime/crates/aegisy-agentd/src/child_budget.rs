@@ -4,7 +4,10 @@
 //! launch a model or tool, grant permissions, or persist a job. Unknown model
 //! usage is charged conservatively against the exact reservation, never as zero.
 
-use crate::child_task::ChildTaskRequest;
+use crate::child_task::{
+    ChildTaskRequest, MAX_CONCURRENCY, MAX_COST_MICROS, MAX_TOKENS, MAX_TOOL_CALLS, MAX_TURNS,
+    MAX_WALL_TIME_MS,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -181,6 +184,160 @@ pub struct ChildBudgetSnapshot {
     pub exhausted_dimensions: Vec<BudgetDimension>,
     pub permission_granted: bool,
     pub execution_available: bool,
+}
+
+impl ChildBudgetSnapshot {
+    pub fn validate(&self) -> Result<(), ChildBudgetError> {
+        if self.schema_version != SCHEMA_VERSION
+            || !valid_task_identity(&self.task_identity)
+            || !(MIN_WARNING_PERCENT..=MAX_WARNING_PERCENT).contains(&self.warning_percent)
+            || self.observed_at_ms < self.started_at_ms
+            || self.limits.max_tokens == 0
+            || self.limits.max_tokens > MAX_TOKENS
+            || self.limits.max_cost_micros == 0
+            || self.limits.max_cost_micros > MAX_COST_MICROS
+            || self.limits.max_wall_time_ms == 0
+            || self.limits.max_wall_time_ms > MAX_WALL_TIME_MS
+            || self.limits.max_turns == 0
+            || self.limits.max_turns > MAX_TURNS
+            || self.limits.max_tool_calls == 0
+            || self.limits.max_tool_calls > MAX_TOOL_CALLS
+            || self.limits.max_concurrency == 0
+            || self.limits.max_concurrency > MAX_CONCURRENCY
+            || self.limits.max_network_requests > MAX_NETWORK_REQUESTS
+            || self.turns_started > self.limits.max_turns
+            || self.tool_calls_started > self.limits.max_tool_calls
+            || self.network_requests_started > self.limits.max_network_requests
+            || self.active_operations > self.limits.max_concurrency
+            || self.peak_concurrency < self.active_operations
+            || self.peak_concurrency > self.limits.max_concurrency
+            || self.permission_granted
+            || self.execution_available
+        {
+            return Err(ChildBudgetError::new(
+                "child-budget-snapshot-invalid",
+                "budget snapshot invariant is invalid",
+            ));
+        }
+
+        let wall_time_ms = self.observed_at_ms - self.started_at_ms;
+        let tokens_admitted = self.tokens_used.saturating_add(self.tokens_reserved);
+        let cost_admitted = self
+            .cost_micros_used
+            .saturating_add(self.cost_micros_reserved);
+        let token_source_count = usage_source_count(self.token_usage_sources)?;
+        let cost_source_count = usage_source_count(self.cost_usage_sources)?;
+        let outstanding_turns = self.turns_started.saturating_sub(token_source_count);
+        if self.wall_time_ms != wall_time_ms
+            || self.remaining.tokens != self.limits.max_tokens.saturating_sub(tokens_admitted)
+            || self.remaining.cost_micros
+                != self.limits.max_cost_micros.saturating_sub(cost_admitted)
+            || self.remaining.wall_time_ms
+                != self.limits.max_wall_time_ms.saturating_sub(wall_time_ms)
+            || self.remaining.turns != self.limits.max_turns.saturating_sub(self.turns_started)
+            || self.remaining.tool_calls
+                != self
+                    .limits
+                    .max_tool_calls
+                    .saturating_sub(self.tool_calls_started)
+            || self.remaining.concurrency
+                != self
+                    .limits
+                    .max_concurrency
+                    .saturating_sub(self.active_operations)
+            || self.remaining.network_requests
+                != self
+                    .limits
+                    .max_network_requests
+                    .saturating_sub(self.network_requests_started)
+            || token_source_count != cost_source_count
+            || token_source_count > self.turns_started
+            || u32::from(self.active_operations) < outstanding_turns
+            || u32::from(self.active_operations)
+                > outstanding_turns.saturating_add(self.tool_calls_started)
+            || (outstanding_turns == 0
+                && (self.tokens_reserved != 0 || self.cost_micros_reserved != 0))
+            || (outstanding_turns > 0
+                && (self.tokens_reserved == 0 || self.cost_micros_reserved == 0))
+        {
+            return Err(ChildBudgetError::new(
+                "child-budget-snapshot-accounting-invalid",
+                "budget snapshot accounting is invalid",
+            ));
+        }
+
+        let mut classification = DimensionClassification::default();
+        classification.consumptive(
+            BudgetDimension::Tokens,
+            self.tokens_used,
+            tokens_admitted,
+            self.limits.max_tokens,
+            self.warning_percent,
+        );
+        classification.consumptive(
+            BudgetDimension::CostMicros,
+            self.cost_micros_used,
+            cost_admitted,
+            self.limits.max_cost_micros,
+            self.warning_percent,
+        );
+        classification.count(
+            BudgetDimension::WallTimeMs,
+            wall_time_ms,
+            self.limits.max_wall_time_ms,
+            self.warning_percent,
+        );
+        classification.count(
+            BudgetDimension::Turns,
+            u64::from(self.turns_started),
+            u64::from(self.limits.max_turns),
+            self.warning_percent,
+        );
+        classification.count(
+            BudgetDimension::ToolCalls,
+            u64::from(self.tool_calls_started),
+            u64::from(self.limits.max_tool_calls),
+            self.warning_percent,
+        );
+        if self.limits.max_network_requests > 0 {
+            classification.count(
+                BudgetDimension::NetworkRequests,
+                u64::from(self.network_requests_started),
+                u64::from(self.limits.max_network_requests),
+                self.warning_percent,
+            );
+        }
+        if self.active_operations >= self.limits.max_concurrency {
+            classification.saturated.push(BudgetDimension::Concurrency);
+        } else if percent_reached(
+            u64::from(self.active_operations),
+            u64::from(self.limits.max_concurrency),
+            self.warning_percent,
+        ) {
+            classification.warnings.push(BudgetDimension::Concurrency);
+        }
+        classification.normalize();
+        let expected_state = if classification.exhausted.is_empty() {
+            if classification.warnings.is_empty() && classification.saturated.is_empty() {
+                BudgetState::Ready
+            } else {
+                BudgetState::Warning
+            }
+        } else {
+            BudgetState::Exhausted
+        };
+        if self.state != expected_state
+            || self.warning_dimensions != classification.warnings
+            || self.saturated_dimensions != classification.saturated
+            || self.exhausted_dimensions != classification.exhausted
+        {
+            return Err(ChildBudgetError::new(
+                "child-budget-snapshot-classification-invalid",
+                "budget snapshot classification is invalid",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -806,6 +963,14 @@ fn percent_reached(used: u64, limit: u64, threshold: u8) -> bool {
     used.saturating_mul(100) >= limit.saturating_mul(u64::from(threshold))
 }
 
+fn usage_source_count(counts: UsageSourceCounts) -> Result<u32, ChildBudgetError> {
+    counts
+        .authoritative
+        .checked_add(counts.estimated)
+        .and_then(|total| total.checked_add(counts.unknown))
+        .ok_or_else(counter_overflow)
+}
+
 fn validate_operation_id(operation_id: &str) -> Result<(), ChildBudgetError> {
     if operation_id.is_empty()
         || operation_id.len() > MAX_OPERATION_ID_BYTES
@@ -1034,6 +1199,39 @@ mod tests {
         let offline = ledger.reserve_tool_call("offline-1", false, 1_300).unwrap();
         assert_eq!(offline.tool_calls_started, 2);
         ledger.finish_tool_call("offline-1", 1_400).unwrap();
+    }
+
+    #[test]
+    fn snapshot_validation_rejects_impossible_limits_reservations_and_classification() {
+        let ledger = ChildBudgetLedger::new(&request("none"), None, 80, 1_000).unwrap();
+        let snapshot = ledger.snapshot();
+        snapshot.validate().unwrap();
+
+        let mut unbounded = snapshot.clone();
+        unbounded.limits.max_tokens = MAX_TOKENS + 1;
+        unbounded.remaining.tokens = MAX_TOKENS + 1;
+        assert_eq!(
+            unbounded.validate().unwrap_err().code,
+            "child-budget-snapshot-invalid"
+        );
+
+        let mut impossible_reservation = snapshot.clone();
+        impossible_reservation.tokens_reserved = 1;
+        impossible_reservation.cost_micros_reserved = 1;
+        impossible_reservation.remaining.tokens -= 1;
+        impossible_reservation.remaining.cost_micros -= 1;
+        assert_eq!(
+            impossible_reservation.validate().unwrap_err().code,
+            "child-budget-snapshot-accounting-invalid"
+        );
+
+        let mut forged_classification = snapshot;
+        forged_classification.state = BudgetState::Exhausted;
+        forged_classification.exhausted_dimensions = vec![BudgetDimension::Tokens];
+        assert_eq!(
+            forged_classification.validate().unwrap_err().code,
+            "child-budget-snapshot-classification-invalid"
+        );
     }
 
     #[test]

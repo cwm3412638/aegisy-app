@@ -101,11 +101,13 @@ Child runtime budget evidence:
   usage retain provenance; unknown token or cost usage consumes the full
   reservation rather than becoming zero. Content-free snapshots return limits,
   used/reserved/remaining values and warning/saturated/exhausted dimensions but
-  no operation IDs, content, permission, or execution authority. Six unit fixtures
+  no operation IDs, content, permission, or execution authority. Snapshot validation
+  also rejects out-of-contract limits, impossible reservation/source accounting,
+  inconsistent remaining values, forged classifications, and authority flags. Seven unit fixtures
   cover warnings, conservative unknown settlement, overcommit with no partial
   state, concurrency saturation/recovery, independent tool/network limits,
-  network-policy mismatch, wall exhaustion, clock regression, and generation
-  exhaustion. Provider usage, Runtime monotonic-clock integration, durable
+  network-policy mismatch, wall exhaustion, clock regression, generation
+  exhaustion, and snapshot tampering. Provider usage, Runtime monotonic-clock integration, durable
   scheduler/session events, cancellation/refund rules, executor admission, AAP/Qt
   events, and endurance/cross-platform evidence remain open under task `21.6`.
 
@@ -203,6 +205,19 @@ Background job lifecycle evidence:
   automatic retry/approval/takeover, dispatch, and mutation authority false and
   never changes job, lease, or process state. Automatic production/consumption,
   recovery actions, notifications, AAP, and Qt remain absent.
+- Internal `background-job-notification-intent/0.1` derives four content-free intent
+  kinds from an exact validated job request/state and optional semantically validated
+  child-budget snapshot. It binds request/state/job/scope/evidence identities,
+  exhausted dimensions, and a stable deduplication identity while separately hashing
+  creation time into the full intent. Budget validation rechecks remaining values,
+  counters, usage-source totals, classifications, scope, and false authority flags;
+  a valid generation-zero wall-time exhaustion snapshot is not rejected. Six fixtures
+  cover completion, failure, approval wait, budget exhaustion, unsupported state,
+  identity and delivery-authority tampering, forged accounting, task drift, and stable
+  deduplication. Intent fields fix content inclusion, delivery availability/attempt,
+  and platform authority to false. Durable outbox/events, scheduler production,
+  platform permission/delivery APIs, Qt settings, restart behavior, localization,
+  and macOS/Windows evidence remain absent, so task `21.9` stays unchecked.
 
 Current editor evidence:
 

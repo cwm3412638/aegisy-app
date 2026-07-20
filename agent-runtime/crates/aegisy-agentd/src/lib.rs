@@ -1,4 +1,5 @@
 pub mod background_job;
+pub mod background_notification;
 pub mod background_process_observation;
 pub mod background_recovery_decision;
 pub mod background_scheduler;
