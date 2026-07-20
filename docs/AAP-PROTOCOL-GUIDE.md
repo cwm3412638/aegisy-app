@@ -173,8 +173,22 @@ metadata, generation, cancellation, attempts, and recovery ordering. Creation an
 generation-CAS updates commit with typed `background-job.*` session events; identical
 retries are idempotent, stale writers fail, event failure rolls back the projection,
 and startup performs a bounded integrity scan before the store becomes writable.
-Active jobs protect session deletion/retention. No scheduler, process probe,
-notification, AAP method, Qt control, or execution path consumes these records yet.
+Active jobs protect session deletion/retention. No durable scheduler lease, process
+probe, notification, AAP method, Qt control, or execution path consumes these
+records yet.
+
+Internal `background-job-scheduler/0.1` is the first scheduler ownership boundary,
+but it owns only a content-free inspection snapshot. It loads one complete bounded
+recovery set from the verified store and binds it to a scheduler owner identity and
+generation. Entries classify schedule wait, admission review, paused, approval wait,
+retry review, terminal review, or manual reconciliation. Every snapshot fixes
+`process_observation_available:false`, `notification_available:false`, and
+`dispatch_available:false`; each entry also fixes automatic retry/approval to false.
+Active state cannot be interpreted without a future authoritative process probe;
+pending cancellation separately reports that acknowledgement is required, including
+for work that never started. Truncation, invalid time/limit, or store failure leaves
+the prior snapshot unchanged. This is not a durable lease, process owner, or dispatch
+loop.
 
 ## Replay And Reconnect
 

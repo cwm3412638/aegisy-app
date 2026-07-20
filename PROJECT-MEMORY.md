@@ -177,9 +177,17 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   are idempotent, stale writers fail, event failure rolls back the projection, and
   startup revalidates at most 10,000 records before the store becomes writable.
   Active jobs block session deletion/retention and terminal records purge with the
-  session. Scheduler/process ownership, authoritative approval, automatic recovery,
-  notification, AAP/Qt controls, and cross-platform endurance remain absent; keep
-  `21.8` unchecked.
+  session. Internal `background-job-scheduler/0.1` now loads a complete bounded
+  recovery set into one owner-identity/generation-bound, content-hashed inspection
+  snapshot. It classifies schedule wait, admission review, paused, approval wait,
+  retry review, terminal review, and manual reconciliation while always reporting
+  `dispatch_available:false`, `automatic_retry:false`, and
+  `automatic_approval:false`. Active work requires an authoritative process
+  observation that is still absent; every pending cancellation separately reports
+  that acknowledgement is required. Truncated/failed refresh retains the previous
+  snapshot. Durable scheduler leases/process ownership, authoritative
+  approval, automatic recovery, notification, AAP/Qt controls, and cross-platform
+  endurance remain absent; keep `21.8` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is
@@ -886,16 +894,17 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 355 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 359 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
 runtime budget-ledger, unified-execution-plan, durable-job lifecycle contracts, and
-schema-v10 job persistence/CAS/migration/integrity fixtures, plus diagnostic,
-terminal, Git, and child-handoff pinned-context authority, strict Git references,
-complete-source drift detection, terminal normalization, image import/preview/
-assembly/release rollback, and source-loss fail-closed invariants.
+schema-v10 job persistence/CAS/migration/integrity fixtures and the owner-bound
+read-only scheduler recovery snapshot, plus diagnostic, terminal, Git, and
+child-handoff pinned-context authority, strict Git references, complete-source drift
+detection, terminal normalization, image import/preview/assembly/release rollback,
+and source-loss fail-closed invariants.
 
 ## Session History Boundary
 

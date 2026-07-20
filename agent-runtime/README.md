@@ -63,7 +63,10 @@ or session methods are accepted.
 - internal `background-job-request/0.1` and `background-job-state/0.1` lifecycle
   contracts (schedule, pause, approval wait, cancellation, attempts, bounded retry,
   and fail-closed restart decisions), plus a schema-v10 internal durable projection
-  and typed session events (no scheduler, process recovery, AAP, or execution)
+  and typed session events
+- internal `background-job-scheduler/0.1` bounded owner snapshot for read-only
+  recovery classification (no lease, process observation, AAP, notification,
+  automatic retry/approval, dispatch, or execution)
 - `workspace/list`
 - `workspace/read`
 - `workspace/instructions` (deterministic, bounded, untrusted instruction discovery)

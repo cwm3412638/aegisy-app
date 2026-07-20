@@ -151,8 +151,20 @@ Background job lifecycle evidence:
   projection row. Active records block deletion/retention and terminal records are
   purged with their session. Four store fixtures cover reopen/event replay, rollback,
   tamper-triggered read-only startup recovery, deletion protection, and WAL-consistent
-  v9-to-v10 backup migration. This is durable metadata only: no scheduler, process
-  observation, automatic recovery, AAP/Qt control, notification, or execution exists.
+  v9-to-v10 backup migration. This is durable metadata only: no durable scheduler
+  lease, process observation, automatic recovery, AAP/Qt control, notification, or
+  execution exists.
+- Internal `background-job-scheduler/0.1` loads only a complete 1,000-record-or-less
+  recovery set and atomically replaces one owner-identity/generation-bound snapshot.
+  Schedule/admission, pause, approval wait, retry review, terminal review, and manual
+  reconciliation are explicit. Active jobs require unavailable process evidence;
+  pending cancellation separately requires acknowledgement. Every entry denies
+  dispatch and automatic retry/approval, and the snapshot reports process observation
+  and notifications unavailable. Invalid owner,
+  time, limit, store failure, or truncation preserves the previous snapshot. Four
+  fixtures cover due/future queue review, active/cancel handling, approval/retry
+  behavior, and transactional refresh. Durable leases, process probes, mutation,
+  dispatch, notifications, AAP, and Qt remain absent.
 
 Current editor evidence:
 

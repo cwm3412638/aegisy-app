@@ -3293,11 +3293,17 @@ impl WorkbenchStore {
             )
             .map_err(|_| error("cannot prepare background job recovery listing"))?;
         let job_ids = statement
-            .query_map([limit as i64], |row| row.get::<_, String>(0))
+            .query_map([limit as i64 + 1], |row| row.get::<_, String>(0))
             .map_err(|_| error("cannot read background job recovery listing"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| error("background job recovery listing row is invalid"))?;
         drop(statement);
+        if job_ids.len() > limit {
+            return Err(coded_error(
+                "background-job-recovery-truncated",
+                "background job recovery listing exceeds the requested bound",
+            ));
+        }
         job_ids
             .iter()
             .map(|job_id| self.load_background_job(job_id))
