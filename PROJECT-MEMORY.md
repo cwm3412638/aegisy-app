@@ -182,10 +182,21 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   snapshot. It classifies schedule wait, admission review, paused, approval wait,
   retry review, terminal review, and manual reconciliation while always reporting
   `dispatch_available:false`, `automatic_retry:false`, and
-  `automatic_approval:false`. Active work requires an authoritative process
-  observation that is still absent; every pending cancellation separately reports
-  that acknowledgement is required. Truncated/failed refresh retains the previous
-  snapshot. Durable scheduler leases/process ownership, authoritative
+  `automatic_approval:false`. Internal
+  `background-job-process-observation/0.1` now accepts only a Runtime-owned
+  `std::process::Child` handle, never a caller-selected PID. Its content-free
+  evidence binds scheduler owner, project/session/root/job, exact request/state
+  identities, job generation, attempt, opaque process identity, registration time,
+  and observation time. It distinguishes owned-running, owned-exited, absent,
+  inaccessible, mismatched, and unknown. Process exit or disappearance never implies
+  job completion; every non-running or ambiguous result requires manual
+  reconciliation, and an owned exit separately requires a terminal job event.
+  The scheduler can consume the non-serializable verified observation and classify
+  exact owned-running work as monitor-only while keeping dispatch disabled. Missing
+  ownership remains manual, pending cancellation separately reports acknowledgement,
+  and failed refresh retains the previous snapshot. The in-memory registry is not a
+  durable lease and cannot adopt a process after Runtime restart. Durable scheduler
+  leases/process ownership, authoritative
   approval, automatic recovery, notification, AAP/Qt controls, and cross-platform
   endurance remain absent; keep `21.8` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
@@ -894,17 +905,26 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 359 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 364 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
 runtime budget-ledger, unified-execution-plan, durable-job lifecycle contracts, and
-schema-v10 job persistence/CAS/migration/integrity fixtures and the owner-bound
-read-only scheduler recovery snapshot, plus diagnostic, terminal, Git, and
+schema-v10 job persistence/CAS/migration/integrity fixtures, the owner-bound
+read-only scheduler recovery snapshot, and Runtime-owned process-observation
+contract, plus diagnostic, terminal, Git, and
 child-handoff pinned-context authority, strict Git references, complete-source drift
 detection, terminal normalization, image import/preview/assembly/release rollback,
 and source-loss fail-closed invariants.
+
+The process-observation fixtures use a real owned child on macOS and prove exact
+generation rebinding, running/exited observation, no PID in serialized evidence, and
+no inferred completion. The same implementation uses only cross-platform
+`std::process::Child` ownership and includes a Windows `cmd.exe` fixture, but the
+macOS-to-MSVC check is currently blocked in bundled SQLite C before this module by
+missing Windows SDK headers. Do not claim Windows runtime evidence until the
+`windows-2022` runner executes it.
 
 ## Session History Boundary
 

@@ -156,15 +156,24 @@ Background job lifecycle evidence:
   execution exists.
 - Internal `background-job-scheduler/0.1` loads only a complete 1,000-record-or-less
   recovery set and atomically replaces one owner-identity/generation-bound snapshot.
-  Schedule/admission, pause, approval wait, retry review, terminal review, and manual
-  reconciliation are explicit. Active jobs require unavailable process evidence;
-  pending cancellation separately requires acknowledgement. Every entry denies
-  dispatch and automatic retry/approval, and the snapshot reports process observation
-  and notifications unavailable. Invalid owner,
-  time, limit, store failure, or truncation preserves the previous snapshot. Four
-  fixtures cover due/future queue review, active/cancel handling, approval/retry
-  behavior, and transactional refresh. Durable leases, process probes, mutation,
-  dispatch, notifications, AAP, and Qt remain absent.
+  Schedule/admission, pause, approval wait, retry review, terminal review,
+  monitor-owned-process, and manual reconciliation are explicit. Internal
+  `background-job-process-observation/0.1` accepts only an owned `Child` handle and
+  binds exact owner/job/request/state/generation/attempt/time evidence without
+  returning a PID, command, path, environment, or output. Owned-running, owned-exited,
+  absent, inaccessible, mismatched, and unknown are distinct. Only exact running
+  ownership is monitor-only; every other active result is manual, and process exit
+  requires a terminal job event without implying completion. Pending cancellation
+  separately requires acknowledgement. Every entry denies dispatch and automatic
+  retry/approval. Invalid owner, time, limit, observation, store failure, or
+  truncation preserves the previous snapshot. Nine scheduler/process fixtures cover
+  due/future queue review, active/cancel handling, approval/retry behavior, absent
+  ownership, exact-generation rebinding, real macOS running/exited observation, and
+  transactional refresh. A cfg-gated Windows fixture is present, but target
+  compilation currently stops in bundled SQLite C before this module because this
+  host lacks Windows SDK headers; a Windows runner is still required. Durable
+  leases/restart ownership, mutation, dispatch, notifications, AAP, and Qt remain
+  absent.
 
 Current editor evidence:
 

@@ -56,6 +56,17 @@ Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账�
 
 配置写入采用读、合并、原子提交，不会直接覆盖无关字段。每次激活前都会建立同批次备份。
 
+## Aegisy Coding 工程预览
+
+仓库正在按 `openspec/changes/build-aegisy-agent-workbench/` 推进原生 Coding
+工作台。当前已具备 Chat/Work 外壳、项目与会话持久化、Monaco、终端、只读 Git、
+结构化上下文和多项恢复基础，但 Codex Agent 仍保持只读，不能把当前版本视为已经
+完成的自动编程 Agent。
+
+后台作业队列、调度快照和运行时拥有的进程观测目前仅是 Rust 内部安全基础。它们
+没有 AAP/Qt 操作入口，不会派发后台工作、自动重试、自动审批或执行无人值守写入。
+进程退出也不会被当成作业成功；缺少完整终止事件时必须人工核对。
+
 ## 系统要求
 
 - CMake 3.16+
@@ -102,13 +113,17 @@ build\Release\AegisyClient.exe
 生成完整 Windows 安装程序：
 
 ```bat
-set OPENSSL_DIR=C:\path\to\openssl\bin
+set OPENSSL_ROOT_DIR=C:\path\to\openssl
+set OPENSSL_DIR=%OPENSSL_ROOT_DIR%\bin
 set AEGISY_SPARKLE_PRIVATE_KEY_FILE=C:\Users\you\.aegisy\sparkle-private-key
 package-windows.bat
 ```
 
 需要预先安装 Qt、OpenSSL、CMake、Visual Studio 2022 和 Inno Setup 6。
-`OPENSSL_DIR` 必须指向 OpenSSL 的运行库目录，其中应同时包含该发行版依赖的 zlib DLL；打包脚本会复制目录中的全部 DLL 并在生成安装包前执行启动测试。
+`OPENSSL_DIR` 必须位于同一个 `OPENSSL_ROOT_DIR` 下。打包脚本会校验 Qt Network
+导入、SSL/crypto DLL 架构与版本，并从暂存目录执行真实 HTTPS TLS 探测；任一检查
+失败都会在生成安装包前停止。发布前仍必须在没有开发版 Qt/OpenSSL `PATH` 的干净
+Windows x64 环境安装并运行完整安装包。
 
 ## 使用流程
 

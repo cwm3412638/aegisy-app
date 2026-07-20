@@ -5,6 +5,10 @@
 //! authoritative process observation always require manual reconciliation.
 
 use crate::background_job::{BackgroundJobStatus, JobCancellationState, JobRecoveryDisposition};
+use crate::background_process_observation::{
+    process_observation_required, BackgroundProcessObservation, BackgroundProcessObservationState,
+    BackgroundProcessRegistry, VerifiedBackgroundProcessObservation,
+};
 use crate::workbench_store::{StoredBackgroundJob, WorkbenchStore};
 use serde::{Deserialize, Serialize};
 use serde_json::to_vec;
@@ -34,6 +38,7 @@ pub enum SchedulerRecoveryAction {
     KeepPaused,
     KeepWaitingApproval,
     RetryReviewRequired,
+    MonitorOwnedProcess,
     ManualReconciliation,
     TerminalReview,
 }
@@ -52,6 +57,7 @@ pub struct SchedulerRecoveryEntry {
     pub action: SchedulerRecoveryAction,
     pub next_eligible_at_ms: Option<u64>,
     pub process_observation_required: bool,
+    pub process_observation: Option<BackgroundProcessObservation>,
     pub approval_required: bool,
     pub cancellation_acknowledgement_required: bool,
     pub automatic_retry: bool,
@@ -79,6 +85,7 @@ pub struct BackgroundJobScheduler {
     owner_identity: String,
     generation: u64,
     observed_at_ms: u64,
+    process_observation_available: bool,
     entries: BTreeMap<String, SchedulerRecoveryEntry>,
 }
 
@@ -101,21 +108,58 @@ impl BackgroundJobScheduler {
         now_ms: u64,
         limit: usize,
     ) -> Result<Self, BackgroundSchedulerError> {
+        let mut scheduler = Self::new(owner_identity)?;
+        scheduler.refresh(store, now_ms, limit)?;
+        Ok(scheduler)
+    }
+
+    pub fn load_with_process_registry(
+        store: &WorkbenchStore,
+        process_registry: &mut BackgroundProcessRegistry,
+        owner_identity: impl Into<String>,
+        now_ms: u64,
+        limit: usize,
+    ) -> Result<Self, BackgroundSchedulerError> {
+        let mut scheduler = Self::new(owner_identity)?;
+        scheduler.refresh_with_process_registry(store, process_registry, now_ms, limit)?;
+        Ok(scheduler)
+    }
+
+    fn new(owner_identity: impl Into<String>) -> Result<Self, BackgroundSchedulerError> {
         let owner_identity = owner_identity.into();
         validate_owner_identity(&owner_identity)?;
-        let mut scheduler = Self {
+        Ok(Self {
             owner_identity,
             generation: 0,
             observed_at_ms: 0,
+            process_observation_available: false,
             entries: BTreeMap::new(),
-        };
-        scheduler.refresh(store, now_ms, limit)?;
-        Ok(scheduler)
+        })
     }
 
     pub fn refresh(
         &mut self,
         store: &WorkbenchStore,
+        now_ms: u64,
+        limit: usize,
+    ) -> Result<BackgroundSchedulerSnapshot, BackgroundSchedulerError> {
+        self.refresh_internal(store, None, now_ms, limit)
+    }
+
+    pub fn refresh_with_process_registry(
+        &mut self,
+        store: &WorkbenchStore,
+        process_registry: &mut BackgroundProcessRegistry,
+        now_ms: u64,
+        limit: usize,
+    ) -> Result<BackgroundSchedulerSnapshot, BackgroundSchedulerError> {
+        self.refresh_internal(store, Some(process_registry), now_ms, limit)
+    }
+
+    fn refresh_internal(
+        &mut self,
+        store: &WorkbenchStore,
+        mut process_registry: Option<&mut BackgroundProcessRegistry>,
         now_ms: u64,
         limit: usize,
     ) -> Result<BackgroundSchedulerSnapshot, BackgroundSchedulerError> {
@@ -145,9 +189,31 @@ impl BackgroundJobScheduler {
                 "scheduler generation is exhausted",
             )
         })?;
+        let process_observation_available = process_registry.is_some();
         let mut next_entries = BTreeMap::new();
         for record in records {
-            let entry = recovery_entry(&record, now_ms)?;
+            let observation = if process_observation_required(record.state.status) {
+                process_registry
+                    .as_deref_mut()
+                    .map(|registry| {
+                        registry.observe_for_scheduler(
+                            &record.request,
+                            &record.state,
+                            &self.owner_identity,
+                            now_ms,
+                        )
+                    })
+                    .transpose()
+                    .map_err(|_| {
+                        error(
+                            "background-scheduler-process-observation-invalid",
+                            "scheduler could not verify runtime-owned process evidence",
+                        )
+                    })?
+            } else {
+                None
+            };
+            let entry = recovery_entry(&record, now_ms, observation.as_ref())?;
             if next_entries.insert(entry.job_id.clone(), entry).is_some() {
                 return Err(error(
                     "background-scheduler-duplicate-job",
@@ -159,10 +225,12 @@ impl BackgroundJobScheduler {
             &self.owner_identity,
             next_generation,
             now_ms,
+            process_observation_available,
             next_entries.values().cloned().collect(),
         )?;
         self.generation = next_generation;
         self.observed_at_ms = now_ms;
+        self.process_observation_available = process_observation_available;
         self.entries = next_entries;
         Ok(snapshot)
     }
@@ -172,6 +240,7 @@ impl BackgroundJobScheduler {
             &self.owner_identity,
             self.generation,
             self.observed_at_ms,
+            self.process_observation_available,
             self.entries.values().cloned().collect(),
         )
     }
@@ -180,6 +249,7 @@ impl BackgroundJobScheduler {
 fn recovery_entry(
     record: &StoredBackgroundJob,
     now_ms: u64,
+    verified_observation: Option<&VerifiedBackgroundProcessObservation>,
 ) -> Result<SchedulerRecoveryEntry, BackgroundSchedulerError> {
     record.request.validate().map_err(|_| {
         error(
@@ -206,7 +276,7 @@ fn recovery_entry(
         )
     })?;
     let decision = record.state.recovery_decision(&record.request, now_ms);
-    let action = match decision.disposition {
+    let mut action = match decision.disposition {
         JobRecoveryDisposition::RunWhenDue if record.state.next_eligible_at_ms > now_ms => {
             SchedulerRecoveryAction::AwaitSchedule
         }
@@ -219,12 +289,37 @@ fn recovery_entry(
         }
         JobRecoveryDisposition::Terminal => SchedulerRecoveryAction::TerminalReview,
     };
-    let process_observation_required = matches!(
-        record.state.status,
-        BackgroundJobStatus::Running
-            | BackgroundJobStatus::PauseRequested
-            | BackgroundJobStatus::Cancelling
-    );
+    let requires_process_observation = process_observation_required(record.state.status);
+    let process_observation = verified_observation.map(|verified| verified.observation().clone());
+    if let Some(observation) = &process_observation {
+        observation.validate().map_err(|_| {
+            error(
+                "background-scheduler-process-observation-invalid",
+                "scheduler process observation is invalid",
+            )
+        })?;
+        if observation.job_id != record.request.job_id
+            || observation.session_id != record.request.session_id
+            || observation.project_id != record.request.project_id
+            || observation.root_id != record.request.root_id
+            || observation.request_identity != request_identity
+            || observation.state_identity != state_identity
+            || observation.job_generation != record.state.generation
+        {
+            return Err(error(
+                "background-scheduler-process-binding-invalid",
+                "scheduler process observation does not bind the durable job",
+            ));
+        }
+    }
+    if requires_process_observation {
+        action = match process_observation.as_ref().map(|value| value.state) {
+            Some(BackgroundProcessObservationState::OwnedRunning) => {
+                SchedulerRecoveryAction::MonitorOwnedProcess
+            }
+            _ => SchedulerRecoveryAction::ManualReconciliation,
+        };
+    }
     let approval_required = record.state.status == BackgroundJobStatus::WaitingApproval;
     let cancellation_acknowledgement_required =
         record.state.cancellation == JobCancellationState::Requested;
@@ -239,9 +334,15 @@ fn recovery_entry(
         SchedulerRecoveryAction::RetryReviewRequired => {
             blockers.push("retry-review-required".into())
         }
+        SchedulerRecoveryAction::MonitorOwnedProcess => {
+            blockers.push("owned-process-running".into())
+        }
         SchedulerRecoveryAction::ManualReconciliation => blockers.push(
-            if process_observation_required {
-                "process-observation-required"
+            if requires_process_observation {
+                process_observation
+                    .as_ref()
+                    .map(|observation| observation.state.blocker_code())
+                    .unwrap_or("process-observation-required")
             } else if cancellation_acknowledgement_required {
                 "cancellation-acknowledgement-required"
             } else {
@@ -250,6 +351,16 @@ fn recovery_entry(
             .into(),
         ),
         SchedulerRecoveryAction::TerminalReview => blockers.push("terminal-review-only".into()),
+    }
+    if cancellation_acknowledgement_required
+        && !blockers
+            .iter()
+            .any(|blocker| blocker == "cancellation-acknowledgement-required")
+    {
+        blockers.push("cancellation-acknowledgement-required".into());
+    }
+    if record.state.status == BackgroundJobStatus::PauseRequested {
+        blockers.push("pause-acknowledgement-required".into());
     }
     Ok(SchedulerRecoveryEntry {
         job_id: record.request.job_id.clone(),
@@ -264,7 +375,8 @@ fn recovery_entry(
         action,
         next_eligible_at_ms: (action == SchedulerRecoveryAction::AwaitSchedule)
             .then_some(record.state.next_eligible_at_ms),
-        process_observation_required,
+        process_observation_required: requires_process_observation,
+        process_observation,
         approval_required,
         cancellation_acknowledgement_required,
         automatic_retry: false,
@@ -278,6 +390,7 @@ fn snapshot(
     owner_identity: &str,
     generation: u64,
     observed_at_ms: u64,
+    process_observation_available: bool,
     entries: Vec<SchedulerRecoveryEntry>,
 ) -> Result<BackgroundSchedulerSnapshot, BackgroundSchedulerError> {
     validate_owner_identity(owner_identity)?;
@@ -298,12 +411,36 @@ fn snapshot(
             "scheduler snapshot cannot grant execution authority",
         ));
     }
+    if entries.iter().any(|entry| {
+        let observation = entry.process_observation.as_ref();
+        observation.is_some_and(|value| {
+            !process_observation_available
+                || value.owner_identity != owner_identity
+                || value.observed_at_ms != observed_at_ms
+                || value.validate().is_err()
+        }) || (process_observation_available
+            && entry.process_observation_required
+            && observation.is_none())
+            || (!entry.process_observation_required && observation.is_some())
+            || (entry.action == SchedulerRecoveryAction::MonitorOwnedProcess
+                && observation.is_none_or(|value| {
+                    value.state != BackgroundProcessObservationState::OwnedRunning
+                }))
+            || (observation.is_some_and(|value| {
+                value.state == BackgroundProcessObservationState::OwnedRunning
+            }) && entry.action != SchedulerRecoveryAction::MonitorOwnedProcess)
+    }) {
+        return Err(error(
+            "background-scheduler-process-snapshot-invalid",
+            "scheduler snapshot process evidence is invalid",
+        ));
+    }
     let binding = SnapshotBinding {
         schema_version: SCHEMA_VERSION,
         owner_identity,
         generation,
         observed_at_ms,
-        process_observation_available: false,
+        process_observation_available,
         notification_available: false,
         dispatch_available: false,
         entries: &entries,
@@ -320,7 +457,7 @@ fn snapshot(
         generation,
         observed_at_ms,
         job_count: entries.len(),
-        process_observation_available: false,
+        process_observation_available,
         notification_available: false,
         dispatch_available: false,
         entries,
@@ -360,11 +497,16 @@ mod tests {
         BackgroundJobRequest, BackgroundJobState, JobRetryPolicy, JobSchedule, JobScheduleKind,
         REQUEST_SCHEMA_VERSION,
     };
+    use crate::background_process_observation::{
+        BackgroundProcessObservationState, BackgroundProcessRegistry,
+    };
     use crate::workbench_store::{
         StoredProjectCreate, StoredSessionCreate, StoredSessionLineage, StoredSessionMode,
     };
     use std::fs;
     use std::path::PathBuf;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -614,6 +756,92 @@ mod tests {
     }
 
     #[test]
+    fn available_registry_reports_absence_without_inferring_process_outcome() {
+        let mut fixture = Fixture::new("process-absent");
+        let request = job_request("foxtrot", None, true);
+        let mut state = BackgroundJobState::new(&request, 120).unwrap();
+        fixture
+            .store
+            .create_background_job(&request, &state)
+            .unwrap();
+        let queued = state.clone();
+        state.start(&request, 200).unwrap();
+        fixture
+            .store
+            .update_background_job_state(&request, &queued, &state)
+            .unwrap();
+        let mut registry = BackgroundProcessRegistry::new(owner()).unwrap();
+        let scheduler = BackgroundJobScheduler::load_with_process_registry(
+            &fixture.store,
+            &mut registry,
+            owner(),
+            220,
+            10,
+        )
+        .unwrap();
+        let snapshot = scheduler.snapshot().unwrap();
+        let entry = &snapshot.entries[0];
+        assert!(snapshot.process_observation_available);
+        assert_eq!(entry.action, SchedulerRecoveryAction::ManualReconciliation);
+        assert_eq!(
+            entry.process_observation.as_ref().unwrap().state,
+            BackgroundProcessObservationState::Absent
+        );
+        assert!(entry.blockers.contains(&"owned-process-absent".into()));
+        assert!(!entry.dispatch_available);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn runtime_owned_running_process_is_monitored_without_dispatch_authority() {
+        let mut fixture = Fixture::new("process-running");
+        let request = job_request("beacon", None, true);
+        let mut state = BackgroundJobState::new(&request, 120).unwrap();
+        fixture
+            .store
+            .create_background_job(&request, &state)
+            .unwrap();
+        let queued = state.clone();
+        state.start(&request, 200).unwrap();
+        fixture
+            .store
+            .update_background_job_state(&request, &queued, &state)
+            .unwrap();
+
+        let mut command = blocking_command();
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let mut registry = BackgroundProcessRegistry::new(owner()).unwrap();
+        registry
+            .register_spawned_child(&request, &state, child, 200)
+            .unwrap();
+        let scheduler = BackgroundJobScheduler::load_with_process_registry(
+            &fixture.store,
+            &mut registry,
+            owner(),
+            220,
+            10,
+        )
+        .unwrap();
+        let entry = &scheduler.snapshot().unwrap().entries[0];
+        assert_eq!(entry.action, SchedulerRecoveryAction::MonitorOwnedProcess);
+        let observation = entry.process_observation.as_ref().unwrap();
+        assert_eq!(
+            observation.state,
+            BackgroundProcessObservationState::OwnedRunning
+        );
+        assert!(!observation.completion_inferred);
+        assert!(!observation.dispatch_authority);
+        assert!(!entry.dispatch_available);
+        drop(input);
+    }
+
+    #[test]
     fn refresh_is_transactional_and_rejects_invalid_owner_time_and_limit() {
         let mut fixture = Fixture::new("transactional");
         fixture.persist("delta", None);
@@ -641,5 +869,19 @@ mod tests {
         );
         assert_eq!(scheduler.snapshot().unwrap(), before);
         assert!(fixture.data_root.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    fn blocking_command() -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "read line"]);
+        command
+    }
+
+    #[cfg(target_os = "windows")]
+    fn blocking_command() -> Command {
+        let mut command = Command::new("cmd.exe");
+        command.args(["/D", "/Q", "/C", "more > NUL"]);
+        command
     }
 }
