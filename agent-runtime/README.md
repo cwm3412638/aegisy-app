@@ -57,6 +57,9 @@ or session methods are accepted.
 - internal `child-runtime-budget/0.1` ledger (pre-admission token/cost reservation,
   conservative unknown-usage settlement, wall/turn/tool/concurrency/network limits,
   and content-free warning/remaining snapshots; no scheduler or execution authority)
+- internal `unified-execution-plan/0.1` pipeline invariant (one ordered stage list
+  for interactive/child/background modes; current read-only interactive dispatch
+  is checked, while child/background dispatch and execution authority remain absent)
 - `workspace/list`
 - `workspace/read`
 - `workspace/instructions` (deterministic, bounded, untrusted instruction discovery)

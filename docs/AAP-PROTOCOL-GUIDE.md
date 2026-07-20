@@ -144,6 +144,19 @@ usage-source counts, and warning/saturated/exhausted dimensions. Snapshots set
 Runtime-owned monotonic clock, persistence, scheduling, cancellation/refund policy,
 and AAP/Qt budget events remain unavailable.
 
+The internal `unified-execution-plan/0.1` invariant uses one fixed ordered stage
+list for interactive, child, and background modes: identity, reconciliation,
+permission, approval, workspace, budget, sandbox, recovery, durable job,
+notification, release, dispatch, observation, and handoff. Mode selects required
+gates and terminal evidence but cannot inject child/job/unattended bindings into a
+different mode. The current Codex read-only interactive `turn/start` validates this
+plan immediately before adapter dispatch. Child and background plans require their
+budget, workspace, durable job, notification, and release evidence and remain
+blocked/unadvertised. Plan output is content-free and always sets
+`permission_granted:false` and `execution_available:false`; it is an invariant, not
+an authorization or executor ticket. Typed proof composition, generic dispatch,
+durable lifecycle, AAP/Qt mode status, and cross-platform evidence remain open.
+
 ## Replay And Reconnect
 
 The durable session stream is ordered by a session-local sequence. After a

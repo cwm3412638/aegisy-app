@@ -109,6 +109,23 @@ Child runtime budget evidence:
   scheduler/session events, cancellation/refund rules, executor admission, AAP/Qt
   events, and endurance/cross-platform evidence remain open under task `21.6`.
 
+Unified execution pipeline evidence:
+
+- Internal `unified-execution-plan/0.1` emits the same ordered 14 stages for
+  interactive, child, and background envelopes. Requirements are derived from
+  mode and mutation policy rather than caller-selected omissions: child work
+  requires budget/release and write isolation/approval when mutating; background
+  additionally requires a durable job, notification, and unattended approval.
+  Invalid child/job/unattended identity relabelling fails. The existing Codex
+  read-only interactive `turn/start` invokes the planner immediately before real
+  adapter dispatch, and all eleven stdio adapter tests pass through that path.
+  Six unit fixtures prove exact cross-mode stage order, current interactive
+  readiness, child/background missing-gate projection, binding rejection, and
+  common reconciliation failure. Plans expose no permission or execution ticket.
+  Typed proof composition, child/background dispatch, generic executor ownership,
+  durable job/session events and recovery, budget/provider settlement, AAP/Qt mode
+  status, and cross-platform evidence remain open under task `21.7`.
+
 Current editor evidence:
 
 - The macOS Qt build and all 16 desktop tests pass.

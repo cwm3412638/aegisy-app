@@ -45,6 +45,7 @@ mod terminal;
 #[path = "terminal_unsupported.rs"]
 mod terminal;
 mod turn_context;
+mod unified_execution;
 mod workbench_migration;
 pub mod workbench_store;
 mod workspace;
@@ -8640,6 +8641,31 @@ impl Runtime {
             );
             return;
         };
+
+        let execution_identity = format!(
+            "execution:sha256:{}",
+            ContentHash::for_bytes(persistence_input.as_bytes()).sha256
+        );
+        let execution_plan = match unified_execution::plan_current_interactive_read_only(
+            &execution_identity,
+            &params.session_id,
+            project_id.as_deref(),
+        ) {
+            Ok(plan) if plan.admission_ready => plan,
+            Ok(_) | Err(_) => {
+                self.emit_all(
+                    self.error_for(
+                        &request,
+                        -32112,
+                        "interactive execution pipeline admission is unavailable",
+                    ),
+                    emit,
+                );
+                return;
+            }
+        };
+        debug_assert!(!execution_plan.permission_granted);
+        debug_assert!(!execution_plan.execution_available);
 
         let image_leases =
             match self.materialize_turn_images(&params.session_id, &prepared_context.images) {
