@@ -240,6 +240,27 @@ Background job lifecycle evidence:
   Scheduler production, AAP/Qt inspection/settings, delivery state transitions,
   platform permission/delivery APIs, localization/privacy review, and macOS/Windows
   evidence remain absent, so task `21.9` stays unchecked.
+- Capability `background-notification.outbox.read-only` is advertised only when the
+  durable Workbench store is writable. AAP `session/background-notifications` accepts
+  a session, optional structured keyset cursor, and 1-100 limit; it remains readable
+  across archive, pending deletion, reconciliation block, and session quarantine, but
+  is unavailable in whole-store recovery. Empty pages still bind the session. Missing
+  storage, forged cursors, cross-session anchors, and invalid limits fail explicitly.
+  Two protocol fixtures cover unavailable storage plus two-kind paging, false authority,
+  forbidden content-field absence, cursor forgery, and restart replay. The complete
+  Rust baseline now passes 389 unit tests with one ignored live fixture, 55 protocol
+  tests, 11 stdio/Codex tests, and strict Clippy.
+- Qt `AgentRuntimeClient` exposes only the structured read request/result signal. The
+  Session context menu enables a metadata-only viewer from negotiated capability;
+  the dialog validates schema, session, cursor, notification/intent versions, allowed
+  kinds/statuses, event/generation/time identities, zero attempts, every false-authority
+  field, and forbidden content fields before rendering. It supports keyset pagination,
+  empty and request-failure states, and has no delivery action. The complete Qt target
+  builds. Its render fixture exercises the real empty-outbox request and dialog, but
+  this host killed that process twice at startup (0.53s and 0.01s) without assertion
+  output; a later lightweight Qt environment test was also killed at 0.42s, while
+  `agent_runtime_protocol` continued to pass. Rerun Qt CTest when host memory is
+  available. This is not evidence of platform notification delivery.
 
 Current editor evidence:
 

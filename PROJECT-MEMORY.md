@@ -250,6 +250,21 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   inspection and settings, delivery transitions/retry/confirmation, platform APIs and
   permissions, localization/privacy review, and cross-platform evidence remain absent;
   keep `21.9` unchecked.
+- The `21.9` read-only inspection layer is now reachable through the negotiated
+  `background-notification.outbox.read-only` capability and AAP method
+  `session/background-notifications`. It serves only a bounded, session-bound
+  `background-notification-page/0.1` metadata page with strict keyset cursors; it is
+  unavailable without writable durable storage or during whole-store recovery, while
+  archived, pending-deletion, quarantined, and reconciliation-blocked sessions remain
+  readable. Qt exposes a capability-gated Session-menu viewer with keyset loading,
+  empty/error states, and strict validation of schema, session, kind, lifecycle
+  identity, timestamps, delivery state, zero attempts, false authority, and forbidden
+  content-field absence. No delivery action, platform permission, retry, or background
+  producer exists. The latest Rust run passes 389 tests with one ignored fixture, 55
+  protocol tests, 11 stdio/Codex tests, and strict Clippy; the complete Qt build and
+  `agent_runtime_protocol` pass. The `agent_workbench_render` process was killed by
+  host resource pressure at startup (0.46s) without assertion output, so it is not
+  treated as a render assertion failure. Keep `21.9` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is
@@ -763,7 +778,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   v4 adds only the durable Blob schema. The v11 background-job and scheduler-lease
   projections plus the v12 notification outbox are
   internal, bounded, content-free canonical contract JSON, event-backed,
-  generation-CAS protected, startup-verified, and unreachable from AAP/Qt. Extensions,
+  generation-CAS protected, and startup-verified. The notification outbox is exposed
+  only through the read-only session inspection capability described under `21.9`;
+  no producer or delivery authority is exposed through AAP/Qt. Extensions,
   model profiles, Git checkpoint projections, and complete scheduler/recovery state
   are still future work. Runtime durable
   replay is now partially integrated: the Qt host's platform data root enables
@@ -959,7 +976,7 @@ git diff --check
 ```
 
 Current verified baseline: 16 desktop tests, 389 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
+one explicitly ignored live Codex fixture, 55 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
@@ -974,13 +991,16 @@ child-handoff pinned-context authority, strict Git references, complete-source d
 detection, terminal normalization, image import/preview/assembly/release rollback,
 and source-loss fail-closed invariants.
 
-On 2026-07-20 the schema-v12 durable notification outbox passed all Rust counts above,
-strict Clippy, formatting, `git diff --check`, the complete desktop build, and CTest
-`agent_runtime_protocol`. Its focused evidence covers progressed-state idempotency,
-durable restart, stable paging/cursor validation, event/projection rollback, semantic
-tampering, v11-to-v12 backup migration, and session-purge cleanup. Task `21.9` remains
-unchecked because scheduler production, AAP/Qt and platform delivery are absent. The
-earlier full CTest attempt could not
+On 2026-07-20 the schema-v12 durable notification outbox and its read-only AAP/Qt
+inspection layer passed all Rust counts above, strict Clippy, formatting,
+`git diff --check`, the complete desktop build, and CTest `agent_runtime_protocol`.
+Focused evidence covers progressed-state idempotency, durable restart, stable
+paging/cursor validation, event/projection rollback, semantic tampering, v11-to-v12
+backup migration, session-purge cleanup, missing-storage degradation, and Qt metadata
+validation paths. Task `21.9` remains unchecked because scheduler production,
+platform delivery, permissions, and cross-platform evidence are absent. The
+`agent_workbench_render` process was killed by the host at startup with no assertion
+output; the earlier full CTest attempt could not
 re-establish the 16-test desktop baseline because the remaining 15 test processes
 were killed at startup by the host under memory pressure; they produced no test
 assertion failure.
@@ -2078,8 +2098,8 @@ Implemented visual baseline:
 9. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
    permission policy and the production approval ledger. A trust acknowledgement must
    never become an implicit write, command, Hook, or network grant.
-10. Continue `21.9` with an AAP/Qt read-only outbox inspection surface, then add
-   reviewed platform permission/delivery settings. Continue `21.8` with
+10. Continue `21.9` by adding reviewed platform permission/delivery settings only
+   after scheduler and approval gates are complete. Continue `21.8` with
    read-only recovery inspection controls over the durable decision journal. Keep
    automatic lease acquisition/renewal, process adoption, retry, approval, recovery
    mutation, and dispatch unavailable until their permission, sandbox, budget, and

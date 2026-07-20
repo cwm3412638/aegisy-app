@@ -22,6 +22,7 @@ class QButtonGroup;
 class QAction;
 class QCheckBox;
 class QComboBox;
+class QDialog;
 class QLineEdit;
 class QListWidgetItem;
 class QPlainTextEdit;
@@ -31,6 +32,7 @@ class QPushButton;
 class QScrollArea;
 class QTabBar;
 class QTabWidget;
+class QTableWidget;
 class QTextEdit;
 class QTimer;
 class QTreeWidget;
@@ -83,6 +85,8 @@ private:
     void beginCompactionCheckpointRevision(const QString &sessionId,
                                            const QJsonObject &sourceReview);
     void showCompactionReview(const QJsonObject &result, bool replayed);
+    Q_INVOKABLE void beginBackgroundNotificationInspection(const QString &sessionId);
+    void showBackgroundNotificationPage(const QJsonObject &result);
     bool currentOperationStatusBlocked() const;
     bool currentSessionRecoveryRequired() const;
     bool currentSessionDeletionPending() const;
@@ -426,6 +430,12 @@ private:
     QString m_compactionRequestId;
     QString m_compactionSessionId;
     QString m_compactionOperation;
+    QString m_backgroundNotificationRequestId;
+    QString m_backgroundNotificationSessionId;
+    QJsonObject m_backgroundNotificationCursor;
+    QDialog *m_backgroundNotificationDialog = nullptr;
+    QTableWidget *m_backgroundNotificationTable = nullptr;
+    QPushButton *m_backgroundNotificationMoreButton = nullptr;
     QString m_sessionMutationRequestId;
     QString m_sessionDeletionRequestId;
     QString m_portableSessionRequestId;
@@ -481,6 +491,7 @@ private:
     bool m_operationStatusKnown = true;
     bool m_operationStatusBlocked = false;
     bool m_compactionAvailable = false;
+    bool m_backgroundNotificationInspectionAvailable = false;
     bool m_pinnedContextAvailable = false;
     bool m_imageContextAvailable = false;
     bool m_gitContextAvailable = false;

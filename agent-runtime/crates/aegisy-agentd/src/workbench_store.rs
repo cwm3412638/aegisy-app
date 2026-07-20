@@ -566,6 +566,7 @@ pub struct BackgroundNotificationCursor {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackgroundNotificationPage {
     pub schema_version: String,
+    pub session_id: String,
     pub notifications: Vec<StoredBackgroundNotification>,
     pub next_cursor: Option<BackgroundNotificationCursor>,
     pub content_included: bool,
@@ -4000,6 +4001,7 @@ impl WorkbenchStore {
         });
         Ok(BackgroundNotificationPage {
             schema_version: "background-notification-page/0.1".into(),
+            session_id: session_id.into(),
             notifications,
             next_cursor,
             content_included: false,

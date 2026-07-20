@@ -254,9 +254,24 @@ conflicting evidence, stale first writes, event failure, projection/event mismat
 missing lifecycle evidence fail closed. Startup validates at most 10,000 records, and
 session purge removes the job, outbox record, and event atomically. An internal
 session-scoped cursor inspection is read-only and ordered by record time descending;
-it is not advertised through AAP. No Qt setting, scheduler producer, delivery retry,
-operating-system permission request, or macOS/Windows notification call consumes the
-outbox yet.
+capability `background-notification.outbox.read-only` advertises it only with a healthy
+durable store. AAP method `session/background-notifications` accepts one session ID,
+an optional structured cursor, and a 1-100 limit. The response binds the session even
+when empty and keeps content, delivery mutation, and platform authority false. It is
+allowed while a session is archived, pending deletion, reconciliation-blocked, or in
+session-level quarantine because it cannot mutate or deliver. Whole-store recovery
+does not advertise or serve it because the outbox is not verified there.
+
+```jsonl
+{"jsonrpc":"2.0","id":"notification-1","method":"session/background-notifications","params":{"session_id":"session-1","limit":100}}
+{"jsonrpc":"2.0","id":"notification-1","result":{"schema_version":"background-notification-page/0.1","session_id":"session-1","notifications":[],"next_cursor":null,"content_included":false,"delivery_mutation_available":false,"platform_delivery_authority":false}}
+```
+
+Qt exposes this metadata-only page from the Session context menu, validates the page
+schema/session/cursor/kind/state/sequence plus every false-authority flag, and rejects
+content-bearing or mismatched records before rendering. No scheduler producer,
+delivery retry, operating-system permission request, or macOS/Windows notification
+call consumes the outbox yet.
 
 ## Replay And Reconnect
 

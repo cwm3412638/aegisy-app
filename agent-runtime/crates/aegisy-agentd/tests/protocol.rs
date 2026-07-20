@@ -1,7 +1,12 @@
+use aegisy_agentd::background_job::{
+    BackgroundJobRequest, BackgroundJobState, JobRetryPolicy, JobSchedule, JobScheduleKind,
+};
+use aegisy_agentd::background_notification::BackgroundNotificationIntent;
 use aegisy_agentd::pinned_context::{PinnedContextSet, SCHEMA_VERSION as PINNED_CONTEXT_SCHEMA};
 use aegisy_agentd::pinned_context_store::PinnedContextStore;
 use aegisy_agentd::workbench_store::{
-    durable_blob_reference_id, DurableBlobKind, DurableBlobWrite, WorkbenchStore,
+    durable_blob_reference_id, DurableBlobKind, DurableBlobWrite, StoredProjectCreate,
+    StoredSessionCreate, StoredSessionLineage, StoredSessionMode, WorkbenchStore,
 };
 use aegisy_agentd::Runtime;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -16,6 +21,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 fn request(id: &str, method: &str, params: Value) -> String {
     json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string()
+}
+
+fn identity(prefix: &str, byte: char) -> String {
+    format!("{prefix}{}", byte.to_string().repeat(64))
 }
 
 fn image_png(width: u32, height: u32) -> Vec<u8> {
@@ -143,6 +152,9 @@ fn ready_runtime() -> Runtime {
         .iter()
         .any(|capability| capability == "runtime.degradations"));
     let capabilities = messages[0]["result"]["capabilities"].as_array().unwrap();
+    assert!(!capabilities
+        .iter()
+        .any(|capability| capability == "background-notification.outbox.read-only"));
     for gated in ["background-jobs", "multi-agent", "unattended-writes"] {
         assert!(
             !capabilities.iter().any(|capability| capability == gated),
@@ -593,6 +605,234 @@ fn searches_sessions_by_title_runtime_model_and_approved_transcript_text() {
         json!({ "limit": 101 }),
     ));
     assert_eq!(invalid[0]["error"]["code"], -32602);
+}
+
+#[test]
+fn background_notification_inspection_requires_durable_storage() {
+    let mut runtime = ready_runtime();
+    let result = runtime.handle_line(&request(
+        "notification-no-store",
+        "session/background-notifications",
+        json!({"session_id": "missing-session"}),
+    ));
+    assert_eq!(result[0]["error"]["code"], -32024);
+}
+
+#[test]
+fn durable_background_notification_outbox_is_read_only_paged_and_restart_safe() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-notification-outbox-{unique}"));
+    let data_root = root.join("data");
+    let project_root = root.join("project");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    let canonical_root = project_root.canonicalize().unwrap();
+    let mut store = WorkbenchStore::open(&data_root).unwrap();
+    store
+        .create_project(StoredProjectCreate {
+            project_id: "notification-project".into(),
+            root_id: "root-1".into(),
+            canonical_root: canonical_root.to_string_lossy().into_owned(),
+            root_identity: identity("root:sha256:", 'a'),
+            display_name: "Notification project".into(),
+            root_access: "write".into(),
+            created_at_ms: 1_000,
+        })
+        .unwrap();
+    store
+        .create_session(StoredSessionCreate {
+            session_id: "notification-session".into(),
+            project_id: Some("notification-project".into()),
+            mode: StoredSessionMode::Work,
+            title: "Notification session".into(),
+            parent_session_id: None,
+            lineage_kind: StoredSessionLineage::New,
+            environment_identity: Some(identity("environment:sha256:", 'b')),
+            created_at_ms: 1_100,
+        })
+        .unwrap();
+    let job = BackgroundJobRequest {
+        schema_version: aegisy_agentd::background_job::REQUEST_SCHEMA_VERSION.into(),
+        job_id: "notification-job".into(),
+        session_id: "notification-session".into(),
+        project_id: "notification-project".into(),
+        root_id: "root-1".into(),
+        execution_plan_identity: identity("unified-execution-plan:sha256:", 'c'),
+        idempotency_identity: identity("idempotency:sha256:", 'd'),
+        child_task_identity: None,
+        schedule: JobSchedule {
+            kind: JobScheduleKind::Manual,
+            scheduled_for_ms: None,
+        },
+        retry: JobRetryPolicy {
+            max_attempts: 1,
+            backoff_ms: 0,
+            safe_retry_boundary_identity: None,
+        },
+        created_at_ms: 1_200,
+    };
+    let mut state = BackgroundJobState::new(&job, 1_200).unwrap();
+    store.create_background_job(&job, &state).unwrap();
+    let queued = state.clone();
+    state.start(&job, 1_300).unwrap();
+    store
+        .update_background_job_state(&job, &queued, &state)
+        .unwrap();
+    let running = state.clone();
+    let approval = identity("approval:sha256:", 'e');
+    state.wait_for_approval(&job, &approval, 1_400).unwrap();
+    store
+        .update_background_job_state(&job, &running, &state)
+        .unwrap();
+    let approval_intent =
+        BackgroundNotificationIntent::from_job_state(&job, &state, 1_450).unwrap();
+    store
+        .enqueue_background_notification(&approval_intent, 1_500)
+        .unwrap();
+    let waiting = state.clone();
+    state.resume_after_approval(&job, &approval, 1_600).unwrap();
+    store
+        .update_background_job_state(&job, &waiting, &state)
+        .unwrap();
+    let running = state.clone();
+    state
+        .complete(
+            &job,
+            &identity("artifact:sha256:", 'f'),
+            &identity("job-evidence:sha256:", 'a'),
+            1_700,
+        )
+        .unwrap();
+    store
+        .update_background_job_state(&job, &running, &state)
+        .unwrap();
+    let completed_intent =
+        BackgroundNotificationIntent::from_job_state(&job, &state, 1_750).unwrap();
+    store
+        .enqueue_background_notification(&completed_intent, 1_800)
+        .unwrap();
+    drop(store);
+
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    let initialized = runtime.handle_line(&request(
+        "notification-initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "notification-outbox", "version": "1"}
+        }),
+    ));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "background-notification.outbox.read-only"));
+    runtime.handle_line(&request("notification-ready", "initialized", json!({})));
+    let first = runtime.handle_line(&request(
+        "notification-first",
+        "session/background-notifications",
+        json!({"session_id": "notification-session", "limit": 1}),
+    ));
+    assert_eq!(
+        first[0]["result"]["schema_version"],
+        "background-notification-page/0.1"
+    );
+    assert_eq!(first[0]["result"]["session_id"], "notification-session");
+    assert_eq!(
+        first[0]["result"]["notifications"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        first[0]["result"]["notifications"][0]["intent"]["kind"],
+        "completed"
+    );
+    assert_eq!(
+        first[0]["result"]["notifications"][0]["delivery_state"],
+        "recorded"
+    );
+    assert_eq!(
+        first[0]["result"]["notifications"][0]["delivery_attempt_count"],
+        0
+    );
+    assert_eq!(first[0]["result"]["content_included"], false);
+    assert_eq!(first[0]["result"]["delivery_mutation_available"], false);
+    assert_eq!(first[0]["result"]["platform_delivery_authority"], false);
+    let cursor = first[0]["result"]["next_cursor"].clone();
+    assert!(cursor.is_object());
+    let mut forged_cursor = cursor.as_object().unwrap().clone();
+    forged_cursor.insert(
+        "recorded_at_ms".into(),
+        json!(forged_cursor["recorded_at_ms"].as_u64().unwrap() + 1),
+    );
+    let forged = runtime.handle_line(&request(
+        "notification-forged-cursor",
+        "session/background-notifications",
+        json!({
+            "session_id": "notification-session",
+            "limit": 1,
+            "cursor": forged_cursor
+        }),
+    ));
+    assert_eq!(forged[0]["error"]["code"], -32114);
+    let second = runtime.handle_line(&request(
+        "notification-second",
+        "session/background-notifications",
+        json!({
+            "session_id": "notification-session",
+            "limit": 1,
+            "cursor": cursor
+        }),
+    ));
+    assert_eq!(
+        second[0]["result"]["notifications"][0]["intent"]["kind"],
+        "approval_needed"
+    );
+    assert!(second[0]["result"]["next_cursor"].is_null());
+    let serialized = serde_json::to_string(&first[0]["result"]).unwrap();
+    for forbidden in [
+        "title",
+        "body",
+        "prompt",
+        "result_content",
+        "platform_payload",
+    ] {
+        assert!(!serialized.contains(forbidden));
+    }
+    drop(runtime);
+
+    let mut restarted = Runtime::with_store(&data_root).unwrap();
+    restarted.handle_line(&request(
+        "notification-restart-initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": {"name": "notification-outbox", "version": "1"}
+        }),
+    ));
+    restarted.handle_line(&request(
+        "notification-restart-ready",
+        "initialized",
+        json!({}),
+    ));
+    let after_restart = restarted.handle_line(&request(
+        "notification-after-restart",
+        "session/background-notifications",
+        json!({"session_id": "notification-session", "limit": 10}),
+    ));
+    assert_eq!(
+        after_restart[0]["result"]["notifications"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

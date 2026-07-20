@@ -23,6 +23,7 @@
 #include <QSplitter>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTextEdit>
 #include <QThread>
@@ -1068,6 +1069,36 @@ int main(int argc, char *argv[])
                 "workspace edit preview fixture did not create a Work session")) {
         return 1;
     }
+    if (!expect(QMetaObject::invokeMethod(
+                    &workbench, "beginBackgroundNotificationInspection",
+                    Qt::DirectConnection, Q_ARG(QString, previewSessionId)),
+                "background notification inspection entry is not invokable")) {
+        return 1;
+    }
+    QDialog *notificationDialog = nullptr;
+    if (!expect(waitUntil(application, [&workbench, &notificationDialog]() {
+                    notificationDialog = workbench.findChild<QDialog *>(
+                        QStringLiteral("agentBackgroundNotificationDialog"));
+                    return notificationDialog != nullptr;
+                }),
+                "background notification dialog did not open from the durable AAP query")) {
+        return 1;
+    }
+    QTableWidget *notificationTable = notificationDialog->findChild<QTableWidget *>(
+        QStringLiteral("agentBackgroundNotificationTable"));
+    QPushButton *notificationMore = notificationDialog->findChild<QPushButton *>(
+        QStringLiteral("agentBackgroundNotificationMoreButton"));
+    if (!expect(notificationTable && notificationMore
+                    && notificationTable->rowCount() == 1
+                    && notificationTable->item(0, 0)
+                    && notificationTable->item(0, 0)->text()
+                        == QStringLiteral("暂无后台通知记录")
+                    && notificationMore->isHidden(),
+                "background notification empty state or pagination gate is invalid")) {
+        return 1;
+    }
+    notificationDialog->close();
+    application.processEvents();
     int gitTabIndex = -1;
     for (int index = 0; index < tabs->count(); ++index) {
         if (tabs->tabText(index) == QStringLiteral("Git")) {

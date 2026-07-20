@@ -97,13 +97,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use terminal::{TerminalError, TerminalManager, TerminalOpenContext};
 use turn_context::{prepare_turn_context_scoped_with_images, TurnContextItem, TurnImageContext};
 use workbench_store::{
-    durable_blob_reference_id, DurableBlobKind, DurableBlobWrite, PortableSessionImportCommand,
-    PortableSessionPackage, RetentionPolicy, SessionDeletionScope, SessionProjectionConsistency,
-    SessionSearchRequest, StoredItem, StoredItemAppend, StoredProjectCreate,
-    StoredProjectNavigationEntry, StoredProjectTrustAcknowledge, StoredProjectTrustAcknowledgement,
-    StoredSessionCreate, StoredSessionLineage, StoredSessionMode,
-    StoredSessionRuntimeBindingCreate, StoredTurnCreate, WorkbenchRecoveryDiagnostic,
-    WorkbenchStore, WorkbenchStoreOpen,
+    durable_blob_reference_id, BackgroundNotificationCursor, DurableBlobKind, DurableBlobWrite,
+    PortableSessionImportCommand, PortableSessionPackage, RetentionPolicy, SessionDeletionScope,
+    SessionProjectionConsistency, SessionSearchRequest, StoredItem, StoredItemAppend,
+    StoredProjectCreate, StoredProjectNavigationEntry, StoredProjectTrustAcknowledge,
+    StoredProjectTrustAcknowledgement, StoredSessionCreate, StoredSessionLineage,
+    StoredSessionMode, StoredSessionRuntimeBindingCreate, StoredTurnCreate,
+    WorkbenchRecoveryDiagnostic, WorkbenchStore, WorkbenchStoreOpen,
 };
 use workspace::{
     collect_search_candidates, list_directory, path_metadata, read_text_file, search_workspace,
@@ -758,6 +758,15 @@ struct SessionSearchParams {
     #[serde(default)]
     cursor: Option<String>,
     #[serde(default = "default_session_search_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct BackgroundNotificationInspectParams {
+    session_id: String,
+    #[serde(default)]
+    cursor: Option<BackgroundNotificationCursor>,
+    #[serde(default = "default_background_notification_limit")]
     limit: usize,
 }
 
@@ -1766,6 +1775,10 @@ const fn default_session_list_limit() -> usize {
 }
 
 const fn default_session_search_limit() -> usize {
+    50
+}
+
+const fn default_background_notification_limit() -> usize {
     50
 }
 
@@ -2936,6 +2949,7 @@ impl Runtime {
             && !matches!(
                 request.method.as_str(),
                 "session/read"
+                    | "session/background-notifications"
                     | "session/recovery/status"
                     | "runtime/projection-recovery/status"
                     | "operation/probe"
@@ -3028,6 +3042,7 @@ impl Runtime {
             && !matches!(
                 request.method.as_str(),
                 "session/read"
+                    | "session/background-notifications"
                     | "session/recovery/status"
                     | "session/deletion/status"
                     | "turn/cancel"
@@ -3059,6 +3074,7 @@ impl Runtime {
         let pending_deletion_read = matches!(
             request.method.as_str(),
             "session/read"
+                | "session/background-notifications"
                 | "session/deletion/status"
                 | "operation/status"
                 | "session/delete/preview"
@@ -3159,6 +3175,7 @@ impl Runtime {
             "session/import" => self.session_import(request),
             "session/list" => self.session_list(request),
             "session/search" => self.session_search(request),
+            "session/background-notifications" => self.background_notification_inspect(request),
             "operation/probe" => self.operation_probe(request),
             "operation/status" => self.operation_status(request),
             "operation/reconcile" => self.operation_reconcile(request),
@@ -3613,6 +3630,7 @@ impl Runtime {
             }
             if self.workbench_store.is_some() {
                 capabilities.extend([
+                    "background-notification.outbox.read-only".into(),
                     "workspace.image.import-user".into(),
                     "workspace.image.preview".into(),
                 ]);
@@ -4867,6 +4885,45 @@ impl Runtime {
                 "unavailable_filters": []
             }),
         )
+    }
+
+    fn background_notification_inspect(&self, request: Request) -> Vec<Value> {
+        let params: BackgroundNotificationInspectParams =
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => params,
+                Err(error) => {
+                    return self.error_for(&request, -32602, format!("invalid params: {error}"))
+                }
+            };
+        if params.limit == 0 || params.limit > 100 {
+            return self.error_for(
+                &request,
+                -32602,
+                "background notification limit must be between 1 and 100",
+            );
+        }
+        let Some(store) = self.workbench_store.as_ref() else {
+            return self.error_for(
+                &request,
+                -32024,
+                "background notification inspection requires durable workbench storage",
+            );
+        };
+        match store.inspect_background_notifications(
+            &params.session_id,
+            params.cursor.as_ref(),
+            params.limit,
+        ) {
+            Ok(page) => self.success_for(
+                &request,
+                serde_json::to_value(page).expect("background notification page serialization"),
+            ),
+            Err(error) => self.error_for(
+                &request,
+                -32114,
+                format!("cannot inspect background notifications: {}", error.message),
+            ),
+        }
     }
 
     fn operation_status(&self, request: Request) -> Vec<Value> {

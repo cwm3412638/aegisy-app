@@ -590,6 +590,17 @@ QString AgentRuntimeClient::readSession(const QString &sessionId, const QString 
     return sendRequest(QStringLiteral("session/read"), params);
 }
 
+QString AgentRuntimeClient::backgroundNotifications(const QString &sessionId,
+                                                    const QJsonObject &cursor, int limit)
+{
+    QJsonObject params{
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("limit"), qBound(1, limit, 100)},
+    };
+    if (!cursor.isEmpty()) params.insert(QStringLiteral("cursor"), cursor);
+    return sendRequest(QStringLiteral("session/background-notifications"), params);
+}
+
 QString AgentRuntimeClient::projectionRecoveryStatus()
 {
     return sendRequest(QStringLiteral("runtime/projection-recovery/status"));
@@ -1308,6 +1319,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit retentionPolicyChanged(id, pendingMethod, result);
     } else if (pendingMethod == QStringLiteral("session/read")) {
         emit sessionRead(id, result);
+    } else if (pendingMethod == QStringLiteral("session/background-notifications")) {
+        emit backgroundNotificationsRead(id, result);
     } else if (pendingMethod == QStringLiteral("runtime/projection-recovery/status")) {
         emit projectionRecoveryStatusRead(result);
     } else if (pendingMethod == QStringLiteral("runtime/health")) {

@@ -65,6 +65,7 @@
 #endif
 #include <QTabBar>
 #include <QTabWidget>
+#include <QTableWidget>
 #include <QTextEdit>
 #include <QTextDocument>
 #include <QTextCursor>
@@ -447,6 +448,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_runtimeRecoveryMode = backend.value(QStringLiteral("status")).toString()
             == QStringLiteral("read-only-recovery");
         m_compactionAvailable = false;
+        m_backgroundNotificationInspectionAvailable = false;
         m_pinnedContextAvailable = false;
         m_imageContextAvailable = false;
         m_gitContextAvailable = false;
@@ -456,6 +458,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             const QString name = capability.toString();
             if (name == QStringLiteral("session.compaction.checkpoint-review")) {
                 m_compactionAvailable = true;
+            } else if (name == QStringLiteral("background-notification.outbox.read-only")) {
+                m_backgroundNotificationInspectionAvailable = true;
             } else if (name == QStringLiteral("turn.context.pinned-selected")) {
                 m_pinnedContextAvailable = true;
             } else if (name == QStringLiteral("workspace.git-context.read-only")) {
@@ -655,6 +659,12 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_compactionOperation.clear();
         showCompactionReview(result, result.value(QStringLiteral("idempotent_replay")).toBool());
     });
+    connect(m_runtime, &AgentRuntimeClient::backgroundNotificationsRead,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        if (requestId != m_backgroundNotificationRequestId) return;
+        m_backgroundNotificationRequestId.clear();
+        showBackgroundNotificationPage(result);
+    });
     connect(m_runtime, &AgentRuntimeClient::connectionStateChanged,
             this, [this](bool ready, const QString &detail) {
         m_runtimeStatus->setText(
@@ -724,6 +734,16 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_compactionSessionId.clear();
             addNotice(QStringLiteral("压缩审查操作失败（错误码 %1）；原始会话历史未改变。")
                           .arg(code), true);
+            return;
+        }
+        if (method == QStringLiteral("session/background-notifications")) {
+            if (requestId.isEmpty() || requestId != m_backgroundNotificationRequestId) return;
+            m_backgroundNotificationRequestId.clear();
+            if (m_backgroundNotificationMoreButton) {
+                m_backgroundNotificationMoreButton->setEnabled(
+                    !m_backgroundNotificationCursor.isEmpty());
+            }
+            addNotice(QStringLiteral("后台通知记录读取失败（错误码 %1）。").arg(code), true);
             return;
         }
         if (method != QStringLiteral("runtime/restart")) return;
@@ -2690,6 +2710,7 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
         QAction *retentionPolicy = menu.addAction(QStringLiteral("会话保留策略…"));
         QAction *createCompaction = menu.addAction(QStringLiteral("创建压缩审查…"));
         QAction *readCompaction = menu.addAction(QStringLiteral("查看压缩审查…"));
+        QAction *backgroundNotifications = menu.addAction(QStringLiteral("后台通知记录…"));
         rename->setEnabled(!recoveryRequired && !deletionPending);
         resume->setEnabled(!archived && !recoveryRequired && !deletionPending
             && !m_turnRunning && m_sessionResumeRequestId.isEmpty());
@@ -2705,6 +2726,8 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
         createCompaction->setEnabled(compactionReady);
         readCompaction->setEnabled(m_compactionAvailable && !recoveryRequired && !deletionPending
             && m_compactionRequestId.isEmpty());
+        backgroundNotifications->setEnabled(m_backgroundNotificationInspectionAvailable
+            && m_backgroundNotificationRequestId.isEmpty());
         menu.addSeparator();
         QAction *deletion = menu.addAction(
             deletionPending ? QStringLiteral("撤销删除") : QStringLiteral("删除会话…"));
@@ -2743,6 +2766,8 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
             beginCompactionCheckpoint(sessionId);
         } else if (selected == readCompaction) {
             beginCompactionCheckpointRead(sessionId);
+        } else if (selected == backgroundNotifications) {
+            beginBackgroundNotificationInspection(sessionId);
         } else if (selected == deletion) {
             if (deletionPending) {
                 const QString deletionId = item->data(kSessionDeletionIdRole).toString();
@@ -6651,6 +6676,234 @@ void AgentWorkbenchWidget::updateOperationReviewButton()
         m_operationStatusReviewButton->setToolTip(QStringLiteral(
             "当前仅支持对 turn 进行受限证据复核；不会执行恢复或 Git mutation"));
     }
+}
+
+void AgentWorkbenchWidget::beginBackgroundNotificationInspection(const QString &sessionId)
+{
+    if (sessionId.isEmpty() || !m_runtime || !m_runtime->isReady()
+            || m_runtimeRecoveryMode || !m_backgroundNotificationInspectionAvailable
+            || !m_backgroundNotificationRequestId.isEmpty()) {
+        return;
+    }
+    if (m_backgroundNotificationDialog) delete m_backgroundNotificationDialog;
+    m_backgroundNotificationSessionId = sessionId;
+    m_backgroundNotificationCursor = {};
+    m_backgroundNotificationRequestId = m_runtime->backgroundNotifications(sessionId, {}, 100);
+    if (m_backgroundNotificationRequestId.isEmpty()) {
+        m_backgroundNotificationSessionId.clear();
+        addNotice(QStringLiteral("无法发起后台通知记录查询。"), true);
+        return;
+    }
+    addNotice(QStringLiteral("正在读取后台通知记录…"));
+}
+
+void AgentWorkbenchWidget::showBackgroundNotificationPage(const QJsonObject &result)
+{
+    const QJsonValue nextCursorValue = result.value(QStringLiteral("next_cursor"));
+    const QJsonArray notifications = result.value(QStringLiteral("notifications")).toArray();
+    const QRegularExpression intentIdentityPattern(QStringLiteral(
+        "^background-job-notification-intent:sha256:[0-9a-f]{64}$"));
+    bool valid = result.value(QStringLiteral("schema_version")).toString()
+            == QStringLiteral("background-notification-page/0.1")
+        && result.value(QStringLiteral("session_id")).toString()
+            == m_backgroundNotificationSessionId
+        && result.value(QStringLiteral("notifications")).isArray()
+        && result.value(QStringLiteral("content_included")).isBool()
+        && !result.value(QStringLiteral("content_included")).toBool()
+        && result.value(QStringLiteral("delivery_mutation_available")).isBool()
+        && !result.value(QStringLiteral("delivery_mutation_available")).toBool()
+        && result.value(QStringLiteral("platform_delivery_authority")).isBool()
+        && !result.value(QStringLiteral("platform_delivery_authority")).toBool()
+        && (nextCursorValue.isNull() || nextCursorValue.isObject());
+    const QStringList allowedKinds{
+        QStringLiteral("completed"),
+        QStringLiteral("failed"),
+        QStringLiteral("approval_needed"),
+        QStringLiteral("budget_exhausted"),
+    };
+    const QStringList allowedStatuses{
+        QStringLiteral("queued"), QStringLiteral("running"),
+        QStringLiteral("pause_requested"), QStringLiteral("paused"),
+        QStringLiteral("waiting_approval"), QStringLiteral("cancelling"),
+        QStringLiteral("completed"), QStringLiteral("failed"),
+        QStringLiteral("cancelled"), QStringLiteral("interrupted"),
+    };
+    if (nextCursorValue.isObject()) {
+        const QJsonObject cursor = nextCursorValue.toObject();
+        valid = valid
+            && cursor.value(QStringLiteral("recorded_at_ms")).isDouble()
+            && cursor.value(QStringLiteral("recorded_at_ms")).toVariant().toLongLong() > 0
+            && intentIdentityPattern.match(
+                cursor.value(QStringLiteral("intent_identity")).toString()).hasMatch();
+    }
+    if (notifications.isEmpty() && nextCursorValue.isObject()) valid = false;
+    for (const QJsonValue &value : notifications) {
+        const QJsonObject notification = value.toObject();
+        const QJsonObject intent = notification.value(QStringLiteral("intent")).toObject();
+        valid = valid && value.isObject()
+            && notification.value(QStringLiteral("schema_version")).toString()
+                == QStringLiteral("stored-background-notification/0.1")
+            && intent.value(QStringLiteral("schema_version")).toString()
+                == QStringLiteral("background-job-notification-intent/0.1")
+            && intent.value(QStringLiteral("session_id")).toString()
+                == m_backgroundNotificationSessionId
+            && allowedKinds.contains(intent.value(QStringLiteral("kind")).toString())
+            && allowedStatuses.contains(intent.value(QStringLiteral("job_status")).toString())
+            && intent.value(QStringLiteral("job_generation")).isDouble()
+            && intent.value(QStringLiteral("job_generation")).toVariant().toLongLong() >= 0
+            && notification.value(QStringLiteral("event_sequence")).isDouble()
+            && notification.value(QStringLiteral("event_sequence")).toVariant().toLongLong() > 0
+            && intentIdentityPattern.match(
+                intent.value(QStringLiteral("intent_identity")).toString()).hasMatch()
+            && notification.value(QStringLiteral("delivery_state")).toString()
+                == QStringLiteral("recorded")
+            && notification.value(QStringLiteral("delivery_attempt_count")).toInt(-1) == 0
+            && notification.value(QStringLiteral("recorded_at_ms")).isDouble()
+            && notification.value(QStringLiteral("recorded_at_ms")).toVariant().toLongLong() > 0
+            && intent.value(QStringLiteral("content_included")).isBool()
+            && !intent.value(QStringLiteral("content_included")).toBool()
+            && intent.value(QStringLiteral("delivery_available")).isBool()
+            && !intent.value(QStringLiteral("delivery_available")).toBool()
+            && intent.value(QStringLiteral("delivery_attempted")).isBool()
+            && !intent.value(QStringLiteral("delivery_attempted")).toBool()
+            && intent.value(QStringLiteral("platform_delivery_authority")).isBool()
+            && !intent.value(QStringLiteral("platform_delivery_authority")).toBool()
+            && !intent.contains(QStringLiteral("title"))
+            && !intent.contains(QStringLiteral("body"))
+            && !intent.contains(QStringLiteral("prompt"))
+            && !intent.contains(QStringLiteral("result_content"))
+            && !intent.contains(QStringLiteral("platform_payload"))
+            && !notification.contains(QStringLiteral("title"))
+            && !notification.contains(QStringLiteral("body"))
+            && !notification.contains(QStringLiteral("prompt"))
+            && !notification.contains(QStringLiteral("result_content"))
+            && !notification.contains(QStringLiteral("platform_payload"));
+    }
+    if (!valid) {
+        if (m_backgroundNotificationMoreButton) {
+            m_backgroundNotificationMoreButton->setEnabled(
+                !m_backgroundNotificationCursor.isEmpty());
+        }
+        addNotice(QStringLiteral("后台通知记录未通过版本、会话或只读权限校验。"), true);
+        return;
+    }
+
+    if (!m_backgroundNotificationDialog) {
+        auto *dialog = new QDialog(this);
+        dialog->setObjectName(QStringLiteral("agentBackgroundNotificationDialog"));
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(QStringLiteral("后台通知记录"));
+        auto *layout = new QVBoxLayout(dialog);
+        layout->setContentsMargins(16, 16, 16, 16);
+        layout->setSpacing(10);
+        auto *table = new QTableWidget(0, 5, dialog);
+        table->setObjectName(QStringLiteral("agentBackgroundNotificationTable"));
+        table->setHorizontalHeaderLabels({
+            QStringLiteral("类型"), QStringLiteral("作业状态"), QStringLiteral("记录时间"),
+            QStringLiteral("代次"), QStringLiteral("投递状态"),
+        });
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setAlternatingRowColors(true);
+        table->verticalHeader()->hide();
+        table->horizontalHeader()->setStretchLastSection(true);
+        table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+        table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        layout->addWidget(table, 1);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+        auto *more = buttons->addButton(QStringLiteral("加载更多"), QDialogButtonBox::ActionRole);
+        more->setObjectName(QStringLiteral("agentBackgroundNotificationMoreButton"));
+        connect(more, &QPushButton::clicked, dialog, [this]() {
+            if (!m_runtime || !m_runtime->isReady() || m_backgroundNotificationCursor.isEmpty()
+                    || !m_backgroundNotificationRequestId.isEmpty()) return;
+            m_backgroundNotificationRequestId = m_runtime->backgroundNotifications(
+                m_backgroundNotificationSessionId, m_backgroundNotificationCursor, 100);
+            if (m_backgroundNotificationRequestId.isEmpty()) {
+                addNotice(QStringLiteral("无法加载更多后台通知记录。"), true);
+                return;
+            }
+            if (m_backgroundNotificationMoreButton) {
+                m_backgroundNotificationMoreButton->setEnabled(false);
+            }
+        });
+        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+        connect(dialog, &QObject::destroyed, this, [this]() {
+            m_backgroundNotificationDialog = nullptr;
+            m_backgroundNotificationTable = nullptr;
+            m_backgroundNotificationMoreButton = nullptr;
+            m_backgroundNotificationRequestId.clear();
+            m_backgroundNotificationSessionId.clear();
+            m_backgroundNotificationCursor = {};
+        });
+        m_backgroundNotificationDialog = dialog;
+        m_backgroundNotificationTable = table;
+        m_backgroundNotificationMoreButton = more;
+        dialog->resize(760, 420);
+    }
+
+    if (m_backgroundNotificationTable->rowCount() == 1
+            && m_backgroundNotificationTable->item(0, 0)
+            && m_backgroundNotificationTable->item(0, 0)->data(Qt::UserRole).toBool()) {
+        m_backgroundNotificationTable->removeRow(0);
+    }
+    const QHash<QString, QString> kindLabels{
+        {QStringLiteral("completed"), QStringLiteral("已完成")},
+        {QStringLiteral("failed"), QStringLiteral("失败")},
+        {QStringLiteral("approval_needed"), QStringLiteral("等待审批")},
+        {QStringLiteral("budget_exhausted"), QStringLiteral("预算耗尽")},
+    };
+    const QHash<QString, QString> statusLabels{
+        {QStringLiteral("queued"), QStringLiteral("排队")},
+        {QStringLiteral("running"), QStringLiteral("运行中")},
+        {QStringLiteral("pause_requested"), QStringLiteral("请求暂停")},
+        {QStringLiteral("paused"), QStringLiteral("已暂停")},
+        {QStringLiteral("waiting_approval"), QStringLiteral("等待审批")},
+        {QStringLiteral("cancelling"), QStringLiteral("取消中")},
+        {QStringLiteral("completed"), QStringLiteral("已完成")},
+        {QStringLiteral("failed"), QStringLiteral("失败")},
+        {QStringLiteral("cancelled"), QStringLiteral("已取消")},
+        {QStringLiteral("interrupted"), QStringLiteral("已中断")},
+    };
+    for (const QJsonValue &value : notifications) {
+        const QJsonObject notification = value.toObject();
+        const QJsonObject intent = notification.value(QStringLiteral("intent")).toObject();
+        const int row = m_backgroundNotificationTable->rowCount();
+        m_backgroundNotificationTable->insertRow(row);
+        const qint64 recordedAt = notification.value(
+            QStringLiteral("recorded_at_ms")).toVariant().toLongLong();
+        const QString tooltip = QStringLiteral("作业：%1\n事件序号：%2\nIntent：%3")
+            .arg(intent.value(QStringLiteral("job_id")).toString())
+            .arg(notification.value(QStringLiteral("event_sequence")).toVariant().toULongLong())
+            .arg(intent.value(QStringLiteral("intent_identity")).toString());
+        const QStringList cells{
+            kindLabels.value(intent.value(QStringLiteral("kind")).toString()),
+            statusLabels.value(intent.value(QStringLiteral("job_status")).toString()),
+            QDateTime::fromMSecsSinceEpoch(recordedAt).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
+            QString::number(intent.value(QStringLiteral("job_generation")).toVariant().toULongLong()),
+            QStringLiteral("已记录"),
+        };
+        for (int column = 0; column < cells.size(); ++column) {
+            auto *item = new QTableWidgetItem(cells.at(column));
+            item->setToolTip(tooltip);
+            m_backgroundNotificationTable->setItem(row, column, item);
+        }
+    }
+    if (m_backgroundNotificationTable->rowCount() == 0) {
+        m_backgroundNotificationTable->insertRow(0);
+        auto *empty = new QTableWidgetItem(QStringLiteral("暂无后台通知记录"));
+        empty->setData(Qt::UserRole, true);
+        empty->setTextAlignment(Qt::AlignCenter);
+        m_backgroundNotificationTable->setItem(0, 0, empty);
+        m_backgroundNotificationTable->setSpan(0, 0, 1, 5);
+    }
+    m_backgroundNotificationCursor = nextCursorValue.toObject();
+    m_backgroundNotificationMoreButton->setVisible(!m_backgroundNotificationCursor.isEmpty());
+    m_backgroundNotificationMoreButton->setEnabled(!m_backgroundNotificationCursor.isEmpty());
+    m_backgroundNotificationDialog->show();
+    m_backgroundNotificationDialog->raise();
+    m_backgroundNotificationDialog->activateWindow();
 }
 
 void AgentWorkbenchWidget::beginCompactionCheckpoint(const QString &sessionId)

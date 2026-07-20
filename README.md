@@ -75,8 +75,11 @@ Aegisy Desktop Client 是一个跨平台 Qt 桌面应用，用于把 Aegisy 账�
 未尝试且无投递权限。Workbench schema v12 已把 intent 与
 `background-job.notification-recorded` 事件原子写入持久 outbox，同一去重身份只记录
 一次，并在重启时校验最多 10,000 条；内部只读分页检查不会发送通知。当前仍无 AAP/Qt
-入口、调度器自动生产、macOS/Windows 通知调用、权限设置、投递重试或确认状态，因此
-这不代表系统通知功能已经可用。
+投递控制；Workbench 仅在 durable store 健康时通过
+`session/background-notifications` 提供会话级 metadata-only 分页，Qt 可从会话菜单查看
+类型、作业状态、时间、代次和固定的“已记录”状态。当前仍无调度器自动生产、
+macOS/Windows 通知调用、权限设置、投递重试或确认状态，因此这不代表系统通知功能
+已经可用。
 
 ## 系统要求
 
