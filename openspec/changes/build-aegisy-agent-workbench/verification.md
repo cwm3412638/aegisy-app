@@ -68,9 +68,20 @@ Child-task contract evidence:
   scheduling, worktree allocation, and executor integration remain open under
   task `21.3`.
 
+Child-task lifecycle evidence:
+
+- An internal `child-task-state/0.1` state machine validates parent/child
+  identity, generation-bound transactional status transitions, cancellation
+  request/rejection/acknowledgement, completion races, generation exhaustion,
+  and content-free bounded handoff references/counts. Six unit fixtures cover
+  binding, invalid transitions without partial state, idempotent and rejected
+  cancellation, cancel-vs-complete races, exhaustion, and handoff rejection.
+  Durable child-session lineage, navigation, AAP status/cancel methods, and
+  parent review are still unavailable under task `21.4`.
+
 Current editor evidence:
 
-- The macOS Qt build and all 15 desktop tests pass.
+- The macOS Qt build and all 16 desktop tests pass.
 - The Monaco render test opens two real workspace files, binds them to separate
   editor groups, switches native save targeting through group focus, verifies an
   atomic save cannot modify the other group file, and restores both groups in a

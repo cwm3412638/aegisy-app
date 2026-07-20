@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-19
+Last updated: 2026-07-20
 
 ## Mandatory First Step
 
@@ -122,6 +122,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   budget/result metadata, validates isolation and content identities, and grants
   no authority. It is unit-tested but has no child-session lineage, approval,
   worktree, scheduler, or executor integration; keep `21.3` unchecked.
+- Task `21.4` now has a partial internal `child-task-state/0.1` lifecycle
+  contract. It tracks parent/child identity, generation-bound statuses,
+  transactional state updates, cancellation request/rejection/acknowledgement,
+  completion races, generation exhaustion, and bounded handoff references/counts.
+  It is unit-tested but is not persisted, exposed through AAP/Qt, or connected to
+  parent review; keep `21.4` unchecked.
 - Task `6.10` now has an internal `session-compaction/0.1` contract foundation.
   Bounded summaries cover decisions, unresolved tasks, changed files, commands,
   tests, failures, and next actions; secret-shaped/control-character content is
@@ -825,14 +831,14 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 322 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 328 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 53 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
-the child-task scope/budget/handoff contract, and diagnostic, terminal, Git, and
-child-handoff pinned-context authority, strict Git references, complete-source
-drift detection, terminal normalization, image import/preview/assembly/release
-rollback, and source-loss fail-closed invariants.
+the child-task scope/budget/handoff and lifecycle contracts, and diagnostic,
+terminal, Git, and child-handoff pinned-context authority, strict Git references,
+complete-source drift detection, terminal normalization, image import/preview/
+assembly/release rollback, and source-loss fail-closed invariants.
 
 ## Session History Boundary
 

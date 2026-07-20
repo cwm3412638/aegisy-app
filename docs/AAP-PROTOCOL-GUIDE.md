@@ -113,6 +113,14 @@ expected `child-handoff/0.1` result shape. Validation does not create a child,
 grant permissions, allocate a worktree, or start a provider. Parent/child
 lineage, approval, scheduling, and execution remain unavailable.
 
+The internal `child-task-state/0.1` state machine keeps parent/child identities,
+generation, transactional status updates, cancellation request/rejection/
+acknowledgement, and a bounded handoff descriptor. Cancellation is not
+completion: a child may finish first and the state records that race explicitly.
+Generation exhaustion and invalid updates fail without leaving partial state.
+Handoffs contain only content references, source revision, counts, and truncation
+metadata. This state is not persisted or exposed through AAP yet.
+
 ## Replay And Reconnect
 
 The durable session stream is ordered by a session-local sequence. After a

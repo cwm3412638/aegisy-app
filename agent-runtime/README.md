@@ -47,6 +47,10 @@ or session methods are accepted.
 - internal `child-task/0.1` validation (goal, context identities, workspace
   isolation, tools, model/permission policy, budgets, and handoff shape; no
   child-session or executor surface yet)
+- internal `child-task-state/0.1` lifecycle validation (parent/child binding,
+  transactional status transitions, cancellation request/rejection/
+  acknowledgement, generation exhaustion, and bounded handoff; no persistence
+  or dispatch surface yet)
 - `workspace/list`
 - `workspace/read`
 - `workspace/instructions` (deterministic, bounded, untrusted instruction discovery)
