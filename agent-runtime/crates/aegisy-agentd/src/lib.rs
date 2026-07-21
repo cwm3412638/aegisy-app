@@ -29,6 +29,7 @@ pub mod git_worktree_lifecycle;
 mod image_context;
 mod instruction_discovery;
 mod language_server;
+mod model_catalog;
 pub mod non_git_checkpoint;
 mod operation_probe;
 pub mod operation_reconciliation;
@@ -3172,6 +3173,7 @@ impl Runtime {
             "runtime/restart" => self.runtime_restart(request),
             "runtime/health" => self.runtime_health(request),
             "runtime/degradations" => self.runtime_degradations(request),
+            "model/catalog" => self.model_catalog(request),
             _ if self.is_recovery_mode() => {
                 self.error_for(&request, -32120, "workbench is in read-only recovery mode")
             }
@@ -3457,6 +3459,47 @@ impl Runtime {
         )
     }
 
+    fn model_catalog(&self, request: Request) -> Vec<Value> {
+        let (adapter, version, provider, model) = match &self.backend {
+            Backend::Preview => (
+                "preview".to_owned(),
+                env!("CARGO_PKG_VERSION").to_owned(),
+                Some("local".to_owned()),
+                Some("deterministic-echo".to_owned()),
+            ),
+            Backend::Codex(adapter) => {
+                let info = adapter.info();
+                (info.adapter, info.version, info.provider, info.model)
+            }
+            Backend::Recovery(diagnostic) => (
+                "aegisy-workbench-store".to_owned(),
+                diagnostic.schema_version.clone(),
+                None,
+                None,
+            ),
+            Backend::Unavailable(error) => {
+                ("codex-app-server".to_owned(), error.clone(), None, None)
+            }
+        };
+        let catalog = model_catalog::offline_for_runtime(
+            &adapter,
+            &version,
+            provider.as_deref(),
+            model.as_deref(),
+        );
+        if let Err(error) = catalog.validate() {
+            return self.error_for(
+                &request,
+                -32114,
+                format!("model catalog validation failed: {}", error.message),
+            );
+        }
+        self.success_for(
+            &request,
+            serde_json::to_value(catalog).expect("model catalog serialization"),
+        )
+    }
+
     fn autonomy_degradations() -> Vec<Value> {
         vec![
             json!({
@@ -3571,6 +3614,7 @@ impl Runtime {
                     "runtime.recovery.read-only".into(),
                     "runtime.health".into(),
                     "runtime.degradations".into(),
+                    "model.catalog.read-only".into(),
                     "runtime.recovery.status".into(),
                     "runtime.recovery.diagnostic-export".into(),
                     "permission.read-only".into(),
@@ -3615,6 +3659,7 @@ impl Runtime {
                 "runtime.projection-recovery.status".into(),
                 "runtime.health".into(),
                 "runtime.degradations".into(),
+                "model.catalog.read-only".into(),
                 "session.work.preview".into(),
                 "timeline.streaming".into(),
                 "turn.context.structured".into(),

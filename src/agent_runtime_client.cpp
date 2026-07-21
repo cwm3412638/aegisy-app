@@ -196,6 +196,11 @@ QString AgentRuntimeClient::runtimeDegradations()
     return sendRequest(QStringLiteral("runtime/degradations"));
 }
 
+QString AgentRuntimeClient::modelCatalog()
+{
+    return sendRequest(QStringLiteral("model/catalog"));
+}
+
 QString AgentRuntimeClient::restartRuntime()
 {
     return sendRequest(QStringLiteral("runtime/restart"));
@@ -1263,6 +1268,7 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit connectionStateChanged(m_ready, detail);
         runtimeHealth();
         runtimeDegradations();
+        modelCatalog();
         if (m_recoveryMode) runtimeRecoveryStatus();
         else projectionRecoveryStatus();
     } else if (pendingMethod == QStringLiteral("project/list")) {
@@ -1341,6 +1347,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit runtimeHealthRead(result);
     } else if (pendingMethod == QStringLiteral("runtime/degradations")) {
         emit runtimeDegradationsRead(id, result);
+    } else if (pendingMethod == QStringLiteral("model/catalog")) {
+        emit modelCatalogRead(id, result);
     } else if (pendingMethod == QStringLiteral("runtime/restart")) {
         emit runtimeRestarted(id, result);
     } else if (pendingMethod == QStringLiteral("session/recovery/status")) {

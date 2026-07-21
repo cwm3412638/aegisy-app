@@ -161,6 +161,11 @@ fn ready_runtime() -> Runtime {
         .unwrap()
         .iter()
         .any(|capability| capability == "runtime.degradations"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "model.catalog.read-only"));
     let capabilities = messages[0]["result"]["capabilities"].as_array().unwrap();
     assert!(!capabilities
         .iter()
@@ -5782,4 +5787,39 @@ fn unavailable_compaction_store_degrades_without_blocking_runtime() {
     ));
     assert_eq!(unavailable[0]["error"]["code"], -32024);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn model_catalog_is_read_only_and_does_not_invent_capabilities() {
+    let mut runtime = Runtime::default();
+    let initialized = runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": { "name": "catalog-test", "version": "1" }
+        }),
+    ));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "model.catalog.read-only"));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+
+    let response = runtime.handle_line(&request("catalog", "model/catalog", json!({})));
+    let catalog = &response[0]["result"];
+    assert_eq!(catalog["schema_version"], "model-catalog/0.1");
+    assert_eq!(catalog["state"], "offline");
+    assert_eq!(catalog["signature_validated"], false);
+    assert_eq!(catalog["refresh_supported"], false);
+    assert_eq!(catalog["contains_credentials"], false);
+    let model = &catalog["models"][0];
+    assert_eq!(model["availability"], "unknown");
+    assert!(model["capabilities"]["tool_calls"].is_null());
+    assert!(model["limits"]["context_tokens"].is_null());
+    assert_eq!(model["field_authority"]["capabilities"], "unknown");
+    let encoded = serde_json::to_string(catalog).unwrap();
+    assert!(!encoded.contains("sk-"));
+    assert!(!encoded.contains("Authorization"));
 }

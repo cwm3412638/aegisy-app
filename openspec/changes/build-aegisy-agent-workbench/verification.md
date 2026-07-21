@@ -36,6 +36,27 @@ Each milestone in `roadmap.md` must attach:
 Implementation is in progress and does not claim that the full workbench, model
 catalog, sandbox, or autonomous feature set is complete.
 
+Model catalog foundation evidence:
+
+- An internal `model-catalog/0.1` contract now validates bounded model identity,
+  provider/protocol/role metadata, explicit availability/entitlement/lifecycle
+  states, optional limits and capabilities, runtime degradation metadata, and
+  field authority labels (`upstream-authoritative`, `aegisy-configured`,
+  `evaluation-derived`, `estimated`, or `unknown`). Invalid limits, oversized
+  lists, control characters, and credential-shaped metadata fail closed.
+- Read-only AAP capability `model.catalog.read-only` and method `model/catalog`
+  expose an offline runtime-binding projection. Unknown capability and limit
+  values remain JSON `null`; the response reports `state: offline`,
+  `signature_validated: false`, `refresh_supported: false`, and
+  `contains_credentials: false`. Qt's `AgentRuntimeClient` requests this
+  projection after initialization and emits `modelCatalogRead` for future
+  picker/projection UI.
+- Unit and protocol fixtures cover unknown-value serialization, invalid catalog
+  rejection, capability negotiation, and the absence of credential-shaped
+  output. This is only a metadata foundation. Signed cloud refresh/cache,
+  capability matching, durable profiles, and model switching remain unchecked
+  under OpenSpec `9.1` through `10.12`.
+
 Autonomy release-gate evidence:
 
 - OpenSpec `21.1` is complete. `runtime/degradations` reports bounded,

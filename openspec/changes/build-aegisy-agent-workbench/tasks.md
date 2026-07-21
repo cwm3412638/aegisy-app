@@ -177,6 +177,11 @@
 ## 9. Aegisy Model Catalog and Cloud Contracts
 
 - [ ] 9.1 Define versioned model-catalog schema for identity, provider, protocols, limits, capabilities, roles, availability, entitlement, lifecycle, and policy
+  - Partial foundation: internal `model-catalog/0.1` validates bounded metadata,
+    explicit unknown availability/capability/limit states, runtime degradation
+    metadata, and field authority labels. It is exposed only through the
+    read-only `model.catalog.read-only` AAP projection and is not a signed or
+    authenticated cloud catalog.
 - [ ] 9.2 Define which catalog fields are upstream-authoritative, Aegisy-configured, evaluation-derived, estimated, or unknown
 - [ ] 9.3 Implement catalog signing, key rotation, cache expiry, rollback protection, and schema validation
 - [ ] 9.4 Add authenticated catalog endpoint with conditional requests and deterministic test fixtures
@@ -190,6 +195,9 @@
 ## 10. Model Profiles, Routing, and Switching
 
 - [ ] 10.1 Implement catalog cache and explicit fresh/stale/invalid/offline states in the desktop host
+  - Partial foundation: `model/catalog` returns an explicit offline runtime-bound
+    projection and Qt requests it after initialization. Durable signed cache,
+    refresh, stale/invalid transitions, and desktop picker state remain open.
 - [ ] 10.2 Implement capability matcher for Chat, Work, attachments, tools, reasoning, context, runtime, and policy
 - [ ] 10.3 Implement global and project model profiles for Agent, plan, apply, review, utility, embedding, and rerank roles
 - [ ] 10.4 Provide a simple one-model profile and prevent unnecessary role calls by default

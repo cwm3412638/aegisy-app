@@ -18,7 +18,7 @@ profile. The client then sends `initialized`.
 
 ```jsonl
 {"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocol_version":"0.1","client":{"name":"aegisy-client","version":"fixture"}}}
-{"jsonrpc":"2.0","id":"1","result":{"protocol_version":"0.1","runtime":{"name":"aegisy-agentd","version":"0.1.0"},"backend":{"adapter":"preview","status":"ready","version":"0.1.0"},"capabilities":["runtime.preview","runtime.health","runtime.degradations","permission.read-only"]}}
+{"jsonrpc":"2.0","id":"1","result":{"protocol_version":"0.1","runtime":{"name":"aegisy-agentd","version":"0.1.0"},"backend":{"adapter":"preview","status":"ready","version":"0.1.0"},"capabilities":["runtime.preview","runtime.health","runtime.degradations","model.catalog.read-only","permission.read-only"]}}
 {"jsonrpc":"2.0","method":"initialized"}
 ```
 
@@ -93,6 +93,27 @@ request fails.
 No degradation response grants write, command, Hook, network, deletion, or
 compaction authority. The Qt host displays the state and does not expose an
 action that would simulate a blocked provider operation.
+
+## Model Catalog Boundary
+
+The negotiated `model.catalog.read-only` capability exposes
+`model/catalog`. The current response is an offline runtime-binding projection,
+not the signed Aegisy cloud catalog. It may identify the active provider/model,
+but availability, limits, capabilities, role suitability, entitlement, and
+policy fields remain explicitly unknown until an authenticated catalog is
+validated. Unknown booleans are serialized as `null`; clients must disable a
+dependent feature rather than treating `null` as support. The response contains
+no credentials, refresh token, prompt, or provider response content.
+
+```jsonl
+{"jsonrpc":"2.0","id":"7","method":"model/catalog","params":{}}
+{"jsonrpc":"2.0","id":"7","result":{"schema_version":"model-catalog/0.1","catalog_version":"offline-runtime-binding","state":"offline","source":"runtime-binding","signature_validated":false,"refresh_supported":false,"models":[{"model_id":"local:deterministic-echo","provider":"local","availability":"unknown","entitlement":"unknown","lifecycle":"unknown","limits":{"context_tokens":null,"output_tokens":null,"authority":"unknown"},"capabilities":{"tool_calls":null,"image_input":null,"authority":"unknown"},"runtime_compatibility":{"state":"metadata-only","known_degradations":["catalog-not-authenticated","model-capabilities-unknown"]}}],"contains_credentials":false}}
+```
+
+This boundary is read-only and does not select a model, issue a token, refresh
+the cache, or emit a model-change event. Catalog signing, authenticated refresh,
+durable cache states, capability matching, profiles, and model switching remain
+OpenSpec tasks `9.1` through `10.12`.
 
 ## Structured Plan Boundary
 

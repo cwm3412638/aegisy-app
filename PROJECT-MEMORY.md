@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-20
+Last updated: 2026-07-21
 
 ## Mandatory First Step
 
@@ -106,6 +106,20 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 - OpenSpec task baseline: 42 of 235 checkbox tasks are complete and 193 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
+- Model catalog foundation (2026-07-21): the sidecar now validates an internal
+  `model-catalog/0.1` metadata contract and exposes the read-only AAP capability
+  `model.catalog.read-only` with `model/catalog`. The current projection is
+  explicitly `state=offline`, `signature_validated=false`, and
+  `refresh_supported=false`; it may identify the active runtime-bound model but
+  leaves availability, limits, capabilities, roles, entitlement, and policy
+  unknown until an authenticated catalog is validated. Unknown booleans and
+  limits serialize as `null`, credential-shaped metadata is rejected, and the
+  response grants no model-selection, token, routing, or execution authority.
+  Qt requests this projection after initialization through
+  `AgentRuntimeClient::modelCatalog` and emits `modelCatalogRead`; the existing
+  model display remains a Session binding display, not a picker. OpenSpec `9.1`
+  through `10.12` remain unchecked pending signed cloud refresh/cache,
+  capability matching, durable profiles, and truthful switching events.
 - OpenSpec task `21.1` is complete: background jobs, multi-agent execution, and
   unattended writes remain unadvertised and disabled until their prerequisite
   security, recovery, budget, evaluation, and release gates are recorded. The
@@ -1038,6 +1052,19 @@ semantic hash tampering. The Qt render fixture now also requires `root-1` and th
 bound branch, but this host killed the process at startup after 0.45s without any
 assertion output. Tasks `6.6` and `12.6` remain unchecked for the control-plane,
 turn-metadata, dedicated-worktree, scale, and cross-platform gates listed above.
+
+On 2026-07-21 the model-catalog foundation stage added the internal
+`model-catalog/0.1` validation contract, the read-only AAP `model/catalog`
+projection, and the Qt `AgentRuntimeClient::modelCatalog` request/signal. Full
+Rust verification passed 397 unit tests with one ignored live fixture, 58
+protocol tests, and 11 stdio/Codex tests; strict Clippy, the complete CMake
+desktop build, and CTest `agent_runtime_protocol` passed. The projection is
+explicitly offline and unsigned, leaves unverified capability/limit values
+unknown, and grants no selection, token, routing, or execution authority.
+`openspec validate build-aegisy-agent-workbench --strict` was attempted but the
+host terminated the Node-backed CLI with exit 137 before producing validation
+output; keep the prior successful validation as the last authoritative result
+and rerun it when host memory is available.
 
 On 2026-07-20 the schema-v12 durable notification outbox and its read-only AAP/Qt
 inspection layer passed all Rust counts above, strict Clippy, formatting,
@@ -2187,3 +2214,7 @@ Implemented visual baseline:
 11. Continue with the next unchecked database/event, durable project/session, typed
    timeline, permission/approval, structured patch/checkpoint, terminal, and Git
    milestones in dependency order.
+12. Replace the offline model-catalog projection with an authenticated,
+   signature-validated cache and then build capability matching and durable
+   global/project profiles before exposing a real model picker or model-change
+   event.
