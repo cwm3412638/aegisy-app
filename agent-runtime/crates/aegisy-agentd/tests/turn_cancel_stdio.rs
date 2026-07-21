@@ -408,9 +408,20 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
             events.push(message);
         }
     }
-    assert!(events
+    let usage_event = events
         .iter()
-        .any(|event| event["params"]["event"] == "usage.updated"));
+        .find(|event| event["params"]["event"] == "usage.updated")
+        .expect("metadata fixture did not emit usage");
+    assert_eq!(
+        usage_event["params"]["item"]["data"]["authority"]["schema_version"],
+        "usage-authority/0.1"
+    );
+    assert_eq!(
+        usage_event["params"]["item"]["data"]["authority"]["entries"]
+            .as_array()
+            .map(Vec::len),
+        Some(4)
+    );
     assert!(events
         .iter()
         .any(|event| event["params"]["event"] == "turn.plan.updated"));

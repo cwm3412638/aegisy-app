@@ -14,6 +14,7 @@ mod command_artifact;
 mod command_diagnostics;
 mod command_output;
 mod context_budget;
+pub mod context_threshold;
 mod diagnostic_store;
 mod durable_blob;
 pub mod git_branch_transaction;
@@ -60,6 +61,7 @@ mod terminal;
 mod terminal;
 mod tokenizer;
 mod turn_context;
+pub mod turn_trace;
 mod unified_execution;
 pub mod usage_authority;
 mod workbench_migration;
@@ -108,6 +110,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use terminal::{TerminalError, TerminalManager, TerminalOpenContext};
 use turn_context::{prepare_turn_context_scoped_with_images, TurnContextItem, TurnImageContext};
+use usage_authority::from_provider_token_usage;
 use workbench_store::{
     durable_blob_reference_id, BackgroundNotificationCursor, DurableBlobKind, DurableBlobWrite,
     PortableSessionImportCommand, PortableSessionPackage, RetentionPolicy, SessionDeletionScope,
@@ -9830,11 +9833,18 @@ impl Runtime {
                             ));
                         }
                     }
-                    CodexEvent::TokenUsage { turn_id, usage } => {
+                    CodexEvent::TokenUsage { turn_id, mut usage } => {
                         let key = format!("usage:{turn_id}");
                         let count = metadata_update_counts.entry(key.clone()).or_default();
                         if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
                             *count += 1;
+                            if let Ok(report) = from_provider_token_usage(&usage, now_ms()) {
+                                if let Ok(authority) = serde_json::to_value(report) {
+                                    if let Some(object) = usage.as_object_mut() {
+                                        object.insert("authority".into(), authority);
+                                    }
+                                }
+                            }
                             let item = TimelineItem {
                                 id: self.allocate_id("usage"),
                                 kind: "usage".into(),

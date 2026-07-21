@@ -6,6 +6,8 @@
 //! cost requires both catalog and derivation-input identities.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 pub const SCHEMA_VERSION: &str = "usage-authority/0.1";
@@ -399,6 +401,141 @@ impl UsageAuthorityReport {
     }
 }
 
+/// Build the metadata-only authority projection for the normalized Codex
+/// `thread/tokenUsage/updated` payload. The raw payload remains caller-owned;
+/// this function only reads bounded numeric fields and never infers price or
+/// model-selection authority. Provider totals whose component semantics do
+/// not reconcile are retained by the raw projection but omitted from the
+/// authoritative contract instead of being silently corrected.
+pub fn from_provider_token_usage(
+    usage: &Value,
+    observed_at_ms: u64,
+) -> Result<UsageAuthorityReport, UsageAuthorityError> {
+    let identity = format!(
+        "provider-usage:sha256:{:x}",
+        Sha256::digest(serde_json::to_vec(usage).map_err(|_| {
+            error(
+                "usage-authority-provider-payload-invalid",
+                "provider usage payload cannot be canonicalized",
+            )
+        })?)
+    );
+    let total = usage
+        .get("total")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            error(
+                "usage-authority-provider-payload-invalid",
+                "provider usage total breakdown is missing",
+            )
+        })?;
+    let input = required_nonnegative_u64(total, "input_tokens")?;
+    let output = required_nonnegative_u64(total, "output_tokens")?;
+    let provider_total = required_nonnegative_u64(total, "total_tokens")?;
+    let cached = required_nonnegative_u64(total, "cached_input_tokens")?;
+    let reasoning_output = required_nonnegative_u64(total, "reasoning_output_tokens")?;
+
+    let reconciled_total = input
+        .checked_add(output)
+        .filter(|expected| *expected == provider_total);
+    let token_reasoning = (reasoning_output <= output).then_some(reasoning_output);
+    let token = UsageValue::Token(TokenUsageValue {
+        input_tokens: Some(input),
+        output_tokens: Some(output),
+        total_tokens: reconciled_total,
+        cached_input_tokens: (cached <= input).then_some(cached),
+        reasoning_output_tokens: token_reasoning,
+    });
+    let observed = |metric: UsageMetric, value: UsageValue| UsageAuthorityEntry {
+        metric,
+        authority: AuthorityLabel::Observed,
+        authoritative: true,
+        value: Some(value),
+        evidence: AuthorityEvidence::Observed {
+            source: ObservationSource::ProviderResponse,
+            evidence_identity: identity.clone(),
+            observed_at_ms,
+        },
+    };
+    let unknown = |metric: UsageMetric, missing_source: MissingSource, reason: UnknownReason| {
+        UsageAuthorityEntry {
+            metric,
+            authority: AuthorityLabel::Unknown,
+            authoritative: false,
+            value: None,
+            evidence: AuthorityEvidence::Unknown {
+                missing_source,
+                reason,
+            },
+        }
+    };
+
+    let context_window = usage
+        .get("model_context_window")
+        .and_then(Value::as_u64)
+        .filter(|window| *window > 0);
+    let context = context_window.map_or_else(
+        || {
+            unknown(
+                UsageMetric::Context,
+                MissingSource::ProviderUsage,
+                UnknownReason::NotReported,
+            )
+        },
+        |window| {
+            observed(
+                UsageMetric::Context,
+                UsageValue::Context(ContextUsageValue {
+                    used_tokens: None,
+                    window_tokens: Some(window),
+                }),
+            )
+        },
+    );
+    let reasoning = if reasoning_output <= output {
+        observed(
+            UsageMetric::Reasoning,
+            UsageValue::Reasoning(ReasoningUsageValue {
+                available: None,
+                enabled: None,
+                output_tokens: Some(reasoning_output),
+            }),
+        )
+    } else {
+        unknown(
+            UsageMetric::Reasoning,
+            MissingSource::ProviderUsage,
+            UnknownReason::Unavailable,
+        )
+    };
+
+    UsageAuthorityReport::new(
+        observed_at_ms,
+        vec![
+            observed(UsageMetric::Token, token),
+            context,
+            unknown(
+                UsageMetric::Cost,
+                MissingSource::Catalog,
+                UnknownReason::Unavailable,
+            ),
+            reasoning,
+        ],
+    )
+}
+
+fn required_nonnegative_u64(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<u64, UsageAuthorityError> {
+    object.get(key).and_then(Value::as_u64).ok_or_else(|| {
+        error(
+            "usage-authority-provider-payload-invalid",
+            "provider usage breakdown contains a missing or invalid count",
+        )
+    })
+}
+
 fn validate_token_value(value: &TokenUsageValue) -> Result<(), UsageAuthorityError> {
     if value.input_tokens.is_none()
         && value.output_tokens.is_none()
@@ -552,6 +689,7 @@ fn error(code: &'static str, message: &'static str) -> UsageAuthorityError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn identity(prefix: &str, byte: char) -> String {
         format!("{prefix}{}", byte.to_string().repeat(64))
@@ -862,5 +1000,58 @@ mod tests {
             UsageAuthorityReport::new(1_000, entries).unwrap_err().code,
             "usage-authority-evidence-future"
         );
+    }
+
+    #[test]
+    fn provider_projection_is_observed_without_inventing_cost_or_rewriting_totals() {
+        let usage = json!({
+            "last": {
+                "cached_input_tokens": 12,
+                "input_tokens": 24,
+                "output_tokens": 8,
+                "reasoning_output_tokens": 4,
+                "total_tokens": 48
+            },
+            "total": {
+                "cached_input_tokens": 12,
+                "input_tokens": 24,
+                "output_tokens": 8,
+                "reasoning_output_tokens": 4,
+                "total_tokens": 48
+            },
+            "model_context_window": 128000
+        });
+        let report = from_provider_token_usage(&usage, 1_000).unwrap();
+        let token = report.entry(UsageMetric::Token).unwrap();
+        assert_eq!(token.authority, AuthorityLabel::Observed);
+        let Some(UsageValue::Token(value)) = &token.value else {
+            panic!("expected token value");
+        };
+        assert_eq!(value.input_tokens, Some(24));
+        assert_eq!(value.output_tokens, Some(8));
+        assert_eq!(value.total_tokens, None);
+        assert_eq!(
+            report.entry(UsageMetric::Context).unwrap().authority,
+            AuthorityLabel::Observed
+        );
+        assert_eq!(
+            report.entry(UsageMetric::Cost).unwrap().authority,
+            AuthorityLabel::Unknown
+        );
+        assert_eq!(
+            report.entry(UsageMetric::Reasoning).unwrap().authority,
+            AuthorityLabel::Observed
+        );
+        report.validate().unwrap();
+        assert!(serde_json::to_string(&report)
+            .unwrap()
+            .contains("provider-usage:sha256:"));
+    }
+
+    #[test]
+    fn provider_projection_rejects_missing_required_breakdown() {
+        let error =
+            from_provider_token_usage(&json!({"total": {"input_tokens": 1}}), 1).unwrap_err();
+        assert_eq!(error.code, "usage-authority-provider-payload-invalid");
     }
 }

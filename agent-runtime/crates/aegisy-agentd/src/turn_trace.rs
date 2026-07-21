@@ -510,7 +510,10 @@ impl TracePayload {
                 validate_identity(runtime_identity, "runtime identity")?;
                 validate_identity(adapter_identity, "adapter identity")?;
                 validate_label(version, "runtime version")?;
-                validate_source(evidence, &[EvidenceSource::Runtime, EvidenceSource::LocalRuntime])?;
+                validate_source(
+                    evidence,
+                    &[EvidenceSource::Runtime, EvidenceSource::LocalRuntime],
+                )?;
                 validate_common(evidence, redaction)?;
             }
             Self::Model {
@@ -526,7 +529,10 @@ impl TracePayload {
                 if let Some(value) = reason_identity {
                     validate_identity(value, "model reason identity")?;
                 }
-                validate_source(evidence, &[EvidenceSource::ModelCatalog, EvidenceSource::Provider])?;
+                validate_source(
+                    evidence,
+                    &[EvidenceSource::ModelCatalog, EvidenceSource::Provider],
+                )?;
                 validate_common(evidence, redaction)?;
             }
             Self::Context {
@@ -595,7 +601,11 @@ impl TracePayload {
                 value.validate(*metric)?;
                 validate_source(
                     evidence,
-                    &[EvidenceSource::UsageProvider, EvidenceSource::Provider, EvidenceSource::Runtime],
+                    &[
+                        EvidenceSource::UsageProvider,
+                        EvidenceSource::Provider,
+                        EvidenceSource::Runtime,
+                    ],
                 )?;
                 validate_common(evidence, redaction)?;
             }
@@ -900,10 +910,7 @@ fn validate_optional_hash_identity(
 
 fn validate_hash_identity(value: &str, field: &'static str) -> Result<(), TurnTraceError> {
     if !value.starts_with("sha256:") && !value.starts_with("turn-trace:sha256:") {
-        return Err(error(
-            "turn-trace-hash-identity-invalid",
-            field,
-        ));
+        return Err(error("turn-trace-hash-identity-invalid", field));
     }
     validate_identity(value, field)
 }
@@ -919,7 +926,9 @@ fn validate_identity(value: &str, _field: &'static str) -> Result<(), TurnTraceE
         || value.starts_with('\\')
         || value.contains("//")
         || value.contains("..")
-        || value.chars().any(|character| character.is_ascii_whitespace())
+        || value
+            .chars()
+            .any(|character| character.is_ascii_whitespace())
         || value.chars().any(|character| character.is_ascii_control())
     {
         return Err(error(
@@ -1035,7 +1044,9 @@ mod tests {
     #[test]
     fn valid_trace_covers_source_qualified_metadata_and_terminal_evidence() {
         let mut trace = TurnTrace::new(binding()).unwrap();
-        trace.append("event-1".into(), 10, runtime_payload()).unwrap();
+        trace
+            .append("event-1".into(), 10, runtime_payload())
+            .unwrap();
         trace
             .append(
                 "event-2".into(),
@@ -1052,20 +1063,32 @@ mod tests {
                 },
             )
             .unwrap();
-        trace.append("event-3".into(), 11, completed_terminal()).unwrap();
+        trace
+            .append("event-3".into(), 11, completed_terminal())
+            .unwrap();
         trace.validate_complete().unwrap();
-        assert!(trace.metadata_identity().unwrap().starts_with("turn-trace:sha256:"));
+        assert!(trace
+            .metadata_identity()
+            .unwrap()
+            .starts_with("turn-trace:sha256:"));
     }
 
     #[test]
     fn sequence_time_and_terminal_order_are_invariants() {
         let mut trace = TurnTrace::new(binding()).unwrap();
-        trace.append("event-1".into(), 20, runtime_payload()).unwrap();
+        trace
+            .append("event-1".into(), 20, runtime_payload())
+            .unwrap();
         assert_eq!(
-            trace.append("event-2".into(), 19, runtime_payload()).unwrap_err().code,
+            trace
+                .append("event-2".into(), 19, runtime_payload())
+                .unwrap_err()
+                .code,
             "turn-trace-time-order-invalid"
         );
-        trace.append("event-2".into(), 20, completed_terminal()).unwrap();
+        trace
+            .append("event-2".into(), 20, completed_terminal())
+            .unwrap();
         assert_eq!(
             trace
                 .append("event-3".into(), 21, runtime_payload())
@@ -1123,7 +1146,9 @@ mod tests {
             "turn-trace-secret-shaped"
         );
         assert_eq!(
-            validate_identity("/Users/alice/project", "id").unwrap_err().code,
+            validate_identity("/Users/alice/project", "id")
+                .unwrap_err()
+                .code,
             "turn-trace-identity-invalid"
         );
         let mut summary = redaction();
