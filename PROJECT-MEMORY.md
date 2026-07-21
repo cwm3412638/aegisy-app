@@ -132,6 +132,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   select a model, issue credentials, start a turn, or emit a model-change event; keep
   OpenSpec `10.2` unchecked until authenticated catalog/profile integration and
   cross-platform UI evidence exist.
+- Model profile foundation (2026-07-21): internal `model-profile/0.1` now
+  validates global/project scope, bounded role bindings for Agent/plan/apply/
+  review/utility/embedding/rerank, secret-free source metadata, and a
+  deterministic SHA-256 identity. `single_model` enables only the Agent role;
+  unconfigured roles never fall back to the default model, and role-specific
+  bindings must be explicit. This contract is not persisted, exposed through
+  AAP/Qt, connected to catalog selection, or used for token/routing/turn
+  authority. Keep OpenSpec `10.3` and `10.4` unchecked until signed catalog,
+  durable profile storage, picker integration, and cross-platform evidence
+  exist.
 - OpenSpec task `21.1` is complete: background jobs, multi-agent execution, and
   unattended writes remain unadvertised and disabled until their prerequisite
   security, recovery, budget, evaluation, and release gates are recorded. The
@@ -1037,7 +1047,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 402 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 408 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 59 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
@@ -1065,15 +1075,15 @@ bound branch, but this host killed the process at startup after 0.45s without an
 assertion output. Tasks `6.6` and `12.6` remain unchecked for the control-plane,
 turn-metadata, dedicated-worktree, scale, and cross-platform gates listed above.
 
-On 2026-07-21 the model-catalog and capability-matcher foundation stages added
-the internal `model-catalog/0.1` validation contract, the read-only AAP
-`model/catalog` and `model/capability-check` projections, and the corresponding
-Qt request/signals. Full Rust verification passed 402 unit tests with one
-ignored live fixture, 59 protocol tests, and 11 stdio/Codex tests; strict
-Clippy, the complete CMake desktop build, and CTest `agent_runtime_protocol`
-passed. The projection is explicitly offline and unsigned, leaves unverified
-capability/limit values unknown, and grants no selection, token, routing, or
-execution authority.
+On 2026-07-21 the model-catalog, capability-matcher, and model-profile
+foundation stages added the internal `model-catalog/0.1` and
+`model-profile/0.1` validation contracts, the read-only AAP `model/catalog` and
+`model/capability-check` projections, and the corresponding Qt request/signals.
+Full Rust verification passed 408 unit tests with one ignored live fixture, 59
+protocol tests, and 11 stdio/Codex tests; strict Clippy, the complete CMake
+desktop build, and CTest `agent_runtime_protocol` passed. The projection is
+explicitly offline and unsigned, leaves unverified capability/limit values
+unknown, and grants no selection, token, routing, or execution authority.
 `openspec validate build-aegisy-agent-workbench --strict` was attempted but the
 host terminated the Node-backed CLI with exit 137 before producing validation
 output; keep the prior successful validation as the last authoritative result

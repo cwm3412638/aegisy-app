@@ -206,7 +206,18 @@
     or unsigned catalog metadata, and values with unknown/estimated authority,
     can never make selection allowed.
 - [ ] 10.3 Implement global and project model profiles for Agent, plan, apply, review, utility, embedding, and rerank roles
+  - Partial foundation: internal `model-profile/0.1` validates global/project
+    scope, bounded role bindings, content-hashed identity, and content-free
+    source metadata without credentials. The conservative single-model factory
+    binds only the Agent role; role resolution never falls back to the default
+    model, and role-specific bindings require explicit configuration. No
+    persistence, catalog selection, AAP/Qt control, token issuance, or routing
+    authority is exposed.
 - [ ] 10.4 Provide a simple one-model profile and prevent unnecessary role calls by default
+  - Partial foundation: `ModelProfile::single_model` creates a one-model
+    profile with only an enabled Agent binding. Plan/apply/review/utility/
+    embedding/rerank roles remain disabled until explicitly configured; this is
+    an internal validation contract and is not connected to turn dispatch.
 - [ ] 10.5 Implement model/profile picker with capability differences, source, availability, role suitability, and expected cost/latency disclosure
 - [ ] 10.6 Implement compatible next-turn model switch with immutable model-change event
 - [ ] 10.7 Implement portable cross-runtime/provider session fork and reviewable context package

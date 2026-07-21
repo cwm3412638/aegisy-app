@@ -65,9 +65,25 @@ Model catalog foundation evidence:
   credential-shaped output. This is only a metadata foundation. Signed cloud
   refresh/cache, durable profiles, and model switching remain unchecked under
   OpenSpec `9.1` through `10.12`.
-- The 2026-07-21 matcher stage passed 402 Rust unit tests with one ignored live
-  fixture, 59 protocol tests, 11 stdio/Codex tests, strict Clippy, the complete
+- The 2026-07-21 catalog, matcher, and profile foundation stage passed 408 Rust
+  unit tests with one ignored live fixture, 59 protocol tests, 11 stdio/Codex
+  tests, strict Clippy, the complete
   CMake build, and CTest `agent_runtime_protocol`.
+
+Model profile foundation evidence:
+
+- Internal `model-profile/0.1` validates global and project scope, bounded
+  `agent`, `plan`, `apply`, `review`, `utility`, `embedding`, and `rerank` role
+  bindings, content-free source metadata, and a deterministic SHA-256 identity.
+  `single_model` creates the conservative default with only the Agent role
+  enabled; `resolve_role` never silently falls back to the default model for an
+  unconfigured role. Role-specific bindings and disabled explicit bindings are
+  represented separately, and secret-shaped metadata is rejected.
+- Six unit fixtures cover the default one-model shape, project-scope identity,
+  single-model mismatch, explicit role-specific resolution, disabled roles, and
+  secret-free content identity. No AAP/Qt method, persistence projection,
+  catalog picker, token, routing, or execution authority is exposed; OpenSpec
+  tasks `10.3` and `10.4` remain unchecked.
 
 Autonomy release-gate evidence:
 

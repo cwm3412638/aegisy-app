@@ -130,6 +130,14 @@ still `unknown` or `estimated` remains an unknown check.
 {"jsonrpc":"2.0","id":"8","result":{"schema_version":"model-capability-check/0.1","model_id":"local:deterministic-echo","catalog_state":"offline","decision":"unknown","selection_allowed":false,"checks":[{"capability":"tool-calls","required":true,"observed":null,"authority":"unknown","result":"unknown"}],"mismatches":[]}}
 ```
 
+The internal `model-profile/0.1` contract is metadata-only and is not an AAP
+method. It validates global/project scope and explicit role bindings for Agent,
+plan, apply, review, utility, embedding, and rerank. The single-model default
+binds only Agent; an unconfigured role is disabled rather than silently using
+the default model. Profiles contain no credential, token, routing, or turn
+authority and remain unavailable to the Qt picker until the signed catalog and
+durable profile gates are complete.
+
 ## Structured Plan Boundary
 
 The sidecar contains an internal `structured-plan/0.1` data contract for the
