@@ -134,6 +134,7 @@ const MAX_TRUST_REVIEW_ENTRIES: usize = 512;
 const MAX_TRUST_REVIEW_DEPTH: usize = 5;
 const MAX_TRUST_REVIEW_HOOK_BYTES: usize = 256 * 1024;
 const MAX_RUNTIME_REPLAY_ITEMS: usize = 2_000;
+const MAX_CONTEXT_THRESHOLD_SCAN_ITEMS: usize = 100_000;
 const RUNTIME_REPLAY_PAGE_SIZE: usize = 200;
 const MAX_TURN_METADATA_UPDATES_PER_KIND: usize = 32;
 const MAX_AUTO_INSTRUCTION_ITEMS: usize = 8;
@@ -619,6 +620,10 @@ enum Backend {
 struct SessionState {
     session: Session,
     items: Vec<TimelineItem>,
+    /// The latest context-threshold state reconstructed from validated usage
+    /// items. This is a review latch only and never grants compaction or
+    /// execution authority.
+    context_threshold_status: context_threshold::ThresholdStatus,
     backend_session_id: Option<String>,
     backend_info: BackendInfo,
     environment: SessionEnvironment,
@@ -2042,6 +2047,226 @@ fn context_threshold_for_usage(
         previous_status,
     )
     .ok()
+}
+
+/// Reconstruct the context-threshold latch from persisted usage Items.
+///
+/// Usage history is an input to the review signal only. Every persisted usage
+/// Item must carry a complete, validated `usage-authority/0.1` report and the
+/// exact threshold decision produced from the preceding status. A malformed
+/// usage history is deliberately not skipped: it restores the conservative
+/// `PreviewRequired` state so a restart can never turn uncertain history into
+/// `NoAction`.
+fn replay_context_threshold_item(
+    item: &TimelineItem,
+    previous_status: context_threshold::ThresholdStatus,
+) -> Option<context_threshold::ThresholdStatus> {
+    let data = item.data.as_ref()?.as_object()?;
+    let authority = data.get("authority")?.as_object()?;
+
+    // The threshold decision is an additive field on the authority report;
+    // remove it before decoding and validating the four-metric contract.
+    let threshold = authority.get("compaction_threshold")?;
+    let mut report_value = Value::Object(authority.clone());
+    let report_object = report_value.as_object_mut()?;
+    report_object.remove("compaction_threshold");
+    if report_object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "schema_version" | "as_of_ms" | "entries"))
+    {
+        return None;
+    }
+    let report: usage_authority::UsageAuthorityReport =
+        serde_json::from_value(report_value).ok()?;
+    report.validate().ok()?;
+
+    let expected = context_threshold_for_usage(&report, previous_status)?;
+    let expected_value = serde_json::to_value(expected).ok()?;
+    // Exact equality rejects unsupported schema versions, extra fields,
+    // authority spoofing, and a decision generated from another latch.
+    if threshold != &expected_value {
+        return None;
+    }
+    Some(expected.status)
+}
+
+fn restore_context_threshold_status(items: &[TimelineItem]) -> context_threshold::ThresholdStatus {
+    let mut status = context_threshold::ThresholdStatus::NoAction;
+    let mut saw_usage = false;
+
+    for item in items.iter().filter(|item| item.kind == "usage") {
+        saw_usage = true;
+        let Some(next_status) = replay_context_threshold_item(item, status) else {
+            return context_threshold::ThresholdStatus::PreviewRequired;
+        };
+        status = next_status;
+    }
+
+    if saw_usage {
+        status
+    } else {
+        context_threshold::ThresholdStatus::NoAction
+    }
+}
+
+/// Restore the latch from the durable source rather than the bounded in-memory
+/// replay window. A scan failure or an unbounded history is itself uncertain
+/// history and therefore remains review-required.
+fn restore_context_threshold_status_from_store(
+    store: &WorkbenchStore,
+    session_id: &str,
+) -> context_threshold::ThresholdStatus {
+    let mut status = context_threshold::ThresholdStatus::NoAction;
+    let mut after_sequence = 0;
+    let mut scanned_items = 0usize;
+    loop {
+        let page =
+            match store.read_session_items(session_id, after_sequence, RUNTIME_REPLAY_PAGE_SIZE) {
+                Ok(page) => page,
+                Err(_) => return context_threshold::ThresholdStatus::PreviewRequired,
+            };
+        if page.is_empty() {
+            return status;
+        }
+        scanned_items = match scanned_items.checked_add(page.len()) {
+            Some(value) if value <= MAX_CONTEXT_THRESHOLD_SCAN_ITEMS => value,
+            _ => return context_threshold::ThresholdStatus::PreviewRequired,
+        };
+        let next_sequence = match page.last().map(|item| item.sequence) {
+            Some(sequence) if sequence > after_sequence => sequence,
+            _ => return context_threshold::ThresholdStatus::PreviewRequired,
+        };
+        for item in page.iter().filter(|item| item.item_kind == "usage") {
+            let timeline_item = stored_timeline_item(item.clone());
+            let Some(next_status) = replay_context_threshold_item(&timeline_item, status) else {
+                return context_threshold::ThresholdStatus::PreviewRequired;
+            };
+            status = next_status;
+        }
+        after_sequence = next_sequence;
+        if scanned_items == MAX_CONTEXT_THRESHOLD_SCAN_ITEMS {
+            // There may be another page; do not infer that the bounded scan is
+            // complete from a full page.
+            return context_threshold::ThresholdStatus::PreviewRequired;
+        }
+    }
+}
+
+#[cfg(test)]
+mod context_threshold_restore_tests {
+    use super::*;
+
+    fn usage_item(
+        id: &str,
+        used_tokens: u64,
+        previous: context_threshold::ThresholdStatus,
+    ) -> TimelineItem {
+        let raw = json!({
+            "total": {
+                "input_tokens": used_tokens,
+                "output_tokens": 0,
+                "total_tokens": used_tokens,
+                "cached_input_tokens": 0,
+                "reasoning_output_tokens": 0
+            },
+            "last": {
+                "input_tokens": used_tokens,
+                "output_tokens": 0,
+                "total_tokens": used_tokens,
+                "cached_input_tokens": 0,
+                "reasoning_output_tokens": 0
+            },
+            "model_context_window": 100
+        });
+        let report = usage_authority::from_provider_token_usage(&raw, 1_000).unwrap();
+        let decision = context_threshold_for_usage(&report, previous).unwrap();
+        let mut authority = serde_json::to_value(report).unwrap();
+        authority["compaction_threshold"] = serde_json::to_value(decision).unwrap();
+        TimelineItem {
+            id: id.into(),
+            kind: "usage".into(),
+            role: "system".into(),
+            state: "updated".into(),
+            content: "Token usage updated".into(),
+            data: Some(json!({ "authority": authority })),
+        }
+    }
+
+    #[test]
+    fn empty_history_starts_with_no_action() {
+        assert_eq!(
+            restore_context_threshold_status(&[]),
+            context_threshold::ThresholdStatus::NoAction
+        );
+    }
+
+    #[test]
+    fn valid_history_replays_the_hysteresis_latch() {
+        let items = vec![
+            usage_item("usage-1", 90, context_threshold::ThresholdStatus::NoAction),
+            usage_item(
+                "usage-2",
+                85,
+                context_threshold::ThresholdStatus::PreviewRequired,
+            ),
+        ];
+        assert_eq!(
+            restore_context_threshold_status(&items),
+            context_threshold::ThresholdStatus::PreviewRequired
+        );
+    }
+
+    #[test]
+    fn missing_threshold_history_fails_closed_to_preview() {
+        let mut item = usage_item(
+            "usage-malformed",
+            10,
+            context_threshold::ThresholdStatus::NoAction,
+        );
+        item.data
+            .as_mut()
+            .and_then(Value::as_object_mut)
+            .and_then(|data| data.get_mut("authority"))
+            .and_then(Value::as_object_mut)
+            .map(|authority| authority.remove("compaction_threshold"));
+        assert_eq!(
+            restore_context_threshold_status(&[item]),
+            context_threshold::ThresholdStatus::PreviewRequired
+        );
+    }
+
+    #[test]
+    fn invalid_report_history_fails_closed_to_preview() {
+        let mut item = usage_item(
+            "usage-invalid-report",
+            10,
+            context_threshold::ThresholdStatus::NoAction,
+        );
+        item.data
+            .as_mut()
+            .and_then(Value::as_object_mut)
+            .and_then(|data| data.get_mut("authority"))
+            .and_then(Value::as_object_mut)
+            .map(|authority| authority.insert("entries".into(), json!([])));
+        assert_eq!(
+            restore_context_threshold_status(&[item]),
+            context_threshold::ThresholdStatus::PreviewRequired
+        );
+    }
+
+    #[test]
+    fn decision_generated_without_previous_latch_is_rejected_after_latch() {
+        let items = vec![
+            usage_item("usage-1", 90, context_threshold::ThresholdStatus::NoAction),
+            // This decision was incorrectly generated from NoAction; replay
+            // requires the prior PreviewRequired latch at 85% usage.
+            usage_item("usage-2", 85, context_threshold::ThresholdStatus::NoAction),
+        ];
+        assert_eq!(
+            restore_context_threshold_status(&items),
+            context_threshold::ThresholdStatus::PreviewRequired
+        );
+    }
 }
 
 fn runtime_error_content_with_provider(
@@ -7047,6 +7272,11 @@ impl Runtime {
             project_id: receipt.session.project_id.clone(),
             title: receipt.session.title.clone(),
         };
+        let restored_items = stored_items
+            .into_iter()
+            .map(stored_timeline_item)
+            .collect::<Vec<_>>();
+        let context_threshold_status = restore_context_threshold_status(&restored_items);
         let backend_info = match &self.backend {
             Backend::Preview => BackendInfo {
                 adapter: "preview".into(),
@@ -7071,7 +7301,8 @@ impl Runtime {
             target_session_id.clone(),
             SessionState {
                 session: session.clone(),
-                items: stored_items.into_iter().map(stored_timeline_item).collect(),
+                items: restored_items,
+                context_threshold_status,
                 backend_session_id: None,
                 backend_info: backend_info.clone(),
                 environment: environment.clone(),
@@ -7581,6 +7812,7 @@ impl Runtime {
             SessionState {
                 session: session.clone(),
                 items: Vec::new(),
+                context_threshold_status: context_threshold::ThresholdStatus::NoAction,
                 backend_session_id,
                 backend_info: backend_info.clone(),
                 environment: environment.clone(),
@@ -7657,6 +7889,8 @@ impl Runtime {
             },
             None => Vec::new(),
         };
+        let restored_context_threshold_status =
+            restore_context_threshold_status_from_store(store, &stored.session_id);
         let binding = match store.load_session_runtime_binding(&params.session_id) {
             Ok(binding) => binding,
             Err(error) => {
@@ -7814,6 +8048,7 @@ impl Runtime {
             SessionState {
                 session: session.clone(),
                 items: restored_items,
+                context_threshold_status: restored_context_threshold_status,
                 backend_session_id,
                 backend_info: backend_info.clone(),
                 environment: environment.clone(),
@@ -8083,11 +8318,17 @@ impl Runtime {
             project_id: receipt.session.project_id.clone(),
             title: receipt.session.title.clone(),
         };
+        let restored_items = stored_items
+            .into_iter()
+            .map(stored_timeline_item)
+            .collect::<Vec<_>>();
+        let context_threshold_status = restore_context_threshold_status(&restored_items);
         self.sessions.insert(
             target_session_id.clone(),
             SessionState {
                 session: session.clone(),
-                items: stored_items.into_iter().map(stored_timeline_item).collect(),
+                items: restored_items,
+                context_threshold_status,
                 backend_session_id,
                 backend_info: backend_info.clone(),
                 environment: environment.clone(),
@@ -9668,7 +9909,11 @@ impl Runtime {
         let mut persistence_error: Option<String> = None;
         let mut metadata_update_counts = HashMap::<String, usize>::new();
         let mut metadata_truncation_notified = HashSet::<String>::new();
-        let mut context_threshold_status = context_threshold::ThresholdStatus::NoAction;
+        let mut context_threshold_status = self
+            .sessions
+            .get(&params.session_id)
+            .map(|state| state.context_threshold_status)
+            .unwrap_or(context_threshold::ThresholdStatus::NoAction);
         let result = match &mut backend {
             Backend::Codex(adapter) => adapter.run_turn(
                 CodexTurnRequest {
@@ -10186,6 +10431,9 @@ impl Runtime {
         };
         self.backend = backend;
         self.control.finish_turn(&params.session_id);
+        if let Some(state) = self.sessions.get_mut(&params.session_id) {
+            state.context_threshold_status = context_threshold_status;
+        }
         if let Some(error) = persistence_error {
             if started {
                 let mut data = runtime_error_data(&error);
@@ -15520,6 +15768,7 @@ mod command_timeline_tests {
                     title: "test".into(),
                 },
                 items: Vec::new(),
+                context_threshold_status: context_threshold::ThresholdStatus::NoAction,
                 backend_session_id: None,
                 backend_info: BackendInfo {
                     adapter: "preview".into(),
@@ -15609,6 +15858,7 @@ mod command_timeline_tests {
                     title: "test".into(),
                 },
                 items: Vec::new(),
+                context_threshold_status: context_threshold::ThresholdStatus::NoAction,
                 backend_session_id: None,
                 backend_info: BackendInfo {
                     adapter: "preview".into(),
@@ -15720,6 +15970,7 @@ mod command_timeline_tests {
                     title: "fixture".into(),
                 },
                 items: Vec::new(),
+                context_threshold_status: context_threshold::ThresholdStatus::NoAction,
                 backend_session_id: None,
                 backend_info: BackendInfo {
                     adapter: "fixture".into(),

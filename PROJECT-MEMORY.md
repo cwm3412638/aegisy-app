@@ -807,10 +807,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   hysteresis. Results are `no-action`, `preview-required`, or
   `hard-limit-exceeded`, and every result fixes
   `automatic_compaction_authority:false`. Codex usage Timeline items now
-  evaluate provider-observed last-input/context-window values and retain
-  hysteresis for the active turn only. The state is not durable across turns or
-  restart and cannot invoke checkpoint creation, provider compact, or Qt, so
-  keep `17.7` unchecked.
+  evaluate provider-observed last-input/context-window values. Runtime session
+  reconstruction, fork, and portable import now replay the complete hydrated
+  usage history through the exact `usage-authority/0.1` and
+  `context-threshold/0.1` contracts; malformed or missing threshold metadata
+  fails closed to `preview-required`, while genuinely empty history starts at
+  `no-action`. The latch is carried into the next turn and remains a review
+  signal only; it cannot invoke checkpoint creation, provider compact, a model,
+  or Qt authority. AAP/Qt summary projection and cross-platform evidence remain
+  open, so keep `17.7` unchecked.
 - User-initiated macOS PTY execution, the named lifecycle, and the Qt/xterm.js
   terminal frontend are verified; Windows ConPTY is implemented but not yet
   runtime-verified. Read-only Codex command events now have a partial structured
@@ -2431,6 +2436,12 @@ Implemented visual baseline:
   turn-trace changes are partial foundations. Their OpenSpec tasks remain
   unchecked until authoritative producers, complete AAP/Qt integration,
   provider/model wiring, and cross-platform release evidence are complete.
+- The context-threshold restoration foundation now passes 489 `aegisy-agentd`
+  library tests (one ignored live fixture). It restores only a strict,
+  content-free review latch from complete persisted usage Items on resume,
+  fork, import, and Runtime reconstruction; malformed history becomes
+  `preview-required` and never `no-action`. No automatic compaction, provider
+  request, checkpoint activation, or execution authority was added.
 - The Qt usage-authority widget and render fixture pass direct C++17 syntax
   compilation using the CMake compile database. The complete render target is
   still blocked before C++ linking because this host kills Qt `rcc` while
