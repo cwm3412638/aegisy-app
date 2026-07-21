@@ -2152,6 +2152,25 @@ fn restore_context_threshold_status_from_store(
     }
 }
 
+/// Build the additive, read-only session projection for the context threshold.
+///
+/// The status is supplied by Runtime-owned state (or a complete durable
+/// replay), never by a client page or a subset of timeline Items. The summary
+/// deliberately exposes no model, provider, compaction, or execution
+/// authority; `automatic_compaction_authority` is fixed false.
+fn session_context_threshold_value(
+    status: context_threshold::ThresholdStatus,
+    history_state: &'static str,
+) -> Value {
+    json!({
+        "schema_version": "session-context-threshold/0.1",
+        "status": status,
+        "source": "runtime-authoritative",
+        "history_state": history_state,
+        "automatic_compaction_authority": false
+    })
+}
+
 #[cfg(test)]
 mod context_threshold_restore_tests {
     use super::*;
@@ -7321,6 +7340,10 @@ impl Runtime {
                 "receipt": receipt,
                 "session": session,
                 "runtime": backend_info,
+                "context_threshold": session_context_threshold_value(
+                    context_threshold_status,
+                    "replayed"
+                ),
                 "workspace": Self::workspace_binding_value(
                     self.session_workspace_bindings.get(&target_session_id)
                 ),
@@ -7823,6 +7846,10 @@ impl Runtime {
             json!({
                 "session": session,
                 "runtime": backend_info,
+                "context_threshold": session_context_threshold_value(
+                    context_threshold::ThresholdStatus::NoAction,
+                    "empty"
+                ),
                 "workspace": Self::workspace_binding_value(
                     self.session_workspace_bindings.get(&id)
                 ),
@@ -7851,6 +7878,10 @@ impl Runtime {
                     "resumed": false,
                     "already_active": true,
                     "runtime": state.backend_info,
+                    "context_threshold": session_context_threshold_value(
+                        state.context_threshold_status,
+                        "active"
+                    ),
                     "workspace": Self::workspace_binding_value(
                         self.session_workspace_bindings.get(&params.session_id)
                     ),
@@ -8066,6 +8097,10 @@ impl Runtime {
                 "resumed": true,
                 "already_active": false,
                 "runtime": backend_info,
+                "context_threshold": session_context_threshold_value(
+                    restored_context_threshold_status,
+                    "replayed"
+                ),
                 "workspace": Self::workspace_binding_value(
                     self.session_workspace_bindings.get(&session.id)
                 ),
@@ -8349,6 +8384,10 @@ impl Runtime {
                 "source_session_id": params.session_id,
                 "boundary_turn_id": params.last_turn_id,
                 "runtime": backend_info,
+                "context_threshold": session_context_threshold_value(
+                    context_threshold_status,
+                    "replayed"
+                ),
                 "workspace": Self::workspace_binding_value(
                     self.session_workspace_bindings.get(&target_session_id)
                 ),
@@ -10770,6 +10809,19 @@ impl Runtime {
                     timeline_item_value(&timeline_item, sequence)
                 })
                 .collect::<Vec<_>>();
+            // Prefer the live Runtime latch when this session is active. A
+            // cold durable read replays the complete usage source, never the
+            // bounded page above, before producing the summary.
+            let (durable_threshold_status, threshold_history_state) = self
+                .sessions
+                .get(&params.session_id)
+                .map(|state| (state.context_threshold_status, "active"))
+                .unwrap_or_else(|| {
+                    (
+                        restore_context_threshold_status_from_store(store, &params.session_id),
+                        "replayed",
+                    )
+                });
             return self.success_for(
                 &request,
                 json!({
@@ -10793,6 +10845,10 @@ impl Runtime {
                         params.limit,
                     ),
                     "runtime": durable_runtime,
+                    "context_threshold": session_context_threshold_value(
+                        durable_threshold_status,
+                        threshold_history_state
+                    ),
                     "workspace": Self::workspace_binding_value(
                         durable_workspace.as_ref()
                     ),
@@ -10856,6 +10912,10 @@ impl Runtime {
                     params.limit,
                 ),
                 "runtime": &state.backend_info,
+                "context_threshold": session_context_threshold_value(
+                    state.context_threshold_status,
+                    "active"
+                ),
                 "workspace": Self::workspace_binding_value(
                     self.session_workspace_bindings.get(&state.session.id)
                 ),

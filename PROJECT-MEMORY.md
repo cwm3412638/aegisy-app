@@ -814,8 +814,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   fails closed to `preview-required`, while genuinely empty history starts at
   `no-action`. The latch is carried into the next turn and remains a review
   signal only; it cannot invoke checkpoint creation, provider compact, a model,
-  or Qt authority. AAP/Qt summary projection and cross-platform evidence remain
-  open, so keep `17.7` unchecked.
+  or Qt authority. The additive `session-context-threshold/0.1` projection is
+  now returned by Session start/resume/fork/read and portable import, and Qt
+  validates it before rendering `阈值正常`, `阈值需预检`, or `阈值已达上限`.
+  Missing, malformed, unknown, or `automatic_compaction_authority:true`
+  summaries render `阈值未知`; no stale normal-looking state is retained.
+  Rust protocol fixtures and direct Qt C++17 syntax checks cover the projection.
+  Complete Qt runtime/render execution and cross-platform evidence remain open,
+  so keep `17.7` unchecked.
 - User-initiated macOS PTY execution, the named lifecycle, and the Qt/xterm.js
   terminal frontend are verified; Windows ConPTY is implemented but not yet
   runtime-verified. Read-only Codex command events now have a partial structured
@@ -2442,10 +2448,14 @@ Implemented visual baseline:
   fork, import, and Runtime reconstruction; malformed history becomes
   `preview-required` and never `no-action`. No automatic compaction, provider
   request, checkpoint activation, or execution authority was added.
-- The Qt usage-authority widget and render fixture pass direct C++17 syntax
-  compilation using the CMake compile database. The complete render target is
-  still blocked before C++ linking because this host kills Qt `rcc` while
-  compiling `resources.qrc`; no runtime/render pass is claimed.
+- The Qt usage-authority and context-threshold widget/render sources pass direct
+  C++17 syntax compilation using the CMake compile database. The complete render
+  target is still blocked before C++ linking because this host kills Qt `rcc`
+  while compiling `resources.qrc`; no runtime/render pass is claimed.
+- The focused threshold verification passes 489 library tests, 63 AAP protocol
+  tests, strict workspace Clippy, Rust format checking, `git diff --check`, and
+  three Qt C++17 syntax checks. This evidence is still not sufficient to mark
+  `17.7` complete without cross-platform runtime/render validation.
 
 ## Next Product Priorities
 

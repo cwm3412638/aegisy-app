@@ -713,6 +713,26 @@ fn durable_work_session_binds_and_searches_its_git_workspace() {
         .as_str()
         .unwrap()
         .to_owned();
+    assert_eq!(
+        started[0]["result"]["context_threshold"]["schema_version"],
+        "session-context-threshold/0.1"
+    );
+    assert_eq!(
+        started[0]["result"]["context_threshold"]["status"],
+        "no_action"
+    );
+    assert_eq!(
+        started[0]["result"]["context_threshold"]["history_state"],
+        "empty"
+    );
+    assert_eq!(
+        started[0]["result"]["context_threshold"]["source"],
+        "runtime-authoritative"
+    );
+    assert_eq!(
+        started[0]["result"]["context_threshold"]["automatic_compaction_authority"],
+        false
+    );
     assert_eq!(started[0]["result"]["workspace"]["session_id"], session_id);
     assert_eq!(started[0]["result"]["workspace"]["project_id"], project_id);
     assert_eq!(started[0]["result"]["workspace"]["branch"], branch);
@@ -2858,6 +2878,18 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
     ));
     assert_eq!(resumed[0]["result"]["resumed"], true);
     assert_eq!(
+        resumed[0]["result"]["context_threshold"]["schema_version"],
+        "session-context-threshold/0.1"
+    );
+    assert_eq!(
+        resumed[0]["result"]["context_threshold"]["history_state"],
+        "replayed"
+    );
+    assert_eq!(
+        resumed[0]["result"]["context_threshold"]["automatic_compaction_authority"],
+        false
+    );
+    assert_eq!(
         resumed[0]["result"]["continuation"]["provider_state_available"],
         true
     );
@@ -2873,6 +2905,18 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
         json!({ "session_id": session_id, "last_turn_id": first_turn_id, "title": "First turn fork" }),
     ));
     assert_eq!(forked[0]["result"]["schema_version"], "session-fork/0.1");
+    assert_eq!(
+        forked[0]["result"]["context_threshold"]["schema_version"],
+        "session-context-threshold/0.1"
+    );
+    assert_eq!(
+        forked[0]["result"]["context_threshold"]["history_state"],
+        "replayed"
+    );
+    assert_eq!(
+        forked[0]["result"]["context_threshold"]["automatic_compaction_authority"],
+        false
+    );
     assert_eq!(
         forked[0]["result"]["continuation"]["portable_history_items"],
         2
@@ -2894,6 +2938,14 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
         fork_history[0]["result"]["items"].as_array().unwrap().len(),
         2
     );
+    assert_eq!(
+        fork_history[0]["result"]["context_threshold"]["schema_version"],
+        "session-context-threshold/0.1"
+    );
+    assert_eq!(
+        fork_history[0]["result"]["context_threshold"]["history_state"],
+        "active"
+    );
     drop(restarted);
 
     let mut reopened = Runtime::with_store(&data).unwrap();
@@ -2903,6 +2955,23 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
         json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
     ));
     reopened.handle_line(&request("initialized-3", "initialized", json!({})));
+    let cold_read = reopened.handle_line(&request(
+        "9-read",
+        "session/read",
+        json!({ "session_id": fork_id, "limit": 1 }),
+    ));
+    assert_eq!(
+        cold_read[0]["result"]["context_threshold"]["schema_version"],
+        "session-context-threshold/0.1"
+    );
+    assert_eq!(
+        cold_read[0]["result"]["context_threshold"]["history_state"],
+        "replayed"
+    );
+    assert_eq!(
+        cold_read[0]["result"]["context_threshold"]["automatic_compaction_authority"],
+        false
+    );
     let fork_resumed = reopened.handle_line(&request(
         "10",
         "session/resume",

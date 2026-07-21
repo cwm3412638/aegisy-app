@@ -687,6 +687,14 @@ int main(int argc, char *argv[])
         {QStringLiteral("id"), QStringLiteral("session-recovery-render")},
         {QStringLiteral("mode"), QStringLiteral("chat")},
         {QStringLiteral("title"), QStringLiteral("Recovery render")},
+        {QStringLiteral("context_threshold"), QJsonObject{
+            {QStringLiteral("schema_version"),
+             QStringLiteral("session-context-threshold/0.1")},
+            {QStringLiteral("status"), QStringLiteral("no_action")},
+            {QStringLiteral("source"), QStringLiteral("runtime-authoritative")},
+            {QStringLiteral("history_state"), QStringLiteral("empty")},
+            {QStringLiteral("automatic_compaction_authority"), false},
+        }},
         {QStringLiteral("runtime"), QJsonObject{
             {QStringLiteral("provider"), QStringLiteral("fixture")},
             {QStringLiteral("model"), QStringLiteral("fixture")},
@@ -695,6 +703,80 @@ int main(int argc, char *argv[])
             {QStringLiteral("permission_profile"), QStringLiteral("read-only")},
         }},
     });
+    application.processEvents();
+    if (!expect(executionContext->text().contains(QStringLiteral("阈值正常")),
+                "valid no-action context threshold did not render")) {
+        return 1;
+    }
+    runtimeClient->sessionStarted(QStringLiteral("threshold-preview-fixture"), QJsonObject{
+        {QStringLiteral("id"), QStringLiteral("session-threshold-preview")},
+        {QStringLiteral("mode"), QStringLiteral("chat")},
+        {QStringLiteral("title"), QStringLiteral("Threshold preview")},
+        {QStringLiteral("context_threshold"), QJsonObject{
+            {QStringLiteral("schema_version"),
+             QStringLiteral("session-context-threshold/0.1")},
+            {QStringLiteral("status"), QStringLiteral("preview_required")},
+            {QStringLiteral("source"), QStringLiteral("runtime-authoritative")},
+            {QStringLiteral("history_state"), QStringLiteral("replayed")},
+            {QStringLiteral("automatic_compaction_authority"), false},
+        }},
+    });
+    application.processEvents();
+    if (!expect(executionContext->text().contains(QStringLiteral("阈值需预检")),
+                "preview-required context threshold did not render")) {
+        return 1;
+    }
+    runtimeClient->sessionStarted(QStringLiteral("threshold-hard-fixture"), QJsonObject{
+        {QStringLiteral("id"), QStringLiteral("session-threshold-hard")},
+        {QStringLiteral("mode"), QStringLiteral("chat")},
+        {QStringLiteral("title"), QStringLiteral("Threshold hard")},
+        {QStringLiteral("context_threshold"), QJsonObject{
+            {QStringLiteral("schema_version"),
+             QStringLiteral("session-context-threshold/0.1")},
+            {QStringLiteral("status"), QStringLiteral("hard_limit_exceeded")},
+            {QStringLiteral("source"), QStringLiteral("runtime-authoritative")},
+            {QStringLiteral("history_state"), QStringLiteral("active")},
+            {QStringLiteral("automatic_compaction_authority"), false},
+        }},
+    });
+    application.processEvents();
+    if (!expect(executionContext->text().contains(QStringLiteral("阈值已达上限")),
+                "hard-limit context threshold did not render")) {
+        return 1;
+    }
+    runtimeClient->sessionStarted(QStringLiteral("threshold-invalid-fixture"), QJsonObject{
+        {QStringLiteral("id"), QStringLiteral("session-threshold-invalid")},
+        {QStringLiteral("mode"), QStringLiteral("chat")},
+        {QStringLiteral("title"), QStringLiteral("Threshold invalid")},
+        {QStringLiteral("context_threshold"), QJsonObject{
+            {QStringLiteral("schema_version"),
+             QStringLiteral("session-context-threshold/0.1")},
+            {QStringLiteral("status"), QStringLiteral("no_action")},
+            {QStringLiteral("source"), QStringLiteral("runtime-authoritative")},
+            {QStringLiteral("history_state"), QStringLiteral("active")},
+            {QStringLiteral("automatic_compaction_authority"), true},
+        }},
+    });
+    application.processEvents();
+    if (!expect(executionContext->text().contains(QStringLiteral("阈值未知"))
+                    && !executionContext->text().contains(QStringLiteral("阈值正常")),
+                "automatic compaction authority did not fail closed to unknown")) {
+        return 1;
+    }
+    runtimeClient->sessionStarted(QStringLiteral("recovery-render-session-restored"), QJsonObject{
+        {QStringLiteral("id"), QStringLiteral("session-recovery-render")},
+        {QStringLiteral("mode"), QStringLiteral("chat")},
+        {QStringLiteral("title"), QStringLiteral("Recovery render")},
+        {QStringLiteral("context_threshold"), QJsonObject{
+            {QStringLiteral("schema_version"),
+             QStringLiteral("session-context-threshold/0.1")},
+            {QStringLiteral("status"), QStringLiteral("no_action")},
+            {QStringLiteral("source"), QStringLiteral("runtime-authoritative")},
+            {QStringLiteral("history_state"), QStringLiteral("active")},
+            {QStringLiteral("automatic_compaction_authority"), false},
+        }},
+    });
+    application.processEvents();
     runtimeClient->sessionRecoveryStatusRead(QJsonObject{
         {QStringLiteral("session_id"), QStringLiteral("session-recovery-render")},
         {QStringLiteral("recovery_required"), true},

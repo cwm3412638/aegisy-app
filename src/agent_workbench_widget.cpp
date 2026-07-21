@@ -257,6 +257,43 @@ struct UsageAuthorityPresentation {
     QString tooltip;
 };
 
+struct SessionContextThresholdPresentation {
+    bool valid = false;
+    QString label = QStringLiteral("阈值未知");
+    QString tooltip = QStringLiteral(
+        "会话上下文阈值摘要缺失或无效，已按只读未知状态显示；不会触发自动压缩。");
+};
+
+SessionContextThresholdPresentation sessionContextThresholdPresentation(
+    const QJsonObject &summary)
+{
+    if (summary.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("session-context-threshold/0.1")
+            || summary.value(QStringLiteral("source")).toString()
+                != QStringLiteral("runtime-authoritative")
+            || !summary.value(QStringLiteral("automatic_compaction_authority")).isBool()
+            || summary.value(QStringLiteral("automatic_compaction_authority")).toBool()
+            || !QStringList{QStringLiteral("empty"), QStringLiteral("active"),
+                            QStringLiteral("replayed")}
+                .contains(summary.value(QStringLiteral("history_state")).toString())) {
+        return {};
+    }
+    const QString status = summary.value(QStringLiteral("status")).toString();
+    if (status == QStringLiteral("no_action")) {
+        return {true, QStringLiteral("阈值正常"),
+                QStringLiteral("Runtime 权威状态：当前未达到上下文预检阈值；自动压缩权限固定关闭。")};
+    }
+    if (status == QStringLiteral("preview_required")) {
+        return {true, QStringLiteral("阈值需预检"),
+                QStringLiteral("Runtime 权威状态：发送前需要人工预检；自动压缩权限固定关闭。")};
+    }
+    if (status == QStringLiteral("hard_limit_exceeded")) {
+        return {true, QStringLiteral("阈值已达上限"),
+                QStringLiteral("Runtime 权威状态：上下文已达到硬上限；仅保留人工审查信号，自动压缩权限固定关闭。")};
+    }
+    return {};
+}
+
 UsageAuthorityPresentation usageAuthorityPresentation(const QJsonObject &data)
 {
     const QJsonObject authority = data.value(QStringLiteral("authority")).toObject();
@@ -1390,6 +1427,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_sessionList->setCurrentRow(0);
         const QJsonObject runtime = session.value(QStringLiteral("runtime")).toObject();
         storeSessionRuntimeBinding(id, runtime);
+        storeSessionContextThreshold(
+            id, session.value(QStringLiteral("context_threshold")).toObject());
         storeSessionWorkspaceBinding(
             id, session.value(QStringLiteral("workspace")).toObject());
         const QJsonObject binding = m_sessionRuntimeBindings.value(id);
@@ -1431,6 +1470,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         if (mode == m_mode) requestOperationStatus();
         const QJsonObject runtime = result.value(QStringLiteral("runtime")).toObject();
         storeSessionRuntimeBinding(id, runtime);
+        storeSessionContextThreshold(
+            id, result.value(QStringLiteral("context_threshold")).toObject());
         storeSessionWorkspaceBinding(
             id, result.value(QStringLiteral("workspace")).toObject());
         resetSessionHistoryPagination();
@@ -1456,6 +1497,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         if (mode == m_mode) requestOperationStatus();
         storeSessionRuntimeBinding(
             id, result.value(QStringLiteral("runtime")).toObject());
+        storeSessionContextThreshold(
+            id, result.value(QStringLiteral("context_threshold")).toObject());
         storeSessionWorkspaceBinding(
             id, result.value(QStringLiteral("workspace")).toObject());
         resetSessionHistoryPagination();
@@ -1581,6 +1624,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_chatSessionProjectId = session.value(QStringLiteral("project_id")).toString();
         }
         requestOperationStatus();
+        storeSessionContextThreshold(
+            sessionId, result.value(QStringLiteral("context_threshold")).toObject());
         m_portableSessionPackage = {};
         m_portableSessionPath.clear();
         m_portableSessionOperation.clear();
@@ -1650,6 +1695,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         }
         storeSessionRuntimeBinding(
             id, snapshot.value(QStringLiteral("runtime")).toObject());
+        storeSessionContextThreshold(
+            id, snapshot.value(QStringLiteral("context_threshold")).toObject());
         storeSessionWorkspaceBinding(
             id, snapshot.value(QStringLiteral("workspace")).toObject());
         if (!appendingHistory) {
@@ -10403,6 +10450,18 @@ bool AgentWorkbenchWidget::storeSessionRuntimeBinding(
     return true;
 }
 
+bool AgentWorkbenchWidget::storeSessionContextThreshold(
+    const QString &sessionId, const QJsonObject &summary)
+{
+    if (sessionId.isEmpty()) return false;
+    // Keep the raw additive object only as display input. Validation happens
+    // again on every render, so a malformed or future schema can never retain
+    // a previous normal-looking state.
+    m_sessionContextThresholds.insert(sessionId, summary);
+    updateContextStrip();
+    return sessionContextThresholdPresentation(summary).valid;
+}
+
 bool AgentWorkbenchWidget::storeSessionWorkspaceBinding(
     const QString &sessionId, const QJsonObject &workspace)
 {
@@ -10553,6 +10612,9 @@ void AgentWorkbenchWidget::updateContextStrip()
     const int selectedCount = includedTurnContext().size() + includedPinnedContextIds().size();
     const QString context = selectedCount == 0
         ? QStringLiteral("上下文 0") : QStringLiteral("上下文 %1").arg(selectedCount);
+    const SessionContextThresholdPresentation thresholdPresentation =
+        sessionContextThresholdPresentation(m_sessionContextThresholds.value(sessionId));
+    const QString threshold = thresholdPresentation.label;
     const QString project = m_projectRoot.isEmpty()
         ? QStringLiteral("项目 --") : QStringLiteral("项目 %1").arg(QFileInfo(m_projectRoot).fileName());
     updateSessionRuntimePresentation();
@@ -10610,19 +10672,19 @@ void AgentWorkbenchWidget::updateContextStrip()
     } else {
         branch = QStringLiteral("分支 --");
     }
-    m_contextStrip->setText(QStringLiteral("%1 · %2 · %3 · 模型 %4 · %5 · %6 · %7")
+    m_contextStrip->setText(QStringLiteral("%1 · %2 · %3 · 模型 %4 · %5 · %6 · %7 · %8")
         .arg(m_mode == QStringLiteral("chat") ? QStringLiteral("Chat") : QStringLiteral("Work"),
              QStringLiteral("%1 / %2").arg(project, workspace), runtime, model,
-             permission, branch, context));
+             permission, branch, context, threshold));
     m_contextStrip->setToolTip(QStringLiteral(
-        "执行上下文：%1\n%2\n%3\n%4%5\nProvider/模型：%6 / %7\n%8\n%9%10\n%11")
+        "执行上下文：%1\n%2\n%3\n%4%5\nProvider/模型：%6 / %7\n%8\n%9%10\n%11\n%12")
         .arg(m_mode == QStringLiteral("chat") ? QStringLiteral("Chat") : QStringLiteral("Work"),
              project, workspace, runtime,
              version.isEmpty() ? QString() : QStringLiteral(" · %1").arg(version),
              provider, model, permission, branch,
              branchDrift ? QStringLiteral("；当前只读观测：%1").arg(m_gitCurrentBranch)
                          : QString(),
-             context));
+             context, thresholdPresentation.tooltip));
 }
 
 void AgentWorkbenchWidget::inspectContext()

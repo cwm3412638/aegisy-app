@@ -1355,6 +1355,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         QJsonObject session = result.value(QStringLiteral("session")).toObject();
         session.insert(QStringLiteral("runtime"), result.value(QStringLiteral("runtime")));
         session.insert(QStringLiteral("workspace"), result.value(QStringLiteral("workspace")));
+        session.insert(QStringLiteral("context_threshold"),
+                       result.value(QStringLiteral("context_threshold")));
         emit sessionStarted(id, session);
     } else if (pendingMethod == QStringLiteral("session/resume")) {
         emit sessionResumed(id, result);

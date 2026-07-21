@@ -136,6 +136,8 @@ private:
     void addTimelineItem(const QJsonObject &item, bool prepend = false);
     void addNotice(const QString &text, bool error = false);
     bool storeSessionRuntimeBinding(const QString &sessionId, const QJsonObject &runtime);
+    bool storeSessionContextThreshold(const QString &sessionId,
+                                      const QJsonObject &summary);
     bool storeSessionWorkspaceBinding(const QString &sessionId, const QJsonObject &workspace);
     QJsonObject activeSessionRuntimeBinding() const;
     QJsonObject activeSessionWorkspaceBinding() const;
@@ -508,6 +510,7 @@ private:
     QString m_pendingPinnedContextSetIdentity;
     QStringList m_pendingPinnedContextIds;
     QHash<QString, QJsonObject> m_sessionRuntimeBindings;
+    QHash<QString, QJsonObject> m_sessionContextThresholds;
     QHash<QString, QJsonObject> m_sessionWorkspaceBindings;
     QList<QJsonObject> m_contextItems;
     QList<QJsonObject> m_pinnedContextItems;
