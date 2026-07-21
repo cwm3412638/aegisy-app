@@ -53,13 +53,28 @@ Model catalog foundation evidence:
   picker/projection UI.
 - Read-only capability `model.capability-check.read-only` and method
   `model/capability-check` provide a preflight matcher for Chat/Work,
-  attachments, tools, reasoning, context-token floors, Runtime identity, model
-  availability/entitlement, and zero-data-retention policy. Work mode forces a
-  tool requirement. The result distinguishes `compatible`, `blocked`, and
-  `unknown`, returns bounded mismatch codes, and sets `selection_allowed` to
-  false unless the catalog is fresh, signed, and every required value has a
-  verified authority; present values marked `unknown` or `estimated` remain
-  unknown checks.
+  attachments, tools, reasoning, context-token floors, exact Runtime identity
+  and version, model availability/entitlement, and zero-data-retention policy.
+  Work mode forces a tool requirement. The result distinguishes `compatible`,
+  `blocked`, and `unknown`, returns bounded mismatch codes, and sets
+  `selection_allowed` to false unless the catalog is fresh, signed, and every
+  required value has a verified authority; present values marked `unknown` or
+  `estimated` remain unknown checks.
+- Additive `model-runtime-compatibility/0.1` entries preserve the legacy Runtime
+  summary while representing Codex App Server, ACP, native, and unknown adapter
+  families with canonical adapter/protocol IDs, bounded exact-version sets,
+  compatibility state, field authority, evidence version, and structured
+  warning/blocking degradations. Validation rejects duplicate adapters, versions,
+  degradation codes/features, secret-shaped data, and state/evidence/severity
+  contradictions. Capability preflight leaves a Runtime without a version
+  `unknown`, blocks a requested version outside an authoritative exact set with
+  `runtime-version-not-verified`, blocks missing/incompatible verified adapters,
+  and exposes warning degradations without converting them into blockers.
+  Protocol evidence proves the offline Preview projection is native / `aap-native`
+  / `0.1.0`, retains unknown authority, and exposes no selection, routing, token,
+  Turn, or execution authority. A signed production catalog, real ACP/native
+  contract fixtures, cloud publication, and macOS/Windows compatibility evidence
+  remain absent, so task `9.5` stays unchecked.
 - Unit and protocol fixtures cover unknown-value serialization, invalid catalog
   rejection, capability negotiation, capability preflight, and the absence of
   credential-shaped output. Catalog policy fixtures additionally reject
@@ -134,6 +149,12 @@ Model catalog foundation evidence:
 - The later 2026-07-21 root-anchored Trust Store stage passed 434 Rust unit tests
   with one ignored live fixture, 62 protocol tests, 11 stdio/Codex tests, strict
   Clippy, the complete CMake build, and CTest `agent_runtime_protocol`.
+- The later 2026-07-21 Runtime compatibility metadata stage passed 439 Rust unit
+  tests with one ignored live fixture, 62 protocol tests, 11 stdio/Codex tests,
+  strict Clippy, formatting, the complete CMake build, CTest
+  `agent_runtime_protocol`, and strict OpenSpec validation. Task `9.5` remains
+  unchecked for the production catalog, real adapter fixtures, authenticated
+  publication, and cross-platform evidence listed above.
 
 Model profile foundation evidence:
 

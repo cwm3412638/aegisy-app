@@ -5824,9 +5824,40 @@ fn model_catalog_is_read_only_and_does_not_invent_capabilities() {
     assert!(model["capabilities"]["tool_calls"].is_null());
     assert!(model["limits"]["context_tokens"].is_null());
     assert_eq!(model["field_authority"]["capabilities"], "unknown");
+    assert_eq!(model["runtime_compatibility"]["adapter"], "preview");
+    assert_eq!(model["runtime_compatibility"]["adapter_version"], "0.1.0");
+    assert_eq!(model["runtime_compatibility"]["state"], "metadata-only");
+    let matrix = model["runtime_compatibility_matrix"].as_array().unwrap();
+    assert_eq!(matrix.len(), 1);
+    assert_eq!(
+        matrix[0]["schema_version"],
+        "model-runtime-compatibility/0.1"
+    );
+    assert_eq!(matrix[0]["adapter_family"], "native");
+    assert_eq!(matrix[0]["adapter"], "preview");
+    assert_eq!(matrix[0]["protocol"], "aap-native");
+    assert_eq!(matrix[0]["exact_versions"], json!(["0.1.0"]));
+    assert_eq!(matrix[0]["state"], "unknown");
+    assert_eq!(matrix[0]["authority"], "unknown");
+    assert_eq!(
+        matrix[0]["known_degradations"][0]["code"],
+        "catalog-not-authenticated"
+    );
+    for forbidden in [
+        "selection_allowed",
+        "routing_authority",
+        "token_issued",
+        "turn_started",
+    ] {
+        assert!(catalog.get(forbidden).is_none());
+        assert!(model.get(forbidden).is_none());
+    }
     let encoded = serde_json::to_string(catalog).unwrap();
     assert!(!encoded.contains("sk-"));
     assert!(!encoded.contains("Authorization"));
+    assert!(!encoded.contains("token_issued"));
+    assert!(!encoded.contains("routing_authority"));
+    assert!(!encoded.contains("turn_started"));
 }
 
 #[test]
@@ -6008,4 +6039,17 @@ fn model_capability_check_fails_closed_for_work_unknowns() {
         .unwrap()
         .iter()
         .any(|check| check["capability"] == "image-input" && check["result"] == "unknown"));
+    let runtime_check = result["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["capability"] == "runtime")
+        .unwrap();
+    assert_eq!(runtime_check["result"], "unknown");
+    assert!(runtime_check["required"]["version"].is_null());
+    assert_eq!(
+        runtime_check["observed"]["schema_version"],
+        "model-runtime-compatibility/0.1"
+    );
+    assert_eq!(runtime_check["observed"]["authority"], "unknown");
 }

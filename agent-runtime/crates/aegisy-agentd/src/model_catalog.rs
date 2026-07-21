@@ -12,10 +12,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const SCHEMA_VERSION: &str = "model-catalog/0.1";
 pub const CAPABILITY_CHECK_SCHEMA_VERSION: &str = "model-capability-check/0.1";
+pub const RUNTIME_COMPATIBILITY_SCHEMA_VERSION: &str = "model-runtime-compatibility/0.1";
 const MAX_MODELS: usize = 256;
 const MAX_PROTOCOLS: usize = 8;
 const MAX_ROLES: usize = 16;
 const MAX_DEGRADATIONS: usize = 32;
+const MAX_RUNTIME_COMPATIBILITIES: usize = 16;
+const MAX_RUNTIME_VERSIONS: usize = 16;
+const MAX_DEGRADATION_FEATURES: usize = 16;
 const MAX_AUTHORITIES: usize = 32;
 const MAX_ALIASES: usize = 16;
 const MAX_TEXT_BYTES: usize = 256;
@@ -97,12 +101,58 @@ pub struct RoleSuitability {
     pub known_limitations: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeAdapterFamily {
+    CodexAppServer,
+    Acp,
+    Native,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeCompatibilityState {
+    Compatible,
+    Degraded,
+    Incompatible,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeDegradationSeverity {
+    Warning,
+    Blocking,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeDegradation {
+    pub code: String,
+    pub severity: RuntimeDegradationSeverity,
+    pub affected_features: Vec<String>,
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeCompatibility {
     pub adapter: String,
     pub adapter_version: String,
     pub state: String,
     pub known_degradations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeCompatibilityEntry {
+    pub schema_version: String,
+    pub adapter_family: RuntimeAdapterFamily,
+    pub adapter: String,
+    pub protocol: String,
+    pub exact_versions: Vec<String>,
+    pub state: RuntimeCompatibilityState,
+    pub authority: FieldAuthority,
+    pub evidence_version: Option<String>,
+    pub known_degradations: Vec<RuntimeDegradation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,6 +177,8 @@ pub struct ModelDescriptor {
     pub roles: Vec<RoleSuitability>,
     pub policy: ModelPolicy,
     pub runtime_compatibility: RuntimeCompatibility,
+    #[serde(default)]
+    pub runtime_compatibility_matrix: Vec<RuntimeCompatibilityEntry>,
     pub field_authority: BTreeMap<String, FieldAuthority>,
 }
 
@@ -163,6 +215,8 @@ pub struct CapabilityRequirements {
     pub context_tokens: Option<u64>,
     #[serde(default)]
     pub runtime: Option<String>,
+    #[serde(default)]
+    pub runtime_version: Option<String>,
     #[serde(default)]
     pub zero_data_retention: bool,
 }
@@ -275,16 +329,45 @@ impl ModelDescriptor {
                 validate_text(evaluation, "evaluation version")?;
             }
         }
-        if self.runtime_compatibility.known_degradations.len() > MAX_DEGRADATIONS {
-            return Err(error("runtime degradation list is too large"));
-        }
         validate_text(&self.runtime_compatibility.adapter, "runtime adapter")?;
         validate_text(
             &self.runtime_compatibility.adapter_version,
             "runtime adapter version",
         )?;
+        validate_text(
+            &self.runtime_compatibility.state,
+            "runtime compatibility state",
+        )?;
+        if self.runtime_compatibility.known_degradations.len() > MAX_DEGRADATIONS {
+            return Err(error("runtime degradation list is too large"));
+        }
         for degradation in &self.runtime_compatibility.known_degradations {
             validate_text(degradation, "runtime degradation")?;
+        }
+        if self.runtime_compatibility_matrix.len() > MAX_RUNTIME_COMPATIBILITIES {
+            return Err(error("runtime compatibility matrix is too large"));
+        }
+        let mut runtime_adapters = BTreeSet::new();
+        for compatibility in &self.runtime_compatibility_matrix {
+            compatibility.validate()?;
+            if !runtime_adapters.insert(compatibility.adapter.as_str()) {
+                return Err(error("runtime compatibility adapters must be unique"));
+            }
+        }
+        let runtime_matrix_authority = self
+            .field_authority
+            .get("runtime_compatibility")
+            .copied()
+            .unwrap_or(FieldAuthority::Unknown);
+        if !authority_is_verified(runtime_matrix_authority)
+            && self
+                .runtime_compatibility_matrix
+                .iter()
+                .any(|compatibility| authority_is_verified(compatibility.authority))
+        {
+            return Err(error(
+                "runtime compatibility entries exceed matrix authority",
+            ));
         }
         if let Some(region) = &self.policy.region {
             validate_text(region, "model region")?;
@@ -306,6 +389,127 @@ impl ModelDescriptor {
                     | "runtime_compatibility"
             ) {
                 return Err(error("model authority field is unsupported"));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl RuntimeCompatibilityEntry {
+    pub fn validate(&self) -> Result<(), CatalogError> {
+        if self.schema_version != RUNTIME_COMPATIBILITY_SCHEMA_VERSION {
+            return Err(error("unsupported runtime compatibility schema"));
+        }
+        validate_identifier(&self.adapter, "runtime adapter")?;
+        validate_identifier(&self.protocol, "runtime protocol")?;
+        match self.adapter_family {
+            RuntimeAdapterFamily::CodexAppServer if self.protocol != "codex-app-server" => {
+                return Err(error(
+                    "Codex App Server compatibility requires its canonical protocol",
+                ));
+            }
+            RuntimeAdapterFamily::Acp if self.protocol != "acp" => {
+                return Err(error("ACP compatibility requires its canonical protocol"));
+            }
+            RuntimeAdapterFamily::Native if self.protocol != "aap-native" => {
+                return Err(error(
+                    "native compatibility requires the AAP native protocol",
+                ));
+            }
+            RuntimeAdapterFamily::Unknown
+                if self.protocol != "unknown"
+                    || self.state != RuntimeCompatibilityState::Unknown
+                    || self.authority != FieldAuthority::Unknown =>
+            {
+                return Err(error(
+                    "unknown runtime family cannot claim protocol or compatibility authority",
+                ));
+            }
+            _ => {}
+        }
+        if self.exact_versions.len() > MAX_RUNTIME_VERSIONS {
+            return Err(error("runtime version list is too large"));
+        }
+        let mut versions = BTreeSet::new();
+        for version in &self.exact_versions {
+            validate_runtime_version(version, "runtime adapter version")?;
+            if !versions.insert(version.as_str()) {
+                return Err(error("runtime adapter versions must be unique"));
+            }
+        }
+        if let Some(evidence_version) = &self.evidence_version {
+            validate_text(evidence_version, "runtime compatibility evidence version")?;
+        }
+        if self.known_degradations.len() > MAX_DEGRADATIONS {
+            return Err(error("runtime degradation list is too large"));
+        }
+        let mut degradation_codes = BTreeSet::new();
+        for degradation in &self.known_degradations {
+            degradation.validate()?;
+            if !degradation_codes.insert(degradation.code.as_str()) {
+                return Err(error("runtime degradation codes must be unique"));
+            }
+        }
+        let verified = authority_is_verified(self.authority);
+        match self.state {
+            RuntimeCompatibilityState::Compatible => {
+                if !verified
+                    || self.exact_versions.is_empty()
+                    || self.evidence_version.is_none()
+                    || !self.known_degradations.is_empty()
+                {
+                    return Err(error("compatible runtime metadata lacks verified evidence"));
+                }
+            }
+            RuntimeCompatibilityState::Degraded => {
+                if !verified
+                    || self.exact_versions.is_empty()
+                    || self.evidence_version.is_none()
+                    || self.known_degradations.is_empty()
+                    || self.known_degradations.iter().any(|degradation| {
+                        degradation.severity == RuntimeDegradationSeverity::Blocking
+                    })
+                {
+                    return Err(error("degraded runtime metadata is inconsistent"));
+                }
+            }
+            RuntimeCompatibilityState::Incompatible => {
+                if !verified
+                    || self.exact_versions.is_empty()
+                    || self.evidence_version.is_none()
+                    || !self.known_degradations.iter().any(|degradation| {
+                        degradation.severity == RuntimeDegradationSeverity::Blocking
+                    })
+                {
+                    return Err(error("incompatible runtime metadata is inconsistent"));
+                }
+            }
+            RuntimeCompatibilityState::Unknown => {
+                if verified || self.evidence_version.is_some() {
+                    return Err(error(
+                        "unknown runtime metadata cannot claim verified evidence",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl RuntimeDegradation {
+    fn validate(&self) -> Result<(), CatalogError> {
+        validate_identifier(&self.code, "runtime degradation code")?;
+        validate_text(&self.summary, "runtime degradation summary")?;
+        if self.affected_features.is_empty()
+            || self.affected_features.len() > MAX_DEGRADATION_FEATURES
+        {
+            return Err(error("runtime degradation feature list is invalid"));
+        }
+        let mut features = BTreeSet::new();
+        for feature in &self.affected_features {
+            validate_identifier(feature, "runtime degradation feature")?;
+            if !features.insert(feature.as_str()) {
+                return Err(error("runtime degradation features must be unique"));
             }
         }
         Ok(())
@@ -337,6 +541,7 @@ pub fn offline_for_runtime(
             "capabilities",
             "roles",
             "policy",
+            "runtime_compatibility",
         ] {
             field_authority.insert(field.to_owned(), FieldAuthority::Unknown);
         }
@@ -400,6 +605,10 @@ pub fn offline_for_runtime(
                     "model-capabilities-unknown".into(),
                 ],
             },
+            runtime_compatibility_matrix: vec![offline_runtime_compatibility(
+                adapter,
+                adapter_version,
+            )],
             field_authority,
         });
     }
@@ -415,6 +624,45 @@ pub fn offline_for_runtime(
         models,
         validation_errors: vec!["signed-cloud-catalog-unavailable".into()],
         contains_credentials: false,
+    }
+}
+
+fn offline_runtime_compatibility(
+    adapter: &str,
+    adapter_version: &str,
+) -> RuntimeCompatibilityEntry {
+    let adapter = safe_identifier(adapter).unwrap_or_else(|| "unknown".into());
+    let (adapter_family, protocol) = match adapter.as_str() {
+        "codex-app-server" => (RuntimeAdapterFamily::CodexAppServer, "codex-app-server"),
+        "acp" => (RuntimeAdapterFamily::Acp, "acp"),
+        "preview" | "aegisy-native" => (RuntimeAdapterFamily::Native, "aap-native"),
+        _ => (RuntimeAdapterFamily::Unknown, "unknown"),
+    };
+    RuntimeCompatibilityEntry {
+        schema_version: RUNTIME_COMPATIBILITY_SCHEMA_VERSION.into(),
+        adapter_family,
+        adapter,
+        protocol: protocol.into(),
+        exact_versions: vec![
+            safe_runtime_version(adapter_version).unwrap_or_else(|| "unknown".into())
+        ],
+        state: RuntimeCompatibilityState::Unknown,
+        authority: FieldAuthority::Unknown,
+        evidence_version: None,
+        known_degradations: vec![
+            RuntimeDegradation {
+                code: "catalog-not-authenticated".into(),
+                severity: RuntimeDegradationSeverity::Warning,
+                affected_features: vec!["model-selection".into()],
+                summary: "runtime compatibility is not authenticated".into(),
+            },
+            RuntimeDegradation {
+                code: "model-capabilities-unknown".into(),
+                severity: RuntimeDegradationSeverity::Warning,
+                affected_features: vec!["capability-matching".into()],
+                summary: "runtime-specific model capabilities are unknown".into(),
+            },
+        ],
     }
 }
 
@@ -439,7 +687,13 @@ impl CapabilityRequirements {
             ));
         }
         if let Some(runtime) = &self.runtime {
-            validate_text(runtime, "capability check runtime")?;
+            validate_identifier(runtime, "capability check runtime")?;
+        }
+        if let Some(runtime_version) = &self.runtime_version {
+            validate_runtime_version(runtime_version, "capability check runtime version")?;
+            if self.runtime.is_none() {
+                return Err(error("capability check runtime version requires a runtime"));
+            }
         }
         if self.mode == "work" {
             self.tools = true;
@@ -592,39 +846,208 @@ pub fn check_capabilities(
     }
 
     if let Some(runtime) = &requirements.runtime {
-        if model.runtime_compatibility.adapter != *runtime
-            && model.runtime_compatibility.state == "verified"
-        {
-            blocked_check(
-                &mut checks,
-                &mut mismatches,
-                "runtime",
-                (
-                    json!(runtime),
-                    json!(model.runtime_compatibility.adapter),
-                    FieldAuthority::AegisyConfigured,
-                ),
-                "runtime-mismatch",
-                "the model is not declared compatible with the requested runtime",
-            );
-        } else if model.runtime_compatibility.state == "verified" {
-            check(
-                &mut checks,
-                "runtime",
-                json!(runtime),
-                json!(model.runtime_compatibility.adapter),
-                FieldAuthority::AegisyConfigured,
-                "compatible",
-            );
+        let matrix_authority = model
+            .field_authority
+            .get("runtime_compatibility")
+            .copied()
+            .unwrap_or(FieldAuthority::Unknown);
+        if model.runtime_compatibility_matrix.is_empty() {
+            if model.runtime_compatibility.state == "verified"
+                && authority_is_verified(matrix_authority)
+                && model.runtime_compatibility.adapter == *runtime
+            {
+                match requirements.runtime_version.as_deref() {
+                    None => unknown_check(
+                        &mut checks,
+                        &mut has_unknown,
+                        "runtime",
+                        json!({ "adapter": runtime, "version": Value::Null }),
+                        json!(model.runtime_compatibility),
+                        FieldAuthority::Unknown,
+                    ),
+                    Some(runtime_version)
+                        if runtime_version != model.runtime_compatibility.adapter_version =>
+                    {
+                        blocked_check(
+                            &mut checks,
+                            &mut mismatches,
+                            "runtime",
+                            (
+                                json!({ "adapter": runtime, "version": runtime_version }),
+                                json!(model.runtime_compatibility.adapter_version),
+                                matrix_authority,
+                            ),
+                            "runtime-version-not-verified",
+                            "the requested runtime version is not verified for this model",
+                        )
+                    }
+                    Some(_) => check(
+                        &mut checks,
+                        "runtime",
+                        json!({ "adapter": runtime, "version": requirements.runtime_version }),
+                        json!(model.runtime_compatibility),
+                        matrix_authority,
+                        "compatible",
+                    ),
+                }
+            } else if model.runtime_compatibility.state == "verified"
+                && authority_is_verified(matrix_authority)
+            {
+                blocked_check(
+                    &mut checks,
+                    &mut mismatches,
+                    "runtime",
+                    (
+                        json!({
+                            "adapter": runtime,
+                            "version": requirements.runtime_version,
+                        }),
+                        json!(model.runtime_compatibility),
+                        matrix_authority,
+                    ),
+                    "runtime-not-declared",
+                    "the legacy compatibility summary does not declare this runtime",
+                );
+            } else {
+                unknown_check(
+                    &mut checks,
+                    &mut has_unknown,
+                    "runtime",
+                    json!({
+                        "adapter": runtime,
+                        "version": requirements.runtime_version,
+                    }),
+                    json!(model.runtime_compatibility),
+                    FieldAuthority::Unknown,
+                );
+            }
         } else {
-            unknown_check(
-                &mut checks,
-                &mut has_unknown,
-                "runtime",
-                json!(runtime),
-                json!(model.runtime_compatibility.adapter),
-                FieldAuthority::Unknown,
-            );
+            let compatibility = model
+                .runtime_compatibility_matrix
+                .iter()
+                .find(|compatibility| compatibility.adapter == *runtime);
+            match compatibility {
+                Some(compatibility) => {
+                    let authority = if authority_is_verified(matrix_authority)
+                        && authority_is_verified(compatibility.authority)
+                    {
+                        compatibility.authority
+                    } else {
+                        FieldAuthority::Unknown
+                    };
+                    let version_verified = match requirements.runtime_version.as_deref() {
+                        None => {
+                            unknown_check(
+                                &mut checks,
+                                &mut has_unknown,
+                                "runtime",
+                                json!({ "adapter": runtime, "version": Value::Null }),
+                                json!(compatibility),
+                                FieldAuthority::Unknown,
+                            );
+                            false
+                        }
+                        Some(runtime_version)
+                            if authority_is_verified(authority)
+                                && !compatibility
+                                    .exact_versions
+                                    .iter()
+                                    .any(|version| version == runtime_version) =>
+                        {
+                            blocked_check(
+                                &mut checks,
+                                &mut mismatches,
+                                "runtime",
+                                (
+                                    json!({ "adapter": runtime, "version": runtime_version }),
+                                    json!(compatibility.exact_versions),
+                                    authority,
+                                ),
+                                "runtime-version-not-verified",
+                                "the requested runtime version is not verified for this model",
+                            );
+                            false
+                        }
+                        Some(_) => true,
+                    };
+                    if version_verified {
+                        match compatibility.state {
+                            RuntimeCompatibilityState::Compatible
+                            | RuntimeCompatibilityState::Degraded
+                                if authority_is_verified(authority) =>
+                            {
+                                check(
+                                    &mut checks,
+                                    "runtime",
+                                    json!({
+                                        "adapter": runtime,
+                                        "version": requirements.runtime_version,
+                                    }),
+                                    json!(compatibility),
+                                    authority,
+                                    "compatible",
+                                );
+                            }
+                            RuntimeCompatibilityState::Incompatible
+                                if authority_is_verified(authority) =>
+                            {
+                                blocked_check(
+                                    &mut checks,
+                                    &mut mismatches,
+                                    "runtime",
+                                    (
+                                        json!({
+                                            "adapter": runtime,
+                                            "version": requirements.runtime_version,
+                                        }),
+                                        json!(compatibility),
+                                        authority,
+                                    ),
+                                    "runtime-incompatible",
+                                    "the compatibility matrix marks this runtime incompatible",
+                                );
+                            }
+                            _ => unknown_check(
+                                &mut checks,
+                                &mut has_unknown,
+                                "runtime",
+                                json!({
+                                    "adapter": runtime,
+                                    "version": requirements.runtime_version,
+                                }),
+                                json!(compatibility),
+                                authority,
+                            ),
+                        }
+                    }
+                }
+                None if authority_is_verified(matrix_authority) => blocked_check(
+                    &mut checks,
+                    &mut mismatches,
+                    "runtime",
+                    (
+                        json!({
+                            "adapter": runtime,
+                            "version": requirements.runtime_version,
+                        }),
+                        json!(model.runtime_compatibility_matrix),
+                        matrix_authority,
+                    ),
+                    "runtime-not-declared",
+                    "the verified compatibility matrix does not declare this runtime",
+                ),
+                None => unknown_check(
+                    &mut checks,
+                    &mut has_unknown,
+                    "runtime",
+                    json!({
+                        "adapter": runtime,
+                        "version": requirements.runtime_version,
+                    }),
+                    json!(model.runtime_compatibility_matrix),
+                    FieldAuthority::Unknown,
+                ),
+            }
         }
     }
 
@@ -904,6 +1327,48 @@ fn safe_metadata_text(value: &str) -> Option<String> {
     Some(value.to_owned())
 }
 
+fn safe_identifier(value: &str) -> Option<String> {
+    validate_identifier(value, "identifier")
+        .ok()
+        .map(|()| value.to_owned())
+}
+
+fn safe_runtime_version(value: &str) -> Option<String> {
+    validate_runtime_version(value, "runtime version")
+        .ok()
+        .map(|()| value.to_owned())
+}
+
+fn validate_runtime_version(value: &str, field: &str) -> Result<(), CatalogError> {
+    validate_text(value, field)?;
+    if value.chars().any(char::is_whitespace)
+        || value
+            .chars()
+            .any(|character| matches!(character, '*' | '^' | '~' | '<' | '>' | '=' | ',' | '|'))
+    {
+        return Err(error(format!(
+            "{field} must be one exact canonical version"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_identifier(value: &str, field: &str) -> Result<(), CatalogError> {
+    validate_text(value, field)?;
+    if !value.chars().all(|character| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || matches!(character, '-' | '_' | '.')
+    }) || !value
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+    {
+        return Err(error(format!("{field} is not a canonical identifier")));
+    }
+    Ok(())
+}
+
 fn validate_text(value: &str, field: &str) -> Result<(), CatalogError> {
     if value.is_empty() || value.len() > MAX_TEXT_BYTES || value.chars().any(char::is_control) {
         return Err(error(format!("{field} is invalid")));
@@ -923,6 +1388,52 @@ fn error(message: impl Into<String>) -> CatalogError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime_compatibility(
+        adapter_family: RuntimeAdapterFamily,
+        adapter: &str,
+        protocol: &str,
+        state: RuntimeCompatibilityState,
+        degradation: Option<RuntimeDegradation>,
+    ) -> RuntimeCompatibilityEntry {
+        RuntimeCompatibilityEntry {
+            schema_version: RUNTIME_COMPATIBILITY_SCHEMA_VERSION.into(),
+            adapter_family,
+            adapter: adapter.into(),
+            protocol: protocol.into(),
+            exact_versions: vec!["1.0.0".into()],
+            state,
+            authority: FieldAuthority::AegisyConfigured,
+            evidence_version: Some("runtime-evaluation-v1".into()),
+            known_degradations: degradation.into_iter().collect(),
+        }
+    }
+
+    fn runtime_degradation(code: &str, severity: RuntimeDegradationSeverity) -> RuntimeDegradation {
+        RuntimeDegradation {
+            code: code.into(),
+            severity,
+            affected_features: vec!["tool-calls".into()],
+            summary: "runtime behavior differs from the complete contract".into(),
+        }
+    }
+
+    fn fresh_catalog_for_runtime_checks() -> ModelCatalog {
+        let mut catalog = offline_for_runtime("preview", "1.0.0", Some("local"), Some("echo"));
+        catalog.state = CatalogState::Fresh;
+        catalog.signature_validated = true;
+        catalog.issued_at_ms = Some(1);
+        catalog.expires_at_ms = Some(10_000);
+        catalog.validation_errors.clear();
+        catalog.models[0].availability = Availability::Available;
+        catalog.models[0].entitlement = Entitlement::Allowed;
+        for field in ["availability", "entitlement", "runtime_compatibility"] {
+            catalog.models[0]
+                .field_authority
+                .insert(field.into(), FieldAuthority::AegisyConfigured);
+        }
+        catalog
+    }
 
     #[test]
     fn offline_projection_keeps_unknown_values_explicit() {
@@ -998,6 +1509,298 @@ mod tests {
     }
 
     #[test]
+    fn runtime_matrix_represents_codex_acp_and_native_with_structured_degradations() {
+        let mut catalog = offline_for_runtime("preview", "1", Some("local"), Some("echo"));
+        catalog.models[0].field_authority.insert(
+            "runtime_compatibility".into(),
+            FieldAuthority::AegisyConfigured,
+        );
+        catalog.models[0].runtime_compatibility_matrix = vec![
+            runtime_compatibility(
+                RuntimeAdapterFamily::CodexAppServer,
+                "codex-app-server",
+                "codex-app-server",
+                RuntimeCompatibilityState::Compatible,
+                None,
+            ),
+            runtime_compatibility(
+                RuntimeAdapterFamily::Acp,
+                "acp",
+                "acp",
+                RuntimeCompatibilityState::Degraded,
+                Some(runtime_degradation(
+                    "structured-patch-unavailable",
+                    RuntimeDegradationSeverity::Warning,
+                )),
+            ),
+            runtime_compatibility(
+                RuntimeAdapterFamily::Native,
+                "aegisy-native",
+                "aap-native",
+                RuntimeCompatibilityState::Incompatible,
+                Some(runtime_degradation(
+                    "native-adapter-not-released",
+                    RuntimeDegradationSeverity::Blocking,
+                )),
+            ),
+        ];
+        assert!(catalog.validate().is_ok());
+        let value = serde_json::to_value(&catalog).unwrap();
+        assert_eq!(
+            value["models"][0]["runtime_compatibility_matrix"][0]["adapter_family"],
+            "codex-app-server"
+        );
+        assert_eq!(
+            value["models"][0]["runtime_compatibility_matrix"][1]["known_degradations"][0]
+                ["severity"],
+            "warning"
+        );
+        assert_eq!(
+            value["models"][0]["runtime_compatibility_matrix"][2]["state"],
+            "incompatible"
+        );
+    }
+
+    #[test]
+    fn runtime_matrix_rejects_duplicate_inconsistent_and_secret_metadata() {
+        let mut catalog = offline_for_runtime("preview", "1", Some("local"), Some("echo"));
+        catalog.models[0].field_authority.insert(
+            "runtime_compatibility".into(),
+            FieldAuthority::AegisyConfigured,
+        );
+        let compatible = runtime_compatibility(
+            RuntimeAdapterFamily::Acp,
+            "acp",
+            "acp",
+            RuntimeCompatibilityState::Compatible,
+            None,
+        );
+        catalog.models[0].runtime_compatibility_matrix = vec![compatible.clone(), compatible];
+        assert!(catalog.validate().is_err());
+
+        catalog.models[0].runtime_compatibility_matrix = vec![
+            runtime_compatibility(
+                RuntimeAdapterFamily::CodexAppServer,
+                "shared-adapter",
+                "codex-app-server",
+                RuntimeCompatibilityState::Compatible,
+                None,
+            ),
+            runtime_compatibility(
+                RuntimeAdapterFamily::Acp,
+                "shared-adapter",
+                "acp",
+                RuntimeCompatibilityState::Compatible,
+                None,
+            ),
+        ];
+        assert!(catalog.validate().is_err());
+
+        let mut mismatched_protocol = runtime_compatibility(
+            RuntimeAdapterFamily::CodexAppServer,
+            "codex-app-server",
+            "acp",
+            RuntimeCompatibilityState::Compatible,
+            None,
+        );
+        catalog.models[0].runtime_compatibility_matrix = vec![mismatched_protocol.clone()];
+        assert!(catalog.validate().is_err());
+
+        mismatched_protocol.adapter_family = RuntimeAdapterFamily::Acp;
+        mismatched_protocol.exact_versions = vec!["^1.0.0".into()];
+        catalog.models[0].runtime_compatibility_matrix = vec![mismatched_protocol];
+        assert!(catalog.validate().is_err());
+
+        catalog.models[0].runtime_compatibility_matrix = vec![runtime_compatibility(
+            RuntimeAdapterFamily::Acp,
+            "acp",
+            "acp",
+            RuntimeCompatibilityState::Unknown,
+            None,
+        )];
+        assert!(catalog.validate().is_err());
+
+        let mut incompatible = runtime_compatibility(
+            RuntimeAdapterFamily::Acp,
+            "acp",
+            "acp",
+            RuntimeCompatibilityState::Incompatible,
+            Some(runtime_degradation(
+                "tools-blocked",
+                RuntimeDegradationSeverity::Blocking,
+            )),
+        );
+        incompatible.known_degradations[0].summary = "token=secret-value".into();
+        catalog.models[0].runtime_compatibility_matrix = vec![incompatible];
+        assert!(catalog.validate().is_err());
+    }
+
+    #[test]
+    fn verified_runtime_matrix_blocks_absent_and_incompatible_adapters() {
+        let mut catalog = fresh_catalog_for_runtime_checks();
+        catalog.models[0].runtime_compatibility_matrix = vec![runtime_compatibility(
+            RuntimeAdapterFamily::Acp,
+            "acp",
+            "acp",
+            RuntimeCompatibilityState::Incompatible,
+            Some(runtime_degradation(
+                "tools-blocked",
+                RuntimeDegradationSeverity::Blocking,
+            )),
+        )];
+        let incompatible = check_capabilities(
+            &catalog,
+            "local:echo",
+            CapabilityRequirements {
+                mode: "chat".into(),
+                attachments: Vec::new(),
+                tools: false,
+                reasoning: false,
+                context_tokens: None,
+                runtime: Some("acp".into()),
+                runtime_version: Some("1.0.0".into()),
+                zero_data_retention: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(incompatible.decision, "blocked");
+        assert_eq!(incompatible.mismatches[0].code, "runtime-incompatible");
+
+        let absent = check_capabilities(
+            &catalog,
+            "local:echo",
+            CapabilityRequirements {
+                mode: "chat".into(),
+                attachments: Vec::new(),
+                tools: false,
+                reasoning: false,
+                context_tokens: None,
+                runtime: Some("codex-app-server".into()),
+                runtime_version: Some("1.0.0".into()),
+                zero_data_retention: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(absent.decision, "blocked");
+        assert_eq!(absent.mismatches[0].code, "runtime-not-declared");
+    }
+
+    #[test]
+    fn verified_warning_degradation_is_visible_without_becoming_a_blocker() {
+        let mut catalog = fresh_catalog_for_runtime_checks();
+        catalog.models[0].runtime_compatibility_matrix = vec![runtime_compatibility(
+            RuntimeAdapterFamily::CodexAppServer,
+            "codex-app-server",
+            "codex-app-server",
+            RuntimeCompatibilityState::Degraded,
+            Some(runtime_degradation(
+                "background-jobs-unavailable",
+                RuntimeDegradationSeverity::Warning,
+            )),
+        )];
+        let result = check_capabilities(
+            &catalog,
+            "local:echo",
+            CapabilityRequirements {
+                mode: "chat".into(),
+                attachments: Vec::new(),
+                tools: false,
+                reasoning: false,
+                context_tokens: None,
+                runtime: Some("codex-app-server".into()),
+                runtime_version: Some("1.0.0".into()),
+                zero_data_retention: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.decision, "compatible");
+        assert!(result.selection_allowed);
+        assert_eq!(
+            result.checks[2].observed["known_degradations"][0]["code"],
+            "background-jobs-unavailable"
+        );
+    }
+
+    #[test]
+    fn verified_runtime_matrix_requires_an_exact_requested_version() {
+        let mut catalog = fresh_catalog_for_runtime_checks();
+        catalog.models[0].runtime_compatibility_matrix = vec![runtime_compatibility(
+            RuntimeAdapterFamily::CodexAppServer,
+            "codex-app-server",
+            "codex-app-server",
+            RuntimeCompatibilityState::Compatible,
+            None,
+        )];
+
+        let missing_version = check_capabilities(
+            &catalog,
+            "local:echo",
+            CapabilityRequirements {
+                mode: "chat".into(),
+                attachments: Vec::new(),
+                tools: false,
+                reasoning: false,
+                context_tokens: None,
+                runtime: Some("codex-app-server".into()),
+                runtime_version: None,
+                zero_data_retention: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(missing_version.decision, "unknown");
+        assert!(!missing_version.selection_allowed);
+        assert!(missing_version
+            .checks
+            .iter()
+            .any(|check| check.capability == "runtime" && check.result == "unknown"));
+
+        let unsupported_version = check_capabilities(
+            &catalog,
+            "local:echo",
+            CapabilityRequirements {
+                mode: "chat".into(),
+                attachments: Vec::new(),
+                tools: false,
+                reasoning: false,
+                context_tokens: None,
+                runtime: Some("codex-app-server".into()),
+                runtime_version: Some("2.0.0".into()),
+                zero_data_retention: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(unsupported_version.decision, "blocked");
+        assert_eq!(
+            unsupported_version.mismatches[0].code,
+            "runtime-version-not-verified"
+        );
+
+        let invalid = CapabilityRequirements {
+            mode: "chat".into(),
+            attachments: Vec::new(),
+            tools: false,
+            reasoning: false,
+            context_tokens: None,
+            runtime: None,
+            runtime_version: Some("1.0.0".into()),
+            zero_data_retention: false,
+        };
+        assert!(invalid.validate_and_normalize().is_err());
+
+        let version_range = CapabilityRequirements {
+            mode: "chat".into(),
+            attachments: Vec::new(),
+            tools: false,
+            reasoning: false,
+            context_tokens: None,
+            runtime: Some("codex-app-server".into()),
+            runtime_version: Some("1.*".into()),
+            zero_data_retention: false,
+        };
+        assert!(version_range.validate_and_normalize().is_err());
+    }
+
+    #[test]
     fn work_requirements_make_unknown_tools_and_attachments_non_selectable() {
         let catalog = offline_for_runtime("preview", "1", Some("local"), Some("echo"));
         let result = check_capabilities(
@@ -1010,6 +1813,7 @@ mod tests {
                 reasoning: false,
                 context_tokens: Some(1_000),
                 runtime: Some("preview".into()),
+                runtime_version: None,
                 zero_data_retention: false,
             },
         )
@@ -1043,6 +1847,7 @@ mod tests {
                 reasoning: false,
                 context_tokens: None,
                 runtime: None,
+                runtime_version: None,
                 zero_data_retention: false,
             },
         )
@@ -1065,7 +1870,15 @@ mod tests {
         catalog.models[0]
             .field_authority
             .insert("entitlement".into(), FieldAuthority::AegisyConfigured);
-        catalog.models[0].runtime_compatibility.state = "verified".into();
+        catalog.models[0].field_authority.insert(
+            "runtime_compatibility".into(),
+            FieldAuthority::AegisyConfigured,
+        );
+        let runtime = &mut catalog.models[0].runtime_compatibility_matrix[0];
+        runtime.state = RuntimeCompatibilityState::Compatible;
+        runtime.authority = FieldAuthority::AegisyConfigured;
+        runtime.evidence_version = Some("runtime-fixture-v1".into());
+        runtime.known_degradations.clear();
         catalog.models[0].limits.context_tokens = Some(8_192);
         catalog.models[0].limits.authority = FieldAuthority::UpstreamAuthoritative;
         catalog.models[0].capabilities.tool_calls = Some(true);
@@ -1084,6 +1897,7 @@ mod tests {
                 reasoning: true,
                 context_tokens: Some(4_096),
                 runtime: Some("preview".into()),
+                runtime_version: Some("1".into()),
                 zero_data_retention: true,
             },
         )
@@ -1115,6 +1929,7 @@ mod tests {
                 reasoning: false,
                 context_tokens: None,
                 runtime: None,
+                runtime_version: None,
                 zero_data_retention: false,
             },
         )
@@ -1147,6 +1962,7 @@ mod tests {
                 reasoning: false,
                 context_tokens: Some(1_024),
                 runtime: None,
+                runtime_version: None,
                 zero_data_retention: true,
             },
         )

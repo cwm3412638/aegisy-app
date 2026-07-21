@@ -103,11 +103,15 @@ but availability, limits, capabilities, role suitability, entitlement, and
 policy fields remain explicitly unknown until an authenticated catalog is
 validated. Unknown booleans are serialized as `null`; clients must disable a
 dependent feature rather than treating `null` as support. The response contains
-no credentials, refresh token, prompt, or provider response content.
+no credentials, refresh token, prompt, or provider response content. The legacy
+`runtime_compatibility` summary remains for additive compatibility. New clients
+consume `runtime_compatibility_matrix`, whose entries identify the adapter
+family, adapter and protocol IDs, exact evaluated versions, field authority,
+evidence version, and structured known degradations.
 
 ```jsonl
 {"jsonrpc":"2.0","id":"7","method":"model/catalog","params":{}}
-{"jsonrpc":"2.0","id":"7","result":{"schema_version":"model-catalog/0.1","catalog_version":"offline-runtime-binding","state":"offline","source":"runtime-binding","signature_validated":false,"refresh_supported":false,"models":[{"model_id":"local:deterministic-echo","provider":"local","availability":"unknown","entitlement":"unknown","lifecycle":"unknown","limits":{"context_tokens":null,"output_tokens":null,"authority":"unknown"},"capabilities":{"tool_calls":null,"image_input":null,"authority":"unknown"},"runtime_compatibility":{"state":"metadata-only","known_degradations":["catalog-not-authenticated","model-capabilities-unknown"]}}],"contains_credentials":false}}
+{"jsonrpc":"2.0","id":"7","result":{"schema_version":"model-catalog/0.1","catalog_version":"offline-runtime-binding","state":"offline","source":"runtime-binding","signature_validated":false,"refresh_supported":false,"models":[{"model_id":"local:deterministic-echo","provider":"local","availability":"unknown","entitlement":"unknown","lifecycle":"unknown","limits":{"context_tokens":null,"output_tokens":null,"authority":"unknown"},"capabilities":{"tool_calls":null,"image_input":null,"authority":"unknown"},"runtime_compatibility":{"adapter":"preview","adapter_version":"0.1.0","state":"metadata-only","known_degradations":["catalog-not-authenticated","model-capabilities-unknown"]},"runtime_compatibility_matrix":[{"schema_version":"model-runtime-compatibility/0.1","adapter_family":"native","adapter":"preview","protocol":"aap-native","exact_versions":["0.1.0"],"state":"unknown","authority":"unknown","evidence_version":null,"known_degradations":[{"code":"catalog-not-authenticated","severity":"warning","affected_features":["model-selection"],"summary":"runtime compatibility is not authenticated"}]}]}],"contains_credentials":false}}
 ```
 
 This boundary is read-only and does not select a model, issue a token, refresh
@@ -118,16 +122,20 @@ OpenSpec tasks `9.1` through `10.12`.
 The additive `model.capability-check.read-only` capability exposes
 `model/capability-check` for preflight only. Its requirements identify Chat or
 Work mode, attachments, tools, reasoning, a context-token floor, the expected
-runtime, and an optional zero-data-retention policy. Work mode implicitly
-requires tool calls. The result is `compatible`, `blocked`, or `unknown` with
-per-capability authority and mismatch codes. Selection is allowed only when the
-catalog is fresh, signature-validated, and every required value is known;
+runtime and exact runtime version, and an optional zero-data-retention policy.
+Work mode implicitly requires tool calls. A requested Runtime without a version
+remains `unknown`; a version outside an authoritative `exact_versions` set is
+blocked with `runtime-version-not-verified`. Only an exact match may proceed to
+the Compatible, Degraded, or Incompatible state. The result is `compatible`,
+`blocked`, or `unknown` with per-capability authority and mismatch codes.
+Selection is allowed only when the catalog is fresh, signature-validated, and
+every required value is known;
 offline metadata remains non-selectable, and a present value whose authority is
 still `unknown` or `estimated` remains an unknown check.
 
 ```jsonl
-{"jsonrpc":"2.0","id":"8","method":"model/capability-check","params":{"model_id":"local:deterministic-echo","requirements":{"mode":"work","attachments":["image"],"context_tokens":1024,"runtime":"preview"}}}
-{"jsonrpc":"2.0","id":"8","result":{"schema_version":"model-capability-check/0.1","model_id":"local:deterministic-echo","catalog_state":"offline","decision":"unknown","selection_allowed":false,"checks":[{"capability":"tool-calls","required":true,"observed":null,"authority":"unknown","result":"unknown"}],"mismatches":[]}}
+{"jsonrpc":"2.0","id":"8","method":"model/capability-check","params":{"model_id":"local:deterministic-echo","requirements":{"mode":"work","attachments":["image"],"context_tokens":1024,"runtime":"preview","runtime_version":"0.1.0"}}}
+{"jsonrpc":"2.0","id":"8","result":{"schema_version":"model-capability-check/0.1","model_id":"local:deterministic-echo","catalog_state":"offline","decision":"unknown","selection_allowed":false,"checks":[{"capability":"runtime","required":{"adapter":"preview","version":"0.1.0"},"observed":{"schema_version":"model-runtime-compatibility/0.1","adapter_family":"native","adapter":"preview","protocol":"aap-native","exact_versions":["0.1.0"],"state":"unknown","authority":"unknown"},"authority":"unknown","result":"unknown"}],"mismatches":[]}}
 ```
 
 The internal `model-profile/0.1` contract is metadata-only and is not an AAP

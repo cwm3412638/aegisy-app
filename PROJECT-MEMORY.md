@@ -128,15 +128,30 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 - Capability matcher foundation (2026-07-21): the sidecar now exposes the
   read-only `model.capability-check.read-only` method
   `model/capability-check`. It validates Chat/Work, attachments, tools,
-  reasoning, context-token floors, Runtime identity, entitlement/availability,
-  and zero-data-retention requirements. Work mode implicitly requires tool calls;
-  results distinguish `compatible`, `blocked`, and `unknown`, and
+  reasoning, context-token floors, exact Runtime identity/version,
+  entitlement/availability, and zero-data-retention requirements. Work mode
+  implicitly requires tool calls; results distinguish `compatible`, `blocked`, and `unknown`, and
   `selection_allowed` remains false unless the catalog is fresh, signed, and
   every required value has a verified authority; present values labelled
   `unknown` or `estimated` still fail closed. This is preflight only and does not
   select a model, issue credentials, start a turn, or emit a model-change event; keep
   OpenSpec `10.2` unchecked until authenticated catalog/profile integration and
   cross-platform UI evidence exist.
+- Runtime compatibility metadata foundation (2026-07-21): additive
+  `model-runtime-compatibility/0.1` entries preserve the legacy summary while
+  representing Codex App Server, ACP, native, and unknown adapter families with
+  canonical adapter/protocol IDs, bounded exact evaluated versions, compatibility
+  state, field authority, evidence version, and structured warning/blocking
+  degradations. Validation rejects duplicate or contradictory entries and
+  secret-shaped metadata. Capability preflight keeps a Runtime request without a
+  version `unknown`, blocks a version outside an authoritative set with stable code
+  `runtime-version-not-verified`, blocks missing/incompatible verified adapters,
+  and exposes warning degradations without treating them as blockers. The offline
+  projection identifies the current adapter/version but retains Unknown authority
+  and grants no model selection, routing, token, Turn, or execution authority. A
+  signed production catalog, real ACP/native adapter fixtures, authenticated cloud
+  publication, and macOS/Windows compatibility evidence remain absent; keep
+  OpenSpec `9.5` unchecked.
 - Model profile foundation (2026-07-21): internal `model-profile/0.1` now
   validates global/project scope, bounded role bindings for Agent/plan/apply/
   review/utility/embedding/rerank, secret-free source metadata, and a
@@ -1122,7 +1137,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 434 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 439 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 62 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
@@ -1184,6 +1199,18 @@ after disk commit failure. No production root, authenticated download, signing o
 key-publication service, Runtime/AAP/Qt trust-store integration, model picker, token,
 routing, or turn authority was added. OpenSpec `9.3`, `9.4`, and `10.1` remain
 unchecked.
+
+On 2026-07-21 the Runtime compatibility metadata stage passed 439 Rust unit tests
+with one ignored live fixture, 62 protocol tests, 11 stdio/Codex tests, strict
+Clippy, formatting, the complete CMake desktop build, and CTest
+`agent_runtime_protocol`. Strict OpenSpec validation passed. Focused evidence covers
+Codex/ACP/native family serialization, duplicate and contradictory metadata denial,
+secret rejection, missing-version Unknown handling, exact-version matching, stable
+version/adaptor blockers, warning degradation visibility, and the offline AAP
+projection's false/absent selection, routing, token, Turn, and execution authority.
+No signed production compatibility catalog, authenticated publication, real ACP or
+native adapter contract fixture, or macOS/Windows compatibility matrix evidence was
+added. OpenSpec `9.5` remains unchecked.
 
 On 2026-07-20 the schema-v12 durable notification outbox and its read-only AAP/Qt
 inspection layer passed all Rust counts above, strict Clippy, formatting,

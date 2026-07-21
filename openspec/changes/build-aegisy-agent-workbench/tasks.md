@@ -227,6 +227,16 @@
     cloud refresh, key-publication endpoint, or AAP/Qt refresh path exists.
 - [ ] 9.4 Add authenticated catalog endpoint with conditional requests and deterministic test fixtures
 - [ ] 9.5 Add runtime compatibility and known-degradation metadata for Codex, ACP, and future native adapters
+  - Partial foundation: additive `model-runtime-compatibility/0.1` entries now
+    describe Codex App Server, ACP, native, and unknown adapter families with
+    canonical adapter/protocol IDs, exact evaluated versions, field authority,
+    evidence version, and structured warning/blocking degradations. Capability
+    preflight requires an exact Runtime version before treating verified metadata
+    as compatible and blocks versions outside the authoritative set. The current
+    Runtime projection remains offline/unknown and grants no selection, routing,
+    token, Turn, or execution authority. A signed production catalog, real ACP and
+    native adapter contract fixtures, cloud publication, and macOS/Windows
+    compatibility evidence are still absent, so the task remains unchecked.
 - [ ] 9.6 Add role recommendations backed by evaluation version, sample size, and known limitations
 - [ ] 9.7 Implement short-lived audience/model/session-scoped Agent token issuance and refresh
 - [ ] 9.8 Implement usage correlation that separates retries, reroutes, cache, reasoning, and child-task consumption
