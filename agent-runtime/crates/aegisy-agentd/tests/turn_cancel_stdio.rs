@@ -262,7 +262,7 @@ while IFS= read -r line; do
       ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-provider-failure"}}}\n' "$id"
-      printf '{"method":"turn/completed","params":{"threadId":"thread-provider-failure","turn":{"id":"turn-provider-failure","status":"failed","error":{"message":"provider request failed after authorization Bearer ghp_123456789012345678901234567890"}}}}\n'
+      printf '{"method":"turn/completed","params":{"threadId":"thread-provider-failure","turn":{"id":"turn-provider-failure","status":"failed","error":{"message":"stream disconnected before completion after authorization Bearer ghp_123456789012345678901234567890","additionalDetails":"private provider response body","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":502}}}}}}\n'
       ;;
     *'"method":"shutdown"'*)
       printf '{"id":%s,"result":{}}\n' "$id"
@@ -788,7 +788,7 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
 }
 
 #[test]
-fn stdio_codex_provider_failure_is_redacted_and_not_retryable() {
+fn stdio_codex_provider_failure_preserves_content_free_upstream_classification() {
     let codex = provider_failure_codex();
     let secret = "ghp_123456789012345678901234567890";
     let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
@@ -861,13 +861,32 @@ fn stdio_codex_provider_failure_is_redacted_and_not_retryable() {
             && message["params"]["event"] == "turn.failed"
             && message["params"]["item"]["data"]["schema_version"] == "runtime-error/0.1"
     });
-    assert_eq!(failed["params"]["item"]["data"]["class"], "provider");
-    assert_eq!(failed["params"]["item"]["data"]["retryable"], false);
+    assert_eq!(failed["params"]["item"]["data"]["class"], "transport");
+    assert_eq!(failed["params"]["item"]["data"]["retryable"], true);
+    assert_eq!(
+        failed["params"]["item"]["data"]["provider_error"]["schema_version"],
+        "provider-error/0.1"
+    );
+    assert_eq!(
+        failed["params"]["item"]["data"]["provider_error"]["kind"],
+        "response-stream-disconnected"
+    );
+    assert_eq!(
+        failed["params"]["item"]["data"]["provider_error"]["http_status"],
+        502
+    );
+    assert_eq!(
+        failed["params"]["item"]["data"]["provider_error"]["response_body_included"],
+        false
+    );
     assert!(!failed.to_string().contains(secret));
-    assert!(failed["params"]["item"]["content"]
-        .as_str()
-        .unwrap()
-        .contains("[REDACTED]"));
+    assert!(!failed
+        .to_string()
+        .contains("private provider response body"));
+    assert_eq!(
+        failed["params"]["item"]["content"],
+        "Upstream provider request failed"
+    );
 
     send(
         &mut stdin,

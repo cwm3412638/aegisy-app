@@ -44,6 +44,7 @@ pub mod permission_issuer;
 pub mod permission_profile;
 pub mod pinned_context;
 pub mod pinned_context_store;
+mod provider_error;
 mod repository_index;
 pub mod session_compaction;
 pub mod session_compaction_store;
@@ -60,7 +61,6 @@ mod terminal;
 mod tokenizer;
 mod turn_context;
 mod unified_execution;
-pub mod usage_authority;
 mod workbench_migration;
 pub mod workbench_store;
 mod workspace;
@@ -94,6 +94,7 @@ use operation_reconciliation::{
     reconcile as reconcile_operation, EventState, GitState, OperationKind, ProcessState,
     ReconciliationEvidence, ReconciliationInput, WorkspaceState,
 };
+use provider_error::ProviderError;
 use repository_index::WorkspaceIndex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1995,6 +1996,17 @@ fn runtime_error_content(message: &str) -> String {
     bounded_provider_text(message, 8 * 1024)
 }
 
+fn runtime_error_content_with_provider(
+    message: &str,
+    provider_error: Option<&ProviderError>,
+) -> String {
+    if provider_error.is_some() {
+        "Upstream provider request failed".into()
+    } else {
+        runtime_error_content(message)
+    }
+}
+
 fn runtime_error_classification(message: &str) -> (&'static str, bool) {
     let normalized = message.to_ascii_lowercase();
     if normalized.contains("timeout") || normalized.contains("timed out") {
@@ -2074,13 +2086,28 @@ fn runtime_error_classification(message: &str) -> (&'static str, bool) {
     }
 }
 
-fn runtime_error_data(message: &str) -> Value {
-    let (class, retryable) = runtime_error_classification(message);
-    json!({
+fn runtime_error_data_with_provider(
+    message: &str,
+    provider_error: Option<&ProviderError>,
+) -> Value {
+    let (class, retryable) = provider_error
+        .map(|error| (error.class, error.retryable))
+        .unwrap_or_else(|| runtime_error_classification(message));
+    let mut data = json!({
         "schema_version": "runtime-error/0.1",
         "class": class,
         "retryable": retryable
-    })
+    });
+    if let Some(provider_error) = provider_error {
+        if let Ok(value) = serde_json::to_value(provider_error) {
+            data["provider_error"] = value;
+        }
+    }
+    data
+}
+
+fn runtime_error_data(message: &str) -> Value {
+    runtime_error_data_with_provider(message, None)
 }
 
 fn default_terminal_kind() -> String {
@@ -10053,7 +10080,11 @@ impl Runtime {
                             None,
                         ));
                     }
-                    CodexEvent::TurnFailed { turn_id, message } => {
+                    CodexEvent::TurnFailed {
+                        turn_id,
+                        message,
+                        provider_error,
+                    } => {
                         if let Err(error) =
                             self.persist_turn_state(&params.session_id, &turn_id, "failed")
                         {
@@ -10066,8 +10097,14 @@ impl Runtime {
                             kind: "error".into(),
                             role: "system".into(),
                             state: "completed".into(),
-                            content: runtime_error_content(&message),
-                            data: Some(runtime_error_data(&message)),
+                            content: runtime_error_content_with_provider(
+                                &message,
+                                provider_error.as_ref(),
+                            ),
+                            data: Some(runtime_error_data_with_provider(
+                                &message,
+                                provider_error.as_ref(),
+                            )),
                         };
                         emit(self.event(
                             &params.session_id,
@@ -15156,6 +15193,37 @@ mod turn_cancel_tests {
         assert_eq!(
             runtime_error_data("cannot read Codex App Server output")["retryable"],
             true
+        );
+    }
+
+    #[test]
+    fn runtime_error_data_preserves_structured_provider_metadata() {
+        let provider_error = crate::provider_error::from_codex_error_info(&json!({
+            "responseStreamDisconnected": { "httpStatusCode": 502 }
+        }))
+        .unwrap();
+        let secret = "ghp_123456789012345678901234567890";
+        let data = runtime_error_data_with_provider(
+            &format!("stream disconnected after authorization {secret}"),
+            Some(&provider_error),
+        );
+        assert_eq!(data["schema_version"], "runtime-error/0.1");
+        assert_eq!(data["class"], "transport");
+        assert_eq!(data["retryable"], true);
+        assert_eq!(
+            data["provider_error"]["schema_version"],
+            "provider-error/0.1"
+        );
+        assert_eq!(
+            data["provider_error"]["kind"],
+            "response-stream-disconnected"
+        );
+        assert_eq!(data["provider_error"]["http_status"], 502);
+        assert_eq!(data["provider_error"]["response_body_included"], false);
+        assert!(!data.to_string().contains(secret));
+        assert_eq!(
+            runtime_error_content_with_provider(secret, Some(&provider_error)),
+            "Upstream provider request failed"
         );
     }
 

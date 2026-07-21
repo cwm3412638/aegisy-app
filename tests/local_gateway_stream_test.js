@@ -32,7 +32,12 @@ function request(port, route) {
       const finish = kind => {
         if (completed) return;
         completed = true;
-        resolve({ kind, body: Buffer.concat(chunks).toString('utf8') });
+        resolve({
+          kind,
+          body: Buffer.concat(chunks).toString('utf8'),
+          headers: response.headers,
+          status: response.statusCode
+        });
       };
       response.on('data', chunk => chunks.push(chunk));
       response.on('end', () => finish('end'));
@@ -49,10 +54,19 @@ async function main() {
     if (req.url === '/v1/responses') {
       response.writeHead(200, {
         'content-type': 'text/event-stream',
-        'x-request-id': 'upstream-normal-id'
+        'x-request-id': 'upstream-normal-id',
+        'x-aegisy-error-class': 'spoofed'
       });
       response.write('data: {"type":"response.output_text.delta","delta":"ok"}\n\n');
       response.end('data: [DONE]\n\n');
+      return;
+    }
+    if (req.url === '/v1/status-429') {
+      response.writeHead(429, {
+        'content-type': 'application/json',
+        'x-request-id': 'upstream-rate-limit-id'
+      });
+      response.end(JSON.stringify({ error: { message: 'private provider body' } }));
       return;
     }
     response.writeHead(200, {
@@ -109,6 +123,7 @@ async function main() {
   const normal = await request(gatewayPort, '/v1/responses');
   assert.strictEqual(normal.kind, 'end');
   assert(normal.body.includes('[DONE]'));
+  assert.strictEqual(normal.headers['x-aegisy-error-class'], undefined);
   await waitFor(() => events.some(event => event.type === 'request'
     && event.upstream_request_id === 'upstream-normal-id'));
   const normalEvent = events.find(event => event.type === 'request'
@@ -116,6 +131,24 @@ async function main() {
   assert.strictEqual(normalEvent.termination, 'end');
   assert(normalEvent.bytes_received > 0);
   assert(normalEvent.request_id);
+  assert.strictEqual(normalEvent.provider_error, undefined);
+
+  const rateLimited = await request(gatewayPort, '/v1/status-429');
+  assert.strictEqual(rateLimited.status, 429);
+  assert.strictEqual(rateLimited.headers['x-aegisy-error-schema'], 'provider-error/0.1');
+  assert.strictEqual(rateLimited.headers['x-aegisy-error-kind'], 'rate-limit');
+  assert.strictEqual(rateLimited.headers['x-aegisy-error-class'], 'provider');
+  assert.strictEqual(rateLimited.headers['x-aegisy-error-retryable'], 'true');
+  await waitFor(() => events.some(event => event.type === 'request'
+    && event.upstream_request_id === 'upstream-rate-limit-id'));
+  const rateEvent = events.find(event => event.type === 'request'
+    && event.upstream_request_id === 'upstream-rate-limit-id');
+  assert.deepStrictEqual(rateEvent.provider_error, {
+    schema_version: 'provider-error/0.1', source: 'aegisy-gateway',
+    kind: 'rate-limit', class: 'provider', http_status: 429, retryable: true,
+    response_body_included: false, credentials_included: false
+  });
+  assert(!JSON.stringify(rateEvent).includes('private provider body'));
 
   await request(gatewayPort, '/v1/abort');
   await waitFor(() => events.some(event => event.type === 'request'
@@ -123,6 +156,10 @@ async function main() {
   const abortedEvent = events.find(event => event.type === 'request'
     && event.termination !== 'end');
   assert(['aborted', 'error'].includes(abortedEvent.termination));
+  assert.strictEqual(abortedEvent.provider_error.schema_version, 'provider-error/0.1');
+  assert.strictEqual(abortedEvent.provider_error.kind, 'response-stream-disconnected');
+  assert.strictEqual(abortedEvent.provider_error.class, 'transport');
+  assert.strictEqual(abortedEvent.provider_error.retryable, true);
   assert(!JSON.stringify(events).includes(upstreamKey));
 
   gateway.stdin.write('{"type":"shutdown"}\n');

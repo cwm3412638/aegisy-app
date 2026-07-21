@@ -1,5 +1,6 @@
 use crate::command_output::CommandOutputCapture;
 use crate::output_redaction::{redact_complete, OutputRedactor};
+use crate::provider_error::{from_codex_error_info, ProviderError};
 use crate::session_environment::{EnvironmentSummary, ProcessEnvironment, SessionEnvironment};
 use crate::{TurnCancellationHandle, TurnSteerRequest, TurnSteeringHandle};
 use serde::Serialize;
@@ -155,6 +156,7 @@ pub enum CodexEvent {
     TurnFailed {
         turn_id: String,
         message: String,
+        provider_error: Option<ProviderError>,
     },
 }
 
@@ -604,6 +606,7 @@ impl CodexAdapter {
                     emit(CodexEvent::TurnFailed {
                         turn_id: turn_id.clone(),
                         message,
+                        provider_error: None,
                     });
                 }
                 _ => {}
@@ -1177,6 +1180,9 @@ fn turn_terminal_event(params: &Value, turn_id: &str) -> CodexEvent {
                 .and_then(Value::as_str)
                 .unwrap_or("Codex turn failed")
                 .to_owned(),
+            provider_error: params
+                .pointer("/turn/error/codexErrorInfo")
+                .and_then(from_codex_error_info),
         },
     }
 }
@@ -1204,6 +1210,40 @@ mod tests {
         assert!(codex_version_is_pinned(PINNED_CODEX_VERSION));
         assert!(!codex_version_is_pinned("codex-cli 0.144.4"));
         assert!(!codex_version_is_pinned("unknown"));
+    }
+
+    #[test]
+    fn turn_terminal_event_preserves_provider_error_classification_only() {
+        let event = turn_terminal_event(
+            &json!({
+                "turn": {
+                    "status": "failed",
+                    "error": {
+                        "message": "stream disconnected before completion: private body",
+                        "codexErrorInfo": {
+                            "responseStreamDisconnected": { "httpStatusCode": 502 }
+                        }
+                    }
+                }
+            }),
+            "turn-provider-error",
+        );
+        let CodexEvent::TurnFailed {
+            message,
+            provider_error,
+            ..
+        } = event
+        else {
+            panic!("expected failed turn event");
+        };
+        assert!(message.contains("stream disconnected"));
+        let provider_error = provider_error.expect("provider metadata");
+        assert_eq!(provider_error.kind, "response-stream-disconnected");
+        assert_eq!(provider_error.http_status, Some(502));
+        assert!(provider_error.retryable);
+        assert!(!serde_json::to_string(&provider_error)
+            .unwrap()
+            .contains("private body"));
     }
 
     #[test]

@@ -38,7 +38,9 @@ function responseHeaders(headers) {
   const result = { ...headers };
   for (const name of [
     'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
-    'te', 'trailer', 'transfer-encoding', 'upgrade'
+    'te', 'trailer', 'transfer-encoding', 'upgrade',
+    'x-aegisy-error-schema', 'x-aegisy-error-kind', 'x-aegisy-error-class',
+    'x-aegisy-error-retryable', 'x-aegisy-upstream-status'
   ]) {
     delete result[name];
   }
@@ -63,6 +65,67 @@ function routeModel(tool, routePath) {
 function finiteNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : null;
+}
+
+// Keep this vocabulary aligned with the AAP provider-error/0.1 projection.
+// Classification is based only on transport state and HTTP metadata; response
+// bodies are intentionally never parsed or copied into gateway events.
+function classifyUpstreamFailure(status, termination) {
+  const httpStatus = Number.isInteger(status) && status >= 0 && status <= 65535
+    ? status : null;
+  if (termination === 'aborted') {
+    return {
+      schema_version: 'provider-error/0.1', source: 'aegisy-gateway',
+      kind: 'response-stream-disconnected', class: 'transport',
+      http_status: httpStatus, retryable: true,
+      response_body_included: false, credentials_included: false
+    };
+  }
+  if (termination === 'error' || termination === 'request_error') {
+    return {
+      schema_version: 'provider-error/0.1', source: 'aegisy-gateway',
+      kind: 'http-connection-failed', class: 'transport',
+      http_status: httpStatus, retryable: true,
+      response_body_included: false, credentials_included: false
+    };
+  }
+  if (termination === 'client_closed') return null;
+  if (httpStatus === null || httpStatus < 400) return null;
+  let kind = 'http-error';
+  let retryable = false;
+  let errorClass = 'provider';
+  if (httpStatus === 408) {
+    kind = 'request-timeout';
+    errorClass = 'timeout';
+    retryable = true;
+  } else if (httpStatus === 401 || httpStatus === 403) {
+    kind = 'unauthorized';
+  } else if ([400, 404, 405, 406, 409, 413, 415, 422].includes(httpStatus)) {
+    kind = 'bad-request';
+  } else if (httpStatus === 429) {
+    kind = 'rate-limit';
+    retryable = true;
+  } else if ([500, 502, 503, 504].includes(httpStatus)) {
+    kind = 'server-overloaded';
+    retryable = true;
+  }
+  return {
+    schema_version: 'provider-error/0.1', source: 'aegisy-gateway',
+    kind, class: errorClass, http_status: httpStatus, retryable,
+    response_body_included: false, credentials_included: false
+  };
+}
+
+function providerErrorHeaders(error) {
+  if (!error) return {};
+  const headers = {
+    'x-aegisy-error-schema': error.schema_version,
+    'x-aegisy-error-kind': error.kind,
+    'x-aegisy-error-class': error.class,
+    'x-aegisy-error-retryable': error.retryable ? 'true' : 'false'
+  };
+  if (error.http_status !== null) headers['x-aegisy-upstream-status'] = String(error.http_status);
+  return headers;
 }
 
 function mergeUsage(target, value) {
@@ -230,8 +293,12 @@ const server = http.createServer((request, response) => {
       if (upstreamRequest.socket && typeof upstreamRequest.socket.setNoDelay === 'function') {
         upstreamRequest.socket.setNoDelay(true);
       }
-      response.writeHead(upstreamResponse.statusCode || 502,
-                         responseHeaders(upstreamResponse.headers));
+      const upstreamStatus = upstreamResponse.statusCode || 502;
+      const responseError = classifyUpstreamFailure(upstreamStatus, 'end');
+      response.writeHead(upstreamStatus, {
+        ...responseHeaders(upstreamResponse.headers),
+        ...providerErrorHeaders(responseError)
+      });
       const usage = { inputTokens: null, outputTokens: null, totalTokens: null };
       const contentType = String(upstreamResponse.headers['content-type'] || '').toLowerCase();
       const contentEncoding = safeHeader(upstreamResponse.headers['content-encoding']);
@@ -242,9 +309,10 @@ const server = http.createServer((request, response) => {
       let eventBuffer = '';
       let jsonBuffer = Buffer.alloc(0);
       let bytesReceived = 0;
-      const emitTerminalEvent = (status, termination, error = '') => {
+      const emitTerminalEvent = (status, termination) => {
         if (terminalEventEmitted) return;
         terminalEventEmitted = true;
+        const providerError = classifyUpstreamFailure(status, termination);
         const event = appendUsageFields({
           type: 'request',
           request_id: requestId,
@@ -263,7 +331,7 @@ const server = http.createServer((request, response) => {
           transfer_encoding: transferEncoding,
           upstream_request_id: upstreamRequestId
         }, usage);
-        if (error) event.error = String(error).slice(0, 200);
+        if (providerError) event.provider_error = providerError;
         emit(event);
       };
       const inspectEventLine = lineValue => {
@@ -305,17 +373,17 @@ const server = http.createServer((request, response) => {
       upstreamResponse.on('aborted', () => {
         upstreamTerminating = true;
         if (!response.destroyed) response.destroy();
-        emitTerminalEvent(502, 'aborted', 'Upstream response aborted before completion');
+        emitTerminalEvent(upstreamStatus, 'aborted');
       });
-      upstreamResponse.on('error', error => {
+      upstreamResponse.on('error', () => {
         upstreamTerminating = true;
         if (!response.destroyed) response.destroy();
-        emitTerminalEvent(502, 'error', error.message || error);
+        emitTerminalEvent(upstreamStatus, 'error');
       });
     });
 
     upstreamRequest.on('timeout', () => upstreamRequest.destroy(new Error('Upstream timeout')));
-    upstreamRequest.on('error', error => {
+    upstreamRequest.on('error', () => {
       if (terminalEventEmitted) return;
       terminalEventEmitted = true;
       if (!response.headersSent) {
@@ -323,7 +391,9 @@ const server = http.createServer((request, response) => {
       } else {
         response.destroy();
       }
-      emit({
+      const providerError = classifyUpstreamFailure(null,
+        clientClosed ? 'client_closed' : 'request_error');
+      const event = {
         type: 'request',
         request_id: requestId,
         timestamp: new Date().toISOString(),
@@ -335,9 +405,10 @@ const server = http.createServer((request, response) => {
         status: 502,
         latency_ms: Date.now() - startedAt,
         termination: clientClosed ? 'client_closed' : 'request_error',
-        bytes_received: 0,
-        error: String(error.message || error).slice(0, 200)
-      });
+        bytes_received: 0
+      };
+      if (providerError) event.provider_error = providerError;
+      emit(event);
     });
     if (body.length) upstreamRequest.write(body);
     upstreamRequest.end();
