@@ -115,6 +115,21 @@ the cache, or emit a model-change event. Catalog signing, authenticated refresh,
 durable cache states, capability matching, profiles, and model switching remain
 OpenSpec tasks `9.1` through `10.12`.
 
+The additive `model.capability-check.read-only` capability exposes
+`model/capability-check` for preflight only. Its requirements identify Chat or
+Work mode, attachments, tools, reasoning, a context-token floor, the expected
+runtime, and an optional zero-data-retention policy. Work mode implicitly
+requires tool calls. The result is `compatible`, `blocked`, or `unknown` with
+per-capability authority and mismatch codes. Selection is allowed only when the
+catalog is fresh, signature-validated, and every required value is known;
+offline metadata remains non-selectable, and a present value whose authority is
+still `unknown` or `estimated` remains an unknown check.
+
+```jsonl
+{"jsonrpc":"2.0","id":"8","method":"model/capability-check","params":{"model_id":"local:deterministic-echo","requirements":{"mode":"work","attachments":["image"],"context_tokens":1024,"runtime":"preview"}}}
+{"jsonrpc":"2.0","id":"8","result":{"schema_version":"model-capability-check/0.1","model_id":"local:deterministic-echo","catalog_state":"offline","decision":"unknown","selection_allowed":false,"checks":[{"capability":"tool-calls","required":true,"observed":null,"authority":"unknown","result":"unknown"}],"mismatches":[]}}
+```
+
 ## Structured Plan Boundary
 
 The sidecar contains an internal `structured-plan/0.1` data contract for the

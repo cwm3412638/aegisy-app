@@ -201,6 +201,15 @@ QString AgentRuntimeClient::modelCatalog()
     return sendRequest(QStringLiteral("model/catalog"));
 }
 
+QString AgentRuntimeClient::checkModelCapabilities(const QString &modelId,
+                                                   const QJsonObject &requirements)
+{
+    return sendRequest(QStringLiteral("model/capability-check"), {
+        {QStringLiteral("model_id"), modelId},
+        {QStringLiteral("requirements"), requirements},
+    });
+}
+
 QString AgentRuntimeClient::restartRuntime()
 {
     return sendRequest(QStringLiteral("runtime/restart"));
@@ -1349,6 +1358,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit runtimeDegradationsRead(id, result);
     } else if (pendingMethod == QStringLiteral("model/catalog")) {
         emit modelCatalogRead(id, result);
+    } else if (pendingMethod == QStringLiteral("model/capability-check")) {
+        emit modelCapabilityChecked(id, result);
     } else if (pendingMethod == QStringLiteral("runtime/restart")) {
         emit runtimeRestarted(id, result);
     } else if (pendingMethod == QStringLiteral("session/recovery/status")) {

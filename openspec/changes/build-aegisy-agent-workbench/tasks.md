@@ -199,6 +199,12 @@
     projection and Qt requests it after initialization. Durable signed cache,
     refresh, stale/invalid transitions, and desktop picker state remain open.
 - [ ] 10.2 Implement capability matcher for Chat, Work, attachments, tools, reasoning, context, runtime, and policy
+  - Partial foundation: read-only `model/capability-check` validates Chat/Work
+    requirements, implicitly requires tools for Work, and returns explicit
+    compatible/blocked/unknown checks for attachments, tools, reasoning, context,
+    Runtime, entitlement, availability, and zero-data-retention policy. Offline
+    or unsigned catalog metadata, and values with unknown/estimated authority,
+    can never make selection allowed.
 - [ ] 10.3 Implement global and project model profiles for Agent, plan, apply, review, utility, embedding, and rerank roles
 - [ ] 10.4 Provide a simple one-model profile and prevent unnecessary role calls by default
 - [ ] 10.5 Implement model/profile picker with capability differences, source, availability, role suitability, and expected cost/latency disclosure

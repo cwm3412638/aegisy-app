@@ -33,6 +33,8 @@ public:
     QString runtimeHealth();
     QString runtimeDegradations();
     QString modelCatalog();
+    QString checkModelCapabilities(const QString &modelId,
+                                   const QJsonObject &requirements);
     QString restartRuntime();
     QString listProjects(int limit = 50);
     QString updateProjectNavigation(const QString &projectId, bool pinned);
@@ -208,6 +210,7 @@ signals:
     void runtimeHealthRead(const QJsonObject &health);
     void runtimeDegradationsRead(const QString &requestId, const QJsonObject &result);
     void modelCatalogRead(const QString &requestId, const QJsonObject &result);
+    void modelCapabilityChecked(const QString &requestId, const QJsonObject &result);
     void runtimeRestarted(const QString &requestId, const QJsonObject &result);
     void projectsListed(const QString &requestId, const QJsonObject &result);
     void projectNavigationChanged(const QString &requestId, const QJsonObject &result);

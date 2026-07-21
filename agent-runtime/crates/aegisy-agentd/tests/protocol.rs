@@ -166,6 +166,11 @@ fn ready_runtime() -> Runtime {
         .unwrap()
         .iter()
         .any(|capability| capability == "model.catalog.read-only"));
+    assert!(messages[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "model.capability-check.read-only"));
     let capabilities = messages[0]["result"]["capabilities"].as_array().unwrap();
     assert!(!capabilities
         .iter()
@@ -5822,4 +5827,51 @@ fn model_catalog_is_read_only_and_does_not_invent_capabilities() {
     let encoded = serde_json::to_string(catalog).unwrap();
     assert!(!encoded.contains("sk-"));
     assert!(!encoded.contains("Authorization"));
+}
+
+#[test]
+fn model_capability_check_fails_closed_for_work_unknowns() {
+    let mut runtime = Runtime::default();
+    let initialized = runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": { "name": "capability-test", "version": "1" }
+        }),
+    ));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "model.capability-check.read-only"));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+
+    let response = runtime.handle_line(&request(
+        "check",
+        "model/capability-check",
+        json!({
+            "model_id": "local:deterministic-echo",
+            "requirements": {
+                "mode": "work",
+                "attachments": ["image"],
+                "context_tokens": 1024,
+                "runtime": "preview"
+            }
+        }),
+    ));
+    let result = &response[0]["result"];
+    assert_eq!(result["schema_version"], "model-capability-check/0.1");
+    assert_eq!(result["decision"], "unknown");
+    assert_eq!(result["selection_allowed"], false);
+    assert!(result["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["capability"] == "tool-calls" && check["result"] == "unknown"));
+    assert!(result["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|check| check["capability"] == "image-input" && check["result"] == "unknown"));
 }

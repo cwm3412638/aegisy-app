@@ -118,8 +118,20 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Qt requests this projection after initialization through
   `AgentRuntimeClient::modelCatalog` and emits `modelCatalogRead`; the existing
   model display remains a Session binding display, not a picker. OpenSpec `9.1`
-  through `10.12` remain unchecked pending signed cloud refresh/cache,
-  capability matching, durable profiles, and truthful switching events.
+  through `10.12` remain unchecked pending signed cloud refresh/cache, complete
+  matcher/profile integration, durable profiles, and truthful switching events.
+- Capability matcher foundation (2026-07-21): the sidecar now exposes the
+  read-only `model.capability-check.read-only` method
+  `model/capability-check`. It validates Chat/Work, attachments, tools,
+  reasoning, context-token floors, Runtime identity, entitlement/availability,
+  and zero-data-retention requirements. Work mode implicitly requires tool calls;
+  results distinguish `compatible`, `blocked`, and `unknown`, and
+  `selection_allowed` remains false unless the catalog is fresh, signed, and
+  every required value has a verified authority; present values labelled
+  `unknown` or `estimated` still fail closed. This is preflight only and does not
+  select a model, issue credentials, start a turn, or emit a model-change event; keep
+  OpenSpec `10.2` unchecked until authenticated catalog/profile integration and
+  cross-platform UI evidence exist.
 - OpenSpec task `21.1` is complete: background jobs, multi-agent execution, and
   unattended writes remain unadvertised and disabled until their prerequisite
   security, recovery, budget, evaluation, and release gates are recorded. The
@@ -1025,8 +1037,8 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 394 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 57 Rust protocol tests, eleven macOS
+Current verified baseline: 16 desktop tests, 402 passed Rust sidecar unit tests plus
+one explicitly ignored live Codex fixture, 59 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
@@ -1053,14 +1065,15 @@ bound branch, but this host killed the process at startup after 0.45s without an
 assertion output. Tasks `6.6` and `12.6` remain unchecked for the control-plane,
 turn-metadata, dedicated-worktree, scale, and cross-platform gates listed above.
 
-On 2026-07-21 the model-catalog foundation stage added the internal
-`model-catalog/0.1` validation contract, the read-only AAP `model/catalog`
-projection, and the Qt `AgentRuntimeClient::modelCatalog` request/signal. Full
-Rust verification passed 397 unit tests with one ignored live fixture, 58
-protocol tests, and 11 stdio/Codex tests; strict Clippy, the complete CMake
-desktop build, and CTest `agent_runtime_protocol` passed. The projection is
-explicitly offline and unsigned, leaves unverified capability/limit values
-unknown, and grants no selection, token, routing, or execution authority.
+On 2026-07-21 the model-catalog and capability-matcher foundation stages added
+the internal `model-catalog/0.1` validation contract, the read-only AAP
+`model/catalog` and `model/capability-check` projections, and the corresponding
+Qt request/signals. Full Rust verification passed 402 unit tests with one
+ignored live fixture, 59 protocol tests, and 11 stdio/Codex tests; strict
+Clippy, the complete CMake desktop build, and CTest `agent_runtime_protocol`
+passed. The projection is explicitly offline and unsigned, leaves unverified
+capability/limit values unknown, and grants no selection, token, routing, or
+execution authority.
 `openspec validate build-aegisy-agent-workbench --strict` was attempted but the
 host terminated the Node-backed CLI with exit 137 before producing validation
 output; keep the prior successful validation as the last authoritative result

@@ -6,16 +6,18 @@
 //! for a supported feature.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 pub const SCHEMA_VERSION: &str = "model-catalog/0.1";
+pub const CAPABILITY_CHECK_SCHEMA_VERSION: &str = "model-capability-check/0.1";
 const MAX_MODELS: usize = 256;
 const MAX_PROTOCOLS: usize = 8;
 const MAX_ROLES: usize = 16;
 const MAX_DEGRADATIONS: usize = 32;
 const MAX_TEXT_BYTES: usize = 256;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CatalogState {
     Fresh,
@@ -24,7 +26,7 @@ pub enum CatalogState {
     Offline,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum FieldAuthority {
     UpstreamAuthoritative,
@@ -34,7 +36,7 @@ pub enum FieldAuthority {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Availability {
     Available,
@@ -43,7 +45,7 @@ pub enum Availability {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Entitlement {
     Allowed,
@@ -51,7 +53,7 @@ pub enum Entitlement {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Lifecycle {
     Active,
@@ -143,6 +145,50 @@ pub struct ModelCatalog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogError {
     pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CapabilityRequirements {
+    pub mode: String,
+    #[serde(default)]
+    pub attachments: Vec<String>,
+    #[serde(default)]
+    pub tools: bool,
+    #[serde(default)]
+    pub reasoning: bool,
+    #[serde(default)]
+    pub context_tokens: Option<u64>,
+    #[serde(default)]
+    pub runtime: Option<String>,
+    #[serde(default)]
+    pub zero_data_retention: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CapabilityCheckEntry {
+    pub capability: String,
+    pub required: Value,
+    pub observed: Value,
+    pub authority: FieldAuthority,
+    pub result: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CapabilityMismatch {
+    pub code: String,
+    pub capability: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CapabilityCheckResult {
+    pub schema_version: String,
+    pub model_id: String,
+    pub catalog_state: CatalogState,
+    pub decision: String,
+    pub selection_allowed: bool,
+    pub checks: Vec<CapabilityCheckEntry>,
+    pub mismatches: Vec<CapabilityMismatch>,
 }
 
 impl ModelCatalog {
@@ -338,6 +384,478 @@ pub fn offline_for_runtime(
     }
 }
 
+impl CapabilityRequirements {
+    pub fn validate_and_normalize(mut self) -> Result<Self, CatalogError> {
+        if !matches!(self.mode.as_str(), "chat" | "work") {
+            return Err(error("capability check mode must be chat or work"));
+        }
+        validate_text(&self.mode, "capability check mode")?;
+        if self.attachments.len() > 8 {
+            return Err(error("capability check attachment list is too large"));
+        }
+        for attachment in &self.attachments {
+            validate_text(attachment, "capability check attachment")?;
+            if !matches!(attachment.as_str(), "image" | "audio" | "video") {
+                return Err(error("capability check attachment kind is unsupported"));
+            }
+        }
+        if self.context_tokens == Some(0) {
+            return Err(error(
+                "capability check context requirement must be positive",
+            ));
+        }
+        if let Some(runtime) = &self.runtime {
+            validate_text(runtime, "capability check runtime")?;
+        }
+        if self.mode == "work" {
+            self.tools = true;
+        }
+        Ok(self)
+    }
+}
+
+pub fn check_capabilities(
+    catalog: &ModelCatalog,
+    model_id: &str,
+    requirements: CapabilityRequirements,
+) -> Result<CapabilityCheckResult, CatalogError> {
+    validate_text(model_id, "capability check model ID")?;
+    let requirements = requirements.validate_and_normalize()?;
+    let Some(model) = catalog
+        .models
+        .iter()
+        .find(|model| model.model_id == model_id)
+    else {
+        return Ok(CapabilityCheckResult {
+            schema_version: CAPABILITY_CHECK_SCHEMA_VERSION.into(),
+            model_id: model_id.into(),
+            catalog_state: catalog.state,
+            decision: "blocked".into(),
+            selection_allowed: false,
+            checks: Vec::new(),
+            mismatches: vec![CapabilityMismatch {
+                code: "model-not-in-catalog".into(),
+                capability: "model".into(),
+                reason: "the requested model is not present in the validated catalog".into(),
+            }],
+        });
+    };
+
+    let mut checks = Vec::new();
+    let mut mismatches = Vec::new();
+    let mut has_unknown = false;
+
+    let availability_authority = model
+        .field_authority
+        .get("availability")
+        .copied()
+        .unwrap_or(FieldAuthority::Unknown);
+    match model.availability {
+        Availability::Available if authority_is_verified(availability_authority) => check(
+            &mut checks,
+            "availability",
+            json!("available"),
+            json!("available"),
+            availability_authority,
+            "compatible",
+        ),
+        Availability::Available => unknown_check(
+            &mut checks,
+            &mut has_unknown,
+            "availability",
+            json!("known"),
+            json!("available"),
+            availability_authority,
+        ),
+        Availability::Unknown => unknown_check(
+            &mut checks,
+            &mut has_unknown,
+            "availability",
+            json!("known"),
+            json!("unknown"),
+            FieldAuthority::Unknown,
+        ),
+        Availability::Unavailable | Availability::Deprecated
+            if authority_is_verified(availability_authority) =>
+        {
+            blocked_check(
+                &mut checks,
+                &mut mismatches,
+                "availability",
+                (
+                    json!("available"),
+                    json!(match model.availability {
+                        Availability::Unavailable => "unavailable",
+                        Availability::Deprecated => "deprecated",
+                        _ => unreachable!("availability branch is exhaustive"),
+                    }),
+                    availability_authority,
+                ),
+                "model-unavailable",
+                "the catalog marks this model unavailable or deprecated",
+            )
+        }
+        Availability::Unavailable | Availability::Deprecated => unknown_check(
+            &mut checks,
+            &mut has_unknown,
+            "availability",
+            json!("available"),
+            json!(match model.availability {
+                Availability::Unavailable => "unavailable",
+                Availability::Deprecated => "deprecated",
+                _ => unreachable!("availability branch is exhaustive"),
+            }),
+            availability_authority,
+        ),
+    }
+
+    let entitlement_authority = model
+        .field_authority
+        .get("entitlement")
+        .copied()
+        .unwrap_or(FieldAuthority::Unknown);
+    match model.entitlement {
+        Entitlement::Allowed if authority_is_verified(entitlement_authority) => check(
+            &mut checks,
+            "entitlement",
+            json!("allowed"),
+            json!("allowed"),
+            entitlement_authority,
+            "compatible",
+        ),
+        Entitlement::Allowed => unknown_check(
+            &mut checks,
+            &mut has_unknown,
+            "entitlement",
+            json!("allowed"),
+            json!("allowed"),
+            entitlement_authority,
+        ),
+        Entitlement::Unknown => unknown_check(
+            &mut checks,
+            &mut has_unknown,
+            "entitlement",
+            json!("allowed"),
+            json!("unknown"),
+            FieldAuthority::Unknown,
+        ),
+        Entitlement::Denied if authority_is_verified(entitlement_authority) => blocked_check(
+            &mut checks,
+            &mut mismatches,
+            "entitlement",
+            (json!("allowed"), json!("denied"), entitlement_authority),
+            "entitlement-denied",
+            "the catalog does not grant access to this model",
+        ),
+        Entitlement::Denied => unknown_check(
+            &mut checks,
+            &mut has_unknown,
+            "entitlement",
+            json!("allowed"),
+            json!("denied"),
+            entitlement_authority,
+        ),
+    }
+
+    if let Some(runtime) = &requirements.runtime {
+        if model.runtime_compatibility.adapter != *runtime
+            && model.runtime_compatibility.state == "verified"
+        {
+            blocked_check(
+                &mut checks,
+                &mut mismatches,
+                "runtime",
+                (
+                    json!(runtime),
+                    json!(model.runtime_compatibility.adapter),
+                    FieldAuthority::AegisyConfigured,
+                ),
+                "runtime-mismatch",
+                "the model is not declared compatible with the requested runtime",
+            );
+        } else if model.runtime_compatibility.state == "verified" {
+            check(
+                &mut checks,
+                "runtime",
+                json!(runtime),
+                json!(model.runtime_compatibility.adapter),
+                FieldAuthority::AegisyConfigured,
+                "compatible",
+            );
+        } else {
+            unknown_check(
+                &mut checks,
+                &mut has_unknown,
+                "runtime",
+                json!(runtime),
+                json!(model.runtime_compatibility.adapter),
+                FieldAuthority::Unknown,
+            );
+        }
+    }
+
+    if requirements.tools {
+        check_bool(
+            &mut checks,
+            &mut mismatches,
+            &mut has_unknown,
+            "tool-calls",
+            model.capabilities.tool_calls,
+            "tool-calls-unsupported",
+            model.capabilities.authority,
+        );
+    }
+    if requirements.reasoning {
+        check_bool(
+            &mut checks,
+            &mut mismatches,
+            &mut has_unknown,
+            "reasoning",
+            model.capabilities.reasoning,
+            "reasoning-unsupported",
+            model.capabilities.authority,
+        );
+    }
+    for attachment in &requirements.attachments {
+        let (capability, observed) = match attachment.as_str() {
+            "image" => ("image-input", model.capabilities.image_input),
+            "audio" => ("audio-input", model.capabilities.audio_input),
+            "video" => ("video-input", model.capabilities.video_input),
+            _ => unreachable!("attachment kinds are validated above"),
+        };
+        check_bool(
+            &mut checks,
+            &mut mismatches,
+            &mut has_unknown,
+            capability,
+            observed,
+            &format!("{capability}-unsupported"),
+            model.capabilities.authority,
+        );
+    }
+    if let Some(required_context) = requirements.context_tokens {
+        match model.limits.context_tokens {
+            Some(observed)
+                if observed >= required_context
+                    && authority_is_verified(model.limits.authority) =>
+            {
+                check(
+                    &mut checks,
+                    "context-tokens",
+                    json!(required_context),
+                    json!(observed),
+                    model.limits.authority,
+                    "compatible",
+                )
+            }
+            Some(observed) if observed >= required_context => unknown_check(
+                &mut checks,
+                &mut has_unknown,
+                "context-tokens",
+                json!(required_context),
+                json!(observed),
+                model.limits.authority,
+            ),
+            Some(observed) if authority_is_verified(model.limits.authority) => blocked_check(
+                &mut checks,
+                &mut mismatches,
+                "context-tokens",
+                (
+                    json!(required_context),
+                    json!(observed),
+                    model.limits.authority,
+                ),
+                "context-too-small",
+                "the declared context limit is smaller than the requirement",
+            ),
+            Some(observed) => unknown_check(
+                &mut checks,
+                &mut has_unknown,
+                "context-tokens",
+                json!(required_context),
+                json!(observed),
+                model.limits.authority,
+            ),
+            None => unknown_check(
+                &mut checks,
+                &mut has_unknown,
+                "context-tokens",
+                json!(required_context),
+                Value::Null,
+                model.limits.authority,
+            ),
+        }
+    }
+    if requirements.zero_data_retention {
+        match model.policy.zero_data_retention {
+            Some(true) if authority_is_verified(model.policy.authority) => check(
+                &mut checks,
+                "zero-data-retention",
+                json!(true),
+                json!(true),
+                model.policy.authority,
+                "compatible",
+            ),
+            Some(true) => unknown_check(
+                &mut checks,
+                &mut has_unknown,
+                "zero-data-retention",
+                json!(true),
+                json!(true),
+                model.policy.authority,
+            ),
+            Some(false) if authority_is_verified(model.policy.authority) => blocked_check(
+                &mut checks,
+                &mut mismatches,
+                "zero-data-retention",
+                (json!(true), json!(false), model.policy.authority),
+                "retention-policy-mismatch",
+                "the model policy does not satisfy zero-data-retention",
+            ),
+            Some(false) => unknown_check(
+                &mut checks,
+                &mut has_unknown,
+                "zero-data-retention",
+                json!(true),
+                json!(false),
+                model.policy.authority,
+            ),
+            None => unknown_check(
+                &mut checks,
+                &mut has_unknown,
+                "zero-data-retention",
+                json!(true),
+                Value::Null,
+                model.policy.authority,
+            ),
+        }
+    }
+
+    let decision = if !mismatches.is_empty() {
+        "blocked"
+    } else if has_unknown || catalog.state != CatalogState::Fresh || !catalog.signature_validated {
+        "unknown"
+    } else {
+        "compatible"
+    };
+    Ok(CapabilityCheckResult {
+        schema_version: CAPABILITY_CHECK_SCHEMA_VERSION.into(),
+        model_id: model_id.into(),
+        catalog_state: catalog.state,
+        selection_allowed: decision == "compatible",
+        decision: decision.into(),
+        checks,
+        mismatches,
+    })
+}
+
+fn check(
+    checks: &mut Vec<CapabilityCheckEntry>,
+    capability: &str,
+    required: Value,
+    observed: Value,
+    authority: FieldAuthority,
+    result: &str,
+) {
+    checks.push(CapabilityCheckEntry {
+        capability: capability.into(),
+        required,
+        observed,
+        authority,
+        result: result.into(),
+    });
+}
+
+fn unknown_check(
+    checks: &mut Vec<CapabilityCheckEntry>,
+    has_unknown: &mut bool,
+    capability: &str,
+    required: Value,
+    observed: Value,
+    authority: FieldAuthority,
+) {
+    *has_unknown = true;
+    check(checks, capability, required, observed, authority, "unknown");
+}
+
+fn blocked_check(
+    checks: &mut Vec<CapabilityCheckEntry>,
+    mismatches: &mut Vec<CapabilityMismatch>,
+    capability: &str,
+    (required, observed, authority): (Value, Value, FieldAuthority),
+    code: &str,
+    reason: &str,
+) {
+    check(checks, capability, required, observed, authority, "blocked");
+    mismatches.push(CapabilityMismatch {
+        code: code.into(),
+        capability: capability.into(),
+        reason: reason.into(),
+    });
+}
+
+fn check_bool(
+    checks: &mut Vec<CapabilityCheckEntry>,
+    mismatches: &mut Vec<CapabilityMismatch>,
+    has_unknown: &mut bool,
+    capability: &str,
+    observed: Option<bool>,
+    mismatch_code: &str,
+    authority: FieldAuthority,
+) {
+    match observed {
+        Some(true) if authority_is_verified(authority) => check(
+            checks,
+            capability,
+            json!(true),
+            json!(true),
+            authority,
+            "compatible",
+        ),
+        Some(true) => unknown_check(
+            checks,
+            has_unknown,
+            capability,
+            json!(true),
+            json!(true),
+            authority,
+        ),
+        Some(false) if authority_is_verified(authority) => blocked_check(
+            checks,
+            mismatches,
+            capability,
+            (json!(true), json!(false), authority),
+            mismatch_code,
+            "the catalog explicitly reports that the required capability is unavailable",
+        ),
+        Some(false) => unknown_check(
+            checks,
+            has_unknown,
+            capability,
+            json!(true),
+            json!(false),
+            authority,
+        ),
+        None => unknown_check(
+            checks,
+            has_unknown,
+            capability,
+            json!(true),
+            Value::Null,
+            authority,
+        ),
+    }
+}
+
+fn authority_is_verified(authority: FieldAuthority) -> bool {
+    matches!(
+        authority,
+        FieldAuthority::UpstreamAuthoritative
+            | FieldAuthority::AegisyConfigured
+            | FieldAuthority::EvaluationDerived
+    )
+}
+
 fn safe_metadata_text(value: &str) -> Option<String> {
     if value.is_empty()
         || value.len() > MAX_TEXT_BYTES
@@ -408,5 +926,164 @@ mod tests {
         let value = serde_json::to_value(catalog).unwrap();
         assert!(value["models"][0]["capabilities"]["tool_calls"].is_null());
         assert_eq!(value["state"], "offline");
+    }
+
+    #[test]
+    fn work_requirements_make_unknown_tools_and_attachments_non_selectable() {
+        let catalog = offline_for_runtime("preview", "1", Some("local"), Some("echo"));
+        let result = check_capabilities(
+            &catalog,
+            "local:echo",
+            CapabilityRequirements {
+                mode: "work".into(),
+                attachments: vec!["image".into()],
+                tools: false,
+                reasoning: false,
+                context_tokens: Some(1_000),
+                runtime: Some("preview".into()),
+                zero_data_retention: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.decision, "unknown");
+        assert!(!result.selection_allowed);
+        assert!(result
+            .checks
+            .iter()
+            .any(|check| check.capability == "tool-calls" && check.result == "unknown"));
+        assert!(result
+            .checks
+            .iter()
+            .any(|check| check.capability == "image-input" && check.result == "unknown"));
+    }
+
+    #[test]
+    fn explicit_unavailable_model_blocks_before_unknown_fallback() {
+        let mut catalog = offline_for_runtime("preview", "1", Some("local"), Some("echo"));
+        catalog.models[0].availability = Availability::Unavailable;
+        catalog.models[0]
+            .field_authority
+            .insert("availability".into(), FieldAuthority::AegisyConfigured);
+        let result = check_capabilities(
+            &catalog,
+            "local:echo",
+            CapabilityRequirements {
+                mode: "chat".into(),
+                attachments: Vec::new(),
+                tools: false,
+                reasoning: false,
+                context_tokens: None,
+                runtime: None,
+                zero_data_retention: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.decision, "blocked");
+        assert_eq!(result.mismatches[0].code, "model-unavailable");
+        assert!(!result.selection_allowed);
+    }
+
+    #[test]
+    fn fresh_signed_catalog_allows_only_complete_compatible_requirements() {
+        let mut catalog = offline_for_runtime("preview", "1", Some("local"), Some("echo"));
+        catalog.state = CatalogState::Fresh;
+        catalog.signature_validated = true;
+        catalog.models[0].availability = Availability::Available;
+        catalog.models[0].entitlement = Entitlement::Allowed;
+        catalog.models[0]
+            .field_authority
+            .insert("availability".into(), FieldAuthority::AegisyConfigured);
+        catalog.models[0]
+            .field_authority
+            .insert("entitlement".into(), FieldAuthority::AegisyConfigured);
+        catalog.models[0].runtime_compatibility.state = "verified".into();
+        catalog.models[0].limits.context_tokens = Some(8_192);
+        catalog.models[0].limits.authority = FieldAuthority::UpstreamAuthoritative;
+        catalog.models[0].capabilities.tool_calls = Some(true);
+        catalog.models[0].capabilities.reasoning = Some(true);
+        catalog.models[0].capabilities.image_input = Some(true);
+        catalog.models[0].capabilities.authority = FieldAuthority::UpstreamAuthoritative;
+        catalog.models[0].policy.zero_data_retention = Some(true);
+        catalog.models[0].policy.authority = FieldAuthority::AegisyConfigured;
+        let result = check_capabilities(
+            &catalog,
+            "local:echo",
+            CapabilityRequirements {
+                mode: "work".into(),
+                attachments: vec!["image".into()],
+                tools: false,
+                reasoning: true,
+                context_tokens: Some(4_096),
+                runtime: Some("preview".into()),
+                zero_data_retention: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.decision, "compatible");
+        assert!(result.selection_allowed);
+        assert!(result.mismatches.is_empty());
+        assert!(result
+            .checks
+            .iter()
+            .all(|check| check.result == "compatible"));
+    }
+
+    #[test]
+    fn present_values_with_unknown_authority_do_not_become_compatible() {
+        let mut catalog = offline_for_runtime("preview", "1", Some("local"), Some("echo"));
+        catalog.state = CatalogState::Fresh;
+        catalog.signature_validated = true;
+        catalog.models[0].availability = Availability::Available;
+        catalog.models[0].entitlement = Entitlement::Allowed;
+        catalog.models[0].capabilities.tool_calls = Some(true);
+        let result = check_capabilities(
+            &catalog,
+            "local:echo",
+            CapabilityRequirements {
+                mode: "work".into(),
+                attachments: Vec::new(),
+                tools: false,
+                reasoning: false,
+                context_tokens: None,
+                runtime: None,
+                zero_data_retention: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.decision, "unknown");
+        assert!(!result.selection_allowed);
+        assert!(result
+            .checks
+            .iter()
+            .any(|check| check.capability == "tool-calls" && check.result == "unknown"));
+    }
+
+    #[test]
+    fn negative_values_with_unknown_authority_do_not_become_blocked() {
+        let mut catalog = offline_for_runtime("preview", "1", Some("local"), Some("echo"));
+        catalog.state = CatalogState::Fresh;
+        catalog.signature_validated = true;
+        catalog.models[0].availability = Availability::Unavailable;
+        catalog.models[0].entitlement = Entitlement::Denied;
+        catalog.models[0].limits.context_tokens = Some(128);
+        catalog.models[0].capabilities.tool_calls = Some(false);
+        catalog.models[0].policy.zero_data_retention = Some(false);
+        let result = check_capabilities(
+            &catalog,
+            "local:echo",
+            CapabilityRequirements {
+                mode: "work".into(),
+                attachments: Vec::new(),
+                tools: false,
+                reasoning: false,
+                context_tokens: Some(1_024),
+                runtime: None,
+                zero_data_retention: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(result.decision, "unknown");
+        assert!(result.mismatches.is_empty());
+        assert!(result.checks.iter().all(|check| check.result == "unknown"));
     }
 }

@@ -3174,6 +3174,7 @@ impl Runtime {
             "runtime/health" => self.runtime_health(request),
             "runtime/degradations" => self.runtime_degradations(request),
             "model/catalog" => self.model_catalog(request),
+            "model/capability-check" => self.model_capability_check(request),
             _ if self.is_recovery_mode() => {
                 self.error_for(&request, -32120, "workbench is in read-only recovery mode")
             }
@@ -3460,6 +3461,55 @@ impl Runtime {
     }
 
     fn model_catalog(&self, request: Request) -> Vec<Value> {
+        let catalog = self.current_model_catalog();
+        if let Err(error) = catalog.validate() {
+            return self.error_for(
+                &request,
+                -32114,
+                format!("model catalog validation failed: {}", error.message),
+            );
+        }
+        self.success_for(
+            &request,
+            serde_json::to_value(catalog).expect("model catalog serialization"),
+        )
+    }
+
+    fn model_capability_check(&self, request: Request) -> Vec<Value> {
+        #[derive(Debug, Deserialize)]
+        struct Params {
+            model_id: String,
+            requirements: model_catalog::CapabilityRequirements,
+        }
+        let params: Params = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        let catalog = self.current_model_catalog();
+        if let Err(error) = catalog.validate() {
+            return self.error_for(
+                &request,
+                -32114,
+                format!("model catalog validation failed: {}", error.message),
+            );
+        }
+        let result = match model_catalog::check_capabilities(
+            &catalog,
+            &params.model_id,
+            params.requirements,
+        ) {
+            Ok(result) => result,
+            Err(error) => return self.error_for(&request, -32602, error.message),
+        };
+        self.success_for(
+            &request,
+            serde_json::to_value(result).expect("model capability check serialization"),
+        )
+    }
+
+    fn current_model_catalog(&self) -> model_catalog::ModelCatalog {
         let (adapter, version, provider, model) = match &self.backend {
             Backend::Preview => (
                 "preview".to_owned(),
@@ -3487,17 +3537,7 @@ impl Runtime {
             provider.as_deref(),
             model.as_deref(),
         );
-        if let Err(error) = catalog.validate() {
-            return self.error_for(
-                &request,
-                -32114,
-                format!("model catalog validation failed: {}", error.message),
-            );
-        }
-        self.success_for(
-            &request,
-            serde_json::to_value(catalog).expect("model catalog serialization"),
-        )
+        catalog
     }
 
     fn autonomy_degradations() -> Vec<Value> {
@@ -3615,6 +3655,7 @@ impl Runtime {
                     "runtime.health".into(),
                     "runtime.degradations".into(),
                     "model.catalog.read-only".into(),
+                    "model.capability-check.read-only".into(),
                     "runtime.recovery.status".into(),
                     "runtime.recovery.diagnostic-export".into(),
                     "permission.read-only".into(),
@@ -3660,6 +3701,7 @@ impl Runtime {
                 "runtime.health".into(),
                 "runtime.degradations".into(),
                 "model.catalog.read-only".into(),
+                "model.capability-check.read-only".into(),
                 "session.work.preview".into(),
                 "timeline.streaming".into(),
                 "turn.context.structured".into(),

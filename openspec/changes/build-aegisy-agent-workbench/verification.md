@@ -51,11 +51,23 @@ Model catalog foundation evidence:
   `contains_credentials: false`. Qt's `AgentRuntimeClient` requests this
   projection after initialization and emits `modelCatalogRead` for future
   picker/projection UI.
+- Read-only capability `model.capability-check.read-only` and method
+  `model/capability-check` provide a preflight matcher for Chat/Work,
+  attachments, tools, reasoning, context-token floors, Runtime identity, model
+  availability/entitlement, and zero-data-retention policy. Work mode forces a
+  tool requirement. The result distinguishes `compatible`, `blocked`, and
+  `unknown`, returns bounded mismatch codes, and sets `selection_allowed` to
+  false unless the catalog is fresh, signed, and every required value has a
+  verified authority; present values marked `unknown` or `estimated` remain
+  unknown checks.
 - Unit and protocol fixtures cover unknown-value serialization, invalid catalog
-  rejection, capability negotiation, and the absence of credential-shaped
-  output. This is only a metadata foundation. Signed cloud refresh/cache,
-  capability matching, durable profiles, and model switching remain unchecked
-  under OpenSpec `9.1` through `10.12`.
+  rejection, capability negotiation, capability preflight, and the absence of
+  credential-shaped output. This is only a metadata foundation. Signed cloud
+  refresh/cache, durable profiles, and model switching remain unchecked under
+  OpenSpec `9.1` through `10.12`.
+- The 2026-07-21 matcher stage passed 402 Rust unit tests with one ignored live
+  fixture, 59 protocol tests, 11 stdio/Codex tests, strict Clippy, the complete
+  CMake build, and CTest `agent_runtime_protocol`.
 
 Autonomy release-gate evidence:
 
