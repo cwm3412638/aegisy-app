@@ -234,19 +234,23 @@
     source metadata without credentials. The conservative single-model factory
     binds only the Agent role; role resolution never falls back to the default
     model, and role-specific bindings require explicit configuration. No
-    persistence, catalog selection, AAP/Qt control, token issuance, or routing
+    catalog selection, writable AAP/Qt control, token issuance, or routing
     authority is exposed. Internal `model-profile-store/0.1` now persists one
     global profile and bounded project profiles in a private atomic snapshot
     with exact revision CAS, idempotent retries, restart hash validation, and
-    secret-free metadata checks; it is not connected to Workbench SQLite, AAP,
-    Qt, catalog selection, or routing.
+    secret-free metadata checks. Runtime exposes only the metadata-only AAP
+    capability `model.profile.read-only` with `model/profile/list` and
+    `model/profile/read`; the responses grant no selection, routing, token, or
+    turn authority. The store is not connected to Workbench SQLite, catalog
+    capability checks, or model routing.
 - [ ] 10.4 Provide a simple one-model profile and prevent unnecessary role calls by default
   - Partial foundation: `ModelProfile::single_model` creates a one-model
     profile with only an enabled Agent binding. Plan/apply/review/utility/
     embedding/rerank roles remain disabled until explicitly configured; this is
-    an internal validation contract and is not connected to turn dispatch.
-    The durable Profile Store preserves that Agent-only shape across restart;
-    no role call, fallback, or model execution is initiated by storage.
+    an internal validation contract and is not connected to turn dispatch. The
+    durable Profile Store preserves that Agent-only shape across restart, and
+    the read-only AAP projection can inspect its metadata without selecting a
+    model; no role call, fallback, or model execution is initiated by storage.
 - [ ] 10.5 Implement model/profile picker with capability differences, source, availability, role suitability, and expected cost/latency disclosure
 - [ ] 10.6 Implement compatible next-turn model switch with immutable model-change event
 - [ ] 10.7 Implement portable cross-runtime/provider session fork and reviewable context package

@@ -137,11 +137,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   review/utility/embedding/rerank, secret-free source metadata, and a
   deterministic SHA-256 identity. `single_model` enables only the Agent role;
   unconfigured roles never fall back to the default model, and role-specific
-  bindings must be explicit. This contract is not persisted, exposed through
-  AAP/Qt, connected to catalog selection, or used for token/routing/turn
-  authority. Keep OpenSpec `10.3` and `10.4` unchecked until signed catalog,
-  durable profile storage, picker integration, and cross-platform evidence
-  exist.
+  bindings must be explicit. Runtime now opens the private Profile Store when
+  available and advertises `model.profile.read-only`; AAP
+  `model/profile/list` and `model/profile/read` expose only validated profile
+  metadata, generation, identity, and revision. Both responses explicitly fix
+  `selection_allowed`, `routing_authority`, `token_issued`, and `turn_started`
+  to `false`; missing profiles return a stable not-found error. This is still
+  not connected to catalog selection, Qt picker controls, token issuance, or
+  routing/turn authority. Keep OpenSpec `10.3` and `10.4` unchecked until
+  authenticated catalog/profile integration, picker/switching UI, and
+  cross-platform evidence exist.
 - Model catalog policy hardening (2026-07-21): `model-catalog/0.1` now rejects
   fresh catalogs without `signature_validated`, invalid catalogs that claim a
   validated signature, duplicate aliases or roles, aliases equal to a model ID,
@@ -167,9 +172,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   scope and secret-free profile metadata, rejects duplicate profile IDs,
   requires exact revision CAS for updates/removals, makes identical retries
   idempotent, and revalidates the snapshot identity after restart. It is not
-  Workbench-SQLite event-backed, exposed through AAP/Qt, connected to catalog
-  capability checks, or used for routing/token/turn authority; keep OpenSpec
-  `10.3` and `10.4` unchecked.
+  Workbench-SQLite event-backed or writable through AAP/Qt. Its validated
+  snapshot is now consumed by the read-only AAP list/read projection described
+  above, but remains disconnected from catalog capability checks and
+  routing/token/turn authority; keep OpenSpec `10.3` and `10.4` unchecked.
 - OpenSpec task `21.1` is complete: background jobs, multi-agent execution, and
   unattended writes remain unadvertised and disabled until their prerequisite
   security, recovery, budget, evaluation, and release gates are recorded. The

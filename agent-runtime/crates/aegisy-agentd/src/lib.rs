@@ -177,6 +177,7 @@ pub struct Runtime {
     workbench_store: Option<WorkbenchStore>,
     compaction_store: Option<session_compaction_store::CompactionCheckpointStore>,
     pinned_context_store: Option<pinned_context_store::PinnedContextStore>,
+    model_profile_store: Option<model_profile_store::ModelProfileStore>,
     backend: Backend,
 }
 
@@ -2804,11 +2805,14 @@ impl Runtime {
                     session_compaction_store::CompactionCheckpointStore::open(data_root).ok();
                 let pinned_context_store =
                     Self::open_compensated_pinned_context_store(data_root, &mut store);
+                let model_profile_store =
+                    model_profile_store::ModelProfileStore::open(data_root).ok();
                 Ok(Self::with_backend_and_store(
                     Backend::Preview,
                     Some(store),
                     compaction_store,
                     pinned_context_store,
+                    model_profile_store,
                 ))
             }
             WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => {
@@ -2824,12 +2828,15 @@ impl Runtime {
                     session_compaction_store::CompactionCheckpointStore::open(data_root).ok();
                 let pinned_context_store =
                     Self::open_compensated_pinned_context_store(data_root, &mut store);
+                let model_profile_store =
+                    model_profile_store::ModelProfileStore::open(data_root).ok();
                 let adapter = CodexAdapter::start()?;
                 Ok(Self::with_backend_and_store(
                     Backend::Codex(adapter),
                     Some(store),
                     compaction_store,
                     pinned_context_store,
+                    model_profile_store,
                 ))
             }
             WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => {
@@ -2843,7 +2850,7 @@ impl Runtime {
     }
 
     fn with_backend(backend: Backend) -> Self {
-        Self::with_backend_and_store(backend, None, None, None)
+        Self::with_backend_and_store(backend, None, None, None, None)
     }
 
     fn with_backend_and_store(
@@ -2851,6 +2858,7 @@ impl Runtime {
         workbench_store: Option<WorkbenchStore>,
         compaction_store: Option<session_compaction_store::CompactionCheckpointStore>,
         pinned_context_store: Option<pinned_context_store::PinnedContextStore>,
+        model_profile_store: Option<model_profile_store::ModelProfileStore>,
     ) -> Self {
         let projects = workbench_store
             .as_ref()
@@ -2928,6 +2936,7 @@ impl Runtime {
             workbench_store,
             compaction_store,
             pinned_context_store,
+            model_profile_store,
             backend,
         }
     }
@@ -3178,6 +3187,8 @@ impl Runtime {
             "runtime/degradations" => self.runtime_degradations(request),
             "model/catalog" => self.model_catalog(request),
             "model/capability-check" => self.model_capability_check(request),
+            "model/profile/list" => self.model_profile_list(request),
+            "model/profile/read" => self.model_profile_read(request),
             _ if self.is_recovery_mode() => {
                 self.error_for(&request, -32120, "workbench is in read-only recovery mode")
             }
@@ -3512,6 +3523,150 @@ impl Runtime {
         )
     }
 
+    fn model_profile_list(&self, request: Request) -> Vec<Value> {
+        #[derive(Debug, Default, Deserialize)]
+        struct Params {
+            #[serde(default)]
+            project_id: Option<String>,
+        }
+
+        let params: Params = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        let Some(store) = self.model_profile_store.as_ref() else {
+            return self.error_for(&request, -32024, "model profile store is unavailable");
+        };
+        let snapshot = match store.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32114,
+                    format!("model profile store validation failed: {}", error.code),
+                )
+            }
+        };
+        if let Some(project_id) = params.project_id.as_deref() {
+            if project_id.is_empty()
+                || project_id.len() > 128
+                || project_id.bytes().any(|byte| {
+                    !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+                })
+            {
+                return self.error_for(&request, -32602, "project_id is invalid");
+            }
+        }
+        let mut profiles = Vec::new();
+        if let Some(profile) = snapshot.global.as_ref() {
+            profiles.push(self.model_profile_view(&snapshot, profile));
+        }
+        for (project_id, profile) in &snapshot.projects {
+            if params
+                .project_id
+                .as_deref()
+                .is_none_or(|filter| filter == project_id)
+            {
+                profiles.push(self.model_profile_view(&snapshot, profile));
+            }
+        }
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "model-profile-list/0.1",
+                "store_schema_version": model_profile_store::STORE_SCHEMA_VERSION,
+                "generation": snapshot.generation,
+                "snapshot_identity": snapshot.snapshot_identity,
+                "profiles": profiles,
+                "selection_allowed": false,
+                "routing_authority": false,
+                "token_issued": false,
+                "turn_started": false,
+            }),
+        )
+    }
+
+    fn model_profile_read(&self, request: Request) -> Vec<Value> {
+        #[derive(Debug, Deserialize)]
+        struct Params {
+            profile_id: String,
+        }
+
+        let params: Params = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        let Some(store) = self.model_profile_store.as_ref() else {
+            return self.error_for(&request, -32024, "model profile store is unavailable");
+        };
+        let snapshot = match store.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32114,
+                    format!("model profile store validation failed: {}", error.code),
+                )
+            }
+        };
+        if params.profile_id.is_empty() || params.profile_id.len() > 128 {
+            return self.error_for(&request, -32602, "profile_id is invalid");
+        }
+        let profile = snapshot
+            .global
+            .as_ref()
+            .filter(|profile| profile.profile_id == params.profile_id)
+            .or_else(|| {
+                snapshot
+                    .projects
+                    .values()
+                    .find(|profile| profile.profile_id == params.profile_id)
+            });
+        let Some(profile) = profile else {
+            return self.error_for(&request, -32023, "model profile not found");
+        };
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "model-profile-read/0.1",
+                "profile": self.model_profile_view(&snapshot, profile),
+                "selection_allowed": false,
+                "routing_authority": false,
+                "token_issued": false,
+                "turn_started": false,
+            }),
+        )
+    }
+
+    fn model_profile_view(
+        &self,
+        snapshot: &model_profile_store::ModelProfileStoreSnapshot,
+        profile: &model_profile::ModelProfile,
+    ) -> Value {
+        json!({
+            "schema_version": "model-profile-view/0.1",
+            "store_generation": snapshot.generation,
+            "scope": profile.scope,
+            "project_id": profile.project_id,
+            "profile_id": profile.profile_id,
+            "profile_identity": profile.identity().unwrap_or_default(),
+            "revision": profile.revision,
+            "name": profile.name,
+            "strategy": profile.strategy,
+            "default_model_id": profile.default_model_id,
+            "roles": profile.roles,
+            "source": profile.source,
+            "selection_allowed": false,
+            "routing_authority": false,
+            "token_issued": false,
+            "turn_started": false,
+        })
+    }
+
     fn current_model_catalog(&self) -> model_catalog::ModelCatalog {
         let (adapter, version, provider, model) = match &self.backend {
             Backend::Preview => (
@@ -3757,6 +3912,9 @@ impl Runtime {
                     "workspace.image.import-user".into(),
                     "workspace.image.preview".into(),
                 ]);
+            }
+            if self.model_profile_store.is_some() {
+                capabilities.push("model.profile.read-only".into());
             }
         }
         let result = InitializeResult {

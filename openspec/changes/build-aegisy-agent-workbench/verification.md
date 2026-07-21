@@ -81,7 +81,7 @@ Model catalog foundation evidence:
   authenticated refresh/key rotation, AAP/Qt host integration, and selection
   authority remain absent, so tasks `9.3` and `10.1` remain unchecked.
 - The 2026-07-21 catalog, matcher, profile, catalog-policy, cache, and profile-store
-  foundation stage passed 422 Rust unit tests with one ignored live fixture, 59 protocol tests,
+  foundation stage passed 422 Rust unit tests with one ignored live fixture, 60 protocol tests,
   11 stdio/Codex tests, strict Clippy, the complete CMake build, and CTest
   `agent_runtime_protocol`.
 
@@ -109,6 +109,18 @@ Model profile foundation evidence:
   bounded storage. The store is not Workbench-SQLite event-backed, exposed
   through AAP/Qt, bound to catalog capability checks, or connected to routing;
   `10.3` and `10.4` therefore remain unchecked.
+- Runtime now opens the validated Profile Store when durable storage is healthy
+  and negotiates `model.profile.read-only`. AAP `model/profile/list` returns a
+  bounded snapshot generation/identity and metadata-only profile views, with an
+  optional project filter; `model/profile/read` resolves a profile ID and
+  returns a stable not-found error when absent. List/read responses and each
+  view explicitly set `selection_allowed:false`, `routing_authority:false`,
+  `token_issued:false`, and `turn_started:false`. The protocol fixture covers
+  capability negotiation, an empty legal snapshot, all false authority fields,
+  and missing-profile error stability. This remains an inspection projection:
+  it does not write profiles, select models, issue tokens, start turns, connect
+  to the catalog matcher, or provide Qt picker/switching controls, so tasks
+  `10.3` and `10.4` remain unchecked.
 
 Autonomy release-gate evidence:
 

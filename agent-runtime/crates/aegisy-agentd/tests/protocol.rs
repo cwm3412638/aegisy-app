@@ -5830,6 +5830,61 @@ fn model_catalog_is_read_only_and_does_not_invent_capabilities() {
 }
 
 #[test]
+fn model_profile_aap_is_metadata_only_and_empty_snapshot_is_valid() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-model-profile-{unique}"));
+    let data_root = root.join("data");
+    fs::create_dir_all(&data_root).unwrap();
+
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    let initialized = runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": { "name": "model-profile-test", "version": "1" }
+        }),
+    ));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "model.profile.read-only"));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+
+    let listed = runtime.handle_line(&request("list", "model/profile/list", json!({})));
+    let result = &listed[0]["result"];
+    assert_eq!(result["schema_version"], "model-profile-list/0.1");
+    assert_eq!(result["store_schema_version"], "model-profile-store/0.1");
+    assert_eq!(result["generation"], 0);
+    assert_eq!(result["profiles"], json!([]));
+    for field in [
+        "selection_allowed",
+        "routing_authority",
+        "token_issued",
+        "turn_started",
+    ] {
+        assert_eq!(
+            result[field], false,
+            "profile list must remain read-only: {field}"
+        );
+    }
+
+    let missing = runtime.handle_line(&request(
+        "read-missing",
+        "model/profile/read",
+        json!({ "profile_id": "missing-profile" }),
+    ));
+    assert_eq!(missing[0]["error"]["code"], -32023);
+    assert_eq!(missing[0]["error"]["message"], "model profile not found");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn model_capability_check_fails_closed_for_work_unknowns() {
     let mut runtime = Runtime::default();
     let initialized = runtime.handle_line(&request(
