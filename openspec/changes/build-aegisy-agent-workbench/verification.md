@@ -69,6 +69,20 @@ Model catalog foundation evidence:
   does not establish a trusted upstream source. This is only a metadata
   foundation. Signed cloud refresh/cache, durable profiles, and model switching
   remain unchecked under OpenSpec `9.1` through `10.12`.
+- Internal `model-catalog-signature/0.1` creates a canonical payload binding the
+  signature schema, Key ID, and exact unvalidated catalog. Strict Ed25519
+  verification is performed with pinned `ed25519-dalek` 2.1.1; only a successful
+  verification can return a catalog with `signature_validated:true`. The bounded
+  `model-catalog-key-ring/0.1` validates key encoding, validity, revocation,
+  content identity, positive generation, and replacement lineage. Rotation
+  preserves prior Key IDs/public keys, advances by one generation, cannot widen
+  old validity or undo revocation, and rejects rollback/conflicting generations.
+  Four signature/key-ring fixtures cover success, payload tampering, wrong or
+  unknown keys, expiry, rollback, missing lineage, revocation, and Key ID
+  rewriting. A fifth cache fixture proves forged envelopes fail before cache
+  admission. The key ring is caller-supplied and not yet authenticated,
+  persisted, or fetched; there is no signing/key-publication service or AAP/Qt
+  refresh path, so `9.3` remains unchecked.
 - Internal `model-catalog-cache/0.1` accepts only a clean catalog marked fresh
   and signature-validated with a bounded future expiry. It content-hashes the
   catalog, binds a positive monotonic sequence and receipt time, treats exact
@@ -76,8 +90,9 @@ Model catalog foundation evidence:
   generations, and derives explicit fresh/stale/expired views with a bounded
   stale window. Clock regression and snapshot identity tampering fail closed;
   expired entries return no catalog metadata. Every view fixes
-  `selection_allowed:false` because this layer does not cryptographically verify
-  the signature flag. Six focused unit fixtures pass. A private
+  `selection_allowed:false`; the Store's public admission path now requires the
+  signed-envelope verifier, while the low-level cache mutation remains private
+  to the module. Seven focused unit fixtures pass. A private
   `model-catalog-cache-store/0.1` now persists the cache outside project roots
   through an atomically replaced, bounded snapshot with private Unix
   permissions, restart identity validation, and tamper detection. Runtime opens
@@ -85,12 +100,12 @@ Model catalog foundation evidence:
   durable storage. Runtime exposes `model.catalog.cache.read-only` and
   `model/catalog-cache`; an empty cache returns no catalog body and an explicit
   false selection authority, while Qt validates and displays that state in the
-  model-binding tooltip. The Store is not Workbench-SQLite event-backed and has
-  no authenticated signature verification, cloud refresh, key rotation,
+  model-binding tooltip. The Store is not Workbench-SQLite event-backed, and
+  Runtime still has no authenticated/persisted trust ring, cloud refresh,
   non-empty host transitions, or selection authority, so tasks `9.3` and `10.1`
   remain unchecked.
 - The 2026-07-21 catalog, matcher, profile, catalog-policy, cache, and profile-store
-  foundation stage passed 423 Rust unit tests with one ignored live fixture, 62 protocol tests,
+  foundation stage passed 428 Rust unit tests with one ignored live fixture, 62 protocol tests,
   11 stdio/Codex tests, strict Clippy, the complete CMake build, and CTest
   `agent_runtime_protocol`.
 

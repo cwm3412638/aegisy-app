@@ -17,6 +17,9 @@ The Aegisy Agent Runtime uses the following third-party components:
 - base64, version 0.22.1 (MIT OR Apache-2.0), used to preserve PTY byte output
   across JSON-RPC:
   https://github.com/marshallpierce/rust-base64
+- ed25519-dalek, version 2.1.1 (BSD-3-Clause), used to verify authenticated
+  model-catalog signatures with strict Ed25519 validation:
+  https://github.com/dalek-cryptography/ed25519-dalek
 - image, version 0.25.10 (MIT OR Apache-2.0), used to validate and bound
   explicitly user-imported PNG, JPEG, and WebP pinned context and to create
   local UI thumbnails:

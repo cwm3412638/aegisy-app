@@ -157,9 +157,25 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   validated signature, duplicate aliases or roles, aliases equal to a model ID,
   unsupported `field_authority` keys, non-positive token limits, and
   secret-shaped catalog/source metadata. This strengthens partial foundations
-  for OpenSpec `9.2`, `9.3`, and `9.10`; it does not implement cryptographic
-  signing, key rotation, authenticated refresh/cache expiry, rollback
-  protection, or an admin publication service, so those tasks remain
+  for OpenSpec `9.2`, `9.3`, and `9.10`; the separate signature foundation below
+  now supplies local cryptographic verification and key-rotation validation but
+  is not connected to authenticated refresh/key publication, persistent trust
+  roots, cache refresh, or an admin publication service, so those tasks remain
+  unchecked.
+- Model catalog signature foundation (2026-07-21): internal
+  `model-catalog-signature/0.1` verifies a canonical schema/Key-ID/catalog payload
+  using strict Ed25519 verification through pinned `ed25519-dalek` 2.1.1. A
+  bounded `model-catalog-key-ring/0.1` binds positive generation, content
+  identity, public-key validity, revocation, and replacement lineage. Rotation
+  advances exactly one generation, retains prior Key IDs/public keys, cannot
+  widen old validity or undo revocation, and rejects rollback, conflicting same-
+  generation content, missing key history, or unknown lineage. The cache Store
+  `install_signed` path sets `signature_validated` only after schema, payload
+  identity, time, active-key, and signature checks pass; a forged envelope leaves
+  the cache empty. This does not establish production trust: the key ring is
+  caller-supplied and is not pinned, persisted, or authenticated from Aegisy;
+  private-key signing, cloud refresh/key publication, Workbench SQLite events,
+  AAP/Qt refresh, and model selection remain absent. Keep OpenSpec `9.3`
   unchecked.
 - Model catalog cache foundation (2026-07-21): internal
   `model-catalog-cache/0.1` accepts only a clean catalog marked fresh and
@@ -168,8 +184,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   treats exact replay as idempotent, and rejects older/conflicting generations,
   snapshot tampering, or clock regression. Reads derive explicit
   fresh/stale/expired views and expose no catalog after the stale window. The
-  contract does not authenticate the signature flag, refresh the cache, or grant
-  selection authority; every view fixes `selection_allowed:false`. A private
+  low-level cache contract assumes an already verified catalog, while public
+  Store admission accepts only the signed-envelope verification path. It does
+  not refresh the cache or grant selection authority; every view fixes
+  `selection_allowed:false`. A private
   `model-catalog-cache-store/0.1` now persists the validated cache outside the
   project root through an atomically replaced bounded snapshot, private Unix
   permissions, restart identity validation, and snapshot tamper detection.
@@ -1094,7 +1112,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 423 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 428 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 62 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
@@ -1130,7 +1148,7 @@ catalog-policy foundation stages added the internal `model-catalog/0.1` and
 projections, and the corresponding Qt request/signals. Qt validates the
 metadata-only profile list and displays only its bounded count in the existing
 model-binding tooltip; the model control remains non-selecting. The
-policy-focused Rust verification passed 423 unit tests with one ignored live
+policy-focused Rust verification passed 428 unit tests with one ignored live
 fixture, 62
 protocol tests, and 11 stdio/Codex tests; strict Clippy, the complete CMake
 desktop build, and CTest `agent_runtime_protocol` passed. The projection is

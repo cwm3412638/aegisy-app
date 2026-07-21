@@ -191,8 +191,16 @@
 - [ ] 9.3 Implement catalog signing, key rotation, cache expiry, rollback protection, and schema validation
   - Partial foundation: schema validation now enforces fresh catalogs to be
     signature-validated, invalid catalogs to be unsigned, bounded catalog/source
-    text, and secret-free metadata. Cryptographic signing, key rotation,
-    authenticated cache expiry, and rollback protection are not implemented.
+    text, and secret-free metadata. Internal `model-catalog-signature/0.1`
+    now verifies a canonical catalog payload with strict Ed25519 verification
+    against a bounded `model-catalog-key-ring/0.1`. The key ring binds a positive
+    generation, content identity, public-key validity windows, revocation state,
+    and replacement lineage. Rotation must advance exactly one generation,
+    preserves prior Key IDs and public keys, cannot widen old validity or undo
+    revocation, treats an identical generation as idempotent, and rejects
+    rollback, conflict, missing history, or unknown lineage. A cache Store entry
+    point sets `signature_validated` only after the envelope passes schema,
+    payload-identity, time, key-state, and signature checks.
     Internal `model-catalog-cache/0.1` additionally binds signed-catalog content
     identity, positive monotonic sequence, receipt/issue/expiry time, bounded
     TTL/stale windows, idempotent same-generation replay, and rejection of older
@@ -202,8 +210,10 @@
     project root using an atomically replaced, bounded snapshot, private Unix
     permissions, restart identity validation, and tamper detection. Runtime
     opens this store when the durable data root is healthy; standalone runtimes
-    retain an in-memory fallback. The store is not Workbench-SQLite event-backed
-    and does not provide cloud refresh or key rotation.
+    retain an in-memory fallback. The Store and key ring are not
+    Workbench-SQLite event-backed. The key ring is caller-supplied and is not yet
+    pinned, persisted, or delivered through an authenticated channel; no signing
+    service, cloud refresh, or key-publication endpoint exists.
 - [ ] 9.4 Add authenticated catalog endpoint with conditional requests and deterministic test fixtures
 - [ ] 9.5 Add runtime compatibility and known-degradation metadata for Codex, ACP, and future native adapters
 - [ ] 9.6 Add role recommendations backed by evaluation version, sample size, and known limitations

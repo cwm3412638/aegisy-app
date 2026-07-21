@@ -8,6 +8,7 @@
 //! not fetch, sign, refresh, select, route, issue tokens, or authorize a turn.
 
 use crate::model_catalog::{CatalogState, ModelCatalog};
+use crate::model_catalog_signature::{CatalogKeyRing, SignedModelCatalog};
 use serde::{Deserialize, Serialize};
 use serde_json::to_vec;
 use sha2::{Digest, Sha256};
@@ -196,7 +197,7 @@ impl ModelCatalogCacheStore {
         Ok(snapshot)
     }
 
-    pub fn install(
+    fn install(
         &mut self,
         catalog: ModelCatalog,
         sequence: u64,
@@ -212,6 +213,23 @@ impl ModelCatalogCacheStore {
             }
         }
         Ok(write)
+    }
+
+    /// Verify an authenticated catalog before applying the normal cache
+    /// generation/expiry rules. The key ring is supplied by the host trust
+    /// boundary; this method does not fetch or authenticate that ring.
+    pub fn install_signed(
+        &mut self,
+        signed: &SignedModelCatalog,
+        key_ring: &CatalogKeyRing,
+        now_ms: u64,
+        sequence: u64,
+        received_at_ms: u64,
+    ) -> Result<CacheWrite, CatalogCacheError> {
+        let catalog = signed
+            .verify(key_ring, now_ms)
+            .map_err(|signature_error| error(signature_error.code, signature_error.message))?;
+        self.install(catalog, sequence, received_at_ms)
     }
 
     fn validate(&self) -> Result<(), CatalogCacheError> {
@@ -281,7 +299,7 @@ impl ModelCatalogCache {
         })
     }
 
-    pub fn install(
+    fn install(
         &mut self,
         catalog: ModelCatalog,
         sequence: u64,
@@ -718,6 +736,13 @@ fn error(code: &'static str, message: &'static str) -> CatalogCacheError {
 mod tests {
     use super::*;
     use crate::model_catalog::offline_for_runtime;
+    use crate::model_catalog_signature::{
+        signing_payload_bytes, signing_payload_identity, CatalogSigningKey,
+        SIGNATURE_SCHEMA_VERSION,
+    };
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine;
+    use ed25519_dalek::{Signer, SigningKey};
 
     const STALE_WINDOW_MS: u64 = 1_000;
 
@@ -821,6 +846,65 @@ mod tests {
             "model-catalog:sha256:tampered".into();
         let error = ModelCatalogCache::from_snapshot(tampered).unwrap_err();
         assert_eq!(error.code, "model-catalog-cache-identity-mismatch");
+    }
+
+    #[test]
+    fn signed_install_verifies_before_cache_admission() {
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let key_id = "catalog-key-1";
+        let key_ring = CatalogKeyRing::new(
+            1,
+            vec![CatalogSigningKey {
+                key_id: key_id.into(),
+                public_key_base64: BASE64_STANDARD.encode(signing_key.verifying_key().to_bytes()),
+                valid_from_ms: 1,
+                valid_until_ms: Some(10_000),
+                revoked: false,
+                replaces: None,
+            }],
+        )
+        .unwrap();
+        let mut catalog = signed_catalog(100, 1_000);
+        catalog.signature_validated = false;
+        let payload = signing_payload_bytes(key_id, &catalog).unwrap();
+        let envelope = SignedModelCatalog {
+            schema_version: SIGNATURE_SCHEMA_VERSION.into(),
+            key_id: key_id.into(),
+            catalog,
+            payload_identity: signing_payload_identity(&payload),
+            signature_base64: BASE64_STANDARD.encode(signing_key.sign(&payload).to_bytes()),
+        };
+        let mut store = ModelCatalogCacheStore::in_memory(STALE_WINDOW_MS).unwrap();
+        assert_eq!(
+            store
+                .install_signed(&envelope, &key_ring, 100, 1, 100)
+                .unwrap(),
+            CacheWrite::Installed { sequence: 1 }
+        );
+        assert!(
+            store
+                .view(200)
+                .unwrap()
+                .catalog
+                .unwrap()
+                .signature_validated
+        );
+
+        let other_key = SigningKey::from_bytes(&[8; 32]);
+        let mut forged = envelope;
+        forged.signature_base64 = BASE64_STANDARD.encode(other_key.sign(&payload).to_bytes());
+        let mut empty = ModelCatalogCacheStore::in_memory(STALE_WINDOW_MS).unwrap();
+        assert_eq!(
+            empty
+                .install_signed(&forged, &key_ring, 100, 1, 100)
+                .unwrap_err()
+                .code,
+            "model-catalog-signature-invalid"
+        );
+        assert_eq!(
+            empty.view(100).unwrap().availability,
+            CacheAvailability::Empty
+        );
     }
 
     #[test]
