@@ -62,13 +62,17 @@ Model catalog foundation evidence:
   unknown checks.
 - Unit and protocol fixtures cover unknown-value serialization, invalid catalog
   rejection, capability negotiation, capability preflight, and the absence of
-  credential-shaped output. This is only a metadata foundation. Signed cloud
-  refresh/cache, durable profiles, and model switching remain unchecked under
-  OpenSpec `9.1` through `10.12`.
-- The 2026-07-21 catalog, matcher, and profile foundation stage passed 408 Rust
-  unit tests with one ignored live fixture, 59 protocol tests, 11 stdio/Codex
-  tests, strict Clippy, the complete
-  CMake build, and CTest `agent_runtime_protocol`.
+  credential-shaped output. Catalog policy fixtures additionally reject
+  signature/state conflicts, duplicate aliases and roles, aliases equal to a
+  model ID, unsupported authority keys, non-positive limits, and secret-shaped
+  catalog/source metadata. Authority classification remains metadata-only and
+  does not establish a trusted upstream source. This is only a metadata
+  foundation. Signed cloud refresh/cache, durable profiles, and model switching
+  remain unchecked under OpenSpec `9.1` through `10.12`.
+- The 2026-07-21 catalog, matcher, profile, and catalog-policy foundation stage
+  passed 410 Rust unit tests with one ignored live fixture, 59 protocol tests,
+  11 stdio/Codex tests, strict Clippy, the complete CMake build, and CTest
+  `agent_runtime_protocol`.
 
 Model profile foundation evidence:
 

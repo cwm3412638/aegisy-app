@@ -183,7 +183,16 @@
     read-only `model.catalog.read-only` AAP projection and is not a signed or
     authenticated cloud catalog.
 - [ ] 9.2 Define which catalog fields are upstream-authoritative, Aegisy-configured, evaluation-derived, estimated, or unknown
+  - Partial foundation: `FieldAuthority` is explicit for availability,
+    entitlement, lifecycle, limits, capabilities, roles, policy, and runtime
+    compatibility. Unknown and estimated values remain non-authoritative, and
+    unsupported authority keys are rejected. This does not establish a trusted
+    upstream source or signed field provenance.
 - [ ] 9.3 Implement catalog signing, key rotation, cache expiry, rollback protection, and schema validation
+  - Partial foundation: schema validation now enforces fresh catalogs to be
+    signature-validated, invalid catalogs to be unsigned, bounded catalog/source
+    text, and secret-free metadata. Cryptographic signing, key rotation,
+    authenticated cache expiry, and rollback protection are not implemented.
 - [ ] 9.4 Add authenticated catalog endpoint with conditional requests and deterministic test fixtures
 - [ ] 9.5 Add runtime compatibility and known-degradation metadata for Codex, ACP, and future native adapters
 - [ ] 9.6 Add role recommendations backed by evaluation version, sample size, and known limitations
@@ -191,6 +200,11 @@
 - [ ] 9.8 Implement usage correlation that separates retries, reroutes, cache, reasoning, and child-task consumption
 - [ ] 9.9 Preserve upstream HTTP/provider error classification through Aegisy gateway and AAP mapping
 - [ ] 9.10 Add catalog admin validation preventing aliases, context limits, protocols, prices, or capability combinations that violate schema policy
+  - Partial foundation: catalog validation rejects duplicate aliases, aliases
+    equal to the model ID, duplicate role entries, unsupported authority keys,
+    non-positive declared token limits, invalid protocol lists, and
+    secret-shaped metadata. It does not provide an authenticated admin service,
+    price policy, cryptographic signature verification, or cloud publication.
 
 ## 10. Model Profiles, Routing, and Switching
 

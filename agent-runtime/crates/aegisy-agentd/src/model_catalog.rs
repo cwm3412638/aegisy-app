@@ -5,9 +5,10 @@
 //! capability values stay `null` so callers cannot mistake an unverified value
 //! for a supported feature.
 
+use crate::output_redaction::redact_complete;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const SCHEMA_VERSION: &str = "model-catalog/0.1";
 pub const CAPABILITY_CHECK_SCHEMA_VERSION: &str = "model-capability-check/0.1";
@@ -15,6 +16,8 @@ const MAX_MODELS: usize = 256;
 const MAX_PROTOCOLS: usize = 8;
 const MAX_ROLES: usize = 16;
 const MAX_DEGRADATIONS: usize = 32;
+const MAX_AUTHORITIES: usize = 32;
+const MAX_ALIASES: usize = 16;
 const MAX_TEXT_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,14 +199,16 @@ impl ModelCatalog {
         if self.schema_version != SCHEMA_VERSION {
             return Err(error("unsupported model catalog schema"));
         }
-        if self.catalog_version.is_empty() || self.catalog_version.len() > MAX_TEXT_BYTES {
-            return Err(error("catalog version is invalid"));
-        }
-        if self.source.is_empty() || self.source.len() > MAX_TEXT_BYTES {
-            return Err(error("catalog source is invalid"));
-        }
+        validate_text(&self.catalog_version, "catalog version")?;
+        validate_text(&self.source, "catalog source")?;
         if self.contains_credentials {
             return Err(error("model catalog cannot contain credentials"));
+        }
+        if self.state == CatalogState::Fresh && !self.signature_validated {
+            return Err(error("fresh catalog must be signature validated"));
+        }
+        if self.state == CatalogState::Invalid && self.signature_validated {
+            return Err(error("invalid catalog cannot be signature validated"));
         }
         if self.models.len() > MAX_MODELS {
             return Err(error("model catalog contains too many models"));
@@ -233,7 +238,7 @@ impl ModelDescriptor {
         if self.protocols.is_empty() || self.protocols.len() > MAX_PROTOCOLS {
             return Err(error("model protocol list is invalid"));
         }
-        if self.aliases.len() > MAX_PROTOCOLS {
+        if self.aliases.len() > MAX_ALIASES {
             return Err(error("model alias list is too large"));
         }
         if self.roles.len() > MAX_ROLES {
@@ -242,14 +247,24 @@ impl ModelDescriptor {
         for protocol in &self.protocols {
             validate_text(protocol, "model protocol")?;
         }
+        let mut aliases = BTreeSet::new();
         for alias in &self.aliases {
             validate_text(alias, "model alias")?;
+            if alias == &self.model_id || !aliases.insert(alias.as_str()) {
+                return Err(error(
+                    "model aliases must be unique and differ from model ID",
+                ));
+            }
         }
         if self.limits.context_tokens == Some(0) || self.limits.output_tokens == Some(0) {
             return Err(error("model token limits must be positive when present"));
         }
+        let mut role_names = BTreeSet::new();
         for role in &self.roles {
             validate_text(&role.role, "model role")?;
+            if !role_names.insert(role.role.as_str()) {
+                return Err(error("model roles must be unique"));
+            }
             if role.known_limitations.len() > MAX_DEGRADATIONS {
                 return Err(error("model role limitation list is too large"));
             }
@@ -273,6 +288,25 @@ impl ModelDescriptor {
         }
         if let Some(region) = &self.policy.region {
             validate_text(region, "model region")?;
+        }
+        if self.field_authority.len() > MAX_AUTHORITIES {
+            return Err(error("model authority map is too large"));
+        }
+        for field in self.field_authority.keys() {
+            validate_text(field, "model authority field")?;
+            if !matches!(
+                field.as_str(),
+                "availability"
+                    | "entitlement"
+                    | "lifecycle"
+                    | "limits"
+                    | "capabilities"
+                    | "roles"
+                    | "policy"
+                    | "runtime_compatibility"
+            ) {
+                return Err(error("model authority field is unsupported"));
+            }
         }
         Ok(())
     }
@@ -874,6 +908,9 @@ fn validate_text(value: &str, field: &str) -> Result<(), CatalogError> {
     if value.is_empty() || value.len() > MAX_TEXT_BYTES || value.chars().any(char::is_control) {
         return Err(error(format!("{field} is invalid")));
     }
+    if redact_complete(value) != value {
+        return Err(error(format!("{field} is secret-shaped")));
+    }
     Ok(())
 }
 
@@ -917,6 +954,38 @@ mod tests {
         assert!(catalog.validate().is_err());
         catalog.contains_credentials = false;
         catalog.models[0].limits.context_tokens = Some(0);
+        assert!(catalog.validate().is_err());
+    }
+
+    #[test]
+    fn catalog_policy_rejects_alias_role_authority_and_signature_conflicts() {
+        let mut catalog = offline_for_runtime("preview", "1", Some("local"), Some("echo"));
+        catalog.models[0].aliases = vec!["local:echo".into()];
+        assert!(catalog.validate().is_err());
+
+        catalog.models[0].aliases.clear();
+        let duplicate_role = catalog.models[0].roles[0].clone();
+        catalog.models[0].roles.push(duplicate_role);
+        assert!(catalog.validate().is_err());
+
+        catalog.models[0].roles.pop();
+        catalog.models[0]
+            .field_authority
+            .insert("untrusted-field".into(), FieldAuthority::Unknown);
+        assert!(catalog.validate().is_err());
+
+        catalog.models[0].field_authority.remove("untrusted-field");
+        catalog.state = CatalogState::Fresh;
+        assert!(catalog.validate().is_err());
+        catalog.signature_validated = true;
+        catalog.state = CatalogState::Invalid;
+        assert!(catalog.validate().is_err());
+    }
+
+    #[test]
+    fn catalog_policy_rejects_secret_shaped_metadata() {
+        let mut catalog = offline_for_runtime("preview", "1", Some("local"), Some("echo"));
+        catalog.catalog_version = "token=abc".into();
         assert!(catalog.validate().is_err());
     }
 

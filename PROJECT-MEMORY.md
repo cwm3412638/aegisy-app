@@ -142,6 +142,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   authority. Keep OpenSpec `10.3` and `10.4` unchecked until signed catalog,
   durable profile storage, picker integration, and cross-platform evidence
   exist.
+- Model catalog policy hardening (2026-07-21): `model-catalog/0.1` now rejects
+  fresh catalogs without `signature_validated`, invalid catalogs that claim a
+  validated signature, duplicate aliases or roles, aliases equal to a model ID,
+  unsupported `field_authority` keys, non-positive token limits, and
+  secret-shaped catalog/source metadata. This strengthens partial foundations
+  for OpenSpec `9.2`, `9.3`, and `9.10`; it does not implement cryptographic
+  signing, key rotation, authenticated refresh/cache expiry, rollback
+  protection, or an admin publication service, so those tasks remain
+  unchecked.
 - OpenSpec task `21.1` is complete: background jobs, multi-agent execution, and
   unattended writes remain unadvertised and disabled until their prerequisite
   security, recovery, budget, evaluation, and release gates are recorded. The
@@ -1047,7 +1056,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 408 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 410 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 59 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
@@ -1075,11 +1084,12 @@ bound branch, but this host killed the process at startup after 0.45s without an
 assertion output. Tasks `6.6` and `12.6` remain unchecked for the control-plane,
 turn-metadata, dedicated-worktree, scale, and cross-platform gates listed above.
 
-On 2026-07-21 the model-catalog, capability-matcher, and model-profile
-foundation stages added the internal `model-catalog/0.1` and
+On 2026-07-21 the model-catalog, capability-matcher, model-profile, and
+catalog-policy foundation stages added the internal `model-catalog/0.1` and
 `model-profile/0.1` validation contracts, the read-only AAP `model/catalog` and
 `model/capability-check` projections, and the corresponding Qt request/signals.
-Full Rust verification passed 408 unit tests with one ignored live fixture, 59
+The policy-focused Rust verification passed 410 unit tests with one ignored live
+fixture, 59
 protocol tests, and 11 stdio/Codex tests; strict Clippy, the complete CMake
 desktop build, and CTest `agent_runtime_protocol` passed. The projection is
 explicitly offline and unsigned, leaves unverified capability/limit values
