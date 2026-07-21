@@ -5830,6 +5830,32 @@ fn model_catalog_is_read_only_and_does_not_invent_capabilities() {
 }
 
 #[test]
+fn model_catalog_cache_reports_empty_without_selection_authority() {
+    let mut runtime = Runtime::default();
+    let initialized = runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": { "name": "catalog-cache-test", "version": "1" }
+        }),
+    ));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "model.catalog.cache.read-only"));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+
+    let response = runtime.handle_line(&request("cache", "model/catalog-cache", json!({})));
+    let cache = &response[0]["result"];
+    assert_eq!(cache["schema_version"], "model-catalog-cache/0.1");
+    assert_eq!(cache["availability"], "empty");
+    assert!(cache["catalog"].is_null());
+    assert_eq!(cache["selection_allowed"], false);
+}
+
+#[test]
 fn model_profile_aap_is_metadata_only_and_empty_snapshot_is_valid() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

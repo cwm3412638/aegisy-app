@@ -475,6 +475,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_modelProfileReadOnlyAvailable = false;
         m_modelProfileSnapshotValid = false;
         m_modelProfileCount = 0;
+        m_modelCatalogCacheState.clear();
         m_compactionAvailable = false;
         m_backgroundNotificationInspectionAvailable = false;
         m_backgroundRecoveryInspectionAvailable = false;
@@ -535,6 +536,29 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             && profiles.size() <= 256
             && authoritySafe;
         m_modelProfileCount = m_modelProfileSnapshotValid ? profiles.size() : 0;
+        updateSessionRuntimePresentation();
+    });
+    connect(m_runtime, &AgentRuntimeClient::modelCatalogCacheRead,
+            this, [this](const QString &, const QJsonObject &result) {
+        const QString availability = result.value(QStringLiteral("availability")).toString();
+        const bool valid = result.value(QStringLiteral("schema_version")).toString()
+                == QStringLiteral("model-catalog-cache/0.1")
+            && (availability == QStringLiteral("empty")
+                || availability == QStringLiteral("fresh")
+                || availability == QStringLiteral("stale")
+                || availability == QStringLiteral("expired"))
+            && !result.value(QStringLiteral("selection_allowed")).toBool(true);
+        if (!valid) {
+            m_modelCatalogCacheState.clear();
+        } else if (availability == QStringLiteral("empty")) {
+            m_modelCatalogCacheState = QStringLiteral("目录缓存为空");
+        } else if (availability == QStringLiteral("fresh")) {
+            m_modelCatalogCacheState = QStringLiteral("目录缓存新鲜");
+        } else if (availability == QStringLiteral("stale")) {
+            m_modelCatalogCacheState = QStringLiteral("目录缓存陈旧");
+        } else {
+            m_modelCatalogCacheState = QStringLiteral("目录缓存过期");
+        }
         updateSessionRuntimePresentation();
     });
     connect(m_runtime, &AgentRuntimeClient::modelProfileRead,
@@ -10199,6 +10223,9 @@ void AgentWorkbenchWidget::updateSessionRuntimePresentation()
         if (m_modelProfileSnapshotValid) {
             tooltip += QStringLiteral("（%1 个）").arg(m_modelProfileCount);
         }
+    }
+    if (!m_modelCatalogCacheState.isEmpty()) {
+        tooltip += QStringLiteral(" · %1").arg(m_modelCatalogCacheState);
     }
     if (m_modelPicker->count() != 1 || m_modelPicker->itemText(0) != display) {
         const QSignalBlocker blocker(m_modelPicker);

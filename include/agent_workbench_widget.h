@@ -237,6 +237,7 @@ private:
     bool m_modelProfileReadOnlyAvailable = false;
     bool m_modelProfileSnapshotValid = false;
     int m_modelProfileCount = 0;
+    QString m_modelCatalogCacheState;
     QLabel *m_recoveryBanner = nullptr;
     QLabel *m_operationStatusBanner = nullptr;
     QWidget *m_operationStatusRow = nullptr;

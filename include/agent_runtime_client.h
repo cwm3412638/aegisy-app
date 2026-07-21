@@ -33,6 +33,7 @@ public:
     QString runtimeHealth();
     QString runtimeDegradations();
     QString modelCatalog();
+    QString modelCatalogCache();
     QString checkModelCapabilities(const QString &modelId,
                                    const QJsonObject &requirements);
     QString listModelProfiles(const QString &projectId = QString());
@@ -212,6 +213,7 @@ signals:
     void runtimeHealthRead(const QJsonObject &health);
     void runtimeDegradationsRead(const QString &requestId, const QJsonObject &result);
     void modelCatalogRead(const QString &requestId, const QJsonObject &result);
+    void modelCatalogCacheRead(const QString &requestId, const QJsonObject &result);
     void modelCapabilityChecked(const QString &requestId, const QJsonObject &result);
     void modelProfilesListed(const QString &requestId, const QJsonObject &result);
     void modelProfileRead(const QString &requestId, const QJsonObject &result);

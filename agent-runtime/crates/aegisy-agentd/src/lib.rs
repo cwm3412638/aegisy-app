@@ -138,6 +138,7 @@ const GIT_CONTEXT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 const PINNED_CONTEXT_INVALIDATION_SCHEMA: &str = "pinned-context-source-invalidation/0.1";
 const IMAGE_CONTEXT_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const MAX_IMAGE_BASE64_CHARS: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
+const MODEL_CATALOG_CACHE_STALE_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
 const TRUST_INSTRUCTION_NAMES: &[&str] = &[
     "AGENTS.md",
@@ -178,6 +179,7 @@ pub struct Runtime {
     compaction_store: Option<session_compaction_store::CompactionCheckpointStore>,
     pinned_context_store: Option<pinned_context_store::PinnedContextStore>,
     model_profile_store: Option<model_profile_store::ModelProfileStore>,
+    model_catalog_cache: Option<model_catalog_cache::ModelCatalogCache>,
     backend: Backend,
 }
 
@@ -2937,6 +2939,11 @@ impl Runtime {
             compaction_store,
             pinned_context_store,
             model_profile_store,
+            model_catalog_cache: if matches!(&backend, Backend::Recovery(_)) {
+                None
+            } else {
+                model_catalog_cache::ModelCatalogCache::new(MODEL_CATALOG_CACHE_STALE_MS).ok()
+            },
             backend,
         }
     }
@@ -3186,6 +3193,7 @@ impl Runtime {
             "runtime/health" => self.runtime_health(request),
             "runtime/degradations" => self.runtime_degradations(request),
             "model/catalog" => self.model_catalog(request),
+            "model/catalog-cache" => self.model_catalog_cache(request),
             "model/capability-check" => self.model_capability_check(request),
             "model/profile/list" => self.model_profile_list(request),
             "model/profile/read" => self.model_profile_read(request),
@@ -3486,6 +3494,26 @@ impl Runtime {
         self.success_for(
             &request,
             serde_json::to_value(catalog).expect("model catalog serialization"),
+        )
+    }
+
+    fn model_catalog_cache(&self, request: Request) -> Vec<Value> {
+        let Some(cache) = self.model_catalog_cache.as_ref() else {
+            return self.error_for(&request, -32024, "model catalog cache is unavailable");
+        };
+        let view = match cache.view(now_ms()) {
+            Ok(view) => view,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32114,
+                    format!("model catalog cache validation failed: {}", error.message),
+                )
+            }
+        };
+        self.success_for(
+            &request,
+            serde_json::to_value(view).expect("model catalog cache serialization"),
         )
     }
 
@@ -3859,6 +3887,7 @@ impl Runtime {
                 "runtime.health".into(),
                 "runtime.degradations".into(),
                 "model.catalog.read-only".into(),
+                "model.catalog.cache.read-only".into(),
                 "model.capability-check.read-only".into(),
                 "session.work.preview".into(),
                 "timeline.streaming".into(),

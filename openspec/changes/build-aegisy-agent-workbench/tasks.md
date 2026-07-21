@@ -218,9 +218,11 @@
     projection and Qt requests it after initialization. Internal
     `model-catalog-cache/0.1` now derives fresh/stale/expired views from a bounded
     validated record, hides catalog metadata after the stale window, rejects
-    clock rollback, and fixes selection authority to false. Durable storage,
-    authenticated signature verification/refresh, invalid/offline host
-    transitions, and desktop picker state remain open.
+    clock rollback, and fixes selection authority to false. Runtime/AAP/Qt now
+    expose the empty cache state and keep it visible as a read-only tooltip
+    status. Durable storage, authenticated signature verification/refresh,
+    non-empty fresh/stale/expired host transitions, and desktop picker state
+    remain open.
 - [ ] 10.2 Implement capability matcher for Chat, Work, attachments, tools, reasoning, context, runtime, and policy
   - Partial foundation: read-only `model/capability-check` validates Chat/Work
     requirements, implicitly requires tools for Work, and returns explicit

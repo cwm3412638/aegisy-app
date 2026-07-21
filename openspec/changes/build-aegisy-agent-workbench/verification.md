@@ -77,11 +77,15 @@ Model catalog foundation evidence:
   stale window. Clock regression and snapshot identity tampering fail closed;
   expired entries return no catalog metadata. Every view fixes
   `selection_allowed:false` because this layer does not cryptographically verify
-  the signature flag. Five focused unit fixtures pass. Persistence,
-  authenticated refresh/key rotation, AAP/Qt host integration, and selection
-  authority remain absent, so tasks `9.3` and `10.1` remain unchecked.
+  the signature flag. Five focused unit fixtures pass. Runtime now exposes
+  `model.catalog.cache.read-only` and `model/catalog-cache`; an empty cache
+  returns no catalog body and an explicit false selection authority, while Qt
+  validates and displays that state in the model-binding tooltip. Signed source,
+  durable cache storage, authenticated refresh/key rotation, non-empty host
+  transitions, and selection authority remain absent, so tasks `9.3` and `10.1`
+  remain unchecked.
 - The 2026-07-21 catalog, matcher, profile, catalog-policy, cache, and profile-store
-  foundation stage passed 422 Rust unit tests with one ignored live fixture, 60 protocol tests,
+  foundation stage passed 422 Rust unit tests with one ignored live fixture, 61 protocol tests,
   11 stdio/Codex tests, strict Clippy, the complete CMake build, and CTest
   `agent_runtime_protocol`.
 
@@ -96,9 +100,9 @@ Model profile foundation evidence:
   represented separately, and secret-shaped metadata is rejected.
 - Six unit fixtures cover the default one-model shape, project-scope identity,
   single-model mismatch, explicit role-specific resolution, disabled roles, and
-  secret-free content identity. No AAP/Qt method, persistence projection,
-  catalog picker, token, routing, or execution authority is exposed; OpenSpec
-  tasks `10.3` and `10.4` remain unchecked.
+  secret-free content identity. Only the metadata-only AAP/Qt projection is
+  exposed; no writable control, catalog picker, token, routing, or execution
+  authority exists. OpenSpec tasks `10.3` and `10.4` remain unchecked.
 - Internal `model-profile-store/0.1` stores one global and bounded project
   profiles in a private, atomically replaced snapshot. It validates profile and
   project scope, rejects duplicate profile IDs and secret-shaped metadata,
@@ -106,8 +110,8 @@ Model profile foundation evidence:
   idempotent, and rechecks the content-hashed snapshot after restart. Seven
   focused fixtures cover create/reopen, revision conflicts, removal, duplicate
   IDs, secret rejection, tamper detection, invalid project IDs, and private
-  bounded storage. The store is not Workbench-SQLite event-backed, exposed
-  through AAP/Qt, bound to catalog capability checks, or connected to routing;
+  bounded storage. The store is not Workbench-SQLite event-backed or writable
+  through AAP/Qt, and is not bound to catalog capability checks or routing;
   `10.3` and `10.4` therefore remain unchecked.
 - Runtime now opens the validated Profile Store when durable storage is healthy
   and negotiates `model.profile.read-only`. AAP `model/profile/list` returns a

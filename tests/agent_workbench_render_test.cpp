@@ -475,6 +475,7 @@ int main(int argc, char *argv[])
             QStringLiteral("workspace.git-context.read-only"),
             QStringLiteral("workspace.image.import-user"),
             QStringLiteral("workspace.image.preview"),
+            QStringLiteral("model.catalog.cache.read-only"),
         }},
     });
     runtimeClient->runtimeDegradationsRead(QStringLiteral("degradation-fixture"), QJsonObject{
@@ -494,12 +495,21 @@ int main(int argc, char *argv[])
         }},
         {QStringLiteral("current_quarantined_sessions"), 0},
     });
+    runtimeClient->modelCatalogCacheRead(QStringLiteral("cache-fixture"), QJsonObject{
+        {QStringLiteral("schema_version"), QStringLiteral("model-catalog-cache/0.1")},
+        {QStringLiteral("availability"), QStringLiteral("empty")},
+        {QStringLiteral("selection_allowed"), false},
+    });
     application.processEvents();
     if (!expect(!recoveryBanner->isHidden()
                     && recoveryBanner->text().contains(QStringLiteral("自动恢复 2 个"))
                     && sendButton->isEnabled() && newSession->isEnabled()
                     && openFolder->isEnabled() && importSession->isEnabled(),
                 "startup projection recovery did not render a non-blocking notice")) {
+        return 1;
+    }
+    if (!expect(modelPicker->toolTip().contains(QStringLiteral("目录缓存为空")),
+                "model catalog cache did not remain an explicit empty read-only state")) {
         return 1;
     }
     if (!expect(runtimeCapability->text().contains(QStringLiteral("Agent 只读"))

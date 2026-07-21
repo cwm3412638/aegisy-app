@@ -203,6 +203,11 @@ QString AgentRuntimeClient::modelCatalog()
     return sendRequest(QStringLiteral("model/catalog"));
 }
 
+QString AgentRuntimeClient::modelCatalogCache()
+{
+    return sendRequest(QStringLiteral("model/catalog-cache"));
+}
+
 QString AgentRuntimeClient::checkModelCapabilities(const QString &modelId,
                                                    const QJsonObject &requirements)
 {
@@ -1295,6 +1300,12 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         runtimeDegradations();
         modelCatalog();
         const QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toArray();
+        const bool modelCatalogCacheAvailable = std::any_of(
+            capabilities.cbegin(), capabilities.cend(),
+            [](const QJsonValue &value) {
+                return value.toString() == QStringLiteral("model.catalog.cache.read-only");
+            });
+        if (modelCatalogCacheAvailable) modelCatalogCache();
         const bool modelProfilesAvailable = std::any_of(
             capabilities.cbegin(), capabilities.cend(),
             [](const QJsonValue &value) {
@@ -1381,6 +1392,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit runtimeDegradationsRead(id, result);
     } else if (pendingMethod == QStringLiteral("model/catalog")) {
         emit modelCatalogRead(id, result);
+    } else if (pendingMethod == QStringLiteral("model/catalog-cache")) {
+        emit modelCatalogCacheRead(id, result);
     } else if (pendingMethod == QStringLiteral("model/capability-check")) {
         emit modelCapabilityChecked(id, result);
     } else if (pendingMethod == QStringLiteral("model/profile/list")) {
