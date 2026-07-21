@@ -2000,6 +2000,50 @@ fn runtime_error_content(message: &str) -> String {
     bounded_provider_text(message, 8 * 1024)
 }
 
+fn context_threshold_for_usage(
+    report: &usage_authority::UsageAuthorityReport,
+    previous_status: context_threshold::ThresholdStatus,
+) -> Option<context_threshold::ThresholdDecision> {
+    let entry = report.entry(usage_authority::UsageMetric::Context)?;
+    let observation = match (entry.authority, &entry.value) {
+        (
+            usage_authority::AuthorityLabel::Observed
+            | usage_authority::AuthorityLabel::CatalogDerived,
+            Some(usage_authority::UsageValue::Context(value)),
+        ) => match (value.used_tokens, value.window_tokens) {
+            (Some(used), Some(window)) => {
+                context_threshold::ContextObservation::fresh_authoritative(used, Some(window))
+            }
+            _ => context_threshold::ContextObservation::unknown(),
+        },
+        (
+            usage_authority::AuthorityLabel::Estimated,
+            Some(usage_authority::UsageValue::Context(value)),
+        ) => match (value.used_tokens, value.window_tokens) {
+            (Some(used), Some(window)) => {
+                context_threshold::ContextObservation::fresh_conservative(used, Some(window))
+            }
+            _ => context_threshold::ContextObservation::unknown(),
+        },
+        (
+            usage_authority::AuthorityLabel::Stale,
+            Some(usage_authority::UsageValue::Context(value)),
+        ) => match (value.used_tokens, value.window_tokens) {
+            (Some(used), Some(window)) => {
+                context_threshold::ContextObservation::stale(used, Some(window))
+            }
+            _ => context_threshold::ContextObservation::unknown(),
+        },
+        _ => context_threshold::ContextObservation::unknown(),
+    };
+    context_threshold::evaluate(
+        observation,
+        context_threshold::ThresholdConfig::default(),
+        previous_status,
+    )
+    .ok()
+}
+
 fn runtime_error_content_with_provider(
     message: &str,
     provider_error: Option<&ProviderError>,
@@ -9624,6 +9668,7 @@ impl Runtime {
         let mut persistence_error: Option<String> = None;
         let mut metadata_update_counts = HashMap::<String, usize>::new();
         let mut metadata_truncation_notified = HashSet::<String>::new();
+        let mut context_threshold_status = context_threshold::ThresholdStatus::NoAction;
         let result = match &mut backend {
             Backend::Codex(adapter) => adapter.run_turn(
                 CodexTurnRequest {
@@ -9839,7 +9884,16 @@ impl Runtime {
                         if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
                             *count += 1;
                             if let Ok(report) = from_provider_token_usage(&usage, now_ms()) {
-                                if let Ok(authority) = serde_json::to_value(report) {
+                                if let Ok(mut authority) = serde_json::to_value(&report) {
+                                    if let Some(decision) = context_threshold_for_usage(
+                                        &report,
+                                        context_threshold_status,
+                                    ) {
+                                        context_threshold_status = decision.status;
+                                        if let Ok(value) = serde_json::to_value(decision) {
+                                            authority["compaction_threshold"] = value;
+                                        }
+                                    }
                                     if let Some(object) = usage.as_object_mut() {
                                         object.insert("authority".into(), authority);
                                     }

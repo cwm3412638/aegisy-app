@@ -422,6 +422,20 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
             .map(Vec::len),
         Some(4)
     );
+    assert_eq!(
+        usage_event["params"]["item"]["data"]["authority"]["compaction_threshold"]
+            ["schema_version"],
+        "context-threshold/0.1"
+    );
+    assert_eq!(
+        usage_event["params"]["item"]["data"]["authority"]["compaction_threshold"]["status"],
+        "no_action"
+    );
+    assert_eq!(
+        usage_event["params"]["item"]["data"]["authority"]["compaction_threshold"]
+            ["automatic_compaction_authority"],
+        false
+    );
     assert!(events
         .iter()
         .any(|event| event["params"]["event"] == "turn.plan.updated"));

@@ -429,11 +429,21 @@ pub fn from_provider_token_usage(
                 "provider usage total breakdown is missing",
             )
         })?;
+    let last = usage
+        .get("last")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            error(
+                "usage-authority-provider-payload-invalid",
+                "provider usage last breakdown is missing",
+            )
+        })?;
     let input = required_nonnegative_u64(total, "input_tokens")?;
     let output = required_nonnegative_u64(total, "output_tokens")?;
     let provider_total = required_nonnegative_u64(total, "total_tokens")?;
     let cached = required_nonnegative_u64(total, "cached_input_tokens")?;
     let reasoning_output = required_nonnegative_u64(total, "reasoning_output_tokens")?;
+    let context_used = required_nonnegative_u64(last, "input_tokens")?;
 
     let reconciled_total = input
         .checked_add(output)
@@ -486,7 +496,7 @@ pub fn from_provider_token_usage(
             observed(
                 UsageMetric::Context,
                 UsageValue::Context(ContextUsageValue {
-                    used_tokens: None,
+                    used_tokens: Some(context_used),
                     window_tokens: Some(window),
                 }),
             )
@@ -1034,6 +1044,12 @@ mod tests {
             report.entry(UsageMetric::Context).unwrap().authority,
             AuthorityLabel::Observed
         );
+        let Some(UsageValue::Context(context)) = &report.entry(UsageMetric::Context).unwrap().value
+        else {
+            panic!("expected context value");
+        };
+        assert_eq!(context.used_tokens, Some(24));
+        assert_eq!(context.window_tokens, Some(128_000));
         assert_eq!(
             report.entry(UsageMetric::Cost).unwrap().authority,
             AuthorityLabel::Unknown
