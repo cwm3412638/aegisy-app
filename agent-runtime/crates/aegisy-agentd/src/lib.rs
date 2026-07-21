@@ -61,6 +61,7 @@ mod terminal;
 mod tokenizer;
 mod turn_context;
 mod unified_execution;
+pub mod usage_authority;
 mod workbench_migration;
 pub mod workbench_store;
 mod workspace;
