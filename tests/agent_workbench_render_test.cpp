@@ -917,6 +917,97 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    const QJsonObject usageAuthority{
+        {QStringLiteral("schema_version"), QStringLiteral("usage-authority/0.1")},
+        {QStringLiteral("entries"), QJsonArray{
+            QJsonObject{
+                {QStringLiteral("metric"), QStringLiteral("token")},
+                {QStringLiteral("authority"), QStringLiteral("observed")},
+                {QStringLiteral("authoritative"), true},
+                {QStringLiteral("value"), QJsonObject{
+                    {QStringLiteral("kind"), QStringLiteral("token")},
+                    {QStringLiteral("input_tokens"), 2},
+                    {QStringLiteral("output_tokens"), 3},
+                    {QStringLiteral("total_tokens"), 5},
+                }},
+            },
+            QJsonObject{
+                {QStringLiteral("metric"), QStringLiteral("context")},
+                {QStringLiteral("authority"), QStringLiteral("observed")},
+                {QStringLiteral("authoritative"), true},
+                {QStringLiteral("value"), QJsonObject{
+                    {QStringLiteral("kind"), QStringLiteral("context")},
+                    {QStringLiteral("used_tokens"), 2},
+                    {QStringLiteral("window_tokens"), 128000},
+                }},
+            },
+            QJsonObject{
+                {QStringLiteral("metric"), QStringLiteral("cost")},
+                {QStringLiteral("authority"), QStringLiteral("unknown")},
+                {QStringLiteral("authoritative"), false},
+                {QStringLiteral("value"), QJsonValue::Null},
+            },
+            QJsonObject{
+                {QStringLiteral("metric"), QStringLiteral("reasoning")},
+                {QStringLiteral("authority"), QStringLiteral("observed")},
+                {QStringLiteral("authoritative"), true},
+                {QStringLiteral("value"), QJsonObject{
+                    {QStringLiteral("kind"), QStringLiteral("reasoning")},
+                    {QStringLiteral("output_tokens"), 0},
+                }},
+            },
+        }},
+        {QStringLiteral("compaction_threshold"), QJsonObject{
+            {QStringLiteral("schema_version"), QStringLiteral("context-threshold/0.1")},
+            {QStringLiteral("status"), QStringLiteral("no_action")},
+            {QStringLiteral("automatic_compaction_authority"), false},
+        }},
+    };
+    runtimeClient->timelineEvent(QJsonObject{
+        {QStringLiteral("event"), QStringLiteral("item.completed")},
+        {QStringLiteral("item"), QJsonObject{
+            {QStringLiteral("id"), QStringLiteral("usage-render-fixture")},
+            {QStringLiteral("kind"), QStringLiteral("usage")},
+            {QStringLiteral("role"), QStringLiteral("system")},
+            {QStringLiteral("state"), QStringLiteral("updated")},
+            {QStringLiteral("content"), QStringLiteral("Token usage updated")},
+            {QStringLiteral("data"), QJsonObject{{QStringLiteral("authority"), usageAuthority}}},
+        }},
+    });
+    application.processEvents();
+    QLabel *usagePresentation = workbench.findChild<QLabel *>(
+        QStringLiteral("timelineUsageAuthority"));
+    if (!expect(usagePresentation && usagePresentation->text().contains(QStringLiteral("输入 2"))
+                    && usagePresentation->text().contains(QStringLiteral("上下文正常"))
+                    && usagePresentation->toolTip().contains(QStringLiteral("不包含提示词")),
+                "usage authority was not rendered as bounded read-only metadata")) {
+        return 1;
+    }
+    runtimeClient->timelineEvent(QJsonObject{
+        {QStringLiteral("event"), QStringLiteral("item.completed")},
+        {QStringLiteral("item"), QJsonObject{
+            {QStringLiteral("id"), QStringLiteral("usage-invalid-render-fixture")},
+            {QStringLiteral("kind"), QStringLiteral("usage")},
+            {QStringLiteral("role"), QStringLiteral("system")},
+            {QStringLiteral("state"), QStringLiteral("updated")},
+            {QStringLiteral("content"), QStringLiteral("Token usage updated")},
+            {QStringLiteral("data"), QJsonObject{{QStringLiteral("authority"), QJsonObject{
+                {QStringLiteral("schema_version"), QStringLiteral("usage-authority/9.9")},
+            }}}},
+        }},
+    });
+    application.processEvents();
+    const QList<QLabel *> usagePresentations = workbench.findChildren<QLabel *>(
+        QStringLiteral("timelineUsageAuthority"));
+    const bool unknownUsageVisible = std::any_of(
+        usagePresentations.cbegin(), usagePresentations.cend(), [](const QLabel *label) {
+            return label->text() == QStringLiteral("用量来源未知");
+        });
+    if (!expect(usagePresentations.size() >= 2 && unknownUsageVisible,
+                "malformed usage authority did not fail closed in Qt")) {
+        return 1;
+    }
+
     runtimeClient->timelineEvent(QJsonObject{
         {QStringLiteral("session_id"), QStringLiteral("session-cancel-fixture")},
         {QStringLiteral("turn_id"), QStringLiteral("turn-cancel-fixture")},

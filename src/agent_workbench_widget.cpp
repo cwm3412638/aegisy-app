@@ -74,6 +74,7 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <algorithm>
+#include <optional>
 #include <utility>
 
 namespace {
@@ -248,6 +249,130 @@ QString formatByteCount(qint64 bytes)
     }
     if (bytes >= 1024) return QStringLiteral("%1 KiB").arg(bytes / 1024.0, 0, 'f', 1);
     return QStringLiteral("%1 B").arg(bytes);
+}
+
+struct UsageAuthorityPresentation {
+    bool valid = false;
+    QString text;
+    QString tooltip;
+};
+
+UsageAuthorityPresentation usageAuthorityPresentation(const QJsonObject &data)
+{
+    const QJsonObject authority = data.value(QStringLiteral("authority")).toObject();
+    if (authority.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("usage-authority/0.1")) {
+        return {false, QStringLiteral("用量来源未知"),
+                QStringLiteral("用量权威信息缺失或版本未知，已按只读状态显示。")};
+    }
+    const QJsonArray entries = authority.value(QStringLiteral("entries")).toArray();
+    if (entries.size() != 4) {
+        return {false, QStringLiteral("用量状态无效"),
+                QStringLiteral("用量权威报告不是完整的四类指标，已拒绝显示数值。")};
+    }
+    QHash<QString, QJsonObject> byMetric;
+    const QStringList metrics{
+        QStringLiteral("token"), QStringLiteral("context"),
+        QStringLiteral("cost"), QStringLiteral("reasoning")};
+    for (const QJsonValue &value : entries) {
+        const QJsonObject entry = value.toObject();
+        const QString metric = entry.value(QStringLiteral("metric")).toString();
+        const QString authorityLabel = entry.value(QStringLiteral("authority")).toString();
+        if (!metrics.contains(metric) || byMetric.contains(metric)
+                || !QStringList{QStringLiteral("observed"), QStringLiteral("catalog-derived"),
+                                QStringLiteral("estimated"), QStringLiteral("stale"),
+                                QStringLiteral("unknown")}
+                    .contains(authorityLabel)) {
+            return {false, QStringLiteral("用量状态无效"),
+                    QStringLiteral("用量权威报告包含未知或重复指标，已拒绝显示数值。")};
+        }
+        const bool expectedAuthoritative = authorityLabel == QStringLiteral("observed")
+            || authorityLabel == QStringLiteral("catalog-derived");
+        if (!entry.value(QStringLiteral("authoritative")).isBool()
+                || entry.value(QStringLiteral("authoritative")).toBool()
+                    != expectedAuthoritative) {
+            return {false, QStringLiteral("用量状态无效"),
+                    QStringLiteral("用量来源标签与权威状态不一致，已拒绝显示。")};
+        }
+        if (authorityLabel == QStringLiteral("unknown")
+                && !entry.value(QStringLiteral("value")).isNull()
+                && !entry.value(QStringLiteral("value")).isUndefined()) {
+            return {false, QStringLiteral("用量状态无效"),
+                    QStringLiteral("未知用量不应携带数值，已拒绝显示。")};
+        }
+        if (authorityLabel != QStringLiteral("unknown")) {
+            const QJsonObject metricValue = entry.value(QStringLiteral("value")).toObject();
+            if (metricValue.value(QStringLiteral("kind")).toString() != metric) {
+                return {false, QStringLiteral("用量状态无效"),
+                        QStringLiteral("用量指标和值类型不一致，已拒绝显示。")};
+            }
+        }
+        byMetric.insert(metric, entry);
+    }
+    for (const QString &metric : metrics) {
+        if (!byMetric.contains(metric)) {
+            return {false, QStringLiteral("用量状态无效"),
+                    QStringLiteral("用量权威报告缺少必要指标，已拒绝显示。")};
+        }
+    }
+    const QJsonObject threshold = authority.value(QStringLiteral("compaction_threshold"))
+        .toObject();
+    if (!threshold.isEmpty()) {
+        const QString status = threshold.value(QStringLiteral("status")).toString();
+        if (threshold.value(QStringLiteral("schema_version")).toString()
+                    != QStringLiteral("context-threshold/0.1")
+                || threshold.value(QStringLiteral("automatic_compaction_authority"))
+                       .toBool(true)
+                || !QStringList{QStringLiteral("no_action"),
+                                QStringLiteral("preview_required"),
+                                QStringLiteral("hard_limit_exceeded")}
+                    .contains(status)) {
+            return {false, QStringLiteral("用量状态无效"),
+                    QStringLiteral("上下文阈值信号不满足只读约束，已拒绝显示。")};
+        }
+    }
+    auto authorityText = [](const QString &label) {
+        if (label == QStringLiteral("observed")) return QStringLiteral("观测");
+        if (label == QStringLiteral("catalog-derived")) return QStringLiteral("目录派生");
+        if (label == QStringLiteral("estimated")) return QStringLiteral("估算");
+        if (label == QStringLiteral("stale")) return QStringLiteral("已过期");
+        return QStringLiteral("未知");
+    };
+    const QJsonObject tokenValue = byMetric.value(QStringLiteral("token"))
+        .value(QStringLiteral("value")).toObject();
+    const QJsonObject contextValue = byMetric.value(QStringLiteral("context"))
+        .value(QStringLiteral("value")).toObject();
+    QStringList parts;
+    parts << QStringLiteral("Token %1").arg(
+        authorityText(byMetric.value(QStringLiteral("token"))
+                          .value(QStringLiteral("authority")).toString()));
+    const auto number = [](const QJsonObject &object, const QString &key) -> std::optional<qint64> {
+        const QJsonValue value = object.value(key);
+        if (!value.isDouble()) return std::nullopt;
+        bool ok = false;
+        const qint64 result = value.toVariant().toLongLong(&ok);
+        return ok && result >= 0 ? std::optional<qint64>(result) : std::nullopt;
+    };
+    if (const auto input = number(tokenValue, QStringLiteral("input_tokens"))) {
+        if (const auto output = number(tokenValue, QStringLiteral("output_tokens"))) {
+            parts << QStringLiteral("输入 %1 · 输出 %2").arg(*input).arg(*output);
+        }
+    }
+    parts << QStringLiteral("Context %1").arg(
+        authorityText(byMetric.value(QStringLiteral("context"))
+                          .value(QStringLiteral("authority")).toString()));
+    if (const auto used = number(contextValue, QStringLiteral("used_tokens"))) {
+        if (const auto window = number(contextValue, QStringLiteral("window_tokens"))) {
+            parts << QStringLiteral("上下文 %1/%2").arg(*used).arg(*window);
+        }
+    }
+    const QString status = threshold.value(QStringLiteral("status")).toString();
+    if (status == QStringLiteral("no_action")) parts << QStringLiteral("上下文正常");
+    else if (status == QStringLiteral("preview_required")) parts << QStringLiteral("需要预检");
+    else if (status == QStringLiteral("hard_limit_exceeded")) parts << QStringLiteral("达到上限");
+    else if (!status.isEmpty()) parts << QStringLiteral("阈值状态未知");
+    return {true, parts.join(QStringLiteral(" · ")),
+            QStringLiteral("仅显示经过 schema 校验的来源和数值；不包含提示词、文件正文或供应商响应。")};
 }
 
 QString boundedUtf8Text(const QString &text, int byteLimit, bool *truncated = nullptr)
@@ -10117,6 +10242,9 @@ void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend
     const QString artifactSession = data.value(QStringLiteral("session_id")).toString();
     const QString content = item.value(QStringLiteral("content")).toString();
     if (id.isEmpty()) return;
+    const UsageAuthorityPresentation usagePresentation = kind == QStringLiteral("usage")
+        ? usageAuthorityPresentation(data)
+        : UsageAuthorityPresentation{};
     if (QLabel *existing = m_itemLabels.value(id, nullptr)) {
         existing->setText(content);
         if (QPushButton *button = m_itemArtifactButtons.value(id, nullptr)) {
@@ -10143,6 +10271,7 @@ void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend
     const QString risk = data.value(QStringLiteral("risk")).toObject()
         .value(QStringLiteral("level")).toString();
     const QString roleText = role == QStringLiteral("user") ? QStringLiteral("你")
+        : kind == QStringLiteral("usage") ? QStringLiteral("用量 · 只读")
         : role == QStringLiteral("system") ? QStringLiteral("运行时")
         : kind == QStringLiteral("command")
             ? QStringLiteral("命令 · 只读沙箱 · 风险 %1").arg(risk)
@@ -10182,6 +10311,17 @@ void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend
     }
     layout->addWidget(roleLabel);
     layout->addWidget(message);
+    if (kind == QStringLiteral("usage")) {
+        auto *usageLabel = new QLabel(usagePresentation.text, bubble);
+        usageLabel->setObjectName(QStringLiteral("timelineUsageAuthority"));
+        usageLabel->setTextFormat(Qt::PlainText);
+        usageLabel->setWordWrap(true);
+        usageLabel->setToolTip(usagePresentation.tooltip);
+        usageLabel->setStyleSheet(usagePresentation.valid
+            ? QStringLiteral("background:transparent; color:#475467; font-size:10px;")
+            : QStringLiteral("background:transparent; color:#b54708; font-size:10px;"));
+        layout->addWidget(usageLabel);
+    }
     if (kind == QStringLiteral("command")) {
         auto *artifactButton = new QPushButton(QStringLiteral("查看完整输出"), bubble);
         artifactButton->setObjectName(QStringLiteral("timelineCommandArtifactButton"));
