@@ -916,4 +916,89 @@ mod tests {
         assert!(result.entries.is_empty());
         let _ = fs::remove_dir_all(project);
     }
+
+    #[test]
+    fn large_monorepo_ignores_dependency_build_and_irrelevant_trees_deterministically() {
+        let project = temp_root("large-monorepo-project");
+        let user = temp_root("large-monorepo-user");
+        fs::write(user.join("AGENTS.md"), "user guidance\n").expect("user instruction");
+
+        for directory in ["node_modules", "target", ".cache"] {
+            fs::create_dir_all(user.join(directory)).expect("ignored tree");
+            fs::write(
+                user.join(directory).join("AGENTS.md"),
+                "irrelevant instruction body\n",
+            )
+            .expect("ignored instruction");
+        }
+        for index in 0..256 {
+            let directory = user.join(format!("package-{index:03}"));
+            fs::create_dir_all(&directory).expect("package tree");
+            fs::write(
+                directory.join("README.md"),
+                "unrelated repository metadata\n",
+            )
+            .expect("unrelated file");
+        }
+
+        let request = DiscoveryRequest {
+            target_path: None,
+            include_content: true,
+        };
+        let first = discover(&roots(&project, None, Some(&user)), &request).expect("discovery");
+        let second = discover(&roots(&project, None, Some(&user)), &request).expect("discovery");
+        assert_eq!(first.entries.len(), 1);
+        assert_eq!(first.entries[0].relative_path, "user/AGENTS.md");
+        assert_eq!(first.entries[0].content.as_deref(), Some("user guidance\n"));
+        assert!(!first.truncated);
+        assert!(first.rejection_reasons.is_empty());
+        assert_eq!(
+            serde_json::to_string(&first).expect("serialize first"),
+            serde_json::to_string(&second).expect("serialize second")
+        );
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(user);
+    }
+
+    #[test]
+    fn nested_instruction_chain_is_target_scoped_and_closer_depth_wins() {
+        let project = temp_root("nested-target");
+        let target = project.join("packages/app/src");
+        fs::create_dir_all(&target).expect("target");
+        fs::create_dir_all(project.join("packages/other")).expect("sibling");
+        fs::write(project.join("AGENTS.md"), "project\n").expect("project");
+        fs::write(project.join("packages/AGENTS.md"), "packages\n").expect("packages");
+        fs::write(project.join("packages/app/AGENTS.md"), "app\n").expect("app");
+        fs::write(target.join("AGENTS.md"), "src\n").expect("src");
+        fs::write(project.join("packages/other/AGENTS.md"), "sibling\n").expect("sibling");
+
+        let result = discover(
+            &roots(&project, None, None),
+            &DiscoveryRequest {
+                target_path: Some("packages/app/src".into()),
+                include_content: true,
+            },
+        )
+        .expect("discovery");
+        let included = result
+            .entries
+            .iter()
+            .filter(|entry| entry.included)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            included
+                .iter()
+                .map(|entry| entry.content.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["project\n", "packages\n", "app\n", "src\n"]
+        );
+        assert!(included
+            .iter()
+            .map(|entry| entry.relative_path.as_str())
+            .all(|path| !path.contains("other")));
+        assert!(included
+            .windows(2)
+            .all(|pair| pair[0].depth < pair[1].depth));
+        let _ = fs::remove_dir_all(project);
+    }
 }

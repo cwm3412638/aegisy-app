@@ -887,6 +887,31 @@ mod tests {
     }
 
     #[test]
+    fn stale_reread_uses_current_body_and_never_reuses_previous_context() {
+        let root = temporary_root();
+        let previous = "fn previous_context() {}\n";
+        let current = "fn current_context() {}\n";
+        fs::write(root.join("main.rs"), previous).unwrap();
+        let initial = read_text_file(&root, "main.rs").unwrap();
+        let mut item = context_item("file", Some("main.rs"), None);
+        item.revision = Some(initial.revision);
+        item.expected_content_hash =
+            Some(format!("sha256:{:x}", Sha256::digest(previous.as_bytes())));
+        fs::write(root.join("main.rs"), current).unwrap();
+
+        let prepared = prepare_turn_context(&[item], Some(&root)).unwrap();
+        assert!(!prepared.truncated);
+        assert!(prepared.text.contains(current.trim()));
+        assert!(!prepared.text.contains(previous.trim()));
+        assert_eq!(prepared.manifest.entries[0].freshness, "stale");
+        assert_eq!(
+            prepared.manifest.entries[0].content_hash,
+            format!("sha256:{:x}", Sha256::digest(current.as_bytes()))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn compares_expected_file_hash_with_raw_bom_and_crlf_bytes() {
         let root = temporary_root();
         let raw = b"\xef\xbb\xbffn raw() {}\r\n";

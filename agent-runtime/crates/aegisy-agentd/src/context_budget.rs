@@ -100,9 +100,12 @@ pub fn allocate(
         .iter()
         .map(|entry| entry.estimated_tokens)
         .fold(0_u64, u64::saturating_add);
+    // Intentional exclusions are policy decisions, not budget truncation. Keep
+    // the signal reserved for eligible context that could not fit the limits.
     let truncated = entries
         .iter()
-        .any(|entry| entry.requested_bytes > entry.allocated_bytes);
+        .zip(inputs.iter())
+        .any(|(entry, input)| !input.excluded && entry.requested_bytes > entry.allocated_bytes);
     BudgetPlan {
         schema_version: SCHEMA_VERSION,
         max_total_bytes,
@@ -242,6 +245,62 @@ mod tests {
         assert_eq!(plan.allocated_bytes, 0);
         assert_eq!(plan.entries[0].reason, "excluded");
         assert!(!plan.entries[0].included);
+        assert!(!plan.truncated);
+    }
+
+    #[test]
+    fn large_monorepo_exclusions_do_not_look_like_budget_overflow() {
+        let mut inputs = vec![BudgetInput {
+            id: "selected-file",
+            kind: Some("file"),
+            priority: Some("pinned"),
+            requested_bytes: 16 * 1024,
+            excluded: false,
+        }];
+        let irrelevant_ids = (0..15)
+            .map(|index| format!("irrelevant-{index}"))
+            .collect::<Vec<_>>();
+        inputs.extend(irrelevant_ids.iter().map(|id| BudgetInput {
+            id: id.as_str(),
+            kind: Some("repository-map"),
+            priority: None,
+            requested_bytes: 16 * 1024,
+            excluded: true,
+        }));
+        let plan = allocate(&inputs, 64 * 1024, 16 * 1024);
+        assert_eq!(plan.entries[0].allocated_bytes, 16 * 1024);
+        assert!(plan.entries[1..].iter().all(|entry| {
+            entry.allocated_bytes == 0 && !entry.included && entry.reason == "excluded"
+        }));
+        assert!(!plan.truncated);
+        assert_eq!(plan.allocated_bytes, 16 * 1024);
+    }
+
+    #[test]
+    fn relevant_pinned_context_resists_irrelevant_repository_map_under_tight_budget() {
+        let mut inputs = vec![BudgetInput {
+            id: "selected-file",
+            kind: Some("file"),
+            priority: Some("pinned"),
+            requested_bytes: 16 * 1024,
+            excluded: false,
+        }];
+        let repository_map_ids = (0..4)
+            .map(|index| format!("repo-map-{index}"))
+            .collect::<Vec<_>>();
+        inputs.extend(repository_map_ids.iter().map(|id| BudgetInput {
+            id: id.as_str(),
+            kind: Some("repository-map"),
+            priority: None,
+            requested_bytes: 16 * 1024,
+            excluded: false,
+        }));
+        let plan = allocate(&inputs, 16 * 1024, 16 * 1024);
+        assert_eq!(plan.entries[0].allocated_bytes, 16 * 1024);
+        assert!(plan.entries[1..].iter().all(|entry| {
+            entry.allocated_bytes == 0 && !entry.included && entry.reason == "context-budget"
+        }));
+        assert!(plan.truncated);
     }
 
     #[test]
