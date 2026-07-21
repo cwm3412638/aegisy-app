@@ -475,6 +475,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_modelProfileReadOnlyAvailable = false;
         m_modelProfileSnapshotValid = false;
         m_modelProfileCount = 0;
+        m_modelCatalogState.clear();
         m_modelCatalogCacheState.clear();
         m_modelCatalogRefreshState.clear();
         m_compactionAvailable = false;
@@ -539,6 +540,31 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_modelProfileCount = m_modelProfileSnapshotValid ? profiles.size() : 0;
         updateSessionRuntimePresentation();
     });
+    connect(m_runtime, &AgentRuntimeClient::modelCatalogRead,
+            this, [this](const QString &, const QJsonObject &result) {
+        const QString state = result.value(QStringLiteral("state")).toString();
+        const QJsonValue refreshSupported = result.value(QStringLiteral("refresh_supported"));
+        const bool valid = result.value(QStringLiteral("schema_version")).toString()
+                == QStringLiteral("model-catalog/0.1")
+            && (state == QStringLiteral("offline")
+                || state == QStringLiteral("fresh")
+                || state == QStringLiteral("stale")
+                || state == QStringLiteral("invalid"))
+            && !result.value(QStringLiteral("contains_credentials")).toBool(true)
+            && refreshSupported.isBool();
+        if (!valid) {
+            m_modelCatalogState = QStringLiteral("目录状态无效");
+        } else if (state == QStringLiteral("offline")) {
+            m_modelCatalogState = QStringLiteral("目录离线");
+        } else if (state == QStringLiteral("fresh")) {
+            m_modelCatalogState = QStringLiteral("目录新鲜");
+        } else if (state == QStringLiteral("stale")) {
+            m_modelCatalogState = QStringLiteral("目录陈旧");
+        } else {
+            m_modelCatalogState = QStringLiteral("目录无效");
+        }
+        updateSessionRuntimePresentation();
+    });
     connect(m_runtime, &AgentRuntimeClient::modelCatalogCacheRead,
             this, [this](const QString &, const QJsonObject &result) {
         const QString availability = result.value(QStringLiteral("availability")).toString();
@@ -550,7 +576,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 || availability == QStringLiteral("expired"))
             && !result.value(QStringLiteral("selection_allowed")).toBool(true);
         if (!valid) {
-            m_modelCatalogCacheState.clear();
+            m_modelCatalogCacheState = QStringLiteral("目录缓存无效");
         } else if (availability == QStringLiteral("empty")) {
             m_modelCatalogCacheState = QStringLiteral("目录缓存为空");
         } else if (availability == QStringLiteral("fresh")) {
@@ -10260,6 +10286,9 @@ void AgentWorkbenchWidget::updateSessionRuntimePresentation()
     }
     if (!m_modelCatalogCacheState.isEmpty()) {
         tooltip += QStringLiteral(" · %1").arg(m_modelCatalogCacheState);
+    }
+    if (!m_modelCatalogState.isEmpty()) {
+        tooltip += QStringLiteral(" · %1").arg(m_modelCatalogState);
     }
     if (!m_modelCatalogRefreshState.isEmpty()) {
         tooltip += QStringLiteral(" · %1").arg(m_modelCatalogRefreshState);

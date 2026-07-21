@@ -275,6 +275,13 @@
     `unconfigured` with conditional-request support and all credential,
     response-body, cache-install, selection, routing, token, and Turn authority
     flags fixed false until a production endpoint and trust anchor are supplied.
+  - Desktop projection now keeps explicit `offline`, `invalid`, `fresh`,
+    `stale`, `expired`, and `empty` labels. Malformed catalog/cache responses,
+    including any response that claims `selection_allowed=true`, become visible
+    invalid states and never leave stale authority in the model binding tooltip.
+    Deterministic render coverage exercises the cache lifecycle and fail-closed
+    malformed responses. Production refresh, non-empty authenticated transitions,
+    and picker state remain open.
 - [ ] 10.2 Implement capability matcher for Chat, Work, attachments, tools, reasoning, context, runtime, and policy
   - Partial foundation: read-only `model/capability-check` validates Chat/Work
     requirements, implicitly requires tools for Work, and returns explicit

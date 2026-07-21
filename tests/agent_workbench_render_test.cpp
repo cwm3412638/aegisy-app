@@ -501,6 +501,12 @@ int main(int argc, char *argv[])
         {QStringLiteral("availability"), QStringLiteral("empty")},
         {QStringLiteral("selection_allowed"), false},
     });
+    runtimeClient->modelCatalogRead(QStringLiteral("catalog-offline-fixture"), QJsonObject{
+        {QStringLiteral("schema_version"), QStringLiteral("model-catalog/0.1")},
+        {QStringLiteral("state"), QStringLiteral("offline")},
+        {QStringLiteral("contains_credentials"), false},
+        {QStringLiteral("refresh_supported"), false},
+    });
     runtimeClient->modelCatalogRefreshStatusRead(
         QStringLiteral("refresh-status-fixture"), QJsonObject{
             {QStringLiteral("schema_version"),
@@ -522,8 +528,60 @@ int main(int argc, char *argv[])
         return 1;
     }
     if (!expect(modelPicker->toolTip().contains(QStringLiteral("目录缓存为空"))
+                    && modelPicker->toolTip().contains(QStringLiteral("目录离线"))
                     && modelPicker->toolTip().contains(QStringLiteral("目录刷新未配置")),
                 "model catalog cache and refresh did not remain explicit read-only states")) {
+        return 1;
+    }
+    runtimeClient->modelCatalogCacheRead(QStringLiteral("cache-fresh-fixture"), QJsonObject{
+        {QStringLiteral("schema_version"), QStringLiteral("model-catalog-cache/0.1")},
+        {QStringLiteral("availability"), QStringLiteral("fresh")},
+        {QStringLiteral("selection_allowed"), false},
+    });
+    application.processEvents();
+    if (!expect(modelPicker->toolTip().contains(QStringLiteral("目录缓存新鲜")),
+                "fresh catalog cache state did not render")) {
+        return 1;
+    }
+    runtimeClient->modelCatalogCacheRead(QStringLiteral("cache-stale-fixture"), QJsonObject{
+        {QStringLiteral("schema_version"), QStringLiteral("model-catalog-cache/0.1")},
+        {QStringLiteral("availability"), QStringLiteral("stale")},
+        {QStringLiteral("selection_allowed"), false},
+    });
+    application.processEvents();
+    if (!expect(modelPicker->toolTip().contains(QStringLiteral("目录缓存陈旧")),
+                "stale catalog cache state did not render")) {
+        return 1;
+    }
+    runtimeClient->modelCatalogCacheRead(QStringLiteral("cache-expired-fixture"), QJsonObject{
+        {QStringLiteral("schema_version"), QStringLiteral("model-catalog-cache/0.1")},
+        {QStringLiteral("availability"), QStringLiteral("expired")},
+        {QStringLiteral("selection_allowed"), false},
+    });
+    application.processEvents();
+    if (!expect(modelPicker->toolTip().contains(QStringLiteral("目录缓存过期")),
+                "expired catalog cache state did not render")) {
+        return 1;
+    }
+    runtimeClient->modelCatalogCacheRead(QStringLiteral("cache-malformed-fixture"), QJsonObject{
+        {QStringLiteral("schema_version"), QStringLiteral("model-catalog-cache/0.1")},
+        {QStringLiteral("availability"), QStringLiteral("fresh")},
+        {QStringLiteral("selection_allowed"), true},
+    });
+    application.processEvents();
+    if (!expect(modelPicker->toolTip().contains(QStringLiteral("目录缓存无效")),
+                "malformed or authority-bearing cache state did not fail closed")) {
+        return 1;
+    }
+    runtimeClient->modelCatalogRead(QStringLiteral("catalog-malformed-fixture"), QJsonObject{
+        {QStringLiteral("schema_version"), QStringLiteral("model-catalog/0.1")},
+        {QStringLiteral("state"), QStringLiteral("unexpected")},
+        {QStringLiteral("contains_credentials"), false},
+        {QStringLiteral("refresh_supported"), false},
+    });
+    application.processEvents();
+    if (!expect(modelPicker->toolTip().contains(QStringLiteral("目录状态无效")),
+                "malformed catalog response did not fail closed")) {
         return 1;
     }
     if (!expect(runtimeCapability->text().contains(QStringLiteral("Agent 只读"))

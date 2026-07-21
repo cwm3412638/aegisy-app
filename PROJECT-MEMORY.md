@@ -167,6 +167,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   anchor configuration are absent. No HTTP request, token transfer, Trust Store
   installation, cache mutation, model selection, routing, token, or Turn
   authority was added; keep OpenSpec `9.4` and `10.1` unchecked.
+- Desktop catalog state projection (2026-07-21): Qt now separately validates
+  and displays `offline`, `invalid`, `fresh`, `stale`, `expired`, and `empty`
+  catalog/cache states in the read-only model-binding tooltip. Malformed
+  catalog/cache results, including a cache response claiming
+  `selection_allowed=true`, become explicit invalid status and cannot leave a
+  previous usable-looking state behind. Deterministic render coverage exercises
+  the lifecycle and fail-closed cases; the test binary compiles, while this host
+  still kills the Qt process during startup with exit 137. This remains metadata
+  only: no picker, catalog refresh, cache install, routing, token, or Turn
+  authority was added, and OpenSpec `10.1` remains unchecked.
 - Model profile foundation (2026-07-21): internal `model-profile/0.1` now
   validates global/project scope, bounded role bindings for Agent/plan/apply/
   review/utility/embedding/rerank, secret-free source metadata, and a

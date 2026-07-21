@@ -154,6 +154,16 @@ Model catalog foundation evidence:
   Runtime still does not open the Trust Store and has no production anchor,
   authenticated cloud refresh, non-empty host transitions, or selection
   authority, so tasks `9.3` and `10.1` remain unchecked.
+- The Qt Workbench now validates and projects the catalog/cache state boundary
+  separately: offline, invalid, fresh, stale, expired, and empty states are
+  shown as bounded model-binding status text. A malformed response or any
+  `selection_allowed=true` cache response becomes an explicit invalid state;
+  it is never silently cleared or treated as a usable catalog. The render
+  fixture covers offline plus fresh/stale/expired/empty lifecycle states and
+  malformed catalog/cache responses. The test binary compiles, but this host
+  still kills the Qt process at startup with exit 137, so execution evidence
+  must be rerun on a host with sufficient memory before this milestone can
+  close.
 - The 2026-07-21 catalog, matcher, profile, catalog-policy, cache, and profile-store
   foundation stage passed 428 Rust unit tests with one ignored live fixture, 62 protocol tests,
   11 stdio/Codex tests, strict Clippy, the complete CMake build, and CTest
