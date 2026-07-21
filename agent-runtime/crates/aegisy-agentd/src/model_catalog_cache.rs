@@ -3,12 +3,14 @@
 //! This contract is intentionally below the cloud/authentication boundary. It
 //! accepts only catalog metadata marked as signature-validated, then protects
 //! local cache state from malformed expiry, clock rollback,
-//! duplicate-generation conflicts, and older revisions. This boundary does not
-//! authenticate that mark, so it fixes selection authority to false and does
-//! not fetch, sign, refresh, select, route, issue tokens, or authorize a turn.
+//! duplicate-generation conflicts, and older revisions. The public persistent
+//! admission path verifies through root-anchored trust state first. The cache
+//! still fixes selection authority to false and does not fetch, sign, refresh,
+//! select, route, issue tokens, or authorize a turn.
 
 use crate::model_catalog::{CatalogState, ModelCatalog};
-use crate::model_catalog_signature::{CatalogKeyRing, SignedModelCatalog};
+use crate::model_catalog_signature::SignedModelCatalog;
+use crate::model_catalog_trust_store::CatalogTrustStore;
 use serde::{Deserialize, Serialize};
 use serde_json::to_vec;
 use sha2::{Digest, Sha256};
@@ -215,20 +217,20 @@ impl ModelCatalogCacheStore {
         Ok(write)
     }
 
-    /// Verify an authenticated catalog before applying the normal cache
-    /// generation/expiry rules. The key ring is supplied by the host trust
-    /// boundary; this method does not fetch or authenticate that ring.
-    pub fn install_signed(
+    /// Install a catalog only after verification through durable root-anchored
+    /// trust state. The host remains responsible for supplying the authentic
+    /// compiled or signed-package trust anchor when it opens the Trust Store.
+    pub fn install_trusted(
         &mut self,
         signed: &SignedModelCatalog,
-        key_ring: &CatalogKeyRing,
+        trust_store: &CatalogTrustStore,
         now_ms: u64,
         sequence: u64,
         received_at_ms: u64,
     ) -> Result<CacheWrite, CatalogCacheError> {
-        let catalog = signed
-            .verify(key_ring, now_ms)
-            .map_err(|signature_error| error(signature_error.code, signature_error.message))?;
+        let catalog = trust_store
+            .verify_catalog(signed, now_ms)
+            .map_err(|trust_error| error(trust_error.code, trust_error.message))?;
         self.install(catalog, sequence, received_at_ms)
     }
 
@@ -737,9 +739,11 @@ mod tests {
     use super::*;
     use crate::model_catalog::offline_for_runtime;
     use crate::model_catalog_signature::{
-        signing_payload_bytes, signing_payload_identity, CatalogSigningKey,
-        SIGNATURE_SCHEMA_VERSION,
+        key_ring_signing_payload_bytes, key_ring_signing_payload_identity, signing_payload_bytes,
+        signing_payload_identity, CatalogKeyRing, CatalogSigningKey, SignedCatalogKeyRing,
+        KEY_RING_SIGNATURE_SCHEMA_VERSION, SIGNATURE_SCHEMA_VERSION,
     };
+    use crate::model_catalog_trust_store::CatalogTrustAnchor;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
@@ -864,6 +868,33 @@ mod tests {
             }],
         )
         .unwrap();
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "aegisy-model-catalog-trust-cache-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let anchor = CatalogTrustAnchor::new(
+            key_id,
+            BASE64_STANDARD.encode(signing_key.verifying_key().to_bytes()),
+        )
+        .unwrap();
+        let mut trust_store = CatalogTrustStore::open(&root, anchor).unwrap();
+        let key_ring_payload = key_ring_signing_payload_bytes(key_id, 100, &key_ring).unwrap();
+        trust_store
+            .install_signed_key_ring(
+                &SignedCatalogKeyRing {
+                    schema_version: KEY_RING_SIGNATURE_SCHEMA_VERSION.into(),
+                    signer_key_id: key_id.into(),
+                    signed_at_ms: 100,
+                    key_ring,
+                    payload_identity: key_ring_signing_payload_identity(&key_ring_payload),
+                    signature_base64: BASE64_STANDARD
+                        .encode(signing_key.sign(&key_ring_payload).to_bytes()),
+                },
+                100,
+            )
+            .unwrap();
         let mut catalog = signed_catalog(100, 1_000);
         catalog.signature_validated = false;
         let payload = signing_payload_bytes(key_id, &catalog).unwrap();
@@ -877,7 +908,7 @@ mod tests {
         let mut store = ModelCatalogCacheStore::in_memory(STALE_WINDOW_MS).unwrap();
         assert_eq!(
             store
-                .install_signed(&envelope, &key_ring, 100, 1, 100)
+                .install_trusted(&envelope, &trust_store, 100, 1, 100)
                 .unwrap(),
             CacheWrite::Installed { sequence: 1 }
         );
@@ -896,7 +927,7 @@ mod tests {
         let mut empty = ModelCatalogCacheStore::in_memory(STALE_WINDOW_MS).unwrap();
         assert_eq!(
             empty
-                .install_signed(&forged, &key_ring, 100, 1, 100)
+                .install_trusted(&forged, &trust_store, 100, 1, 100)
                 .unwrap_err()
                 .code,
             "model-catalog-signature-invalid"
@@ -905,6 +936,7 @@ mod tests {
             empty.view(100).unwrap().availability,
             CacheAvailability::Empty
         );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

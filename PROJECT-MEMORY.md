@@ -158,10 +158,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   unsupported `field_authority` keys, non-positive token limits, and
   secret-shaped catalog/source metadata. This strengthens partial foundations
   for OpenSpec `9.2`, `9.3`, and `9.10`; the separate signature foundation below
-  now supplies local cryptographic verification and key-rotation validation but
-  is not connected to authenticated refresh/key publication, persistent trust
-  roots, cache refresh, or an admin publication service, so those tasks remain
-  unchecked.
+  now supplies local cryptographic verification, signed key rotation, and a
+  persistent externally anchored Trust Store, but is not connected to a real
+  production root, authenticated refresh/key publication, cache refresh, or an
+  admin publication service, so those tasks remain unchecked.
 - Model catalog signature foundation (2026-07-21): internal
   `model-catalog-signature/0.1` verifies a canonical schema/Key-ID/catalog payload
   using strict Ed25519 verification through pinned `ed25519-dalek` 2.1.1. A
@@ -169,14 +169,23 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   identity, public-key validity, revocation, and replacement lineage. Rotation
   advances exactly one generation, retains prior Key IDs/public keys, cannot
   widen old validity or undo revocation, and rejects rollback, conflicting same-
-  generation content, missing key history, or unknown lineage. The cache Store
-  `install_signed` path sets `signature_validated` only after schema, payload
-  identity, time, active-key, and signature checks pass; a forged envelope leaves
-  the cache empty. This does not establish production trust: the key ring is
-  caller-supplied and is not pinned, persisted, or authenticated from Aegisy;
-  private-key signing, cloud refresh/key publication, Workbench SQLite events,
-  AAP/Qt refresh, and model selection remain absent. Keep OpenSpec `9.3`
-  unchecked.
+  generation content, missing key history, or unknown lineage. Internal
+  `model-catalog-key-ring-signature/0.1` binds the signer, signature time, exact
+  ring, payload identity, and Ed25519 signature. A private
+  `model-catalog-trust-store/0.1` accepts generation one only when it is signed by
+  the exact externally supplied `model-catalog-trust-anchor/0.1` root and preserves
+  that root; later generations must be signed by a known, currently active and
+  unrevoked key from the previous ring before monotonic rotation validation. The
+  Store persists an empty first-open marker plus the anchor/current ring in a
+  private atomic snapshot, rejects wrong anchors, forged/unknown/inactive signers,
+  rollback, tampering, or a deleted snapshot, and restores prior in-memory authority
+  after disk commit failure. The cache Store `install_trusted` path sets
+  `signature_validated` only after Trust Store verification; raw cache admission is
+  module-private. This still does not establish production trust: no real Aegisy
+  root is embedded or configured, Runtime/AAP/Qt do not open the Trust Store, and
+  private-key signing, authenticated Key Ring/catalog download, conditional cloud
+  refresh, key publication, Workbench SQLite events, and model selection remain
+  absent. Keep OpenSpec `9.3`, `9.4`, and `10.1` unchecked.
 - Model catalog cache foundation (2026-07-21): internal
   `model-catalog-cache/0.1` accepts only a clean catalog marked fresh and
   signature-validated, binds its SHA-256 identity to a positive monotonic
@@ -185,7 +194,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   snapshot tampering, or clock regression. Reads derive explicit
   fresh/stale/expired views and expose no catalog after the stale window. The
   low-level cache contract assumes an already verified catalog, while public
-  Store admission accepts only the signed-envelope verification path. It does
+  Store admission accepts only the root-anchored Trust Store verification path. It does
   not refresh the cache or grant selection authority; every view fixes
   `selection_allowed:false`. A private
   `model-catalog-cache-store/0.1` now persists the validated cache outside the
@@ -193,10 +202,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   permissions, restart identity validation, and snapshot tamper detection.
   Runtime opens this Store from the durable Workbench data root; standalone
   runtimes use a bounded in-memory fallback. The Store is not Workbench-SQLite
-  event-backed and does not authenticate signatures, fetch cloud data, rotate
-  keys, or grant selection authority. Runtime/AAP/Qt expose the empty cache
-  view, while authenticated refresh and real fresh/stale/expired desktop
-  transitions remain open. Keep OpenSpec `9.3` and `10.1` unchecked.
+  event-backed and does not fetch cloud data, open the Trust Store, rotate keys,
+  or grant selection authority. Runtime/AAP/Qt expose the empty cache view, while
+  production-root configuration, authenticated refresh, and real fresh/stale/
+  expired desktop transitions remain open. Keep OpenSpec `9.3` and `10.1`
+  unchecked.
 - Model profile store foundation (2026-07-21): internal
   `model-profile-store/0.1` persists one global and bounded project profiles in
   a private, atomically replaced snapshot outside project roots. It validates
@@ -1112,7 +1122,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 428 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 434 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 62 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
@@ -1162,6 +1172,18 @@ and rerun it when host memory is available. The focused
 also terminated by the host with exit 137 before assertions; the CMake build
 itself completed successfully, so those render/runtime checks remain pending
 on a host with sufficient memory.
+
+On 2026-07-21 the signed Key Ring and root-anchored Trust Store stage passed 434
+Rust unit tests with one ignored live fixture, 62 protocol tests, 11 stdio/Codex
+tests, strict Clippy, formatting, the complete CMake desktop build, and CTest
+`agent_runtime_protocol`. Focused fixtures prove an empty first-open marker,
+root-signed bootstrap, previous-generation-signed rotation, restart catalog/cache
+verification, wrong-anchor and forged/unknown/expired/revoked signer denial,
+generation-gap denial, snapshot tamper/missing detection, and in-memory rollback
+after disk commit failure. No production root, authenticated download, signing or
+key-publication service, Runtime/AAP/Qt trust-store integration, model picker, token,
+routing, or turn authority was added. OpenSpec `9.3`, `9.4`, and `10.1` remain
+unchecked.
 
 On 2026-07-20 the schema-v12 durable notification outbox and its read-only AAP/Qt
 inspection layer passed all Rust counts above, strict Clippy, formatting,

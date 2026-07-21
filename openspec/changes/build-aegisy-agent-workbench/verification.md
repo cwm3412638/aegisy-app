@@ -79,10 +79,33 @@ Model catalog foundation evidence:
   old validity or undo revocation, and rejects rollback/conflicting generations.
   Four signature/key-ring fixtures cover success, payload tampering, wrong or
   unknown keys, expiry, rollback, missing lineage, revocation, and Key ID
-  rewriting. A fifth cache fixture proves forged envelopes fail before cache
-  admission. The key ring is caller-supplied and not yet authenticated,
-  persisted, or fetched; there is no signing/key-publication service or AAP/Qt
-  refresh path, so `9.3` remains unchecked.
+  rewriting. A fifth cache fixture proves forged catalog envelopes fail before
+  cache admission.
+- Internal `model-catalog-key-ring-signature/0.1` binds the signer Key ID,
+  signature time, exact validated Key Ring, payload identity, and Ed25519
+  signature. `model-catalog-trust-anchor/0.1` contains only the expected public
+  root supplied by the signed host/package boundary; the repository contains no
+  invented production root or private key. A first Key Ring must be signed by
+  that root, use generation one, and preserve the exact non-revoked root without
+  replacement lineage. Every later Ring must be signed by a known, currently
+  active and unrevoked key from the previous generation before structural
+  rotation validation runs; a new key cannot authorize its own admission.
+- Private `model-catalog-trust-store/0.1` persists that anchor and current Key
+  Ring outside project roots in a bounded atomically replaced snapshot with
+  private Unix permissions and content identity validation. First open persists
+  an empty anchor snapshot, so later snapshot deletion fails closed instead of
+  re-enabling generation-one bootstrap. Wrong anchors, forged signatures,
+  unknown/expired/revoked signers, generation gaps, snapshot tampering, and
+  missing snapshots fail closed; disk commit failure restores the previous
+  in-memory Ring. Six Trust Store fixtures cover bootstrap, signed rotation,
+  restart, catalog/cache verification, signer denial, tampering, deletion, and
+  rollback. Cache Store public admission now requires this Trust Store, while
+  its lower-level catalog mutation is module-private.
+- The Trust Store is not yet opened by Runtime/AAP/Qt, is not Workbench-SQLite
+  event-backed, and has no real Aegisy production root. There is no authenticated
+  Key Ring/catalog endpoint, conditional request flow, private signing service,
+  key-publication service, cloud refresh, or desktop transition evidence. Tasks
+  `9.3`, `9.4`, and `10.1` therefore remain unchecked.
 - Internal `model-catalog-cache/0.1` accepts only a clean catalog marked fresh
   and signature-validated with a bounded future expiry. It content-hashes the
   catalog, binds a positive monotonic sequence and receipt time, treats exact
@@ -91,8 +114,8 @@ Model catalog foundation evidence:
   stale window. Clock regression and snapshot identity tampering fail closed;
   expired entries return no catalog metadata. Every view fixes
   `selection_allowed:false`; the Store's public admission path now requires the
-  signed-envelope verifier, while the low-level cache mutation remains private
-  to the module. Seven focused unit fixtures pass. A private
+  root-anchored Trust Store and signed catalog verifier, while the low-level cache
+  mutation remains private to the module. Seven focused unit fixtures pass. A private
   `model-catalog-cache-store/0.1` now persists the cache outside project roots
   through an atomically replaced, bounded snapshot with private Unix
   permissions, restart identity validation, and tamper detection. Runtime opens
@@ -101,13 +124,16 @@ Model catalog foundation evidence:
   `model/catalog-cache`; an empty cache returns no catalog body and an explicit
   false selection authority, while Qt validates and displays that state in the
   model-binding tooltip. The Store is not Workbench-SQLite event-backed, and
-  Runtime still has no authenticated/persisted trust ring, cloud refresh,
-  non-empty host transitions, or selection authority, so tasks `9.3` and `10.1`
-  remain unchecked.
+  Runtime still does not open the Trust Store and has no production anchor,
+  authenticated cloud refresh, non-empty host transitions, or selection
+  authority, so tasks `9.3` and `10.1` remain unchecked.
 - The 2026-07-21 catalog, matcher, profile, catalog-policy, cache, and profile-store
   foundation stage passed 428 Rust unit tests with one ignored live fixture, 62 protocol tests,
   11 stdio/Codex tests, strict Clippy, the complete CMake build, and CTest
   `agent_runtime_protocol`.
+- The later 2026-07-21 root-anchored Trust Store stage passed 434 Rust unit tests
+  with one ignored live fixture, 62 protocol tests, 11 stdio/Codex tests, strict
+  Clippy, the complete CMake build, and CTest `agent_runtime_protocol`.
 
 Model profile foundation evidence:
 

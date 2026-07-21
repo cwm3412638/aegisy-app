@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const SIGNATURE_SCHEMA_VERSION: &str = "model-catalog-signature/0.1";
 pub const KEY_RING_SCHEMA_VERSION: &str = "model-catalog-key-ring/0.1";
+pub const KEY_RING_SIGNATURE_SCHEMA_VERSION: &str = "model-catalog-key-ring-signature/0.1";
 const MAX_KEYS: usize = 32;
 const MAX_KEY_ID_BYTES: usize = 128;
 const MAX_ENCODED_KEY_BYTES: usize = 128;
@@ -48,6 +49,16 @@ pub struct SignedModelCatalog {
     pub signature_base64: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignedCatalogKeyRing {
+    pub schema_version: String,
+    pub signer_key_id: String,
+    pub signed_at_ms: u64,
+    pub key_ring: CatalogKeyRing,
+    pub payload_identity: String,
+    pub signature_base64: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyRingWrite {
     Installed { generation: u64 },
@@ -65,6 +76,14 @@ struct CatalogSigningPayload<'a> {
     schema_version: &'static str,
     key_id: &'a str,
     catalog: &'a ModelCatalog,
+}
+
+#[derive(Serialize)]
+struct KeyRingSigningPayload<'a> {
+    schema_version: &'static str,
+    signer_key_id: &'a str,
+    signed_at_ms: u64,
+    key_ring: &'a CatalogKeyRing,
 }
 
 impl CatalogKeyRing {
@@ -241,6 +260,55 @@ impl SignedModelCatalog {
     }
 }
 
+impl SignedCatalogKeyRing {
+    pub(crate) fn verify_with_key(
+        &self,
+        expected_signer_key_id: &str,
+        public_key_base64: &str,
+        now_ms: u64,
+    ) -> Result<CatalogKeyRing, CatalogSignatureError> {
+        if self.schema_version != KEY_RING_SIGNATURE_SCHEMA_VERSION {
+            return Err(error(
+                "model-catalog-key-ring-signature-schema-unsupported",
+                "catalog key ring signature schema is unsupported",
+            ));
+        }
+        validate_key_id(&self.signer_key_id)?;
+        if self.signer_key_id != expected_signer_key_id {
+            return Err(error(
+                "model-catalog-key-ring-signature-signer-mismatch",
+                "catalog key ring signer does not match trusted authority",
+            ));
+        }
+        if self.signed_at_ms == 0 || self.signed_at_ms > now_ms {
+            return Err(error(
+                "model-catalog-key-ring-signature-time-invalid",
+                "catalog key ring signature time is invalid",
+            ));
+        }
+        self.key_ring.validate()?;
+        let payload =
+            key_ring_signing_payload_bytes(&self.signer_key_id, self.signed_at_ms, &self.key_ring)?;
+        if self.payload_identity != key_ring_payload_identity(&payload) {
+            return Err(error(
+                "model-catalog-key-ring-signature-payload-identity-mismatch",
+                "catalog key ring signature payload identity does not match",
+            ));
+        }
+        let signature = decode_signature(&self.signature_base64)?;
+        let verifying_key = decode_verifying_key(public_key_base64)?;
+        verifying_key
+            .verify_strict(&payload, &signature)
+            .map_err(|_| {
+                error(
+                    "model-catalog-key-ring-signature-invalid",
+                    "catalog key ring signature is invalid",
+                )
+            })?;
+        Ok(self.key_ring.clone())
+    }
+}
+
 pub fn validate_key_ring_rotation(
     previous: &CatalogKeyRing,
     next: &CatalogKeyRing,
@@ -346,6 +414,46 @@ pub fn signing_payload_identity(payload: &[u8]) -> String {
     payload_identity(payload)
 }
 
+pub fn key_ring_signing_payload_bytes(
+    signer_key_id: &str,
+    signed_at_ms: u64,
+    key_ring: &CatalogKeyRing,
+) -> Result<Vec<u8>, CatalogSignatureError> {
+    validate_key_id(signer_key_id)?;
+    if signed_at_ms == 0 {
+        return Err(error(
+            "model-catalog-key-ring-signature-time-invalid",
+            "catalog key ring signature time is invalid",
+        ));
+    }
+    key_ring.validate()?;
+    serde_json::to_vec(&KeyRingSigningPayload {
+        schema_version: KEY_RING_SIGNATURE_SCHEMA_VERSION,
+        signer_key_id,
+        signed_at_ms,
+        key_ring,
+    })
+    .map_err(|_| {
+        error(
+            "model-catalog-key-ring-signature-payload-serialize",
+            "catalog key ring signature payload could not be serialized",
+        )
+    })
+}
+
+pub fn key_ring_signing_payload_identity(payload: &[u8]) -> String {
+    key_ring_payload_identity(payload)
+}
+
+pub(crate) fn validate_trust_key(
+    key_id: &str,
+    public_key_base64: &str,
+) -> Result<(), CatalogSignatureError> {
+    validate_key_id(key_id)?;
+    decode_verifying_key(public_key_base64)?;
+    Ok(())
+}
+
 fn validity_widened(previous: Option<u64>, next: Option<u64>) -> bool {
     match (previous, next) {
         (Some(previous), Some(next)) => next > previous,
@@ -371,6 +479,13 @@ fn ring_identity(ring: &CatalogKeyRing) -> Result<String, CatalogSignatureError>
 
 fn payload_identity(payload: &[u8]) -> String {
     format!("model-catalog-payload:sha256:{:x}", Sha256::digest(payload))
+}
+
+fn key_ring_payload_identity(payload: &[u8]) -> String {
+    format!(
+        "model-catalog-key-ring-payload:sha256:{:x}",
+        Sha256::digest(payload)
+    )
 }
 
 fn decode_verifying_key(encoded: &str) -> Result<VerifyingKey, CatalogSignatureError> {

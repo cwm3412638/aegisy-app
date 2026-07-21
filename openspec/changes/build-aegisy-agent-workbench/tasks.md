@@ -204,16 +204,27 @@
     Internal `model-catalog-cache/0.1` additionally binds signed-catalog content
     identity, positive monotonic sequence, receipt/issue/expiry time, bounded
     TTL/stale windows, idempotent same-generation replay, and rejection of older
-    or conflicting generations. It does not authenticate the signature flag or
-    fetch the cache, so it grants no selection authority. A private
+    or conflicting generations. A private
     `model-catalog-cache-store/0.1` now persists the validated cache outside the
     project root using an atomically replaced, bounded snapshot, private Unix
     permissions, restart identity validation, and tamper detection. Runtime
     opens this store when the durable data root is healthy; standalone runtimes
-    retain an in-memory fallback. The Store and key ring are not
-    Workbench-SQLite event-backed. The key ring is caller-supplied and is not yet
-    pinned, persisted, or delivered through an authenticated channel; no signing
-    service, cloud refresh, or key-publication endpoint exists.
+    retain an in-memory fallback. Internal
+    `model-catalog-key-ring-signature/0.1` now binds the signer, signature time,
+    complete ring, and payload identity. A private
+    `model-catalog-trust-store/0.1` accepts generation one only when that envelope
+    verifies against an exact externally supplied Ed25519 root anchor and the ring
+    preserves the same root key. Later generations must be signed by a current,
+    active, unrevoked key from the previous ring before the existing monotonic
+    rotation rules run. The Trust Store persists the anchor and current ring in a
+    private atomic snapshot, writes an empty first-open marker so deleting the
+    snapshot cannot re-enable generation-one bootstrap, and restores its prior
+    in-memory authority when disk commit fails. Cache Store public admission now
+    requires this Trust Store; raw validated-catalog mutation remains private.
+    Neither Store is Workbench-SQLite event-backed. The repository intentionally
+    contains no production root key, and the host/runtime does not yet open the
+    Trust Store. No authenticated Key Ring/catalog download, signing service,
+    cloud refresh, key-publication endpoint, or AAP/Qt refresh path exists.
 - [ ] 9.4 Add authenticated catalog endpoint with conditional requests and deterministic test fixtures
 - [ ] 9.5 Add runtime compatibility and known-degradation metadata for Codex, ACP, and future native adapters
 - [ ] 9.6 Add role recommendations backed by evaluation version, sample size, and known limitations
@@ -237,9 +248,11 @@
     clock rollback, and fixes selection authority to false. Runtime/AAP/Qt now
     expose the empty cache state and keep it visible as a read-only tooltip
     status. A private cache Store now survives Runtime restart and rejects
-    snapshot tampering; the Store remains outside Workbench SQLite and is not
-    authenticated. Signed refresh, key rotation, non-empty fresh/stale/expired
-    host transitions, and desktop picker state remain open.
+    snapshot tampering; the Store remains outside Workbench SQLite. A separate
+    root-anchored Trust Store now authenticates signed Key Rings before cache
+    admission, but it has no production anchor and is not opened by Runtime/AAP/Qt.
+    Authenticated refresh, non-empty fresh/stale/expired host transitions, and
+    desktop picker state remain open.
 - [ ] 10.2 Implement capability matcher for Chat, Work, attachments, tools, reasoning, context, runtime, and policy
   - Partial foundation: read-only `model/capability-check` validates Chat/Work
     requirements, implicitly requires tools for Work, and returns explicit
