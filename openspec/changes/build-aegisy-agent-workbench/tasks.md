@@ -241,8 +241,11 @@
     secret-free metadata checks. Runtime exposes only the metadata-only AAP
     capability `model.profile.read-only` with `model/profile/list` and
     `model/profile/read`; the responses grant no selection, routing, token, or
-    turn authority. The store is not connected to Workbench SQLite, catalog
-    capability checks, or model routing.
+    turn authority. `AgentRuntimeClient` negotiates this capability and
+    validates the metadata-only list for the workbench; the existing model
+    control remains a binding display and cannot select a profile. The store is
+    not connected to Workbench SQLite, catalog capability checks, or model
+    routing.
 - [ ] 10.4 Provide a simple one-model profile and prevent unnecessary role calls by default
   - Partial foundation: `ModelProfile::single_model` creates a one-model
     profile with only an enabled Agent binding. Plan/apply/review/utility/
@@ -250,7 +253,8 @@
     an internal validation contract and is not connected to turn dispatch. The
     durable Profile Store preserves that Agent-only shape across restart, and
     the read-only AAP projection can inspect its metadata without selecting a
-    model; no role call, fallback, or model execution is initiated by storage.
+    model; Qt only shows its bounded metadata count in a tooltip, and no role
+    call, fallback, or model execution is initiated by storage.
 - [ ] 10.5 Implement model/profile picker with capability differences, source, availability, role suitability, and expected cost/latency disclosure
 - [ ] 10.6 Implement compatible next-turn model switch with immutable model-change event
 - [ ] 10.7 Implement portable cross-runtime/provider session fork and reviewable context package

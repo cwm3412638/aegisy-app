@@ -509,6 +509,24 @@ int main(int argc, char *argv[])
                 "runtime degradations were not projected into a fail-closed capability state")) {
         return 1;
     }
+    runtimeClient->modelProfilesListed(QStringLiteral("profile-list-fixture"), QJsonObject{
+        {QStringLiteral("schema_version"), QStringLiteral("model-profile-list/0.1")},
+        {QStringLiteral("store_schema_version"), QStringLiteral("model-profile-store/0.1")},
+        {QStringLiteral("profiles"), QJsonArray{QJsonObject{
+            {QStringLiteral("profile_id"), QStringLiteral("fixture-profile")},
+            {QStringLiteral("revision"), 0},
+        }}},
+        {QStringLiteral("selection_allowed"), false},
+        {QStringLiteral("routing_authority"), false},
+        {QStringLiteral("token_issued"), false},
+        {QStringLiteral("turn_started"), false},
+    });
+    application.processEvents();
+    if (!expect(modelPicker->toolTip().contains(QStringLiteral("Profile 元数据只读"))
+                    && modelPicker->toolTip().contains(QStringLiteral("1 个")),
+                "model profile metadata did not remain an explicit read-only projection")) {
+        return 1;
+    }
     runtimeClient->runtimeDegradationsRead(QStringLiteral("degradation-invalid"), QJsonObject{
         {QStringLiteral("schema_version"), QStringLiteral("runtime-degradations/unknown")},
     });

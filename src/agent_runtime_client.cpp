@@ -11,6 +11,8 @@
 #include <QStandardPaths>
 #include <QTimer>
 
+#include <algorithm>
+
 namespace {
 constexpr int kStartupTimeoutMs = 5000;
 constexpr int kMaximumFrameBytes = 8 * 1024 * 1024;
@@ -207,6 +209,20 @@ QString AgentRuntimeClient::checkModelCapabilities(const QString &modelId,
     return sendRequest(QStringLiteral("model/capability-check"), {
         {QStringLiteral("model_id"), modelId},
         {QStringLiteral("requirements"), requirements},
+    });
+}
+
+QString AgentRuntimeClient::listModelProfiles(const QString &projectId)
+{
+    QJsonObject params;
+    if (!projectId.isEmpty()) params.insert(QStringLiteral("project_id"), projectId);
+    return sendRequest(QStringLiteral("model/profile/list"), params);
+}
+
+QString AgentRuntimeClient::readModelProfile(const QString &profileId)
+{
+    return sendRequest(QStringLiteral("model/profile/read"), {
+        {QStringLiteral("profile_id"), profileId},
     });
 }
 
@@ -1278,6 +1294,13 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         runtimeHealth();
         runtimeDegradations();
         modelCatalog();
+        const QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toArray();
+        const bool modelProfilesAvailable = std::any_of(
+            capabilities.cbegin(), capabilities.cend(),
+            [](const QJsonValue &value) {
+                return value.toString() == QStringLiteral("model.profile.read-only");
+            });
+        if (modelProfilesAvailable) listModelProfiles();
         if (m_recoveryMode) runtimeRecoveryStatus();
         else projectionRecoveryStatus();
     } else if (pendingMethod == QStringLiteral("project/list")) {
@@ -1360,6 +1383,10 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit modelCatalogRead(id, result);
     } else if (pendingMethod == QStringLiteral("model/capability-check")) {
         emit modelCapabilityChecked(id, result);
+    } else if (pendingMethod == QStringLiteral("model/profile/list")) {
+        emit modelProfilesListed(id, result);
+    } else if (pendingMethod == QStringLiteral("model/profile/read")) {
+        emit modelProfileRead(id, result);
     } else if (pendingMethod == QStringLiteral("runtime/restart")) {
         emit runtimeRestarted(id, result);
     } else if (pendingMethod == QStringLiteral("session/recovery/status")) {

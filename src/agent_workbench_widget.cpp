@@ -472,6 +472,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         const QJsonObject backend = result.value(QStringLiteral("backend")).toObject();
         m_runtimeRecoveryMode = backend.value(QStringLiteral("status")).toString()
             == QStringLiteral("read-only-recovery");
+        m_modelProfileReadOnlyAvailable = false;
+        m_modelProfileSnapshotValid = false;
+        m_modelProfileCount = 0;
         m_compactionAvailable = false;
         m_backgroundNotificationInspectionAvailable = false;
         m_backgroundRecoveryInspectionAvailable = false;
@@ -496,6 +499,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 imageImportAvailable = true;
             } else if (name == QStringLiteral("workspace.image.preview")) {
                 imagePreviewAvailable = true;
+            } else if (name == QStringLiteral("model.profile.read-only")) {
+                m_modelProfileReadOnlyAvailable = true;
             }
         }
         m_imageContextAvailable = imageImportAvailable && imagePreviewAvailable;
@@ -515,6 +520,26 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         updateRuntimeCapabilityUi();
         updateRecoveryUi();
         updateGitPinControls();
+    });
+    connect(m_runtime, &AgentRuntimeClient::modelProfilesListed,
+            this, [this](const QString &, const QJsonObject &result) {
+        const QJsonArray profiles = result.value(QStringLiteral("profiles")).toArray();
+        const bool authoritySafe = !result.value(QStringLiteral("selection_allowed")).toBool(true)
+            && !result.value(QStringLiteral("routing_authority")).toBool(true)
+            && !result.value(QStringLiteral("token_issued")).toBool(true)
+            && !result.value(QStringLiteral("turn_started")).toBool(true);
+        m_modelProfileSnapshotValid = result.value(QStringLiteral("schema_version")).toString()
+                == QStringLiteral("model-profile-list/0.1")
+            && result.value(QStringLiteral("store_schema_version")).toString()
+                == QStringLiteral("model-profile-store/0.1")
+            && profiles.size() <= 256
+            && authoritySafe;
+        m_modelProfileCount = m_modelProfileSnapshotValid ? profiles.size() : 0;
+        updateSessionRuntimePresentation();
+    });
+    connect(m_runtime, &AgentRuntimeClient::modelProfileRead,
+            this, [this](const QString &, const QJsonObject &) {
+        // Profile reads are available for future detail views; the picker remains read-only.
     });
     connect(m_runtime, &AgentRuntimeClient::runtimeDegradationsRead,
             this, [this](const QString &, const QJsonObject &result) {
@@ -10168,6 +10193,12 @@ void AgentWorkbenchWidget::updateSessionRuntimePresentation()
             .arg(binding.value(QStringLiteral("adapter")).toString(),
                  binding.value(QStringLiteral("version")).toString(),
                  binding.value(QStringLiteral("permission_profile")).toString());
+    }
+    if (m_modelProfileReadOnlyAvailable) {
+        tooltip += QStringLiteral(" · Profile 元数据只读");
+        if (m_modelProfileSnapshotValid) {
+            tooltip += QStringLiteral("（%1 个）").arg(m_modelProfileCount);
+        }
     }
     if (m_modelPicker->count() != 1 || m_modelPicker->itemText(0) != display) {
         const QSignalBlocker blocker(m_modelPicker);

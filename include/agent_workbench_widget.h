@@ -234,6 +234,9 @@ private:
     QLabel *m_runtimeStatus = nullptr;
     QLabel *m_runtimeCapabilityStatus = nullptr;
     QPushButton *m_runtimeRestartButton = nullptr;
+    bool m_modelProfileReadOnlyAvailable = false;
+    bool m_modelProfileSnapshotValid = false;
+    int m_modelProfileCount = 0;
     QLabel *m_recoveryBanner = nullptr;
     QLabel *m_operationStatusBanner = nullptr;
     QWidget *m_operationStatusRow = nullptr;

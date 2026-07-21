@@ -121,6 +121,15 @@ Model profile foundation evidence:
   it does not write profiles, select models, issue tokens, start turns, connect
   to the catalog matcher, or provide Qt picker/switching controls, so tasks
   `10.3` and `10.4` remain unchecked.
+- Qt `AgentRuntimeClient` now negotiates `model.profile.read-only`, requests
+  `model/profile/list`, validates the list schema and all four false authority
+  flags, and emits a typed result signal. `AgentWorkbenchWidget` displays only
+  a bounded "Profile metadata read-only" count in the existing model-binding
+  tooltip; it does not populate selectable models or initiate profile reads,
+  routing, token issuance, or turns. CMake compilation covers the Client and
+  render targets. The focused Qt runtime/render CTest processes were killed by
+  host resource pressure before assertions, so their runtime evidence remains
+  pending and no UI milestone is claimed.
 
 Autonomy release-gate evidence:
 

@@ -1082,7 +1082,7 @@ git diff --check
 ```
 
 Current verified baseline: 16 desktop tests, 422 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 59 Rust protocol tests, eleven macOS
+one explicitly ignored live Codex fixture, 60 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
@@ -1111,10 +1111,13 @@ turn-metadata, dedicated-worktree, scale, and cross-platform gates listed above.
 
 On 2026-07-21 the model-catalog, capability-matcher, model-profile, and
 catalog-policy foundation stages added the internal `model-catalog/0.1` and
-`model-profile/0.1` validation contracts, the read-only AAP `model/catalog` and
-`model/capability-check` projections, and the corresponding Qt request/signals.
-The policy-focused Rust verification passed 422 unit tests with one ignored live
-fixture, 59
+`model-profile/0.1` validation contracts, the read-only AAP `model/catalog`,
+`model/capability-check`, `model/profile/list`, and `model/profile/read`
+projections, and the corresponding Qt request/signals. Qt validates the
+metadata-only profile list and displays only its bounded count in the existing
+model-binding tooltip; the model control remains non-selecting. The
+policy-focused Rust verification passed 422 unit tests with one ignored live
+fixture, 60
 protocol tests, and 11 stdio/Codex tests; strict Clippy, the complete CMake
 desktop build, and CTest `agent_runtime_protocol` passed. The projection is
 explicitly offline and unsigned, leaves unverified capability/limit values
@@ -1122,7 +1125,11 @@ unknown, and grants no selection, token, routing, or execution authority.
 `openspec validate build-aegisy-agent-workbench --strict` was attempted but the
 host terminated the Node-backed CLI with exit 137 before producing validation
 output; keep the prior successful validation as the last authoritative result
-and rerun it when host memory is available.
+and rerun it when host memory is available. The focused
+`agent_workbench_render` and `agent_runtime_environment` CTest processes were
+also terminated by the host with exit 137 before assertions; the CMake build
+itself completed successfully, so those render/runtime checks remain pending
+on a host with sufficient memory.
 
 On 2026-07-20 the schema-v12 durable notification outbox and its read-only AAP/Qt
 inspection layer passed all Rust counts above, strict Clippy, formatting,
@@ -2273,6 +2280,7 @@ Implemented visual baseline:
    timeline, permission/approval, structured patch/checkpoint, terminal, and Git
    milestones in dependency order.
 12. Replace the offline model-catalog projection with an authenticated,
-   signature-validated cache and then build capability matching and durable
-   global/project profiles before exposing a real model picker or model-change
-   event.
+   signature-validated cache; connect durable global/project profiles to the
+   catalog matcher; then expose a real picker and immutable model-change event
+   only after token, routing, and cross-platform evidence gates pass. The
+   current Qt profile count is metadata-only and is not a picker.
