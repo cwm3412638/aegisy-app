@@ -289,6 +289,13 @@
     Runtime, entitlement, availability, and zero-data-retention policy. Offline
     or unsigned catalog metadata, and values with unknown/estimated authority,
     can never make selection allowed.
+  - The Qt host now requests this preflight for the active catalog-bound model,
+    changes the requirements when Chat/Work changes, and renders compatible,
+    blocked, unknown, or invalid results as metadata-only status. It validates
+    model identity, bounded check/mismatch arrays, decision/selection consistency,
+    and never turns a compatible result into picker, routing, token, Turn, or
+    execution authority. Cross-provider contract fixtures and authenticated
+    catalog evidence remain open.
 - [ ] 10.3 Implement global and project model profiles for Agent, plan, apply, review, utility, embedding, and rerank roles
   - Partial foundation: internal `model-profile/0.1` validates global/project
     scope, bounded role bindings, content-hashed identity, and content-free

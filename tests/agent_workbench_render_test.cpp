@@ -506,6 +506,9 @@ int main(int argc, char *argv[])
         {QStringLiteral("state"), QStringLiteral("offline")},
         {QStringLiteral("contains_credentials"), false},
         {QStringLiteral("refresh_supported"), false},
+        {QStringLiteral("models"), QJsonArray{QJsonObject{
+            {QStringLiteral("model_id"), QStringLiteral("aegisy:fixture")},
+        }}},
     });
     runtimeClient->modelCatalogRefreshStatusRead(
         QStringLiteral("refresh-status-fixture"), QJsonObject{
@@ -531,6 +534,68 @@ int main(int argc, char *argv[])
                     && modelPicker->toolTip().contains(QStringLiteral("目录离线"))
                     && modelPicker->toolTip().contains(QStringLiteral("目录刷新未配置")),
                 "model catalog cache and refresh did not remain explicit read-only states")) {
+        return 1;
+    }
+    runtimeClient->modelCapabilityChecked(QStringLiteral("capability-unknown-fixture"),
+                                          QJsonObject{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("model-capability-check/0.1")},
+        {QStringLiteral("model_id"), QStringLiteral("aegisy:fixture")},
+        {QStringLiteral("decision"), QStringLiteral("unknown")},
+        {QStringLiteral("selection_allowed"), false},
+        {QStringLiteral("checks"), QJsonArray{}},
+        {QStringLiteral("mismatches"), QJsonArray{}},
+    });
+    application.processEvents();
+    if (!expect(modelPicker->toolTip().contains(QStringLiteral("能力未知")),
+                "unknown capability preflight did not render")) {
+        return 1;
+    }
+    runtimeClient->modelCapabilityChecked(QStringLiteral("capability-blocked-fixture"),
+                                          QJsonObject{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("model-capability-check/0.1")},
+        {QStringLiteral("model_id"), QStringLiteral("aegisy:fixture")},
+        {QStringLiteral("decision"), QStringLiteral("blocked")},
+        {QStringLiteral("selection_allowed"), false},
+        {QStringLiteral("checks"), QJsonArray{}},
+        {QStringLiteral("mismatches"), QJsonArray{QJsonObject{
+            {QStringLiteral("code"), QStringLiteral("fixture-blocked")},
+        }}},
+    });
+    application.processEvents();
+    if (!expect(modelPicker->toolTip().contains(QStringLiteral("能力受限")),
+                "blocked capability preflight did not render")) {
+        return 1;
+    }
+    runtimeClient->modelCapabilityChecked(QStringLiteral("capability-compatible-fixture"),
+                                          QJsonObject{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("model-capability-check/0.1")},
+        {QStringLiteral("model_id"), QStringLiteral("aegisy:fixture")},
+        {QStringLiteral("decision"), QStringLiteral("compatible")},
+        {QStringLiteral("selection_allowed"), true},
+        {QStringLiteral("checks"), QJsonArray{}},
+        {QStringLiteral("mismatches"), QJsonArray{}},
+    });
+    application.processEvents();
+    if (!expect(modelPicker->toolTip().contains(QStringLiteral("能力兼容（仍只读）")),
+                "compatible capability preflight did not preserve the read-only boundary")) {
+        return 1;
+    }
+    runtimeClient->modelCapabilityChecked(QStringLiteral("capability-invalid-fixture"),
+                                          QJsonObject{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("model-capability-check/0.1")},
+        {QStringLiteral("model_id"), QStringLiteral("aegisy:fixture")},
+        {QStringLiteral("decision"), QStringLiteral("unknown")},
+        {QStringLiteral("selection_allowed"), true},
+        {QStringLiteral("checks"), QJsonArray{}},
+        {QStringLiteral("mismatches"), QJsonArray{}},
+    });
+    application.processEvents();
+    if (!expect(modelPicker->toolTip().contains(QStringLiteral("能力状态无效")),
+                "inconsistent capability authority did not fail closed")) {
         return 1;
     }
     runtimeClient->modelCatalogCacheRead(QStringLiteral("cache-fresh-fixture"), QJsonObject{

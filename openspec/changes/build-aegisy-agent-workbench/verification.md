@@ -164,6 +164,15 @@ Model catalog foundation evidence:
   still kills the Qt process at startup with exit 137, so execution evidence
   must be rerun on a host with sufficient memory before this milestone can
   close.
+- The Qt host also consumes the read-only `model/capability-check` projection
+  for the current catalog-bound model. Chat and Work requirements are rebuilt
+  on mode changes; result validation binds the exact model identity, bounds
+  check/mismatch arrays, and requires decision/`selection_allowed` consistency.
+  Compatible, blocked, unknown, and malformed results render as explicit
+  metadata-only status, with compatible still labeled read-only. No picker,
+  routing, credential, Turn, or execution authority is granted. The render
+  fixture covers all four outcomes; execution remains subject to the host
+  resource limitation above.
 - The 2026-07-21 catalog, matcher, profile, catalog-policy, cache, and profile-store
   foundation stage passed 428 Rust unit tests with one ignored live fixture, 62 protocol tests,
   11 stdio/Codex tests, strict Clippy, the complete CMake build, and CTest

@@ -475,6 +475,12 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_modelProfileReadOnlyAvailable = false;
         m_modelProfileSnapshotValid = false;
         m_modelProfileCount = 0;
+        m_modelCapabilityReadOnlyAvailable = false;
+        m_modelCapabilityRequestId.clear();
+        m_modelCapabilityModelId.clear();
+        m_modelCapabilityRuntime.clear();
+        m_modelCapabilityRuntimeVersion.clear();
+        m_modelCapabilityState.clear();
         m_modelCatalogState.clear();
         m_modelCatalogCacheState.clear();
         m_modelCatalogRefreshState.clear();
@@ -504,6 +510,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 imagePreviewAvailable = true;
             } else if (name == QStringLiteral("model.profile.read-only")) {
                 m_modelProfileReadOnlyAvailable = true;
+            } else if (name == QStringLiteral("model.capability-check.read-only")) {
+                m_modelCapabilityReadOnlyAvailable = true;
             }
         }
         m_imageContextAvailable = imageImportAvailable && imagePreviewAvailable;
@@ -554,6 +562,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             && refreshSupported.isBool();
         if (!valid) {
             m_modelCatalogState = QStringLiteral("目录状态无效");
+            m_modelCapabilityState = QStringLiteral("能力状态无效");
         } else if (state == QStringLiteral("offline")) {
             m_modelCatalogState = QStringLiteral("目录离线");
         } else if (state == QStringLiteral("fresh")) {
@@ -562,6 +571,59 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_modelCatalogState = QStringLiteral("目录陈旧");
         } else {
             m_modelCatalogState = QStringLiteral("目录无效");
+        }
+        m_modelCapabilityRequestId.clear();
+        m_modelCapabilityModelId.clear();
+        m_modelCapabilityRuntime.clear();
+        m_modelCapabilityRuntimeVersion.clear();
+        if (valid) {
+            m_modelCapabilityState = QStringLiteral("能力未知");
+        }
+        const QJsonArray models = result.value(QStringLiteral("models")).toArray();
+        const QJsonObject model = models.isEmpty()
+            ? QJsonObject{} : models.at(0).toObject();
+        const QString modelId = model.value(QStringLiteral("model_id")).toString();
+        const QJsonObject runtime = model.value(QStringLiteral("runtime_compatibility"))
+                                        .toObject();
+        if (valid && !modelId.isEmpty() && isBoundedRuntimeMetadata(modelId, 256, true)) {
+            m_modelCapabilityModelId = modelId;
+            m_modelCapabilityRuntime = runtime.value(QStringLiteral("adapter")).toString();
+            m_modelCapabilityRuntimeVersion = runtime.value(
+                QStringLiteral("adapter_version")).toString();
+            requestModelCapabilityCheck();
+        } else if (valid) {
+            m_modelCapabilityState = QStringLiteral("能力未知");
+        }
+        updateSessionRuntimePresentation();
+    });
+    connect(m_runtime, &AgentRuntimeClient::modelCapabilityChecked,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        if (!m_modelCapabilityRequestId.isEmpty() && requestId != m_modelCapabilityRequestId) {
+            return;
+        }
+        m_modelCapabilityRequestId.clear();
+        const QString decision = result.value(QStringLiteral("decision")).toString();
+        const bool valid = result.value(QStringLiteral("schema_version")).toString()
+                == QStringLiteral("model-capability-check/0.1")
+            && result.value(QStringLiteral("model_id")).toString() == m_modelCapabilityModelId
+            && (decision == QStringLiteral("compatible")
+                || decision == QStringLiteral("blocked")
+                || decision == QStringLiteral("unknown"))
+            && result.value(QStringLiteral("selection_allowed")).isBool()
+            && ((decision == QStringLiteral("compatible"))
+                == result.value(QStringLiteral("selection_allowed")).toBool())
+            && result.value(QStringLiteral("checks")).isArray()
+            && result.value(QStringLiteral("checks")).toArray().size() <= 32
+            && result.value(QStringLiteral("mismatches")).isArray()
+            && result.value(QStringLiteral("mismatches")).toArray().size() <= 32;
+        if (!valid) {
+            m_modelCapabilityState = QStringLiteral("能力状态无效");
+        } else if (decision == QStringLiteral("compatible")) {
+            m_modelCapabilityState = QStringLiteral("能力兼容（仍只读）");
+        } else if (decision == QStringLiteral("blocked")) {
+            m_modelCapabilityState = QStringLiteral("能力受限");
+        } else {
+            m_modelCapabilityState = QStringLiteral("能力未知");
         }
         updateSessionRuntimePresentation();
     });
@@ -6690,6 +6752,7 @@ void AgentWorkbenchWidget::setMode(const QString &mode)
 {
     if (mode == m_mode) return;
     m_mode = mode;
+    requestModelCapabilityCheck();
     updateContextStrip();
     updateTurnAction();
     updateTerminalControls();
@@ -6701,6 +6764,34 @@ void AgentWorkbenchWidget::setMode(const QString &mode)
     }
     m_composer->setFocus();
     requestOperationStatus();
+}
+
+void AgentWorkbenchWidget::requestModelCapabilityCheck()
+{
+    if (!m_runtime || !m_runtime->isReady() || !m_modelCapabilityReadOnlyAvailable
+            || m_modelCapabilityModelId.isEmpty()) {
+        return;
+    }
+    QJsonObject requirements{
+        {QStringLiteral("mode"), m_mode},
+        {QStringLiteral("attachments"), QJsonArray{}},
+        {QStringLiteral("tools"), m_mode == QStringLiteral("work")},
+        {QStringLiteral("reasoning"), false},
+    };
+    if (!m_modelCapabilityRuntime.isEmpty()) {
+        requirements.insert(QStringLiteral("runtime"), m_modelCapabilityRuntime);
+    }
+    if (!m_modelCapabilityRuntimeVersion.isEmpty()) {
+        requirements.insert(QStringLiteral("runtime_version"),
+                            m_modelCapabilityRuntimeVersion);
+    }
+    m_modelCapabilityState = QStringLiteral("能力检查中");
+    m_modelCapabilityRequestId = m_runtime->checkModelCapabilities(
+        m_modelCapabilityModelId, requirements);
+    if (m_modelCapabilityRequestId.isEmpty()) {
+        m_modelCapabilityState = QStringLiteral("能力未知");
+    }
+    updateSessionRuntimePresentation();
 }
 
 void AgentWorkbenchWidget::requestOperationStatus()
@@ -10289,6 +10380,9 @@ void AgentWorkbenchWidget::updateSessionRuntimePresentation()
     }
     if (!m_modelCatalogState.isEmpty()) {
         tooltip += QStringLiteral(" · %1").arg(m_modelCatalogState);
+    }
+    if (!m_modelCapabilityState.isEmpty()) {
+        tooltip += QStringLiteral(" · %1").arg(m_modelCapabilityState);
     }
     if (!m_modelCatalogRefreshState.isEmpty()) {
         tooltip += QStringLiteral(" · %1").arg(m_modelCatalogRefreshState);

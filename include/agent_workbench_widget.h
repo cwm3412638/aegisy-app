@@ -228,6 +228,7 @@ private:
     void showEditorFallback(const QString &path, const QJsonObject &metadata,
                             const QString &message);
     void updateRuntimeCapabilityUi();
+    void requestModelCapabilityCheck();
 
     AgentRuntimeClient *m_runtime = nullptr;
     QButtonGroup *m_modeGroup = nullptr;
@@ -237,6 +238,12 @@ private:
     bool m_modelProfileReadOnlyAvailable = false;
     bool m_modelProfileSnapshotValid = false;
     int m_modelProfileCount = 0;
+    bool m_modelCapabilityReadOnlyAvailable = false;
+    QString m_modelCapabilityRequestId;
+    QString m_modelCapabilityModelId;
+    QString m_modelCapabilityRuntime;
+    QString m_modelCapabilityRuntimeVersion;
+    QString m_modelCapabilityState;
     QString m_modelCatalogState;
     QString m_modelCatalogCacheState;
     QString m_modelCatalogRefreshState;

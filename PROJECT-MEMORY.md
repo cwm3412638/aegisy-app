@@ -137,6 +137,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   select a model, issue credentials, start a turn, or emit a model-change event; keep
   OpenSpec `10.2` unchecked until authenticated catalog/profile integration and
   cross-platform UI evidence exist.
+- Desktop capability preflight projection (2026-07-21): after a catalog-bound
+  model is observed, Qt requests the read-only capability check using the active
+  Chat/Work requirements and rebuilds it when the mode changes. It validates
+  exact model identity, bounded check/mismatch arrays, and decision versus
+  `selection_allowed` consistency; compatible, blocked, unknown, and malformed
+  results are rendered as metadata-only status, with compatible explicitly
+  labeled read-only. No picker, routing, credential, Turn, or execution authority
+  is granted. Render coverage compiles but remains unexecuted on this host due
+  to the known Qt startup exit-137 resource limit; OpenSpec `10.2` remains
+  unchecked pending authenticated catalog and cross-platform evidence.
 - Runtime compatibility metadata foundation (2026-07-21): additive
   `model-runtime-compatibility/0.1` entries preserve the legacy summary while
   representing Codex App Server, ACP, native, and unknown adapter families with
