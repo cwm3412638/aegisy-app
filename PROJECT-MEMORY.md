@@ -151,6 +151,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   signing, key rotation, authenticated refresh/cache expiry, rollback
   protection, or an admin publication service, so those tasks remain
   unchecked.
+- Model catalog cache foundation (2026-07-21): internal
+  `model-catalog-cache/0.1` accepts only a clean catalog marked fresh and
+  signature-validated, binds its SHA-256 identity to a positive monotonic
+  sequence and receipt/issue/expiry times, bounds TTL and stale retention,
+  treats exact replay as idempotent, and rejects older/conflicting generations,
+  snapshot tampering, or clock regression. Reads derive explicit
+  fresh/stale/expired views and expose no catalog after the stale window. The
+  contract does not authenticate the signature flag, persist or refresh the
+  cache, integrate AAP/Qt, or grant selection authority; every view fixes
+  `selection_allowed:false`. Keep OpenSpec `9.3` and `10.1` unchecked.
 - OpenSpec task `21.1` is complete: background jobs, multi-agent execution, and
   unattended writes remain unadvertised and disabled until their prerequisite
   security, recovery, budget, evaluation, and release gates are recorded. The
@@ -1056,7 +1066,7 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 410 passed Rust sidecar unit tests plus
+Current verified baseline: 16 desktop tests, 415 passed Rust sidecar unit tests plus
 one explicitly ignored live Codex fixture, 59 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
@@ -1088,7 +1098,7 @@ On 2026-07-21 the model-catalog, capability-matcher, model-profile, and
 catalog-policy foundation stages added the internal `model-catalog/0.1` and
 `model-profile/0.1` validation contracts, the read-only AAP `model/catalog` and
 `model/capability-check` projections, and the corresponding Qt request/signals.
-The policy-focused Rust verification passed 410 unit tests with one ignored live
+The policy-focused Rust verification passed 415 unit tests with one ignored live
 fixture, 59
 protocol tests, and 11 stdio/Codex tests; strict Clippy, the complete CMake
 desktop build, and CTest `agent_runtime_protocol` passed. The projection is

@@ -69,8 +69,19 @@ Model catalog foundation evidence:
   does not establish a trusted upstream source. This is only a metadata
   foundation. Signed cloud refresh/cache, durable profiles, and model switching
   remain unchecked under OpenSpec `9.1` through `10.12`.
-- The 2026-07-21 catalog, matcher, profile, and catalog-policy foundation stage
-  passed 410 Rust unit tests with one ignored live fixture, 59 protocol tests,
+- Internal `model-catalog-cache/0.1` accepts only a clean catalog marked fresh
+  and signature-validated with a bounded future expiry. It content-hashes the
+  catalog, binds a positive monotonic sequence and receipt time, treats exact
+  same-generation replay as idempotent, rejects older or conflicting
+  generations, and derives explicit fresh/stale/expired views with a bounded
+  stale window. Clock regression and snapshot identity tampering fail closed;
+  expired entries return no catalog metadata. Every view fixes
+  `selection_allowed:false` because this layer does not cryptographically verify
+  the signature flag. Five focused unit fixtures pass. Persistence,
+  authenticated refresh/key rotation, AAP/Qt host integration, and selection
+  authority remain absent, so tasks `9.3` and `10.1` remain unchecked.
+- The 2026-07-21 catalog, matcher, profile, catalog-policy, and cache foundation
+  stage passed 415 Rust unit tests with one ignored live fixture, 59 protocol tests,
   11 stdio/Codex tests, strict Clippy, the complete CMake build, and CTest
   `agent_runtime_protocol`.
 

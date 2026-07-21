@@ -30,6 +30,7 @@ mod image_context;
 mod instruction_discovery;
 mod language_server;
 mod model_catalog;
+pub mod model_catalog_cache;
 pub mod model_profile;
 pub mod non_git_checkpoint;
 mod operation_probe;

@@ -193,6 +193,11 @@
     signature-validated, invalid catalogs to be unsigned, bounded catalog/source
     text, and secret-free metadata. Cryptographic signing, key rotation,
     authenticated cache expiry, and rollback protection are not implemented.
+    Internal `model-catalog-cache/0.1` additionally binds signed-catalog content
+    identity, positive monotonic sequence, receipt/issue/expiry time, bounded
+    TTL/stale windows, idempotent same-generation replay, and rejection of older
+    or conflicting generations. It does not authenticate the signature flag or
+    persist/fetch the cache, so it grants no selection authority.
 - [ ] 9.4 Add authenticated catalog endpoint with conditional requests and deterministic test fixtures
 - [ ] 9.5 Add runtime compatibility and known-degradation metadata for Codex, ACP, and future native adapters
 - [ ] 9.6 Add role recommendations backed by evaluation version, sample size, and known limitations
@@ -210,8 +215,12 @@
 
 - [ ] 10.1 Implement catalog cache and explicit fresh/stale/invalid/offline states in the desktop host
   - Partial foundation: `model/catalog` returns an explicit offline runtime-bound
-    projection and Qt requests it after initialization. Durable signed cache,
-    refresh, stale/invalid transitions, and desktop picker state remain open.
+    projection and Qt requests it after initialization. Internal
+    `model-catalog-cache/0.1` now derives fresh/stale/expired views from a bounded
+    validated record, hides catalog metadata after the stale window, rejects
+    clock rollback, and fixes selection authority to false. Durable storage,
+    authenticated signature verification/refresh, invalid/offline host
+    transitions, and desktop picker state remain open.
 - [ ] 10.2 Implement capability matcher for Chat, Work, attachments, tools, reasoning, context, runtime, and policy
   - Partial foundation: read-only `model/capability-check` validates Chat/Work
     requirements, implicitly requires tools for Work, and returns explicit
