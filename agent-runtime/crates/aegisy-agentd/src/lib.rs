@@ -31,6 +31,7 @@ mod instruction_discovery;
 mod language_server;
 mod model_catalog;
 pub mod model_catalog_cache;
+pub mod model_catalog_refresh;
 pub mod model_catalog_signature;
 pub mod model_catalog_trust_store;
 pub mod model_profile;
@@ -3211,6 +3212,7 @@ impl Runtime {
             "runtime/degradations" => self.runtime_degradations(request),
             "model/catalog" => self.model_catalog(request),
             "model/catalog-cache" => self.model_catalog_cache(request),
+            "model/catalog-refresh-status" => self.model_catalog_refresh_status(request),
             "model/capability-check" => self.model_capability_check(request),
             "model/profile/list" => self.model_profile_list(request),
             "model/profile/read" => self.model_profile_read(request),
@@ -3531,6 +3533,24 @@ impl Runtime {
         self.success_for(
             &request,
             serde_json::to_value(view).expect("model catalog cache serialization"),
+        )
+    }
+
+    fn model_catalog_refresh_status(&self, request: Request) -> Vec<Value> {
+        let status = model_catalog_refresh::CatalogRefreshStatus::unconfigured();
+        if let Err(error) = status.validate() {
+            return self.error_for(
+                &request,
+                -32114,
+                format!(
+                    "model catalog refresh status validation failed: {}",
+                    error.code
+                ),
+            );
+        }
+        self.success_for(
+            &request,
+            serde_json::to_value(status).expect("model catalog refresh status serialization"),
         )
     }
 
@@ -3858,6 +3878,7 @@ impl Runtime {
                     "runtime.health".into(),
                     "runtime.degradations".into(),
                     "model.catalog.read-only".into(),
+                    "model.catalog.refresh.status.read-only".into(),
                     "model.capability-check.read-only".into(),
                     "runtime.recovery.status".into(),
                     "runtime.recovery.diagnostic-export".into(),
@@ -3905,6 +3926,7 @@ impl Runtime {
                 "runtime.degradations".into(),
                 "model.catalog.read-only".into(),
                 "model.catalog.cache.read-only".into(),
+                "model.catalog.refresh.status.read-only".into(),
                 "model.capability-check.read-only".into(),
                 "session.work.preview".into(),
                 "timeline.streaming".into(),

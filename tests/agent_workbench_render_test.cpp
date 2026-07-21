@@ -476,6 +476,7 @@ int main(int argc, char *argv[])
             QStringLiteral("workspace.image.import-user"),
             QStringLiteral("workspace.image.preview"),
             QStringLiteral("model.catalog.cache.read-only"),
+            QStringLiteral("model.catalog.refresh.status.read-only"),
         }},
     });
     runtimeClient->runtimeDegradationsRead(QStringLiteral("degradation-fixture"), QJsonObject{
@@ -500,6 +501,18 @@ int main(int argc, char *argv[])
         {QStringLiteral("availability"), QStringLiteral("empty")},
         {QStringLiteral("selection_allowed"), false},
     });
+    runtimeClient->modelCatalogRefreshStatusRead(
+        QStringLiteral("refresh-status-fixture"), QJsonObject{
+            {QStringLiteral("schema_version"),
+             QStringLiteral("model-catalog-refresh-status/0.1")},
+            {QStringLiteral("state"), QStringLiteral("unconfigured")},
+            {QStringLiteral("authenticated_transport_required"), true},
+            {QStringLiteral("conditional_requests_supported"), true},
+            {QStringLiteral("response_body_retained"), false},
+            {QStringLiteral("credentials_included"), false},
+            {QStringLiteral("cache_install_authority"), false},
+            {QStringLiteral("selection_allowed"), false},
+        });
     application.processEvents();
     if (!expect(!recoveryBanner->isHidden()
                     && recoveryBanner->text().contains(QStringLiteral("自动恢复 2 个"))
@@ -508,8 +521,9 @@ int main(int argc, char *argv[])
                 "startup projection recovery did not render a non-blocking notice")) {
         return 1;
     }
-    if (!expect(modelPicker->toolTip().contains(QStringLiteral("目录缓存为空")),
-                "model catalog cache did not remain an explicit empty read-only state")) {
+    if (!expect(modelPicker->toolTip().contains(QStringLiteral("目录缓存为空"))
+                    && modelPicker->toolTip().contains(QStringLiteral("目录刷新未配置")),
+                "model catalog cache and refresh did not remain explicit read-only states")) {
         return 1;
     }
     if (!expect(runtimeCapability->text().contains(QStringLiteral("Agent 只读"))

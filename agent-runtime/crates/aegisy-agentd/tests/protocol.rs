@@ -5887,6 +5887,52 @@ fn model_catalog_cache_reports_empty_without_selection_authority() {
 }
 
 #[test]
+fn model_catalog_refresh_status_is_read_only_and_unconfigured() {
+    let mut runtime = Runtime::default();
+    let initialized = runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": { "name": "catalog-refresh-status-test", "version": "1" }
+        }),
+    ));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "model.catalog.refresh.status.read-only"));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+
+    let response = runtime.handle_line(&request(
+        "refresh-status",
+        "model/catalog-refresh-status",
+        json!({}),
+    ));
+    let status = &response[0]["result"];
+    assert_eq!(status["schema_version"], "model-catalog-refresh-status/0.1");
+    assert_eq!(status["state"], "unconfigured");
+    assert_eq!(status["endpoint_configured"], false);
+    assert_eq!(status["trust_anchor_configured"], false);
+    assert_eq!(status["authenticated_transport_required"], true);
+    assert_eq!(status["conditional_requests_supported"], true);
+    assert_eq!(status["response_body_retained"], false);
+    assert_eq!(status["credentials_included"], false);
+    assert_eq!(status["cache_install_authority"], false);
+    assert_eq!(status["selection_allowed"], false);
+    let encoded = serde_json::to_string(status).unwrap();
+    assert!(!encoded.contains("Authorization"));
+    assert!(!encoded.contains("Bearer "));
+
+    let mutation = runtime.handle_line(&request(
+        "refresh-install",
+        "model/catalog-refresh",
+        json!({}),
+    ));
+    assert_eq!(mutation[0]["error"]["code"], -32601);
+}
+
+#[test]
 fn model_catalog_cache_store_is_opened_for_durable_runtime_restart() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

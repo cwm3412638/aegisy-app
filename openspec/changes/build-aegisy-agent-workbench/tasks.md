@@ -226,6 +226,14 @@
     Trust Store. No authenticated Key Ring/catalog download, signing service,
     cloud refresh, key-publication endpoint, or AAP/Qt refresh path exists.
 - [ ] 9.4 Add authenticated catalog endpoint with conditional requests and deterministic test fixtures
+  - Partial foundation: internal `model-catalog-refresh/0.1` validates the
+    host-owned authenticated transport observation, bounded ETag/
+    Last-Modified validators, `Accept-Encoding: identity`, 200/304 response
+    contracts, signed bundle envelope shape, and content-free classification of
+    authentication, redirect, rate-limit, server, encoding, size, and invalid
+    body failures. A deterministic 304 fixture and nine Rust contract tests are
+    checked in. No HTTP client, production endpoint, credential transfer,
+    signing service, Trust Store installation, or cache mutation path exists.
 - [ ] 9.5 Add runtime compatibility and known-degradation metadata for Codex, ACP, and future native adapters
   - Partial foundation: additive `model-runtime-compatibility/0.1` entries now
     describe Codex App Server, ACP, native, and unknown adapter families with
@@ -263,6 +271,10 @@
     admission, but it has no production anchor and is not opened by Runtime/AAP/Qt.
     Authenticated refresh, non-empty fresh/stale/expired host transitions, and
     desktop picker state remain open.
+  - Additive refresh status: read-only `model/catalog-refresh-status` reports
+    `unconfigured` with conditional-request support and all credential,
+    response-body, cache-install, selection, routing, token, and Turn authority
+    flags fixed false until a production endpoint and trust anchor are supplied.
 - [ ] 10.2 Implement capability matcher for Chat, Work, attachments, tools, reasoning, context, runtime, and policy
   - Partial foundation: read-only `model/capability-check` validates Chat/Work
     requirements, implicitly requires tools for Work, and returns explicit

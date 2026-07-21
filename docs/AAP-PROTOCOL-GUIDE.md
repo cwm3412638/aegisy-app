@@ -119,6 +119,24 @@ the cache, or emit a model-change event. Catalog signing, authenticated refresh,
 durable cache states, capability matching, profiles, and model switching remain
 OpenSpec tasks `9.1` through `10.12`.
 
+The additive read-only method `model/catalog-refresh-status` reports the state of
+the host-owned catalog refresh contract. The current response is deliberately
+`unconfigured` because no production endpoint or trust anchor is embedded in the
+repository:
+
+```jsonl
+{"jsonrpc":"2.0","id":"8","method":"model/catalog-refresh-status","params":{}}
+{"jsonrpc":"2.0","id":"8","result":{"schema_version":"model-catalog-refresh-status/0.1","state":"unconfigured","endpoint_configured":false,"trust_anchor_configured":false,"authenticated_transport_required":true,"conditional_requests_supported":true,"last_attempt_at_ms":null,"last_http_status":null,"last_outcome":null,"last_error_code":"production-catalog-endpoint-and-trust-anchor-unavailable","retryable":false,"etag_present":false,"last_modified_present":false,"validator_identity":null,"response_body_retained":false,"credentials_included":false,"cache_install_authority":false,"selection_allowed":false}}
+```
+
+The transport contract accepts only a Qt-owned authenticated observation of a
+bounded JSON response: a 200 response must carry a signed bundle and a
+conditional validator, while a 304 response must be backed by a prior ETag or
+Last-Modified validator. Redirects, non-identity content encodings, oversized or
+malformed bodies, and content-free authentication/rate-limit/server failures are
+rejected. The status method never refreshes or installs the cache and never
+grants model, token, routing, or Turn authority.
+
 The additive `model.capability-check.read-only` capability exposes
 `model/capability-check` for preflight only. Its requirements identify Chat or
 Work mode, attachments, tools, reasoning, a context-token floor, the expected

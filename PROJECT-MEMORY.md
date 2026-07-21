@@ -152,6 +152,21 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   signed production catalog, real ACP/native adapter fixtures, authenticated cloud
   publication, and macOS/Windows compatibility evidence remain absent; keep
   OpenSpec `9.5` unchecked.
+- Catalog refresh transport foundation (2026-07-21): internal
+  `model-catalog-refresh/0.1` now validates the Qt-owned authenticated
+  transport observation without receiving a credential. Conditional
+  ETag/Last-Modified values are bounded, header-injection safe, and hashed for
+  content-free status. Requests require the fixed `aegisy-model-catalog` scope
+  and `Accept-Encoding: identity`; responses accept only an authenticated JSON
+  200 signed-bundle envelope or a validator-backed 304. Redirects, unsupported
+  encodings, oversized/malformed bodies, and authentication/rate-limit/server
+  failures map to stable content-free codes with retryability. A deterministic
+  304 fixture and nine unit tests cover the contract. Read-only AAP
+  `model/catalog-refresh-status` and Qt now expose an explicit `目录刷新未配置`
+  state with `conditional_requests_supported=true` while endpoint and trust
+  anchor configuration are absent. No HTTP request, token transfer, Trust Store
+  installation, cache mutation, model selection, routing, token, or Turn
+  authority was added; keep OpenSpec `9.4` and `10.1` unchecked.
 - Model profile foundation (2026-07-21): internal `model-profile/0.1` now
   validates global/project scope, bounded role bindings for Agent/plan/apply/
   review/utility/embedding/rerank, secret-free source metadata, and a
@@ -1137,8 +1152,8 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 439 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 62 Rust protocol tests, eleven macOS
+Current verified baseline: 16 desktop tests, 448 passed Rust sidecar unit tests plus
+one explicitly ignored live Codex fixture, 63 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
@@ -1211,6 +1226,19 @@ projection's false/absent selection, routing, token, Turn, and execution authori
 No signed production compatibility catalog, authenticated publication, real ACP or
 native adapter contract fixture, or macOS/Windows compatibility matrix evidence was
 added. OpenSpec `9.5` remains unchecked.
+
+On 2026-07-21 the catalog refresh transport stage added nine unit tests and one
+protocol test for the host-owned authenticated 200/304 contract, bounded
+ETag/Last-Modified validators, identity content encoding, content-free failure
+classification, and the read-only refresh status projection. The full Rust
+workspace now passes 448 tests plus one ignored live fixture, 63 protocol tests,
+and 11 stdio/Codex tests with strict Clippy. The incremental CMake build and
+`agent_runtime_protocol` passed. A fresh CMake configure was killed by the host
+while running Qt `uic -h`; 15 of the other 16 CTest processes were also killed at
+startup by host resource pressure, while `agent_runtime_protocol` passed. The
+Node-backed strict OpenSpec validator exited 137 before producing output. These
+environment-limited checks are pending rerun on a host with sufficient memory;
+the refresh contract remains partial and OpenSpec `9.4`/`10.1` stay unchecked.
 
 On 2026-07-20 the schema-v12 durable notification outbox and its read-only AAP/Qt
 inspection layer passed all Rust counts above, strict Clippy, formatting,

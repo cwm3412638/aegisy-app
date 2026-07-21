@@ -1,0 +1,24 @@
+{
+  "request": {
+    "schema_version": "model-catalog-refresh/0.1",
+    "request_id": "refresh-fixture-1",
+    "endpoint_scope": "aegisy-model-catalog",
+    "started_at_ms": 1000,
+    "validators": {
+      "etag": "\"catalog-1\"",
+      "last_modified": "Tue, 21 Jul 2026 08:00:00 GMT"
+    },
+    "authenticated_transport_required": true,
+    "accept_encoding": "identity",
+    "credentials_included": false,
+    "body_included": false
+  },
+  "response": {
+    "authenticated_transport": true,
+    "http_status": 304,
+    "validators": {
+      "etag": "\"catalog-1\"",
+      "last_modified": null
+    }
+  }
+}

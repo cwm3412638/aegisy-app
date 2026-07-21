@@ -476,6 +476,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_modelProfileSnapshotValid = false;
         m_modelProfileCount = 0;
         m_modelCatalogCacheState.clear();
+        m_modelCatalogRefreshState.clear();
         m_compactionAvailable = false;
         m_backgroundNotificationInspectionAvailable = false;
         m_backgroundRecoveryInspectionAvailable = false;
@@ -558,6 +559,39 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_modelCatalogCacheState = QStringLiteral("目录缓存陈旧");
         } else {
             m_modelCatalogCacheState = QStringLiteral("目录缓存过期");
+        }
+        updateSessionRuntimePresentation();
+    });
+    connect(m_runtime, &AgentRuntimeClient::modelCatalogRefreshStatusRead,
+            this, [this](const QString &, const QJsonObject &result) {
+        const QString state = result.value(QStringLiteral("state")).toString();
+        const bool authoritySafe = !result.value(QStringLiteral("response_body_retained"))
+                                        .toBool(true)
+            && !result.value(QStringLiteral("credentials_included")).toBool(true)
+            && !result.value(QStringLiteral("cache_install_authority")).toBool(true)
+            && !result.value(QStringLiteral("selection_allowed")).toBool(true);
+        const bool valid = result.value(QStringLiteral("schema_version")).toString()
+                == QStringLiteral("model-catalog-refresh-status/0.1")
+            && result.value(QStringLiteral("authenticated_transport_required")).toBool()
+            && result.value(QStringLiteral("conditional_requests_supported")).toBool()
+            && authoritySafe
+            && (state == QStringLiteral("unconfigured")
+                || state == QStringLiteral("ready")
+                || state == QStringLiteral("succeeded")
+                || state == QStringLiteral("not-modified")
+                || state == QStringLiteral("failed"));
+        if (!valid) {
+            m_modelCatalogRefreshState.clear();
+        } else if (state == QStringLiteral("unconfigured")) {
+            m_modelCatalogRefreshState = QStringLiteral("目录刷新未配置");
+        } else if (state == QStringLiteral("ready")) {
+            m_modelCatalogRefreshState = QStringLiteral("目录刷新已就绪");
+        } else if (state == QStringLiteral("succeeded")) {
+            m_modelCatalogRefreshState = QStringLiteral("目录刷新成功");
+        } else if (state == QStringLiteral("not-modified")) {
+            m_modelCatalogRefreshState = QStringLiteral("目录内容未变化");
+        } else {
+            m_modelCatalogRefreshState = QStringLiteral("目录刷新失败");
         }
         updateSessionRuntimePresentation();
     });
@@ -10226,6 +10260,9 @@ void AgentWorkbenchWidget::updateSessionRuntimePresentation()
     }
     if (!m_modelCatalogCacheState.isEmpty()) {
         tooltip += QStringLiteral(" · %1").arg(m_modelCatalogCacheState);
+    }
+    if (!m_modelCatalogRefreshState.isEmpty()) {
+        tooltip += QStringLiteral(" · %1").arg(m_modelCatalogRefreshState);
     }
     if (m_modelPicker->count() != 1 || m_modelPicker->itemText(0) != display) {
         const QSignalBlocker blocker(m_modelPicker);

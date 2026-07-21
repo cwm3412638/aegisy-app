@@ -121,6 +121,18 @@ Model catalog foundation evidence:
   Key Ring/catalog endpoint, conditional request flow, private signing service,
   key-publication service, cloud refresh, or desktop transition evidence. Tasks
   `9.3`, `9.4`, and `10.1` therefore remain unchecked.
+- The internal `model-catalog-refresh/0.1` contract now validates only a
+  host-owned authenticated transport observation. It binds bounded conditional
+  ETag/Last-Modified validators, requires `Accept-Encoding: identity`, accepts
+  only JSON 200 responses with a bounded signed bundle or a validator-backed 304,
+  and classifies authentication, redirect, rate-limit, server, content-encoding,
+  size, and malformed-body failures without retaining response content. The
+  deterministic 304 fixture and nine unit tests prove validator preservation,
+  content-free errors, and false authority flags. Read-only AAP
+  `model/catalog-refresh-status` and its Qt projection expose only the current
+  `unconfigured` state; no network request, credential transfer, Trust Store
+  install, cache mutation, model selection, token, routing, or Turn authority
+  exists. This is partial evidence for `9.4`/`10.1`, not completion.
 - Internal `model-catalog-cache/0.1` accepts only a clean catalog marked fresh
   and signature-validated with a bounded future expiry. It content-hashes the
   catalog, binds a positive monotonic sequence and receipt time, treats exact
