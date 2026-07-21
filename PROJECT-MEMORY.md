@@ -871,9 +871,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Codex `thread/tokenUsage/updated` Timeline items now retain raw bounded usage
   plus a validated report: provider token, context-window, and reasoning fields
   are observed, cost is unknown, and unreconciled totals are not rewritten.
-  This remains Codex-only and is not connected to catalog pricing,
-  cross-provider correlation, billing, routing, or Qt; keep task `20.2`
-  unchecked.
+  Qt validates the schema, complete metric set, authority flags/value kinds,
+  and false automatic-compaction authority before rendering fixed labels and
+  numeric values; malformed or unknown reports show a fixed unknown state and
+  no provider text. This remains Codex-only and is not connected to catalog
+  pricing, cross-provider correlation, billing, routing, or durable cross-turn
+  threshold state; keep task `20.2` unchecked.
 - OpenSpec task `20.1` now has an internal `turn-trace/0.1` contract for
   source-qualified runtime/model/context/tool/approval/usage/change/test/error/
   terminal metadata. It rejects content and secrets, bounds identities and
@@ -2428,6 +2431,10 @@ Implemented visual baseline:
   turn-trace changes are partial foundations. Their OpenSpec tasks remain
   unchecked until authoritative producers, complete AAP/Qt integration,
   provider/model wiring, and cross-platform release evidence are complete.
+- The Qt usage-authority widget and render fixture pass direct C++17 syntax
+  compilation using the CMake compile database. The complete render target is
+  still blocked before C++ linking because this host kills Qt `rcc` while
+  compiling `resources.qrc`; no runtime/render pass is claimed.
 
 ## Next Product Priorities
 

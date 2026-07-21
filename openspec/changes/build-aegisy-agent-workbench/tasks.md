@@ -357,6 +357,13 @@
 ## 12. Agent Timeline and Composer
 
 - [ ] 12.1 Implement virtualized typed timeline for user, agent, plan, reasoning, command, file-change, approval, question, error, usage, and artifact items
+  - Partial usage-item projection: Qt validates `usage-authority/0.1`, requires
+    exactly token/context/cost/reasoning metrics with consistent authority
+    flags and value kinds, validates the read-only context threshold, and
+    renders only fixed labels plus numeric token/context values. Unknown or
+    malformed authority fails closed without displaying provider text. The
+    timeline is still not virtualized and the remaining item types, stress
+    behavior, and cross-platform render evidence are incomplete.
 - [ ] 12.2 Implement deterministic delta accumulation and terminal-state rendering for every item type
 - [ ] 12.3 Implement live plan view with stable step status and links to child sessions or evidence
 - [ ] 12.4 Implement inline approvals showing command/diff/scope/risk/reason and exact available decision scopes
@@ -607,8 +614,10 @@
     `thread/tokenUsage/updated` Timeline items now retain the raw bounded usage
     projection plus a validated authority report: provider-reported token and
     context-window/reasoning fields are observed, cost is unknown, and
-    unreconciled provider totals are not rewritten. This remains Codex-only and
-    has no catalog pricing, cross-provider correlation, billing, or Qt surface;
+    unreconciled provider totals are not rewritten. Qt now renders a strict
+    metadata-only summary and rejects malformed/unknown versions. This remains
+    Codex-only and has no catalog pricing, cross-provider correlation, billing,
+    durable cross-turn threshold state, or complete cross-platform evidence;
     keep this task unchecked.
 - [ ] 20.3 Implement privacy-preserving local audit events for privileged operations and permission decisions
 - [ ] 20.4 Implement diagnostic bundle preview, category opt-in, redaction report, deterministic archive, and support correlation ID

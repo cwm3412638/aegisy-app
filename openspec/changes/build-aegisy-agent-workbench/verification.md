@@ -1341,8 +1341,10 @@ Known limitations:
   this host, so it is not used as runtime evidence.
 - `usage-authority/0.1` focused tests and the aegisy-agentd library suite pass.
   Codex usage Timeline items now carry the validated authority report and a
-  stdio/restart fixture verifies it; catalog pricing, cross-provider usage,
-  billing, routing, and Qt remain absent, so task 20.2 stays incomplete.
+  stdio/restart fixture verifies it. Qt adds strict valid/malformed render
+  fixtures and both changed C++ translation units pass direct syntax compilation;
+  catalog pricing, cross-provider usage, billing, routing, and complete Qt
+  runtime evidence remain absent, so task 20.2 stays incomplete.
 - `context-threshold/0.1` has ten deterministic tests for authority,
   freshness, soft/hard limits, hysteresis, missing limits, and overflow. It is
   projected from provider-observed Codex usage into the durable Timeline and
@@ -1352,3 +1354,6 @@ Known limitations:
   coverage for source authority, event ordering, duplicate usage, terminal
   evidence, and secret rejection. No durable trace producer, AAP/Qt surface,
   audit export, or retention policy exists yet.
+- The Qt render target cannot complete on this host because Qt `rcc` is killed
+  while compiling `resources.qrc`. Direct compile-database syntax checks pass
+  for both the widget and render fixture; this is not counted as a render run.

@@ -105,6 +105,13 @@ hysteresis is active-turn-only and `automatic_compaction_authority` is always
 false. The trace contract has no durable producer or diagnostic export path.
 Clients must not infer automatic compaction or trace export from these fields.
 
+The Qt Timeline treats this metadata as untrusted protocol input. It requires
+the exact usage schema, all four metric classes, consistent authority/value
+types, and a threshold that explicitly denies automatic authority. Only fixed
+localized labels and non-negative numeric values are rendered; malformed or
+unknown versions become a fixed unknown state without exposing raw provider
+text.
+
 ## Capability Degradation
 
 `runtime/degradations` is a versioned, content-free explanation for features that
