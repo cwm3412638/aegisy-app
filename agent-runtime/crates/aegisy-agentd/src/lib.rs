@@ -179,7 +179,7 @@ pub struct Runtime {
     compaction_store: Option<session_compaction_store::CompactionCheckpointStore>,
     pinned_context_store: Option<pinned_context_store::PinnedContextStore>,
     model_profile_store: Option<model_profile_store::ModelProfileStore>,
-    model_catalog_cache: Option<model_catalog_cache::ModelCatalogCache>,
+    model_catalog_cache: Option<model_catalog_cache::ModelCatalogCacheStore>,
     backend: Backend,
 }
 
@@ -2809,12 +2809,18 @@ impl Runtime {
                     Self::open_compensated_pinned_context_store(data_root, &mut store);
                 let model_profile_store =
                     model_profile_store::ModelProfileStore::open(data_root).ok();
+                let model_catalog_cache = model_catalog_cache::ModelCatalogCacheStore::open(
+                    data_root,
+                    MODEL_CATALOG_CACHE_STALE_MS,
+                )
+                .ok();
                 Ok(Self::with_backend_and_store(
                     Backend::Preview,
                     Some(store),
                     compaction_store,
                     pinned_context_store,
                     model_profile_store,
+                    model_catalog_cache,
                 ))
             }
             WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => {
@@ -2832,6 +2838,11 @@ impl Runtime {
                     Self::open_compensated_pinned_context_store(data_root, &mut store);
                 let model_profile_store =
                     model_profile_store::ModelProfileStore::open(data_root).ok();
+                let model_catalog_cache = model_catalog_cache::ModelCatalogCacheStore::open(
+                    data_root,
+                    MODEL_CATALOG_CACHE_STALE_MS,
+                )
+                .ok();
                 let adapter = CodexAdapter::start()?;
                 Ok(Self::with_backend_and_store(
                     Backend::Codex(adapter),
@@ -2839,6 +2850,7 @@ impl Runtime {
                     compaction_store,
                     pinned_context_store,
                     model_profile_store,
+                    model_catalog_cache,
                 ))
             }
             WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => {
@@ -2852,7 +2864,13 @@ impl Runtime {
     }
 
     fn with_backend(backend: Backend) -> Self {
-        Self::with_backend_and_store(backend, None, None, None, None)
+        let model_catalog_cache = if matches!(&backend, Backend::Recovery(_)) {
+            None
+        } else {
+            model_catalog_cache::ModelCatalogCacheStore::in_memory(MODEL_CATALOG_CACHE_STALE_MS)
+                .ok()
+        };
+        Self::with_backend_and_store(backend, None, None, None, None, model_catalog_cache)
     }
 
     fn with_backend_and_store(
@@ -2861,6 +2879,7 @@ impl Runtime {
         compaction_store: Option<session_compaction_store::CompactionCheckpointStore>,
         pinned_context_store: Option<pinned_context_store::PinnedContextStore>,
         model_profile_store: Option<model_profile_store::ModelProfileStore>,
+        model_catalog_cache: Option<model_catalog_cache::ModelCatalogCacheStore>,
     ) -> Self {
         let projects = workbench_store
             .as_ref()
@@ -2939,11 +2958,7 @@ impl Runtime {
             compaction_store,
             pinned_context_store,
             model_profile_store,
-            model_catalog_cache: if matches!(&backend, Backend::Recovery(_)) {
-                None
-            } else {
-                model_catalog_cache::ModelCatalogCache::new(MODEL_CATALOG_CACHE_STALE_MS).ok()
-            },
+            model_catalog_cache,
             backend,
         }
     }

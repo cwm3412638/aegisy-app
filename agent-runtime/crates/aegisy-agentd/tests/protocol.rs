@@ -5856,6 +5856,59 @@ fn model_catalog_cache_reports_empty_without_selection_authority() {
 }
 
 #[test]
+fn model_catalog_cache_store_is_opened_for_durable_runtime_restart() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("aegisy-aap-model-catalog-cache-runtime-{unique}"));
+    let data_root = root.join("data");
+    fs::create_dir_all(&data_root).unwrap();
+
+    let mut runtime = Runtime::with_store(&data_root).unwrap();
+    let initialized = runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": { "name": "catalog-cache-durable-test", "version": "1" }
+        }),
+    ));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "model.catalog.cache.read-only"));
+    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    let response = runtime.handle_line(&request("cache", "model/catalog-cache", json!({})));
+    assert_eq!(response[0]["result"]["availability"], "empty");
+    assert_eq!(response[0]["result"]["selection_allowed"], false);
+    drop(runtime);
+
+    let mut reopened = Runtime::with_store(&data_root).unwrap();
+    let initialized = reopened.handle_line(&request(
+        "initialize-reopened",
+        "initialize",
+        json!({
+            "protocol_version": "0.1",
+            "client": { "name": "catalog-cache-durable-test", "version": "1" }
+        }),
+    ));
+    assert!(initialized[0]["result"]["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "model.catalog.cache.read-only"));
+    reopened.handle_line(&request("initialized-reopened", "initialized", json!({})));
+    let response =
+        reopened.handle_line(&request("cache-reopened", "model/catalog-cache", json!({})));
+    assert_eq!(response[0]["result"]["availability"], "empty");
+    assert_eq!(response[0]["result"]["selection_allowed"], false);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn model_profile_aap_is_metadata_only_and_empty_snapshot_is_valid() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)

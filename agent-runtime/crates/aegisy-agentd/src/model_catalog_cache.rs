@@ -11,10 +11,17 @@ use crate::model_catalog::{CatalogState, ModelCatalog};
 use serde::{Deserialize, Serialize};
 use serde_json::to_vec;
 use sha2::{Digest, Sha256};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const SCHEMA_VERSION: &str = "model-catalog-cache/0.1";
+pub const STORE_SCHEMA_VERSION: &str = "model-catalog-cache-store/0.1";
 const MAX_STALE_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const MAX_TTL_MS: u64 = 90 * 24 * 60 * 60 * 1_000;
+const MAX_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -72,6 +79,196 @@ pub struct ModelCatalogCache {
     schema_version: String,
     max_stale_ms: u64,
     current: Option<CatalogCacheRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CatalogCacheStoreSnapshot {
+    pub schema_version: String,
+    pub cache: CatalogCacheSnapshot,
+    pub store_identity: String,
+}
+
+#[derive(Debug)]
+pub struct ModelCatalogCacheStore {
+    root: Option<PathBuf>,
+    cache: ModelCatalogCache,
+}
+
+impl ModelCatalogCacheStore {
+    pub fn in_memory(max_stale_ms: u64) -> Result<Self, CatalogCacheError> {
+        Ok(Self {
+            root: None,
+            cache: ModelCatalogCache::new(max_stale_ms)?,
+        })
+    }
+
+    pub fn open(data_root: &Path, max_stale_ms: u64) -> Result<Self, CatalogCacheError> {
+        let metadata = fs::symlink_metadata(data_root).map_err(|_| {
+            error(
+                "model-catalog-cache-data-root-unavailable",
+                "cache data root is unavailable",
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(error(
+                "model-catalog-cache-data-root-unsafe",
+                "cache data root is unsafe",
+            ));
+        }
+        let data_root = data_root.canonicalize().map_err(|_| {
+            error(
+                "model-catalog-cache-data-root-unavailable",
+                "cache data root is unavailable",
+            )
+        })?;
+        let root = data_root.join("model-catalog-cache-v1");
+        create_secure_directory(&root)?;
+        let root = root.canonicalize().map_err(|_| {
+            error(
+                "model-catalog-cache-store-unavailable",
+                "cache store is unavailable",
+            )
+        })?;
+        if root != data_root.join("model-catalog-cache-v1") {
+            return Err(error(
+                "model-catalog-cache-store-symlink",
+                "cache store traverses a symlink",
+            ));
+        }
+        let snapshot_path = root.join("snapshot.json");
+        let cache = match fs::symlink_metadata(&snapshot_path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(error(
+                        "model-catalog-cache-snapshot-unsafe",
+                        "cache snapshot is unsafe",
+                    ));
+                }
+                let bytes = read_limited(&snapshot_path)?;
+                let stored: CatalogCacheStoreSnapshot =
+                    serde_json::from_slice(&bytes).map_err(|_| {
+                        error(
+                            "model-catalog-cache-snapshot-invalid",
+                            "cache snapshot is invalid",
+                        )
+                    })?;
+                if stored.schema_version != STORE_SCHEMA_VERSION
+                    || stored.store_identity != store_snapshot_identity(&stored)?
+                {
+                    return Err(error(
+                        "model-catalog-cache-snapshot-identity-mismatch",
+                        "cache snapshot identity does not match",
+                    ));
+                }
+                ModelCatalogCache::from_snapshot(stored.cache)?
+            }
+            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
+                ModelCatalogCache::new(max_stale_ms)?
+            }
+            Err(_) => {
+                return Err(error(
+                    "model-catalog-cache-snapshot-unavailable",
+                    "cache snapshot is unavailable",
+                ))
+            }
+        };
+        let store = Self {
+            root: Some(root),
+            cache,
+        };
+        store.validate()?;
+        Ok(store)
+    }
+
+    pub fn view(&self, now_ms: u64) -> Result<CatalogCacheView, CatalogCacheError> {
+        self.validate()?;
+        self.cache.view(now_ms)
+    }
+
+    pub fn snapshot(&self) -> Result<CatalogCacheStoreSnapshot, CatalogCacheError> {
+        self.validate()?;
+        let mut snapshot = CatalogCacheStoreSnapshot {
+            schema_version: STORE_SCHEMA_VERSION.into(),
+            cache: self.cache.snapshot()?,
+            store_identity: String::new(),
+        };
+        snapshot.store_identity = store_snapshot_identity(&snapshot)?;
+        Ok(snapshot)
+    }
+
+    pub fn install(
+        &mut self,
+        catalog: ModelCatalog,
+        sequence: u64,
+        received_at_ms: u64,
+    ) -> Result<CacheWrite, CatalogCacheError> {
+        self.validate()?;
+        let previous = self.cache.clone();
+        let write = self.cache.install(catalog, sequence, received_at_ms)?;
+        if let Some(root) = &self.root {
+            if let Err(error) = self.write_snapshot(root) {
+                self.cache = previous;
+                return Err(error);
+            }
+        }
+        Ok(write)
+    }
+
+    fn validate(&self) -> Result<(), CatalogCacheError> {
+        self.cache.validate()
+    }
+
+    fn write_snapshot(&self, root: &Path) -> Result<(), CatalogCacheError> {
+        let snapshot = self.snapshot()?;
+        let bytes = serde_json::to_vec(&snapshot).map_err(|_| {
+            error(
+                "model-catalog-cache-snapshot-serialize",
+                "cache snapshot could not be serialized",
+            )
+        })?;
+        if bytes.len() > MAX_SNAPSHOT_BYTES {
+            return Err(error(
+                "model-catalog-cache-snapshot-too-large",
+                "cache snapshot exceeds its size limit",
+            ));
+        }
+        let target = root.join("snapshot.json");
+        if let Ok(metadata) = fs::symlink_metadata(&target) {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(error(
+                    "model-catalog-cache-snapshot-unsafe",
+                    "cache snapshot is unsafe",
+                ));
+            }
+        }
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary = root.join(format!(".snapshot.{sequence}.tmp"));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|_| {
+                    error(
+                        "model-catalog-cache-snapshot-stage",
+                        "cache snapshot staging failed",
+                    )
+                })?;
+            secure_file(&file)?;
+            file.write_all(&bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|_| {
+                    error(
+                        "model-catalog-cache-snapshot-sync",
+                        "cache snapshot sync failed",
+                    )
+                })?;
+            replace_file(&temporary, &target)
+        })();
+        let _ = fs::remove_file(&temporary);
+        result?;
+        sync_directory(root)
+    }
 }
 
 impl ModelCatalogCache {
@@ -335,6 +532,184 @@ fn identity(catalog: &ModelCatalog) -> Result<String, CatalogCacheError> {
     Ok(format!("model-catalog:sha256:{:x}", Sha256::digest(bytes)))
 }
 
+fn store_snapshot_identity(
+    snapshot: &CatalogCacheStoreSnapshot,
+) -> Result<String, CatalogCacheError> {
+    let mut copy = snapshot.clone();
+    copy.store_identity.clear();
+    let bytes = to_vec(&copy).map_err(|_| {
+        error(
+            "model-catalog-cache-snapshot-serialize",
+            "cache snapshot could not be serialized",
+        )
+    })?;
+    Ok(format!(
+        "model-catalog-cache-store:sha256:{:x}",
+        Sha256::digest(bytes)
+    ))
+}
+
+fn read_limited(path: &Path) -> Result<Vec<u8>, CatalogCacheError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        error(
+            "model-catalog-cache-snapshot-read",
+            "cache snapshot could not be read",
+        )
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_SNAPSHOT_BYTES as u64
+    {
+        return Err(error(
+            "model-catalog-cache-snapshot-size-or-layout",
+            "cache snapshot exceeds its size or layout limit",
+        ));
+    }
+    let mut file = File::open(path).map_err(|_| {
+        error(
+            "model-catalog-cache-snapshot-read",
+            "cache snapshot could not be read",
+        )
+    })?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes).map_err(|_| {
+        error(
+            "model-catalog-cache-snapshot-read",
+            "cache snapshot could not be read",
+        )
+    })?;
+    if bytes.len() > MAX_SNAPSHOT_BYTES {
+        return Err(error(
+            "model-catalog-cache-snapshot-size-or-layout",
+            "cache snapshot exceeds its size or layout limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn create_secure_directory(path: &Path) -> Result<(), CatalogCacheError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(error(
+            "model-catalog-cache-directory-unsafe",
+            "cache directory is unsafe",
+        )),
+        Ok(_) => secure_directory(path),
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(|_| {
+                error(
+                    "model-catalog-cache-directory-create",
+                    "cache directory could not be created",
+                )
+            })?;
+            secure_directory(path)
+        }
+        Err(_) => Err(error(
+            "model-catalog-cache-directory-read",
+            "cache directory could not be read",
+        )),
+    }
+}
+
+fn secure_directory(path: &Path) -> Result<(), CatalogCacheError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| {
+            error(
+                "model-catalog-cache-directory-permission",
+                "cache directory permissions could not be set",
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn secure_file(file: &File) -> Result<(), CatalogCacheError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|_| {
+                error(
+                    "model-catalog-cache-file-permission",
+                    "cache file permissions could not be set",
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), CatalogCacheError> {
+    #[cfg(unix)]
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| {
+            error(
+                "model-catalog-cache-directory-sync",
+                "cache directory sync failed",
+            )
+        })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn replace_file(source: &Path, target: &Path) -> Result<(), CatalogCacheError> {
+    fs::rename(source, target).map_err(|_| {
+        error(
+            "model-catalog-cache-snapshot-commit",
+            "cache snapshot commit failed",
+        )
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn replace_file(source: &Path, target: &Path) -> Result<(), CatalogCacheError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        return Err(error(
+            "model-catalog-cache-snapshot-commit",
+            "cache snapshot commit failed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn replace_file(source: &Path, target: &Path) -> Result<(), CatalogCacheError> {
+    if target.exists() {
+        return Err(error(
+            "model-catalog-cache-snapshot-commit",
+            "cache snapshot replacement is unsupported",
+        ));
+    }
+    fs::rename(source, target).map_err(|_| {
+        error(
+            "model-catalog-cache-snapshot-commit",
+            "cache snapshot commit failed",
+        )
+    })
+}
+
 fn error(code: &'static str, message: &'static str) -> CatalogCacheError {
     CatalogCacheError { code, message }
 }
@@ -446,5 +821,38 @@ mod tests {
             "model-catalog:sha256:tampered".into();
         let error = ModelCatalogCache::from_snapshot(tampered).unwrap_err();
         assert_eq!(error.code, "model-catalog-cache-identity-mismatch");
+    }
+
+    #[test]
+    fn persistent_store_reopens_and_rejects_snapshot_tampering() {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "aegisy-model-catalog-cache-store-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut store = ModelCatalogCacheStore::open(&root, STALE_WINDOW_MS).unwrap();
+        store.install(signed_catalog(100, 1_000), 1, 100).unwrap();
+        assert_eq!(
+            store.view(200).unwrap().availability,
+            CacheAvailability::Fresh
+        );
+        drop(store);
+
+        let reopened = ModelCatalogCacheStore::open(&root, STALE_WINDOW_MS).unwrap();
+        assert_eq!(
+            reopened.view(1_500).unwrap().availability,
+            CacheAvailability::Stale
+        );
+        drop(reopened);
+
+        let snapshot_path = root.join("model-catalog-cache-v1").join("snapshot.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+        value["store_identity"] = serde_json::Value::String("tampered".into());
+        fs::write(&snapshot_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = ModelCatalogCacheStore::open(&root, STALE_WINDOW_MS).unwrap_err();
+        assert_eq!(error.code, "model-catalog-cache-snapshot-identity-mismatch");
+        let _ = fs::remove_dir_all(root);
     }
 }

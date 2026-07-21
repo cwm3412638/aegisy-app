@@ -197,7 +197,13 @@
     identity, positive monotonic sequence, receipt/issue/expiry time, bounded
     TTL/stale windows, idempotent same-generation replay, and rejection of older
     or conflicting generations. It does not authenticate the signature flag or
-    persist/fetch the cache, so it grants no selection authority.
+    fetch the cache, so it grants no selection authority. A private
+    `model-catalog-cache-store/0.1` now persists the validated cache outside the
+    project root using an atomically replaced, bounded snapshot, private Unix
+    permissions, restart identity validation, and tamper detection. Runtime
+    opens this store when the durable data root is healthy; standalone runtimes
+    retain an in-memory fallback. The store is not Workbench-SQLite event-backed
+    and does not provide cloud refresh or key rotation.
 - [ ] 9.4 Add authenticated catalog endpoint with conditional requests and deterministic test fixtures
 - [ ] 9.5 Add runtime compatibility and known-degradation metadata for Codex, ACP, and future native adapters
 - [ ] 9.6 Add role recommendations backed by evaluation version, sample size, and known limitations
@@ -220,9 +226,10 @@
     validated record, hides catalog metadata after the stale window, rejects
     clock rollback, and fixes selection authority to false. Runtime/AAP/Qt now
     expose the empty cache state and keep it visible as a read-only tooltip
-    status. Durable storage, authenticated signature verification/refresh,
-    non-empty fresh/stale/expired host transitions, and desktop picker state
-    remain open.
+    status. A private cache Store now survives Runtime restart and rejects
+    snapshot tampering; the Store remains outside Workbench SQLite and is not
+    authenticated. Signed refresh, key rotation, non-empty fresh/stale/expired
+    host transitions, and desktop picker state remain open.
 - [ ] 10.2 Implement capability matcher for Chat, Work, attachments, tools, reasoning, context, runtime, and policy
   - Partial foundation: read-only `model/capability-check` validates Chat/Work
     requirements, implicitly requires tools for Work, and returns explicit

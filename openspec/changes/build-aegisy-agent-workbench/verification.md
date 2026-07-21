@@ -77,15 +77,20 @@ Model catalog foundation evidence:
   stale window. Clock regression and snapshot identity tampering fail closed;
   expired entries return no catalog metadata. Every view fixes
   `selection_allowed:false` because this layer does not cryptographically verify
-  the signature flag. Five focused unit fixtures pass. Runtime now exposes
-  `model.catalog.cache.read-only` and `model/catalog-cache`; an empty cache
-  returns no catalog body and an explicit false selection authority, while Qt
-  validates and displays that state in the model-binding tooltip. Signed source,
-  durable cache storage, authenticated refresh/key rotation, non-empty host
-  transitions, and selection authority remain absent, so tasks `9.3` and `10.1`
+  the signature flag. Six focused unit fixtures pass. A private
+  `model-catalog-cache-store/0.1` now persists the cache outside project roots
+  through an atomically replaced, bounded snapshot with private Unix
+  permissions, restart identity validation, and tamper detection. Runtime opens
+  it from the durable data root and uses an in-memory fallback only without
+  durable storage. Runtime exposes `model.catalog.cache.read-only` and
+  `model/catalog-cache`; an empty cache returns no catalog body and an explicit
+  false selection authority, while Qt validates and displays that state in the
+  model-binding tooltip. The Store is not Workbench-SQLite event-backed and has
+  no authenticated signature verification, cloud refresh, key rotation,
+  non-empty host transitions, or selection authority, so tasks `9.3` and `10.1`
   remain unchecked.
 - The 2026-07-21 catalog, matcher, profile, catalog-policy, cache, and profile-store
-  foundation stage passed 422 Rust unit tests with one ignored live fixture, 61 protocol tests,
+  foundation stage passed 423 Rust unit tests with one ignored live fixture, 62 protocol tests,
   11 stdio/Codex tests, strict Clippy, the complete CMake build, and CTest
   `agent_runtime_protocol`.
 

@@ -168,11 +168,17 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   treats exact replay as idempotent, and rejects older/conflicting generations,
   snapshot tampering, or clock regression. Reads derive explicit
   fresh/stale/expired views and expose no catalog after the stale window. The
-  contract does not authenticate the signature flag, persist or refresh the
-  cache, or grant selection authority; every view fixes
-  `selection_allowed:false`. Runtime/AAP/Qt now expose the empty cache view,
-  but authenticated refresh, durable cache storage, and real fresh/stale/expired
-  desktop transitions remain open. Keep OpenSpec `9.3` and `10.1` unchecked.
+  contract does not authenticate the signature flag, refresh the cache, or grant
+  selection authority; every view fixes `selection_allowed:false`. A private
+  `model-catalog-cache-store/0.1` now persists the validated cache outside the
+  project root through an atomically replaced bounded snapshot, private Unix
+  permissions, restart identity validation, and snapshot tamper detection.
+  Runtime opens this Store from the durable Workbench data root; standalone
+  runtimes use a bounded in-memory fallback. The Store is not Workbench-SQLite
+  event-backed and does not authenticate signatures, fetch cloud data, rotate
+  keys, or grant selection authority. Runtime/AAP/Qt expose the empty cache
+  view, while authenticated refresh and real fresh/stale/expired desktop
+  transitions remain open. Keep OpenSpec `9.3` and `10.1` unchecked.
 - Model profile store foundation (2026-07-21): internal
   `model-profile-store/0.1` persists one global and bounded project profiles in
   a private, atomically replaced snapshot outside project roots. It validates
@@ -1088,8 +1094,8 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 422 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 61 Rust protocol tests, eleven macOS
+Current verified baseline: 16 desktop tests, 423 passed Rust sidecar unit tests plus
+one explicitly ignored live Codex fixture, 62 Rust protocol tests, eleven macOS
 sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
@@ -1124,8 +1130,8 @@ catalog-policy foundation stages added the internal `model-catalog/0.1` and
 projections, and the corresponding Qt request/signals. Qt validates the
 metadata-only profile list and displays only its bounded count in the existing
 model-binding tooltip; the model control remains non-selecting. The
-policy-focused Rust verification passed 422 unit tests with one ignored live
-fixture, 61
+policy-focused Rust verification passed 423 unit tests with one ignored live
+fixture, 62
 protocol tests, and 11 stdio/Codex tests; strict Clippy, the complete CMake
 desktop build, and CTest `agent_runtime_protocol` passed. The projection is
 explicitly offline and unsigned, leaves unverified capability/limit values
