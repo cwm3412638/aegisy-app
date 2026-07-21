@@ -80,8 +80,8 @@ Model catalog foundation evidence:
   the signature flag. Five focused unit fixtures pass. Persistence,
   authenticated refresh/key rotation, AAP/Qt host integration, and selection
   authority remain absent, so tasks `9.3` and `10.1` remain unchecked.
-- The 2026-07-21 catalog, matcher, profile, catalog-policy, and cache foundation
-  stage passed 415 Rust unit tests with one ignored live fixture, 59 protocol tests,
+- The 2026-07-21 catalog, matcher, profile, catalog-policy, cache, and profile-store
+  foundation stage passed 422 Rust unit tests with one ignored live fixture, 59 protocol tests,
   11 stdio/Codex tests, strict Clippy, the complete CMake build, and CTest
   `agent_runtime_protocol`.
 
@@ -99,6 +99,16 @@ Model profile foundation evidence:
   secret-free content identity. No AAP/Qt method, persistence projection,
   catalog picker, token, routing, or execution authority is exposed; OpenSpec
   tasks `10.3` and `10.4` remain unchecked.
+- Internal `model-profile-store/0.1` stores one global and bounded project
+  profiles in a private, atomically replaced snapshot. It validates profile and
+  project scope, rejects duplicate profile IDs and secret-shaped metadata,
+  requires exact revision CAS for updates/removals, makes identical retries
+  idempotent, and rechecks the content-hashed snapshot after restart. Seven
+  focused fixtures cover create/reopen, revision conflicts, removal, duplicate
+  IDs, secret rejection, tamper detection, invalid project IDs, and private
+  bounded storage. The store is not Workbench-SQLite event-backed, exposed
+  through AAP/Qt, bound to catalog capability checks, or connected to routing;
+  `10.3` and `10.4` therefore remain unchecked.
 
 Autonomy release-gate evidence:
 

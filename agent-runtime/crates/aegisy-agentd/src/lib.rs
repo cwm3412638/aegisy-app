@@ -32,6 +32,7 @@ mod language_server;
 mod model_catalog;
 pub mod model_catalog_cache;
 pub mod model_profile;
+pub mod model_profile_store;
 pub mod non_git_checkpoint;
 mod operation_probe;
 pub mod operation_reconciliation;
