@@ -249,6 +249,16 @@
 - [ ] 9.7 Implement short-lived audience/model/session-scoped Agent token issuance and refresh
 - [ ] 9.8 Implement usage correlation that separates retries, reroutes, cache, reasoning, and child-task consumption
 - [ ] 9.9 Preserve upstream HTTP/provider error classification through Aegisy gateway and AAP mapping
+  - Partial foundation: internal `provider-error/0.1` maps Codex
+    `codexErrorInfo` and HTTP status metadata to stable `kind`, `class`,
+    `http_status`, and conservative `retryable` fields. AAP timeline errors
+    use a fixed content-free message and include no provider response body,
+    credentials, or dynamic rollout text. The local gateway classifies HTTP
+    failures, rate limits, connection failures, and SSE disconnects, removes
+    spoofed diagnostic headers, and emits bounded `x-aegisy-error-*` headers
+    plus metadata-only request events. Provider retry orchestration, complete
+    cross-provider mapping, and release evidence remain required; keep this
+    task unchecked.
 - [ ] 9.10 Add catalog admin validation preventing aliases, context limits, protocols, prices, or capability combinations that violate schema policy
   - Partial foundation: catalog validation rejects duplicate aliases, aliases
     equal to the model ID, duplicate role entries, unsupported authority keys,
@@ -533,6 +543,11 @@
 - [ ] 17.8 Implement compaction summary schema covering decisions, unresolved tasks, changed files, commands, tests, failures, and next steps
 - [ ] 17.9 Implement manual compaction preservation instructions and editable review before activation
 - [ ] 17.10 Add context quality tests for large monorepos, irrelevant-file resistance, stale results, nested instructions, and provider switching
+  - Partial quality evidence: deterministic unit tests cover large monorepo
+    ignored trees, irrelevant repository-map resistance, stale file rereads,
+    nested target-scoped instruction inheritance, and the distinction between
+    intentional exclusions and budget truncation. Provider switching and
+    cross-platform scale evidence remain open; keep this task unchecked.
 
 ## 18. Permission, Sandbox, and Secret Enforcement
 
@@ -568,6 +583,12 @@
 
 - [ ] 20.1 Implement structured local turn trace with source-qualified runtime/model/context/tool/approval/usage/change/test/error data
 - [ ] 20.2 Implement observed, catalog-derived, estimated, stale, and unknown labels for token, context, cost, and reasoning status
+  - Partial foundation: internal `usage-authority/0.1` validates exactly the
+    four metric classes and source labels, rejects unknown values with numbers,
+    stale authoritative flags, expired catalog-derived values, invalid
+    derivation identities, and inconsistent token/cache/reasoning counts. It
+    currently has no provider usage/AAP/Qt/billing integration; keep this task
+    unchecked.
 - [ ] 20.3 Implement privacy-preserving local audit events for privileged operations and permission decisions
 - [ ] 20.4 Implement diagnostic bundle preview, category opt-in, redaction report, deterministic archive, and support correlation ID
 - [ ] 20.5 Build deterministic adapter replay harness with event ordering and property tests

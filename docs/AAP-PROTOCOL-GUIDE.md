@@ -58,7 +58,7 @@ prompts, response bodies, or raw provider rollout text in AAP timeline data.
 {"jsonrpc":"2.0","id":"4","result":{"state":"cancellation-requested"}}
 {"jsonrpc":"2.0","method":"event","params":{"event":"turn.cancellation-acknowledged","session_id":"session-1","turn_id":"turn-1"}}
 {"jsonrpc":"2.0","method":"event","params":{"event":"turn.interrupted","session_id":"session-1","turn_id":"turn-1"}}
-{"jsonrpc":"2.0","id":"5","error":{"code":-32110,"message":"provider request failed: [REDACTED]","data":{"schema_version":"runtime-error/0.1","class":"provider","retryable":false}}}
+{"jsonrpc":"2.0","id":"5","error":{"code":-32110,"message":"provider request failed: [REDACTED]","data":{"schema_version":"runtime-error/0.1","class":"provider","retryable":false,"provider_error":{"schema_version":"provider-error/0.1","source":"codex-app-server","kind":"unauthorized","class":"provider","http_status":401,"retryable":false,"response_body_included":false,"credentials_included":false}}}}
 ```
 
 Cancellation acknowledgement means the provider accepted the interrupt; it
@@ -73,6 +73,22 @@ explicitly transient provider failures may be retryable; policy, sandbox,
 workspace, Git, storage, tool, budget, protocol, and adapter failures are not
 automatically retried. `persistence` remains accepted as a legacy display alias
 for `storage` in older clients.
+
+Provider metadata is intentionally content-free. The `provider-error/0.1`
+object may preserve only the stable kind/class, an optional HTTP status, and a
+retryability decision. It must set `response_body_included:false` and
+`credentials_included:false`; a provider response body or dynamic provider
+message is never copied into an AAP Timeline item. The local gateway uses the
+same contract for 4xx/5xx, rate-limit, connection, and SSE-disconnect events
+and removes upstream `x-aegisy-error-*` headers before forwarding a successful
+response.
+
+Usage accounting is separately described by the internal
+`usage-authority/0.1` contract. Token, context, cost, and reasoning metrics
+carry one of `observed`, `catalog-derived`, `estimated`, `stale`, or `unknown`
+evidence labels. This metadata is validation-only and grants no model,
+routing, billing, token, or turn authority; unknown values have no numeric
+payload and stale values cannot remain authoritative.
 
 ## Capability Degradation
 

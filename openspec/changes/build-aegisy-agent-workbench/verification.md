@@ -1326,3 +1326,19 @@ Known limitations:
   surfaces remain open.
 - Windows packaging, TLS runtime, scaling, IME, and accessibility evidence remain
   required before a Windows release claim.
+
+## 2026-07-22 Partial Evidence
+
+- Context-quality unit coverage now exercises large monorepos, ignored
+  dependency/build/cache trees, irrelevant repository maps, nested instruction
+  precedence, stale rereads, and intentional-exclusion versus budget-
+  truncation semantics. These tests do not prove provider switching or
+  cross-platform scale behavior.
+- Provider error mapping has focused Rust and Codex stdio/AAP coverage plus
+  Node syntax and deterministic gateway assertions. The gateway stream and
+  existing gateway integration tests pass under the bundled application Node
+  runtime. The system Homebrew Node is killed with exit 137 during startup on
+  this host, so it is not used as runtime evidence.
+- `usage-authority/0.1` focused tests and the aegisy-agentd library suite pass;
+  the contract is not wired to provider usage, billing, routing, AAP, or Qt and
+  therefore does not complete task 20.2.

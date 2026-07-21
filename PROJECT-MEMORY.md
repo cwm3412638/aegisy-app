@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-21
+Last updated: 2026-07-22
 
 ## Mandatory First Step
 
@@ -793,6 +793,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Complete context classes, explicit redaction/exclusion explanations,
   provider/tokenizer authority, and cross-platform evidence remain open; keep
   `17.6` unchecked.
+- OpenSpec task `17.10` now has deterministic context-quality coverage for
+  large monorepos, ignored dependency/build/cache trees, irrelevant repository
+  maps, nested target-scoped instruction precedence, and stale file rereads.
+  The tests prove intentional exclusions do not masquerade as budget
+  truncation and that stale context uses the current file body rather than
+  reusing an old snapshot. They remain unit-level evidence only; provider
+  switching, model-specific tokenizers, and clean cross-platform scale runs
+  are still absent, so `17.10` remains unchecked.
 - User-initiated macOS PTY execution, the named lifecycle, and the Qt/xterm.js
   terminal frontend are verified; Windows ConPTY is implemented but not yet
   runtime-verified. Read-only Codex command events now have a partial structured
@@ -837,6 +845,21 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   lifecycle and restart error text behind bounded operation/error-code/recovery
   status. Protocol and Qt projection coverage for this boundary is complete under
   task `7.10`.
+- Provider failures now carry a content-free `provider-error/0.1` classification
+  from Codex `codexErrorInfo` and HTTP status metadata through AAP
+  `runtime-error/0.1`; response bodies, credentials, and dynamic provider text
+  are excluded from Timeline items. The local gateway classifies 4xx/5xx,
+  rate-limit, connection, and SSE-disconnect cases, strips spoofed diagnostic
+  headers, and emits only bounded `x-aegisy-error-*` metadata. This is a
+  provider-error contract foundation for task `9.9`, not a complete provider
+  retry or routing policy.
+- Internal `usage-authority/0.1` now validates source-qualified token, context,
+  cost, and reasoning entries labelled observed, catalog-derived, estimated,
+  stale, or unknown. Unknown values cannot carry numbers, stale values cannot
+  remain authoritative, catalog-derived cost requires fresh catalog and
+  derivation identities, and reports must contain exactly the four metrics.
+  It is not yet connected to provider usage projection, billing, routing, Qt,
+  or AAP; keep task `20.2` unchecked.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
   at most three retries for transient output-channel, transport, write, read, or
   timeout failures. Version mismatch and protocol rejection are not retried; the
@@ -2371,6 +2394,20 @@ Implemented visual baseline:
   some styles and display scales. Widget-local QSS must not hide the shared arrow.
 - Do not layer Qt-Material, QDarkStyleSheet, or Fluent QSS over the current 400+
   local style rules. Continue consolidating local QSS into semantic components.
+
+## Verification Snapshot (2026-07-22)
+
+- The Rust workspace passes `cargo fmt --all -- --check`, `cargo test
+  --workspace` (465 `aegisy-agentd` library tests passed, one ignored, 63 AAP
+  protocol tests, and 11 stdio/Codex tests), and strict workspace Clippy.
+- The bundled application Node runtime passes both local gateway integration
+  suites, JavaScript syntax checks, and `openspec validate
+  build-aegisy-agent-workbench --strict`. The system Homebrew Node is killed by
+  this host with exit 137 at startup; use the bundled runtime for evidence.
+- The context-quality, provider-error, and usage-authority changes are partial
+  foundations. Their OpenSpec tasks remain unchecked until authoritative
+  producers, AAP/Qt integration, provider/model wiring, and cross-platform
+  release evidence are complete.
 
 ## Next Product Priorities
 
