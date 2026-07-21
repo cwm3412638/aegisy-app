@@ -545,8 +545,11 @@
     soft/hard limits; uses explicit hysteresis; handles missing limits and
     checked arithmetic overflow; and returns `no-action`, `preview-required`,
     or `hard-limit-exceeded` decisions. Every decision fixes
-    `automatic_compaction_authority=false`; it is not wired to turn preparation,
-    checkpoint activation, model calls, AAP, or Qt, so keep this task unchecked.
+    `automatic_compaction_authority=false`. Codex usage Timeline items now feed
+    provider-observed last-input/context-window values into the evaluator and
+    retain hysteresis within the active turn. The state is not durable across
+    turns/restarts and is not wired to context inspection, checkpoint activation,
+    provider compact, or Qt, so keep this task unchecked.
 - [ ] 17.8 Implement compaction summary schema covering decisions, unresolved tasks, changed files, commands, tests, failures, and next steps
 - [ ] 17.9 Implement manual compaction preservation instructions and editable review before activation
 - [ ] 17.10 Add context quality tests for large monorepos, irrelevant-file resistance, stale results, nested instructions, and provider switching

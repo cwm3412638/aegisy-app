@@ -806,8 +806,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   conservative evidence, soft and hard limits, checked overflow, and explicit
   hysteresis. Results are `no-action`, `preview-required`, or
   `hard-limit-exceeded`, and every result fixes
-  `automatic_compaction_authority:false`; it is not connected to turn
-  preparation or compaction activation, so keep `17.7` unchecked.
+  `automatic_compaction_authority:false`. Codex usage Timeline items now
+  evaluate provider-observed last-input/context-window values and retain
+  hysteresis for the active turn only. The state is not durable across turns or
+  restart and cannot invoke checkpoint creation, provider compact, or Qt, so
+  keep `17.7` unchecked.
 - User-initiated macOS PTY execution, the named lifecycle, and the Qt/xterm.js
   terminal frontend are verified; Windows ConPTY is implemented but not yet
   runtime-verified. Read-only Codex command events now have a partial structured

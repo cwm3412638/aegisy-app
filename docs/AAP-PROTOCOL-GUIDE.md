@@ -98,10 +98,12 @@ its component semantics, Aegisy preserves the original bounded total but does
 not silently copy it into the authoritative field.
 
 The sidecar also contains internal `context-threshold/0.1` and
-`turn-trace/0.1` validation contracts. Neither is currently an AAP capability:
-the threshold evaluator cannot activate compaction, and the trace contract has
-no durable producer or diagnostic export path. Clients must not infer either
-feature from their presence in the Runtime crate.
+`turn-trace/0.1` validation contracts. Neither is currently an AAP capability.
+Codex usage Timeline metadata may include a `compaction_threshold` decision
+computed from provider-observed last-input/context-window values, but its
+hysteresis is active-turn-only and `automatic_compaction_authority` is always
+false. The trace contract has no durable producer or diagnostic export path.
+Clients must not infer automatic compaction or trace export from these fields.
 
 ## Capability Degradation
 

@@ -1345,7 +1345,9 @@ Known limitations:
   billing, routing, and Qt remain absent, so task 20.2 stays incomplete.
 - `context-threshold/0.1` has ten deterministic tests for authority,
   freshness, soft/hard limits, hysteresis, missing limits, and overflow. It is
-  not connected to compaction activation and grants no automatic authority.
+  projected from provider-observed Codex usage into the durable Timeline and
+  covered by the stdio/restart fixture, but has no cross-turn/restart latch,
+  compaction activation, provider compact, or automatic authority.
 - `turn-trace/0.1` has seven focused content-free trace tests plus full crate
   coverage for source authority, event ordering, duplicate usage, terminal
   evidence, and secret rejection. No durable trace producer, AAP/Qt surface,
