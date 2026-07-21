@@ -801,6 +801,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   reusing an old snapshot. They remain unit-level evidence only; provider
   switching, model-specific tokenizers, and clean cross-platform scale runs
   are still absent, so `17.10` remains unchecked.
+- OpenSpec task `17.7` now has an internal `context-threshold/0.1` evaluator.
+  It validates fresh/stale/unknown observations, authoritative versus
+  conservative evidence, soft and hard limits, checked overflow, and explicit
+  hysteresis. Results are `no-action`, `preview-required`, or
+  `hard-limit-exceeded`, and every result fixes
+  `automatic_compaction_authority:false`; it is not connected to turn
+  preparation or compaction activation, so keep `17.7` unchecked.
 - User-initiated macOS PTY execution, the named lifecycle, and the Qt/xterm.js
   terminal frontend are verified; Windows ConPTY is implemented but not yet
   runtime-verified. Read-only Codex command events now have a partial structured
@@ -858,8 +865,18 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   stale, or unknown. Unknown values cannot carry numbers, stale values cannot
   remain authoritative, catalog-derived cost requires fresh catalog and
   derivation identities, and reports must contain exactly the four metrics.
-  It is not yet connected to provider usage projection, billing, routing, Qt,
-  or AAP; keep task `20.2` unchecked.
+  Codex `thread/tokenUsage/updated` Timeline items now retain raw bounded usage
+  plus a validated report: provider token, context-window, and reasoning fields
+  are observed, cost is unknown, and unreconciled totals are not rewritten.
+  This remains Codex-only and is not connected to catalog pricing,
+  cross-provider correlation, billing, routing, or Qt; keep task `20.2`
+  unchecked.
+- OpenSpec task `20.1` now has an internal `turn-trace/0.1` contract for
+  source-qualified runtime/model/context/tool/approval/usage/change/test/error/
+  terminal metadata. It rejects content and secrets, bounds identities and
+  redaction summaries, prevents duplicate usage evidence, and enforces ordered
+  terminal state. The sidecar module is not yet emitted as a durable trace or
+  exposed through AAP/Qt, so keep `20.1` unchecked.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
   at most three retries for transient output-channel, transport, write, read, or
   timeout failures. Version mismatch and protocol rejection are not retried; the
@@ -2398,16 +2415,16 @@ Implemented visual baseline:
 ## Verification Snapshot (2026-07-22)
 
 - The Rust workspace passes `cargo fmt --all -- --check`, `cargo test
-  --workspace` (465 `aegisy-agentd` library tests passed, one ignored, 63 AAP
+  --workspace` (484 `aegisy-agentd` library tests passed, one ignored, 63 AAP
   protocol tests, and 11 stdio/Codex tests), and strict workspace Clippy.
 - The bundled application Node runtime passes both local gateway integration
   suites, JavaScript syntax checks, and `openspec validate
   build-aegisy-agent-workbench --strict`. The system Homebrew Node is killed by
   this host with exit 137 at startup; use the bundled runtime for evidence.
-- The context-quality, provider-error, and usage-authority changes are partial
-  foundations. Their OpenSpec tasks remain unchecked until authoritative
-  producers, AAP/Qt integration, provider/model wiring, and cross-platform
-  release evidence are complete.
+- The context-quality, provider-error, usage-authority, context-threshold, and
+  turn-trace changes are partial foundations. Their OpenSpec tasks remain
+  unchecked until authoritative producers, complete AAP/Qt integration,
+  provider/model wiring, and cross-platform release evidence are complete.
 
 ## Next Product Priorities
 

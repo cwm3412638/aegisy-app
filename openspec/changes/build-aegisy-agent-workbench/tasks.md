@@ -540,6 +540,13 @@
   - Qt now exposes a search-icon preflight action for an existing session and a read-only metadata table; unchecked client context is represented as an explicit exclusion marker. The Workbench render fixture covers the control and metadata-only result.
   - Keep this task unchecked until all context classes, explicit redaction/exclusion explanations, provider/tokenizer authority, and cross-platform render evidence exist.
 - [ ] 17.7 Implement automatic compaction thresholds based on authoritative or conservative context state
+  - Partial internal `context-threshold/0.1` evaluator now distinguishes
+    authoritative, conservative, stale, and unknown observations; validates
+    soft/hard limits; uses explicit hysteresis; handles missing limits and
+    checked arithmetic overflow; and returns `no-action`, `preview-required`,
+    or `hard-limit-exceeded` decisions. Every decision fixes
+    `automatic_compaction_authority=false`; it is not wired to turn preparation,
+    checkpoint activation, model calls, AAP, or Qt, so keep this task unchecked.
 - [ ] 17.8 Implement compaction summary schema covering decisions, unresolved tasks, changed files, commands, tests, failures, and next steps
 - [ ] 17.9 Implement manual compaction preservation instructions and editable review before activation
 - [ ] 17.10 Add context quality tests for large monorepos, irrelevant-file resistance, stale results, nested instructions, and provider switching
@@ -582,13 +589,24 @@
 ## 20. Observability, Diagnostics, and Evaluation
 
 - [ ] 20.1 Implement structured local turn trace with source-qualified runtime/model/context/tool/approval/usage/change/test/error data
+  - Partial internal `turn-trace/0.1` contract validates content-free runtime,
+    model, context, tool, approval, usage, change, test, error, and terminal
+    evidence with bounded identities, source/authority labels, redaction
+    summaries, duplicate-usage protection, ordered events, and terminal-last
+    invariants. It is now part of the sidecar crate but is not yet emitted as
+    a durable local trace, exposed through AAP/Qt, or connected to audit/export;
+    keep this task unchecked.
 - [ ] 20.2 Implement observed, catalog-derived, estimated, stale, and unknown labels for token, context, cost, and reasoning status
   - Partial foundation: internal `usage-authority/0.1` validates exactly the
     four metric classes and source labels, rejects unknown values with numbers,
     stale authoritative flags, expired catalog-derived values, invalid
-    derivation identities, and inconsistent token/cache/reasoning counts. It
-    currently has no provider usage/AAP/Qt/billing integration; keep this task
-    unchecked.
+    derivation identities, and inconsistent token/cache/reasoning counts. Codex
+    `thread/tokenUsage/updated` Timeline items now retain the raw bounded usage
+    projection plus a validated authority report: provider-reported token and
+    context-window/reasoning fields are observed, cost is unknown, and
+    unreconciled provider totals are not rewritten. This remains Codex-only and
+    has no catalog pricing, cross-provider correlation, billing, or Qt surface;
+    keep this task unchecked.
 - [ ] 20.3 Implement privacy-preserving local audit events for privileged operations and permission decisions
 - [ ] 20.4 Implement diagnostic bundle preview, category opt-in, redaction report, deterministic archive, and support correlation ID
 - [ ] 20.5 Build deterministic adapter replay harness with event ordering and property tests

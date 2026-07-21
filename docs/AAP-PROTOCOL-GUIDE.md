@@ -90,6 +90,19 @@ evidence labels. This metadata is validation-only and grants no model,
 routing, billing, token, or turn authority; unknown values have no numeric
 payload and stale values cannot remain authoritative.
 
+Codex `thread/tokenUsage/updated` events keep their existing bounded numeric
+projection and add an `authority` member containing this report. Provider token
+counts, the reported context window, and reasoning token counts are labelled
+`observed`; cost remains `unknown`. If a provider total does not reconcile with
+its component semantics, Aegisy preserves the original bounded total but does
+not silently copy it into the authoritative field.
+
+The sidecar also contains internal `context-threshold/0.1` and
+`turn-trace/0.1` validation contracts. Neither is currently an AAP capability:
+the threshold evaluator cannot activate compaction, and the trace contract has
+no durable producer or diagnostic export path. Clients must not infer either
+feature from their presence in the Runtime crate.
+
 ## Capability Degradation
 
 `runtime/degradations` is a versioned, content-free explanation for features that

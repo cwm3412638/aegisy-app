@@ -1339,6 +1339,14 @@ Known limitations:
   existing gateway integration tests pass under the bundled application Node
   runtime. The system Homebrew Node is killed with exit 137 during startup on
   this host, so it is not used as runtime evidence.
-- `usage-authority/0.1` focused tests and the aegisy-agentd library suite pass;
-  the contract is not wired to provider usage, billing, routing, AAP, or Qt and
-  therefore does not complete task 20.2.
+- `usage-authority/0.1` focused tests and the aegisy-agentd library suite pass.
+  Codex usage Timeline items now carry the validated authority report and a
+  stdio/restart fixture verifies it; catalog pricing, cross-provider usage,
+  billing, routing, and Qt remain absent, so task 20.2 stays incomplete.
+- `context-threshold/0.1` has ten deterministic tests for authority,
+  freshness, soft/hard limits, hysteresis, missing limits, and overflow. It is
+  not connected to compaction activation and grants no automatic authority.
+- `turn-trace/0.1` has seven focused content-free trace tests plus full crate
+  coverage for source authority, event ordering, duplicate usage, terminal
+  evidence, and secret rejection. No durable trace producer, AAP/Qt surface,
+  audit export, or retention policy exists yet.
