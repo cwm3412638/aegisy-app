@@ -892,8 +892,17 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   source-qualified runtime/model/context/tool/approval/usage/change/test/error/
   terminal metadata. It rejects content and secrets, bounds identities and
   redaction summaries, prevents duplicate usage evidence, and enforces ordered
-  terminal state. The sidecar module is not yet emitted as a durable trace or
-  exposed through AAP/Qt, so keep `20.1` unchecked.
+  terminal state. `WorkbenchStore::finish_turn_with_trace` now persists one
+  complete `turn.trace.recorded/0.1` metadata event in the same SQLite
+  transaction as the terminal Turn state/event. The trace event is immediately
+  before the terminal event so operation reconciliation keeps terminal state
+  authority. Exact retries are idempotent; conflicting identities, bindings,
+  project, state, or time fail closed. Session projection replay revalidates the
+  full trace, outer metadata, and exact following terminal event; an injected
+  terminal-event failure rolls back both the trace and Turn update, while hash-
+  consistent semantic tampering quarantines the Session after restart. The
+  current Runtime does not yet produce a complete trace, and Timeline, AAP/Qt,
+  audit, and export remain disconnected, so keep `20.1` unchecked.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
   at most three retries for transient output-channel, transport, write, read, or
   timeout failures. Version mismatch and protocol rejection are not retried; the
@@ -2432,8 +2441,9 @@ Implemented visual baseline:
 ## Verification Snapshot (2026-07-22)
 
 - The Rust workspace passes `cargo fmt --all -- --check`, `cargo test
-  --workspace` (484 `aegisy-agentd` library tests passed, one ignored, 63 AAP
-  protocol tests, and 11 stdio/Codex tests), and strict workspace Clippy.
+  --workspace` (492 `aegisy-agentd` library tests passed, one ignored, 10
+  context-threshold contract tests, 63 AAP protocol tests, and 11 stdio/Codex
+  tests), and strict workspace Clippy.
 - The bundled application Node runtime passes both local gateway integration
   suites, JavaScript syntax checks, and `openspec validate
   build-aegisy-agent-workbench --strict`. The system Homebrew Node is killed by
@@ -2456,6 +2466,12 @@ Implemented visual baseline:
   tests, strict workspace Clippy, Rust format checking, `git diff --check`, and
   three Qt C++17 syntax checks. This evidence is still not sufficient to mark
   `17.7` complete without cross-platform runtime/render validation.
+- The durable Turn Trace slice adds three Store tests for atomic terminal commit,
+  exact-retry idempotency, conflict rejection, restart recovery, terminal-event
+  rollback, semantic tamper quarantine, and terminal-last operation state. The
+  complete Rust workspace, strict Clippy, format, diff, and strict OpenSpec
+  validation pass. This is still an internal persistence path without a Runtime
+  producer or AAP/Qt surface, so `20.1` remains unchecked.
 
 ## Next Product Priorities
 

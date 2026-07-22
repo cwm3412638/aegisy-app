@@ -603,9 +603,17 @@
     model, context, tool, approval, usage, change, test, error, and terminal
     evidence with bounded identities, source/authority labels, redaction
     summaries, duplicate-usage protection, ordered events, and terminal-last
-    invariants. It is now part of the sidecar crate but is not yet emitted as
-    a durable local trace, exposed through AAP/Qt, or connected to audit/export;
-    keep this task unchecked.
+    invariants. `WorkbenchStore::finish_turn_with_trace` now validates and
+    records one complete metadata-only trace as `turn.trace.recorded/0.1` in
+    the same SQLite transaction as the terminal Turn update/event. The trace
+    precedes the terminal event so operation reconciliation still observes the
+    terminal Turn state. Identical retries are idempotent; binding, identity,
+    state, time, project, or trace conflicts fail closed. Projection replay
+    revalidates the trace and exact following terminal event, and tests cover
+    restart recovery, duplicate conflict, transaction rollback, and hash-
+    consistent semantic tampering. No Runtime producer calls this path yet,
+    and it remains unexposed through Timeline, AAP/Qt, audit, or export; keep
+    this task unchecked.
 - [ ] 20.2 Implement observed, catalog-derived, estimated, stale, and unknown labels for token, context, cost, and reasoning status
   - Partial foundation: internal `usage-authority/0.1` validates exactly the
     four metric classes and source labels, rejects unknown values with numbers,

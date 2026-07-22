@@ -180,7 +180,7 @@ impl TraceBinding {
             validate_identity(value, "project identity")?;
         }
         if let Some(value) = &self.environment_identity {
-            validate_hash_identity(value, "environment identity")?;
+            validate_environment_identity(value)?;
         }
         Ok(())
     }
@@ -909,10 +909,34 @@ fn validate_optional_hash_identity(
 }
 
 fn validate_hash_identity(value: &str, field: &'static str) -> Result<(), TurnTraceError> {
-    if !value.starts_with("sha256:") && !value.starts_with("turn-trace:sha256:") {
+    let digest = ["sha256:", "turn-trace:sha256:"]
+        .iter()
+        .find_map(|prefix| value.strip_prefix(prefix));
+    if !digest.is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }) {
         return Err(error("turn-trace-hash-identity-invalid", field));
     }
     validate_identity(value, field)
+}
+
+fn validate_environment_identity(value: &str) -> Result<(), TurnTraceError> {
+    let digest = value.strip_prefix("environment:sha256:");
+    if !digest.is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }) {
+        return Err(error(
+            "turn-trace-environment-identity-invalid",
+            "environment identity is not a canonical SHA-256 identity",
+        ));
+    }
+    validate_identity(value, "environment identity")
 }
 
 fn validate_identity(value: &str, _field: &'static str) -> Result<(), TurnTraceError> {
@@ -922,9 +946,8 @@ fn validate_identity(value: &str, _field: &'static str) -> Result<(), TurnTraceE
             "identity is empty, non-ASCII, or exceeds its bound",
         ));
     }
-    if value.starts_with('/')
-        || value.starts_with('\\')
-        || value.contains("//")
+    if value.contains('/')
+        || value.contains('\\')
         || value.contains("..")
         || value
             .chars()
@@ -938,7 +961,7 @@ fn validate_identity(value: &str, _field: &'static str) -> Result<(), TurnTraceE
     }
     if value
         .chars()
-        .any(|character| !(character.is_ascii_alphanumeric() || ".:_/@+-".contains(character)))
+        .any(|character| !(character.is_ascii_alphanumeric() || ".:_@+-".contains(character)))
     {
         return Err(error(
             "turn-trace-identity-invalid",
@@ -979,11 +1002,34 @@ fn validate_label(value: &str, _field: &'static str) -> Result<(), TurnTraceErro
     if value.chars().any(|character| {
         character.is_ascii_whitespace()
             || character.is_ascii_control()
-            || !(character.is_ascii_alphanumeric() || ".:_/-".contains(character))
+            || !(character.is_ascii_alphanumeric() || ".:_-".contains(character))
     }) {
         return Err(error(
             "turn-trace-label-invalid",
             "label contains unsupported content",
+        ));
+    }
+    let lower = value.to_ascii_lowercase();
+    if [
+        "sk-",
+        "ghp_",
+        "github_pat_",
+        "jwt:",
+        "bearer:",
+        "api_key:",
+        "apikey:",
+        "password:",
+        "secret:",
+        "authorization:",
+        "private-key:",
+        "-----begin",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return Err(error(
+            "turn-trace-secret-shaped",
+            "label resembles a credential or secret",
         ));
     }
     Ok(())
@@ -994,12 +1040,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn hash_identity(prefix: &str, byte: char) -> String {
+        format!("{prefix}{}", byte.to_string().repeat(64))
+    }
+
     fn binding() -> TraceBinding {
         TraceBinding {
             session_id: "session-1".into(),
             turn_id: "turn-1".into(),
             project_id: Some("project-1".into()),
-            environment_identity: Some("sha256:env-1".into()),
+            environment_identity: Some(hash_identity("environment:sha256:", 'a')),
         }
     }
 
@@ -1007,7 +1057,7 @@ mod tests {
         EvidenceRef {
             authority: AuthorityLabel::Observed,
             source,
-            identity: Some("sha256:evidence-1".into()),
+            identity: Some(hash_identity("sha256:", 'b')),
             observed_at_ms: Some(10),
         }
     }
@@ -1020,9 +1070,9 @@ mod tests {
         TracePayload::Terminal {
             state: TerminalState::Completed,
             evidence: TerminalEvidence {
-                workspace_identity: Some("sha256:workspace-1".into()),
-                git_state_identity: Some("sha256:git-1".into()),
-                verification_identity: Some("sha256:verification-1".into()),
+                workspace_identity: Some(hash_identity("sha256:", 'c')),
+                git_state_identity: Some(hash_identity("sha256:", 'd')),
+                verification_identity: Some(hash_identity("sha256:", 'e')),
                 observed_verification_count: 1,
                 evidence: evidence(EvidenceSource::TestRunner),
             },
@@ -1056,8 +1106,8 @@ mod tests {
                     runner_identity: "runner-1".into(),
                     outcome: TestOutcome::Passed,
                     case_count: 2,
-                    command_identity: "sha256:command-1".into(),
-                    verification_identity: "sha256:verification-1".into(),
+                    command_identity: hash_identity("sha256:", 'f'),
+                    verification_identity: hash_identity("sha256:", 'e'),
                     evidence: evidence(EvidenceSource::TestRunner),
                     redaction: redaction(),
                 },
@@ -1120,7 +1170,7 @@ mod tests {
         let unknown = EvidenceRef {
             authority: AuthorityLabel::Unknown,
             source: EvidenceSource::Runtime,
-            identity: Some("sha256:must-not-exist".into()),
+            identity: Some(hash_identity("sha256:", '9')),
             observed_at_ms: None,
         };
         assert_eq!(
@@ -1151,6 +1201,37 @@ mod tests {
                 .code,
             "turn-trace-identity-invalid"
         );
+        for path in ["C:/Users/alice/project", "foo/bar", r"foo\bar"] {
+            assert_eq!(
+                validate_identity(path, "id").unwrap_err().code,
+                "turn-trace-identity-invalid"
+            );
+        }
+        for label in ["/Users/alice/project", "C:/Users/alice", "foo/bar"] {
+            assert_eq!(
+                validate_label(label, "label").unwrap_err().code,
+                "turn-trace-label-invalid"
+            );
+        }
+        for forged_hash in [
+            "sha256:C:/Users/alice",
+            "sha256:relative/path",
+            "sha256:abc",
+        ] {
+            assert_eq!(
+                validate_hash_identity(forged_hash, "hash")
+                    .unwrap_err()
+                    .code,
+                "turn-trace-hash-identity-invalid"
+            );
+        }
+        validate_environment_identity(&hash_identity("environment:sha256:", '7')).unwrap();
+        assert_eq!(
+            validate_label("api_key:credential", "label")
+                .unwrap_err()
+                .code,
+            "turn-trace-secret-shaped"
+        );
         let mut summary = redaction();
         summary.content_included = true;
         assert_eq!(
@@ -1169,9 +1250,9 @@ mod tests {
         let payload = TracePayload::Terminal {
             state: TerminalState::Completed,
             evidence: TerminalEvidence {
-                workspace_identity: Some("sha256:workspace-1".into()),
+                workspace_identity: Some(hash_identity("sha256:", 'c')),
                 git_state_identity: None,
-                verification_identity: Some("sha256:verification-1".into()),
+                verification_identity: Some(hash_identity("sha256:", 'e')),
                 observed_verification_count: 1,
                 evidence: evidence(EvidenceSource::Workspace),
             },
