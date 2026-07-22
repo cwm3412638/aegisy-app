@@ -554,9 +554,18 @@
     or `hard-limit-exceeded` decisions. Every decision fixes
     `automatic_compaction_authority=false`. Codex usage Timeline items now feed
     provider-observed last-input/context-window values into the evaluator and
-    retain hysteresis within the active turn. The state is not durable across
-    turns/restarts and is not wired to context inspection, checkpoint activation,
-    provider compact, or Qt, so keep this task unchecked.
+    retain hysteresis within the active turn. Runtime reconstruction, resume,
+    fork, and portable import now replay the complete bounded durable usage
+    history; malformed or incomplete evidence fails closed to
+    `preview-required`, while a complete history with no usage is explicitly
+    `empty` and starts at `no-action`. Session start/resume/fork/read/import
+    expose a read-only `session-context-threshold/0.1` projection and Qt renders
+    valid normal/review/hard-limit states while malformed input becomes unknown.
+    The Qt per-Session display cache is capped at 128 entries and preserves the
+    current Chat, Work, history, and active-Turn Sessions during deterministic
+    eviction. This remains a review signal only: it is not wired to checkpoint
+    activation, provider compact, or automatic authority. Complete Qt runtime
+    coverage and cross-platform evidence remain open, so keep this task unchecked.
 - [ ] 17.8 Implement compaction summary schema covering decisions, unresolved tasks, changed files, commands, tests, failures, and next steps
 - [ ] 17.9 Implement manual compaction preservation instructions and editable review before activation
 - [ ] 17.10 Add context quality tests for large monorepos, irrelevant-file resistance, stale results, nested instructions, and provider switching

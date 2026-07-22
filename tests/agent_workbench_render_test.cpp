@@ -35,12 +35,68 @@
 #include <algorithm>
 #include <iterator>
 
+class AgentWorkbenchWidgetTestAccess
+{
+public:
+    static bool storeContextThreshold(AgentWorkbenchWidget &widget,
+                                      const QString &sessionId,
+                                      const QJsonObject &summary)
+    {
+        return widget.storeSessionContextThreshold(sessionId, summary);
+    }
+
+    static qsizetype contextThresholdCacheSize(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_sessionContextThresholds.size();
+    }
+
+    static bool containsContextThreshold(const AgentWorkbenchWidget &widget,
+                                         const QString &sessionId)
+    {
+        return widget.m_sessionContextThresholds.contains(sessionId);
+    }
+
+    static void setCurrentChatSession(AgentWorkbenchWidget &widget,
+                                      const QString &sessionId)
+    {
+        widget.m_chatSessionId = sessionId;
+    }
+};
+
 namespace {
 
 bool expect(bool condition, const char *message)
 {
     if (!condition) qCritical() << message;
     return condition;
+}
+
+bool verifyBoundedContextThresholdCache(AgentWorkbenchWidget &workbench,
+                                        const QString &protectedSessionId)
+{
+    const QJsonObject threshold{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("session-context-threshold/0.1")},
+        {QStringLiteral("status"), QStringLiteral("no_action")},
+        {QStringLiteral("source"), QStringLiteral("runtime-authoritative")},
+        {QStringLiteral("history_state"), QStringLiteral("replayed")},
+        {QStringLiteral("automatic_compaction_authority"), false},
+    };
+    for (int index = 0; index < 132; ++index) {
+        AgentWorkbenchWidgetTestAccess::storeContextThreshold(
+            workbench, QStringLiteral("threshold-cache-%1").arg(index), threshold);
+    }
+    return expect(AgentWorkbenchWidgetTestAccess::contextThresholdCacheSize(workbench) == 128,
+                  "context threshold cache did not enforce its fixed capacity")
+        && expect(!AgentWorkbenchWidgetTestAccess::containsContextThreshold(
+                      workbench, QStringLiteral("threshold-cache-0")),
+                  "context threshold cache did not evict the oldest unprotected entry")
+        && expect(AgentWorkbenchWidgetTestAccess::containsContextThreshold(
+                      workbench, QStringLiteral("threshold-cache-131")),
+                  "context threshold cache evicted its newest entry")
+        && expect(AgentWorkbenchWidgetTestAccess::containsContextThreshold(
+                      workbench, protectedSessionId),
+                  "context threshold cache evicted the protected Chat session");
 }
 
 int nonTransparentPixels(const QImage &image)
@@ -115,6 +171,22 @@ int main(int argc, char *argv[])
     workbench.resize(1100, 700);
     workbench.show();
     application.processEvents();
+
+    if (qEnvironmentVariableIsSet("AEGISY_CONTEXT_THRESHOLD_CACHE_TEST_ONLY")) {
+        const QString protectedSessionId = QStringLiteral("threshold-cache-protected");
+        AgentWorkbenchWidgetTestAccess::setCurrentChatSession(
+            workbench, protectedSessionId);
+        AgentWorkbenchWidgetTestAccess::storeContextThreshold(
+            workbench, protectedSessionId, QJsonObject{
+                {QStringLiteral("schema_version"),
+                 QStringLiteral("session-context-threshold/0.1")},
+                {QStringLiteral("status"), QStringLiteral("no_action")},
+                {QStringLiteral("source"), QStringLiteral("runtime-authoritative")},
+                {QStringLiteral("history_state"), QStringLiteral("active")},
+                {QStringLiteral("automatic_compaction_authority"), false},
+            });
+        return verifyBoundedContextThresholdCache(workbench, protectedSessionId) ? 0 : 1;
+    }
 
     QPushButton *runtimeRestart = workbench.findChild<QPushButton *>(
         QStringLiteral("agentRuntimeRestartButton"));
@@ -777,6 +849,10 @@ int main(int argc, char *argv[])
         }},
     });
     application.processEvents();
+    if (!verifyBoundedContextThresholdCache(
+            workbench, QStringLiteral("session-recovery-render"))) {
+        return 1;
+    }
     runtimeClient->sessionRecoveryStatusRead(QJsonObject{
         {QStringLiteral("session_id"), QStringLiteral("session-recovery-render")},
         {QStringLiteral("recovery_required"), true},

@@ -819,7 +819,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   validates it before rendering `阈值正常`, `阈值需预检`, or `阈值已达上限`.
   Missing, malformed, unknown, or `automatic_compaction_authority:true`
   summaries render `阈值未知`; no stale normal-looking state is retained.
-  Rust protocol fixtures and direct Qt C++17 syntax checks cover the projection.
+  A cold durable `session/read` now reports `history_state=empty` only after a
+  complete scan finds no usage Items; usage evidence is `replayed`, and scan
+  failure, malformed evidence, or a bound hit remains `replayed` plus
+  `preview-required`. Qt retains at most 128 Session threshold summaries and
+  deterministically evicts inactive entries while protecting the current Chat,
+  Work, history, and active-Turn Sessions. Rust protocol fixtures, a focused Qt
+  cache run, and direct C++17 syntax checks cover these paths.
   Complete Qt runtime/render execution and cross-platform evidence remain open,
   so keep `17.7` unchecked.
 - User-initiated macOS PTY execution, the named lifecycle, and the Qt/xterm.js
@@ -2441,7 +2447,7 @@ Implemented visual baseline:
 ## Verification Snapshot (2026-07-22)
 
 - The Rust workspace passes `cargo fmt --all -- --check`, `cargo test
-  --workspace` (492 `aegisy-agentd` library tests passed, one ignored, 10
+  --workspace` (493 `aegisy-agentd` library tests passed, one ignored, 10
   context-threshold contract tests, 63 AAP protocol tests, and 11 stdio/Codex
   tests), and strict workspace Clippy.
 - The bundled application Node runtime passes both local gateway integration
@@ -2452,20 +2458,25 @@ Implemented visual baseline:
   turn-trace changes are partial foundations. Their OpenSpec tasks remain
   unchecked until authoritative producers, complete AAP/Qt integration,
   provider/model wiring, and cross-platform release evidence are complete.
-- The context-threshold restoration foundation now passes 489 `aegisy-agentd`
+- The context-threshold restoration foundation now passes 493 `aegisy-agentd`
   library tests (one ignored live fixture). It restores only a strict,
   content-free review latch from complete persisted usage Items on resume,
-  fork, import, and Runtime reconstruction; malformed history becomes
-  `preview-required` and never `no-action`. No automatic compaction, provider
-  request, checkpoint activation, or execution authority was added.
+  fork, import, and Runtime reconstruction. A complete cold read without usage
+  is explicitly `empty`/`no-action`; malformed, incomplete, over-limit, or
+  unreadable history is `replayed`/`preview-required` and never silently normal.
+  No automatic compaction, provider request, checkpoint activation, or execution
+  authority was added.
 - The Qt usage-authority and context-threshold widget/render sources pass direct
   C++17 syntax compilation using the CMake compile database. The complete render
-  target is still blocked before C++ linking because this host kills Qt `rcc`
-  while compiling `resources.qrc`; no runtime/render pass is claimed.
-- The focused threshold verification passes 489 library tests, 63 AAP protocol
-  tests, strict workspace Clippy, Rust format checking, `git diff --check`, and
-  three Qt C++17 syntax checks. This evidence is still not sufficient to mark
-  `17.7` complete without cross-platform runtime/render validation.
+  target now passes MOC/RCC/compile/link and its focused threshold-cache mode
+  exits successfully. The ordinary render run still fails before the threshold
+  cache assertions at the existing model-profile read-only projection assertion;
+  no complete render pass is claimed.
+- The focused threshold verification passes 493 library tests, 63 AAP protocol
+  tests, 11 stdio/Codex tests, strict workspace Clippy, Rust format checking,
+  `git diff --check`, strict OpenSpec validation, two Qt C++17 syntax checks, and
+  the focused Qt cache run. This evidence is still not sufficient to mark `17.7`
+  complete without the full Qt runtime/render pass and cross-platform validation.
 - The durable Turn Trace slice adds three Store tests for atomic terminal commit,
   exact-retry idempotency, conflict rejection, restart recovery, terminal-event
   rollback, semantic tamper quarantine, and terminal-last operation state. The

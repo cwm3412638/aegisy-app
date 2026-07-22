@@ -78,6 +78,8 @@
 #include <utility>
 
 namespace {
+
+constexpr qsizetype kMaxSessionContextThresholdEntries = 128;
 const QString kPanelBorder = QStringLiteral("#e4e7ec");
 constexpr int kPathRole = Qt::UserRole;
 constexpr int kKindRole = Qt::UserRole + 1;
@@ -10458,6 +10460,27 @@ bool AgentWorkbenchWidget::storeSessionContextThreshold(
     // again on every render, so a malformed or future schema can never retain
     // a previous normal-looking state.
     m_sessionContextThresholds.insert(sessionId, summary);
+    m_sessionContextThresholdRecency.removeAll(sessionId);
+    m_sessionContextThresholdRecency.append(sessionId);
+
+    const QSet<QString> protectedSessionIds{
+        m_chatSessionId,
+        m_workSessionId,
+        m_sessionHistoryId,
+        m_activeTurnSessionId,
+    };
+    while (m_sessionContextThresholds.size() > kMaxSessionContextThresholdEntries) {
+        auto candidate = std::find_if(
+            m_sessionContextThresholdRecency.cbegin(),
+            m_sessionContextThresholdRecency.cend(),
+            [&protectedSessionIds](const QString &id) {
+                return !id.isEmpty() && !protectedSessionIds.contains(id);
+            });
+        if (candidate == m_sessionContextThresholdRecency.cend()) break;
+        const QString evictedSessionId = *candidate;
+        m_sessionContextThresholdRecency.erase(candidate);
+        m_sessionContextThresholds.remove(evictedSessionId);
+    }
     updateContextStrip();
     return sessionContextThresholdPresentation(summary).valid;
 }

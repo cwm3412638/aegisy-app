@@ -2112,34 +2112,58 @@ fn restore_context_threshold_status(items: &[TimelineItem]) -> context_threshold
 /// Restore the latch from the durable source rather than the bounded in-memory
 /// replay window. A scan failure or an unbounded history is itself uncertain
 /// history and therefore remains review-required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RestoredContextThreshold {
+    status: context_threshold::ThresholdStatus,
+    history_state: &'static str,
+}
+
+impl RestoredContextThreshold {
+    fn complete(status: context_threshold::ThresholdStatus, saw_usage: bool) -> Self {
+        Self {
+            status,
+            history_state: if saw_usage { "replayed" } else { "empty" },
+        }
+    }
+
+    fn uncertain() -> Self {
+        Self {
+            status: context_threshold::ThresholdStatus::PreviewRequired,
+            history_state: "replayed",
+        }
+    }
+}
+
 fn restore_context_threshold_status_from_store(
     store: &WorkbenchStore,
     session_id: &str,
-) -> context_threshold::ThresholdStatus {
+) -> RestoredContextThreshold {
     let mut status = context_threshold::ThresholdStatus::NoAction;
+    let mut saw_usage = false;
     let mut after_sequence = 0;
     let mut scanned_items = 0usize;
     loop {
         let page =
             match store.read_session_items(session_id, after_sequence, RUNTIME_REPLAY_PAGE_SIZE) {
                 Ok(page) => page,
-                Err(_) => return context_threshold::ThresholdStatus::PreviewRequired,
+                Err(_) => return RestoredContextThreshold::uncertain(),
             };
         if page.is_empty() {
-            return status;
+            return RestoredContextThreshold::complete(status, saw_usage);
         }
         scanned_items = match scanned_items.checked_add(page.len()) {
             Some(value) if value <= MAX_CONTEXT_THRESHOLD_SCAN_ITEMS => value,
-            _ => return context_threshold::ThresholdStatus::PreviewRequired,
+            _ => return RestoredContextThreshold::uncertain(),
         };
         let next_sequence = match page.last().map(|item| item.sequence) {
             Some(sequence) if sequence > after_sequence => sequence,
-            _ => return context_threshold::ThresholdStatus::PreviewRequired,
+            _ => return RestoredContextThreshold::uncertain(),
         };
         for item in page.iter().filter(|item| item.item_kind == "usage") {
+            saw_usage = true;
             let timeline_item = stored_timeline_item(item.clone());
             let Some(next_status) = replay_context_threshold_item(&timeline_item, status) else {
-                return context_threshold::ThresholdStatus::PreviewRequired;
+                return RestoredContextThreshold::uncertain();
             };
             status = next_status;
         }
@@ -2147,7 +2171,7 @@ fn restore_context_threshold_status_from_store(
         if scanned_items == MAX_CONTEXT_THRESHOLD_SCAN_ITEMS {
             // There may be another page; do not infer that the bounded scan is
             // complete from a full page.
-            return context_threshold::ThresholdStatus::PreviewRequired;
+            return RestoredContextThreshold::uncertain();
         }
     }
 }
@@ -2217,6 +2241,25 @@ mod context_threshold_restore_tests {
             restore_context_threshold_status(&[]),
             context_threshold::ThresholdStatus::NoAction
         );
+    }
+
+    #[test]
+    fn durable_history_state_distinguishes_empty_usage_from_replay_uncertainty() {
+        let empty =
+            RestoredContextThreshold::complete(context_threshold::ThresholdStatus::NoAction, false);
+        assert_eq!(empty.status, context_threshold::ThresholdStatus::NoAction);
+        assert_eq!(empty.history_state, "empty");
+
+        let replayed =
+            RestoredContextThreshold::complete(context_threshold::ThresholdStatus::NoAction, true);
+        assert_eq!(replayed.history_state, "replayed");
+
+        let uncertain = RestoredContextThreshold::uncertain();
+        assert_eq!(
+            uncertain.status,
+            context_threshold::ThresholdStatus::PreviewRequired
+        );
+        assert_eq!(uncertain.history_state, "replayed");
     }
 
     #[test]
@@ -7921,7 +7964,7 @@ impl Runtime {
             None => Vec::new(),
         };
         let restored_context_threshold_status =
-            restore_context_threshold_status_from_store(store, &stored.session_id);
+            restore_context_threshold_status_from_store(store, &stored.session_id).status;
         let binding = match store.load_session_runtime_binding(&params.session_id) {
             Ok(binding) => binding,
             Err(error) => {
@@ -10817,10 +10860,9 @@ impl Runtime {
                 .get(&params.session_id)
                 .map(|state| (state.context_threshold_status, "active"))
                 .unwrap_or_else(|| {
-                    (
-                        restore_context_threshold_status_from_store(store, &params.session_id),
-                        "replayed",
-                    )
+                    let restored =
+                        restore_context_threshold_status_from_store(store, &params.session_id);
+                    (restored.status, restored.history_state)
                 });
             return self.success_for(
                 &request,

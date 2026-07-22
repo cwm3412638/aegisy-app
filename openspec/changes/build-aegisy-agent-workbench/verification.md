@@ -1348,12 +1348,18 @@ Known limitations:
 - `context-threshold/0.1` has ten deterministic tests for authority,
   freshness, soft/hard limits, hysteresis, missing limits, and overflow. It is
   projected from provider-observed Codex usage into the durable Timeline and
-  covered by the stdio/restart fixture, but has no cross-turn/restart latch,
-  compaction activation, provider compact, or automatic authority.
-- `turn-trace/0.1` has seven focused content-free trace tests plus full crate
-  coverage for source authority, event ordering, duplicate usage, terminal
-  evidence, and secret rejection. No durable trace producer, AAP/Qt surface,
-  audit export, or retention policy exists yet.
-- The Qt render target cannot complete on this host because Qt `rcc` is killed
-  while compiling `resources.qrc`. Direct compile-database syntax checks pass
-  for both the widget and render fixture; this is not counted as a render run.
+  covered by the stdio/restart fixture. Complete bounded usage replay restores
+  the latch after restart and distinguishes a genuinely empty usage history
+  from replayed or uncertain evidence. The additive Session projection is
+  consumed by Qt, whose deterministic threshold cache is capped at 128 entries.
+  Compaction activation, provider compact, and automatic authority remain absent.
+- `turn-trace/0.1` has ten focused content-free trace tests plus Store coverage
+  for source authority, event ordering, duplicate usage, terminal evidence,
+  secret rejection, atomic terminal persistence, idempotency, rollback, restart,
+  and tamper quarantine. The Store can durably commit a trace, but Runtime has no
+  trace producer and no AAP/Qt, audit-export, or retention surface exists yet.
+- Direct C++17 syntax checks pass for the Qt widget and render fixture, and the
+  render target now completes MOC/RCC/compile/link on this host. A focused cache
+  mode passes. The full render run currently fails earlier at the existing model-
+  profile read-only projection assertion, before the threshold-cache assertion;
+  this is not claimed as a complete render pass.

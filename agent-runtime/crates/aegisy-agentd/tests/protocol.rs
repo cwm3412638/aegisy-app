@@ -2966,7 +2966,11 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
     );
     assert_eq!(
         cold_read[0]["result"]["context_threshold"]["history_state"],
-        "replayed"
+        "empty"
+    );
+    assert_eq!(
+        cold_read[0]["result"]["context_threshold"]["status"],
+        "no_action"
     );
     assert_eq!(
         cold_read[0]["result"]["context_threshold"]["automatic_compaction_authority"],

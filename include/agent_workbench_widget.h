@@ -43,6 +43,8 @@ class AgentWorkbenchWidget : public QWidget
 {
     Q_OBJECT
 
+    friend class AgentWorkbenchWidgetTestAccess;
+
 public:
     explicit AgentWorkbenchWidget(QWidget *parent = nullptr);
     ~AgentWorkbenchWidget() override;
@@ -511,6 +513,7 @@ private:
     QStringList m_pendingPinnedContextIds;
     QHash<QString, QJsonObject> m_sessionRuntimeBindings;
     QHash<QString, QJsonObject> m_sessionContextThresholds;
+    QStringList m_sessionContextThresholdRecency;
     QHash<QString, QJsonObject> m_sessionWorkspaceBindings;
     QList<QJsonObject> m_contextItems;
     QList<QJsonObject> m_pinnedContextItems;

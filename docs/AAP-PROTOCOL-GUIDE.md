@@ -100,9 +100,11 @@ not silently copy it into the authoritative field.
 The sidecar also contains internal `context-threshold/0.1` and
 `turn-trace/0.1` validation contracts. Neither is currently an AAP capability.
 Codex usage Timeline metadata may include a `compaction_threshold` decision
-computed from provider-observed last-input/context-window values, but its
-hysteresis is active-turn-only and `automatic_compaction_authority` is always
-false. The trace contract has no durable producer or diagnostic export path.
+computed from provider-observed last-input/context-window values. Runtime can
+restore its hysteresis latch from complete bounded usage history and projects a
+content-free Session summary; `automatic_compaction_authority` is always false.
+The Workbench Store can atomically persist a validated terminal trace, but the
+Runtime does not yet produce one and there is no trace diagnostic-export path.
 Clients must not infer automatic compaction or trace export from these fields.
 
 The Qt Timeline treats this metadata as untrusted protocol input. It requires
