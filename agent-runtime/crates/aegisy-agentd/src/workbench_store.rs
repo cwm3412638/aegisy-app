@@ -26,7 +26,11 @@ use crate::session_compaction::{activate_review, CompactionCheckpointReview};
 use crate::session_compaction_store::{
     CompactionCheckpointDescriptor, STORE_SCHEMA_VERSION as COMPACTION_STORE_SCHEMA_VERSION,
 };
-use crate::turn_trace::{TerminalState as TraceTerminalState, TracePayload, TurnTrace};
+use crate::turn_trace::{
+    SessionMode as TraceSessionMode, TerminalState as TraceTerminalState, TracePayload, TurnTrace,
+    LEGACY_SCHEMA_VERSION as LEGACY_TURN_TRACE_SCHEMA_VERSION,
+    SCHEMA_VERSION as TURN_TRACE_SCHEMA_VERSION,
+};
 pub use crate::workbench_migration::WorkbenchRecoveryDiagnostic;
 use crate::workbench_migration::{create_pre_upgrade_backup, inspect_recovery};
 use crate::workspace_edit::ContentHash;
@@ -6422,9 +6426,9 @@ impl WorkbenchStore {
         }
         let timestamp = to_i64(updated_at_ms, "turn update time")?;
         let transaction = self.begin_database_write("cannot start turn completion transaction")?;
-        let (project_id, environment_identity) = transaction
+        let (project_id, environment_identity, session_mode) = transaction
             .query_row(
-                "SELECT session.project_id, session.environment_identity
+                "SELECT session.project_id, session.environment_identity, session.mode
                  FROM turns AS turn_record
                  JOIN sessions AS session ON session.session_id = turn_record.session_id
                  WHERE turn_record.turn_id = ?1 AND turn_record.session_id = ?2",
@@ -6433,6 +6437,7 @@ impl WorkbenchStore {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
                         row.get::<_, Option<String>>(1)?,
+                        parse_session_mode(&row.get::<_, String>(2)?)?,
                     ))
                 },
             )
@@ -6442,10 +6447,11 @@ impl WorkbenchStore {
         if let Some(prepared_trace) = prepared_trace.as_ref() {
             if prepared_trace.trace.binding.project_id != project_id
                 || prepared_trace.trace.binding.environment_identity != environment_identity
+                || !turn_trace_matches_session_mode(&prepared_trace.trace, session_mode)
             {
                 return Err(coded_error(
                     "turn-trace-binding-mismatch",
-                    "turn trace project or environment binding does not match the stored turn",
+                    "turn trace project, environment, or mode binding does not match the stored turn",
                 ));
             }
             if prepared_trace.terminal_at_ms != updated_at_ms {
@@ -6554,6 +6560,22 @@ impl WorkbenchStore {
         validate_identifier(turn_id, "turn trace turn ID")?;
         let stored = load_turn_trace_record(&self.connection, session_id, turn_id)?;
         if let Some(stored) = stored.as_ref() {
+            let session_mode = self
+                .connection
+                .query_row(
+                    "SELECT mode FROM sessions WHERE session_id = ?1",
+                    [session_id],
+                    |row| parse_session_mode(&row.get::<_, String>(0)?),
+                )
+                .optional()
+                .map_err(|_| error("cannot read turn trace session mode"))?
+                .ok_or_else(|| error("turn trace session is missing"))?;
+            if !turn_trace_matches_session_mode(&stored.trace, session_mode) {
+                return Err(coded_error(
+                    "turn-trace-binding-mismatch",
+                    "turn trace mode binding does not match the stored session",
+                ));
+            }
             validate_trace_terminal_pair(&self.connection, stored)?;
         }
         Ok(stored)
@@ -8278,6 +8300,7 @@ impl WorkbenchStore {
                             trace.trace.binding.project_id == session.project_id
                                 && trace.trace.binding.environment_identity
                                     == session.environment_identity
+                                && turn_trace_matches_session_mode(&trace.trace, session.mode)
                         }) && turns.get(&trace.trace.binding.turn_id).is_some_and(|turn| {
                             turn.session_id == session_id
                                 && matches!(turn.state.as_str(), "started" | "running")
@@ -12551,6 +12574,24 @@ fn trace_terminal_event(trace: &TurnTrace) -> Option<(TraceTerminalState, u64)> 
     }
 }
 
+fn turn_trace_matches_session_mode(trace: &TurnTrace, mode: StoredSessionMode) -> bool {
+    if trace.schema_version == LEGACY_TURN_TRACE_SCHEMA_VERSION {
+        return true;
+    }
+    if trace.schema_version != TURN_TRACE_SCHEMA_VERSION {
+        return false;
+    }
+    let trace_mode = trace.events.iter().find_map(|event| match &event.payload {
+        TracePayload::Intent { session_mode, .. } => Some(*session_mode),
+        _ => None,
+    });
+    matches!(
+        (trace_mode, mode),
+        (Some(TraceSessionMode::Chat), StoredSessionMode::Chat)
+            | (Some(TraceSessionMode::Work), StoredSessionMode::Work)
+    )
+}
+
 fn prepare_turn_trace_record(
     session_id: &str,
     turn_id: &str,
@@ -12644,6 +12685,24 @@ fn parse_turn_trace_event(event: &WorkbenchEvent) -> Result<StoredTurnTrace, Wor
             "turn trace event metadata is invalid",
         )
     })?;
+    let trace_schema_version = trace_value
+        .get("schema_version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            coded_error(
+                "turn-trace-event-trace-version-invalid",
+                "turn trace event schema version is missing",
+            )
+        })?;
+    if !matches!(
+        trace_schema_version,
+        LEGACY_TURN_TRACE_SCHEMA_VERSION | TURN_TRACE_SCHEMA_VERSION
+    ) {
+        return Err(coded_error(
+            "turn-trace-event-trace-version-unsupported",
+            "turn trace event schema version is unsupported",
+        ));
+    }
     let trace = serde_json::from_value::<TurnTrace>(trace_value.clone()).map_err(|_| {
         coded_error(
             "turn-trace-event-trace-invalid",
@@ -15817,8 +15876,9 @@ mod tests {
     use crate::session_compaction::{create_review, CompactionSummary};
     use crate::session_compaction_store::CompactionCheckpointStore;
     use crate::turn_trace::{
-        AuthorityLabel, EvidenceRef, EvidenceSource, RedactionSummary, TerminalEvidence,
-        TraceBinding,
+        AuthorityLabel, CompletionDomain, CompletionEvidence, EvidenceRef, EvidenceSource,
+        RedactionSummary, SessionMode as TraceSessionMode, TerminalEvidence, TraceBinding,
+        TurnAccess, TurnKind,
     };
     use crate::workbench_migration::{
         create_pre_upgrade_backup_with_available_bytes, migration_backup_manifests,
@@ -15863,11 +15923,104 @@ mod tests {
         background_job_identity("environment:sha256:", '8')
     }
 
+    const LEGACY_COMPLETED_TURN_TRACE_JSON: &str = r#"{
+        "schema_version":"turn-trace/0.1",
+        "binding":{
+            "session_id":"trace-session",
+            "turn_id":"trace-turn",
+            "project_id":"trace-project",
+            "environment_identity":"environment:sha256:8888888888888888888888888888888888888888888888888888888888888888"
+        },
+        "events":[{
+            "event_id":"legacy-completed-terminal",
+            "sequence":1,
+            "at_ms":4,
+            "payload":{
+                "kind":"terminal",
+                "state":"completed",
+                "evidence":{
+                    "workspace_identity":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "git_state_identity":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "verification_identity":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                    "observed_verification_count":1,
+                    "evidence":{
+                        "authority":"observed",
+                        "source":"test-runner",
+                        "identity":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                        "observed_at_ms":4
+                    }
+                },
+                "redaction":{
+                    "content_included":false,
+                    "raw_bytes":0,
+                    "retained_bytes":0,
+                    "redacted_fields":0,
+                    "omitted_fields":0
+                }
+            }
+        }]
+    }"#;
+
+    const LEGACY_COMPLETED_TURN_TRACE_IDENTITY: &str =
+        "turn-trace:sha256:c3df0de4005f5135500fc4c2fe313d2f408b95e4f9ec1a38c75bda018304c4ea";
+
+    const LEGACY_FAILED_TURN_TRACE_JSON: &str = r#"{
+        "schema_version":"turn-trace/0.1",
+        "binding":{
+            "session_id":"trace-session",
+            "turn_id":"trace-turn",
+            "project_id":"trace-project",
+            "environment_identity":"environment:sha256:8888888888888888888888888888888888888888888888888888888888888888"
+        },
+        "events":[{
+            "event_id":"legacy-failed-terminal",
+            "sequence":1,
+            "at_ms":4,
+            "payload":{
+                "kind":"terminal",
+                "state":"failed",
+                "evidence":{
+                    "observed_verification_count":0,
+                    "evidence":{
+                        "authority":"unknown",
+                        "source":"local-runtime"
+                    }
+                },
+                "redaction":{
+                    "content_included":false,
+                    "raw_bytes":0,
+                    "retained_bytes":0,
+                    "redacted_fields":0,
+                    "omitted_fields":0
+                }
+            }
+        }]
+    }"#;
+
+    const LEGACY_FAILED_TURN_TRACE_IDENTITY: &str =
+        "turn-trace:sha256:19f87469e6bbb4b3d7c5d838e84cef5b3e381080873abc3eb123b308ec4946b8";
+
     fn create_turn_trace_fixture(
         store: &mut WorkbenchStore,
         root: &Root,
         session_id: &str,
         turn_id: &str,
+    ) {
+        create_turn_trace_fixture_with_mode(
+            store,
+            root,
+            session_id,
+            turn_id,
+            StoredSessionMode::Work,
+        );
+    }
+
+    fn create_turn_trace_fixture_with_mode(
+        store: &mut WorkbenchStore,
+        root: &Root,
+        session_id: &str,
+        turn_id: &str,
+        mode: StoredSessionMode,
     ) {
         let project_root = root.parent.join(format!("{session_id}-project"));
         fs::create_dir(&project_root).unwrap();
@@ -15889,7 +16042,7 @@ mod tests {
             .create_session(StoredSessionCreate {
                 session_id: session_id.into(),
                 project_id: Some("trace-project".into()),
-                mode: StoredSessionMode::Work,
+                mode,
                 title: "Trace session".into(),
                 parent_session_id: None,
                 lineage_kind: StoredSessionLineage::New,
@@ -15914,7 +16067,7 @@ mod tests {
         terminal_event_id: &str,
         at_ms: u64,
     ) -> TurnTrace {
-        let mut trace = TurnTrace::new(TraceBinding {
+        let mut trace = TurnTrace::new_legacy(TraceBinding {
             session_id: session_id.into(),
             turn_id: turn_id.into(),
             project_id: Some("trace-project".into()),
@@ -15938,11 +16091,170 @@ mod tests {
                             identity: None,
                             observed_at_ms: None,
                         },
+                        completion: None,
                     },
                     redaction: RedactionSummary::metadata_only(),
                 },
             )
             .unwrap();
+        trace
+    }
+
+    fn golden_turn_trace(json: &str, expected_identity: &str) -> TurnTrace {
+        let value = serde_json::from_str::<Value>(json).unwrap();
+        let trace = serde_json::from_value::<TurnTrace>(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&trace).unwrap(), value);
+        trace.validate_complete().unwrap();
+        assert_eq!(trace.metadata_identity().unwrap(), expected_identity);
+        trace
+    }
+
+    fn observed_trace_evidence(
+        source: EvidenceSource,
+        identity_byte: char,
+        at_ms: u64,
+    ) -> EvidenceRef {
+        EvidenceRef {
+            authority: AuthorityLabel::Observed,
+            source,
+            identity: Some(background_job_identity("sha256:", identity_byte)),
+            observed_at_ms: Some(at_ms),
+        }
+    }
+
+    fn completed_turn_trace_v2(session_id: &str, turn_id: &str, at_ms: u64) -> TurnTrace {
+        let mut trace = TurnTrace::new(TraceBinding {
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            project_id: Some("trace-project".into()),
+            environment_identity: Some(trace_environment_identity()),
+        })
+        .unwrap();
+        trace
+            .append(
+                "trace-intent".into(),
+                at_ms,
+                TracePayload::Intent {
+                    session_mode: TraceSessionMode::Work,
+                    turn_kind: TurnKind::ReadOnlyInspection,
+                    access: TurnAccess::ReadOnly,
+                    intent_identity: background_job_identity("sha256:", '1'),
+                    evidence: observed_trace_evidence(EvidenceSource::Runtime, '2', at_ms),
+                    redaction: RedactionSummary::metadata_only(),
+                },
+            )
+            .unwrap();
+        trace
+            .append(
+                "trace-terminal".into(),
+                at_ms,
+                TracePayload::Terminal {
+                    state: TraceTerminalState::Completed,
+                    evidence: TerminalEvidence {
+                        workspace_identity: None,
+                        git_state_identity: None,
+                        verification_identity: None,
+                        observed_verification_count: 0,
+                        evidence: observed_trace_evidence(EvidenceSource::Runtime, '3', at_ms),
+                        completion: Some(CompletionEvidence {
+                            intent_identity: background_job_identity("sha256:", '1'),
+                            workspace_change: CompletionDomain::NotApplicable {
+                                evidence: observed_trace_evidence(
+                                    EvidenceSource::Runtime,
+                                    '4',
+                                    at_ms,
+                                ),
+                            },
+                            git_change: CompletionDomain::NotApplicable {
+                                evidence: observed_trace_evidence(
+                                    EvidenceSource::Runtime,
+                                    '5',
+                                    at_ms,
+                                ),
+                            },
+                            verification: CompletionDomain::Unknown {
+                                evidence: EvidenceRef {
+                                    authority: AuthorityLabel::Unknown,
+                                    source: EvidenceSource::Runtime,
+                                    identity: None,
+                                    observed_at_ms: None,
+                                },
+                            },
+                        }),
+                    },
+                    redaction: RedactionSummary::metadata_only(),
+                },
+            )
+            .unwrap();
+        trace.validate_complete().unwrap();
+        trace
+    }
+
+    fn completed_chat_turn_trace_v2(session_id: &str, turn_id: &str, at_ms: u64) -> TurnTrace {
+        let intent_identity = background_job_identity("sha256:", '6');
+        let mut trace = TurnTrace::new(TraceBinding {
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            project_id: Some("trace-project".into()),
+            environment_identity: Some(trace_environment_identity()),
+        })
+        .unwrap();
+        trace
+            .append(
+                "trace-intent".into(),
+                at_ms,
+                TracePayload::Intent {
+                    session_mode: TraceSessionMode::Chat,
+                    turn_kind: TurnKind::Conversation,
+                    access: TurnAccess::NonMutating,
+                    intent_identity: intent_identity.clone(),
+                    evidence: observed_trace_evidence(EvidenceSource::Runtime, '7', at_ms),
+                    redaction: RedactionSummary::metadata_only(),
+                },
+            )
+            .unwrap();
+        trace
+            .append(
+                "trace-terminal".into(),
+                at_ms,
+                TracePayload::Terminal {
+                    state: TraceTerminalState::Completed,
+                    evidence: TerminalEvidence {
+                        workspace_identity: None,
+                        git_state_identity: None,
+                        verification_identity: None,
+                        observed_verification_count: 0,
+                        evidence: observed_trace_evidence(EvidenceSource::Runtime, '8', at_ms),
+                        completion: Some(CompletionEvidence {
+                            intent_identity,
+                            workspace_change: CompletionDomain::NotApplicable {
+                                evidence: observed_trace_evidence(
+                                    EvidenceSource::Runtime,
+                                    '9',
+                                    at_ms,
+                                ),
+                            },
+                            git_change: CompletionDomain::NotApplicable {
+                                evidence: observed_trace_evidence(
+                                    EvidenceSource::Runtime,
+                                    'a',
+                                    at_ms,
+                                ),
+                            },
+                            verification: CompletionDomain::NotApplicable {
+                                evidence: observed_trace_evidence(
+                                    EvidenceSource::Runtime,
+                                    'b',
+                                    at_ms,
+                                ),
+                            },
+                        }),
+                    },
+                    redaction: RedactionSummary::metadata_only(),
+                },
+            )
+            .unwrap();
+        trace.validate_complete().unwrap();
         trace
     }
 
@@ -19573,6 +19885,10 @@ mod tests {
             .unwrap();
         assert_eq!(finished.state, "completed");
         assert!(store
+            .read_turn_trace("session-turn", "turn-1")
+            .unwrap()
+            .is_none());
+        assert!(store
             .append_item(StoredItemAppend {
                 session_id: "session-turn".into(),
                 turn_id: Some("turn-1".into()),
@@ -19595,6 +19911,10 @@ mod tests {
         assert_eq!(rebuilt.items, replay);
         drop(store);
         let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert!(reopened
+            .read_turn_trace("session-turn", "turn-1")
+            .unwrap()
+            .is_none());
         assert_eq!(
             reopened.read_session_items("session-turn", 0, 20).unwrap(),
             replay
@@ -19698,6 +20018,418 @@ mod tests {
             Some(stored)
         );
         assert!(!reopened.session_requires_recovery("trace-session"));
+    }
+
+    #[test]
+    fn current_turn_trace_mode_must_match_the_persisted_session() {
+        let work_root = Root::new("turn-trace-work-chat-mode-mismatch");
+        let mut work_store = WorkbenchStore::open(&work_root.path).unwrap();
+        create_turn_trace_fixture(&mut work_store, &work_root, "trace-session", "trace-turn");
+        let chat_trace = completed_chat_turn_trace_v2("trace-session", "trace-turn", 4);
+        assert_eq!(
+            work_store
+                .finish_turn_with_trace("trace-session", "trace-turn", "completed", 4, &chat_trace,)
+                .unwrap_err()
+                .code,
+            "turn-trace-binding-mismatch"
+        );
+        assert_eq!(work_store.load_turn("trace-turn").unwrap().state, "started");
+        assert!(work_store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .is_none());
+
+        let chat_root = Root::new("turn-trace-chat-work-mode-mismatch");
+        let mut chat_store = WorkbenchStore::open(&chat_root.path).unwrap();
+        create_turn_trace_fixture_with_mode(
+            &mut chat_store,
+            &chat_root,
+            "trace-session",
+            "trace-turn",
+            StoredSessionMode::Chat,
+        );
+        let work_trace = completed_turn_trace_v2("trace-session", "trace-turn", 4);
+        assert_eq!(
+            chat_store
+                .finish_turn_with_trace("trace-session", "trace-turn", "completed", 4, &work_trace,)
+                .unwrap_err()
+                .code,
+            "turn-trace-binding-mismatch"
+        );
+        assert_eq!(chat_store.load_turn("trace-turn").unwrap().state, "started");
+        assert!(chat_store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn legacy_completed_turn_trace_replays_without_migration_or_rewrite() {
+        let root = Root::new("turn-trace-legacy-completed");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+        let trace = golden_turn_trace(
+            LEGACY_COMPLETED_TURN_TRACE_JSON,
+            LEGACY_COMPLETED_TURN_TRACE_IDENTITY,
+        );
+        let finished = store
+            .finish_turn_with_trace("trace-session", "trace-turn", "completed", 4, &trace)
+            .unwrap();
+        assert_eq!(finished.state, "completed");
+        let stored = store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.trace, trace);
+        assert_eq!(stored.trace_identity, LEGACY_COMPLETED_TURN_TRACE_IDENTITY);
+        let event_before: (String, String, String, i64) = store
+            .connection
+            .query_row(
+                "SELECT event_id, payload_json, payload_sha256, payload_bytes FROM events
+                 WHERE session_id = 'trace-session' AND sequence = ?1",
+                [stored.event_sequence as i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let payload_before = serde_json::from_str::<Value>(&event_before.1).unwrap();
+        assert_eq!(
+            payload_before["schema_version"],
+            TURN_TRACE_RECORDED_SCHEMA_VERSION
+        );
+        assert_eq!(
+            payload_before["trace"],
+            serde_json::from_str::<Value>(LEGACY_COMPLETED_TURN_TRACE_JSON).unwrap()
+        );
+        let database_version: i64 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(database_version, SCHEMA_VERSION);
+        let candidate = store
+            .rebuild_session_projection_candidate("trace-session")
+            .unwrap();
+        assert!(candidate.source_complete);
+        assert!(candidate.matches_current_projection);
+
+        let current = completed_turn_trace_v2("trace-session", "trace-turn", 4);
+        assert_eq!(
+            store
+                .finish_turn_with_trace("trace-session", "trace-turn", "completed", 4, &current,)
+                .unwrap_err()
+                .code,
+            "turn-trace-conflict"
+        );
+
+        drop(store);
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .read_turn_trace("trace-session", "trace-turn")
+                .unwrap()
+                .unwrap(),
+            stored
+        );
+        let event_after: (String, String, String, i64) = reopened
+            .connection
+            .query_row(
+                "SELECT event_id, payload_json, payload_sha256, payload_bytes FROM events
+                 WHERE session_id = 'trace-session' AND sequence = ?1",
+                [stored.event_sequence as i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(event_after, event_before);
+        let reopened_version: i64 = reopened
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(reopened_version, SCHEMA_VERSION);
+        assert!(!reopened.session_requires_recovery("trace-session"));
+    }
+
+    #[test]
+    fn legacy_failed_turn_trace_replays_with_its_fixed_identity() {
+        let root = Root::new("turn-trace-legacy-failed");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+        let trace = golden_turn_trace(
+            LEGACY_FAILED_TURN_TRACE_JSON,
+            LEGACY_FAILED_TURN_TRACE_IDENTITY,
+        );
+        store
+            .finish_turn_with_trace("trace-session", "trace-turn", "failed", 4, &trace)
+            .unwrap();
+        let stored = store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.trace_identity, LEGACY_FAILED_TURN_TRACE_IDENTITY);
+        assert_eq!(stored.trace, trace);
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .read_turn_trace("trace-session", "trace-turn")
+                .unwrap()
+                .unwrap(),
+            stored
+        );
+        let candidate = reopened
+            .rebuild_session_projection_candidate("trace-session")
+            .unwrap();
+        assert!(candidate.source_complete);
+        assert!(candidate.matches_current_projection);
+        assert!(!reopened.session_requires_recovery("trace-session"));
+    }
+
+    #[test]
+    fn current_completed_turn_trace_is_idempotent_and_restart_safe() {
+        let root = Root::new("turn-trace-current-completed");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+        let trace = completed_turn_trace_v2("trace-session", "trace-turn", 4);
+        assert_eq!(trace.schema_version, TURN_TRACE_SCHEMA_VERSION);
+        let finished = store
+            .finish_turn_with_trace("trace-session", "trace-turn", "completed", 4, &trace)
+            .unwrap();
+        assert_eq!(
+            store
+                .finish_turn_with_trace("trace-session", "trace-turn", "completed", 4, &trace)
+                .unwrap(),
+            finished
+        );
+        let stored = store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.trace, trace);
+        assert_eq!(stored.state, "completed");
+        assert_eq!(
+            store
+                .latest_operation_event_state("trace-session", "trace-turn")
+                .unwrap(),
+            Some(EventState::Completed)
+        );
+        let candidate = store
+            .rebuild_session_projection_candidate("trace-session")
+            .unwrap();
+        assert!(candidate.source_complete);
+        assert!(candidate.matches_current_projection);
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .read_turn_trace("trace-session", "trace-turn")
+                .unwrap()
+                .unwrap(),
+            stored
+        );
+        assert!(!reopened.session_requires_recovery("trace-session"));
+    }
+
+    #[test]
+    fn store_rejects_legacy_new_fields_and_future_trace_versions_without_side_effects() {
+        let root = Root::new("turn-trace-version-rejection");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+        let baseline_events = store
+            .read_session_events("trace-session", 0, MAX_EVENT_PAGE)
+            .unwrap();
+        let current =
+            serde_json::to_value(completed_turn_trace_v2("trace-session", "trace-turn", 4))
+                .unwrap();
+        let completion = current["events"][1]["payload"]["evidence"]["completion"].clone();
+
+        let mut legacy_with_new_fields =
+            serde_json::from_str::<Value>(LEGACY_COMPLETED_TURN_TRACE_JSON).unwrap();
+        legacy_with_new_fields["events"][0]["payload"]["evidence"]["completion"] = completion;
+        let legacy_with_new_fields =
+            serde_json::from_value::<TurnTrace>(legacy_with_new_fields).unwrap();
+        assert!(store
+            .finish_turn_with_trace(
+                "trace-session",
+                "trace-turn",
+                "completed",
+                4,
+                &legacy_with_new_fields,
+            )
+            .is_err());
+
+        let mut future = serde_json::from_str::<Value>(LEGACY_COMPLETED_TURN_TRACE_JSON).unwrap();
+        future["schema_version"] = Value::String("turn-trace/0.3".into());
+        let future_event_payload = json!({
+            "schema_version": TURN_TRACE_RECORDED_SCHEMA_VERSION,
+            "trace": future.clone(),
+            "trace_identity": LEGACY_COMPLETED_TURN_TRACE_IDENTITY,
+            "state": "completed",
+            "recorded_at_ms": 4,
+            "content_included": false,
+            "execution_authority": false
+        });
+        let future_event_bytes = serde_json::to_vec(&future_event_payload).unwrap();
+        let future_event = WorkbenchEvent {
+            schema_version: "workbench-event/0.1".into(),
+            session_id: "trace-session".into(),
+            sequence: 1,
+            event_id: "future-turn-trace".into(),
+            timestamp_ms: 4,
+            correlation_id: "trace-turn".into(),
+            event_kind: "turn.trace.recorded".into(),
+            project_id: Some("trace-project".into()),
+            operation_id: "trace-turn".into(),
+            generation: 0,
+            payload: future_event_payload,
+            payload_hash: ContentHash::for_bytes(&future_event_bytes),
+        };
+        assert_eq!(
+            parse_turn_trace_event(&future_event).unwrap_err().code,
+            "turn-trace-event-trace-version-unsupported"
+        );
+        let future = serde_json::from_value::<TurnTrace>(future).unwrap();
+        assert!(store
+            .finish_turn_with_trace("trace-session", "trace-turn", "completed", 4, &future)
+            .is_err());
+        assert_eq!(store.load_turn("trace-turn").unwrap().state, "started");
+        assert!(store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .read_session_events("trace-session", 0, MAX_EVENT_PAGE)
+                .unwrap(),
+            baseline_events
+        );
+    }
+
+    #[test]
+    fn current_completion_semantic_tamper_quarantines_after_restart() {
+        let root = Root::new("turn-trace-current-semantic-tamper");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+        let trace = completed_turn_trace_v2("trace-session", "trace-turn", 4);
+        store
+            .finish_turn_with_trace("trace-session", "trace-turn", "completed", 4, &trace)
+            .unwrap();
+        let stored = store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .unwrap();
+        let payload_json: String = store
+            .connection
+            .query_row(
+                "SELECT payload_json FROM events
+                 WHERE session_id = 'trace-session' AND sequence = ?1",
+                [stored.event_sequence as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut payload = serde_json::from_str::<Value>(&payload_json).unwrap();
+        payload["trace"]["events"][1]["payload"]["evidence"]["completion"]["workspace_change"]
+            ["state"] = Value::String("unknown".into());
+        let tampered_json = serde_json::to_string(&payload).unwrap();
+        let tampered_hash = ContentHash::for_bytes(tampered_json.as_bytes());
+        store
+            .connection
+            .execute(
+                "UPDATE events SET payload_json = ?1, payload_sha256 = ?2, payload_bytes = ?3
+                 WHERE session_id = 'trace-session' AND sequence = ?4",
+                params![
+                    tampered_json,
+                    tampered_hash.sha256,
+                    tampered_hash.bytes as i64,
+                    stored.event_sequence as i64,
+                ],
+            )
+            .unwrap();
+        let candidate = store
+            .rebuild_session_projection_candidate("trace-session")
+            .unwrap();
+        assert!(!candidate.source_complete);
+        assert!(candidate
+            .issues
+            .iter()
+            .any(|issue| issue == "turn-trace-event-invalid"));
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert!(reopened.session_requires_recovery("trace-session"));
+        assert_eq!(reopened.quarantined_session_count(), 1);
+        assert!(reopened
+            .read_turn_trace("trace-session", "trace-turn")
+            .is_err());
+    }
+
+    #[test]
+    fn current_trace_mode_semantic_tamper_quarantines_after_restart() {
+        let root = Root::new("turn-trace-mode-semantic-tamper");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+        let trace = completed_turn_trace_v2("trace-session", "trace-turn", 4);
+        store
+            .finish_turn_with_trace("trace-session", "trace-turn", "completed", 4, &trace)
+            .unwrap();
+        let stored = store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .unwrap();
+        let chat_trace = completed_chat_turn_trace_v2("trace-session", "trace-turn", 4);
+        let chat_trace_identity = chat_trace.metadata_identity().unwrap();
+        let payload_json: String = store
+            .connection
+            .query_row(
+                "SELECT payload_json FROM events
+                 WHERE session_id = 'trace-session' AND sequence = ?1",
+                [stored.event_sequence as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut payload = serde_json::from_str::<Value>(&payload_json).unwrap();
+        payload["trace"] = serde_json::to_value(&chat_trace).unwrap();
+        payload["trace_identity"] = Value::String(chat_trace_identity.clone());
+        let tampered_json = serde_json::to_string(&payload).unwrap();
+        let tampered_hash = ContentHash::for_bytes(tampered_json.as_bytes());
+        let tampered_event_id = derived_event_id(
+            "turn-trace-recorded",
+            format!("trace-turn\0{chat_trace_identity}").as_bytes(),
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE events
+                 SET event_id = ?1, payload_json = ?2, payload_sha256 = ?3, payload_bytes = ?4
+                 WHERE session_id = 'trace-session' AND sequence = ?5",
+                params![
+                    tampered_event_id,
+                    tampered_json,
+                    tampered_hash.sha256,
+                    tampered_hash.bytes as i64,
+                    stored.event_sequence as i64,
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .read_turn_trace("trace-session", "trace-turn")
+                .unwrap_err()
+                .code,
+            "turn-trace-binding-mismatch"
+        );
+        let candidate = store
+            .rebuild_session_projection_candidate("trace-session")
+            .unwrap();
+        assert!(!candidate.source_complete);
+        assert!(candidate
+            .issues
+            .iter()
+            .any(|issue| issue == "turn-trace-event-invalid"));
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert!(reopened.session_requires_recovery("trace-session"));
+        assert_eq!(reopened.quarantined_session_count(), 1);
     }
 
     #[test]

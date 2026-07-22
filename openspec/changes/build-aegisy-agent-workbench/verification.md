@@ -1353,22 +1353,30 @@ Known limitations:
   from replayed or uncertain evidence. The additive Session projection is
   consumed by Qt, whose deterministic threshold cache is capped at 128 entries.
   Compaction activation, provider compact, and automatic authority remain absent.
-- `turn-trace/0.1` has focused contract/producer tests plus Store coverage for
-  source authority, event ordering, duplicate usage, terminal evidence, secret
-  rejection, atomic terminal persistence, idempotency, rollback, restart, and
-  tamper quarantine. The pinned Codex Runtime now produces terminal-last traces
-  for failed and interrupted Turns. Stdio fixtures prove EOF transport failure,
-  provider retry observation followed by authoritative failure, user
-  interruption, exact Session/Turn/environment binding, excluded Context counts,
-  content-free provider classification, restart equality, and no fabricated
-  Workspace/Git/Test evidence. A completed persisted Turn is also proven to have
-  no trace while completion evidence remains unavailable. Codex `error` is
-  non-terminal and its dynamic text does not enter Timeline output; malformed
-  terminal identities/statuses fail as protocol errors. The full Rust workspace
-  passes 502 library tests with one ignored live fixture, 10 threshold contract
-  tests, 63 protocol tests, 11 stdio tests, formatting, and strict Clippy. No
-  AAP/Qt trace read, audit/export, or retention surface exists, so task 20.1 stays
-  incomplete.
+- `turn-trace/0.2` has focused contract/producer tests plus Store coverage for
+  source authority, Intent/domain applicability, exact completion-to-Intent
+  binding, event ordering, duplicate usage, terminal evidence, secret rejection,
+  atomic terminal persistence, idempotency, rollback, restart, and semantic-tamper
+  quarantine. Strict dual-read fixtures preserve hand-written `0.1` failed and
+  completed JSON plus fixed trace identities without SQLite migration, backfill,
+  or event rewrite; legacy/new-field drift and future versions fail closed. The
+  pinned Codex Runtime now produces terminal-last traces for completed, failed,
+  and interrupted Turns. Chat completion records three not-applicable domains;
+  current read-only Work records no Workspace/Git change and keeps verification
+  unknown. Completed is only a provider lifecycle terminal, not proof that a task
+  changed files or passed tests. Stdio fixtures prove EOF transport failure,
+  provider retry then failure, interruption, successful Chat recovery, a Work
+  command/diagnostic completion, exact Session/Turn/environment/Intent binding,
+  restart equality, excluded Context counts, content-free classification, and no
+  fabricated Workspace/Git/Test evidence. Store admission rejects Work-to-Chat and
+  Chat-to-Work Intent substitution before any terminal side effect, direct read
+  rejects a hash-consistent mode substitution immediately, and projection replay
+  quarantines it while retaining mode-less
+  legacy `0.1` compatibility. The full Rust workspace passes 516
+  library tests with one ignored live fixture, 10 threshold contract tests, 63
+  protocol tests, 11 stdio tests, formatting, and strict Clippy. Complete
+  Tool/Approval/Usage/Change/Test production and any AAP/Qt trace read,
+  audit/export, or retention surface remain absent, so task 20.1 stays incomplete.
 - Direct C++17 syntax checks pass for the Qt widget and render fixture, and the
   render target now completes MOC/RCC/compile/link on this host. A focused cache
   mode passes. The full render run currently fails earlier at the existing model-

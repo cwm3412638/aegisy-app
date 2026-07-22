@@ -116,12 +116,14 @@ use turn_context::{
 use turn_trace::{
     ErrorClass as TraceErrorClass, EvidenceSource as TraceEvidenceSource,
     ModelReason as TraceModelReason, ModelRole as TraceModelRole,
-    RuntimeState as TraceRuntimeState, TraceBinding, TurnTrace,
+    RuntimeState as TraceRuntimeState, SessionMode as TraceSessionMode, TraceBinding,
+    TurnAccess as TraceTurnAccess, TurnKind as TraceTurnKind, TurnTrace,
 };
 use turn_trace_producer::{
     CodexTurnTraceAccumulator, ErrorMetadata as TraceErrorMetadata,
-    ModelMetadata as TraceModelMetadata, PreparedContextSummary as TraceContextSummary,
-    RuntimeMetadata as TraceRuntimeMetadata, TerminalMetadata as TraceTerminalMetadata,
+    IntentMetadata as TraceIntentMetadata, ModelMetadata as TraceModelMetadata,
+    PreparedContextSummary as TraceContextSummary, RuntimeMetadata as TraceRuntimeMetadata,
+    TerminalMetadata as TraceTerminalMetadata,
 };
 use usage_authority::from_provider_token_usage;
 use workbench_store::{
@@ -2500,14 +2502,18 @@ fn trace_error_class(class: &str) -> TraceErrorClass {
 }
 
 fn codex_turn_trace_accumulator(
-    session_id: &str,
-    turn_id: &str,
-    project_id: Option<&str>,
-    environment_identity: &str,
+    binding: TraceBinding,
+    session_mode: &SessionMode,
     backend_info: &BackendInfo,
     prepared_context: &PreparedTurnContext,
     started_at_ms: u64,
 ) -> Result<CodexTurnTraceAccumulator, String> {
+    let session_id = binding.session_id.as_str();
+    let turn_id = binding.turn_id.as_str();
+    if backend_info.permission_profile != "read-only" {
+        return Err("turn trace requires the exact read-only Runtime binding".into());
+    }
+    let permission_profile = backend_info.permission_profile.as_str();
     let manifest_bytes = serde_json::to_vec(&prepared_context.manifest)
         .map_err(|_| "cannot serialize context metadata for turn trace".to_owned())?;
     let manifest_identity = format!("sha256:{}", ContentHash::for_bytes(&manifest_bytes).sha256);
@@ -2550,6 +2556,39 @@ fn codex_turn_trace_accumulator(
         state: TraceRuntimeState::Ready,
         evidence_identity: runtime_evidence,
     };
+    let (trace_session_mode, turn_kind, access, mode_label) = match session_mode {
+        SessionMode::Chat => (
+            TraceSessionMode::Chat,
+            TraceTurnKind::Conversation,
+            TraceTurnAccess::NonMutating,
+            "chat",
+        ),
+        SessionMode::Work => (
+            TraceSessionMode::Work,
+            TraceTurnKind::ReadOnlyInspection,
+            TraceTurnAccess::ReadOnly,
+            "work",
+        ),
+    };
+    let intent = TraceIntentMetadata {
+        session_mode: trace_session_mode,
+        turn_kind,
+        access,
+        intent_identity: trace_hash_identity(
+            "turn-trace-intent",
+            &[session_id, turn_id, mode_label, permission_profile],
+        ),
+        evidence_identity: trace_hash_identity(
+            "turn-trace-intent-evidence",
+            &[
+                session_id,
+                turn_id,
+                mode_label,
+                permission_profile,
+                "codex-app-server",
+            ],
+        ),
+    };
     let model = backend_info
         .provider
         .as_deref()
@@ -2584,19 +2623,8 @@ fn codex_turn_trace_accumulator(
                 evidence_identity,
             }
         });
-    CodexTurnTraceAccumulator::started(
-        TraceBinding {
-            session_id: session_id.to_owned(),
-            turn_id: turn_id.to_owned(),
-            project_id: project_id.map(str::to_owned),
-            environment_identity: Some(environment_identity.to_owned()),
-        },
-        started_at_ms,
-        runtime,
-        model,
-        context,
-    )
-    .map_err(|cause| format!("{}: {}", cause.code, cause.message))
+    CodexTurnTraceAccumulator::started(binding, started_at_ms, intent, runtime, model, context)
+        .map_err(|cause| format!("{}: {}", cause.code, cause.message))
 }
 
 fn trace_error_metadata(
@@ -10032,6 +10060,7 @@ impl Runtime {
         };
         let backend_session_id = state.backend_session_id.clone();
         let trace_backend_info = state.backend_info.clone();
+        let trace_session_mode = state.session.mode.clone();
         let trace_environment_identity = state.environment.summary().environment_id.clone();
         let (command_environment, command_environment_binding) =
             if let Some(environment) = state.backend_info.environment.clone() {
@@ -10229,10 +10258,13 @@ impl Runtime {
                         CodexEvent::TurnStarted { turn_id } => {
                             let started_at_ms = now_ms();
                             let accumulator = match codex_turn_trace_accumulator(
-                                &params.session_id,
-                                &turn_id,
-                                project_id.as_deref(),
-                                &trace_environment_identity,
+                                TraceBinding {
+                                    session_id: params.session_id.clone(),
+                                    turn_id: turn_id.clone(),
+                                    project_id: project_id.clone(),
+                                    environment_identity: Some(trace_environment_identity.clone()),
+                                },
+                                &trace_session_mode,
                                 &trace_backend_info,
                                 &prepared_context,
                                 started_at_ms,
@@ -10667,25 +10699,62 @@ impl Runtime {
                             }
                         }
                         CodexEvent::TurnCompleted { turn_id } => {
-                            // Successful traces remain unsupported until Runtime
-                            // has authoritative Workspace, Git, and verification
-                            // evidence. Drop the open accumulator without claiming
-                            // a complete trace.
-                            if let Err(error) =
-                                self.persist_turn_state(&params.session_id, &turn_id, "completed")
-                            {
+                            let terminal_at_ms = now_ms();
+                            let Some(accumulator) = turn_trace_accumulator.take() else {
+                                persistence_error = Some(
+                                    "cannot persist completed turn without its trace accumulator"
+                                        .into(),
+                                );
+                                return;
+                            };
+                            let trace = match accumulator.finalize_completed(
+                                terminal_at_ms,
+                                trace_terminal_metadata(
+                                    &turn_id,
+                                    "completed",
+                                    TraceEvidenceSource::Provider,
+                                ),
+                            ) {
+                                Ok(trace) => trace,
+                                Err(error) => {
+                                    persistence_error = Some(format!(
+                                        "cannot finalize completed turn trace: {}: {}",
+                                        error.code, error.message
+                                    ));
+                                    return;
+                                }
+                            };
+                            pending_terminal = Some(PendingTurnTerminal {
+                                turn_id: turn_id.clone(),
+                                state: "completed",
+                                terminal_at_ms,
+                                trace,
+                                item: None,
+                            });
+                            let pending = pending_terminal
+                                .as_ref()
+                                .expect("completed terminal trace was prepared");
+                            if let Err(error) = self.persist_turn_state_with_trace(
+                                &params.session_id,
+                                &pending.turn_id,
+                                pending.state,
+                                pending.terminal_at_ms,
+                                &pending.trace,
+                            ) {
                                 persistence_error =
-                                    Some(format!("cannot persist turn completion: {error}"));
+                                    Some(format!("cannot persist completed turn: {error}"));
                                 cancellation.request();
                                 return;
                             }
-                            turn_trace_accumulator.take();
                             terminal_persisted = true;
+                            let pending = pending_terminal
+                                .take()
+                                .expect("persisted completed terminal trace is available");
                             emit(self.event(
                                 &params.session_id,
-                                Some(&turn_id),
+                                Some(&pending.turn_id),
                                 "turn.completed",
-                                None,
+                                pending.item,
                             ))
                         }
                         CodexEvent::TurnSteeringRequested { turn_id, input } => {
@@ -10950,9 +11019,10 @@ impl Runtime {
                         .take()
                         .expect("retried terminal trace is available");
                     let event_name = match pending.state {
+                        "completed" => "turn.completed",
                         "failed" => "turn.failed",
                         "interrupted" => "turn.interrupted",
-                        _ => unreachable!("only failed and interrupted traces are produced"),
+                        _ => unreachable!("only terminal turn traces are produced"),
                     };
                     emit(self.event(
                         &params.session_id,

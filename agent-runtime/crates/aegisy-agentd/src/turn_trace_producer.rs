@@ -6,11 +6,12 @@
 //! The accumulator is created only after Codex has returned the real Turn ID.
 
 use crate::turn_trace::{
-    AuthorityLabel, ErrorClass, EvidenceRef, EvidenceSource, ModelReason, ModelRole,
-    RedactionSummary, RuntimeState, TerminalEvidence, TerminalState, TraceBinding, TracePayload,
-    TurnTrace, TurnTraceError,
+    AuthorityLabel, CompletionDomain, CompletionEvidence, ErrorClass, EvidenceRef, EvidenceSource,
+    ModelReason, ModelRole, RedactionSummary, RuntimeState, SessionMode, TerminalEvidence,
+    TerminalState, TraceBinding, TracePayload, TurnAccess, TurnKind, TurnTrace, TurnTraceError,
 };
 
+const INTENT_EVENT_ID: &str = "intent-1";
 const RUNTIME_EVENT_ID: &str = "runtime-1";
 const MODEL_EVENT_ID: &str = "model-1";
 const CONTEXT_EVENT_ID: &str = "context-1";
@@ -23,6 +24,15 @@ pub struct RuntimeMetadata {
     pub adapter_identity: String,
     pub version: String,
     pub state: RuntimeState,
+    pub evidence_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentMetadata {
+    pub session_mode: SessionMode,
+    pub turn_kind: TurnKind,
+    pub access: TurnAccess,
+    pub intent_identity: String,
     pub evidence_identity: String,
 }
 
@@ -90,17 +100,39 @@ impl From<TurnTraceError> for TurnTraceProducerError {
 #[derive(Debug)]
 pub struct CodexTurnTraceAccumulator {
     trace: TurnTrace,
+    session_mode: SessionMode,
+    intent_identity: String,
+    completion_basis: EvidenceRef,
 }
 
 impl CodexTurnTraceAccumulator {
     pub fn started(
         binding: TraceBinding,
         started_at_ms: u64,
+        intent: IntentMetadata,
         runtime: RuntimeMetadata,
         model: Option<ModelMetadata>,
         context: PreparedContextSummary,
     ) -> Result<Self, TurnTraceProducerError> {
         let mut trace = TurnTrace::new(binding)?;
+        let completion_basis = observed(
+            EvidenceSource::Runtime,
+            intent.evidence_identity.clone(),
+            started_at_ms,
+        );
+        let intent_identity = intent.intent_identity.clone();
+        trace.append(
+            INTENT_EVENT_ID.into(),
+            started_at_ms,
+            TracePayload::Intent {
+                session_mode: intent.session_mode,
+                turn_kind: intent.turn_kind,
+                access: intent.access,
+                intent_identity: intent.intent_identity,
+                evidence: completion_basis.clone(),
+                redaction: RedactionSummary::metadata_only(),
+            },
+        )?;
         trace.append(
             RUNTIME_EVENT_ID.into(),
             started_at_ms,
@@ -161,7 +193,12 @@ impl CodexTurnTraceAccumulator {
             },
         )?;
         trace.validate_open()?;
-        Ok(Self { trace })
+        Ok(Self {
+            trace,
+            session_mode: intent.session_mode,
+            intent_identity,
+            completion_basis,
+        })
     }
 
     #[cfg(test)]
@@ -201,7 +238,7 @@ impl CodexTurnTraceAccumulator {
                 },
             },
         )?;
-        self.append_terminal(TerminalState::Failed, terminal_at_ms, terminal)
+        self.append_terminal(TerminalState::Failed, terminal_at_ms, terminal, None)
     }
 
     pub fn finalize_interrupted(
@@ -209,20 +246,42 @@ impl CodexTurnTraceAccumulator {
         terminal_at_ms: u64,
         terminal: TerminalMetadata,
     ) -> Result<TurnTrace, TurnTraceProducerError> {
-        self.append_terminal(TerminalState::Interrupted, terminal_at_ms, terminal)
+        self.append_terminal(TerminalState::Interrupted, terminal_at_ms, terminal, None)
     }
 
-    /// Successful completion remains fail-closed until Runtime supplies
-    /// authoritative terminal Workspace, Git, and verification evidence.
-    #[cfg(test)]
     pub fn finalize_completed(
         self,
-        _terminal_at_ms: u64,
+        terminal_at_ms: u64,
+        terminal: TerminalMetadata,
     ) -> Result<TurnTrace, TurnTraceProducerError> {
-        Err(TurnTraceProducerError {
-            code: "turn-trace-completed-unsupported",
-            message: "completed Codex traces require authoritative completion evidence",
-        })
+        let not_applicable = || CompletionDomain::NotApplicable {
+            evidence: self.completion_basis.clone(),
+        };
+        let completion = match self.session_mode {
+            SessionMode::Chat => CompletionEvidence {
+                intent_identity: self.intent_identity.clone(),
+                workspace_change: not_applicable(),
+                git_change: not_applicable(),
+                verification: not_applicable(),
+            },
+            SessionMode::Work => CompletionEvidence {
+                intent_identity: self.intent_identity.clone(),
+                workspace_change: not_applicable(),
+                git_change: not_applicable(),
+                // The current adapter does not observe every verification
+                // producer, so absence of a Test item is not evidence that no
+                // verification ran.
+                verification: CompletionDomain::Unknown {
+                    evidence: unknown(EvidenceSource::Runtime),
+                },
+            },
+        };
+        self.append_terminal(
+            TerminalState::Completed,
+            terminal_at_ms,
+            terminal,
+            Some(completion),
+        )
     }
 
     fn append_terminal(
@@ -230,6 +289,7 @@ impl CodexTurnTraceAccumulator {
         state: TerminalState,
         terminal_at_ms: u64,
         terminal: TerminalMetadata,
+        completion: Option<CompletionEvidence>,
     ) -> Result<TurnTrace, TurnTraceProducerError> {
         self.trace.append(
             TERMINAL_EVENT_ID.into(),
@@ -246,6 +306,7 @@ impl CodexTurnTraceAccumulator {
                         terminal.evidence_identity,
                         terminal_at_ms,
                     ),
+                    completion,
                 },
                 redaction: RedactionSummary::metadata_only(),
             },
@@ -264,6 +325,15 @@ fn observed(source: EvidenceSource, identity: String, observed_at_ms: u64) -> Ev
     }
 }
 
+fn unknown(source: EvidenceSource) -> EvidenceRef {
+    EvidenceRef {
+        authority: AuthorityLabel::Unknown,
+        source,
+        identity: None,
+        observed_at_ms: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +348,35 @@ mod tests {
             turn_id: "turn-1".into(),
             project_id: Some("project-1".into()),
             environment_identity: Some(format!("environment:sha256:{}", "a".repeat(64))),
+        }
+    }
+
+    fn chat_binding() -> TraceBinding {
+        TraceBinding {
+            session_id: "chat-session-1".into(),
+            turn_id: "chat-turn-1".into(),
+            project_id: None,
+            environment_identity: Some(format!("environment:sha256:{}", "9".repeat(64))),
+        }
+    }
+
+    fn work_intent() -> IntentMetadata {
+        IntentMetadata {
+            session_mode: SessionMode::Work,
+            turn_kind: TurnKind::ReadOnlyInspection,
+            access: TurnAccess::ReadOnly,
+            intent_identity: hash('a'),
+            evidence_identity: hash('b'),
+        }
+    }
+
+    fn chat_intent() -> IntentMetadata {
+        IntentMetadata {
+            session_mode: SessionMode::Chat,
+            turn_kind: TurnKind::Conversation,
+            access: TurnAccess::NonMutating,
+            intent_identity: hash('8'),
+            evidence_identity: hash('9'),
         }
     }
 
@@ -316,8 +415,27 @@ mod tests {
     }
 
     fn accumulator() -> CodexTurnTraceAccumulator {
-        CodexTurnTraceAccumulator::started(binding(), 10, runtime(), Some(model()), context())
-            .unwrap()
+        CodexTurnTraceAccumulator::started(
+            binding(),
+            10,
+            work_intent(),
+            runtime(),
+            Some(model()),
+            context(),
+        )
+        .unwrap()
+    }
+
+    fn chat_accumulator() -> CodexTurnTraceAccumulator {
+        CodexTurnTraceAccumulator::started(
+            chat_binding(),
+            10,
+            chat_intent(),
+            runtime(),
+            Some(model()),
+            context(),
+        )
+        .unwrap()
     }
 
     fn terminal() -> TerminalMetadata {
@@ -327,25 +445,56 @@ mod tests {
         }
     }
 
+    fn assert_content_free(trace: &TurnTrace) {
+        let serialized = serde_json::to_string(trace).unwrap();
+        for forbidden in [
+            "prompt",
+            "response",
+            "command",
+            "cwd",
+            "path",
+            "diff",
+            "output",
+            "credential",
+            "authorization",
+            "process_id",
+            "Bearer",
+            "private provider body",
+        ] {
+            assert!(!serialized.contains(forbidden), "found {forbidden}");
+        }
+        assert!(serialized.contains("\"content_included\":false"));
+    }
+
     #[test]
-    fn turn_started_records_only_runtime_model_and_context_metadata() {
+    fn turn_started_records_intent_runtime_model_and_context_metadata() {
         let accumulator = accumulator();
         let trace = accumulator.open_trace();
         trace.validate_open().unwrap();
-        assert_eq!(trace.events.len(), 3);
+        assert_eq!(trace.events.len(), 4);
         assert_eq!(trace.events[0].sequence, 1);
         assert_eq!(trace.events[1].sequence, 2);
         assert_eq!(trace.events[2].sequence, 3);
+        assert_eq!(trace.events[3].sequence, 4);
         assert!(matches!(
             trace.events[0].payload,
-            TracePayload::Runtime { .. }
+            TracePayload::Intent {
+                session_mode: SessionMode::Work,
+                turn_kind: TurnKind::ReadOnlyInspection,
+                access: TurnAccess::ReadOnly,
+                ..
+            }
         ));
         assert!(matches!(
             trace.events[1].payload,
-            TracePayload::Model { .. }
+            TracePayload::Runtime { .. }
         ));
         assert!(matches!(
             trace.events[2].payload,
+            TracePayload::Model { .. }
+        ));
+        assert!(matches!(
+            trace.events[3].payload,
             TracePayload::Context { .. }
         ));
         assert!(trace.events.iter().all(|event| event.at_ms == 10));
@@ -368,15 +517,15 @@ mod tests {
             .finalize_failed(20, error, terminal())
             .unwrap();
         trace.validate_complete().unwrap();
-        assert_eq!(trace.events.len(), 5);
-        assert_eq!(trace.events[3].at_ms, 20);
+        assert_eq!(trace.events.len(), 6);
         assert_eq!(trace.events[4].at_ms, 20);
+        assert_eq!(trace.events[5].at_ms, 20);
         assert!(matches!(
-            trace.events[3].payload,
+            trace.events[4].payload,
             TracePayload::Error { .. }
         ));
         assert!(matches!(
-            trace.events[4].payload,
+            trace.events[5].payload,
             TracePayload::Terminal {
                 state: TerminalState::Failed,
                 ..
@@ -390,15 +539,19 @@ mod tests {
                 .count(),
             1
         );
+        let TracePayload::Terminal { evidence, .. } = &trace.events[5].payload else {
+            panic!("failed trace must end with terminal evidence")
+        };
+        assert_eq!(evidence.completion, None);
     }
 
     #[test]
     fn interruption_is_terminal_last_without_fabricated_error_or_completion_evidence() {
         let trace = accumulator().finalize_interrupted(21, terminal()).unwrap();
-        assert_eq!(trace.events.len(), 4);
+        assert_eq!(trace.events.len(), 5);
         let TracePayload::Terminal {
             state, evidence, ..
-        } = &trace.events[3].payload
+        } = &trace.events[4].payload
         else {
             panic!("terminal event is missing")
         };
@@ -407,12 +560,63 @@ mod tests {
         assert_eq!(evidence.git_state_identity, None);
         assert_eq!(evidence.verification_identity, None);
         assert_eq!(evidence.observed_verification_count, 0);
+        assert_eq!(evidence.completion, None);
     }
 
     #[test]
-    fn completed_turn_remains_explicitly_unsupported() {
-        let error = accumulator().finalize_completed(20).unwrap_err();
-        assert_eq!(error.code, "turn-trace-completed-unsupported");
+    fn completed_chat_marks_all_completion_domains_not_applicable() {
+        let trace = chat_accumulator()
+            .finalize_completed(20, terminal())
+            .unwrap();
+        trace.validate_complete().unwrap();
+        let TracePayload::Terminal {
+            state: TerminalState::Completed,
+            evidence,
+            ..
+        } = &trace.events.last().unwrap().payload
+        else {
+            panic!("completed Chat trace must end with completed terminal evidence")
+        };
+        let completion = evidence.completion.as_ref().unwrap();
+        for domain in [
+            &completion.workspace_change,
+            &completion.git_change,
+            &completion.verification,
+        ] {
+            let CompletionDomain::NotApplicable { evidence } = domain else {
+                panic!("Chat completion domains must be not applicable")
+            };
+            assert_eq!(evidence.authority, AuthorityLabel::Observed);
+            assert_eq!(evidence.source, EvidenceSource::Runtime);
+            assert!(evidence.identity.is_some());
+        }
+        assert_content_free(&trace);
+    }
+
+    #[test]
+    fn completed_read_only_work_keeps_verification_unknown() {
+        let trace = accumulator().finalize_completed(20, terminal()).unwrap();
+        trace.validate_complete().unwrap();
+        let TracePayload::Terminal { evidence, .. } = &trace.events.last().unwrap().payload else {
+            panic!("completed Work trace must end with terminal evidence")
+        };
+        let completion = evidence.completion.as_ref().unwrap();
+        assert!(matches!(
+            completion.workspace_change,
+            CompletionDomain::NotApplicable { .. }
+        ));
+        assert!(matches!(
+            completion.git_change,
+            CompletionDomain::NotApplicable { .. }
+        ));
+        let CompletionDomain::Unknown { evidence } = &completion.verification else {
+            panic!("unobserved Work verification must remain unknown")
+        };
+        assert_eq!(evidence.authority, AuthorityLabel::Unknown);
+        assert_eq!(evidence.source, EvidenceSource::Runtime);
+        assert_eq!(evidence.identity, None);
+        assert_eq!(evidence.observed_at_ms, None);
+        assert_content_free(&trace);
     }
 
     #[test]
@@ -427,6 +631,7 @@ mod tests {
         let identity_error = CodexTurnTraceAccumulator::started(
             binding(),
             10,
+            work_intent(),
             unsafe_runtime,
             Some(model()),
             context(),
@@ -437,10 +642,17 @@ mod tests {
 
     #[test]
     fn unknown_model_metadata_is_omitted_instead_of_fabricated() {
-        let trace = CodexTurnTraceAccumulator::started(binding(), 10, runtime(), None, context())
-            .unwrap()
-            .finalize_interrupted(20, terminal())
-            .unwrap();
+        let trace = CodexTurnTraceAccumulator::started(
+            binding(),
+            10,
+            work_intent(),
+            runtime(),
+            None,
+            context(),
+        )
+        .unwrap()
+        .finalize_interrupted(20, terminal())
+        .unwrap();
         assert!(trace
             .events
             .iter()
@@ -469,21 +681,6 @@ mod tests {
                 },
             )
             .unwrap();
-        let serialized = serde_json::to_string(&trace).unwrap();
-        for forbidden in [
-            "prompt",
-            "response",
-            "command",
-            "cwd",
-            "path",
-            "diff",
-            "output",
-            "credential",
-            "authorization",
-            "process_id",
-        ] {
-            assert!(!serialized.contains(forbidden), "found {forbidden}");
-        }
-        assert!(serialized.contains("\"content_included\":false"));
+        assert_content_free(&trace);
     }
 }

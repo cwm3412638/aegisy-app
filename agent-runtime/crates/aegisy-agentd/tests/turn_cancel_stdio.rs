@@ -1,8 +1,9 @@
 #![cfg(unix)]
 
 use aegisy_agentd::turn_trace::{
-    ErrorClass as TraceErrorClass, EvidenceSource as TraceEvidenceSource,
-    TerminalState as TraceTerminalState, TracePayload,
+    CompletionDomain, ErrorClass as TraceErrorClass, EvidenceSource as TraceEvidenceSource,
+    SessionMode as TraceSessionMode, TerminalState as TraceTerminalState, TracePayload,
+    TurnAccess as TraceTurnAccess, TurnKind as TraceTurnKind,
 };
 use aegisy_agentd::workbench_store::WorkbenchStore;
 #[cfg(target_os = "macos")]
@@ -903,10 +904,63 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
     ] {
         assert!(!serialized_trace.contains(forbidden), "found {forbidden}");
     }
-    assert!(store
+    let completed_trace = store
         .read_turn_trace(&session_id, "turn-reconnect-2")
         .unwrap()
-        .is_none());
+        .expect("recovered completion must persist a terminal trace");
+    assert_eq!(completed_trace.state, "completed");
+    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.2");
+    assert_eq!(completed_trace.trace.binding.session_id, session_id);
+    assert_eq!(completed_trace.trace.binding.turn_id, "turn-reconnect-2");
+    let intent_identity = completed_trace
+        .trace
+        .events
+        .iter()
+        .find_map(|event| match &event.payload {
+            TracePayload::Intent {
+                session_mode: TraceSessionMode::Chat,
+                turn_kind: TraceTurnKind::Conversation,
+                access: TraceTurnAccess::NonMutating,
+                intent_identity,
+                ..
+            } => Some(intent_identity.as_str()),
+            _ => None,
+        })
+        .expect("completed Chat trace must contain its immutable intent");
+    let TracePayload::Terminal {
+        state: TraceTerminalState::Completed,
+        evidence,
+        ..
+    } = &completed_trace
+        .trace
+        .events
+        .last()
+        .expect("completed trace must end with terminal evidence")
+        .payload
+    else {
+        panic!("completed trace must end with a completed terminal event")
+    };
+    let completion = evidence
+        .completion
+        .as_ref()
+        .expect("completed trace must classify every completion domain");
+    assert_eq!(completion.intent_identity, intent_identity);
+    assert!(matches!(
+        completion.workspace_change,
+        CompletionDomain::NotApplicable { .. }
+    ));
+    assert!(matches!(
+        completion.git_change,
+        CompletionDomain::NotApplicable { .. }
+    ));
+    assert!(matches!(
+        completion.verification,
+        CompletionDomain::NotApplicable { .. }
+    ));
+    assert!(completed_trace.trace.events.iter().all(|event| !matches!(
+        event.payload,
+        TracePayload::Tool { .. } | TracePayload::Change { .. } | TracePayload::Test { .. }
+    )));
     drop(store);
     let reopened = WorkbenchStore::open(&data_root).unwrap();
     assert_eq!(
@@ -916,10 +970,13 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
             .unwrap(),
         failed_trace
     );
-    assert!(reopened
-        .read_turn_trace(&session_id, "turn-reconnect-2")
-        .unwrap()
-        .is_none());
+    assert_eq!(
+        reopened
+            .read_turn_trace(&session_id, "turn-reconnect-2")
+            .unwrap()
+            .unwrap(),
+        completed_trace
+    );
     drop(reopened);
     let _ = fs::remove_dir_all(codex.parent().unwrap());
 }
@@ -1243,6 +1300,8 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
 #[test]
 fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority() {
     let codex = fake_codex();
+    let data_root = codex.parent().unwrap().join("diagnostic-workbench");
+    fs::create_dir_all(&data_root).unwrap();
     let project_root = codex.parent().unwrap().join("project");
     fs::create_dir_all(project_root.join("src")).unwrap();
     fs::write(
@@ -1253,6 +1312,7 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
     let project_root = project_root.canonicalize().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
         .env("AEGISY_CODEX_PATH", &codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
         .env("AEGISY_FIXTURE_ROOT", &project_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1430,6 +1490,55 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    let completed_trace = store
+        .read_turn_trace(&session_id, "turn-fixture")
+        .unwrap()
+        .expect("read-only Work completion must persist a terminal trace");
+    let intent_identity = completed_trace
+        .trace
+        .events
+        .iter()
+        .find_map(|event| match &event.payload {
+            TracePayload::Intent {
+                session_mode: TraceSessionMode::Work,
+                turn_kind: TraceTurnKind::ReadOnlyInspection,
+                access: TraceTurnAccess::ReadOnly,
+                intent_identity,
+                ..
+            } => Some(intent_identity.as_str()),
+            _ => None,
+        })
+        .expect("Work trace must retain its read-only intent");
+    let TracePayload::Terminal {
+        state: TraceTerminalState::Completed,
+        evidence,
+        ..
+    } = &completed_trace.trace.events.last().unwrap().payload
+    else {
+        panic!("Work trace must end with completed terminal evidence")
+    };
+    let completion = evidence.completion.as_ref().unwrap();
+    assert_eq!(completion.intent_identity, intent_identity);
+    assert!(matches!(
+        completion.workspace_change,
+        CompletionDomain::NotApplicable { .. }
+    ));
+    assert!(matches!(
+        completion.git_change,
+        CompletionDomain::NotApplicable { .. }
+    ));
+    let CompletionDomain::Unknown { evidence } = &completion.verification else {
+        panic!("unobserved Work verification must remain unknown")
+    };
+    assert_eq!(evidence.source, TraceEvidenceSource::Runtime);
+    assert_eq!(evidence.identity, None);
+    assert_eq!(evidence.observed_at_ms, None);
+    assert!(completed_trace.trace.events.iter().all(|event| !matches!(
+        event.payload,
+        TracePayload::Change { .. } | TracePayload::Test { .. }
+    )));
+    drop(store);
     let _ = fs::remove_dir_all(codex.parent().unwrap());
 }
 

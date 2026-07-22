@@ -107,19 +107,30 @@ its component semantics, Aegisy preserves the original bounded total but does
 not silently copy it into the authoritative field.
 
 The sidecar also contains internal `context-threshold/0.1` and
-`turn-trace/0.1` validation contracts. Neither is currently an AAP capability.
+`turn-trace/0.2` validation contracts. Neither is currently an AAP capability.
 Codex usage Timeline metadata may include a `compaction_threshold` decision
 computed from provider-observed last-input/context-window values. Runtime can
 restore its hysteresis latch from complete bounded usage history and projects a
 content-free Session summary; `automatic_compaction_authority` is always false.
-The Workbench Store atomically persists validated terminal traces, and the pinned
-Codex Runtime produces them only for failed and interrupted Turns. Runtime and
-Session model-binding identities, prepared Context counts/hashes, stable Error
-classification, and terminal evidence are metadata-only. Successful completion
-does not produce a trace until authoritative Workspace/Git/Test applicability and
-evidence can be represented without fabrication. Trace records are not Timeline
-Items and have no AAP/Qt read, audit/export, or retention surface. Clients must not
-infer automatic compaction, trace visibility, or trace export from these fields.
+The Workbench Store atomically persists validated terminal traces and strictly
+replays both inner `turn-trace/0.1` and `turn-trace/0.2` without rewriting legacy
+events. The outer durable envelope remains `turn.trace.recorded/0.1`. The pinned
+Codex Runtime produces `0.2` traces for completed, failed, and interrupted Turns.
+One immutable Intent identifies Chat conversation or current Work read-only
+inspection. Completed terminal metadata binds that Intent and independently marks
+Workspace change, Git change, and verification as not-applicable, applicable,
+unknown, or observed. Chat uses three not-applicable domains; Work has no mutation
+authority, so Workspace/Git change are not applicable and unobserved verification
+is unknown. `completed` means only that the provider Turn lifecycle ended normally;
+it is not proof of file changes, Git state, or passing tests. Failed/interrupted
+traces carry no completion domains. Runtime and Session model-binding identities,
+prepared Context counts/hashes, stable Error classification, and terminal evidence
+remain metadata-only. Admission, direct read, and replay require a current Intent Chat/Work mode
+to match the durable Session mode; legacy `0.1` traces retain their mode-less replay
+semantics. A mismatch fails closed rather than reclassifying completion. Trace
+records are not Timeline Items and have no AAP/Qt read,
+audit/export, or retention surface. Clients must not infer task success, automatic
+compaction, trace visibility, or trace export from these fields.
 
 The Qt Timeline treats this metadata as untrusted protocol input. It requires
 the exact usage schema, all four metric classes, consistent authority/value

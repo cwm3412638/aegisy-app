@@ -608,32 +608,33 @@
 ## 20. Observability, Diagnostics, and Evaluation
 
 - [ ] 20.1 Implement structured local turn trace with source-qualified runtime/model/context/tool/approval/usage/change/test/error data
-  - Partial internal `turn-trace/0.1` contract validates content-free runtime,
-    model, context, tool, approval, usage, change, test, error, and terminal
-    evidence with bounded identities, source/authority labels, redaction
-    summaries, duplicate-usage protection, ordered events, and terminal-last
-    invariants. `WorkbenchStore::finish_turn_with_trace` now validates and
-    records one complete metadata-only trace as `turn.trace.recorded/0.1` in
-    the same SQLite transaction as the terminal Turn update/event. The trace
-    precedes the terminal event so operation reconciliation still observes the
-    terminal Turn state. Identical retries are idempotent; binding, identity,
-    state, time, project, or trace conflicts fail closed. Projection replay
-    revalidates the trace and exact following terminal event, and tests cover
-    restart recovery, duplicate conflict, transaction rollback, and hash-
-    consistent semantic tampering. The pinned Codex Runtime now produces this
-    metadata-only trace for authoritative `failed` and `interrupted` terminal
-    Turns. Runtime, Session model binding, prepared Context manifest, stable
-    Error classification, and terminal evidence use identities/counts only;
-    excluded Context entries are counted and no prompt, provider body, path,
-    command, diff, output, or credential enters the trace. Codex `error`
-    notifications are non-terminal observations; only a schema-valid
-    `turn/completed` terminal status ends the Turn. Persistence failure requests
-    interruption and a successfully committed storage-class fallback emits an
-    exact `turn.failed` lifecycle event. Successful `completed` traces remain
-    unsupported until the contract can truthfully represent Chat/read-only/
-    mutation applicability and authoritative Workspace/Git/Test evidence. Trace
-    data remains unexposed through Timeline, AAP/Qt, audit, retention, or export;
-    keep this task unchecked.
+  - Partial internal `turn-trace/0.2` contract keeps strict dual-read support for
+    durable `0.1` records while adding one immutable Runtime-observed Intent for
+    Chat conversation, Work read-only inspection, or future Work mutation. A
+    completed terminal binds that exact Intent and classifies workspace change,
+    Git change, and verification independently as not-applicable, applicable,
+    unknown, or observed; `completed` means only that the provider Turn lifecycle
+    ended normally. Chat uses three explicit not-applicable domains. Current Work
+    is read-only, so workspace/Git change are not applicable and verification
+    remains unknown rather than being inferred from missing provider items. Future
+    mutation completion requires observed Workspace evidence matching an Applied
+    Change. Failed/interrupted Turns contain no completion domains. Existing
+    runtime/model/context/tool/approval/usage/change/test/error validation,
+    source/authority labels, redaction bounds, duplicate-usage protection, event
+    ordering, and terminal-last invariants remain. The Store continues writing the
+    unchanged outer `turn.trace.recorded/0.1` envelope in the same SQLite
+    transaction as the terminal Turn event, reads both inner versions without a
+    schema migration or event rewrite, and preserves fixed legacy identities.
+    Current Codex Runtime now produces `0.2` traces for completed, failed, and
+    interrupted Turns with one idempotent terminal-write retry. Stdio fixtures
+    prove Chat and read-only Work completion, exact Intent/domain binding, restart
+    equality, transport/provider failure, interruption, and no fabricated
+    Workspace/Git/Test evidence or content. Store admission, direct read, and projection replay
+    require the current Intent mode to equal the persisted Session mode while
+    leaving legacy `0.1` mode-less records readable; semantic mode substitution
+    fails closed. Complete Tool/Approval/Usage/Change/
+    Test producers plus Timeline, AAP/Qt, audit, retention, and export surfaces
+    remain absent; keep this task unchecked.
 - [ ] 20.2 Implement observed, catalog-derived, estimated, stale, and unknown labels for token, context, cost, and reasoning status
   - Partial foundation: internal `usage-authority/0.1` validates exactly the
     four metric classes and source labels, rejects unknown values with numbers,
