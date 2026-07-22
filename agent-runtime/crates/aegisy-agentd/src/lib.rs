@@ -123,7 +123,7 @@ use turn_trace_producer::{
     CodexTurnTraceAccumulator, ErrorMetadata as TraceErrorMetadata,
     IntentMetadata as TraceIntentMetadata, ModelMetadata as TraceModelMetadata,
     PreparedContextSummary as TraceContextSummary, RuntimeMetadata as TraceRuntimeMetadata,
-    TerminalMetadata as TraceTerminalMetadata,
+    TerminalMetadata as TraceTerminalMetadata, UsageSnapshotMetadata as TraceUsageSnapshotMetadata,
 };
 use usage_authority::from_provider_token_usage;
 use workbench_store::{
@@ -2078,18 +2078,33 @@ fn context_threshold_for_usage(
 
 /// Reconstruct the context-threshold latch from persisted usage Items.
 ///
-/// Usage history is an input to the review signal only. Every persisted usage
-/// Item must carry a complete, validated `usage-authority/0.1` report and the
-/// exact threshold decision produced from the preceding status. A malformed
-/// usage history is deliberately not skipped: it restores the conservative
-/// `PreviewRequired` state so a restart can never turn uncertain history into
-/// `NoAction`.
+/// Usage history is an input to the review signal only. Every authoritative
+/// Usage Item must carry a complete `usage-authority/0.1` report and the exact
+/// threshold decision produced from the preceding status. A genuinely malformed
+/// provider snapshot without authority advances the latch to `PreviewRequired`
+/// and replay continues. A valid snapshot with missing or invalid authority stays
+/// uncertain, so a restart can never turn tampering into `NoAction`.
 fn replay_context_threshold_item(
     item: &TimelineItem,
     previous_status: context_threshold::ThresholdStatus,
 ) -> Option<context_threshold::ThresholdStatus> {
     let data = item.data.as_ref()?.as_object()?;
-    let authority = data.get("authority")?.as_object()?;
+    let authority = match data.get("authority") {
+        Some(authority) => authority.as_object()?,
+        None => {
+            let raw_usage = json!({
+                "last": data.get("last").cloned().unwrap_or(Value::Null),
+                "total": data.get("total").cloned().unwrap_or(Value::Null),
+                "model_context_window": data
+                    .get("model_context_window")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            });
+            return usage_authority::from_provider_token_usage(&raw_usage, 1)
+                .is_err()
+                .then_some(context_threshold::ThresholdStatus::PreviewRequired);
+        }
+    };
 
     // The threshold decision is an additive field on the authority report;
     // remove it before decoding and validating the four-metric contract.
@@ -2252,13 +2267,40 @@ mod context_threshold_restore_tests {
         let decision = context_threshold_for_usage(&report, previous).unwrap();
         let mut authority = serde_json::to_value(report).unwrap();
         authority["compaction_threshold"] = serde_json::to_value(decision).unwrap();
+        let mut data = raw;
+        data["authority"] = authority;
         TimelineItem {
             id: id.into(),
             kind: "usage".into(),
             role: "system".into(),
             state: "updated".into(),
             content: "Token usage updated".into(),
-            data: Some(json!({ "authority": authority })),
+            data: Some(data),
+        }
+    }
+
+    fn malformed_usage_item(id: &str) -> TimelineItem {
+        TimelineItem {
+            id: id.into(),
+            kind: "usage".into(),
+            role: "system".into(),
+            state: "updated".into(),
+            content: "Token usage updated".into(),
+            data: Some(json!({
+                "total": {
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "reasoning_output_tokens": 0
+                },
+                "last": {
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "reasoning_output_tokens": 0
+                },
+                "model_context_window": 100
+            })),
         }
     }
 
@@ -2321,6 +2363,22 @@ mod context_threshold_restore_tests {
         assert_eq!(
             restore_context_threshold_status(&[item]),
             context_threshold::ThresholdStatus::PreviewRequired
+        );
+    }
+
+    #[test]
+    fn malformed_provider_usage_advances_the_latch_and_replay_continues() {
+        let items = vec![
+            malformed_usage_item("usage-malformed"),
+            usage_item(
+                "usage-after-malformed",
+                75,
+                context_threshold::ThresholdStatus::PreviewRequired,
+            ),
+        ];
+        assert_eq!(
+            restore_context_threshold_status(&items),
+            context_threshold::ThresholdStatus::NoAction
         );
     }
 
@@ -10497,15 +10555,22 @@ impl Runtime {
                             let count = metadata_update_counts.entry(key.clone()).or_default();
                             if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
                                 *count += 1;
-                                if let Ok(report) = from_provider_token_usage(&usage, now_ms()) {
-                                    if let Ok(mut authority) = serde_json::to_value(&report) {
+                                let observed_at_ms = now_ms();
+                                let mut next_context_threshold_status =
+                                    context_threshold::ThresholdStatus::PreviewRequired;
+                                let mut report = None;
+                                if let Ok(candidate) =
+                                    from_provider_token_usage(&usage, observed_at_ms)
+                                {
+                                    if let Ok(mut authority) = serde_json::to_value(&candidate) {
                                         if let Some(decision) = context_threshold_for_usage(
-                                            &report,
+                                            &candidate,
                                             context_threshold_status,
                                         ) {
-                                            context_threshold_status = decision.status;
                                             if let Ok(value) = serde_json::to_value(decision) {
                                                 authority["compaction_threshold"] = value;
+                                                next_context_threshold_status = decision.status;
+                                                report = Some(candidate);
                                             }
                                         }
                                         if let Some(object) = usage.as_object_mut() {
@@ -10528,6 +10593,31 @@ impl Runtime {
                                         Some(format!("cannot persist usage item: {error}"));
                                     cancellation.request();
                                     return;
+                                }
+                                context_threshold_status = next_context_threshold_status;
+                                if let Some(report) = report {
+                                    let Some(accumulator) = turn_trace_accumulator.as_mut() else {
+                                        persistence_error = Some(
+                                            "cannot bind persisted usage to the turn trace"
+                                                .to_owned(),
+                                        );
+                                        cancellation.request();
+                                        return;
+                                    };
+                                    if let Err(cause) = accumulator.record_persisted_usage_snapshot(
+                                        TraceUsageSnapshotMetadata {
+                                            persisted_item_id: item.id.clone(),
+                                            report,
+                                            observed_at_ms,
+                                        },
+                                    ) {
+                                        persistence_error = Some(format!(
+                                            "cannot bind persisted usage to the turn trace: {}: {}",
+                                            cause.code, cause.message
+                                        ));
+                                        cancellation.request();
+                                        return;
+                                    }
                                 }
                                 if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                     state.items.push(item.clone());

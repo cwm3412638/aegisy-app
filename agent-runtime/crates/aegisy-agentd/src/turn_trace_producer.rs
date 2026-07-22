@@ -9,12 +9,15 @@ use crate::turn_trace::{
     AuthorityLabel, CompletionDomain, CompletionEvidence, ErrorClass, EvidenceRef, EvidenceSource,
     ModelReason, ModelRole, RedactionSummary, RuntimeState, SessionMode, TerminalEvidence,
     TerminalState, TraceBinding, TracePayload, TurnAccess, TurnKind, TurnTrace, TurnTraceError,
+    UsageAccounting, UsageAttribution, UsageReportScope,
 };
+use crate::usage_authority::{UsageAuthorityError, UsageAuthorityReport};
 
 const INTENT_EVENT_ID: &str = "intent-1";
 const RUNTIME_EVENT_ID: &str = "runtime-1";
 const MODEL_EVENT_ID: &str = "model-1";
 const CONTEXT_EVENT_ID: &str = "context-1";
+const USAGE_REPORT_EVENT_ID: &str = "usage-report-1";
 const ERROR_EVENT_ID: &str = "error-1";
 const TERMINAL_EVENT_ID: &str = "terminal-1";
 
@@ -77,6 +80,15 @@ pub struct TerminalMetadata {
     pub evidence_identity: String,
 }
 
+/// A Provider thread Usage snapshot whose corresponding Timeline Item has
+/// already been persisted successfully.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageSnapshotMetadata {
+    pub persisted_item_id: String,
+    pub report: UsageAuthorityReport,
+    pub observed_at_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnTraceProducerError {
     pub code: &'static str,
@@ -85,6 +97,15 @@ pub struct TurnTraceProducerError {
 
 impl From<TurnTraceError> for TurnTraceProducerError {
     fn from(value: TurnTraceError) -> Self {
+        Self {
+            code: value.code,
+            message: value.message,
+        }
+    }
+}
+
+impl From<UsageAuthorityError> for TurnTraceProducerError {
+    fn from(value: UsageAuthorityError) -> Self {
         Self {
             code: value.code,
             message: value.message,
@@ -103,6 +124,7 @@ pub struct CodexTurnTraceAccumulator {
     session_mode: SessionMode,
     intent_identity: String,
     completion_basis: EvidenceRef,
+    latest_usage_snapshot: Option<UsageSnapshotMetadata>,
 }
 
 impl CodexTurnTraceAccumulator {
@@ -198,12 +220,31 @@ impl CodexTurnTraceAccumulator {
             session_mode: intent.session_mode,
             intent_identity,
             completion_basis,
+            latest_usage_snapshot: None,
         })
     }
 
     #[cfg(test)]
     pub fn open_trace(&self) -> &TurnTrace {
         &self.trace
+    }
+
+    /// Replace the retained Provider thread Usage snapshot after its Timeline
+    /// Item has committed. Snapshots are absolute and therefore never summed;
+    /// the last successful record is the only one emitted at terminal time.
+    pub fn record_persisted_usage_snapshot(
+        &mut self,
+        snapshot: UsageSnapshotMetadata,
+    ) -> Result<(), TurnTraceProducerError> {
+        let mut candidate = self.trace.clone();
+        candidate.append(
+            USAGE_REPORT_EVENT_ID.into(),
+            snapshot.observed_at_ms,
+            usage_report_payload(&snapshot)?,
+        )?;
+        candidate.validate_open()?;
+        self.latest_usage_snapshot = Some(snapshot);
+        Ok(())
     }
 
     /// Finalize a provider, adapter, transport, policy, tool, or Runtime
@@ -215,6 +256,7 @@ impl CodexTurnTraceAccumulator {
         error: ErrorMetadata,
         terminal: TerminalMetadata,
     ) -> Result<TurnTrace, TurnTraceProducerError> {
+        self.append_latest_usage_snapshot()?;
         self.trace.append(
             ERROR_EVENT_ID.into(),
             terminal_at_ms,
@@ -291,6 +333,7 @@ impl CodexTurnTraceAccumulator {
         terminal: TerminalMetadata,
         completion: Option<CompletionEvidence>,
     ) -> Result<TurnTrace, TurnTraceProducerError> {
+        self.append_latest_usage_snapshot()?;
         self.trace.append(
             TERMINAL_EVENT_ID.into(),
             terminal_at_ms,
@@ -314,6 +357,39 @@ impl CodexTurnTraceAccumulator {
         self.trace.validate_complete()?;
         Ok(self.trace)
     }
+
+    fn append_latest_usage_snapshot(&mut self) -> Result<(), TurnTraceProducerError> {
+        let Some(snapshot) = self.latest_usage_snapshot.take() else {
+            return Ok(());
+        };
+        self.trace.append(
+            USAGE_REPORT_EVENT_ID.into(),
+            snapshot.observed_at_ms,
+            usage_report_payload(&snapshot)?,
+        )?;
+        Ok(())
+    }
+}
+
+fn usage_report_payload(
+    snapshot: &UsageSnapshotMetadata,
+) -> Result<TracePayload, TurnTraceProducerError> {
+    let report_identity = snapshot.report.metadata_identity()?;
+    Ok(TracePayload::UsageReport {
+        report_identity: report_identity.clone(),
+        persisted_item_id: snapshot.persisted_item_id.clone(),
+        scope: UsageReportScope::ProviderThread,
+        accounting: UsageAccounting::AbsoluteSnapshot,
+        attempt_attribution: UsageAttribution::Unavailable,
+        retry_attribution: UsageAttribution::Unavailable,
+        report: snapshot.report.clone(),
+        evidence: observed(
+            EvidenceSource::UsageProvider,
+            report_identity,
+            snapshot.observed_at_ms,
+        ),
+        redaction: RedactionSummary::metadata_only(),
+    })
 }
 
 fn observed(source: EvidenceSource, identity: String, observed_at_ms: u64) -> EvidenceRef {
@@ -445,6 +521,50 @@ mod tests {
         }
     }
 
+    fn usage_snapshot(
+        persisted_item_id: &str,
+        observed_at_ms: u64,
+        input_tokens: u64,
+    ) -> UsageSnapshotMetadata {
+        let usage = serde_json::json!({
+            "last": {
+                "cached_input_tokens": 0,
+                "input_tokens": input_tokens,
+                "output_tokens": 8,
+                "reasoning_output_tokens": 4,
+                "total_tokens": input_tokens + 8
+            },
+            "total": {
+                "cached_input_tokens": 0,
+                "input_tokens": input_tokens,
+                "output_tokens": 8,
+                "reasoning_output_tokens": 4,
+                "total_tokens": input_tokens + 8
+            },
+            "model_context_window": 128000
+        });
+        UsageSnapshotMetadata {
+            persisted_item_id: persisted_item_id.into(),
+            report: crate::usage_authority::from_provider_token_usage(&usage, observed_at_ms)
+                .unwrap(),
+            observed_at_ms,
+        }
+    }
+
+    fn transport_error() -> ErrorMetadata {
+        ErrorMetadata {
+            error_identity: hash('4'),
+            stable_class: ErrorClass::Transport,
+            source_class: "response-stream-disconnected".into(),
+            retryable: true,
+            evidence_source: EvidenceSource::Provider,
+            evidence_identity: hash('5'),
+            source_bytes: 512,
+            redacted_fields: 1,
+            omitted_fields: 2,
+        }
+    }
+
     fn assert_content_free(trace: &TurnTrace) {
         let serialized = serde_json::to_string(trace).unwrap();
         for forbidden in [
@@ -501,20 +621,123 @@ mod tests {
     }
 
     #[test]
-    fn failure_records_error_then_one_terminal_with_one_timestamp() {
-        let error = ErrorMetadata {
-            error_identity: hash('4'),
-            stable_class: ErrorClass::Transport,
-            source_class: "response-stream-disconnected".into(),
-            retryable: true,
-            evidence_source: EvidenceSource::Provider,
-            evidence_identity: hash('5'),
-            source_bytes: 512,
-            redacted_fields: 1,
-            omitted_fields: 2,
+    fn no_persisted_usage_snapshot_emits_no_usage_report() {
+        let trace = accumulator().finalize_completed(20, terminal()).unwrap();
+        assert_eq!(trace.schema_version, "turn-trace/0.3");
+        assert!(trace
+            .events
+            .iter()
+            .all(|event| !matches!(event.payload, TracePayload::UsageReport { .. })));
+    }
+
+    #[test]
+    fn repeated_absolute_usage_snapshots_retain_only_the_last_persisted_item() {
+        let mut accumulator = accumulator();
+        accumulator
+            .record_persisted_usage_snapshot(usage_snapshot("item-usage-1", 12, 24))
+            .unwrap();
+        accumulator
+            .record_persisted_usage_snapshot(usage_snapshot("item-usage-2", 15, 41))
+            .unwrap();
+
+        let trace = accumulator.finalize_completed(20, terminal()).unwrap();
+        let usage_events = trace
+            .events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                TracePayload::UsageReport {
+                    persisted_item_id,
+                    scope,
+                    accounting,
+                    attempt_attribution,
+                    retry_attribution,
+                    report,
+                    ..
+                } => Some((
+                    event,
+                    persisted_item_id,
+                    scope,
+                    accounting,
+                    attempt_attribution,
+                    retry_attribution,
+                    report,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(usage_events.len(), 1);
+        let (event, item_id, scope, accounting, attempt, retry, report) = usage_events[0];
+        assert_eq!(event.at_ms, 15);
+        assert_eq!(item_id, "item-usage-2");
+        assert_eq!(*scope, UsageReportScope::ProviderThread);
+        assert_eq!(*accounting, UsageAccounting::AbsoluteSnapshot);
+        assert_eq!(*attempt, UsageAttribution::Unavailable);
+        assert_eq!(*retry, UsageAttribution::Unavailable);
+        let token = report
+            .entry(crate::usage_authority::UsageMetric::Token)
+            .unwrap();
+        let Some(crate::usage_authority::UsageValue::Token(value)) = &token.value else {
+            panic!("expected final token snapshot")
         };
+        assert_eq!(value.input_tokens, Some(41));
+    }
+
+    #[test]
+    fn completed_failed_and_interrupted_traces_retain_usage_before_error_and_terminal() {
+        let mut completed = accumulator();
+        completed
+            .record_persisted_usage_snapshot(usage_snapshot("item-completed", 14, 30))
+            .unwrap();
+        let completed = completed.finalize_completed(20, terminal()).unwrap();
+
+        let mut failed = accumulator();
+        failed
+            .record_persisted_usage_snapshot(usage_snapshot("item-failed", 15, 31))
+            .unwrap();
+        let failed = failed
+            .finalize_failed(21, transport_error(), terminal())
+            .unwrap();
+
+        let mut interrupted = accumulator();
+        interrupted
+            .record_persisted_usage_snapshot(usage_snapshot("item-interrupted", 16, 32))
+            .unwrap();
+        let interrupted = interrupted.finalize_interrupted(22, terminal()).unwrap();
+
+        for trace in [&completed, &failed, &interrupted] {
+            assert_eq!(
+                trace
+                    .events
+                    .iter()
+                    .filter(|event| matches!(event.payload, TracePayload::UsageReport { .. }))
+                    .count(),
+                1
+            );
+            assert!(matches!(
+                trace.events.last().unwrap().payload,
+                TracePayload::Terminal { .. }
+            ));
+        }
+        for trace in [&completed, &interrupted] {
+            assert!(matches!(
+                trace.events[trace.events.len() - 2].payload,
+                TracePayload::UsageReport { .. }
+            ));
+        }
+        assert!(matches!(
+            failed.events[failed.events.len() - 3].payload,
+            TracePayload::UsageReport { .. }
+        ));
+        assert!(matches!(
+            failed.events[failed.events.len() - 2].payload,
+            TracePayload::Error { .. }
+        ));
+    }
+
+    #[test]
+    fn failure_records_error_then_one_terminal_with_one_timestamp() {
         let trace = accumulator()
-            .finalize_failed(20, error, terminal())
+            .finalize_failed(20, transport_error(), terminal())
             .unwrap();
         trace.validate_complete().unwrap();
         assert_eq!(trace.events.len(), 6);

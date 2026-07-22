@@ -107,15 +107,18 @@ its component semantics, Aegisy preserves the original bounded total but does
 not silently copy it into the authoritative field.
 
 The sidecar also contains internal `context-threshold/0.1` and
-`turn-trace/0.2` validation contracts. Neither is currently an AAP capability.
+`turn-trace/0.3` validation contracts. Neither is currently an AAP capability.
 Codex usage Timeline metadata may include a `compaction_threshold` decision
 computed from provider-observed last-input/context-window values. Runtime can
 restore its hysteresis latch from complete bounded usage history and projects a
 content-free Session summary; `automatic_compaction_authority` is always false.
 The Workbench Store atomically persists validated terminal traces and strictly
-replays both inner `turn-trace/0.1` and `turn-trace/0.2` without rewriting legacy
-events. The outer durable envelope remains `turn.trace.recorded/0.1`. The pinned
-Codex Runtime produces `0.2` traces for completed, failed, and interrupted Turns.
+replays inner `turn-trace/0.1`, `turn-trace/0.2`, and `turn-trace/0.3` without
+rewriting legacy events. Fixed `0.1` and `0.2` serialization identities remain
+unchanged; unknown fields and future versions fail closed. The outer durable
+envelope remains `turn.trace.recorded/0.1`, and the Workbench Store remains SQLite
+schema v13. The pinned Codex Runtime produces `0.3` traces for completed, failed,
+and interrupted Turns.
 One immutable Intent identifies Chat conversation or current Work read-only
 inspection. Completed terminal metadata binds that Intent and independently marks
 Workspace change, Git change, and verification as not-applicable, applicable,
@@ -125,10 +128,44 @@ is unknown. `completed` means only that the provider Turn lifecycle ended normal
 it is not proof of file changes, Git state, or passing tests. Failed/interrupted
 traces carry no completion domains. Runtime and Session model-binding identities,
 prepared Context counts/hashes, stable Error classification, and terminal evidence
-remain metadata-only. Admission, direct read, and replay require a current Intent Chat/Work mode
-to match the durable Session mode; legacy `0.1` traces retain their mode-less replay
-semantics. A mismatch fails closed rather than reclassifying completion. Trace
-records are not Timeline Items and have no AAP/Qt read,
+remain metadata-only. Admission, direct read, and replay require the Trace project,
+environment, and current Intent Chat/Work mode to match the durable Session binding;
+legacy `0.1` traces retain their mode-less Intent semantics but still bind Session,
+Turn, project, and environment. A mismatch fails closed rather than reclassifying
+completion. Trace
+version `0.3` may additionally contain one `usage-report` event. It embeds the validated
+`usage-authority/0.1` report as the latest successfully validated and persisted
+Codex Provider-thread snapshot, with `scope: provider-thread`,
+`accounting: absolute-snapshot`,
+and both Attempt and Retry attribution explicitly `unavailable`. Provider thread
+totals are not an Aegisy Turn Attempt total, so snapshots are never summed and no
+Attempt or Retry identity is manufactured.
+
+Runtime first commits the ordinary Usage Timeline Item. Only after that commit may
+the trace accumulator retain its exact Item ID and authority report. At terminal
+finalization it emits at most the latest retained snapshot, binds the report's
+deterministic metadata identity, observation time, and exact persisted Usage Item,
+and places it before any Error and the terminal event. Completed, failed, and
+interrupted traces retain a snapshot when one was successfully validated, observed,
+and persisted. Multiple notifications replace the retained absolute snapshot; they
+do not add to it. A Turn with no valid, successfully persisted Usage snapshot has no
+`usage-report` event; it does not receive an `unknown` placeholder. Store admission,
+direct read, and projection replay inspect the complete bounded Session Item prefix
+through that Turn's final Usage Item. They start from the single Session initial
+state `NoAction`, replay every prior Usage transition in sequence, revalidate each
+current Item's Session/Turn/kind/role/state, payload hash, raw Provider snapshot
+shape, reconstructed authority report, and context-threshold transition, then
+require the Trace to bind the final valid authority snapshot. The scan uses the same
+100,000-all-Item uncertainty boundary as Runtime restoration and never reads later
+Turns when validating an older Trace. A genuinely malformed Provider notification
+that cannot form an authority report remains ordinary Timeline metadata and is not
+a Trace Usage candidate, but advances the review latch to conservative
+`PreviewRequired` consistently live, in Store replay, and after restart. Valid raw
+Usage with a removed authority report is rejected as a semantic downgrade rather
+than treated as malformed input. Initial-state and cross-Turn hysteresis substitution
+therefore fail closed even when Item and Event hashes are recomputed.
+
+Trace records are not Timeline Items and have no AAP/Qt read,
 audit/export, or retention surface. Clients must not infer task success, automatic
 compaction, trace visibility, or trace export from these fields.
 

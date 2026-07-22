@@ -3,7 +3,8 @@
 use aegisy_agentd::turn_trace::{
     CompletionDomain, ErrorClass as TraceErrorClass, EvidenceSource as TraceEvidenceSource,
     SessionMode as TraceSessionMode, TerminalState as TraceTerminalState, TracePayload,
-    TurnAccess as TraceTurnAccess, TurnKind as TraceTurnKind,
+    TurnAccess as TraceTurnAccess, TurnKind as TraceTurnKind, UsageAccounting, UsageAttribution,
+    UsageReportScope,
 };
 use aegisy_agentd::workbench_store::WorkbenchStore;
 #[cfg(target_os = "macos")]
@@ -88,6 +89,7 @@ while IFS= read -r line; do
       case "$line" in
         *'emit metadata'*)
           printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","tokenUsage":{"last":{"cachedInputTokens":1,"inputTokens":2,"outputTokens":3,"reasoningOutputTokens":0,"totalTokens":5},"total":{"cachedInputTokens":1,"inputTokens":2,"outputTokens":3,"reasoningOutputTokens":0,"totalTokens":5},"modelContextWindow":128000}}}\n'
+          printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","tokenUsage":{"last":{"cachedInputTokens":4,"inputTokens":20,"outputTokens":7,"reasoningOutputTokens":2,"totalTokens":27},"total":{"cachedInputTokens":10,"inputTokens":50,"outputTokens":15,"reasoningOutputTokens":4,"totalTokens":65},"modelContextWindow":128000}}}\n'
           printf '{"method":"turn/plan/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","explanation":"Inspect then verify","plan":[{"status":"inProgress","step":"Inspect"},{"status":"pending","step":"Verify"}]}}\n'
           printf '{"method":"turn/diff/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","diff":"@@ -1 +1 @@\\n-old\\n+new\\n"}}\n'
           printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
@@ -97,6 +99,9 @@ while IFS= read -r line; do
           printf '{"method":"item/commandExecution/outputDelta","params":{"threadId":"thread-fixture","turnId":"turn-fixture","itemId":"command-fixture","delta":"error[E0425]: cannot find function missing\\n --> src/main.rs:2:5\\n"}}\n'
           printf '{"method":"item/completed","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"id":"command-fixture","type":"commandExecution","command":"cargo check","commandActions":[{"type":"unknown"}],"cwd":"%s","status":"failed","aggregatedOutput":"error[E0425]: cannot find function missing\\n --> src/main.rs:2:5\\n","durationMs":12,"exitCode":101,"source":"agent"}}}\n' "$AEGISY_FIXTURE_ROOT"
           printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
+          ;;
+        *'wait for cancellation'*)
+          printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","tokenUsage":{"last":{"cachedInputTokens":1,"inputTokens":8,"outputTokens":2,"reasoningOutputTokens":1,"totalTokens":10},"total":{"cachedInputTokens":1,"inputTokens":8,"outputTokens":2,"reasoningOutputTokens":1,"totalTokens":10},"modelContextWindow":128000}}}\n'
           ;;
       esac
       ;;
@@ -268,6 +273,7 @@ while IFS= read -r line; do
       ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-provider-failure"}}}\n' "$id"
+      printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-provider-failure","turnId":"turn-provider-failure","tokenUsage":{"last":{"cachedInputTokens":1,"inputTokens":12,"outputTokens":3,"reasoningOutputTokens":1,"totalTokens":15},"total":{"cachedInputTokens":1,"inputTokens":12,"outputTokens":3,"reasoningOutputTokens":1,"totalTokens":15},"modelContextWindow":128000}}}\n'
       printf '{"method":"error","params":{"threadId":"thread-provider-failure","turnId":"turn-provider-failure","willRetry":true,"error":{"message":"stream retry includes private provider response body and authorization Bearer ghp_123456789012345678901234567890","codexErrorInfo":null}}}\n'
       printf '{"method":"turn/completed","params":{"threadId":"thread-provider-failure","turn":{"id":"turn-provider-failure","status":"failed","error":{"message":"stream disconnected before completion after authorization Bearer ghp_123456789012345678901234567890","additionalDetails":"private provider response body","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":502}}}}}}\n'
       ;;
@@ -415,10 +421,12 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
             events.push(message);
         }
     }
-    let usage_event = events
+    let usage_events = events
         .iter()
-        .find(|event| event["params"]["event"] == "usage.updated")
-        .expect("metadata fixture did not emit usage");
+        .filter(|event| event["params"]["event"] == "usage.updated")
+        .collect::<Vec<_>>();
+    assert_eq!(usage_events.len(), 2);
+    let usage_event = usage_events[0];
     assert_eq!(
         usage_event["params"]["item"]["data"]["authority"]["schema_version"],
         "usage-authority/0.1"
@@ -458,6 +466,90 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    let completed_trace = store
+        .read_turn_trace(&session_id, "turn-fixture")
+        .unwrap()
+        .expect("metadata completion must persist a terminal trace");
+    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.3");
+    let usage_trace_events = completed_trace
+        .trace
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, TracePayload::UsageReport { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(usage_trace_events.len(), 1);
+    let usage_trace_event = usage_trace_events[0];
+    let TracePayload::UsageReport {
+        report_identity,
+        persisted_item_id,
+        scope,
+        accounting,
+        attempt_attribution,
+        retry_attribution,
+        report,
+        evidence,
+        ..
+    } = &usage_trace_event.payload
+    else {
+        unreachable!("filtered UsageReport event")
+    };
+    assert_eq!(*scope, UsageReportScope::ProviderThread);
+    assert_eq!(*accounting, UsageAccounting::AbsoluteSnapshot);
+    assert_eq!(*attempt_attribution, UsageAttribution::Unavailable);
+    assert_eq!(*retry_attribution, UsageAttribution::Unavailable);
+    assert_eq!(usage_trace_event.at_ms, report.as_of_ms);
+    assert_eq!(report.metadata_identity().unwrap(), *report_identity);
+    assert_eq!(evidence.identity.as_deref(), Some(report_identity.as_str()));
+    assert_eq!(evidence.observed_at_ms, Some(report.as_of_ms));
+    assert_eq!(
+        persisted_item_id,
+        usage_events[1]["params"]["item"]["id"]
+            .as_str()
+            .expect("final live Usage Item ID")
+    );
+    let report_value = serde_json::to_value(report).unwrap();
+    let token = report_value["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["metric"] == "token")
+        .expect("token Usage authority entry");
+    assert_eq!(token["value"]["input_tokens"], 50);
+    assert_eq!(token["value"]["output_tokens"], 15);
+    assert_eq!(token["value"]["total_tokens"], 65);
+    let context = report_value["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["metric"] == "context")
+        .expect("context Usage authority entry");
+    assert_eq!(context["value"]["used_tokens"], 20);
+    let persisted_items = store.read_session_items(&session_id, 0, 20).unwrap();
+    let persisted_usage = persisted_items
+        .iter()
+        .find(|item| item.item_id == *persisted_item_id)
+        .expect("UsageReport must reference a persisted Timeline Item");
+    assert_eq!(persisted_usage.turn_id.as_deref(), Some("turn-fixture"));
+    assert_eq!(persisted_usage.item_kind, "usage");
+    assert_eq!(persisted_usage.role, "system");
+    assert_eq!(persisted_usage.state, "updated");
+    let mut persisted_report = persisted_usage.payload["data"]["authority"].clone();
+    persisted_report
+        .as_object_mut()
+        .expect("persisted authority object")
+        .remove("compaction_threshold");
+    assert_eq!(persisted_report, report_value);
+    let usage_position = completed_trace
+        .trace
+        .events
+        .iter()
+        .position(|event| matches!(event.payload, TracePayload::UsageReport { .. }))
+        .unwrap();
+    let terminal_position = completed_trace.trace.events.len() - 1;
+    assert!(usage_position < terminal_position);
+    drop(store);
 
     let mut restarted = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
         .env("AEGISY_CODEX_PATH", &codex)
@@ -862,6 +954,11 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
         .events
         .iter()
         .any(|event| matches!(event.payload, TracePayload::Error { .. })));
+    assert!(failed_trace
+        .trace
+        .events
+        .iter()
+        .all(|event| !matches!(event.payload, TracePayload::UsageReport { .. })));
     let runtime_error = failed_trace
         .trace
         .events
@@ -909,9 +1006,14 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
         .unwrap()
         .expect("recovered completion must persist a terminal trace");
     assert_eq!(completed_trace.state, "completed");
-    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.2");
+    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.3");
     assert_eq!(completed_trace.trace.binding.session_id, session_id);
     assert_eq!(completed_trace.trace.binding.turn_id, "turn-reconnect-2");
+    assert!(completed_trace
+        .trace
+        .events
+        .iter()
+        .all(|event| !matches!(event.payload, TracePayload::UsageReport { .. })));
     let intent_identity = completed_trace
         .trace
         .events
@@ -1147,6 +1249,20 @@ fn stdio_codex_provider_failure_preserves_content_free_upstream_classification()
     assert_eq!(error.0, TraceErrorClass::Transport);
     assert_eq!(error.1, "response-stream-disconnected");
     assert!(error.2);
+    let usage_position = failed_trace
+        .trace
+        .events
+        .iter()
+        .position(|event| matches!(event.payload, TracePayload::UsageReport { .. }))
+        .expect("provider failure trace must retain observed Usage");
+    let error_position = failed_trace
+        .trace
+        .events
+        .iter()
+        .position(|event| matches!(event.payload, TracePayload::Error { .. }))
+        .expect("provider failure trace error position");
+    assert!(usage_position < error_position);
+    assert!(error_position < failed_trace.trace.events.len() - 1);
     let context = failed_trace
         .trace
         .events
@@ -1752,6 +1868,13 @@ fn stdio_control_steers_and_cancels_a_turn_while_normal_dispatch_is_blocked() {
     assert_eq!(evidence.verification_identity, None);
     assert_eq!(evidence.observed_verification_count, 0);
     assert_eq!(evidence.evidence.source, TraceEvidenceSource::Provider);
+    let usage_position = interrupted_trace
+        .trace
+        .events
+        .iter()
+        .position(|event| matches!(event.payload, TracePayload::UsageReport { .. }))
+        .expect("interrupted trace must retain observed Usage");
+    assert!(usage_position < interrupted_trace.trace.events.len() - 1);
     assert_eq!(
         interrupted_trace
             .trace

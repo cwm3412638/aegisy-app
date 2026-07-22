@@ -1337,8 +1337,9 @@ Known limitations:
 - Provider error mapping has focused Rust and Codex stdio/AAP coverage plus
   Node syntax and deterministic gateway assertions. The gateway stream and
   existing gateway integration tests pass under the bundled application Node
-  runtime. The system Homebrew Node is killed with exit 137 during startup on
-  this host, so it is not used as runtime evidence.
+  runtime. An earlier Homebrew Node gateway run was killed with exit 137, so that
+  run was not used as gateway runtime evidence; the current Homebrew OpenSpec CLI
+  validation completed successfully.
 - `usage-authority/0.1` focused tests and the aegisy-agentd library suite pass.
   Codex usage Timeline items now carry the validated authority report and a
   stdio/restart fixture verifies it. Qt adds strict valid/malformed render
@@ -1353,14 +1354,43 @@ Known limitations:
   from replayed or uncertain evidence. The additive Session projection is
   consumed by Qt, whose deterministic threshold cache is capped at 128 entries.
   Compaction activation, provider compact, and automatic authority remain absent.
-- `turn-trace/0.2` has focused contract/producer tests plus Store coverage for
+- `turn-trace/0.3` retains the existing Intent/completion-domain contract and adds
+  one final Provider-thread Usage authority snapshot. Strict three-version fixtures
+  preserve hand-written `0.1` failed/completed JSON and the fixed `0.1` and `0.2`
+  trace identities; cross-version fields and future `0.4` fail closed. The outer
+  event remains `turn.trace.recorded/0.1`, SQLite remains v13, and no migration,
+  backfill, or legacy event rewrite is introduced.
+- The `0.3` contract/producer/Store verification scope covers deterministic
+  `UsageAuthorityReport` identity and tamper rejection; exact schema, Provider
+  source, observed time, report identity, and persisted Timeline Item binding; at
+  most one Usage report; final-snapshot replacement without summing or assigning an
+  Attempt/Retry; completed, failed, and interrupted retention before Error/Terminal;
+  and no Usage event when no notification formed a valid authority report and was
+  successfully persisted. Store fixtures cover Timeline Item first persistence,
+  exact Session/Turn/kind/role/state, raw Provider snapshot/report/threshold
+  reconstruction, final-valid-snapshot selection, malformed non-authoritative
+  metadata, authority-downgrade rejection, idempotency, rollback, restart,
+  direct-read rejection, and semantic-tamper quarantine.
+- Threshold reconstruction now starts from the single Session `NoAction` state and
+  replays the complete Session Item prefix through the target Turn's final Usage under
+  the same 100,000-all-Item uncertainty bound as Runtime restoration. Later Turn
+  Usage is excluded. Malformed authority-less Provider metadata advances the latch to
+  conservative `PreviewRequired` consistently in the live producer, Store, and
+  restart replay without becoming a Trace Usage event. Fixtures reject a forged first
+  snapshot state and a hash-consistent cross-Turn 80%-90% hysteresis downgrade during
+  admission, direct read, projection replay, and restart quarantine.
+- The direct SQLite validator counts the complete Item prefix before reading Usage
+  and consumes the Usage query lazily. It retains only one threshold latch, the
+  current-Turn count, and the final valid report/Item binding, so peak memory is
+  bounded by one Item rather than all historical Usage payloads. Repeated terminal
+  admission and per-Trace projection replay still rescan bounded history; a verified
+  prefix cache and single-pass replay remain required before large-Session performance
+  is considered complete.
+- Existing focused contract/producer tests plus Store coverage continue to cover
   source authority, Intent/domain applicability, exact completion-to-Intent
   binding, event ordering, duplicate usage, terminal evidence, secret rejection,
   atomic terminal persistence, idempotency, rollback, restart, and semantic-tamper
-  quarantine. Strict dual-read fixtures preserve hand-written `0.1` failed and
-  completed JSON plus fixed trace identities without SQLite migration, backfill,
-  or event rewrite; legacy/new-field drift and future versions fail closed. The
-  pinned Codex Runtime now produces terminal-last traces for completed, failed,
+  quarantine. The pinned Codex Runtime now produces terminal-last traces for completed, failed,
   and interrupted Turns. Chat completion records three not-applicable domains;
   current read-only Work records no Workspace/Git change and keeps verification
   unknown. Completed is only a provider lifecycle terminal, not proof that a task
@@ -1372,10 +1402,12 @@ Known limitations:
   Chat-to-Work Intent substitution before any terminal side effect, direct read
   rejects a hash-consistent mode substitution immediately, and projection replay
   quarantines it while retaining mode-less
-  legacy `0.1` compatibility. The full Rust workspace passes 516
-  library tests with one ignored live fixture, 10 threshold contract tests, 63
-  protocol tests, 11 stdio tests, formatting, and strict Clippy. Complete
-  Tool/Approval/Usage/Change/Test production and any AAP/Qt trace read,
+  legacy `0.1` compatibility.
+- The complete `0.3` verification passes 539 library tests with one ignored live
+  fixture, 10 threshold contract tests, 63 protocol tests, 11 stdio tests,
+  formatting, strict Clippy, `git diff --check`, and strict OpenSpec validation.
+  Complete Tool/Approval/Change/Test production,
+  authoritative per-Attempt/Retry Usage, and any AAP/Qt trace read,
   audit/export, or retention surface remain absent, so task 20.1 stays incomplete.
 - Direct C++17 syntax checks pass for the Qt widget and render fixture, and the
   render target now completes MOC/RCC/compile/link on this host. A focused cache

@@ -887,47 +887,54 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   derivation identities, and reports must contain exactly the four metrics.
   Codex `thread/tokenUsage/updated` Timeline items now retain raw bounded usage
   plus a validated report: provider token, context-window, and reasoning fields
-  are observed, cost is unknown, and unreconciled totals are not rewritten.
+  are observed, cost is unknown, and unreconciled totals are not rewritten. A
+  deterministic metadata identity canonicalizes the complete validated report for
+  `turn-trace/0.3`; the report remains a Provider-thread absolute snapshot and
+  grants no Turn Attempt or Retry attribution.
   Qt validates the schema, complete metric set, authority flags/value kinds,
   and false automatic-compaction authority before rendering fixed labels and
   numeric values; malformed or unknown reports show a fixed unknown state and
   no provider text. This remains Codex-only and is not connected to catalog
   pricing, cross-provider correlation, billing, routing, or durable cross-turn
   threshold state; keep task `20.2` unchecked.
-- OpenSpec task `20.1` now has an internal `turn-trace/0.2` contract while retaining
-  strict durable read compatibility for `turn-trace/0.1`. The new version records
-  one immutable Runtime-observed Intent for Chat conversation, Work read-only
-  inspection, or future Work mutation. A completed terminal binds the exact Intent
-  identity and independently classifies Workspace change, Git change, and
-  verification as not-applicable, applicable, unknown, or observed. Completed means
-  only that the provider Turn lifecycle ended normally; it does not mean a task
-  changed files, reached a verified Git state, or passed tests. Chat completion uses
-  three explicit not-applicable domains. Current Work remains read-only, so
-  Workspace/Git change are not applicable and verification stays unknown unless an
-  authoritative producer is added. Future mutation completion requires observed
-  Workspace evidence matching an Applied Change. Failed/interrupted traces carry no
-  completion domains but still bind the same start Intent. Existing content/secret
-  rejection, bounded identities/redaction, duplicate usage protection, source labels,
-  event ordering, and terminal-last invariants remain.
-  `WorkbenchStore::finish_turn_with_trace` still persists the unchanged outer
-  `turn.trace.recorded/0.1` event in the same SQLite transaction as the terminal Turn
-  event, immediately before it. Store schema remains v13: no migration, backfill, or
-  legacy event rewrite occurs. Hand-written legacy failed/completed JSON and fixed
-  identities replay unchanged; unknown fields, future versions, binding drift, and
-  hash-consistent semantic tampering fail closed or quarantine the Session. The
-  pinned Codex Runtime now produces `0.2` traces for completed, failed, and
-  interrupted Turns, binding Session/Turn/Project/environment, pinned Runtime,
-  Runtime-observed Session model binding, prepared Context identities/counts, and
-  stable Error classes without prompt, provider body, path, command, diff, output,
-  or credential content. All terminal Trace writes retain the finalized value for
-  one idempotent retry. Store admission, direct read, and projection replay also require the
-  `0.2` Intent Chat/Work mode to match the persisted Session mode; legacy `0.1`
-  remains readable because it has no Intent field. Hash-consistent Work-to-Chat or
-  Chat-to-Work semantic substitution is rejected and quarantines the Session on
-  restart. Codex `error` remains non-terminal; only exact schema-valid
-  `turn/completed` status is terminal. Complete Tool/Approval/Usage/Change/Test
-  production plus Timeline, AAP/Qt, audit, retention, and export remain disconnected,
-  so keep `20.1` unchecked.
+- OpenSpec task `20.1` now has an internal `turn-trace/0.3` contract with strict
+  durable reads for `turn-trace/0.1`, `0.2`, and `0.3`. Fixed hand-written legacy
+  JSON and `0.1`/`0.2` identities remain unchanged; future versions and cross-version
+  fields fail closed. The `0.2` Intent/completion-domain contract remains intact:
+  one immutable Runtime-observed Intent identifies Chat conversation, Work read-only
+  inspection, or future Work mutation, and completion never implies file changes,
+  Git state, or passing tests.
+  `0.3` adds at most one final `usage-report`. It binds the latest successfully
+  validated and persisted Codex Provider-thread `usage-authority/0.1` snapshot,
+  exact Timeline Item, deterministic report identity, observation time,
+  `scope=provider-thread`, and `accounting=absolute-snapshot`; Attempt and Retry
+  attribution remain explicitly unavailable. Runtime persists the ordinary Usage
+  Item before retaining it in the Trace accumulator. Later valid notifications
+  replace the retained absolute snapshot rather than being summed. Completed,
+  failed, and interrupted traces retain the snapshot before Error/Terminal, while a
+  Turn with no valid persisted authority report emits no fabricated Usage event.
+  Store admission, direct read, and projection replay scan the complete bounded
+  Session Item prefix through the target Turn's final Usage Item. They reconstruct
+  one context-threshold latch from the single `NoAction` Session initial state,
+  validate every prior Usage transition, verify Item hashes/bindings, rebuild
+  authority from raw Provider values, and require the Trace to bind the final valid
+  snapshot. The bound matches Runtime restoration's 100,000-all-Item fail-closed
+  limit; later Turns cannot influence an older Trace. Genuinely malformed
+  non-authoritative Provider metadata is ignored as a Trace candidate but advances
+  the live, Store, and restart latch to conservative `PreviewRequired`; a later valid
+  observation may clear it only through the normal hysteresis rule. Valid raw Usage
+  with authority removed is rejected as a semantic downgrade. Direct reads recheck
+  Session mode, project, and environment together, matching admission and replay.
+  Initial-latch substitution, cross-Turn hysteresis downgrade, earlier-valid-snapshot
+  substitution, raw/threshold tampering, binding substitution, and restart replay all
+  fail closed or quarantine the Session.
+  `WorkbenchStore::finish_turn_with_trace` still writes the unchanged outer
+  `turn.trace.recorded/0.1` event immediately before the terminal event in one SQLite
+  transaction. Store schema remains v13 with no migration, backfill, or legacy event
+  rewrite. The Trace remains content-free: no prompt, provider body, path, command,
+  diff, output, or credential content is recorded. Complete Tool/Approval/Change/Test
+  production, per-Attempt/Retry Usage authority, Timeline projection, AAP/Qt,
+  audit/export, and retention remain absent; keep `20.1` and `20.2` unchecked.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
   at most three retries for transient output-channel, transport, write, read, or
   timeout failures. Version mismatch and protocol rejection are not retried; the
@@ -1263,9 +1270,10 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: 16 desktop tests, 516 passed Rust sidecar unit tests plus
-one explicitly ignored live Codex fixture, 63 Rust protocol tests, eleven macOS
-sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
+Current verified baseline: the last complete desktop run remains 16 tests; the
+current Rust run has 539 passed sidecar unit tests plus one explicitly ignored live
+Codex fixture, 63 Rust protocol tests, ten context-threshold contract tests, eleven
+macOS sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
 runtime budget-ledger, unified-execution-plan, durable-job lifecycle contracts, and
@@ -2466,13 +2474,13 @@ Implemented visual baseline:
 ## Verification Snapshot (2026-07-22)
 
 - The Rust workspace passes `cargo fmt --all -- --check`, `cargo test
-  --workspace` (516 `aegisy-agentd` library tests passed, one ignored, 10
+  --workspace` (539 `aegisy-agentd` library tests passed, one ignored, 10
   context-threshold contract tests, 63 AAP protocol tests, and 11 stdio/Codex
   tests), and strict workspace Clippy.
-- The bundled application Node runtime passes both local gateway integration
-  suites, JavaScript syntax checks, and `openspec validate
-  build-aegisy-agent-workbench --strict`. The system Homebrew Node is killed by
-  this host with exit 137 at startup; use the bundled runtime for evidence.
+- The previously verified bundled application Node runtime passes both local gateway
+  integration suites and JavaScript syntax checks. The current Homebrew OpenSpec CLI
+  passes `openspec validate build-aegisy-agent-workbench --strict`; the earlier
+  host exit-137 condition did not recur in this run.
 - The context-quality, provider-error, usage-authority, context-threshold, and
   turn-trace changes are partial foundations. Their OpenSpec tasks remain
   unchecked until authoritative producers, complete AAP/Qt integration,
@@ -2496,21 +2504,34 @@ Implemented visual baseline:
   `git diff --check`, strict OpenSpec validation, two Qt C++17 syntax checks, and
   the focused Qt cache run. This evidence is still not sufficient to mark `17.7`
   complete without the full Qt runtime/render pass and cross-platform validation.
-- The durable Turn Trace slice now uses inner `turn-trace/0.2` with strict `0.1`
-  replay compatibility and an unchanged outer `turn.trace.recorded/0.1` event.
-  Producer/adapter/Store and stdio coverage proves exact immutable Intent/domain/
-  terminal binding, completed Chat and read-only Work classification, excluded
-  Context accounting, Runtime-owned model-binding evidence, provider retry without
-  early termination, transport EOF, user interruption, content/secret/path
-  exclusion, legacy identity preservation, idempotent restart equality, and no
-  fabricated Workspace/Git/Test evidence. Store admission, direct read, and event replay reject
-  current Trace Intent modes that differ from the persisted Session mode, including
-  hash-consistent semantic substitution. The complete Rust workspace passes 516
-  library tests (one ignored live fixture), 10 threshold tests, 63 protocol tests,
-  11 stdio tests, formatting, and strict Clippy. Strict OpenSpec validation and
-  `git diff --check` pass. Complete Tool/Approval/Usage/Change/Test production and
-  any AAP/Qt, audit/export, or retention surface remain absent, so `20.1` stays
-  unchecked.
+- The durable Turn Trace slice now uses inner `turn-trace/0.3` with strict `0.1` and
+  `0.2` replay compatibility and an unchanged outer `turn.trace.recorded/0.1` event.
+  Producer/adapter/Store and stdio coverage preserves exact Intent/domain/terminal
+  binding and adds the final valid Provider-thread Usage snapshot described above.
+  Tests prove completed/failed/interrupted retention, no-Usage behavior, latest-only
+  replacement, raw/report/threshold reconstruction, full Session binding,
+  earlier-valid substitution rejection, semantic-tamper quarantine, fixed legacy
+  identities, idempotent restart equality, and no fabricated Workspace/Git/Test,
+  Attempt, or Retry evidence. Store and Runtime now share one exact cross-Turn
+  threshold-history reconstruction: Session history starts at `NoAction`, scans all
+  Items under the existing 100,000-Item uncertainty boundary, stops at the target
+  Turn's final Usage, and moves genuinely malformed authority-less Provider metadata
+  to conservative `PreviewRequired` both live and after restart. Tests reject a
+  forged first-Session latch and a hash-consistent 80%-90% cross-Turn hysteresis
+  downgrade at admission, direct read, replay, and restart. The direct Store path
+  counts the complete Item prefix in SQL and validates matching Usage rows lazily,
+  retaining only the threshold latch, current-Turn count, and final valid report;
+  peak memory therefore does not grow with accumulated Usage payload bytes. Long
+  Sessions still repeat this bounded historical scan at terminal admission, and
+  projection replay currently rebuilds the same prefix per Trace. A verified-prefix
+  cache and single-pass replay remain required before the large-Session performance
+  gate. The complete Rust
+  workspace passes 539 library tests
+  (one ignored live fixture), 10 threshold tests, 63 protocol tests, 11 stdio tests,
+  formatting, and strict Clippy. Strict OpenSpec validation and `git diff --check`
+  pass. Complete Tool/Approval/Change/Test production, per-Attempt/Retry Usage, and
+  any AAP/Qt, audit/export, or retention surface remain absent, so `20.1` and `20.2`
+  stay unchecked.
 
 ## Next Product Priorities
 
@@ -2545,10 +2566,13 @@ Implemented visual baseline:
    permission, sandbox, budget, and release gates pass. Keep automatic lease
    acquisition/renewal, process adoption, retry, approval, recovery mutation, and
    dispatch unavailable until those gates pass.
-11. Continue with the next unchecked database/event, durable project/session, typed
-   timeline, permission/approval, structured patch/checkpoint, terminal, and Git
-   milestones in dependency order.
-12. Replace the offline model-catalog projection with an authenticated,
+11. Continue `20.1` in dependency order with content-free Tool lifecycle production
+    and exact persisted Timeline Item binding, then add Approval policy observation.
+    Do not record command/path/output content or treat Runtime denial as user approval.
+12. Continue with the next unchecked database/event, durable project/session, typed
+    timeline, permission/approval, structured patch/checkpoint, terminal, and Git
+    milestones in dependency order.
+13. Replace the offline model-catalog projection with an authenticated,
    signature-validated cache; connect durable global/project profiles to the
    catalog matcher; then expose a real picker and immutable model-change event
    only after token, routing, and cross-platform evidence gates pass. The

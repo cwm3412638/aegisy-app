@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
+use crate::usage_authority::UsageAuthorityReport;
+
 pub const LEGACY_SCHEMA_VERSION: &str = "turn-trace/0.1";
-pub const SCHEMA_VERSION: &str = "turn-trace/0.2";
+pub const V0_2_SCHEMA_VERSION: &str = "turn-trace/0.2";
+pub const SCHEMA_VERSION: &str = "turn-trace/0.3";
 
 const MAX_ID_BYTES: usize = 128;
 const MAX_LABEL_BYTES: usize = 96;
@@ -272,6 +275,27 @@ pub enum UsageMetric {
     Cost,
     Reasoning,
     Latency,
+}
+
+/// Codex reports this snapshot for the provider thread, not for one Aegisy
+/// turn attempt. The closed enum prevents a future producer from silently
+/// narrowing the accounting scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UsageReportScope {
+    ProviderThread,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UsageAccounting {
+    AbsoluteSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UsageAttribution {
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,7 +578,7 @@ impl TerminalEvidence {
                     ));
                 }
             }
-            SCHEMA_VERSION => {
+            V0_2_SCHEMA_VERSION | SCHEMA_VERSION => {
                 if self.workspace_identity.is_some()
                     || self.git_state_identity.is_some()
                     || self.verification_identity.is_some()
@@ -562,7 +586,7 @@ impl TerminalEvidence {
                 {
                     return Err(error(
                         "turn-trace-v0-2-legacy-completion-invalid",
-                        "turn-trace/0.2 cannot contain legacy completion evidence",
+                        "turn-trace/0.2 and turn-trace/0.3 cannot contain legacy completion evidence",
                     ));
                 }
                 match (state, &self.completion) {
@@ -570,7 +594,7 @@ impl TerminalEvidence {
                     (TerminalState::Completed, None) => {
                         return Err(error(
                             "turn-trace-completion-domains-missing",
-                            "completed turn-trace/0.2 requires explicit completion domains",
+                            "completed turn-trace/0.2 and turn-trace/0.3 require explicit completion domains",
                         ));
                     }
                     (_, None) => {}
@@ -659,6 +683,17 @@ pub enum TracePayload {
         evidence: EvidenceRef,
         redaction: RedactionSummary,
     },
+    UsageReport {
+        report_identity: String,
+        persisted_item_id: String,
+        scope: UsageReportScope,
+        accounting: UsageAccounting,
+        attempt_attribution: UsageAttribution,
+        retry_attribution: UsageAttribution,
+        report: UsageAuthorityReport,
+        evidence: EvidenceRef,
+        redaction: RedactionSummary,
+    },
     Change {
         change_identity: String,
         state: ChangeState,
@@ -708,7 +743,7 @@ impl TracePayload {
                 evidence,
                 redaction,
             } => {
-                if schema_version != SCHEMA_VERSION {
+                if !matches!(schema_version, V0_2_SCHEMA_VERSION | SCHEMA_VERSION) {
                     return Err(error(
                         "turn-trace-v0-1-intent-invalid",
                         "turn-trace/0.1 cannot contain an intent event",
@@ -832,6 +867,12 @@ impl TracePayload {
                 redaction,
                 ..
             } => {
+                if schema_version == SCHEMA_VERSION {
+                    return Err(error(
+                        "turn-trace-v0-3-attempt-usage-invalid",
+                        "turn-trace/0.3 cannot contain per-attempt usage without authoritative attempt attribution",
+                    ));
+                }
                 validate_identity(usage_identity, "usage identity")?;
                 validate_identity(attempt_identity, "attempt identity")?;
                 value.validate(*metric)?;
@@ -844,6 +885,67 @@ impl TracePayload {
                     ],
                 )?;
                 validate_common(evidence, redaction)?;
+            }
+            Self::UsageReport {
+                report_identity,
+                persisted_item_id,
+                scope: UsageReportScope::ProviderThread,
+                accounting: UsageAccounting::AbsoluteSnapshot,
+                attempt_attribution: UsageAttribution::Unavailable,
+                retry_attribution: UsageAttribution::Unavailable,
+                report,
+                evidence,
+                redaction,
+            } => {
+                if schema_version != SCHEMA_VERSION {
+                    return Err(error(
+                        "turn-trace-usage-report-version-invalid",
+                        "provider thread usage reports require turn-trace/0.3",
+                    ));
+                }
+                validate_usage_report_identity(report_identity)?;
+                validate_identity(persisted_item_id, "persisted usage Timeline item identity")?;
+                report.validate().map_err(|_| {
+                    error(
+                        "turn-trace-usage-report-invalid",
+                        "embedded usage authority report is invalid",
+                    )
+                })?;
+                let expected_identity = report.metadata_identity().map_err(|_| {
+                    error(
+                        "turn-trace-usage-report-invalid",
+                        "embedded usage authority report is invalid",
+                    )
+                })?;
+                if *report_identity != expected_identity {
+                    return Err(error(
+                        "turn-trace-usage-report-identity-mismatch",
+                        "usage report identity does not bind the embedded report",
+                    ));
+                }
+                validate_source(
+                    evidence,
+                    &[EvidenceSource::Provider, EvidenceSource::UsageProvider],
+                )?;
+                if evidence.authority != AuthorityLabel::Observed {
+                    return Err(error(
+                        "turn-trace-usage-report-authority-invalid",
+                        "provider thread usage requires observed evidence",
+                    ));
+                }
+                if evidence.identity.as_deref() != Some(report_identity.as_str()) {
+                    return Err(error(
+                        "turn-trace-usage-report-evidence-mismatch",
+                        "usage evidence identity does not bind the embedded report",
+                    ));
+                }
+                validate_common(evidence, redaction)?;
+                if *redaction != RedactionSummary::metadata_only() {
+                    return Err(error(
+                        "turn-trace-usage-report-redaction-invalid",
+                        "provider thread usage must use an empty metadata-only redaction summary",
+                    ));
+                }
             }
             Self::Change {
                 change_identity,
@@ -1046,7 +1148,19 @@ impl TraceEvent {
                 "event sequence must start at one",
             ));
         }
-        self.payload.validate(schema_version)
+        self.payload.validate(schema_version)?;
+        if let TracePayload::UsageReport {
+            report, evidence, ..
+        } = &self.payload
+        {
+            if self.at_ms != report.as_of_ms || evidence.observed_at_ms != Some(report.as_of_ms) {
+                return Err(error(
+                    "turn-trace-usage-report-time-mismatch",
+                    "usage event, report, and observed evidence times must match exactly",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1062,6 +1176,15 @@ impl TurnTrace {
         binding.validate()?;
         Ok(Self {
             schema_version: SCHEMA_VERSION.to_owned(),
+            binding,
+            events: Vec::new(),
+        })
+    }
+
+    pub fn new_v0_2(binding: TraceBinding) -> Result<Self, TurnTraceError> {
+        binding.validate()?;
+        Ok(Self {
+            schema_version: V0_2_SCHEMA_VERSION.to_owned(),
             binding,
             events: Vec::new(),
         })
@@ -1133,7 +1256,7 @@ impl TurnTrace {
     pub fn validate(&self, require_terminal: bool) -> Result<(), TurnTraceError> {
         if !matches!(
             self.schema_version.as_str(),
-            LEGACY_SCHEMA_VERSION | SCHEMA_VERSION
+            LEGACY_SCHEMA_VERSION | V0_2_SCHEMA_VERSION | SCHEMA_VERSION
         ) {
             return Err(error(
                 "turn-trace-schema-invalid",
@@ -1151,6 +1274,8 @@ impl TurnTrace {
         let mut usage_identities = BTreeSet::new();
         let mut terminal_count = 0usize;
         let mut intent_count = 0usize;
+        let mut usage_report_count = 0usize;
+        let mut error_seen = false;
         let mut intent = None;
         let mut applied_workspace_identities = Vec::new();
         let mut previous_time = None;
@@ -1201,6 +1326,22 @@ impl TurnTrace {
                     workspace_identity,
                     ..
                 } => applied_workspace_identities.push(workspace_identity.as_str()),
+                TracePayload::Error { .. } => error_seen = true,
+                TracePayload::UsageReport { .. } => {
+                    usage_report_count += 1;
+                    if usage_report_count > 1 {
+                        return Err(error(
+                            "turn-trace-usage-report-duplicate",
+                            "a turn trace can contain at most one provider thread usage snapshot",
+                        ));
+                    }
+                    if error_seen {
+                        return Err(error(
+                            "turn-trace-usage-report-order-invalid",
+                            "provider thread usage must precede error and terminal events",
+                        ));
+                    }
+                }
                 _ => {}
             }
             if let TracePayload::Usage { usage_identity, .. } = &event.payload {
@@ -1219,16 +1360,19 @@ impl TurnTrace {
                     "turn-trace/0.1 cannot contain an intent event",
                 ));
             }
-            SCHEMA_VERSION if intent_count != 1 => {
+            V0_2_SCHEMA_VERSION | SCHEMA_VERSION if intent_count != 1 => {
                 return Err(error(
                     "turn-trace-intent-count-invalid",
-                    "turn-trace/0.2 requires exactly one intent event",
+                    "turn-trace/0.2 and turn-trace/0.3 require exactly one intent event",
                 ));
             }
             _ => {}
         }
-        if self.schema_version == SCHEMA_VERSION {
-            let intent = intent.expect("validated turn-trace/0.2 intent count");
+        if matches!(
+            self.schema_version.as_str(),
+            V0_2_SCHEMA_VERSION | SCHEMA_VERSION
+        ) {
+            let intent = intent.expect("validated current turn trace intent count");
             if intent.0 == SessionMode::Work && self.binding.project_id.is_none() {
                 return Err(error(
                     "turn-trace-work-project-missing",
@@ -1324,6 +1468,22 @@ fn validate_hash_identity(value: &str, field: &'static str) -> Result<(), TurnTr
         return Err(error("turn-trace-hash-identity-invalid", field));
     }
     validate_identity(value, field)
+}
+
+fn validate_usage_report_identity(value: &str) -> Result<(), TurnTraceError> {
+    let digest = value.strip_prefix("usage-authority:sha256:");
+    if !digest.is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }) {
+        return Err(error(
+            "turn-trace-usage-report-identity-invalid",
+            "usage report identity is not a canonical SHA-256 identity",
+        ));
+    }
+    validate_identity(value, "usage report identity")
 }
 
 fn validate_environment_identity(value: &str) -> Result<(), TurnTraceError> {
@@ -1476,6 +1636,51 @@ mod tests {
 
     fn redaction() -> RedactionSummary {
         RedactionSummary::metadata_only()
+    }
+
+    fn usage_report(at_ms: u64) -> UsageAuthorityReport {
+        crate::usage_authority::from_provider_token_usage(
+            &json!({
+                "total": {
+                    "input_tokens": 80,
+                    "cached_input_tokens": 20,
+                    "output_tokens": 20,
+                    "reasoning_output_tokens": 5,
+                    "total_tokens": 100
+                },
+                "last": {
+                    "input_tokens": 12,
+                    "cached_input_tokens": 3,
+                    "output_tokens": 4,
+                    "reasoning_output_tokens": 1,
+                    "total_tokens": 16
+                },
+                "model_context_window": 128000
+            }),
+            at_ms,
+        )
+        .unwrap()
+    }
+
+    fn usage_report_payload(at_ms: u64, persisted_item_id: &str) -> TracePayload {
+        let report = usage_report(at_ms);
+        let report_identity = report.metadata_identity().unwrap();
+        TracePayload::UsageReport {
+            report_identity: report_identity.clone(),
+            persisted_item_id: persisted_item_id.into(),
+            scope: UsageReportScope::ProviderThread,
+            accounting: UsageAccounting::AbsoluteSnapshot,
+            attempt_attribution: UsageAttribution::Unavailable,
+            retry_attribution: UsageAttribution::Unavailable,
+            report,
+            evidence: EvidenceRef {
+                authority: AuthorityLabel::Observed,
+                source: EvidenceSource::UsageProvider,
+                identity: Some(report_identity),
+                observed_at_ms: Some(at_ms),
+            },
+            redaction: redaction(),
+        }
     }
 
     fn intent_payload(
@@ -1813,6 +2018,268 @@ mod tests {
     }
 
     #[test]
+    fn v0_3_usage_report_binds_schema_source_time_item_and_report() {
+        let mut trace = TurnTrace::new(binding()).unwrap();
+        trace
+            .append(
+                "intent-1".into(),
+                10,
+                intent_payload(
+                    SessionMode::Work,
+                    TurnKind::ReadOnlyInspection,
+                    TurnAccess::ReadOnly,
+                ),
+            )
+            .unwrap();
+        trace
+            .append(
+                "usage-report-1".into(),
+                20,
+                usage_report_payload(20, "item-usage-1"),
+            )
+            .unwrap();
+        trace.validate_open().unwrap();
+
+        let value = serde_json::to_value(&trace.events[1].payload).unwrap();
+        assert_eq!(value["kind"], "usage-report");
+        assert_eq!(value["persisted_item_id"], "item-usage-1");
+        assert_eq!(value["scope"], "provider-thread");
+        assert_eq!(value["accounting"], "absolute-snapshot");
+        assert_eq!(value["attempt_attribution"], "unavailable");
+        assert_eq!(value["retry_attribution"], "unavailable");
+        assert!(value.get("attempt_identity").is_none());
+        assert!(value.get("retry").is_none());
+
+        let mut wrong_source = trace.clone();
+        if let TracePayload::UsageReport { evidence, .. } = &mut wrong_source.events[1].payload {
+            evidence.source = EvidenceSource::Runtime;
+        }
+        assert_eq!(
+            wrong_source.validate_open().unwrap_err().code,
+            "turn-trace-source-mismatch"
+        );
+
+        let mut wrong_time = trace.clone();
+        wrong_time.events[1].at_ms = 21;
+        assert_eq!(
+            wrong_time.validate_open().unwrap_err().code,
+            "turn-trace-usage-report-time-mismatch"
+        );
+
+        let mut wrong_evidence_time = trace.clone();
+        if let TracePayload::UsageReport { evidence, .. } =
+            &mut wrong_evidence_time.events[1].payload
+        {
+            evidence.observed_at_ms = Some(19);
+        }
+        assert_eq!(
+            wrong_evidence_time.validate_open().unwrap_err().code,
+            "turn-trace-usage-report-time-mismatch"
+        );
+
+        let mut wrong_item = trace.clone();
+        if let TracePayload::UsageReport {
+            persisted_item_id, ..
+        } = &mut wrong_item.events[1].payload
+        {
+            *persisted_item_id = "timeline/item".into();
+        }
+        assert_eq!(
+            wrong_item.validate_open().unwrap_err().code,
+            "turn-trace-identity-invalid"
+        );
+
+        let mut wrong_evidence_identity = trace.clone();
+        if let TracePayload::UsageReport { evidence, .. } =
+            &mut wrong_evidence_identity.events[1].payload
+        {
+            evidence.identity = Some(hash_identity("usage-authority:sha256:", '9'));
+        }
+        assert_eq!(
+            wrong_evidence_identity.validate_open().unwrap_err().code,
+            "turn-trace-usage-report-evidence-mismatch"
+        );
+    }
+
+    #[test]
+    fn v0_3_usage_report_rejects_semantic_tampering_and_nonmetadata_redaction() {
+        let mut trace = TurnTrace::new(binding()).unwrap();
+        trace
+            .append(
+                "intent-1".into(),
+                10,
+                intent_payload(
+                    SessionMode::Work,
+                    TurnKind::ReadOnlyInspection,
+                    TurnAccess::ReadOnly,
+                ),
+            )
+            .unwrap();
+        trace
+            .append(
+                "usage-report-1".into(),
+                20,
+                usage_report_payload(20, "item-usage-1"),
+            )
+            .unwrap();
+
+        let mut tampered = trace.clone();
+        if let TracePayload::UsageReport { report, .. } = &mut tampered.events[1].payload {
+            report.as_of_ms = 21;
+        }
+        assert_eq!(
+            tampered.validate_open().unwrap_err().code,
+            "turn-trace-usage-report-identity-mismatch"
+        );
+
+        let mut nonmetadata = trace;
+        if let TracePayload::UsageReport { redaction, .. } = &mut nonmetadata.events[1].payload {
+            redaction.raw_bytes = 1;
+        }
+        assert_eq!(
+            nonmetadata.validate_open().unwrap_err().code,
+            "turn-trace-usage-report-redaction-invalid"
+        );
+    }
+
+    #[test]
+    fn v0_3_allows_at_most_one_usage_report_before_error_and_terminal() {
+        let mut duplicate = TurnTrace::new(binding()).unwrap();
+        duplicate
+            .append(
+                "intent-1".into(),
+                10,
+                intent_payload(
+                    SessionMode::Work,
+                    TurnKind::ReadOnlyInspection,
+                    TurnAccess::ReadOnly,
+                ),
+            )
+            .unwrap();
+        duplicate
+            .append(
+                "usage-report-1".into(),
+                20,
+                usage_report_payload(20, "item-usage-1"),
+            )
+            .unwrap();
+        duplicate
+            .append(
+                "usage-report-2".into(),
+                21,
+                usage_report_payload(21, "item-usage-2"),
+            )
+            .unwrap();
+        assert_eq!(
+            duplicate.validate_open().unwrap_err().code,
+            "turn-trace-usage-report-duplicate"
+        );
+
+        let mut after_error = TurnTrace::new(binding()).unwrap();
+        after_error
+            .append(
+                "intent-1".into(),
+                10,
+                intent_payload(
+                    SessionMode::Work,
+                    TurnKind::ReadOnlyInspection,
+                    TurnAccess::ReadOnly,
+                ),
+            )
+            .unwrap();
+        after_error
+            .append(
+                "error-1".into(),
+                19,
+                TracePayload::Error {
+                    error_identity: "error-1".into(),
+                    stable_class: ErrorClass::Provider,
+                    source_class: "provider".into(),
+                    retryable: true,
+                    evidence: evidence(EvidenceSource::Provider),
+                    redaction: redaction(),
+                },
+            )
+            .unwrap();
+        after_error
+            .append(
+                "usage-report-1".into(),
+                20,
+                usage_report_payload(20, "item-usage-1"),
+            )
+            .unwrap();
+        assert_eq!(
+            after_error.validate_open().unwrap_err().code,
+            "turn-trace-usage-report-order-invalid"
+        );
+
+        let mut valid = TurnTrace::new(binding()).unwrap();
+        valid
+            .append(
+                "intent-1".into(),
+                10,
+                intent_payload(
+                    SessionMode::Work,
+                    TurnKind::ReadOnlyInspection,
+                    TurnAccess::ReadOnly,
+                ),
+            )
+            .unwrap();
+        valid
+            .append(
+                "usage-report-1".into(),
+                20,
+                usage_report_payload(20, "item-usage-1"),
+            )
+            .unwrap();
+        valid
+            .append(
+                "terminal-1".into(),
+                21,
+                completed_terminal(read_only_completion(CompletionDomain::Unknown {
+                    evidence: unknown_evidence(EvidenceSource::Runtime),
+                })),
+            )
+            .unwrap();
+        valid.validate_complete().unwrap();
+    }
+
+    #[test]
+    fn usage_report_is_v0_3_only_and_future_versions_fail_closed() {
+        let mut legacy = TurnTrace::new_legacy(binding()).unwrap();
+        assert_eq!(
+            legacy
+                .append(
+                    "usage-report-1".into(),
+                    20,
+                    usage_report_payload(20, "item-usage-1"),
+                )
+                .unwrap_err()
+                .code,
+            "turn-trace-usage-report-version-invalid"
+        );
+
+        let mut v0_2 = TurnTrace::new_v0_2(binding()).unwrap();
+        assert_eq!(
+            v0_2.append(
+                "usage-report-1".into(),
+                20,
+                usage_report_payload(20, "item-usage-1"),
+            )
+            .unwrap_err()
+            .code,
+            "turn-trace-usage-report-version-invalid"
+        );
+
+        let mut future = TurnTrace::new(binding()).unwrap();
+        future.schema_version = "turn-trace/0.4".into();
+        assert_eq!(
+            future.validate_open().unwrap_err().code,
+            "turn-trace-schema-invalid"
+        );
+    }
+
+    #[test]
     fn deserialization_rechecks_schema_and_content_flag() {
         let mut value = serde_json::to_value(TurnTrace::new(binding()).unwrap()).unwrap();
         value["schema_version"] = json!("turn-trace/9.9");
@@ -1879,7 +2346,7 @@ mod tests {
             "turn-trace-v0-1-intent-invalid"
         );
 
-        let mut v0_2_legacy_fields = TurnTrace::new(binding()).unwrap();
+        let mut v0_2_legacy_fields = TurnTrace::new_v0_2(binding()).unwrap();
         assert_eq!(
             v0_2_legacy_fields
                 .append("terminal-1".into(), 10, legacy_completed_terminal())
@@ -2180,6 +2647,10 @@ mod tests {
             .append("terminal-1".into(), 10, legacy_completed_terminal())
             .unwrap();
         legacy.validate_complete().unwrap();
+        assert_eq!(
+            legacy.metadata_identity().unwrap(),
+            "turn-trace:sha256:987ac38d2f5f7e9cadd5fc63fe114497889baa8830c76364977d96b6d101f785"
+        );
         let legacy_value = serde_json::to_value(&legacy).unwrap();
         assert_eq!(legacy_value["schema_version"], LEGACY_SCHEMA_VERSION);
         assert!(legacy_value["events"][0]["payload"]["evidence"]
@@ -2192,7 +2663,7 @@ mod tests {
         let legacy_round_trip: TurnTrace = serde_json::from_value(legacy_value).unwrap();
         assert_eq!(legacy_round_trip, legacy);
 
-        let mut v0_2 = TurnTrace::new(binding()).unwrap();
+        let mut v0_2 = TurnTrace::new_v0_2(binding()).unwrap();
         v0_2.append(
             "intent-1".into(),
             10,
@@ -2212,6 +2683,10 @@ mod tests {
         )
         .unwrap();
         v0_2.validate_complete().unwrap();
+        assert_eq!(
+            v0_2.metadata_identity().unwrap(),
+            "turn-trace:sha256:a9f787c2e3e40c6adf4ee8bf15a2bb46c9865a4291ff4b45ac4ea3f884b9aaa7"
+        );
         let value = serde_json::to_value(&v0_2).unwrap();
         assert_eq!(
             value,

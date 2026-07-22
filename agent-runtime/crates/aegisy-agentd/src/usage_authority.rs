@@ -399,6 +399,26 @@ impl UsageAuthorityReport {
     pub fn entry(&self, metric: UsageMetric) -> Option<&UsageAuthorityEntry> {
         self.entries.iter().find(|entry| entry.metric == metric)
     }
+
+    /// Return a deterministic identity over the complete validated authority
+    /// report. Entries are canonicalized by metric before serialization so a
+    /// semantically equivalent decoded report cannot change identity by
+    /// reordering its four entries.
+    pub fn metadata_identity(&self) -> Result<String, UsageAuthorityError> {
+        self.validate()?;
+        let mut canonical = self.clone();
+        canonical.entries.sort_by_key(|entry| entry.metric);
+        let bytes = serde_json::to_vec(&canonical).map_err(|_| {
+            error(
+                "usage-authority-serialization-failed",
+                "validated usage authority report could not be serialized",
+            )
+        })?;
+        Ok(format!(
+            "usage-authority:sha256:{:x}",
+            Sha256::digest(bytes)
+        ))
+    }
 }
 
 /// Build the metadata-only authority projection for the normalized Codex
@@ -804,6 +824,71 @@ mod tests {
         assert_eq!(serialized["entries"][2]["authority"], "estimated");
         let decoded: UsageAuthorityReport = serde_json::from_value(serialized).unwrap();
         decoded.validate().unwrap();
+    }
+
+    #[test]
+    fn metadata_identity_is_stable_across_roundtrip_and_entry_order() {
+        let report = UsageAuthorityReport::new(1_000, valid_entries()).unwrap();
+        let expected = report.metadata_identity().unwrap();
+        assert_eq!(report.metadata_identity().unwrap(), expected);
+
+        let mut decoded: UsageAuthorityReport =
+            serde_json::from_slice(&serde_json::to_vec(&report).unwrap()).unwrap();
+        decoded.entries.reverse();
+        decoded.validate().unwrap();
+        assert_eq!(decoded.metadata_identity().unwrap(), expected);
+    }
+
+    #[test]
+    fn metadata_identity_changes_when_validated_fields_change() {
+        let report = UsageAuthorityReport::new(1_000, valid_entries()).unwrap();
+        let baseline = report.metadata_identity().unwrap();
+        let mut changed = report.clone();
+        let cost = changed
+            .entries
+            .iter_mut()
+            .find(|entry| entry.metric == UsageMetric::Cost)
+            .unwrap();
+        let Some(UsageValue::Cost(value)) = &mut cost.value else {
+            panic!("expected cost usage value");
+        };
+        value.amount_micros += 1;
+        changed.validate().unwrap();
+        assert_ne!(changed.metadata_identity().unwrap(), baseline);
+    }
+
+    #[test]
+    fn metadata_identity_contains_only_prefix_and_lowercase_digest() {
+        let mut entries = valid_entries();
+        let cost = entries
+            .iter_mut()
+            .find(|entry| entry.metric == UsageMetric::Cost)
+            .unwrap();
+        let AuthorityEvidence::Estimated { estimator_id, .. } = &mut cost.evidence else {
+            panic!("expected estimated cost evidence");
+        };
+        *estimator_id = "private-estimator-marker".into();
+        let report = UsageAuthorityReport::new(1_000, entries).unwrap();
+        let identity = report.metadata_identity().unwrap();
+        let digest = identity
+            .strip_prefix("usage-authority:sha256:")
+            .expect("usage authority identity prefix");
+        assert_eq!(digest.len(), 64);
+        assert!(digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+        assert!(!identity.contains("private-estimator-marker"));
+        assert!(!identity.contains("provider-usage"));
+    }
+
+    #[test]
+    fn invalid_report_cannot_receive_metadata_identity() {
+        let mut report = UsageAuthorityReport::new(1_000, valid_entries()).unwrap();
+        report.entries.pop();
+        assert_eq!(
+            report.metadata_identity().unwrap_err().code,
+            "usage-authority-metrics-incomplete"
+        );
     }
 
     #[test]

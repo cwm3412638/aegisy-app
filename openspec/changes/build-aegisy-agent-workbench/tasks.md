@@ -608,8 +608,9 @@
 ## 20. Observability, Diagnostics, and Evaluation
 
 - [ ] 20.1 Implement structured local turn trace with source-qualified runtime/model/context/tool/approval/usage/change/test/error data
-  - Partial internal `turn-trace/0.2` contract keeps strict dual-read support for
-    durable `0.1` records while adding one immutable Runtime-observed Intent for
+  - Partial internal `turn-trace/0.3` contract keeps strict three-version reads for
+    durable `0.1`, `0.2`, and `0.3` records while preserving fixed `0.1`/`0.2`
+    serialization identities. `0.2` added one immutable Runtime-observed Intent for
     Chat conversation, Work read-only inspection, or future Work mutation. A
     completed terminal binds that exact Intent and classifies workspace change,
     Git change, and verification independently as not-applicable, applicable,
@@ -623,18 +624,42 @@
     source/authority labels, redaction bounds, duplicate-usage protection, event
     ordering, and terminal-last invariants remain. The Store continues writing the
     unchanged outer `turn.trace.recorded/0.1` envelope in the same SQLite
-    transaction as the terminal Turn event, reads both inner versions without a
-    schema migration or event rewrite, and preserves fixed legacy identities.
-    Current Codex Runtime now produces `0.2` traces for completed, failed, and
+    transaction as the terminal Turn event. SQLite remains v13; no migration,
+    backfill, or event rewrite is introduced.
+  - `0.3` adds at most one final `usage-report`: the latest successfully validated
+    and persisted Codex Provider-thread `usage-authority/0.1` report, explicitly
+    scoped as an `absolute-snapshot` with unavailable Attempt and Retry attribution.
+    Runtime commits the ordinary Usage Timeline Item before updating the trace accumulator;
+    each later successful notification replaces the retained snapshot rather than
+    being summed. At terminal finalization the retained report binds its deterministic
+    identity, observation time, and exact persisted Usage Item and is ordered before
+    Error/Terminal. Completed, failed, and interrupted traces retain observed Usage.
+    If no notification forms a valid authority report and is successfully persisted,
+    no Usage event is emitted; an Unknown event is not fabricated. Store admission,
+    direct read, and projection replay inspect the complete bounded Session Item
+    prefix through the target Turn's final Usage. They restore one threshold latch
+    from the single `NoAction` initial state, use the same 100,000-all-Item uncertainty
+    boundary as Runtime restoration, consume matching Usage rows lazily instead of
+    retaining every historical payload, rebuild authority from each valid raw Provider
+    snapshot, and require the Trace to reference the final valid Item. Later Turns do
+    not affect older Trace validation. Malformed raw metadata may remain a
+    non-authoritative Timeline Item and consistently advances the review latch to
+    `PreviewRequired`, while removal of an authority report from valid raw Usage fails
+    closed as a semantic downgrade. First-state and cross-Turn hysteresis substitution
+    fail admission and quarantine hash-consistent replay tampering.
+  - Current Codex Runtime produces `0.3` traces for completed, failed, and
     interrupted Turns with one idempotent terminal-write retry. Stdio fixtures
     prove Chat and read-only Work completion, exact Intent/domain binding, restart
     equality, transport/provider failure, interruption, and no fabricated
-    Workspace/Git/Test evidence or content. Store admission, direct read, and projection replay
-    require the current Intent mode to equal the persisted Session mode while
+    Workspace/Git/Test evidence or content. Store admission, direct read, and
+    projection replay require project/environment plus the current Intent mode to
+    equal the persisted Session binding while
     leaving legacy `0.1` mode-less records readable; semantic mode substitution
-    fails closed. Complete Tool/Approval/Usage/Change/
-    Test producers plus Timeline, AAP/Qt, audit, retention, and export surfaces
-    remain absent; keep this task unchecked.
+    fails closed. Complete Tool/Approval/Change/Test producers, per-Attempt and Retry
+    Usage authority, and Timeline trace projection, AAP/Qt, audit, retention, and
+    export surfaces remain absent. Terminal admission and projection replay also
+    still repeat the bounded historical scan for long Sessions; single-pass replay
+    and a verified-prefix cache remain performance work. Keep this task unchecked.
 - [ ] 20.2 Implement observed, catalog-derived, estimated, stale, and unknown labels for token, context, cost, and reasoning status
   - Partial foundation: internal `usage-authority/0.1` validates exactly the
     four metric classes and source labels, rejects unknown values with numbers,
@@ -643,10 +668,13 @@
     `thread/tokenUsage/updated` Timeline items now retain the raw bounded usage
     projection plus a validated authority report: provider-reported token and
     context-window/reasoning fields are observed, cost is unknown, and
-    unreconciled provider totals are not rewritten. Qt now renders a strict
+    unreconciled provider totals are not rewritten. The report now has a
+    deterministic metadata identity used by `turn-trace/0.3`; it remains a Codex
+    Provider-thread absolute snapshot and does not claim Turn Attempt or Retry
+    attribution. Qt now renders a strict
     metadata-only summary and rejects malformed/unknown versions. This remains
     Codex-only and has no catalog pricing, cross-provider correlation, billing,
-    durable cross-turn threshold state, or complete cross-platform evidence;
+    durable per-Attempt accounting, routing, or complete cross-platform evidence;
     keep this task unchecked.
 - [ ] 20.3 Implement privacy-preserving local audit events for privileged operations and permission decisions
 - [ ] 20.4 Implement diagnostic bundle preview, category opt-in, redaction report, deterministic archive, and support correlation ID

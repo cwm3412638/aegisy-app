@@ -9,6 +9,7 @@ use crate::background_recovery_decision::{
 };
 use crate::background_scheduler::{BackgroundSchedulerSnapshot, SchedulerLeaseState};
 use crate::background_scheduler_lease::{BackgroundSchedulerLease, BackgroundSchedulerLeaseStatus};
+use crate::context_threshold::{self, ContextObservation, ThresholdConfig, ThresholdStatus};
 use crate::durable_blob::{
     available_space, sha256_hex, BlobFileError, DurableBlobFileStore, DurableBlobLocalFile,
     MAX_BLOB_BYTES, MAX_BLOB_OBJECTS, MAX_SCAN_ENTRIES, MAX_STORE_BYTES, MIN_FREE_BYTES,
@@ -30,6 +31,11 @@ use crate::turn_trace::{
     SessionMode as TraceSessionMode, TerminalState as TraceTerminalState, TracePayload, TurnTrace,
     LEGACY_SCHEMA_VERSION as LEGACY_TURN_TRACE_SCHEMA_VERSION,
     SCHEMA_VERSION as TURN_TRACE_SCHEMA_VERSION,
+    V0_2_SCHEMA_VERSION as V0_2_TURN_TRACE_SCHEMA_VERSION,
+};
+use crate::usage_authority::{
+    from_provider_token_usage, AuthorityLabel as UsageAuthorityLabel, UsageAuthorityReport,
+    UsageMetric as UsageAuthorityMetric, UsageValue as UsageAuthorityValue,
 };
 pub use crate::workbench_migration::WorkbenchRecoveryDiagnostic;
 use crate::workbench_migration::{create_pre_upgrade_backup, inspect_recovery};
@@ -67,6 +73,8 @@ const MAX_BACKGROUND_NOTIFICATIONS: usize = 10_000;
 const MAX_BACKGROUND_NOTIFICATION_PAGE: usize = 100;
 const MAX_BACKGROUND_NOTIFICATION_JSON_BYTES: usize = 32 * 1024;
 const TURN_TRACE_RECORDED_SCHEMA_VERSION: &str = "turn.trace.recorded/0.1";
+const MAX_TURN_USAGE_ITEMS: usize = 32;
+const MAX_TURN_TRACE_HISTORY_ITEMS: usize = 100_000;
 const MAX_BACKGROUND_JOB_PAGE: usize = 1_000;
 const MAX_BACKGROUND_JOB_JSON_BYTES: usize = 64 * 1024;
 const MAX_BACKGROUND_LEASE_JSON_BYTES: usize = 32 * 1024;
@@ -6454,6 +6462,7 @@ impl WorkbenchStore {
                     "turn trace project, environment, or mode binding does not match the stored turn",
                 ));
             }
+            validate_trace_usage_item_bindings(&transaction, &prepared_trace.trace)?;
             if prepared_trace.terminal_at_ms != updated_at_ms {
                 return Err(coded_error(
                     "turn-trace-terminal-time-mismatch",
@@ -6560,22 +6569,33 @@ impl WorkbenchStore {
         validate_identifier(turn_id, "turn trace turn ID")?;
         let stored = load_turn_trace_record(&self.connection, session_id, turn_id)?;
         if let Some(stored) = stored.as_ref() {
-            let session_mode = self
+            let (session_mode, project_id, environment_identity) = self
                 .connection
                 .query_row(
-                    "SELECT mode FROM sessions WHERE session_id = ?1",
+                    "SELECT mode, project_id, environment_identity
+                     FROM sessions WHERE session_id = ?1",
                     [session_id],
-                    |row| parse_session_mode(&row.get::<_, String>(0)?),
+                    |row| {
+                        Ok((
+                            parse_session_mode(&row.get::<_, String>(0)?)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
                 )
                 .optional()
-                .map_err(|_| error("cannot read turn trace session mode"))?
+                .map_err(|_| error("cannot read turn trace session binding"))?
                 .ok_or_else(|| error("turn trace session is missing"))?;
-            if !turn_trace_matches_session_mode(&stored.trace, session_mode) {
+            if stored.trace.binding.project_id != project_id
+                || stored.trace.binding.environment_identity != environment_identity
+                || !turn_trace_matches_session_mode(&stored.trace, session_mode)
+            {
                 return Err(coded_error(
                     "turn-trace-binding-mismatch",
-                    "turn trace mode binding does not match the stored session",
+                    "turn trace project, environment, or mode binding does not match the stored session",
                 ));
             }
+            validate_trace_usage_item_bindings(&self.connection, &stored.trace)?;
             validate_trace_terminal_pair(&self.connection, stored)?;
         }
         Ok(stored)
@@ -8304,7 +8324,8 @@ impl WorkbenchStore {
                         }) && turns.get(&trace.trace.binding.turn_id).is_some_and(|turn| {
                             turn.session_id == session_id
                                 && matches!(turn.state.as_str(), "started" | "running")
-                        }) && !pending_turn_traces.contains_key(&trace.trace.binding.turn_id)
+                        }) && validate_trace_usage_items(&trace.trace, &items, None).is_ok()
+                            && !pending_turn_traces.contains_key(&trace.trace.binding.turn_id)
                     });
                     if valid {
                         if let Ok(trace) = parsed {
@@ -12578,7 +12599,10 @@ fn turn_trace_matches_session_mode(trace: &TurnTrace, mode: StoredSessionMode) -
     if trace.schema_version == LEGACY_TURN_TRACE_SCHEMA_VERSION {
         return true;
     }
-    if trace.schema_version != TURN_TRACE_SCHEMA_VERSION {
+    if !matches!(
+        trace.schema_version.as_str(),
+        V0_2_TURN_TRACE_SCHEMA_VERSION | TURN_TRACE_SCHEMA_VERSION
+    ) {
         return false;
     }
     let trace_mode = trace.events.iter().find_map(|event| match &event.payload {
@@ -12590,6 +12614,502 @@ fn turn_trace_matches_session_mode(trace: &TurnTrace, mode: StoredSessionMode) -
         (Some(TraceSessionMode::Chat), StoredSessionMode::Chat)
             | (Some(TraceSessionMode::Work), StoredSessionMode::Work)
     )
+}
+
+fn validate_trace_usage_item_bindings(
+    connection: &Connection,
+    trace: &TurnTrace,
+) -> Result<(), WorkbenchStoreError> {
+    if trace.schema_version != TURN_TRACE_SCHEMA_VERSION {
+        return Ok(());
+    }
+    let last_usage_sequence = connection
+        .query_row(
+            "SELECT MAX(item_sequence) FROM items
+             WHERE session_id = ?1 AND turn_id = ?2 AND item_kind = 'usage'",
+            params![&trace.binding.session_id, &trace.binding.turn_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(|_| {
+            coded_error(
+                "turn-trace-usage-items-invalid",
+                "turn trace usage Timeline boundary cannot be inspected",
+            )
+        })?;
+    let Some(last_usage_sequence) = last_usage_sequence else {
+        return validate_trace_usage_items(trace, &[], Some(0));
+    };
+    let relevant_item_count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM items
+             WHERE session_id = ?1 AND item_sequence <= ?2",
+            params![&trace.binding.session_id, last_usage_sequence],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|_| {
+            coded_error(
+                "turn-trace-usage-items-invalid",
+                "turn trace usage Timeline history cannot be inspected",
+            )
+        })?;
+    let relevant_item_count = usize::try_from(relevant_item_count).map_err(|_| {
+        coded_error(
+            "turn-trace-usage-history-limit",
+            "turn trace usage Timeline history limit is exceeded",
+        )
+    })?;
+    if relevant_item_count >= MAX_TURN_TRACE_HISTORY_ITEMS {
+        return Err(coded_error(
+            "turn-trace-usage-history-limit",
+            "turn trace usage Timeline history limit is exceeded",
+        ));
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT session_id, item_sequence, item_id, turn_id, item_kind, role, state,
+                    payload_json, payload_sha256, payload_bytes, created_at_ms
+             FROM items
+             WHERE session_id = ?1
+               AND item_kind = 'usage'
+               AND item_sequence <= ?2
+             ORDER BY item_sequence ASC LIMIT ?3",
+        )
+        .map_err(|_| {
+            coded_error(
+                "turn-trace-usage-items-invalid",
+                "turn trace usage Timeline items cannot be inspected",
+            )
+        })?;
+    let rows = statement
+        .query_map(
+            params![
+                &trace.binding.session_id,
+                last_usage_sequence,
+                MAX_TURN_TRACE_HISTORY_ITEMS as i64,
+            ],
+            |row| {
+                let payload_json: String = row.get(7)?;
+                let payload = serde_json::from_str(&payload_json).map_err(|cause| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        payload_json.len(),
+                        rusqlite::types::Type::Text,
+                        Box::new(cause),
+                    )
+                })?;
+                Ok(StoredItem {
+                    session_id: row.get(0)?,
+                    sequence: to_u64_sql(row.get(1)?, "usage item sequence")?,
+                    item_id: row.get(2)?,
+                    turn_id: row.get(3)?,
+                    item_kind: row.get(4)?,
+                    role: row.get(5)?,
+                    state: row.get(6)?,
+                    payload,
+                    payload_hash: ContentHash {
+                        sha256: row.get(8)?,
+                        bytes: to_u64_sql(row.get(9)?, "usage item payload byte count")?,
+                    },
+                    created_at_ms: to_u64_sql(row.get(10)?, "usage item creation time")?,
+                })
+            },
+        )
+        .map_err(|_| {
+            coded_error(
+                "turn-trace-usage-items-invalid",
+                "turn trace usage Timeline items cannot be inspected",
+            )
+        })?;
+    let mut validation = TraceUsageValidationState::new(trace);
+    for item in rows {
+        let item = item.map_err(|_| {
+            coded_error(
+                "turn-trace-usage-items-invalid",
+                "turn trace usage Timeline items cannot be read",
+            )
+        })?;
+        validation.push(&item)?;
+    }
+    validation.finish()
+}
+
+struct TraceUsageValidationState<'a> {
+    trace: &'a TurnTrace,
+    trace_usage: Option<(&'a str, &'a UsageAuthorityReport)>,
+    previous_status: ThresholdStatus,
+    current_usage_count: usize,
+    current_usage_started: bool,
+    last_report: Option<(String, UsageAuthorityReport)>,
+}
+
+impl<'a> TraceUsageValidationState<'a> {
+    fn new(trace: &'a TurnTrace) -> Self {
+        let trace_usage = trace.events.iter().find_map(|event| match &event.payload {
+            TracePayload::UsageReport {
+                persisted_item_id,
+                report,
+                ..
+            } => Some((persisted_item_id.as_str(), report)),
+            _ => None,
+        });
+        Self {
+            trace,
+            trace_usage,
+            previous_status: ThresholdStatus::NoAction,
+            current_usage_count: 0,
+            current_usage_started: false,
+            last_report: None,
+        }
+    }
+
+    fn push(&mut self, item: &StoredItem) -> Result<(), WorkbenchStoreError> {
+        let belongs_to_turn = item.turn_id.as_deref() == Some(self.trace.binding.turn_id.as_str());
+        if belongs_to_turn {
+            self.current_usage_started = true;
+            self.current_usage_count = self.current_usage_count.saturating_add(1);
+            if self.current_usage_count > MAX_TURN_USAGE_ITEMS {
+                return Err(coded_error(
+                    "turn-trace-usage-item-limit",
+                    "turn trace usage Timeline item limit is exceeded",
+                ));
+            }
+            let (report, next_status) = validate_trace_usage_item(
+                self.trace,
+                item,
+                Some(self.trace.binding.turn_id.as_str()),
+                self.previous_status,
+            )?;
+            self.previous_status = next_status;
+            if let Some(report) = report {
+                self.last_report = Some((item.item_id.clone(), report));
+            }
+        } else {
+            if self.current_usage_started {
+                return Err(coded_error(
+                    "turn-trace-usage-item-binding-invalid",
+                    "turn trace usage Timeline items are interleaved with another turn",
+                ));
+            }
+            let (_, next_status) =
+                validate_trace_usage_item(self.trace, item, None, self.previous_status)?;
+            self.previous_status = next_status;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<(), WorkbenchStoreError> {
+        match (self.trace_usage, self.last_report) {
+            (None, None) => Ok(()),
+            (Some(_), None) => Err(coded_error(
+                "turn-trace-usage-item-missing",
+                "turn trace usage Timeline item is missing",
+            )),
+            (None, Some(_)) => Err(coded_error(
+                "turn-trace-usage-report-missing",
+                "turn trace omits the latest persisted usage Timeline item",
+            )),
+            (Some((persisted_item_id, trace_report)), Some((last_item_id, last_item_report))) => {
+                if persisted_item_id != last_item_id || trace_report != &last_item_report {
+                    Err(coded_error(
+                        "turn-trace-usage-item-not-latest",
+                        "turn trace does not bind the latest persisted usage Timeline item",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+fn validate_trace_usage_items(
+    trace: &TurnTrace,
+    items: &[StoredItem],
+    known_relevant_item_count: Option<usize>,
+) -> Result<(), WorkbenchStoreError> {
+    if trace.schema_version != TURN_TRACE_SCHEMA_VERSION {
+        return Ok(());
+    }
+    let mut session_items = items
+        .iter()
+        .filter(|item| item.session_id == trace.binding.session_id)
+        .collect::<Vec<_>>();
+    session_items.sort_by_key(|item| item.sequence);
+    let usage_items = session_items
+        .iter()
+        .copied()
+        .filter(|item| {
+            item.item_kind == "usage"
+                && item.turn_id.as_deref() == Some(trace.binding.turn_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    if usage_items.is_empty() {
+        return TraceUsageValidationState::new(trace).finish();
+    }
+
+    let last_usage_sequence = usage_items
+        .last()
+        .expect("non-empty turn usage sequence")
+        .sequence;
+    let relevant_items = session_items
+        .iter()
+        .copied()
+        .take_while(|item| item.sequence <= last_usage_sequence)
+        .collect::<Vec<_>>();
+    // Match Runtime durable restoration exactly: reaching the complete-scan
+    // boundary is uncertain because another page may exist.
+    if known_relevant_item_count.unwrap_or(relevant_items.len()) >= MAX_TURN_TRACE_HISTORY_ITEMS {
+        return Err(coded_error(
+            "turn-trace-usage-history-limit",
+            "turn trace usage Timeline history limit is exceeded",
+        ));
+    }
+    let mut validation = TraceUsageValidationState::new(trace);
+    for item in relevant_items
+        .iter()
+        .copied()
+        .filter(|item| item.item_kind == "usage")
+    {
+        validation.push(item)?;
+    }
+    validation.finish()
+}
+
+fn validate_trace_usage_item(
+    trace: &TurnTrace,
+    item: &StoredItem,
+    expected_turn_id: Option<&str>,
+    previous_status: ThresholdStatus,
+) -> Result<(Option<UsageAuthorityReport>, ThresholdStatus), WorkbenchStoreError> {
+    if item.session_id != trace.binding.session_id
+        || expected_turn_id.is_some_and(|turn_id| item.turn_id.as_deref() != Some(turn_id))
+        || item.item_kind != "usage"
+        || item.role != "system"
+        || item.state != "updated"
+    {
+        return Err(coded_error(
+            "turn-trace-usage-item-binding-invalid",
+            "turn trace usage Timeline item binding is invalid",
+        ));
+    }
+    let payload_json = validate_item_payload(&item.payload).map_err(|_| {
+        coded_error(
+            "turn-trace-usage-item-integrity-invalid",
+            "turn trace usage Timeline item integrity is invalid",
+        )
+    })?;
+    if ContentHash::for_bytes(payload_json.as_bytes()) != item.payload_hash {
+        return Err(coded_error(
+            "turn-trace-usage-item-integrity-invalid",
+            "turn trace usage Timeline item integrity is invalid",
+        ));
+    }
+    let payload = item.payload.as_object().ok_or_else(|| {
+        coded_error(
+            "turn-trace-usage-item-structure-invalid",
+            "turn trace usage Timeline item structure is invalid",
+        )
+    })?;
+    if payload.len() != 2
+        || payload.get("content").and_then(Value::as_str).is_none()
+        || payload
+            .keys()
+            .any(|key| !matches!(key.as_str(), "content" | "data"))
+    {
+        return Err(coded_error(
+            "turn-trace-usage-item-structure-invalid",
+            "turn trace usage Timeline item structure is invalid",
+        ));
+    }
+    let data = payload
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            coded_error(
+                "turn-trace-usage-item-structure-invalid",
+                "turn trace usage Timeline item structure is invalid",
+            )
+        })?;
+    validate_trace_provider_usage_data(data)?;
+    let raw_usage = json!({
+        "last": data.get("last").expect("validated usage last breakdown"),
+        "total": data.get("total").expect("validated usage total breakdown"),
+        "model_context_window": data
+            .get("model_context_window")
+            .expect("validated usage context window"),
+    });
+    let Some(authority_value) = data.get("authority") else {
+        if from_provider_token_usage(&raw_usage, item.created_at_ms).is_ok() {
+            return Err(coded_error(
+                "turn-trace-usage-item-authority-downgrade",
+                "valid provider usage cannot omit its authority report",
+            ));
+        }
+        return Ok((None, ThresholdStatus::PreviewRequired));
+    };
+    let authority = authority_value.as_object().ok_or_else(|| {
+        coded_error(
+            "turn-trace-usage-item-report-invalid",
+            "turn trace usage Timeline item report is invalid",
+        )
+    })?;
+    if authority.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "schema_version" | "as_of_ms" | "entries" | "compaction_threshold"
+        )
+    }) {
+        return Err(coded_error(
+            "turn-trace-usage-item-report-invalid",
+            "turn trace usage Timeline item report is invalid",
+        ));
+    }
+    let threshold_value = authority.get("compaction_threshold").ok_or_else(|| {
+        coded_error(
+            "turn-trace-usage-item-threshold-invalid",
+            "turn trace usage Timeline item threshold decision is missing",
+        )
+    })?;
+    let mut report_value = Value::Object(authority.clone());
+    report_value
+        .as_object_mut()
+        .expect("usage authority report object")
+        .remove("compaction_threshold");
+    let item_report =
+        serde_json::from_value::<UsageAuthorityReport>(report_value).map_err(|_| {
+            coded_error(
+                "turn-trace-usage-item-report-invalid",
+                "turn trace usage Timeline item report is invalid",
+            )
+        })?;
+    item_report.validate().map_err(|_| {
+        coded_error(
+            "turn-trace-usage-item-report-invalid",
+            "turn trace usage Timeline item report is invalid",
+        )
+    })?;
+    if item.created_at_ms < item_report.as_of_ms {
+        return Err(coded_error(
+            "turn-trace-usage-item-time-invalid",
+            "turn trace usage Timeline item predates its provider observation",
+        ));
+    }
+    let rebuilt = from_provider_token_usage(&raw_usage, item_report.as_of_ms).map_err(|_| {
+        coded_error(
+            "turn-trace-usage-item-report-invalid",
+            "turn trace usage Timeline item report cannot be rebuilt",
+        )
+    })?;
+    if rebuilt != item_report {
+        return Err(coded_error(
+            "turn-trace-usage-item-report-mismatch",
+            "turn trace usage Timeline item report does not match its raw provider snapshot",
+        ));
+    }
+    let Some(decision) = trace_context_threshold_for_usage(&item_report, previous_status) else {
+        return Err(coded_error(
+            "turn-trace-usage-item-threshold-invalid",
+            "turn trace usage Timeline item threshold decision is invalid",
+        ));
+    };
+    if serde_json::to_value(decision).ok().as_ref() != Some(threshold_value) {
+        return Err(coded_error(
+            "turn-trace-usage-item-threshold-invalid",
+            "turn trace usage Timeline item threshold decision is invalid",
+        ));
+    }
+    Ok((Some(item_report), decision.status))
+}
+
+fn validate_trace_provider_usage_data(
+    data: &serde_json::Map<String, Value>,
+) -> Result<(), WorkbenchStoreError> {
+    if !matches!(data.len(), 3 | 4)
+        || !data.contains_key("last")
+        || !data.contains_key("total")
+        || !data.contains_key("model_context_window")
+        || data.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "last" | "total" | "model_context_window" | "authority"
+            )
+        })
+    {
+        return Err(coded_error(
+            "turn-trace-usage-item-structure-invalid",
+            "turn trace usage provider snapshot structure is invalid",
+        ));
+    }
+    for key in ["last", "total"] {
+        let breakdown = data.get(key).and_then(Value::as_object).ok_or_else(|| {
+            coded_error(
+                "turn-trace-usage-item-structure-invalid",
+                "turn trace usage provider breakdown is invalid",
+            )
+        })?;
+        let allowed = [
+            "cached_input_tokens",
+            "input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+            "total_tokens",
+        ];
+        if breakdown.len() > allowed.len()
+            || breakdown
+                .keys()
+                .any(|field| !allowed.contains(&field.as_str()))
+            || breakdown
+                .values()
+                .any(|value| value.as_u64().is_none_or(|value| value > i64::MAX as u64))
+        {
+            return Err(coded_error(
+                "turn-trace-usage-item-structure-invalid",
+                "turn trace usage provider breakdown is invalid",
+            ));
+        }
+    }
+    if !data.get("model_context_window").is_some_and(|value| {
+        value.is_null() || value.as_u64().is_some_and(|v| v <= i64::MAX as u64)
+    }) {
+        return Err(coded_error(
+            "turn-trace-usage-item-structure-invalid",
+            "turn trace usage provider context window is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn trace_context_threshold_for_usage(
+    report: &UsageAuthorityReport,
+    previous_status: ThresholdStatus,
+) -> Option<context_threshold::ThresholdDecision> {
+    let entry = report.entry(UsageAuthorityMetric::Context)?;
+    let observation = match (entry.authority, &entry.value) {
+        (
+            UsageAuthorityLabel::Observed | UsageAuthorityLabel::CatalogDerived,
+            Some(UsageAuthorityValue::Context(value)),
+        ) => match (value.used_tokens, value.window_tokens) {
+            (Some(used), Some(window)) => {
+                ContextObservation::fresh_authoritative(used, Some(window))
+            }
+            _ => ContextObservation::unknown(),
+        },
+        (UsageAuthorityLabel::Estimated, Some(UsageAuthorityValue::Context(value))) => {
+            match (value.used_tokens, value.window_tokens) {
+                (Some(used), Some(window)) => {
+                    ContextObservation::fresh_conservative(used, Some(window))
+                }
+                _ => ContextObservation::unknown(),
+            }
+        }
+        (UsageAuthorityLabel::Stale, Some(UsageAuthorityValue::Context(value))) => {
+            match (value.used_tokens, value.window_tokens) {
+                (Some(used), Some(window)) => ContextObservation::stale(used, Some(window)),
+                _ => ContextObservation::unknown(),
+            }
+        }
+        _ => ContextObservation::unknown(),
+    };
+    context_threshold::evaluate(observation, ThresholdConfig::default(), previous_status).ok()
 }
 
 fn prepare_turn_trace_record(
@@ -12696,7 +13216,9 @@ fn parse_turn_trace_event(event: &WorkbenchEvent) -> Result<StoredTurnTrace, Wor
         })?;
     if !matches!(
         trace_schema_version,
-        LEGACY_TURN_TRACE_SCHEMA_VERSION | TURN_TRACE_SCHEMA_VERSION
+        LEGACY_TURN_TRACE_SCHEMA_VERSION
+            | V0_2_TURN_TRACE_SCHEMA_VERSION
+            | TURN_TRACE_SCHEMA_VERSION
     ) {
         return Err(coded_error(
             "turn-trace-event-trace-version-unsupported",
@@ -15878,8 +16400,9 @@ mod tests {
     use crate::turn_trace::{
         AuthorityLabel, CompletionDomain, CompletionEvidence, EvidenceRef, EvidenceSource,
         RedactionSummary, SessionMode as TraceSessionMode, TerminalEvidence, TraceBinding,
-        TurnAccess, TurnKind,
+        TurnAccess, TurnKind, UsageAccounting, UsageAttribution, UsageReportScope,
     };
+    use crate::usage_authority::{from_provider_token_usage, UsageAuthorityReport};
     use crate::workbench_migration::{
         create_pre_upgrade_backup_with_available_bytes, migration_backup_manifests,
     };
@@ -16123,7 +16646,7 @@ mod tests {
     }
 
     fn completed_turn_trace_v2(session_id: &str, turn_id: &str, at_ms: u64) -> TurnTrace {
-        let mut trace = TurnTrace::new(TraceBinding {
+        let mut trace = TurnTrace::new_v0_2(TraceBinding {
             session_id: session_id.into(),
             turn_id: turn_id.into(),
             project_id: Some("trace-project".into()),
@@ -16192,7 +16715,7 @@ mod tests {
 
     fn completed_chat_turn_trace_v2(session_id: &str, turn_id: &str, at_ms: u64) -> TurnTrace {
         let intent_identity = background_job_identity("sha256:", '6');
-        let mut trace = TurnTrace::new(TraceBinding {
+        let mut trace = TurnTrace::new_v0_2(TraceBinding {
             session_id: session_id.into(),
             turn_id: turn_id.into(),
             project_id: Some("trace-project".into()),
@@ -16256,6 +16779,316 @@ mod tests {
             .unwrap();
         trace.validate_complete().unwrap();
         trace
+    }
+
+    fn provider_usage_snapshot(observed_at_ms: u64) -> (Value, UsageAuthorityReport) {
+        let raw = json!({
+            "last": {
+                "cached_input_tokens": 2,
+                "input_tokens": 24,
+                "output_tokens": 8,
+                "reasoning_output_tokens": 4,
+                "total_tokens": 32
+            },
+            "total": {
+                "cached_input_tokens": 12,
+                "input_tokens": 120,
+                "output_tokens": 30,
+                "reasoning_output_tokens": 10,
+                "total_tokens": 150
+            },
+            "model_context_window": 128000
+        });
+        let report = from_provider_token_usage(&raw, observed_at_ms).unwrap();
+        (raw, report)
+    }
+
+    fn append_usage_timeline_item(
+        store: &mut WorkbenchStore,
+        item_id: &str,
+        raw: &Value,
+        report: &UsageAuthorityReport,
+        created_at_ms: u64,
+        previous_status: ThresholdStatus,
+    ) -> StoredItem {
+        append_usage_timeline_item_for_turn(
+            store,
+            "trace-turn",
+            item_id,
+            raw,
+            report,
+            created_at_ms,
+            previous_status,
+        )
+    }
+
+    fn append_usage_timeline_item_for_turn(
+        store: &mut WorkbenchStore,
+        turn_id: &str,
+        item_id: &str,
+        raw: &Value,
+        report: &UsageAuthorityReport,
+        created_at_ms: u64,
+        previous_status: ThresholdStatus,
+    ) -> StoredItem {
+        let mut authority = serde_json::to_value(report).unwrap();
+        authority["compaction_threshold"] = serde_json::to_value(
+            trace_context_threshold_for_usage(report, previous_status).unwrap(),
+        )
+        .unwrap();
+        let mut data = raw.clone();
+        data["authority"] = authority;
+        store
+            .append_item(StoredItemAppend {
+                session_id: "trace-session".into(),
+                turn_id: Some(turn_id.into()),
+                item_id: item_id.into(),
+                item_kind: "usage".into(),
+                role: "system".into(),
+                state: "updated".into(),
+                payload: json!({
+                    "content": "Token usage updated",
+                    "data": data
+                }),
+                created_at_ms,
+            })
+            .unwrap()
+    }
+
+    fn completed_turn_trace_v3_with_usage(
+        session_id: &str,
+        turn_id: &str,
+        persisted_item_id: &str,
+        report: UsageAuthorityReport,
+        terminal_at_ms: u64,
+    ) -> TurnTrace {
+        let intent_identity = background_job_identity("sha256:", 'c');
+        let report_identity = report.metadata_identity().unwrap();
+        let observed_at_ms = report.as_of_ms;
+        let mut trace = TurnTrace::new(TraceBinding {
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            project_id: Some("trace-project".into()),
+            environment_identity: Some(trace_environment_identity()),
+        })
+        .unwrap();
+        trace
+            .append(
+                "trace-intent".into(),
+                observed_at_ms.saturating_sub(1),
+                TracePayload::Intent {
+                    session_mode: TraceSessionMode::Work,
+                    turn_kind: TurnKind::ReadOnlyInspection,
+                    access: TurnAccess::ReadOnly,
+                    intent_identity: intent_identity.clone(),
+                    evidence: observed_trace_evidence(
+                        EvidenceSource::Runtime,
+                        'd',
+                        observed_at_ms.saturating_sub(1),
+                    ),
+                    redaction: RedactionSummary::metadata_only(),
+                },
+            )
+            .unwrap();
+        trace
+            .append(
+                "trace-usage-report".into(),
+                observed_at_ms,
+                TracePayload::UsageReport {
+                    report_identity: report_identity.clone(),
+                    persisted_item_id: persisted_item_id.into(),
+                    scope: UsageReportScope::ProviderThread,
+                    accounting: UsageAccounting::AbsoluteSnapshot,
+                    attempt_attribution: UsageAttribution::Unavailable,
+                    retry_attribution: UsageAttribution::Unavailable,
+                    report,
+                    evidence: EvidenceRef {
+                        authority: AuthorityLabel::Observed,
+                        source: EvidenceSource::UsageProvider,
+                        identity: Some(report_identity),
+                        observed_at_ms: Some(observed_at_ms),
+                    },
+                    redaction: RedactionSummary::metadata_only(),
+                },
+            )
+            .unwrap();
+        trace
+            .append(
+                "trace-terminal".into(),
+                terminal_at_ms,
+                TracePayload::Terminal {
+                    state: TraceTerminalState::Completed,
+                    evidence: TerminalEvidence {
+                        workspace_identity: None,
+                        git_state_identity: None,
+                        verification_identity: None,
+                        observed_verification_count: 0,
+                        evidence: observed_trace_evidence(
+                            EvidenceSource::Runtime,
+                            'e',
+                            terminal_at_ms,
+                        ),
+                        completion: Some(CompletionEvidence {
+                            intent_identity,
+                            workspace_change: CompletionDomain::NotApplicable {
+                                evidence: observed_trace_evidence(
+                                    EvidenceSource::Runtime,
+                                    'f',
+                                    terminal_at_ms,
+                                ),
+                            },
+                            git_change: CompletionDomain::NotApplicable {
+                                evidence: observed_trace_evidence(
+                                    EvidenceSource::Runtime,
+                                    '1',
+                                    terminal_at_ms,
+                                ),
+                            },
+                            verification: CompletionDomain::Unknown {
+                                evidence: EvidenceRef {
+                                    authority: AuthorityLabel::Unknown,
+                                    source: EvidenceSource::Runtime,
+                                    identity: None,
+                                    observed_at_ms: None,
+                                },
+                            },
+                        }),
+                    },
+                    redaction: RedactionSummary::metadata_only(),
+                },
+            )
+            .unwrap();
+        trace.validate_complete().unwrap();
+        trace
+    }
+
+    fn completed_turn_trace_v3_without_usage(
+        session_id: &str,
+        turn_id: &str,
+        terminal_at_ms: u64,
+    ) -> TurnTrace {
+        let (_, report) = provider_usage_snapshot(terminal_at_ms.saturating_sub(1));
+        let mut trace = completed_turn_trace_v3_with_usage(
+            session_id,
+            turn_id,
+            "unused-usage-item",
+            report,
+            terminal_at_ms,
+        );
+        trace.events.remove(1);
+        trace.events[1].sequence = 2;
+        trace.validate_complete().unwrap();
+        trace
+    }
+
+    fn rewrite_turn_trace_event(
+        store: &WorkbenchStore,
+        event_sequence: u64,
+        mutate: impl FnOnce(&mut Value),
+        rebind_valid_trace: bool,
+    ) {
+        let (event_id, payload_json): (String, String) = store
+            .connection
+            .query_row(
+                "SELECT event_id, payload_json FROM events
+                 WHERE session_id = 'trace-session' AND sequence = ?1",
+                [event_sequence as i64],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let mut payload = serde_json::from_str::<Value>(&payload_json).unwrap();
+        mutate(&mut payload);
+        let event_id = if rebind_valid_trace {
+            let trace = serde_json::from_value::<TurnTrace>(payload["trace"].clone()).unwrap();
+            trace.validate_complete().unwrap();
+            let trace_identity = trace.metadata_identity().unwrap();
+            payload["trace_identity"] = Value::String(trace_identity.clone());
+            derived_event_id(
+                "turn-trace-recorded",
+                format!("trace-turn\0{trace_identity}").as_bytes(),
+            )
+        } else {
+            event_id
+        };
+        let payload_json = serde_json::to_string(&payload).unwrap();
+        let payload_hash = ContentHash::for_bytes(payload_json.as_bytes());
+        store
+            .connection
+            .execute(
+                "UPDATE events
+                 SET event_id = ?1, payload_json = ?2, payload_sha256 = ?3, payload_bytes = ?4
+                 WHERE session_id = 'trace-session' AND sequence = ?5",
+                params![
+                    event_id,
+                    payload_json,
+                    payload_hash.sha256,
+                    payload_hash.bytes as i64,
+                    event_sequence as i64,
+                ],
+            )
+            .unwrap();
+    }
+
+    fn rewrite_usage_item_and_event(
+        store: &WorkbenchStore,
+        item_id: &str,
+        mutate: impl Fn(&mut Value),
+    ) {
+        let payload_json: String = store
+            .connection
+            .query_row(
+                "SELECT payload_json FROM items WHERE item_id = ?1",
+                [item_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut item_payload = serde_json::from_str::<Value>(&payload_json).unwrap();
+        mutate(&mut item_payload);
+        let item_payload_json = serde_json::to_string(&item_payload).unwrap();
+        let item_payload_hash = ContentHash::for_bytes(item_payload_json.as_bytes());
+        store
+            .connection
+            .execute(
+                "UPDATE items
+                 SET payload_json = ?1, payload_sha256 = ?2, payload_bytes = ?3
+                 WHERE item_id = ?4",
+                params![
+                    item_payload_json,
+                    item_payload_hash.sha256,
+                    item_payload_hash.bytes as i64,
+                    item_id,
+                ],
+            )
+            .unwrap();
+
+        let (sequence, event_payload_json): (i64, String) = store
+            .connection
+            .query_row(
+                "SELECT sequence, payload_json FROM events
+                 WHERE event_kind = 'item.appended' AND correlation_id = ?1",
+                [item_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let mut event_payload = serde_json::from_str::<Value>(&event_payload_json).unwrap();
+        mutate(&mut event_payload["item"]["payload"]);
+        event_payload["item"]["payload_hash"] = serde_json::to_value(&item_payload_hash).unwrap();
+        let event_payload_json = serde_json::to_string(&event_payload).unwrap();
+        let event_payload_hash = ContentHash::for_bytes(event_payload_json.as_bytes());
+        store
+            .connection
+            .execute(
+                "UPDATE events
+                 SET payload_json = ?1, payload_sha256 = ?2, payload_bytes = ?3
+                 WHERE session_id = 'trace-session' AND sequence = ?4",
+                params![
+                    event_payload_json,
+                    event_payload_hash.sha256,
+                    event_payload_hash.bytes as i64,
+                    sequence,
+                ],
+            )
+            .unwrap();
     }
 
     fn create_background_job_fixture(
@@ -20189,7 +21022,7 @@ mod tests {
         let mut store = WorkbenchStore::open(&root.path).unwrap();
         create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
         let trace = completed_turn_trace_v2("trace-session", "trace-turn", 4);
-        assert_eq!(trace.schema_version, TURN_TRACE_SCHEMA_VERSION);
+        assert_eq!(trace.schema_version, V0_2_TURN_TRACE_SCHEMA_VERSION);
         let finished = store
             .finish_turn_with_trace("trace-session", "trace-turn", "completed", 4, &trace)
             .unwrap();
@@ -20230,6 +21063,888 @@ mod tests {
     }
 
     #[test]
+    fn v0_3_usage_report_trace_is_idempotent_restart_safe_and_keeps_v13() {
+        let root = Root::new("turn-trace-v0-3-usage");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+        let (raw, report) = provider_usage_snapshot(4);
+        let item = append_usage_timeline_item(
+            &mut store,
+            "usage-item-1",
+            &raw,
+            &report,
+            5,
+            ThresholdStatus::NoAction,
+        );
+        let trace = completed_turn_trace_v3_with_usage(
+            "trace-session",
+            "trace-turn",
+            &item.item_id,
+            report,
+            6,
+        );
+        assert_eq!(trace.schema_version, TURN_TRACE_SCHEMA_VERSION);
+
+        let finished = store
+            .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &trace)
+            .unwrap();
+        assert_eq!(
+            store
+                .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &trace)
+                .unwrap(),
+            finished
+        );
+        let stored = store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.trace, trace);
+        let payload: String = store
+            .connection
+            .query_row(
+                "SELECT payload_json FROM events
+                 WHERE session_id = 'trace-session' AND sequence = ?1",
+                [stored.event_sequence as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload = serde_json::from_str::<Value>(&payload).unwrap();
+        assert_eq!(
+            payload["schema_version"],
+            TURN_TRACE_RECORDED_SCHEMA_VERSION
+        );
+        assert_eq!(
+            payload["trace"]["schema_version"],
+            TURN_TRACE_SCHEMA_VERSION
+        );
+        let database_version: i64 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(database_version, SCHEMA_VERSION);
+        let candidate = store
+            .rebuild_session_projection_candidate("trace-session")
+            .unwrap();
+        assert!(candidate.source_complete);
+        assert!(candidate.matches_current_projection);
+
+        drop(store);
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .read_turn_trace("trace-session", "trace-turn")
+                .unwrap()
+                .unwrap(),
+            stored
+        );
+        assert_eq!(
+            reopened
+                .connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+        assert!(!reopened.session_requires_recovery("trace-session"));
+    }
+
+    #[test]
+    fn v0_3_usage_report_requires_its_exact_persisted_timeline_item() {
+        let root = Root::new("turn-trace-v0-3-usage-item-admission");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+        let (_, report) = provider_usage_snapshot(4);
+        let trace = completed_turn_trace_v3_with_usage(
+            "trace-session",
+            "trace-turn",
+            "missing-usage-item",
+            report,
+            6,
+        );
+        assert_eq!(
+            store
+                .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &trace)
+                .unwrap_err()
+                .code,
+            "turn-trace-usage-item-missing"
+        );
+        assert_eq!(store.load_turn("trace-turn").unwrap().state, "started");
+        assert!(store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .is_none());
+
+        let (raw, report) = provider_usage_snapshot(4);
+        let mut authority = serde_json::to_value(&report).unwrap();
+        authority["compaction_threshold"] = serde_json::to_value(
+            trace_context_threshold_for_usage(&report, ThresholdStatus::NoAction).unwrap(),
+        )
+        .unwrap();
+        authority["unrecognized_authority"] = Value::Bool(true);
+        let mut data = raw;
+        data["authority"] = authority;
+        store
+            .append_item(StoredItemAppend {
+                session_id: "trace-session".into(),
+                turn_id: Some("trace-turn".into()),
+                item_id: "usage-item-with-extra-authority".into(),
+                item_kind: "usage".into(),
+                role: "system".into(),
+                state: "updated".into(),
+                payload: json!({
+                    "content": "Token usage updated",
+                    "data": data
+                }),
+                created_at_ms: 5,
+            })
+            .unwrap();
+        let trace = completed_turn_trace_v3_with_usage(
+            "trace-session",
+            "trace-turn",
+            "usage-item-with-extra-authority",
+            report,
+            6,
+        );
+        assert_eq!(
+            store
+                .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &trace)
+                .unwrap_err()
+                .code,
+            "turn-trace-usage-item-report-invalid"
+        );
+        assert_eq!(store.load_turn("trace-turn").unwrap().state, "running");
+    }
+
+    #[test]
+    fn v0_3_usage_report_terminal_event_failure_rolls_back_trace_and_terminal() {
+        let root = Root::new("turn-trace-v0-3-usage-rollback");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+        let (raw, report) = provider_usage_snapshot(4);
+        append_usage_timeline_item(
+            &mut store,
+            "usage-item-1",
+            &raw,
+            &report,
+            5,
+            ThresholdStatus::NoAction,
+        );
+        let trace = completed_turn_trace_v3_with_usage(
+            "trace-session",
+            "trace-turn",
+            "usage-item-1",
+            report,
+            6,
+        );
+        let before = store
+            .read_session_events("trace-session", 0, MAX_EVENT_PAGE)
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_v0_3_turn_terminal_event
+                 BEFORE INSERT ON events
+                 WHEN NEW.event_kind = 'turn.completed'
+                 BEGIN SELECT RAISE(ABORT, 'injected v0.3 turn terminal failure'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &trace)
+            .is_err());
+        assert_eq!(store.load_turn("trace-turn").unwrap().state, "running");
+        assert!(store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .read_session_events("trace-session", 0, MAX_EVENT_PAGE)
+                .unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn v0_3_usage_report_hash_consistent_semantic_tampering_is_quarantined() {
+        for tamper in [
+            "report",
+            "item",
+            "time",
+            "scope",
+            "accounting",
+            "attempt-attribution",
+            "retry-attribution",
+        ] {
+            let root = Root::new(&format!("turn-trace-v0-3-{tamper}-tamper"));
+            let mut store = WorkbenchStore::open(&root.path).unwrap();
+            create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+            let (raw, report) = provider_usage_snapshot(4);
+            append_usage_timeline_item(
+                &mut store,
+                "usage-item-1",
+                &raw,
+                &report,
+                5,
+                ThresholdStatus::NoAction,
+            );
+            let trace = completed_turn_trace_v3_with_usage(
+                "trace-session",
+                "trace-turn",
+                "usage-item-1",
+                report,
+                6,
+            );
+            store
+                .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &trace)
+                .unwrap();
+            let stored = store
+                .read_turn_trace("trace-session", "trace-turn")
+                .unwrap()
+                .unwrap();
+            let rebind_valid_trace = matches!(tamper, "report" | "item" | "time");
+            rewrite_turn_trace_event(
+                &store,
+                stored.event_sequence,
+                |payload| {
+                    let usage = &mut payload["trace"]["events"][1];
+                    match tamper {
+                        "report" => {
+                            let replacement = from_provider_token_usage(
+                                &json!({
+                                    "last": {
+                                        "cached_input_tokens": 3,
+                                        "input_tokens": 30,
+                                        "output_tokens": 9,
+                                        "reasoning_output_tokens": 4,
+                                        "total_tokens": 39
+                                    },
+                                    "total": {
+                                        "cached_input_tokens": 15,
+                                        "input_tokens": 150,
+                                        "output_tokens": 40,
+                                        "reasoning_output_tokens": 10,
+                                        "total_tokens": 190
+                                    },
+                                    "model_context_window": 128000
+                                }),
+                                4,
+                            )
+                            .unwrap();
+                            let identity = replacement.metadata_identity().unwrap();
+                            usage["payload"]["report"] = serde_json::to_value(replacement).unwrap();
+                            usage["payload"]["report_identity"] = Value::String(identity.clone());
+                            usage["payload"]["evidence"]["identity"] = Value::String(identity);
+                        }
+                        "item" => {
+                            usage["payload"]["persisted_item_id"] =
+                                Value::String("missing-substituted-item".into());
+                        }
+                        "time" => {
+                            usage["at_ms"] = Value::from(5_u64);
+                            usage["payload"]["report"]["as_of_ms"] = Value::from(5_u64);
+                            usage["payload"]["evidence"]["observed_at_ms"] = Value::from(5_u64);
+                            let report = serde_json::from_value::<UsageAuthorityReport>(
+                                usage["payload"]["report"].clone(),
+                            )
+                            .unwrap();
+                            let identity = report.metadata_identity().unwrap();
+                            usage["payload"]["report_identity"] = Value::String(identity.clone());
+                            usage["payload"]["evidence"]["identity"] = Value::String(identity);
+                        }
+                        "scope" => {
+                            usage["payload"]["scope"] = Value::String("turn-attempt".into());
+                        }
+                        "accounting" => {
+                            usage["payload"]["accounting"] = Value::String("additive-delta".into());
+                        }
+                        "attempt-attribution" => {
+                            usage["payload"]["attempt_attribution"] =
+                                Value::String("observed".into());
+                        }
+                        "retry-attribution" => {
+                            usage["payload"]["retry_attribution"] =
+                                Value::String("observed".into());
+                        }
+                        _ => unreachable!(),
+                    }
+                },
+                rebind_valid_trace,
+            );
+
+            assert!(
+                store
+                    .read_turn_trace("trace-session", "trace-turn")
+                    .is_err(),
+                "direct read accepted {tamper} tampering"
+            );
+            let candidate = store
+                .rebuild_session_projection_candidate("trace-session")
+                .unwrap();
+            assert!(
+                !candidate.source_complete,
+                "replay accepted {tamper} tampering"
+            );
+            assert!(candidate
+                .issues
+                .iter()
+                .any(|issue| issue == "turn-trace-event-invalid"));
+            drop(store);
+
+            let reopened = WorkbenchStore::open(&root.path).unwrap();
+            assert!(
+                reopened.session_requires_recovery("trace-session"),
+                "restart accepted {tamper} tampering"
+            );
+            assert_eq!(reopened.quarantined_session_count(), 1);
+            assert!(reopened
+                .read_turn_trace("trace-session", "trace-turn")
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn v0_3_usage_report_ignores_only_genuinely_unvalidated_provider_usage() {
+        let malformed_root = Root::new("turn-trace-v0-3-malformed-usage");
+        let mut malformed_store = WorkbenchStore::open(&malformed_root.path).unwrap();
+        create_turn_trace_fixture(
+            &mut malformed_store,
+            &malformed_root,
+            "trace-session",
+            "trace-turn",
+        );
+        let (mut malformed_raw, _) = provider_usage_snapshot(4);
+        malformed_raw["total"]
+            .as_object_mut()
+            .unwrap()
+            .remove("input_tokens");
+        malformed_store
+            .append_item(StoredItemAppend {
+                session_id: "trace-session".into(),
+                turn_id: Some("trace-turn".into()),
+                item_id: "usage-item-malformed".into(),
+                item_kind: "usage".into(),
+                role: "system".into(),
+                state: "updated".into(),
+                payload: json!({
+                    "content": "Token usage updated",
+                    "data": malformed_raw
+                }),
+                created_at_ms: 5,
+            })
+            .unwrap();
+        let trace = completed_turn_trace_v3_without_usage("trace-session", "trace-turn", 6);
+        malformed_store
+            .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &trace)
+            .unwrap();
+        assert_eq!(
+            malformed_store
+                .read_turn_trace("trace-session", "trace-turn")
+                .unwrap()
+                .unwrap()
+                .trace,
+            trace
+        );
+        drop(malformed_store);
+        let mut malformed_reopened = WorkbenchStore::open(&malformed_root.path).unwrap();
+        assert!(!malformed_reopened.session_requires_recovery("trace-session"));
+        malformed_reopened
+            .create_turn(StoredTurnCreate {
+                turn_id: "trace-turn-after-malformed".into(),
+                session_id: "trace-session".into(),
+                idempotency_key: Some("trace-turn-after-malformed-key".into()),
+                input_hash: ContentHash::for_bytes(b"post-malformed trace fixture"),
+                created_at_ms: 7,
+            })
+            .unwrap();
+        let (mut recovered_raw, _) = provider_usage_snapshot(8);
+        recovered_raw["last"]["input_tokens"] = Value::from(75_u64);
+        recovered_raw["model_context_window"] = Value::from(100_u64);
+        let recovered_report = from_provider_token_usage(&recovered_raw, 8).unwrap();
+        append_usage_timeline_item_for_turn(
+            &mut malformed_reopened,
+            "trace-turn-after-malformed",
+            "usage-item-after-malformed",
+            &recovered_raw,
+            &recovered_report,
+            9,
+            ThresholdStatus::PreviewRequired,
+        );
+        let recovered_trace = completed_turn_trace_v3_with_usage(
+            "trace-session",
+            "trace-turn-after-malformed",
+            "usage-item-after-malformed",
+            recovered_report,
+            10,
+        );
+        malformed_reopened
+            .finish_turn_with_trace(
+                "trace-session",
+                "trace-turn-after-malformed",
+                "completed",
+                10,
+                &recovered_trace,
+            )
+            .unwrap();
+
+        let downgrade_root = Root::new("turn-trace-v0-3-usage-authority-downgrade");
+        let mut downgrade_store = WorkbenchStore::open(&downgrade_root.path).unwrap();
+        create_turn_trace_fixture(
+            &mut downgrade_store,
+            &downgrade_root,
+            "trace-session",
+            "trace-turn",
+        );
+        let (valid_raw, _) = provider_usage_snapshot(4);
+        downgrade_store
+            .append_item(StoredItemAppend {
+                session_id: "trace-session".into(),
+                turn_id: Some("trace-turn".into()),
+                item_id: "usage-item-downgraded".into(),
+                item_kind: "usage".into(),
+                role: "system".into(),
+                state: "updated".into(),
+                payload: json!({
+                    "content": "Token usage updated",
+                    "data": valid_raw
+                }),
+                created_at_ms: 5,
+            })
+            .unwrap();
+        let trace = completed_turn_trace_v3_without_usage("trace-session", "trace-turn", 6);
+        assert_eq!(
+            downgrade_store
+                .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &trace)
+                .unwrap_err()
+                .code,
+            "turn-trace-usage-item-authority-downgrade"
+        );
+        assert_eq!(
+            downgrade_store.load_turn("trace-turn").unwrap().state,
+            "running"
+        );
+    }
+
+    #[test]
+    fn v0_3_usage_report_rejects_rebinding_to_an_earlier_valid_snapshot() {
+        let root = Root::new("turn-trace-v0-3-earlier-usage-substitution");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+        let (raw_1, report_1) = provider_usage_snapshot(6);
+        append_usage_timeline_item(
+            &mut store,
+            "usage-item-1",
+            &raw_1,
+            &report_1,
+            6,
+            ThresholdStatus::NoAction,
+        );
+        let (raw_2, report_2) = provider_usage_snapshot(7);
+        append_usage_timeline_item(
+            &mut store,
+            "usage-item-2",
+            &raw_2,
+            &report_2,
+            7,
+            ThresholdStatus::NoAction,
+        );
+        let trace = completed_turn_trace_v3_with_usage(
+            "trace-session",
+            "trace-turn",
+            "usage-item-2",
+            report_2,
+            8,
+        );
+        store
+            .finish_turn_with_trace("trace-session", "trace-turn", "completed", 8, &trace)
+            .unwrap();
+        let stored = store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .unwrap();
+        let report_1_identity = report_1.metadata_identity().unwrap();
+        rewrite_turn_trace_event(
+            &store,
+            stored.event_sequence,
+            |payload| {
+                let usage = &mut payload["trace"]["events"][1];
+                usage["at_ms"] = Value::from(6_u64);
+                usage["payload"]["persisted_item_id"] = Value::String("usage-item-1".into());
+                usage["payload"]["report"] = serde_json::to_value(&report_1).unwrap();
+                usage["payload"]["report_identity"] = Value::String(report_1_identity.clone());
+                usage["payload"]["evidence"]["identity"] = Value::String(report_1_identity.clone());
+                usage["payload"]["evidence"]["observed_at_ms"] = Value::from(6_u64);
+            },
+            true,
+        );
+        assert_eq!(
+            store
+                .read_turn_trace("trace-session", "trace-turn")
+                .unwrap_err()
+                .code,
+            "turn-trace-usage-item-not-latest"
+        );
+        let candidate = store
+            .rebuild_session_projection_candidate("trace-session")
+            .unwrap();
+        assert!(!candidate.source_complete);
+        drop(store);
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert!(reopened.session_requires_recovery("trace-session"));
+    }
+
+    #[test]
+    fn v0_3_usage_report_rejects_hash_consistent_raw_and_threshold_tampering() {
+        for tamper in ["raw", "threshold"] {
+            let root = Root::new(&format!("turn-trace-v0-3-usage-item-{tamper}-tamper"));
+            let mut store = WorkbenchStore::open(&root.path).unwrap();
+            create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+            let (raw, report) = provider_usage_snapshot(4);
+            append_usage_timeline_item(
+                &mut store,
+                "usage-item-1",
+                &raw,
+                &report,
+                5,
+                ThresholdStatus::NoAction,
+            );
+            let trace = completed_turn_trace_v3_with_usage(
+                "trace-session",
+                "trace-turn",
+                "usage-item-1",
+                report,
+                6,
+            );
+            store
+                .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &trace)
+                .unwrap();
+            rewrite_usage_item_and_event(&store, "usage-item-1", |payload| match tamper {
+                "raw" => payload["data"]["total"]["input_tokens"] = Value::from(121_u64),
+                "threshold" => {
+                    payload["data"]["authority"]["compaction_threshold"]
+                        ["automatic_compaction_authority"] = Value::Bool(true)
+                }
+                _ => unreachable!(),
+            });
+            assert!(store
+                .read_turn_trace("trace-session", "trace-turn")
+                .is_err());
+            let candidate = store
+                .rebuild_session_projection_candidate("trace-session")
+                .unwrap();
+            assert!(!candidate.source_complete);
+            assert!(candidate
+                .issues
+                .iter()
+                .any(|issue| issue == "turn-trace-event-invalid"));
+            drop(store);
+            let reopened = WorkbenchStore::open(&root.path).unwrap();
+            assert!(reopened.session_requires_recovery("trace-session"));
+            assert_eq!(reopened.quarantined_session_count(), 1);
+        }
+    }
+
+    #[test]
+    fn v0_3_usage_report_admission_uses_the_exact_prior_turn_threshold_latch() {
+        let root = Root::new("turn-trace-v0-3-prior-threshold-admission");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+
+        let (mut first_raw, _) = provider_usage_snapshot(4);
+        first_raw["last"]["input_tokens"] = Value::from(95_u64);
+        first_raw["model_context_window"] = Value::from(100_u64);
+        let first_report = from_provider_token_usage(&first_raw, 4).unwrap();
+        append_usage_timeline_item_for_turn(
+            &mut store,
+            "trace-turn",
+            "usage-item-first-turn",
+            &first_raw,
+            &first_report,
+            5,
+            ThresholdStatus::NoAction,
+        );
+        let first_trace = completed_turn_trace_v3_with_usage(
+            "trace-session",
+            "trace-turn",
+            "usage-item-first-turn",
+            first_report,
+            6,
+        );
+        store
+            .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &first_trace)
+            .unwrap();
+
+        store
+            .create_turn(StoredTurnCreate {
+                turn_id: "trace-turn-2".into(),
+                session_id: "trace-session".into(),
+                idempotency_key: Some("trace-turn-2-key".into()),
+                input_hash: ContentHash::for_bytes(b"second metadata-only trace fixture"),
+                created_at_ms: 7,
+            })
+            .unwrap();
+        let (mut second_raw, _) = provider_usage_snapshot(8);
+        second_raw["last"]["input_tokens"] = Value::from(85_u64);
+        second_raw["model_context_window"] = Value::from(100_u64);
+        let second_report = from_provider_token_usage(&second_raw, 8).unwrap();
+        append_usage_timeline_item_for_turn(
+            &mut store,
+            "trace-turn-2",
+            "usage-item-second-turn-forged",
+            &second_raw,
+            &second_report,
+            9,
+            ThresholdStatus::NoAction,
+        );
+        let second_trace = completed_turn_trace_v3_with_usage(
+            "trace-session",
+            "trace-turn-2",
+            "usage-item-second-turn-forged",
+            second_report,
+            10,
+        );
+        assert_eq!(
+            store
+                .finish_turn_with_trace(
+                    "trace-session",
+                    "trace-turn-2",
+                    "completed",
+                    10,
+                    &second_trace,
+                )
+                .unwrap_err()
+                .code,
+            "turn-trace-usage-item-threshold-invalid"
+        );
+        assert_eq!(store.load_turn("trace-turn-2").unwrap().state, "running");
+    }
+
+    #[test]
+    fn v0_3_usage_report_first_session_snapshot_starts_from_no_action() {
+        let root = Root::new("turn-trace-v0-3-initial-threshold-admission");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+
+        let (mut raw, _) = provider_usage_snapshot(4);
+        raw["last"]["input_tokens"] = Value::from(85_u64);
+        raw["model_context_window"] = Value::from(100_u64);
+        let report = from_provider_token_usage(&raw, 4).unwrap();
+        append_usage_timeline_item(
+            &mut store,
+            "usage-item-forged-initial-latch",
+            &raw,
+            &report,
+            5,
+            ThresholdStatus::PreviewRequired,
+        );
+        let trace = completed_turn_trace_v3_with_usage(
+            "trace-session",
+            "trace-turn",
+            "usage-item-forged-initial-latch",
+            report,
+            6,
+        );
+        assert_eq!(
+            store
+                .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &trace,)
+                .unwrap_err()
+                .code,
+            "turn-trace-usage-item-threshold-invalid"
+        );
+        assert_eq!(store.load_turn("trace-turn").unwrap().state, "running");
+    }
+
+    #[test]
+    fn v0_3_usage_report_cross_turn_threshold_tampering_is_quarantined() {
+        let root = Root::new("turn-trace-v0-3-prior-threshold-tamper");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+
+        let (mut first_raw, _) = provider_usage_snapshot(4);
+        first_raw["last"]["input_tokens"] = Value::from(95_u64);
+        first_raw["model_context_window"] = Value::from(100_u64);
+        let first_report = from_provider_token_usage(&first_raw, 4).unwrap();
+        append_usage_timeline_item_for_turn(
+            &mut store,
+            "trace-turn",
+            "usage-item-first-turn",
+            &first_raw,
+            &first_report,
+            5,
+            ThresholdStatus::NoAction,
+        );
+        let first_trace = completed_turn_trace_v3_with_usage(
+            "trace-session",
+            "trace-turn",
+            "usage-item-first-turn",
+            first_report,
+            6,
+        );
+        store
+            .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &first_trace)
+            .unwrap();
+
+        store
+            .create_turn(StoredTurnCreate {
+                turn_id: "trace-turn-2".into(),
+                session_id: "trace-session".into(),
+                idempotency_key: Some("trace-turn-2-key".into()),
+                input_hash: ContentHash::for_bytes(b"second metadata-only trace fixture"),
+                created_at_ms: 7,
+            })
+            .unwrap();
+        let (mut second_raw, _) = provider_usage_snapshot(8);
+        second_raw["last"]["input_tokens"] = Value::from(85_u64);
+        second_raw["model_context_window"] = Value::from(100_u64);
+        let second_report = from_provider_token_usage(&second_raw, 8).unwrap();
+        append_usage_timeline_item_for_turn(
+            &mut store,
+            "trace-turn-2",
+            "usage-item-second-turn",
+            &second_raw,
+            &second_report,
+            9,
+            ThresholdStatus::PreviewRequired,
+        );
+        let second_trace = completed_turn_trace_v3_with_usage(
+            "trace-session",
+            "trace-turn-2",
+            "usage-item-second-turn",
+            second_report.clone(),
+            10,
+        );
+        store
+            .finish_turn_with_trace(
+                "trace-session",
+                "trace-turn-2",
+                "completed",
+                10,
+                &second_trace,
+            )
+            .unwrap();
+
+        let forged = serde_json::to_value(
+            trace_context_threshold_for_usage(&second_report, ThresholdStatus::NoAction).unwrap(),
+        )
+        .unwrap();
+        rewrite_usage_item_and_event(&store, "usage-item-second-turn", |payload| {
+            payload["data"]["authority"]["compaction_threshold"] = forged.clone();
+        });
+        assert_eq!(
+            store
+                .read_turn_trace("trace-session", "trace-turn-2")
+                .unwrap_err()
+                .code,
+            "turn-trace-usage-item-threshold-invalid"
+        );
+        let candidate = store
+            .rebuild_session_projection_candidate("trace-session")
+            .unwrap();
+        assert!(!candidate.source_complete);
+        assert!(candidate
+            .issues
+            .iter()
+            .any(|issue| issue == "turn-trace-event-invalid"));
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert!(reopened.session_requires_recovery("trace-session"));
+        assert_eq!(reopened.quarantined_session_count(), 1);
+        assert!(reopened
+            .read_turn_trace("trace-session", "trace-turn-2")
+            .is_err());
+    }
+
+    #[test]
+    fn v0_3_turn_trace_direct_read_rejects_project_and_environment_substitution() {
+        for tamper in ["project", "environment"] {
+            let root = Root::new(&format!("turn-trace-v0-3-{tamper}-binding-tamper"));
+            let mut store = WorkbenchStore::open(&root.path).unwrap();
+            create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+            if tamper == "project" {
+                let alternate_root = root.parent.join("alternate-project");
+                fs::create_dir(&alternate_root).unwrap();
+                store
+                    .create_project(StoredProjectCreate {
+                        project_id: "trace-project-alternate".into(),
+                        root_id: "trace-root-alternate".into(),
+                        canonical_root: alternate_root
+                            .canonicalize()
+                            .unwrap()
+                            .to_string_lossy()
+                            .into(),
+                        root_identity: background_job_identity("root:sha256:", '7'),
+                        display_name: "Alternate trace project".into(),
+                        root_access: "read".into(),
+                        created_at_ms: 3,
+                    })
+                    .unwrap();
+            }
+            let (raw, report) = provider_usage_snapshot(4);
+            append_usage_timeline_item(
+                &mut store,
+                "usage-item-1",
+                &raw,
+                &report,
+                5,
+                ThresholdStatus::NoAction,
+            );
+            let trace = completed_turn_trace_v3_with_usage(
+                "trace-session",
+                "trace-turn",
+                "usage-item-1",
+                report,
+                6,
+            );
+            store
+                .finish_turn_with_trace("trace-session", "trace-turn", "completed", 6, &trace)
+                .unwrap();
+            let stored = store
+                .read_turn_trace("trace-session", "trace-turn")
+                .unwrap()
+                .unwrap();
+            rewrite_turn_trace_event(
+                &store,
+                stored.event_sequence,
+                |payload| match tamper {
+                    "project" => {
+                        payload["trace"]["binding"]["project_id"] =
+                            Value::String("trace-project-alternate".into())
+                    }
+                    "environment" => {
+                        payload["trace"]["binding"]["environment_identity"] =
+                            Value::String(background_job_identity("environment:sha256:", '7'))
+                    }
+                    _ => unreachable!(),
+                },
+                true,
+            );
+            if tamper == "project" {
+                store
+                    .connection
+                    .execute(
+                        "UPDATE events SET project_id = 'trace-project-alternate'
+                         WHERE session_id = 'trace-session' AND sequence = ?1",
+                        [stored.event_sequence as i64],
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                store
+                    .read_turn_trace("trace-session", "trace-turn")
+                    .unwrap_err()
+                    .code,
+                "turn-trace-binding-mismatch"
+            );
+            let candidate = store
+                .rebuild_session_projection_candidate("trace-session")
+                .unwrap();
+            assert!(!candidate.source_complete);
+            drop(store);
+            let reopened = WorkbenchStore::open(&root.path).unwrap();
+            assert!(reopened.session_requires_recovery("trace-session"));
+        }
+    }
+
+    #[test]
     fn store_rejects_legacy_new_fields_and_future_trace_versions_without_side_effects() {
         let root = Root::new("turn-trace-version-rejection");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
@@ -20258,7 +21973,7 @@ mod tests {
             .is_err());
 
         let mut future = serde_json::from_str::<Value>(LEGACY_COMPLETED_TURN_TRACE_JSON).unwrap();
-        future["schema_version"] = Value::String("turn-trace/0.3".into());
+        future["schema_version"] = Value::String("turn-trace/0.4".into());
         let future_event_payload = json!({
             "schema_version": TURN_TRACE_RECORDED_SCHEMA_VERSION,
             "trace": future.clone(),
