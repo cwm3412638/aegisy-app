@@ -1353,11 +1353,22 @@ Known limitations:
   from replayed or uncertain evidence. The additive Session projection is
   consumed by Qt, whose deterministic threshold cache is capped at 128 entries.
   Compaction activation, provider compact, and automatic authority remain absent.
-- `turn-trace/0.1` has ten focused content-free trace tests plus Store coverage
-  for source authority, event ordering, duplicate usage, terminal evidence,
-  secret rejection, atomic terminal persistence, idempotency, rollback, restart,
-  and tamper quarantine. The Store can durably commit a trace, but Runtime has no
-  trace producer and no AAP/Qt, audit-export, or retention surface exists yet.
+- `turn-trace/0.1` has focused contract/producer tests plus Store coverage for
+  source authority, event ordering, duplicate usage, terminal evidence, secret
+  rejection, atomic terminal persistence, idempotency, rollback, restart, and
+  tamper quarantine. The pinned Codex Runtime now produces terminal-last traces
+  for failed and interrupted Turns. Stdio fixtures prove EOF transport failure,
+  provider retry observation followed by authoritative failure, user
+  interruption, exact Session/Turn/environment binding, excluded Context counts,
+  content-free provider classification, restart equality, and no fabricated
+  Workspace/Git/Test evidence. A completed persisted Turn is also proven to have
+  no trace while completion evidence remains unavailable. Codex `error` is
+  non-terminal and its dynamic text does not enter Timeline output; malformed
+  terminal identities/statuses fail as protocol errors. The full Rust workspace
+  passes 502 library tests with one ignored live fixture, 10 threshold contract
+  tests, 63 protocol tests, 11 stdio tests, formatting, and strict Clippy. No
+  AAP/Qt trace read, audit/export, or retention surface exists, so task 20.1 stays
+  incomplete.
 - Direct C++17 syntax checks pass for the Qt widget and render fixture, and the
   render target now completes MOC/RCC/compile/link on this host. A focused cache
   mode passes. The full render run currently fails earlier at the existing model-

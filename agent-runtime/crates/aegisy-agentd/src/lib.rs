@@ -62,6 +62,7 @@ mod terminal;
 mod tokenizer;
 mod turn_context;
 pub mod turn_trace;
+mod turn_trace_producer;
 mod unified_execution;
 pub mod usage_authority;
 mod workbench_migration;
@@ -109,7 +110,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use terminal::{TerminalError, TerminalManager, TerminalOpenContext};
-use turn_context::{prepare_turn_context_scoped_with_images, TurnContextItem, TurnImageContext};
+use turn_context::{
+    prepare_turn_context_scoped_with_images, PreparedTurnContext, TurnContextItem, TurnImageContext,
+};
+use turn_trace::{
+    ErrorClass as TraceErrorClass, EvidenceSource as TraceEvidenceSource,
+    ModelReason as TraceModelReason, ModelRole as TraceModelRole,
+    RuntimeState as TraceRuntimeState, TraceBinding, TurnTrace,
+};
+use turn_trace_producer::{
+    CodexTurnTraceAccumulator, ErrorMetadata as TraceErrorMetadata,
+    ModelMetadata as TraceModelMetadata, PreparedContextSummary as TraceContextSummary,
+    RuntimeMetadata as TraceRuntimeMetadata, TerminalMetadata as TraceTerminalMetadata,
+};
 use usage_authority::from_provider_token_usage;
 use workbench_store::{
     durable_blob_reference_id, BackgroundNotificationCursor, DurableBlobKind, DurableBlobWrite,
@@ -227,6 +240,10 @@ pub(crate) struct TurnCancellationHandle {
 impl TurnCancellationHandle {
     pub(crate) fn is_requested(&self) -> bool {
         self.requested.load(Ordering::Acquire)
+    }
+
+    fn request(&self) -> bool {
+        self.requested.swap(true, Ordering::AcqRel)
     }
 }
 
@@ -969,6 +986,14 @@ struct PreviewTurn {
     persistence_input: String,
     prepared_context: turn_context::PreparedTurnContext,
     user_item: TimelineItem,
+}
+
+struct PendingTurnTerminal {
+    turn_id: String,
+    state: &'static str,
+    terminal_at_ms: u64,
+    trace: TurnTrace,
+    item: Option<TimelineItem>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2332,13 +2357,13 @@ mod context_threshold_restore_tests {
 }
 
 fn runtime_error_content_with_provider(
-    message: &str,
+    _message: &str,
     provider_error: Option<&ProviderError>,
 ) -> String {
     if provider_error.is_some() {
         "Upstream provider request failed".into()
     } else {
-        runtime_error_content(message)
+        "Codex turn failed".into()
     }
 }
 
@@ -2443,6 +2468,173 @@ fn runtime_error_data_with_provider(
 
 fn runtime_error_data(message: &str) -> Value {
     runtime_error_data_with_provider(message, None)
+}
+
+fn trace_hash_identity(domain: &str, fields: &[&str]) -> String {
+    let mut input = Vec::new();
+    input.extend_from_slice(domain.as_bytes());
+    input.push(0);
+    for field in fields {
+        input.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        input.extend_from_slice(field.as_bytes());
+    }
+    format!("sha256:{}", ContentHash::for_bytes(&input).sha256)
+}
+
+fn trace_error_class(class: &str) -> TraceErrorClass {
+    match class {
+        "protocol" => TraceErrorClass::Protocol,
+        "provider" => TraceErrorClass::Provider,
+        "transport" => TraceErrorClass::Transport,
+        "timeout" => TraceErrorClass::Timeout,
+        "sandbox" => TraceErrorClass::Sandbox,
+        "policy" => TraceErrorClass::Policy,
+        "tool" => TraceErrorClass::Tool,
+        "storage" => TraceErrorClass::Storage,
+        "workspace" => TraceErrorClass::Workspace,
+        "git" => TraceErrorClass::Git,
+        "budget" => TraceErrorClass::Budget,
+        "adapter" | "runtime" => TraceErrorClass::Runtime,
+        _ => TraceErrorClass::Unknown,
+    }
+}
+
+fn codex_turn_trace_accumulator(
+    session_id: &str,
+    turn_id: &str,
+    project_id: Option<&str>,
+    environment_identity: &str,
+    backend_info: &BackendInfo,
+    prepared_context: &PreparedTurnContext,
+    started_at_ms: u64,
+) -> Result<CodexTurnTraceAccumulator, String> {
+    let manifest_bytes = serde_json::to_vec(&prepared_context.manifest)
+        .map_err(|_| "cannot serialize context metadata for turn trace".to_owned())?;
+    let manifest_identity = format!("sha256:{}", ContentHash::for_bytes(&manifest_bytes).sha256);
+    let included_items = prepared_context
+        .manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.included)
+        .count();
+    let excluded_items = prepared_context
+        .manifest
+        .entries
+        .len()
+        .saturating_sub(included_items);
+    let context_item_count = prepared_context.manifest.entries.len();
+    let context = TraceContextSummary {
+        manifest_identity: manifest_identity.clone(),
+        item_count: u32::try_from(context_item_count)
+            .map_err(|_| "turn trace context item count is out of range".to_owned())?,
+        included_items: u32::try_from(included_items)
+            .map_err(|_| "turn trace included context count is out of range".to_owned())?,
+        excluded_items: u32::try_from(excluded_items)
+            .map_err(|_| "turn trace excluded context count is out of range".to_owned())?,
+        bytes: u64::try_from(prepared_context.bytes)
+            .map_err(|_| "turn trace context byte count is out of range".to_owned())?,
+        omitted_fields: u32::try_from(excluded_items)
+            .map_err(|_| "turn trace context omission count is out of range".to_owned())?,
+        evidence_identity: manifest_identity,
+    };
+    let runtime_evidence = trace_hash_identity(
+        "turn-trace-runtime",
+        &["codex-app-server", "0.144.5", env!("CARGO_PKG_VERSION")],
+    );
+    let runtime = TraceRuntimeMetadata {
+        runtime_identity: format!("aegisy-agentd:{}", env!("CARGO_PKG_VERSION")),
+        adapter_identity: "codex-app-server".into(),
+        // Adapter startup rejects every version except this exact pin before a
+        // Turn can reach Runtime.
+        version: "0.144.5".into(),
+        state: TraceRuntimeState::Ready,
+        evidence_identity: runtime_evidence,
+    };
+    let model = backend_info
+        .provider
+        .as_deref()
+        .zip(backend_info.model.as_deref())
+        .filter(|(provider, model)| {
+            !provider.is_empty()
+                && !model.is_empty()
+                && *provider != "unknown"
+                && *model != "unknown"
+        })
+        .map(|(provider, model)| {
+            let model_identity = trace_hash_identity("turn-trace-model", &[model]);
+            let provider_identity = trace_hash_identity("turn-trace-provider", &[provider]);
+            let reason_identity = trace_hash_identity(
+                "turn-trace-session-model-binding",
+                &[session_id, provider, model],
+            );
+            let evidence_identity = trace_hash_identity(
+                "turn-trace-runtime-session-model-binding",
+                &[session_id, turn_id, provider, model],
+            );
+            TraceModelMetadata {
+                role: TraceModelRole::Agent,
+                model_identity,
+                provider_identity,
+                reason: TraceModelReason::Continuation,
+                reason_identity: Some(reason_identity),
+                // The provider/model pair was observed when the Session binding
+                // was created. At Turn start Runtime observes that binding; it
+                // must not fabricate a fresh provider observation timestamp.
+                evidence_source: TraceEvidenceSource::Runtime,
+                evidence_identity,
+            }
+        });
+    CodexTurnTraceAccumulator::started(
+        TraceBinding {
+            session_id: session_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            project_id: project_id.map(str::to_owned),
+            environment_identity: Some(environment_identity.to_owned()),
+        },
+        started_at_ms,
+        runtime,
+        model,
+        context,
+    )
+    .map_err(|cause| format!("{}: {}", cause.code, cause.message))
+}
+
+fn trace_error_metadata(
+    turn_id: &str,
+    class: &str,
+    source_class: &str,
+    retryable: bool,
+    evidence_source: TraceEvidenceSource,
+) -> TraceErrorMetadata {
+    let retry = if retryable { "retryable" } else { "terminal" };
+    let error_identity =
+        trace_hash_identity("turn-trace-error", &[turn_id, class, source_class, retry]);
+    let evidence_identity = trace_hash_identity(
+        "turn-trace-error-evidence",
+        &[turn_id, class, source_class, retry],
+    );
+    TraceErrorMetadata {
+        error_identity,
+        stable_class: trace_error_class(class),
+        source_class: source_class.to_owned(),
+        retryable,
+        evidence_source,
+        evidence_identity,
+        source_bytes: 0,
+        redacted_fields: 1,
+        omitted_fields: 1,
+    }
+}
+
+fn trace_terminal_metadata(
+    turn_id: &str,
+    state: &str,
+    evidence_source: TraceEvidenceSource,
+) -> TraceTerminalMetadata {
+    TraceTerminalMetadata {
+        evidence_source,
+        evidence_identity: trace_hash_identity("turn-trace-terminal-evidence", &[turn_id, state]),
+    }
 }
 
 fn default_terminal_kind() -> String {
@@ -8854,6 +9046,23 @@ impl Runtime {
             .map_err(|cause| cause.message)
     }
 
+    fn persist_turn_state_with_trace(
+        &mut self,
+        session_id: &str,
+        turn_id: &str,
+        state: &str,
+        terminal_at_ms: u64,
+        trace: &TurnTrace,
+    ) -> Result<(), String> {
+        let Some(store) = self.workbench_store.as_mut() else {
+            return Ok(());
+        };
+        store
+            .finish_turn_with_trace(session_id, turn_id, state, terminal_at_ms, trace)
+            .map(|_| ())
+            .map_err(|cause| cause.message)
+    }
+
     fn append_instruction_context(
         &self,
         context_roots: &HashMap<String, PathBuf>,
@@ -9822,6 +10031,8 @@ impl Runtime {
             return;
         };
         let backend_session_id = state.backend_session_id.clone();
+        let trace_backend_info = state.backend_info.clone();
+        let trace_environment_identity = state.environment.summary().environment_id.clone();
         let (command_environment, command_environment_binding) =
             if let Some(environment) = state.backend_info.environment.clone() {
                 (environment, "codex-adapter-launch-contract")
@@ -9988,6 +10199,10 @@ impl Runtime {
             .steering_handle(&params.session_id)
             .expect("active turn steering handle");
         let mut started = false;
+        let mut started_turn_id: Option<String> = None;
+        let mut turn_trace_accumulator: Option<CodexTurnTraceAccumulator> = None;
+        let mut pending_terminal: Option<PendingTurnTerminal> = None;
+        let mut terminal_persisted = false;
         let mut persistence_error: Option<String> = None;
         let mut metadata_update_counts = HashMap::<String, usize>::new();
         let mut metadata_truncation_notified = HashSet::<String>::new();
@@ -10006,239 +10221,488 @@ impl Runtime {
                 },
                 &cancellation,
                 &steering,
-                |event| match event {
-                    CodexEvent::TurnStarted { turn_id } => {
-                        if let Err(error) = self.persist_turn(
-                            &params.session_id,
-                            &turn_id,
-                            &persistence_input,
-                            &params.idempotency_key,
-                        ) {
-                            persistence_error = Some(format!("cannot persist turn: {error}"));
-                            return;
-                        }
-                        if let Err(error) =
-                            self.persist_item(&params.session_id, Some(&turn_id), &user_item)
-                        {
-                            let _ = self.persist_turn_state(&params.session_id, &turn_id, "failed");
-                            persistence_error = Some(format!("cannot persist user item: {error}"));
-                            return;
-                        }
-                        started = true;
-                        self.control.identify_turn(&params.session_id, &turn_id);
-                        emit(
-                            serde_json::to_value(Response::success(
-                                request.id.clone().unwrap_or(Value::Null),
-                                json!({
-                                    "turn": { "id": turn_id, "state": "started" },
-                                    "context": {
-                                        "item_count": prepared_context.item_count,
-                                        "bytes": prepared_context.bytes,
-                                        "truncated": prepared_context.truncated,
-                                        "manifest": prepared_context.manifest,
-                                        "budget": prepared_context.budget
-                                    }
-                                }),
-                            ))
-                            .expect("response serialization"),
-                        );
-                        emit(self.event(&params.session_id, Some(&turn_id), "turn.started", None));
-                        if let Some(state) = self.sessions.get_mut(&params.session_id) {
-                            state.items.push(user_item.clone());
-                        }
-                        emit(self.event(
-                            &params.session_id,
-                            Some(&turn_id),
-                            "item.completed",
-                            Some(user_item.clone()),
-                        ));
+                |event| {
+                    if persistence_error.is_some() {
+                        return;
                     }
-                    CodexEvent::AgentDelta {
-                        turn_id,
-                        item_id,
-                        text,
-                    } => emit(self.event(
-                        &params.session_id,
-                        Some(&turn_id),
-                        "item.delta",
-                        Some(TimelineItem {
-                            id: item_id,
-                            kind: "message".into(),
-                            role: "agent".into(),
-                            state: "delta".into(),
-                            content: text,
-                            data: None,
-                        }),
-                    )),
-                    CodexEvent::AgentCompleted {
-                        turn_id,
-                        item_id,
-                        text,
-                    } => {
-                        let item = TimelineItem {
-                            id: item_id,
-                            kind: "message".into(),
-                            role: "agent".into(),
-                            state: "completed".into(),
-                            content: text,
-                            data: None,
-                        };
-                        if let Err(error) =
-                            self.persist_item(&params.session_id, Some(&turn_id), &item)
-                        {
-                            persistence_error = Some(format!("cannot persist agent item: {error}"));
-                            return;
-                        }
-                        if let Some(state) = self.sessions.get_mut(&params.session_id) {
-                            state.items.push(item.clone());
-                        }
-                        emit(self.event(
-                            &params.session_id,
-                            Some(&turn_id),
-                            "item.completed",
-                            Some(item),
-                        ));
-                    }
-                    CodexEvent::CommandUpdated {
-                        turn_id,
-                        command,
-                        lifecycle,
-                    } => {
-                        let mut artifact = if lifecycle == "completed" {
-                            self.command_artifacts.record(
+                    match event {
+                        CodexEvent::TurnStarted { turn_id } => {
+                            let started_at_ms = now_ms();
+                            let accumulator = match codex_turn_trace_accumulator(
                                 &params.session_id,
-                                &command.item_id,
-                                &command.output,
-                                command.redactor.source_bytes(),
-                                command.redactor.redacted_count(),
-                            )
-                        } else {
-                            None
-                        };
-                        let command_diagnostics = if lifecycle == "completed" {
-                            self.record_command_diagnostics(
+                                &turn_id,
+                                project_id.as_deref(),
+                                &trace_environment_identity,
+                                &trace_backend_info,
+                                &prepared_context,
+                                started_at_ms,
+                            ) {
+                                Ok(accumulator) => accumulator,
+                                Err(error) => {
+                                    persistence_error = Some(format!(
+                                        "cannot prepare metadata-only turn trace: {error}"
+                                    ));
+                                    cancellation.request();
+                                    return;
+                                }
+                            };
+                            if let Err(error) = self.persist_turn(
                                 &params.session_id,
-                                &command,
-                                artifact.as_ref(),
-                            )
-                        } else {
-                            None
-                        };
-                        if let Some((_, _, _, source_artifact)) = &command_diagnostics {
-                            artifact = Some(source_artifact.clone());
-                        }
-                        let item = command_timeline_item(
-                            &command,
-                            &lifecycle,
-                            &command_environment,
-                            command_environment_binding,
-                            artifact.as_ref(),
-                            &params.session_id,
-                        );
-                        if lifecycle == "completed" {
-                            if let Err(error) = self.persist_item_with_command_artifact(
+                                &turn_id,
+                                &persistence_input,
+                                &params.idempotency_key,
+                            ) {
+                                persistence_error = Some(format!("cannot persist turn: {error}"));
+                                cancellation.request();
+                                return;
+                            }
+                            started = true;
+                            started_turn_id = Some(turn_id.clone());
+                            turn_trace_accumulator = Some(accumulator);
+                            self.control.identify_turn(&params.session_id, &turn_id);
+                            if let Err(error) =
+                                self.persist_item(&params.session_id, Some(&turn_id), &user_item)
+                            {
+                                persistence_error =
+                                    Some(format!("cannot persist user item: {error}"));
+                                cancellation.request();
+                                return;
+                            }
+                            emit(
+                                serde_json::to_value(Response::success(
+                                    request.id.clone().unwrap_or(Value::Null),
+                                    json!({
+                                        "turn": { "id": turn_id, "state": "started" },
+                                        "context": {
+                                            "item_count": prepared_context.item_count,
+                                            "bytes": prepared_context.bytes,
+                                            "truncated": prepared_context.truncated,
+                                            "manifest": prepared_context.manifest,
+                                            "budget": prepared_context.budget
+                                        }
+                                    }),
+                                ))
+                                .expect("response serialization"),
+                            );
+                            emit(self.event(
                                 &params.session_id,
                                 Some(&turn_id),
-                                &item,
-                                artifact.as_ref(),
-                            ) {
+                                "turn.started",
+                                None,
+                            ));
+                            if let Some(state) = self.sessions.get_mut(&params.session_id) {
+                                state.items.push(user_item.clone());
+                            }
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&turn_id),
+                                "item.completed",
+                                Some(user_item.clone()),
+                            ));
+                        }
+                        CodexEvent::AgentDelta {
+                            turn_id,
+                            item_id,
+                            text,
+                        } => emit(self.event(
+                            &params.session_id,
+                            Some(&turn_id),
+                            "item.delta",
+                            Some(TimelineItem {
+                                id: item_id,
+                                kind: "message".into(),
+                                role: "agent".into(),
+                                state: "delta".into(),
+                                content: text,
+                                data: None,
+                            }),
+                        )),
+                        CodexEvent::AgentCompleted {
+                            turn_id,
+                            item_id,
+                            text,
+                        } => {
+                            let item = TimelineItem {
+                                id: item_id,
+                                kind: "message".into(),
+                                role: "agent".into(),
+                                state: "completed".into(),
+                                content: text,
+                                data: None,
+                            };
+                            if let Err(error) =
+                                self.persist_item(&params.session_id, Some(&turn_id), &item)
+                            {
                                 persistence_error =
-                                    Some(format!("cannot persist command item: {error}"));
+                                    Some(format!("cannot persist agent item: {error}"));
+                                cancellation.request();
                                 return;
                             }
                             if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                 state.items.push(item.clone());
                             }
-                        }
-                        let event_name = match lifecycle.as_str() {
-                            "started" => "item.started",
-                            "completed" => "item.completed",
-                            _ => "item.delta",
-                        };
-                        emit(self.event(
-                            &params.session_id,
-                            Some(&turn_id),
-                            event_name,
-                            Some(item),
-                        ));
-                        if let Some((project_id, toolchain, observation, _)) = command_diagnostics {
-                            let mut data = serde_json::to_value(&observation)
-                                .expect("command diagnostic observation serialization");
-                            if let Some(object) = data.as_object_mut() {
-                                object.insert("project_id".into(), Value::String(project_id));
-                                object
-                                    .insert("source_kind".into(), Value::String("command".into()));
-                                object.insert(
-                                    "source_identity".into(),
-                                    Value::String(format!("command:{toolchain}")),
-                                );
-                            }
-                            let diagnostic_item = TimelineItem {
-                                id: format!("diagnostics-{}", command.item_id),
-                                kind: "diagnostic".into(),
-                                role: "tool".into(),
-                                state: "completed".into(),
-                                content: format!(
-                                    "{} reported {} observed diagnostic(s)",
-                                    toolchain,
-                                    observation.diagnostics.len()
-                                ),
-                                data: Some(data),
-                            };
-                            if let Err(error) = self.persist_item(
-                                &params.session_id,
-                                Some(&turn_id),
-                                &diagnostic_item,
-                            ) {
-                                persistence_error =
-                                    Some(format!("cannot persist diagnostic item: {error}"));
-                                return;
-                            }
-                            if let Some(state) = self.sessions.get_mut(&params.session_id) {
-                                state.items.push(diagnostic_item.clone());
-                            }
                             emit(self.event(
                                 &params.session_id,
                                 Some(&turn_id),
-                                "diagnostics.observed",
-                                Some(diagnostic_item),
+                                "item.completed",
+                                Some(item),
                             ));
                         }
-                    }
-                    CodexEvent::TokenUsage { turn_id, mut usage } => {
-                        let key = format!("usage:{turn_id}");
-                        let count = metadata_update_counts.entry(key.clone()).or_default();
-                        if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
-                            *count += 1;
-                            if let Ok(report) = from_provider_token_usage(&usage, now_ms()) {
-                                if let Ok(mut authority) = serde_json::to_value(&report) {
-                                    if let Some(decision) = context_threshold_for_usage(
-                                        &report,
-                                        context_threshold_status,
-                                    ) {
-                                        context_threshold_status = decision.status;
-                                        if let Ok(value) = serde_json::to_value(decision) {
-                                            authority["compaction_threshold"] = value;
-                                        }
-                                    }
-                                    if let Some(object) = usage.as_object_mut() {
-                                        object.insert("authority".into(), authority);
-                                    }
+                        CodexEvent::CommandUpdated {
+                            turn_id,
+                            command,
+                            lifecycle,
+                        } => {
+                            let mut artifact = if lifecycle == "completed" {
+                                self.command_artifacts.record(
+                                    &params.session_id,
+                                    &command.item_id,
+                                    &command.output,
+                                    command.redactor.source_bytes(),
+                                    command.redactor.redacted_count(),
+                                )
+                            } else {
+                                None
+                            };
+                            let command_diagnostics = if lifecycle == "completed" {
+                                self.record_command_diagnostics(
+                                    &params.session_id,
+                                    &command,
+                                    artifact.as_ref(),
+                                )
+                            } else {
+                                None
+                            };
+                            if let Some((_, _, _, source_artifact)) = &command_diagnostics {
+                                artifact = Some(source_artifact.clone());
+                            }
+                            let item = command_timeline_item(
+                                &command,
+                                &lifecycle,
+                                &command_environment,
+                                command_environment_binding,
+                                artifact.as_ref(),
+                                &params.session_id,
+                            );
+                            if lifecycle == "completed" {
+                                if let Err(error) = self.persist_item_with_command_artifact(
+                                    &params.session_id,
+                                    Some(&turn_id),
+                                    &item,
+                                    artifact.as_ref(),
+                                ) {
+                                    persistence_error =
+                                        Some(format!("cannot persist command item: {error}"));
+                                    cancellation.request();
+                                    return;
+                                }
+                                if let Some(state) = self.sessions.get_mut(&params.session_id) {
+                                    state.items.push(item.clone());
                                 }
                             }
+                            let event_name = match lifecycle.as_str() {
+                                "started" => "item.started",
+                                "completed" => "item.completed",
+                                _ => "item.delta",
+                            };
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&turn_id),
+                                event_name,
+                                Some(item),
+                            ));
+                            if let Some((project_id, toolchain, observation, _)) =
+                                command_diagnostics
+                            {
+                                let mut data = serde_json::to_value(&observation)
+                                    .expect("command diagnostic observation serialization");
+                                if let Some(object) = data.as_object_mut() {
+                                    object.insert("project_id".into(), Value::String(project_id));
+                                    object.insert(
+                                        "source_kind".into(),
+                                        Value::String("command".into()),
+                                    );
+                                    object.insert(
+                                        "source_identity".into(),
+                                        Value::String(format!("command:{toolchain}")),
+                                    );
+                                }
+                                let diagnostic_item = TimelineItem {
+                                    id: format!("diagnostics-{}", command.item_id),
+                                    kind: "diagnostic".into(),
+                                    role: "tool".into(),
+                                    state: "completed".into(),
+                                    content: format!(
+                                        "{} reported {} observed diagnostic(s)",
+                                        toolchain,
+                                        observation.diagnostics.len()
+                                    ),
+                                    data: Some(data),
+                                };
+                                if let Err(error) = self.persist_item(
+                                    &params.session_id,
+                                    Some(&turn_id),
+                                    &diagnostic_item,
+                                ) {
+                                    persistence_error =
+                                        Some(format!("cannot persist diagnostic item: {error}"));
+                                    cancellation.request();
+                                    return;
+                                }
+                                if let Some(state) = self.sessions.get_mut(&params.session_id) {
+                                    state.items.push(diagnostic_item.clone());
+                                }
+                                emit(self.event(
+                                    &params.session_id,
+                                    Some(&turn_id),
+                                    "diagnostics.observed",
+                                    Some(diagnostic_item),
+                                ));
+                            }
+                        }
+                        CodexEvent::TokenUsage { turn_id, mut usage } => {
+                            let key = format!("usage:{turn_id}");
+                            let count = metadata_update_counts.entry(key.clone()).or_default();
+                            if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
+                                *count += 1;
+                                if let Ok(report) = from_provider_token_usage(&usage, now_ms()) {
+                                    if let Ok(mut authority) = serde_json::to_value(&report) {
+                                        if let Some(decision) = context_threshold_for_usage(
+                                            &report,
+                                            context_threshold_status,
+                                        ) {
+                                            context_threshold_status = decision.status;
+                                            if let Ok(value) = serde_json::to_value(decision) {
+                                                authority["compaction_threshold"] = value;
+                                            }
+                                        }
+                                        if let Some(object) = usage.as_object_mut() {
+                                            object.insert("authority".into(), authority);
+                                        }
+                                    }
+                                }
+                                let item = TimelineItem {
+                                    id: self.allocate_id("usage"),
+                                    kind: "usage".into(),
+                                    role: "system".into(),
+                                    state: "updated".into(),
+                                    content: "Token usage updated".into(),
+                                    data: Some(usage),
+                                };
+                                if let Err(error) =
+                                    self.persist_item(&params.session_id, Some(&turn_id), &item)
+                                {
+                                    persistence_error =
+                                        Some(format!("cannot persist usage item: {error}"));
+                                    cancellation.request();
+                                    return;
+                                }
+                                if let Some(state) = self.sessions.get_mut(&params.session_id) {
+                                    state.items.push(item.clone());
+                                }
+                                emit(self.event(
+                                    &params.session_id,
+                                    Some(&turn_id),
+                                    "usage.updated",
+                                    Some(item),
+                                ));
+                            } else if metadata_truncation_notified.insert(key) {
+                                let item = TimelineItem {
+                                    id: self.allocate_id("usage-truncated"),
+                                    kind: "usage".into(),
+                                    role: "system".into(),
+                                    state: "truncated".into(),
+                                    content: "Token usage updates truncated".into(),
+                                    data: Some(json!({
+                                        "max_updates": MAX_TURN_METADATA_UPDATES_PER_KIND
+                                    })),
+                                };
+                                emit(self.event(
+                                    &params.session_id,
+                                    Some(&turn_id),
+                                    "usage.truncated",
+                                    Some(item),
+                                ));
+                            }
+                        }
+                        CodexEvent::TurnDiff { turn_id, diff } => {
+                            let key = format!("diff:{turn_id}");
+                            let count = metadata_update_counts.entry(key.clone()).or_default();
+                            if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
+                                *count += 1;
+                                let item = TimelineItem {
+                                    id: self.allocate_id("diff"),
+                                    kind: "diff".into(),
+                                    role: "tool".into(),
+                                    state: "updated".into(),
+                                    content: diff,
+                                    data: Some(json!({ "projection": "bounded-unified-diff" })),
+                                };
+                                if let Err(error) =
+                                    self.persist_item(&params.session_id, Some(&turn_id), &item)
+                                {
+                                    persistence_error =
+                                        Some(format!("cannot persist diff item: {error}"));
+                                    cancellation.request();
+                                    return;
+                                }
+                                if let Some(state) = self.sessions.get_mut(&params.session_id) {
+                                    state.items.push(item.clone());
+                                }
+                                emit(self.event(
+                                    &params.session_id,
+                                    Some(&turn_id),
+                                    "turn.diff.updated",
+                                    Some(item),
+                                ));
+                            } else if metadata_truncation_notified.insert(key) {
+                                let item = TimelineItem {
+                                    id: self.allocate_id("diff-truncated"),
+                                    kind: "diff".into(),
+                                    role: "tool".into(),
+                                    state: "truncated".into(),
+                                    content: "Diff updates truncated".into(),
+                                    data: Some(json!({
+                                        "max_updates": MAX_TURN_METADATA_UPDATES_PER_KIND
+                                    })),
+                                };
+                                emit(self.event(
+                                    &params.session_id,
+                                    Some(&turn_id),
+                                    "turn.diff.truncated",
+                                    Some(item),
+                                ));
+                            }
+                        }
+                        CodexEvent::TurnPlan {
+                            turn_id,
+                            explanation,
+                            steps,
+                        } => {
+                            let key = format!("plan:{turn_id}");
+                            let count = metadata_update_counts.entry(key.clone()).or_default();
+                            if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
+                                *count += 1;
+                                let item = TimelineItem {
+                                    id: self.allocate_id("plan"),
+                                    kind: "plan".into(),
+                                    role: "agent".into(),
+                                    state: "updated".into(),
+                                    content: explanation.unwrap_or_else(|| "Plan updated".into()),
+                                    data: Some(json!({ "steps": steps })),
+                                };
+                                if let Err(error) =
+                                    self.persist_item(&params.session_id, Some(&turn_id), &item)
+                                {
+                                    persistence_error =
+                                        Some(format!("cannot persist plan item: {error}"));
+                                    cancellation.request();
+                                    return;
+                                }
+                                if let Some(state) = self.sessions.get_mut(&params.session_id) {
+                                    state.items.push(item.clone());
+                                }
+                                emit(self.event(
+                                    &params.session_id,
+                                    Some(&turn_id),
+                                    "turn.plan.updated",
+                                    Some(item),
+                                ));
+                            } else if metadata_truncation_notified.insert(key) {
+                                let item = TimelineItem {
+                                    id: self.allocate_id("plan-truncated"),
+                                    kind: "plan".into(),
+                                    role: "agent".into(),
+                                    state: "truncated".into(),
+                                    content: "Plan updates truncated".into(),
+                                    data: Some(json!({
+                                        "max_updates": MAX_TURN_METADATA_UPDATES_PER_KIND
+                                    })),
+                                };
+                                emit(self.event(
+                                    &params.session_id,
+                                    Some(&turn_id),
+                                    "turn.plan.truncated",
+                                    Some(item),
+                                ));
+                            }
+                        }
+                        CodexEvent::TurnErrorObserved {
+                            turn_id,
+                            message,
+                            provider_error,
+                            will_retry,
+                        } => {
+                            let key = format!("error-observed:{turn_id}");
+                            let count = metadata_update_counts.entry(key.clone()).or_default();
+                            if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
+                                *count += 1;
+                                let mut data = runtime_error_data_with_provider(
+                                    &message,
+                                    provider_error.as_ref(),
+                                );
+                                data["terminal"] = Value::Bool(false);
+                                data["will_retry"] = Value::Bool(will_retry);
+                                let item = TimelineItem {
+                                    id: self.allocate_id("error-observed"),
+                                    kind: "error".into(),
+                                    role: "system".into(),
+                                    state: "updated".into(),
+                                    content: "Codex reported a non-terminal turn error".into(),
+                                    data: Some(data),
+                                };
+                                emit(self.event(
+                                    &params.session_id,
+                                    Some(&turn_id),
+                                    "turn.error-observed",
+                                    Some(item),
+                                ));
+                            } else if metadata_truncation_notified.insert(key) {
+                                emit(self.event(
+                                    &params.session_id,
+                                    Some(&turn_id),
+                                    "turn.error-observed.truncated",
+                                    None,
+                                ));
+                            }
+                        }
+                        CodexEvent::TurnCompleted { turn_id } => {
+                            // Successful traces remain unsupported until Runtime
+                            // has authoritative Workspace, Git, and verification
+                            // evidence. Drop the open accumulator without claiming
+                            // a complete trace.
+                            if let Err(error) =
+                                self.persist_turn_state(&params.session_id, &turn_id, "completed")
+                            {
+                                persistence_error =
+                                    Some(format!("cannot persist turn completion: {error}"));
+                                cancellation.request();
+                                return;
+                            }
+                            turn_trace_accumulator.take();
+                            terminal_persisted = true;
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&turn_id),
+                                "turn.completed",
+                                None,
+                            ))
+                        }
+                        CodexEvent::TurnSteeringRequested { turn_id, input } => {
                             let item = TimelineItem {
-                                id: self.allocate_id("usage"),
-                                kind: "usage".into(),
-                                role: "system".into(),
-                                state: "updated".into(),
-                                content: "Token usage updated".into(),
-                                data: Some(usage),
+                                id: self.allocate_id("item"),
+                                kind: "message".into(),
+                                role: "user".into(),
+                                state: "completed".into(),
+                                content: input,
+                                data: Some(json!({ "source": "turn-steer" })),
                             };
                             if let Err(error) =
                                 self.persist_item(&params.session_id, Some(&turn_id), &item)
                             {
                                 persistence_error =
-                                    Some(format!("cannot persist usage item: {error}"));
+                                    Some(format!("cannot persist steering item: {error}"));
+                                cancellation.request();
                                 return;
                             }
                             if let Some(state) = self.sessions.get_mut(&params.session_id) {
@@ -10247,263 +10711,215 @@ impl Runtime {
                             emit(self.event(
                                 &params.session_id,
                                 Some(&turn_id),
-                                "usage.updated",
-                                Some(item),
-                            ));
-                        } else if metadata_truncation_notified.insert(key) {
-                            let item = TimelineItem {
-                                id: self.allocate_id("usage-truncated"),
-                                kind: "usage".into(),
-                                role: "system".into(),
-                                state: "truncated".into(),
-                                content: "Token usage updates truncated".into(),
-                                data: Some(json!({
-                                    "max_updates": MAX_TURN_METADATA_UPDATES_PER_KIND
-                                })),
-                            };
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&turn_id),
-                                "usage.truncated",
+                                "turn.steering-requested",
                                 Some(item),
                             ));
                         }
-                    }
-                    CodexEvent::TurnDiff { turn_id, diff } => {
-                        let key = format!("diff:{turn_id}");
-                        let count = metadata_update_counts.entry(key.clone()).or_default();
-                        if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
-                            *count += 1;
-                            let item = TimelineItem {
-                                id: self.allocate_id("diff"),
-                                kind: "diff".into(),
-                                role: "tool".into(),
-                                state: "updated".into(),
-                                content: diff,
-                                data: Some(json!({ "projection": "bounded-unified-diff" })),
-                            };
-                            if let Err(error) =
-                                self.persist_item(&params.session_id, Some(&turn_id), &item)
-                            {
-                                persistence_error =
-                                    Some(format!("cannot persist diff item: {error}"));
-                                return;
-                            }
-                            if let Some(state) = self.sessions.get_mut(&params.session_id) {
-                                state.items.push(item.clone());
-                            }
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&turn_id),
-                                "turn.diff.updated",
-                                Some(item),
-                            ));
-                        } else if metadata_truncation_notified.insert(key) {
-                            let item = TimelineItem {
-                                id: self.allocate_id("diff-truncated"),
-                                kind: "diff".into(),
-                                role: "tool".into(),
-                                state: "truncated".into(),
-                                content: "Diff updates truncated".into(),
-                                data: Some(json!({
-                                    "max_updates": MAX_TURN_METADATA_UPDATES_PER_KIND
-                                })),
-                            };
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&turn_id),
-                                "turn.diff.truncated",
-                                Some(item),
-                            ));
-                        }
-                    }
-                    CodexEvent::TurnPlan {
-                        turn_id,
-                        explanation,
-                        steps,
-                    } => {
-                        let key = format!("plan:{turn_id}");
-                        let count = metadata_update_counts.entry(key.clone()).or_default();
-                        if *count < MAX_TURN_METADATA_UPDATES_PER_KIND {
-                            *count += 1;
-                            let item = TimelineItem {
-                                id: self.allocate_id("plan"),
-                                kind: "plan".into(),
-                                role: "agent".into(),
-                                state: "updated".into(),
-                                content: explanation.unwrap_or_else(|| "Plan updated".into()),
-                                data: Some(json!({ "steps": steps })),
-                            };
-                            if let Err(error) =
-                                self.persist_item(&params.session_id, Some(&turn_id), &item)
-                            {
-                                persistence_error =
-                                    Some(format!("cannot persist plan item: {error}"));
-                                return;
-                            }
-                            if let Some(state) = self.sessions.get_mut(&params.session_id) {
-                                state.items.push(item.clone());
-                            }
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&turn_id),
-                                "turn.plan.updated",
-                                Some(item),
-                            ));
-                        } else if metadata_truncation_notified.insert(key) {
-                            let item = TimelineItem {
-                                id: self.allocate_id("plan-truncated"),
-                                kind: "plan".into(),
-                                role: "agent".into(),
-                                state: "truncated".into(),
-                                content: "Plan updates truncated".into(),
-                                data: Some(json!({
-                                    "max_updates": MAX_TURN_METADATA_UPDATES_PER_KIND
-                                })),
-                            };
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&turn_id),
-                                "turn.plan.truncated",
-                                Some(item),
-                            ));
-                        }
-                    }
-                    CodexEvent::TurnCompleted { turn_id } => {
-                        if let Err(error) =
-                            self.persist_turn_state(&params.session_id, &turn_id, "completed")
-                        {
-                            persistence_error =
-                                Some(format!("cannot persist turn completion: {error}"));
-                            return;
-                        }
-                        emit(self.event(&params.session_id, Some(&turn_id), "turn.completed", None))
-                    }
-                    CodexEvent::TurnSteeringRequested { turn_id, input } => {
-                        let item = TimelineItem {
-                            id: self.allocate_id("item"),
-                            kind: "message".into(),
-                            role: "user".into(),
-                            state: "completed".into(),
-                            content: input,
-                            data: Some(json!({ "source": "turn-steer" })),
-                        };
-                        if let Err(error) =
-                            self.persist_item(&params.session_id, Some(&turn_id), &item)
-                        {
-                            persistence_error =
-                                Some(format!("cannot persist steering item: {error}"));
-                            return;
-                        }
-                        if let Some(state) = self.sessions.get_mut(&params.session_id) {
-                            state.items.push(item.clone());
-                        }
-                        emit(self.event(
+                        CodexEvent::TurnSteeringAcknowledged { turn_id } => emit(self.event(
                             &params.session_id,
                             Some(&turn_id),
-                            "turn.steering-requested",
-                            Some(item),
-                        ));
-                    }
-                    CodexEvent::TurnSteeringAcknowledged { turn_id } => emit(self.event(
-                        &params.session_id,
-                        Some(&turn_id),
-                        "turn.steering-acknowledged",
-                        None,
-                    )),
-                    CodexEvent::TurnSteeringFailed { turn_id, message } => {
-                        let item = TimelineItem {
-                            id: self.allocate_id("error"),
-                            kind: "error".into(),
-                            role: "system".into(),
-                            state: "completed".into(),
-                            content: runtime_error_content(&message),
-                            data: Some({
-                                let mut data = runtime_error_data(&message);
-                                data["operation"] = Value::String("turn.steer".into());
-                                data
-                            }),
-                        };
-                        emit(self.event(
-                            &params.session_id,
-                            Some(&turn_id),
-                            "turn.steering-failed",
-                            Some(item),
-                        ));
-                    }
-                    CodexEvent::TurnCancellationAcknowledged { turn_id } => emit(self.event(
-                        &params.session_id,
-                        Some(&turn_id),
-                        "turn.cancellation-acknowledged",
-                        None,
-                    )),
-                    CodexEvent::TurnCancellationFailed { turn_id, message } => {
-                        let item = TimelineItem {
-                            id: self.allocate_id("error"),
-                            kind: "error".into(),
-                            role: "system".into(),
-                            state: "completed".into(),
-                            content: runtime_error_content(&message),
-                            data: Some({
-                                let mut data = runtime_error_data(&message);
-                                data["operation"] = Value::String("turn.cancel".into());
-                                data
-                            }),
-                        };
-                        emit(self.event(
-                            &params.session_id,
-                            Some(&turn_id),
-                            "turn.cancellation-failed",
-                            Some(item),
-                        ));
-                    }
-                    CodexEvent::TurnInterrupted { turn_id } => {
-                        if let Err(error) =
-                            self.persist_turn_state(&params.session_id, &turn_id, "interrupted")
-                        {
-                            persistence_error =
-                                Some(format!("cannot persist interrupted turn: {error}"));
-                            return;
-                        }
-                        emit(self.event(
-                            &params.session_id,
-                            Some(&turn_id),
-                            "turn.interrupted",
+                            "turn.steering-acknowledged",
                             None,
-                        ));
-                    }
-                    CodexEvent::TurnFailed {
-                        turn_id,
-                        message,
-                        provider_error,
-                    } => {
-                        if let Err(error) =
-                            self.persist_turn_state(&params.session_id, &turn_id, "failed")
-                        {
-                            persistence_error =
-                                Some(format!("cannot persist failed turn: {error}"));
-                            return;
+                        )),
+                        CodexEvent::TurnSteeringFailed { turn_id, message } => {
+                            let item = TimelineItem {
+                                id: self.allocate_id("error"),
+                                kind: "error".into(),
+                                role: "system".into(),
+                                state: "completed".into(),
+                                content: runtime_error_content(&message),
+                                data: Some({
+                                    let mut data = runtime_error_data(&message);
+                                    data["operation"] = Value::String("turn.steer".into());
+                                    data
+                                }),
+                            };
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&turn_id),
+                                "turn.steering-failed",
+                                Some(item),
+                            ));
                         }
-                        let item = TimelineItem {
-                            id: self.allocate_id("error"),
-                            kind: "error".into(),
-                            role: "system".into(),
-                            state: "completed".into(),
-                            content: runtime_error_content_with_provider(
-                                &message,
-                                provider_error.as_ref(),
-                            ),
-                            data: Some(runtime_error_data_with_provider(
-                                &message,
-                                provider_error.as_ref(),
-                            )),
-                        };
-                        emit(self.event(
+                        CodexEvent::TurnCancellationAcknowledged { turn_id } => emit(self.event(
                             &params.session_id,
                             Some(&turn_id),
-                            "turn.failed",
-                            Some(item),
-                        ));
+                            "turn.cancellation-acknowledged",
+                            None,
+                        )),
+                        CodexEvent::TurnCancellationFailed { turn_id, message } => {
+                            let item = TimelineItem {
+                                id: self.allocate_id("error"),
+                                kind: "error".into(),
+                                role: "system".into(),
+                                state: "completed".into(),
+                                content: runtime_error_content(&message),
+                                data: Some({
+                                    let mut data = runtime_error_data(&message);
+                                    data["operation"] = Value::String("turn.cancel".into());
+                                    data
+                                }),
+                            };
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&turn_id),
+                                "turn.cancellation-failed",
+                                Some(item),
+                            ));
+                        }
+                        CodexEvent::TurnInterrupted { turn_id } => {
+                            let terminal_at_ms = now_ms();
+                            let Some(accumulator) = turn_trace_accumulator.take() else {
+                                persistence_error = Some(
+                                    "cannot persist interrupted turn without its trace accumulator"
+                                        .into(),
+                                );
+                                return;
+                            };
+                            let trace = match accumulator.finalize_interrupted(
+                                terminal_at_ms,
+                                trace_terminal_metadata(
+                                    &turn_id,
+                                    "interrupted",
+                                    TraceEvidenceSource::Provider,
+                                ),
+                            ) {
+                                Ok(trace) => trace,
+                                Err(error) => {
+                                    persistence_error = Some(format!(
+                                        "cannot finalize interrupted turn trace: {}: {}",
+                                        error.code, error.message
+                                    ));
+                                    return;
+                                }
+                            };
+                            pending_terminal = Some(PendingTurnTerminal {
+                                turn_id: turn_id.clone(),
+                                state: "interrupted",
+                                terminal_at_ms,
+                                trace,
+                                item: None,
+                            });
+                            let pending = pending_terminal
+                                .as_ref()
+                                .expect("interrupted terminal trace was prepared");
+                            if let Err(error) = self.persist_turn_state_with_trace(
+                                &params.session_id,
+                                &pending.turn_id,
+                                pending.state,
+                                pending.terminal_at_ms,
+                                &pending.trace,
+                            ) {
+                                persistence_error =
+                                    Some(format!("cannot persist interrupted turn: {error}"));
+                                cancellation.request();
+                                return;
+                            }
+                            terminal_persisted = true;
+                            let pending = pending_terminal
+                                .take()
+                                .expect("persisted interrupted terminal trace is available");
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&pending.turn_id),
+                                "turn.interrupted",
+                                pending.item,
+                            ));
+                        }
+                        CodexEvent::TurnFailed {
+                            turn_id,
+                            message,
+                            provider_error,
+                        } => {
+                            let (class, source_class, retryable, evidence_source) = provider_error
+                                .as_ref()
+                                .map(|error| {
+                                    (
+                                        error.class,
+                                        error.kind,
+                                        error.retryable,
+                                        TraceEvidenceSource::Provider,
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    let (class, retryable) = runtime_error_classification(&message);
+                                    (class, class, retryable, TraceEvidenceSource::Runtime)
+                                });
+                            let terminal_at_ms = now_ms();
+                            let Some(accumulator) = turn_trace_accumulator.take() else {
+                                persistence_error = Some(
+                                    "cannot persist failed turn without its trace accumulator"
+                                        .into(),
+                                );
+                                return;
+                            };
+                            let trace = match accumulator.finalize_failed(
+                                terminal_at_ms,
+                                trace_error_metadata(
+                                    &turn_id,
+                                    class,
+                                    source_class,
+                                    retryable,
+                                    evidence_source,
+                                ),
+                                trace_terminal_metadata(&turn_id, "failed", evidence_source),
+                            ) {
+                                Ok(trace) => trace,
+                                Err(error) => {
+                                    persistence_error = Some(format!(
+                                        "cannot finalize failed turn trace: {}: {}",
+                                        error.code, error.message
+                                    ));
+                                    return;
+                                }
+                            };
+                            let item = TimelineItem {
+                                id: self.allocate_id("error"),
+                                kind: "error".into(),
+                                role: "system".into(),
+                                state: "completed".into(),
+                                content: runtime_error_content_with_provider(
+                                    &message,
+                                    provider_error.as_ref(),
+                                ),
+                                data: Some(runtime_error_data_with_provider(
+                                    &message,
+                                    provider_error.as_ref(),
+                                )),
+                            };
+                            pending_terminal = Some(PendingTurnTerminal {
+                                turn_id: turn_id.clone(),
+                                state: "failed",
+                                terminal_at_ms,
+                                trace,
+                                item: Some(item),
+                            });
+                            let pending = pending_terminal
+                                .as_ref()
+                                .expect("failed terminal trace was prepared");
+                            if let Err(error) = self.persist_turn_state_with_trace(
+                                &params.session_id,
+                                &pending.turn_id,
+                                pending.state,
+                                pending.terminal_at_ms,
+                                &pending.trace,
+                            ) {
+                                persistence_error =
+                                    Some(format!("cannot persist failed turn: {error}"));
+                                cancellation.request();
+                                return;
+                            }
+                            terminal_persisted = true;
+                            let pending = pending_terminal
+                                .take()
+                                .expect("persisted failed terminal trace is available");
+                            emit(self.event(
+                                &params.session_id,
+                                Some(&pending.turn_id),
+                                "turn.failed",
+                                pending.item,
+                            ));
+                        }
                     }
                 },
             ),
@@ -10516,24 +10932,114 @@ impl Runtime {
         if let Some(state) = self.sessions.get_mut(&params.session_id) {
             state.context_threshold_status = context_threshold_status;
         }
+        if persistence_error.is_some() && !terminal_persisted {
+            if let Some(pending) = pending_terminal.as_ref() {
+                if self
+                    .persist_turn_state_with_trace(
+                        &params.session_id,
+                        &pending.turn_id,
+                        pending.state,
+                        pending.terminal_at_ms,
+                        &pending.trace,
+                    )
+                    .is_ok()
+                {
+                    terminal_persisted = true;
+                    persistence_error = None;
+                    let pending = pending_terminal
+                        .take()
+                        .expect("retried terminal trace is available");
+                    let event_name = match pending.state {
+                        "failed" => "turn.failed",
+                        "interrupted" => "turn.interrupted",
+                        _ => unreachable!("only failed and interrupted traces are produced"),
+                    };
+                    emit(self.event(
+                        &params.session_id,
+                        Some(&pending.turn_id),
+                        event_name,
+                        pending.item,
+                    ));
+                }
+            }
+        }
+        let mut storage_failure_terminal_persisted = false;
+        if persistence_error.is_some()
+            && started
+            && !terminal_persisted
+            && pending_terminal.is_none()
+        {
+            let terminal_result = match (started_turn_id.as_deref(), turn_trace_accumulator.take())
+            {
+                (Some(turn_id), Some(accumulator)) => {
+                    let terminal_at_ms = now_ms();
+                    accumulator
+                        .finalize_failed(
+                            terminal_at_ms,
+                            trace_error_metadata(
+                                turn_id,
+                                "storage",
+                                "store-write",
+                                false,
+                                TraceEvidenceSource::Runtime,
+                            ),
+                            trace_terminal_metadata(
+                                turn_id,
+                                "failed",
+                                TraceEvidenceSource::Runtime,
+                            ),
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "cannot finalize persistence-failure trace: {}: {}",
+                                error.code, error.message
+                            )
+                        })
+                        .and_then(|trace| {
+                            self.persist_turn_state_with_trace(
+                                &params.session_id,
+                                turn_id,
+                                "failed",
+                                terminal_at_ms,
+                                &trace,
+                            )
+                        })
+                }
+                _ => Err("turn trace accumulator is unavailable after persistence failure".into()),
+            };
+            match terminal_result {
+                Ok(()) => {
+                    storage_failure_terminal_persisted = true;
+                }
+                Err(terminal_error) => {
+                    let original = persistence_error.take().unwrap_or_default();
+                    persistence_error = Some(format!("{original}; {terminal_error}"));
+                }
+            }
+        }
         if let Some(error) = persistence_error {
             if started {
-                let mut data = runtime_error_data(&error);
+                let turn_id = started_turn_id.as_deref();
+                let (event_name, content) = if storage_failure_terminal_persisted {
+                    ("turn.failed", "Workbench persistence failed")
+                } else {
+                    (
+                        "turn.persistence-failed",
+                        "Workbench terminal persistence failed",
+                    )
+                };
+                let mut data = runtime_error_data("storage persistence failed");
                 data["operation"] = Value::String("workbench.persistence".into());
+                data["terminal_persisted"] = Value::Bool(storage_failure_terminal_persisted);
                 let item = TimelineItem {
                     id: self.allocate_id("error"),
                     kind: "error".into(),
                     role: "system".into(),
                     state: "completed".into(),
-                    content: error.clone(),
+                    content: content.into(),
                     data: Some(data),
                 };
-                emit(self.event(
-                    &params.session_id,
-                    None,
-                    "turn.persistence-failed",
-                    Some(item),
-                ));
+                emit(self.event(&params.session_id, turn_id, event_name, Some(item)));
             } else {
                 self.emit_all(self.error_for(&request, -32113, error), emit);
             }
@@ -10541,6 +11047,84 @@ impl Runtime {
         }
         if let Err(error) = result {
             if started {
+                let terminal_at_ms = now_ms();
+                let (class, retryable) = runtime_error_classification(&error);
+                let Some(turn_id) = started_turn_id.as_deref() else {
+                    let item = TimelineItem {
+                        id: self.allocate_id("error"),
+                        kind: "error".into(),
+                        role: "system".into(),
+                        state: "completed".into(),
+                        content: "Turn identity is unavailable after adapter failure".into(),
+                        data: Some(runtime_error_data(
+                            "turn identity is unavailable after adapter failure",
+                        )),
+                    };
+                    emit(self.event(
+                        &params.session_id,
+                        None,
+                        "turn.persistence-failed",
+                        Some(item),
+                    ));
+                    return;
+                };
+                let terminal_result = turn_trace_accumulator
+                    .take()
+                    .ok_or_else(|| {
+                        "turn trace accumulator is unavailable after adapter failure".to_owned()
+                    })
+                    .and_then(|accumulator| {
+                        accumulator
+                            .finalize_failed(
+                                terminal_at_ms,
+                                trace_error_metadata(
+                                    turn_id,
+                                    class,
+                                    class,
+                                    retryable,
+                                    TraceEvidenceSource::Runtime,
+                                ),
+                                trace_terminal_metadata(
+                                    turn_id,
+                                    "failed",
+                                    TraceEvidenceSource::Runtime,
+                                ),
+                            )
+                            .map_err(|cause| {
+                                format!(
+                                    "cannot finalize adapter-failure trace: {}: {}",
+                                    cause.code, cause.message
+                                )
+                            })
+                    })
+                    .and_then(|trace| {
+                        self.persist_turn_state_with_trace(
+                            &params.session_id,
+                            turn_id,
+                            "failed",
+                            terminal_at_ms,
+                            &trace,
+                        )
+                    });
+                if let Err(terminal_error) = terminal_result {
+                    let mut data = runtime_error_data(&terminal_error);
+                    data["operation"] = Value::String("workbench.persistence".into());
+                    let item = TimelineItem {
+                        id: self.allocate_id("error"),
+                        kind: "error".into(),
+                        role: "system".into(),
+                        state: "completed".into(),
+                        content: terminal_error,
+                        data: Some(data),
+                    };
+                    emit(self.event(
+                        &params.session_id,
+                        Some(turn_id),
+                        "turn.persistence-failed",
+                        Some(item),
+                    ));
+                    return;
+                }
                 let item = TimelineItem {
                     id: self.allocate_id("error"),
                     kind: "error".into(),
@@ -10549,7 +11133,7 @@ impl Runtime {
                     content: runtime_error_content(&error),
                     data: Some(runtime_error_data(&error)),
                 };
-                emit(self.event(&params.session_id, None, "turn.failed", Some(item)));
+                emit(self.event(&params.session_id, Some(turn_id), "turn.failed", Some(item)));
             } else {
                 self.emit_all(
                     self.error_for(&request, -32112, runtime_error_content(&error)),
@@ -15590,6 +16174,10 @@ mod turn_cancel_tests {
         );
         for (message, class) in [
             ("invalid AAP protocol frame", "protocol"),
+            (
+                "Codex App Server protocol error: invalid turn status",
+                "protocol",
+            ),
             ("sandbox denied filesystem access", "sandbox"),
             ("managed policy denied command", "policy"),
             ("tool command execution failed", "tool"),
@@ -15639,6 +16227,10 @@ mod turn_cancel_tests {
         assert_eq!(
             runtime_error_content_with_provider(secret, Some(&provider_error)),
             "Upstream provider request failed"
+        );
+        assert_eq!(
+            runtime_error_content_with_provider(secret, None),
+            "Codex turn failed"
         );
     }
 

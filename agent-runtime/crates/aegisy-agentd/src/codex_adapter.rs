@@ -129,6 +129,12 @@ pub enum CodexEvent {
         explanation: Option<String>,
         steps: Vec<Value>,
     },
+    TurnErrorObserved {
+        turn_id: String,
+        message: String,
+        provider_error: Option<ProviderError>,
+        will_retry: bool,
+    },
     TurnCompleted {
         turn_id: String,
     },
@@ -594,20 +600,13 @@ impl CodexAdapter {
                     });
                 }
                 "turn/completed" => {
-                    emit(turn_terminal_event(&params, &turn_id));
+                    emit(turn_terminal_event(&params, &turn_id)?);
                     return Ok(());
                 }
                 "error" => {
-                    let message = params
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Codex runtime error")
-                        .to_owned();
-                    emit(CodexEvent::TurnFailed {
-                        turn_id: turn_id.clone(),
-                        message,
-                        provider_error: None,
-                    });
+                    if let Some(event) = turn_error_observation(&params, &turn_id)? {
+                        emit(event);
+                    }
                 }
                 _ => {}
             }
@@ -1165,15 +1164,70 @@ fn turn_steer_params(thread_id: &str, turn_id: &str, steer: &TurnSteerRequest) -
     })
 }
 
-fn turn_terminal_event(params: &Value, turn_id: &str) -> CodexEvent {
+fn turn_error_observation(params: &Value, turn_id: &str) -> Result<Option<CodexEvent>, String> {
+    let notification_turn_id = params
+        .get("turnId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "Codex App Server protocol error: error notification is missing turnId".to_owned()
+        })?;
+    if notification_turn_id != turn_id {
+        return Ok(None);
+    }
+    let will_retry = params
+        .get("willRetry")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            "Codex App Server protocol error: error notification is missing willRetry".to_owned()
+        })?;
+    let error = params
+        .get("error")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "Codex App Server protocol error: error notification is missing error metadata"
+                .to_owned()
+        })?;
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "Codex App Server protocol error: error notification is missing error.message"
+                .to_owned()
+        })?
+        .to_owned();
+    let provider_error = error
+        .get("codexErrorInfo")
+        .filter(|value| !value.is_null())
+        .and_then(from_codex_error_info);
+    Ok(Some(CodexEvent::TurnErrorObserved {
+        turn_id: turn_id.to_owned(),
+        message,
+        provider_error,
+        will_retry,
+    }))
+}
+
+fn turn_terminal_event(params: &Value, turn_id: &str) -> Result<CodexEvent, String> {
+    let notification_turn_id = params
+        .pointer("/turn/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "Codex App Server protocol error: terminal notification is missing turn.id".to_owned()
+        })?;
+    if notification_turn_id != turn_id {
+        return Err(
+            "Codex App Server protocol error: terminal notification has a different turn identity"
+                .into(),
+        );
+    }
     match params.pointer("/turn/status").and_then(Value::as_str) {
-        Some("completed") => CodexEvent::TurnCompleted {
+        Some("completed") => Ok(CodexEvent::TurnCompleted {
             turn_id: turn_id.into(),
-        },
-        Some("interrupted") => CodexEvent::TurnInterrupted {
+        }),
+        Some("interrupted") => Ok(CodexEvent::TurnInterrupted {
             turn_id: turn_id.into(),
-        },
-        _ => CodexEvent::TurnFailed {
+        }),
+        Some("failed") => Ok(CodexEvent::TurnFailed {
             turn_id: turn_id.into(),
             message: params
                 .pointer("/turn/error/message")
@@ -1183,7 +1237,13 @@ fn turn_terminal_event(params: &Value, turn_id: &str) -> CodexEvent {
             provider_error: params
                 .pointer("/turn/error/codexErrorInfo")
                 .and_then(from_codex_error_info),
-        },
+        }),
+        Some("inProgress") => Err(
+            "Codex App Server protocol error: terminal notification is still in progress".into(),
+        ),
+        _ => Err(
+            "Codex App Server protocol error: terminal notification has an invalid status".into(),
+        ),
     }
 }
 
@@ -1217,6 +1277,7 @@ mod tests {
         let event = turn_terminal_event(
             &json!({
                 "turn": {
+                    "id": "turn-provider-error",
                     "status": "failed",
                     "error": {
                         "message": "stream disconnected before completion: private body",
@@ -1227,7 +1288,8 @@ mod tests {
                 }
             }),
             "turn-provider-error",
-        );
+        )
+        .unwrap();
         let CodexEvent::TurnFailed {
             message,
             provider_error,
@@ -1485,11 +1547,76 @@ mod tests {
             turn_terminal_event(
                 &json!({ "turn": { "id": "turn-1", "status": "interrupted" } }),
                 "turn-1"
-            ),
+            )
+            .unwrap(),
             CodexEvent::TurnInterrupted {
                 turn_id: "turn-1".into()
             }
         );
+    }
+
+    #[test]
+    fn error_notification_is_non_terminal_and_preserves_retry_metadata() {
+        let observed = turn_error_observation(
+            &json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "willRetry": true,
+                "error": {
+                    "message": "stream disconnected before completion: private body",
+                    "codexErrorInfo": {
+                        "responseStreamDisconnected": { "httpStatusCode": 502 }
+                    }
+                }
+            }),
+            "turn-1",
+        )
+        .unwrap()
+        .unwrap();
+        let CodexEvent::TurnErrorObserved {
+            turn_id,
+            provider_error,
+            will_retry,
+            ..
+        } = observed
+        else {
+            panic!("expected a non-terminal error observation")
+        };
+        assert_eq!(turn_id, "turn-1");
+        assert!(will_retry);
+        assert_eq!(
+            provider_error.expect("provider classification").kind,
+            "response-stream-disconnected"
+        );
+        assert!(turn_error_observation(
+            &json!({
+                "turnId": "late-turn",
+                "willRetry": false,
+                "error": { "message": "late" }
+            }),
+            "turn-1"
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn terminal_notification_rejects_identity_and_non_terminal_status_drift() {
+        let identity_error = turn_terminal_event(
+            &json!({ "turn": { "id": "turn-2", "status": "completed" } }),
+            "turn-1",
+        )
+        .unwrap_err();
+        assert!(identity_error.contains("protocol error"));
+        let status_error = turn_terminal_event(
+            &json!({ "turn": { "id": "turn-1", "status": "inProgress" } }),
+            "turn-1",
+        )
+        .unwrap_err();
+        assert!(status_error.contains("protocol error"));
+        let missing_status =
+            turn_terminal_event(&json!({ "turn": { "id": "turn-1" } }), "turn-1").unwrap_err();
+        assert!(missing_status.contains("protocol error"));
     }
 
     #[test]

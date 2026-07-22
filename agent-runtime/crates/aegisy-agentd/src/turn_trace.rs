@@ -531,7 +531,11 @@ impl TracePayload {
                 }
                 validate_source(
                     evidence,
-                    &[EvidenceSource::ModelCatalog, EvidenceSource::Provider],
+                    &[
+                        EvidenceSource::ModelCatalog,
+                        EvidenceSource::Provider,
+                        EvidenceSource::Runtime,
+                    ],
                 )?;
                 validate_common(evidence, redaction)?;
             }

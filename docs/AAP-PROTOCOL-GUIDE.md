@@ -83,6 +83,15 @@ same contract for 4xx/5xx, rate-limit, connection, and SSE-disconnect events
 and removes upstream `x-aegisy-error-*` headers before forwarding a successful
 response.
 
+Pinned Codex `error` notifications are observations, not terminal events. Aegisy
+emits `turn.error-observed` with a fixed display message, stable content-free
+classification, `will_retry`, and `terminal:false`; it does not copy the dynamic
+Codex message. A Turn ends only after a schema-valid `turn/completed` notification
+whose exact Turn ID has status `completed`, `failed`, or `interrupted`. Missing,
+mismatched, `inProgress`, or unknown terminal state is a protocol failure. A
+non-terminal error followed by EOF is therefore terminated by the transport
+failure path rather than by the observation itself.
+
 Usage accounting is separately described by the internal
 `usage-authority/0.1` contract. Token, context, cost, and reasoning metrics
 carry one of `observed`, `catalog-derived`, `estimated`, `stale`, or `unknown`
@@ -103,9 +112,14 @@ Codex usage Timeline metadata may include a `compaction_threshold` decision
 computed from provider-observed last-input/context-window values. Runtime can
 restore its hysteresis latch from complete bounded usage history and projects a
 content-free Session summary; `automatic_compaction_authority` is always false.
-The Workbench Store can atomically persist a validated terminal trace, but the
-Runtime does not yet produce one and there is no trace diagnostic-export path.
-Clients must not infer automatic compaction or trace export from these fields.
+The Workbench Store atomically persists validated terminal traces, and the pinned
+Codex Runtime produces them only for failed and interrupted Turns. Runtime and
+Session model-binding identities, prepared Context counts/hashes, stable Error
+classification, and terminal evidence are metadata-only. Successful completion
+does not produce a trace until authoritative Workspace/Git/Test applicability and
+evidence can be represented without fabrication. Trace records are not Timeline
+Items and have no AAP/Qt read, audit/export, or retention surface. Clients must not
+infer automatic compaction, trace visibility, or trace export from these fields.
 
 The Qt Timeline treats this metadata as untrusted protocol input. It requires
 the exact usage schema, all four metric classes, consistent authority/value

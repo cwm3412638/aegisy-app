@@ -1,5 +1,10 @@
 #![cfg(unix)]
 
+use aegisy_agentd::turn_trace::{
+    ErrorClass as TraceErrorClass, EvidenceSource as TraceEvidenceSource,
+    TerminalState as TraceTerminalState, TracePayload,
+};
+use aegisy_agentd::workbench_store::WorkbenchStore;
 #[cfg(target_os = "macos")]
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 #[cfg(target_os = "macos")]
@@ -262,6 +267,7 @@ while IFS= read -r line; do
       ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-provider-failure"}}}\n' "$id"
+      printf '{"method":"error","params":{"threadId":"thread-provider-failure","turnId":"turn-provider-failure","willRetry":true,"error":{"message":"stream retry includes private provider response body and authorization Bearer ghp_123456789012345678901234567890","codexErrorInfo":null}}}\n'
       printf '{"method":"turn/completed","params":{"threadId":"thread-provider-failure","turn":{"id":"turn-provider-failure","status":"failed","error":{"message":"stream disconnected before completion after authorization Bearer ghp_123456789012345678901234567890","additionalDetails":"private provider response body","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":502}}}}}}\n'
       ;;
     *'"method":"shutdown"'*)
@@ -693,8 +699,11 @@ fn stdio_codex_restart_recovers_after_later_process_exit() {
 fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
     let codex = reconnectable_codex();
     let instances = codex.with_extension("sh.instances");
+    let data_root = codex.parent().expect("fixture directory").join("workbench");
+    fs::create_dir_all(&data_root).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
         .env("AEGISY_CODEX_PATH", &codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -740,7 +749,7 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
     let session = receive_until(&receiver, |message| message["id"] == "reconnect-session");
     let session_id = session["result"]["session"]["id"]
         .as_str()
-        .unwrap()
+        .unwrap_or_else(|| panic!("reconnect session did not start: {session}"))
         .to_owned();
 
     send(
@@ -809,6 +818,109 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    assert_eq!(store.load_turn("turn-reconnect-1").unwrap().state, "failed");
+    assert_eq!(
+        store.load_turn("turn-reconnect-2").unwrap().state,
+        "completed"
+    );
+    let failed_trace = store
+        .read_turn_trace(&session_id, "turn-reconnect-1")
+        .unwrap()
+        .expect("transport failure must persist a terminal trace");
+    assert_eq!(failed_trace.state, "failed");
+    assert_eq!(failed_trace.trace.binding.session_id, session_id);
+    assert_eq!(failed_trace.trace.binding.turn_id, "turn-reconnect-1");
+    assert_eq!(failed_trace.trace.binding.project_id, None);
+    assert!(failed_trace.trace.binding.environment_identity.is_some());
+    assert!(matches!(
+        failed_trace.trace.events.last().map(|event| &event.payload),
+        Some(TracePayload::Terminal {
+            state: TraceTerminalState::Failed,
+            ..
+        })
+    ));
+    assert!(failed_trace
+        .trace
+        .events
+        .iter()
+        .any(|event| matches!(event.payload, TracePayload::Runtime { .. })));
+    assert!(failed_trace
+        .trace
+        .events
+        .iter()
+        .any(|event| matches!(event.payload, TracePayload::Model { .. })));
+    assert!(failed_trace
+        .trace
+        .events
+        .iter()
+        .any(|event| matches!(event.payload, TracePayload::Context { .. })));
+    assert!(failed_trace
+        .trace
+        .events
+        .iter()
+        .any(|event| matches!(event.payload, TracePayload::Error { .. })));
+    let runtime_error = failed_trace
+        .trace
+        .events
+        .iter()
+        .find_map(|event| match &event.payload {
+            TracePayload::Error {
+                stable_class,
+                source_class,
+                retryable,
+                evidence,
+                ..
+            } => Some((
+                *stable_class,
+                source_class.as_str(),
+                *retryable,
+                evidence.source,
+            )),
+            _ => None,
+        })
+        .expect("transport failure trace must contain error metadata");
+    assert_eq!(runtime_error.0, TraceErrorClass::Transport);
+    assert_eq!(runtime_error.1, "transport");
+    assert!(runtime_error.2);
+    assert_eq!(runtime_error.3, TraceEvidenceSource::Runtime);
+    assert_eq!(
+        failed_trace
+            .trace
+            .events
+            .iter()
+            .filter(|event| matches!(event.payload, TracePayload::Terminal { .. }))
+            .count(),
+        1
+    );
+    let serialized_trace = serde_json::to_string(&failed_trace).unwrap();
+    for forbidden in [
+        "first attempt",
+        "partial",
+        "Bearer",
+        "codex-reconnect-fixture",
+    ] {
+        assert!(!serialized_trace.contains(forbidden), "found {forbidden}");
+    }
+    assert!(store
+        .read_turn_trace(&session_id, "turn-reconnect-2")
+        .unwrap()
+        .is_none());
+    drop(store);
+    let reopened = WorkbenchStore::open(&data_root).unwrap();
+    assert_eq!(
+        reopened
+            .read_turn_trace(&session_id, "turn-reconnect-1")
+            .unwrap()
+            .unwrap(),
+        failed_trace
+    );
+    assert!(reopened
+        .read_turn_trace(&session_id, "turn-reconnect-2")
+        .unwrap()
+        .is_none());
+    drop(reopened);
     let _ = fs::remove_dir_all(codex.parent().unwrap());
 }
 
@@ -816,8 +928,11 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
 fn stdio_codex_provider_failure_preserves_content_free_upstream_classification() {
     let codex = provider_failure_codex();
     let secret = "ghp_123456789012345678901234567890";
+    let data_root = codex.parent().expect("fixture directory").join("workbench");
+    fs::create_dir_all(&data_root).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
         .env("AEGISY_CODEX_PATH", &codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -877,10 +992,31 @@ fn stdio_codex_provider_failure_preserves_content_free_upstream_classification()
             json!({
                 "session_id": session_id,
                 "input": "provider failure",
-                "idempotency_key": "provider-failure-turn"
+                "idempotency_key": "provider-failure-turn",
+                "context": [{
+                    "id": "excluded-context",
+                    "kind": "selection",
+                    "label": "excluded",
+                    "origin": "test",
+                    "exclusion_reason": "user-excluded"
+                }]
             }),
         ),
     );
+    let observed = receive_until(&receiver, |message| {
+        message["method"] == "event" && message["params"]["event"] == "turn.error-observed"
+    });
+    assert_eq!(
+        observed["params"]["item"]["content"],
+        "Codex reported a non-terminal turn error"
+    );
+    assert_eq!(observed["params"]["item"]["data"]["terminal"], false);
+    assert_eq!(observed["params"]["item"]["data"]["will_retry"], true);
+    assert_eq!(observed["params"]["item"]["data"]["class"], "transport");
+    assert!(!observed.to_string().contains(secret));
+    assert!(!observed
+        .to_string()
+        .contains("private provider response body"));
     let failed = receive_until(&receiver, |message| {
         message["method"] == "event"
             && message["params"]["event"] == "turn.failed"
@@ -923,6 +1059,98 @@ fn stdio_codex_provider_failure_preserves_content_free_upstream_classification()
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    let failed_trace = store
+        .read_turn_trace(&session_id, "turn-provider-failure")
+        .unwrap()
+        .expect("provider failure must persist a terminal trace");
+    assert_eq!(
+        store.load_turn("turn-provider-failure").unwrap().state,
+        "failed"
+    );
+    assert_eq!(failed_trace.trace.binding.session_id, session_id);
+    assert_eq!(failed_trace.trace.binding.turn_id, "turn-provider-failure");
+    assert_eq!(failed_trace.trace.binding.project_id, None);
+    assert!(failed_trace.trace.binding.environment_identity.is_some());
+    let error = failed_trace
+        .trace
+        .events
+        .iter()
+        .find_map(|event| match &event.payload {
+            TracePayload::Error {
+                stable_class,
+                source_class,
+                retryable,
+                ..
+            } => Some((*stable_class, source_class.as_str(), *retryable)),
+            _ => None,
+        })
+        .expect("provider failure trace must contain error metadata");
+    assert_eq!(error.0, TraceErrorClass::Transport);
+    assert_eq!(error.1, "response-stream-disconnected");
+    assert!(error.2);
+    let context = failed_trace
+        .trace
+        .events
+        .iter()
+        .find_map(|event| match &event.payload {
+            TracePayload::Context {
+                item_count,
+                included_items,
+                excluded_items,
+                ..
+            } => Some((*item_count, *included_items, *excluded_items)),
+            _ => None,
+        })
+        .expect("provider failure trace must contain context metadata");
+    assert_eq!(context, (1, 0, 1));
+    let model_evidence_source = failed_trace
+        .trace
+        .events
+        .iter()
+        .find_map(|event| match &event.payload {
+            TracePayload::Model { evidence, .. } => Some(evidence.source),
+            _ => None,
+        })
+        .expect("provider-bound turn must contain model binding metadata");
+    assert_eq!(model_evidence_source, TraceEvidenceSource::Runtime);
+    assert!(matches!(
+        failed_trace.trace.events.last().map(|event| &event.payload),
+        Some(TracePayload::Terminal {
+            state: TraceTerminalState::Failed,
+            ..
+        })
+    ));
+    assert_eq!(
+        failed_trace
+            .trace
+            .events
+            .iter()
+            .filter(|event| matches!(event.payload, TracePayload::Terminal { .. }))
+            .count(),
+        1
+    );
+    let serialized_trace = serde_json::to_string(&failed_trace).unwrap();
+    for forbidden in [
+        secret,
+        "private provider response body",
+        "stream disconnected before completion",
+        "provider failure",
+        "codex-provider-failure-fixture",
+    ] {
+        assert!(!serialized_trace.contains(forbidden), "found {forbidden}");
+    }
+    drop(store);
+    let reopened = WorkbenchStore::open(&data_root).unwrap();
+    assert_eq!(
+        reopened
+            .read_turn_trace(&session_id, "turn-provider-failure")
+            .unwrap()
+            .unwrap(),
+        failed_trace
+    );
+    drop(reopened);
     let _ = fs::remove_dir_all(codex.parent().unwrap());
 }
 
@@ -1208,8 +1436,11 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
 #[test]
 fn stdio_control_steers_and_cancels_a_turn_while_normal_dispatch_is_blocked() {
     let codex = fake_codex();
+    let data_root = codex.parent().expect("fixture directory").join("workbench");
+    fs::create_dir_all(&data_root).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
         .env("AEGISY_CODEX_PATH", &codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1376,6 +1607,77 @@ fn stdio_control_steers_and_cancels_a_turn_while_normal_dispatch_is_blocked() {
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    let interrupted_trace = store
+        .read_turn_trace(&session_id, "turn-fixture")
+        .unwrap()
+        .expect("interrupted turn must persist a terminal trace");
+    assert_eq!(
+        store.load_turn("turn-fixture").unwrap().state,
+        "interrupted"
+    );
+    assert_eq!(interrupted_trace.state, "interrupted");
+    assert_eq!(interrupted_trace.trace.binding.session_id, session_id);
+    assert_eq!(interrupted_trace.trace.binding.turn_id, "turn-fixture");
+    assert_eq!(interrupted_trace.trace.binding.project_id, None);
+    assert!(interrupted_trace
+        .trace
+        .binding
+        .environment_identity
+        .is_some());
+    let TracePayload::Terminal {
+        state, evidence, ..
+    } = &interrupted_trace
+        .trace
+        .events
+        .last()
+        .expect("interrupted trace must have a terminal event")
+        .payload
+    else {
+        panic!("interrupted trace must end with a terminal event")
+    };
+    assert_eq!(*state, TraceTerminalState::Interrupted);
+    assert_eq!(evidence.workspace_identity, None);
+    assert_eq!(evidence.git_state_identity, None);
+    assert_eq!(evidence.verification_identity, None);
+    assert_eq!(evidence.observed_verification_count, 0);
+    assert_eq!(evidence.evidence.source, TraceEvidenceSource::Provider);
+    assert_eq!(
+        interrupted_trace
+            .trace
+            .events
+            .iter()
+            .filter(|event| matches!(event.payload, TracePayload::Terminal { .. }))
+            .count(),
+        1
+    );
+    assert!(interrupted_trace.trace.events.iter().all(|event| !matches!(
+        event.payload,
+        TracePayload::Tool { .. }
+            | TracePayload::Change { .. }
+            | TracePayload::Test { .. }
+            | TracePayload::Error { .. }
+    )));
+    let serialized_trace = serde_json::to_string(&interrupted_trace).unwrap();
+    for forbidden in [
+        "wait for cancellation",
+        "focus on the latest instruction",
+        "ghp_",
+        "aegisy-cancel-fixture",
+    ] {
+        assert!(!serialized_trace.contains(forbidden), "found {forbidden}");
+    }
+    drop(store);
+    let reopened = WorkbenchStore::open(&data_root).unwrap();
+    assert_eq!(
+        reopened
+            .read_turn_trace(&session_id, "turn-fixture")
+            .unwrap()
+            .unwrap(),
+        interrupted_trace
+    );
+    drop(reopened);
     let _ = fs::remove_dir_all(codex.parent().unwrap());
 }
 

@@ -620,9 +620,20 @@
     state, time, project, or trace conflicts fail closed. Projection replay
     revalidates the trace and exact following terminal event, and tests cover
     restart recovery, duplicate conflict, transaction rollback, and hash-
-    consistent semantic tampering. No Runtime producer calls this path yet,
-    and it remains unexposed through Timeline, AAP/Qt, audit, or export; keep
-    this task unchecked.
+    consistent semantic tampering. The pinned Codex Runtime now produces this
+    metadata-only trace for authoritative `failed` and `interrupted` terminal
+    Turns. Runtime, Session model binding, prepared Context manifest, stable
+    Error classification, and terminal evidence use identities/counts only;
+    excluded Context entries are counted and no prompt, provider body, path,
+    command, diff, output, or credential enters the trace. Codex `error`
+    notifications are non-terminal observations; only a schema-valid
+    `turn/completed` terminal status ends the Turn. Persistence failure requests
+    interruption and a successfully committed storage-class fallback emits an
+    exact `turn.failed` lifecycle event. Successful `completed` traces remain
+    unsupported until the contract can truthfully represent Chat/read-only/
+    mutation applicability and authoritative Workspace/Git/Test evidence. Trace
+    data remains unexposed through Timeline, AAP/Qt, audit, retention, or export;
+    keep this task unchecked.
 - [ ] 20.2 Implement observed, catalog-derived, estimated, stale, and unknown labels for token, context, cost, and reasoning status
   - Partial foundation: internal `usage-authority/0.1` validates exactly the
     four metric classes and source labels, rejects unknown values with numbers,

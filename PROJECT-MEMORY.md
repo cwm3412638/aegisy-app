@@ -907,8 +907,23 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   full trace, outer metadata, and exact following terminal event; an injected
   terminal-event failure rolls back both the trace and Turn update, while hash-
   consistent semantic tampering quarantines the Session after restart. The
-  current Runtime does not yet produce a complete trace, and Timeline, AAP/Qt,
-  audit, and export remain disconnected, so keep `20.1` unchecked.
+  pinned Codex Runtime now produces terminal-last traces for authoritative failed
+  and interrupted Turns. It binds the exact Session, real Codex Turn, optional
+  Project, Session environment, pinned Runtime, Runtime-observed Session model
+  binding, and prepared Context manifest through identities/counts only. Explicit
+  Context exclusions are included in the total count. Provider/adapter/transport/
+  storage failures use stable content-free Error classes; user interruption carries
+  no fabricated Error, Workspace, Git, or verification evidence. Codex `error`
+  notifications are non-terminal observations with fixed Timeline text; only a
+  schema-valid exact-ID `turn/completed` status ends a Turn. Schema drift is a
+  protocol failure. A persistence failure after provider start requests exact Turn
+  interruption; if the storage-class fallback commits, Runtime emits exact
+  `turn.failed` so Qt cannot remain stuck in an active state. Failed/interrupted
+  terminal Trace writes retain the finalized value for one idempotent retry.
+  Successful completion still uses the normal terminal transaction and produces no
+  Trace: the current contract cannot yet truthfully distinguish Chat/read-only/
+  mutation applicability or complete Workspace/Git/Test evidence. Timeline, AAP/Qt,
+  audit, retention, and export remain disconnected, so keep `20.1` unchecked.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
   at most three retries for transient output-channel, transport, write, read, or
   timeout failures. Version mismatch and protocol rejection are not retried; the
@@ -2477,12 +2492,16 @@ Implemented visual baseline:
   `git diff --check`, strict OpenSpec validation, two Qt C++17 syntax checks, and
   the focused Qt cache run. This evidence is still not sufficient to mark `17.7`
   complete without the full Qt runtime/render pass and cross-platform validation.
-- The durable Turn Trace slice adds three Store tests for atomic terminal commit,
-  exact-retry idempotency, conflict rejection, restart recovery, terminal-event
-  rollback, semantic tamper quarantine, and terminal-last operation state. The
-  complete Rust workspace, strict Clippy, format, diff, and strict OpenSpec
-  validation pass. This is still an internal persistence path without a Runtime
-  producer or AAP/Qt surface, so `20.1` remains unchecked.
+- The durable Turn Trace slice now includes a pinned Codex Runtime producer for
+  failed/interrupted Turns. Producer/adapter/Store and stdio coverage proves exact
+  terminal binding, excluded Context accounting, Runtime-owned model-binding
+  evidence, provider retry observation without early termination, transport EOF,
+  user interruption, content/secret/path exclusion, idempotent restart equality,
+  and completed-without-fabricated-trace behavior. The
+  complete Rust workspace passes 502 library tests (one ignored live fixture), 10
+  threshold tests, 63 protocol tests, 11 stdio tests, formatting, and strict
+  Clippy. Strict OpenSpec validation and `git diff --check` pass. Trace still has
+  no AAP/Qt, audit/export, or retention surface, so `20.1` remains unchecked.
 
 ## Next Product Priorities
 
