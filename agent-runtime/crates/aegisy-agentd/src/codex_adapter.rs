@@ -34,6 +34,7 @@ const CODEX_TRACE_RUNTIME_VERSION: &str = "0.144.5";
 const PINNED_CODEX_VERSION: &str = "codex-cli 0.144.5";
 const MAX_SERVER_REQUEST_ID_BYTES: usize = 128;
 const MAX_SERVER_REQUEST_ITEM_ID_BYTES: usize = 4 * 1024;
+const MAX_UNKNOWN_NOTIFICATION_METHODS: usize = 16;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BackendInfo {
@@ -56,6 +57,55 @@ pub struct AdapterHealth {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     pub stderr: StderrDiagnostics,
+    pub unknown_notifications: UnknownNotificationDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UnknownNotificationMethodDiagnostic {
+    pub method_sha256: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UnknownNotificationDiagnostics {
+    pub schema_version: &'static str,
+    pub total_count: u64,
+    pub methods: Vec<UnknownNotificationMethodDiagnostic>,
+    pub unretained_count: u64,
+}
+
+impl Default for UnknownNotificationDiagnostics {
+    fn default() -> Self {
+        Self {
+            schema_version: "codex-unknown-notification-diagnostics/0.1",
+            total_count: 0,
+            methods: Vec::new(),
+            unretained_count: 0,
+        }
+    }
+}
+
+impl UnknownNotificationDiagnostics {
+    fn observe(&mut self, method: &str) {
+        self.total_count = self.total_count.saturating_add(1);
+        let method_sha256 = format!("sha256:{:x}", Sha256::digest(method.as_bytes()));
+        if let Some(entry) = self
+            .methods
+            .iter_mut()
+            .find(|entry| entry.method_sha256 == method_sha256)
+        {
+            entry.count = entry.count.saturating_add(1);
+            return;
+        }
+        if self.methods.len() < MAX_UNKNOWN_NOTIFICATION_METHODS {
+            self.methods.push(UnknownNotificationMethodDiagnostic {
+                method_sha256,
+                count: 1,
+            });
+        } else {
+            self.unretained_count = self.unretained_count.saturating_add(1);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -302,6 +352,7 @@ pub struct CodexAdapter {
     version: String,
     environment: EnvironmentSummary,
     stderr: Arc<Mutex<StderrDiagnostics>>,
+    unknown_notifications: UnknownNotificationDiagnostics,
 }
 
 pub(crate) struct CodexTurnRequest<'a> {
@@ -454,6 +505,7 @@ impl CodexAdapter {
             version,
             environment: process_environment.summary().clone(),
             stderr: stderr_diagnostics,
+            unknown_notifications: UnknownNotificationDiagnostics::default(),
         };
         adapter.request_with_timeout(
             "initialize",
@@ -495,18 +547,21 @@ impl CodexAdapter {
                 process_id,
                 exit_code: None,
                 stderr,
+                unknown_notifications: self.unknown_notifications.clone(),
             },
             Ok(Some(status)) => AdapterHealth {
                 state: "exited".into(),
                 process_id,
                 exit_code: status.code(),
                 stderr,
+                unknown_notifications: self.unknown_notifications.clone(),
             },
             Err(_) => AdapterHealth {
                 state: "unknown".into(),
                 process_id,
                 exit_code: None,
                 stderr,
+                unknown_notifications: self.unknown_notifications.clone(),
             },
         }
     }
@@ -812,6 +867,7 @@ impl CodexAdapter {
                 }
                 continue;
             }
+            self.observe_unknown_notification(&message);
             let method = message.get("method").and_then(Value::as_str).unwrap_or("");
             let params = message.get("params").cloned().unwrap_or(Value::Null);
             if params.get("threadId").and_then(Value::as_str) != Some(request.thread_id) {
@@ -913,6 +969,7 @@ impl CodexAdapter {
                 continue;
             }
             if message.get("id").and_then(Value::as_i64) != Some(request_id) {
+                self.observe_unknown_notification(&message);
                 continue;
             }
             if let Some(error) = message.get("error") {
@@ -932,6 +989,18 @@ impl CodexAdapter {
     fn receive(&mut self, timeout: Duration) -> Result<Value, String> {
         self.receive_optional(timeout)?
             .ok_or_else(|| "Codex App Server timed out".into())
+    }
+
+    fn observe_unknown_notification(&mut self, message: &Value) {
+        if message.get("id").is_some() {
+            return;
+        }
+        let Some(method) = message.get("method").and_then(Value::as_str) else {
+            return;
+        };
+        if !crate::codex_capability_matrix::is_known_server_notification(method) {
+            self.unknown_notifications.observe(method);
+        }
     }
 
     fn receive_optional(&mut self, timeout: Duration) -> Result<Option<Value>, String> {
@@ -978,20 +1047,25 @@ impl CodexAdapter {
             }))?;
             return Err("Codex approval request arrived without an active bound turn".into());
         }
+        if method == "item/tool/requestUserInput" {
+            return match user_input_request_disposition(message) {
+                UserInputRequestDisposition::Continue(response) => {
+                    self.write_message(&response)?;
+                    Ok(true)
+                }
+                UserInputRequestDisposition::FailClosed(response) => {
+                    self.write_message(&response)?;
+                    Err("Codex user input request has an invalid request ID".into())
+                }
+            };
+        }
         let Some(id) = message.get("id").cloned() else {
             return Ok(false);
         };
-        let result = match method {
-            "item/tool/requestUserInput" => json!({ "answers": {} }),
-            _ => {
-                self.write_message(&json!({
-                    "id": id,
-                    "error": { "code": -32601, "message": "unsupported server request" }
-                }))?;
-                return Ok(true);
-            }
-        };
-        self.write_message(&json!({ "id": id, "result": result }))?;
+        self.write_message(&json!({
+            "id": id,
+            "error": { "code": -32601, "message": "unsupported server request" }
+        }))?;
         Ok(true)
     }
 
@@ -1116,6 +1190,35 @@ fn valid_server_request_id(value: &Value) -> bool {
                 && value.len() <= MAX_SERVER_REQUEST_ID_BYTES
                 && !value.chars().any(char::is_control)
         })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum UserInputRequestDisposition {
+    Continue(Value),
+    FailClosed(Value),
+}
+
+fn user_input_request_disposition(message: &Value) -> UserInputRequestDisposition {
+    let Some(id) = message
+        .get("id")
+        .filter(|value| valid_server_request_id(value))
+        .cloned()
+    else {
+        return UserInputRequestDisposition::FailClosed(json!({
+            "id": Value::Null,
+            "error": {
+                "code": -32602,
+                "message": "user input request is invalid"
+            }
+        }));
+    };
+    UserInputRequestDisposition::Continue(json!({
+        "id": id,
+        "error": {
+            "code": -32601,
+            "message": "user input request is unsupported"
+        }
+    }))
 }
 
 fn invalid_runtime_denial_request_error() -> Value {
@@ -1998,6 +2101,145 @@ mod tests {
         ));
         assert_eq!(STARTUP_MAX_ATTEMPTS, 3);
         assert_eq!(STARTUP_TIMEOUT, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn unknown_notification_diagnostics_are_bounded_hashed_and_content_free() {
+        let private_method = "future/private-notification-sk-secret";
+        let mut diagnostics = UnknownNotificationDiagnostics::default();
+        diagnostics.observe(private_method);
+        diagnostics.observe(private_method);
+        for index in 1..20 {
+            diagnostics.observe(&format!("future/private-notification-{index}"));
+        }
+
+        assert_eq!(diagnostics.total_count, 21);
+        assert_eq!(diagnostics.methods.len(), MAX_UNKNOWN_NOTIFICATION_METHODS);
+        assert_eq!(diagnostics.unretained_count, 4);
+        assert_eq!(diagnostics.methods[0].count, 2);
+        assert_eq!(
+            diagnostics.methods[0].method_sha256,
+            format!("sha256:{:x}", Sha256::digest(private_method.as_bytes()))
+        );
+        let encoded = serde_json::to_string(&diagnostics).unwrap();
+        assert!(!encoded.contains(private_method));
+        assert!(!encoded.contains("future/private-notification"));
+        assert!(!encoded.contains("sk-secret"));
+        assert!(!encoded.contains("params"));
+        assert!(!encoded.contains("body"));
+    }
+
+    #[test]
+    fn known_notification_methods_do_not_enter_unknown_diagnostics() {
+        assert!(crate::codex_capability_matrix::is_known_server_notification("turn/completed"));
+        assert!(
+            !crate::codex_capability_matrix::is_known_server_notification(
+                "future/private-notification"
+            )
+        );
+    }
+
+    #[test]
+    fn user_input_server_request_returns_only_a_content_free_unsupported_error() {
+        let secret = "sk-request-user-input-secret";
+        let request = json!({
+            "id": "user-input-1",
+            "method": "item/tool/requestUserInput",
+            "params": {
+                "questions": [{
+                    "header": "Private question",
+                    "question": format!("Reveal {secret}"),
+                    "options": [{"label": "Secret answer", "description": secret}]
+                }]
+            }
+        });
+
+        let UserInputRequestDisposition::Continue(response) =
+            user_input_request_disposition(&request)
+        else {
+            panic!("valid request ID must receive a correlated unsupported error");
+        };
+        assert_eq!(response["id"], "user-input-1");
+        assert_eq!(response["error"]["code"], -32601);
+        assert_eq!(
+            response["error"]["message"],
+            "user input request is unsupported"
+        );
+        assert!(response.get("result").is_none());
+        let encoded = serde_json::to_string(&response).unwrap();
+        for forbidden in [
+            "answers",
+            "params",
+            "questions",
+            "Private question",
+            "Secret answer",
+            secret,
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "unsupported response leaked {forbidden}"
+            );
+        }
+
+        assert!(matches!(
+            user_input_request_disposition(&json!({
+                "id": 7,
+                "method": "item/tool/requestUserInput",
+                "params": {"question": secret}
+            })),
+            UserInputRequestDisposition::Continue(response)
+                if response["id"] == 7 && response.get("result").is_none()
+        ));
+    }
+
+    #[test]
+    fn invalid_user_input_request_ids_fail_closed_without_echoing_the_body() {
+        let secret = "ghp_request_user_input_secret_value";
+        let requests = [
+            json!({
+                "method": "item/tool/requestUserInput",
+                "params": {"question": secret}
+            }),
+            json!({
+                "id": {"untrusted": secret},
+                "method": "item/tool/requestUserInput",
+                "params": {"question": secret}
+            }),
+            json!({
+                "id": "",
+                "method": "item/tool/requestUserInput",
+                "params": {"question": secret}
+            }),
+            json!({
+                "id": "x".repeat(MAX_SERVER_REQUEST_ID_BYTES + 1),
+                "method": "item/tool/requestUserInput",
+                "params": {"question": secret}
+            }),
+            json!({
+                "id": "invalid\nrequest",
+                "method": "item/tool/requestUserInput",
+                "params": {"question": secret}
+            }),
+        ];
+
+        for request in requests {
+            let UserInputRequestDisposition::FailClosed(response) =
+                user_input_request_disposition(&request)
+            else {
+                panic!("invalid request ID must fail closed");
+            };
+            assert!(response["id"].is_null());
+            assert_eq!(response["error"]["code"], -32602);
+            assert_eq!(
+                response["error"]["message"],
+                "user input request is invalid"
+            );
+            assert!(response.get("result").is_none());
+            let encoded = serde_json::to_string(&response).unwrap();
+            assert!(!encoded.contains(secret));
+            assert!(!encoded.contains("question"));
+            assert!(!encoded.contains("answers"));
+        }
     }
 
     #[test]

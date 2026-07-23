@@ -111,6 +111,194 @@ constexpr int kProjectRelinkRole = Qt::UserRole + 44;
 constexpr int kMaxTurnContextItems = 16;
 constexpr int kMaxInlineContextBytes = 16 * 1024;
 constexpr qint64 kMaxPortableSessionBytes = 4LL * 1024 * 1024;
+constexpr int kMaxTimelinePageItems = 200;
+constexpr int kMaxTimelineIdentityBytes = 256;
+constexpr int kMaxTimelineContentBytes = 64 * 1024;
+constexpr int kMaxTimelineDataBytes = 256 * 1024;
+
+struct RuntimeDegradationExpectation {
+    QString state;
+    QString scope;
+    bool autonomy = false;
+    bool runtimeOnly = false;
+};
+
+bool hasExactJsonKeys(const QJsonObject &object, const QSet<QString> &expected)
+{
+    const QStringList keys = object.keys();
+    return keys.size() == expected.size()
+        && std::all_of(keys.cbegin(), keys.cend(), [&expected](const QString &key) {
+            return expected.contains(key);
+        });
+}
+
+bool isBoundedDiagnosticText(const QJsonValue &value, qsizetype maxBytes)
+{
+    if (!value.isString()) return false;
+    const QString text = value.toString();
+    if (text.isEmpty() || text.toUtf8().size() > maxBytes) return false;
+    return std::none_of(text.cbegin(), text.cend(), [](QChar character) {
+        return character.unicode() < 0x20 || character.unicode() == 0x7f;
+    });
+}
+
+bool isBoundedTimelineContent(const QJsonValue &value, qsizetype maxBytes)
+{
+    if (!value.isString() || value.toString().toUtf8().size() > maxBytes) return false;
+    const QString text = value.toString();
+    return std::none_of(text.cbegin(), text.cend(), [](QChar character) {
+        const ushort code = character.unicode();
+        return (code < 0x20 && code != '\n' && code != '\r' && code != '\t')
+            || code == 0x7f;
+    });
+}
+
+bool isNonnegativeSafeJsonInteger(const QJsonValue &value)
+{
+    if (!value.isDouble()) return false;
+    const double number = value.toDouble();
+    if (number < 0.0 || number > 9'007'199'254'740'991.0) return false;
+    const quint64 integer = static_cast<quint64>(number);
+    return static_cast<double>(integer) == number;
+}
+
+bool isPositiveSafeJsonInteger(const QJsonValue &value)
+{
+    return isNonnegativeSafeJsonInteger(value) && value.toDouble() >= 1.0;
+}
+
+QHash<QString, RuntimeDegradationExpectation> runtimeDegradationExpectations(
+    const QString &backendKind)
+{
+    QHash<QString, RuntimeDegradationExpectation> expected{
+        {QStringLiteral("background-jobs"),
+         {QStringLiteral("disabled"), QStringLiteral("runtime"), true, false}},
+        {QStringLiteral("multi-agent"),
+         {QStringLiteral("disabled"), QStringLiteral("runtime"), true, false}},
+        {QStringLiteral("unattended-writes"),
+         {QStringLiteral("disabled"), QStringLiteral("runtime"), true, false}},
+    };
+    if (backendKind == QStringLiteral("codex")) {
+        expected.insert(QStringLiteral("agent-mutation"),
+                        {QStringLiteral("disabled"), QStringLiteral("runtime"), false, false});
+        expected.insert(QStringLiteral("provider-thread-item-content"),
+                        {QStringLiteral("metadata-only"), QStringLiteral("provider"), false, false});
+        expected.insert(QStringLiteral("provider-thread-delete"),
+                        {QStringLiteral("blocked"), QStringLiteral("provider"), false, false});
+        expected.insert(QStringLiteral("provider-thread-compact"),
+                        {QStringLiteral("blocked"), QStringLiteral("provider"), false, false});
+        expected.insert(QStringLiteral("turn.steer.same-turn"),
+                        {QStringLiteral("runtime-only"), QStringLiteral("provider"), false, true});
+        expected.insert(QStringLiteral("session.provider.lifecycle.list-read"),
+                        {QStringLiteral("runtime-only"), QStringLiteral("provider"), false, true});
+    } else if (backendKind == QStringLiteral("preview")) {
+        expected.insert(QStringLiteral("codex-provider"),
+                        {QStringLiteral("unavailable"), QStringLiteral("runtime"), false, false});
+    } else if (backendKind == QStringLiteral("recovery")) {
+        expected.insert(QStringLiteral("workbench-mutation"),
+                        {QStringLiteral("disabled"), QStringLiteral("runtime"), false, false});
+    } else if (backendKind == QStringLiteral("unavailable")) {
+        expected.insert(QStringLiteral("runtime-adapter"),
+                        {QStringLiteral("unavailable"), QStringLiteral("runtime"), false, false});
+    } else {
+        expected.clear();
+    }
+    return expected;
+}
+
+bool validateAutonomyMissingGates(const QJsonValue &value)
+{
+    if (!value.isArray()) return false;
+    const QJsonArray gates = value.toArray();
+    if (gates.isEmpty() || gates.size() > 16) return false;
+    static const QRegularExpression gatePattern(QStringLiteral("^[0-9]{1,2}\\.[0-9]{1,2}$"));
+    QSet<QString> seen;
+    for (const QJsonValue &gateValue : gates) {
+        if (!gateValue.isString()) return false;
+        const QString gate = gateValue.toString();
+        if (!gatePattern.match(gate).hasMatch() || seen.contains(gate)) return false;
+        seen.insert(gate);
+    }
+    return true;
+}
+
+bool validateRuntimeDegradationEntries(const QJsonArray &degradations,
+                                       const QString &backendKind,
+                                       QHash<QString, QString> *states)
+{
+    const QHash<QString, RuntimeDegradationExpectation> expected =
+        runtimeDegradationExpectations(backendKind);
+    if (expected.isEmpty() || degradations.isEmpty()
+            || degradations.size() != expected.size()) {
+        return false;
+    }
+
+    const QSet<QString> ordinaryKeys{
+        QStringLiteral("feature"), QStringLiteral("state"), QStringLiteral("reason"),
+        QStringLiteral("scope"), QStringLiteral("authority_granted"),
+    };
+    QSet<QString> autonomyKeys = ordinaryKeys;
+    autonomyKeys.insert(QStringLiteral("availability"));
+    autonomyKeys.insert(QStringLiteral("stable_enabled"));
+    autonomyKeys.insert(QStringLiteral("override_available"));
+    autonomyKeys.insert(QStringLiteral("missing_gates"));
+    QSet<QString> runtimeOnlyKeys = ordinaryKeys;
+    runtimeOnlyKeys.insert(QStringLiteral("runtime_supported"));
+    runtimeOnlyKeys.insert(QStringLiteral("desktop_surface_available"));
+
+    QHash<QString, QString> validatedStates;
+    for (const QJsonValue &value : degradations) {
+        if (!value.isObject()) return false;
+        const QJsonObject degradation = value.toObject();
+        if (!degradation.value(QStringLiteral("feature")).isString()
+                || !degradation.value(QStringLiteral("state")).isString()
+                || !degradation.value(QStringLiteral("scope")).isString()
+                || !isBoundedDiagnosticText(degradation.value(QStringLiteral("reason")), 512)) {
+            return false;
+        }
+        const QString feature = degradation.value(QStringLiteral("feature")).toString();
+        const auto expectedIt = expected.constFind(feature);
+        if (expectedIt == expected.cend() || validatedStates.contains(feature)) return false;
+        const RuntimeDegradationExpectation &entry = expectedIt.value();
+        if (degradation.value(QStringLiteral("state")).toString() != entry.state
+                || degradation.value(QStringLiteral("scope")).toString() != entry.scope
+                || !degradation.value(QStringLiteral("authority_granted")).isBool()
+                || degradation.value(QStringLiteral("authority_granted")).toBool()) {
+            return false;
+        }
+
+        if (entry.autonomy) {
+            if (!hasExactJsonKeys(degradation, autonomyKeys)
+                    || !degradation.value(QStringLiteral("availability")).isString()
+                    || degradation.value(QStringLiteral("availability")).toString()
+                        != QStringLiteral("not-advertised")
+                    || !degradation.value(QStringLiteral("stable_enabled")).isBool()
+                    || degradation.value(QStringLiteral("stable_enabled")).toBool()
+                    || !degradation.value(QStringLiteral("override_available")).isBool()
+                    || degradation.value(QStringLiteral("override_available")).toBool()
+                    || !validateAutonomyMissingGates(
+                        degradation.value(QStringLiteral("missing_gates")))) {
+                return false;
+            }
+        } else if (entry.runtimeOnly) {
+            if (!hasExactJsonKeys(degradation, runtimeOnlyKeys)
+                    || !degradation.value(QStringLiteral("runtime_supported")).isBool()
+                    || !degradation.value(QStringLiteral("runtime_supported")).toBool()
+                    || !degradation.value(
+                            QStringLiteral("desktop_surface_available")).isBool()
+                    || degradation.value(
+                            QStringLiteral("desktop_surface_available")).toBool()) {
+                return false;
+            }
+        } else if (!hasExactJsonKeys(degradation, ordinaryKeys)) {
+            return false;
+        }
+        validatedStates.insert(feature, entry.state);
+    }
+    if (validatedStates.size() != expected.size()) return false;
+    *states = validatedStates;
+    return true;
+}
 
 bool isLowerHex(const QString &value, int length)
 {
@@ -119,6 +307,96 @@ bool isLowerHex(const QString &value, int length)
             return (character >= QLatin1Char('0') && character <= QLatin1Char('9'))
                 || (character >= QLatin1Char('a') && character <= QLatin1Char('f'));
         });
+}
+
+bool validateRuntimeDegradationSnapshot(const QJsonObject &result,
+                                        QHash<QString, QString> *states)
+{
+    const QSet<QString> topLevelKeys{
+        QStringLiteral("schema_version"), QStringLiteral("backend"),
+        QStringLiteral("capability_matrix"), QStringLiteral("complete"),
+        QStringLiteral("degradations"),
+    };
+    if (!hasExactJsonKeys(result, topLevelKeys)
+            || result.value(QStringLiteral("schema_version")).toString()
+                != QStringLiteral("runtime-degradations/0.2")
+            || !result.value(QStringLiteral("complete")).isBool()
+            || !result.value(QStringLiteral("complete")).toBool()
+            || !result.value(QStringLiteral("backend")).isObject()
+            || !result.value(QStringLiteral("capability_matrix")).isObject()
+            || !result.value(QStringLiteral("degradations")).isArray()) {
+        return false;
+    }
+
+    const QJsonObject backend = result.value(QStringLiteral("backend")).toObject();
+    const QSet<QString> backendKeys{
+        QStringLiteral("kind"), QStringLiteral("adapter"),
+        QStringLiteral("version"), QStringLiteral("status"),
+    };
+    if (!hasExactJsonKeys(backend, backendKeys)
+            || !backend.value(QStringLiteral("kind")).isString()
+            || !backend.value(QStringLiteral("adapter")).isString()
+            || !backend.value(QStringLiteral("version")).isString()
+            || !backend.value(QStringLiteral("status")).isString()) {
+        return false;
+    }
+    const QString backendKind = backend.value(QStringLiteral("kind")).toString();
+    const QString backendAdapter = backend.value(QStringLiteral("adapter")).toString();
+    const QString backendVersion = backend.value(QStringLiteral("version")).toString();
+    const QString backendStatus = backend.value(QStringLiteral("status")).toString();
+    const bool validBackend =
+        (backendKind == QStringLiteral("codex")
+         && backendAdapter == QStringLiteral("codex-app-server")
+         && backendVersion == QStringLiteral("codex-cli 0.144.5")
+         && backendStatus == QStringLiteral("ready"))
+        || (backendKind == QStringLiteral("preview")
+            && backendAdapter == QStringLiteral("preview")
+            && backendVersion == QStringLiteral("0.1.0")
+            && backendStatus == QStringLiteral("ready"))
+        || (backendKind == QStringLiteral("recovery")
+            && backendAdapter == QStringLiteral("aegisy-workbench-store")
+            && backendVersion == QStringLiteral("workbench-recovery-diagnostic/0.1")
+            && backendStatus == QStringLiteral("read-only-recovery"))
+        || (backendKind == QStringLiteral("unavailable")
+            && backendAdapter == QStringLiteral("codex-app-server")
+            && backendVersion == QStringLiteral("codex-cli 0.144.5")
+            && backendStatus == QStringLiteral("unavailable"));
+    if (!validBackend) return false;
+
+    const QJsonObject matrix = result.value(QStringLiteral("capability_matrix")).toObject();
+    const QSet<QString> matrixKeys{
+        QStringLiteral("schema_version"), QStringLiteral("identity"),
+        QStringLiteral("adapter"), QStringLiteral("codex_version"),
+        QStringLiteral("vendor_schema_version"), QStringLiteral("vendor_schema_sha256"),
+        QStringLiteral("client_request_count"),
+        QStringLiteral("server_notification_count"),
+        QStringLiteral("thread_item_count"), QStringLiteral("complete"),
+    };
+    const bool validMatrix = hasExactJsonKeys(matrix, matrixKeys)
+        && matrix.value(QStringLiteral("schema_version")).toString()
+            == QStringLiteral("codex-capability-matrix/0.1")
+        && matrix.value(QStringLiteral("identity")).toString()
+            == QStringLiteral("codex-capability-matrix:sha256:"
+                              "473ddd66cd30b903778c248f28aa55d3cfb2ff37123c4831a23a263703362d04")
+        && matrix.value(QStringLiteral("adapter")).toString()
+            == QStringLiteral("codex-app-server")
+        && matrix.value(QStringLiteral("codex_version")).toString()
+            == QStringLiteral("codex-cli 0.144.5")
+        && matrix.value(QStringLiteral("vendor_schema_version")).toString()
+            == QStringLiteral("v2")
+        && matrix.value(QStringLiteral("vendor_schema_sha256")).toString()
+            == QStringLiteral("e66ff6063c146734a92c9a018e43efefb079278ee597782f30674edcccedbdb2")
+        && matrix.value(QStringLiteral("client_request_count")).isDouble()
+        && matrix.value(QStringLiteral("client_request_count")).toInt() == 87
+        && matrix.value(QStringLiteral("server_notification_count")).isDouble()
+        && matrix.value(QStringLiteral("server_notification_count")).toInt() == 68
+        && matrix.value(QStringLiteral("thread_item_count")).isDouble()
+        && matrix.value(QStringLiteral("thread_item_count")).toInt() == 18
+        && matrix.value(QStringLiteral("complete")).isBool()
+        && matrix.value(QStringLiteral("complete")).toBool();
+    return validMatrix
+        && validateRuntimeDegradationEntries(
+            result.value(QStringLiteral("degradations")).toArray(), backendKind, states);
 }
 
 const QList<QPair<QString, QString>> &compactionSummaryCategories()
@@ -599,6 +877,11 @@ int editorOffsetForLineColumn(const QString &content, int line, int column)
     const int length = (lineEnd < 0 ? content.size() : lineEnd) - lineStart;
     return lineStart + qBound(0, column - 1, length);
 }
+
+QString timelineTurnKey(const QString &sessionId, const QString &turnId)
+{
+    return sessionId + QChar(0x1f) + turnId;
+}
 }
 
 AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
@@ -633,6 +916,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
 
     connect(m_runtime, &AgentRuntimeClient::runtimeInitialized,
             this, [this](const QJsonObject &result) {
+        m_lastTimelineEventSequences.clear();
+        m_turnStates.clear();
         const QJsonObject backend = result.value(QStringLiteral("backend")).toObject();
         m_runtimeRecoveryMode = backend.value(QStringLiteral("status")).toString()
             == QStringLiteral("read-only-recovery");
@@ -690,9 +975,11 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 && !m_projectId.isEmpty() && !m_workSessionId.isEmpty());
         }
         m_runtimeRestartRequired = false;
-        m_runtimeDegradationsAvailable = false;
+        m_runtimeDegradationState = RuntimeDegradationState::Pending;
+        m_runtimeDegradationRequestId.clear();
         m_runtimeDegradationStates.clear();
         updateRuntimeCapabilityUi();
+        updateTurnAction();
         updateRecoveryUi();
         updateGitPinControls();
     });
@@ -852,38 +1139,49 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         // Profile reads are available for future detail views; the picker remains read-only.
     });
     connect(m_runtime, &AgentRuntimeClient::runtimeDegradationsRead,
-            this, [this](const QString &, const QJsonObject &result) {
-        if (result.value(QStringLiteral("schema_version")).toString()
-                != QStringLiteral("runtime-degradations/0.1")) {
-            m_runtimeDegradationsAvailable = false;
-            m_runtimeDegradationStates.clear();
-            updateRuntimeCapabilityUi();
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        if (m_runtimeDegradationState != RuntimeDegradationState::Pending
+                || requestId.isEmpty()
+                || (!m_runtimeDegradationRequestId.isEmpty()
+                    && requestId != m_runtimeDegradationRequestId)) {
             return;
         }
-        m_runtimeDegradationStates.clear();
-        for (const QJsonValue &value : result.value(QStringLiteral("degradations")).toArray()) {
-            const QJsonObject degradation = value.toObject();
-            const QString feature = degradation.value(QStringLiteral("feature")).toString();
-            const QString state = degradation.value(QStringLiteral("state")).toString();
-            if (!feature.isEmpty() && !state.isEmpty()) {
-                m_runtimeDegradationStates.insert(feature, state);
-            }
+        m_runtimeDegradationRequestId.clear();
+        QHash<QString, QString> states;
+        if (!validateRuntimeDegradationSnapshot(result, &states)) {
+            m_runtimeDegradationState = RuntimeDegradationState::Invalid;
+            m_runtimeDegradationStates.clear();
+            updateRuntimeCapabilityUi();
+            updateTurnAction();
+            return;
         }
-        m_runtimeDegradationsAvailable = true;
+        m_runtimeDegradationStates = states;
+        m_runtimeDegradationState = RuntimeDegradationState::Valid;
         updateRuntimeCapabilityUi();
+        updateTurnAction();
+        startPendingTurnIfReady();
     });
     connect(m_runtime, &AgentRuntimeClient::runtimeHealthRead,
             this, [this](const QJsonObject &health) {
         const QString state = health.value(QStringLiteral("state")).toString();
         m_runtimeRestartRequired = health.value(QStringLiteral("restart_required")).toBool();
-        if (state == QStringLiteral("exited") || state == QStringLiteral("unavailable")) {
+        const bool runtimeUnavailable = state == QStringLiteral("exited")
+            || state == QStringLiteral("unavailable") || m_runtimeRestartRequired;
+        if (runtimeUnavailable) {
+            m_runtimeDegradationState = RuntimeDegradationState::Invalid;
+            m_runtimeDegradationRequestId.clear();
+            m_runtimeDegradationStates.clear();
             m_runtimeStatus->setText(QStringLiteral("○ Codex 不可用"));
             m_runtimeStatus->setToolTip(QStringLiteral("Codex 进程已退出，可点击重启"));
+            updateRuntimeCapabilityUi();
+            updateTurnAction();
         }
         updateRecoveryUi();
     });
     connect(m_runtime, &AgentRuntimeClient::runtimeRestarted,
             this, [this](const QString &, const QJsonObject &result) {
+        m_lastTimelineEventSequences.clear();
+        m_turnStates.clear();
         m_runtimeRestartRequired = false;
         const QJsonObject health = result.value(QStringLiteral("health")).toObject();
         m_runtimeStatus->setText(QStringLiteral("● Codex 已恢复"));
@@ -893,7 +1191,16 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         }
         if (health.value(QStringLiteral("state")).toString() != QStringLiteral("running")) {
             m_runtimeRestartRequired = true;
+            m_runtimeDegradationState = RuntimeDegradationState::Invalid;
+            m_runtimeDegradationRequestId.clear();
+            m_runtimeDegradationStates.clear();
+        } else {
+            m_runtimeDegradationState = RuntimeDegradationState::Pending;
+            m_runtimeDegradationStates.clear();
+            m_runtimeDegradationRequestId = m_runtime->runtimeDegradations();
         }
+        updateRuntimeCapabilityUi();
+        updateTurnAction();
         updateRecoveryUi();
     });
     connect(m_runtime, &AgentRuntimeClient::projectionRecoveryStatusRead,
@@ -1051,6 +1358,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_turnCancelling = false;
             m_activeTurnSessionId.clear();
             m_activeTurnId.clear();
+            m_lastTimelineEventSequences.clear();
+            m_turnStates.clear();
             m_turnCancelRequestId.clear();
         }
         updateTurnAction();
@@ -1477,8 +1786,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         storeSessionWorkspaceBinding(
             id, result.value(QStringLiteral("workspace")).toObject());
         resetSessionHistoryPagination();
-        const QString readRequest = m_runtime->readSession(id);
-        if (!readRequest.isEmpty()) m_sessionReadRequestId = readRequest;
+        requestSessionHistory(id);
         addNotice(QStringLiteral("会话已恢复，可继续发送新任务。"));
         requestSessionList();
     });
@@ -1504,8 +1812,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         storeSessionWorkspaceBinding(
             id, result.value(QStringLiteral("workspace")).toObject());
         resetSessionHistoryPagination();
-        const QString readRequest = m_runtime->readSession(id);
-        if (!readRequest.isEmpty()) m_sessionReadRequestId = readRequest;
+        requestSessionHistory(id);
         addNotice(QStringLiteral("已创建会话分支，历史已复制到最新边界。"));
         requestSessionList();
     });
@@ -1636,7 +1943,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         requestSessionList();
         if (m_sessionReadRequestId.isEmpty()) {
             resetSessionHistoryPagination();
-            m_sessionReadRequestId = m_runtime->readSession(sessionId);
+            requestSessionHistory(sessionId);
         }
     });
     connect(m_runtime, &AgentRuntimeClient::retentionMaintenanceCompleted,
@@ -1672,19 +1979,158 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::sessionRead,
             this, [this](const QString &requestId, const QJsonObject &snapshot) {
-        if (requestId != m_sessionReadRequestId) return;
+        if (m_sessionReadRequestId.isEmpty() || requestId != m_sessionReadRequestId) return;
         const bool appendingHistory = m_sessionHistoryAppending;
-        m_sessionReadRequestId.clear();
-        m_sessionHistoryAppending = false;
-        const QJsonObject session = snapshot.value(QStringLiteral("session")).toObject();
+        const QString requestedSessionId = m_sessionReadSessionId;
+        const QString requestedCursor = m_sessionReadCursor;
+        const int requestedLimit = m_sessionReadLimit;
+        const quint64 expectedFirstSequence = m_sessionReadExpectedFirstSequence;
+        const quint64 expectedLatestSequence = m_sessionReadExpectedLatestSequence;
+        const auto rejectPage = [this]() {
+            clearSessionReadRequest();
+            m_sessionHistoryAppending = false;
+            if (m_sessionHistoryMoreButton) {
+                m_sessionHistoryMoreButton->setText(QStringLiteral("加载更早记录"));
+                m_sessionHistoryMoreButton->setEnabled(!m_sessionHistoryCursor.isEmpty());
+                m_sessionHistoryMoreButton->setVisible(!m_sessionHistoryCursor.isEmpty());
+            }
+        };
+        const QJsonValue sessionValue = snapshot.value(QStringLiteral("session"));
+        const QJsonValue itemsValue = snapshot.value(QStringLiteral("items"));
+        const QJsonValue pageValue = snapshot.value(QStringLiteral("history_page"));
+        if (!sessionValue.isObject() || !itemsValue.isArray() || !pageValue.isObject()) {
+            rejectPage();
+            return;
+        }
+        const QJsonObject session = sessionValue.toObject();
         const QString id = session.value(QStringLiteral("id")).toString();
-        if (id.isEmpty()) return;
+        const QString mode = session.value(QStringLiteral("mode")).toString();
+        const QString status = snapshot.value(QStringLiteral("status")).toString();
+        const QJsonArray items = itemsValue.toArray();
+        const QJsonObject page = pageValue.toObject();
+        const QSet<QString> pageKeys{
+            QStringLiteral("limit"), QStringLiteral("first_sequence"),
+            QStringLiteral("last_sequence"), QStringLiteral("latest_sequence"),
+            QStringLiteral("has_older"), QStringLiteral("older_cursor"),
+        };
+        bool validPage = isBoundedDiagnosticText(session.value(QStringLiteral("id")),
+                                                 kMaxTimelineIdentityBytes)
+            && (mode == QStringLiteral("chat") || mode == QStringLiteral("work"))
+            && (status == QStringLiteral("active") || status == QStringLiteral("archived"))
+            && requestedLimit >= 1 && requestedLimit <= kMaxTimelinePageItems
+            && items.size() <= requestedLimit
+            && hasExactJsonKeys(page, pageKeys)
+            && isPositiveSafeJsonInteger(page.value(QStringLiteral("limit")))
+            && static_cast<quint64>(page.value(QStringLiteral("limit")).toDouble())
+                == static_cast<quint64>(requestedLimit)
+            && page.value(QStringLiteral("has_older")).isBool();
+        const QString boundSessionId = mode == QStringLiteral("work")
+            ? m_workSessionId : m_chatSessionId;
+        validPage = validPage && !requestedSessionId.isEmpty()
+            && id == requestedSessionId && id == boundSessionId;
+        if (appendingHistory) {
+            validPage = validPage && id == m_sessionHistoryId
+                && requestedCursor == m_sessionHistoryCursor
+                && expectedFirstSequence == m_sessionHistoryFirstSequence
+                && expectedLatestSequence == m_sessionHistoryLatestSequence;
+        } else {
+            validPage = validPage && requestedCursor.isEmpty()
+                && m_sessionHistoryCursor == requestedCursor
+                && m_sessionHistoryFirstSequence == expectedFirstSequence
+                && m_sessionHistoryLatestSequence == expectedLatestSequence;
+        }
+
+        quint64 requestedBeforeSequence = 0;
+        if (appendingHistory) {
+            const QRegularExpressionMatch cursorMatch = QRegularExpression(
+                QStringLiteral("^before:([1-9][0-9]*)$")).match(requestedCursor);
+            bool cursorNumberValid = false;
+            requestedBeforeSequence = cursorMatch.hasMatch()
+                ? cursorMatch.captured(1).toULongLong(&cursorNumberValid) : 0;
+            validPage = validPage && cursorNumberValid && requestedBeforeSequence > 1
+                && requestedBeforeSequence == expectedFirstSequence;
+        }
+
+        QHash<QString, QString> validatedKinds = appendingHistory
+            ? m_itemKinds : QHash<QString, QString>{};
+        QHash<QString, QString> validatedRoles = appendingHistory
+            ? m_itemRoles : QHash<QString, QString>{};
+        QHash<QString, QString> validatedStates = appendingHistory
+            ? m_itemStates : QHash<QString, QString>{};
+        QSet<QString> pageItemIds;
+        quint64 firstSequence = 0;
+        quint64 lastSequence = 0;
+        for (const QJsonValue &value : items) {
+            if (!validPage || !value.isObject()) {
+                validPage = false;
+                break;
+            }
+            const QJsonObject replayItem = value.toObject();
+            const QString replayItemId = replayItem.value(QStringLiteral("id")).toString();
+            if ((appendingHistory && m_itemKinds.contains(replayItemId))
+                    || pageItemIds.contains(replayItemId)
+                    || !replayItem.contains(QStringLiteral("sequence"))
+                    || !validateTimelineItem(replayItem, id, QString(),
+                                             &validatedKinds, &validatedRoles)) {
+                validPage = false;
+                break;
+            }
+            pageItemIds.insert(replayItemId);
+            validatedStates.insert(
+                replayItemId, replayItem.value(QStringLiteral("state")).toString());
+            const quint64 sequence = static_cast<quint64>(
+                replayItem.value(QStringLiteral("sequence")).toDouble());
+            if ((lastSequence != 0 && sequence != lastSequence + 1)
+                    || (lastSequence == 0 && sequence == 0)) {
+                validPage = false;
+                break;
+            }
+            if (firstSequence == 0) firstSequence = sequence;
+            lastSequence = sequence;
+        }
+
+        const QJsonValue pageFirst = page.value(QStringLiteral("first_sequence"));
+        const QJsonValue pageLast = page.value(QStringLiteral("last_sequence"));
+        const QJsonValue pageLatest = page.value(QStringLiteral("latest_sequence"));
+        const QJsonValue olderCursor = page.value(QStringLiteral("older_cursor"));
+        if (items.isEmpty()) {
+            validPage = validPage && pageFirst.isNull() && pageLast.isNull()
+                && isNonnegativeSafeJsonInteger(pageLatest)
+                && !appendingHistory
+                && static_cast<quint64>(pageLatest.toDouble()) == 0
+                && !page.value(QStringLiteral("has_older")).toBool()
+                && olderCursor.isNull();
+        } else {
+            const bool hasOlder = firstSequence > 1;
+            validPage = validPage && isPositiveSafeJsonInteger(pageFirst)
+                && isPositiveSafeJsonInteger(pageLast)
+                && isPositiveSafeJsonInteger(pageLatest)
+                && static_cast<quint64>(pageFirst.toDouble()) == firstSequence
+                && static_cast<quint64>(pageLast.toDouble()) == lastSequence
+                && (appendingHistory
+                    ? lastSequence == requestedBeforeSequence - 1
+                        && static_cast<quint64>(pageLatest.toDouble())
+                            >= expectedLatestSequence
+                    : static_cast<quint64>(pageLatest.toDouble()) == lastSequence)
+                && page.value(QStringLiteral("has_older")).toBool() == hasOlder
+                && (hasOlder
+                    ? olderCursor.isString()
+                        && olderCursor.toString()
+                            == QStringLiteral("before:%1").arg(firstSequence)
+                    : olderCursor.isNull());
+        }
+        if (!validPage) {
+            rejectPage();
+            return;
+        }
+
+        clearSessionReadRequest();
+        m_sessionHistoryAppending = false;
         if (appendingHistory && id != m_sessionHistoryId) {
             resetSessionHistoryPagination();
             return;
         }
-        const QString mode = session.value(QStringLiteral("mode")).toString();
-        if (snapshot.value(QStringLiteral("status")).toString() == QStringLiteral("archived")) {
+        if (status == QStringLiteral("archived")) {
             m_archivedSessionIds.insert(id);
         } else {
             m_archivedSessionIds.remove(id);
@@ -1709,11 +2155,16 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
             m_itemLabels.clear();
             m_itemArtifactButtons.clear();
+            m_itemKinds.clear();
+            m_itemRoles.clear();
+            m_itemStates.clear();
             m_commandArtifactRequests.clear();
             m_emptyTimeline->show();
             m_sessionHistoryId = id;
         }
-        const QJsonArray items = snapshot.value(QStringLiteral("items")).toArray();
+        m_itemKinds = validatedKinds;
+        m_itemRoles = validatedRoles;
+        m_itemStates = validatedStates;
         if (appendingHistory) {
             for (int index = items.size() - 1; index >= 0; --index) {
                 addTimelineItem(items.at(index).toObject(), true);
@@ -1729,7 +2180,6 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             addNotice(QStringLiteral("已恢复会话：%1")
                 .arg(session.value(QStringLiteral("title")).toString(id)));
         }
-        const QJsonObject page = snapshot.value(QStringLiteral("history_page")).toObject();
         const QJsonObject recovery = snapshot.value(QStringLiteral("recovery")).toObject();
         if (recovery.value(QStringLiteral("status")).toString()
                 == QStringLiteral("projection-rebuilt")) {
@@ -1737,6 +2187,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             addNotice(QStringLiteral("已从完整事件记录安全重建会话索引。"));
         }
         const bool hasOlder = page.value(QStringLiteral("has_older")).toBool();
+        m_sessionHistoryFirstSequence = items.isEmpty() ? 0 : firstSequence;
+        m_sessionHistoryLatestSequence = items.isEmpty() ? 0
+            : static_cast<quint64>(pageLatest.toDouble());
         m_sessionHistoryCursor = hasOlder
             ? page.value(QStringLiteral("older_cursor")).toString() : QString();
         if (m_sessionHistoryMoreButton) {
@@ -1752,11 +2205,30 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::timelineEvent,
             this, [this](const QJsonObject &event) {
-        const QString eventName = event.value(QStringLiteral("event")).toString();
+        QJsonObject item;
+        if (!validateTimelineEvent(event, &item)) return;
         const QString sessionId = event.value(QStringLiteral("session_id")).toString();
+        m_lastTimelineEventSequences.insert(
+            sessionId, static_cast<quint64>(
+                event.value(QStringLiteral("sequence")).toDouble()));
+        const QString eventName = event.value(QStringLiteral("event")).toString();
         const QString turnId = event.value(QStringLiteral("turn_id")).toString();
-        const QJsonObject item = event.value(QStringLiteral("item")).toObject();
-        if (!item.isEmpty()) addTimelineItem(item);
+        if (!item.isEmpty()) {
+            const QString itemId = item.value(QStringLiteral("id")).toString();
+            m_itemKinds.insert(itemId, item.value(QStringLiteral("kind")).toString());
+            m_itemRoles.insert(itemId, item.value(QStringLiteral("role")).toString());
+            m_itemStates.insert(itemId, item.value(QStringLiteral("state")).toString());
+            addTimelineItem(item);
+        }
+        const QString turnKey = timelineTurnKey(sessionId, turnId);
+        if (eventName == QStringLiteral("turn.started")) {
+            m_turnStates.insert(turnKey, QStringLiteral("running"));
+        } else if (eventName == QStringLiteral("turn.completed")
+                   || eventName == QStringLiteral("turn.failed")
+                   || eventName == QStringLiteral("turn.persistence-failed")
+                   || eventName == QStringLiteral("turn.interrupted")) {
+            m_turnStates.insert(turnKey, eventName);
+        }
         const auto showRuntimeFailure = [this](const QJsonObject &failureItem,
                                                 const QString &operation) {
             const QJsonObject data = failureItem.value(QStringLiteral("data")).toObject();
@@ -1825,10 +2297,12 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
         } else if ((eventName == QStringLiteral("turn.completed")
                     || eventName == QStringLiteral("turn.failed")
+                    || eventName == QStringLiteral("turn.persistence-failed")
                     || eventName == QStringLiteral("turn.interrupted"))
-                   && (m_activeTurnId.isEmpty() || turnId.isEmpty()
-                       || turnId == m_activeTurnId)) {
-            if (eventName == QStringLiteral("turn.failed")) {
+                   && sessionId == m_activeTurnSessionId
+                   && turnId == m_activeTurnId) {
+            if (eventName == QStringLiteral("turn.failed")
+                    || eventName == QStringLiteral("turn.persistence-failed")) {
                 showRuntimeFailure(item, QStringLiteral("任务"));
             }
             if (eventName == QStringLiteral("turn.interrupted")) {
@@ -2434,6 +2908,21 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     connect(m_runtime, &AgentRuntimeClient::requestFailed,
             this, [this](const QString &requestId, const QString &method,
                          const QString &message, int code) {
+        if (method == QStringLiteral("runtime/degradations")
+                && (m_runtimeDegradationState != RuntimeDegradationState::Pending
+                    || requestId.isEmpty()
+                    || (!m_runtimeDegradationRequestId.isEmpty()
+                        && requestId != m_runtimeDegradationRequestId))) {
+            return;
+        }
+        if (method == QStringLiteral("runtime/degradations")) {
+            m_runtimeDegradationRequestId.clear();
+            m_runtimeDegradationState = RuntimeDegradationState::Invalid;
+            m_runtimeDegradationStates.clear();
+            updateRuntimeCapabilityUi();
+            updateTurnAction();
+            return;
+        }
         m_pendingPrompt.clear();
         m_pendingContext = {};
         m_pendingPinnedContextSetIdentity.clear();
@@ -2477,10 +2966,6 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_pinnedImagePreviewReference.clear();
             addNotice(QStringLiteral("读取固定图片预览失败：%1").arg(message), true);
             rebuildContextPanel();
-        } else if (method == QStringLiteral("runtime/degradations")) {
-            m_runtimeDegradationsAvailable = false;
-            m_runtimeDegradationStates.clear();
-            updateRuntimeCapabilityUi();
         } else if (method == QStringLiteral("project/list")
                    && requestId == m_projectListRequestId) {
             m_projectListRequestId.clear();
@@ -2555,9 +3040,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
             addNotice(QStringLiteral("读取会话列表失败：%1").arg(message), true);
         } else if (method == QStringLiteral("session/read")
+                   && !m_sessionReadRequestId.isEmpty()
                    && requestId == m_sessionReadRequestId) {
-            m_sessionReadRequestId.clear();
             const bool appendingHistory = std::exchange(m_sessionHistoryAppending, false);
+            clearSessionReadRequest();
             if (m_sessionHistoryMoreButton) {
                 m_sessionHistoryMoreButton->setText(QStringLiteral("加载更早记录"));
                 m_sessionHistoryMoreButton->setEnabled(!m_sessionHistoryCursor.isEmpty());
@@ -2779,10 +3265,12 @@ AgentWorkbenchWidget::~AgentWorkbenchWidget()
 void AgentWorkbenchWidget::updateRuntimeCapabilityUi()
 {
     if (!m_runtimeCapabilityStatus) return;
-    if (!m_runtimeDegradationsAvailable) {
+    if (m_runtimeDegradationState != RuntimeDegradationState::Valid) {
+        const bool pending = m_runtimeDegradationState == RuntimeDegradationState::Pending;
         m_runtimeCapabilityStatus->setText(QStringLiteral("能力未知"));
-        m_runtimeCapabilityStatus->setToolTip(
-            QStringLiteral("未收到版本化 runtime/degradations 声明；依赖能力保持只读门控"));
+        m_runtimeCapabilityStatus->setToolTip(pending
+            ? QStringLiteral("正在检查版本化 runtime/degradations 声明；新任务保持只读门控")
+            : QStringLiteral("未收到有效的 runtime/degradations 声明；依赖能力保持只读门控"));
         m_runtimeCapabilityStatus->setStyleSheet(
             QStringLiteral("border:none; color:#b54708; font-size:10px; font-weight:600;"));
         return;
@@ -2797,6 +3285,24 @@ void AgentWorkbenchWidget::updateRuntimeCapabilityUi()
             QStringLiteral("border:none; color:#b42318; font-size:10px; font-weight:600;"));
         return;
     }
+    if (m_runtimeDegradationStates.value(QStringLiteral("runtime-adapter"))
+            == QStringLiteral("unavailable")) {
+        m_runtimeCapabilityStatus->setText(QStringLiteral("Runtime 不可用"));
+        m_runtimeCapabilityStatus->setToolTip(
+            QStringLiteral("运行时适配器未就绪；所有依赖操作保持关闭"));
+        m_runtimeCapabilityStatus->setStyleSheet(
+            QStringLiteral("border:none; color:#b42318; font-size:10px; font-weight:600;"));
+        return;
+    }
+    if (m_runtimeDegradationStates.value(QStringLiteral("workbench-mutation"))
+            == QStringLiteral("disabled")) {
+        m_runtimeCapabilityStatus->setText(QStringLiteral("工作台只读"));
+        m_runtimeCapabilityStatus->setToolTip(
+            QStringLiteral("工作台处于恢复模式；所有变更操作保持关闭"));
+        m_runtimeCapabilityStatus->setStyleSheet(
+            QStringLiteral("border:none; color:#b54708; font-size:10px; font-weight:600;"));
+        return;
+    }
     const bool readOnly = m_runtimeDegradationStates.value(
         QStringLiteral("agent-mutation")) == QStringLiteral("disabled");
     const bool compactBlocked = m_runtimeDegradationStates.value(
@@ -2807,7 +3313,14 @@ void AgentWorkbenchWidget::updateRuntimeCapabilityUi()
     if (readOnly) summary.append(QStringLiteral("Agent 只读"));
     if (compactBlocked) summary.append(QStringLiteral("Compact 不可用"));
     if (deleteBlocked) summary.append(QStringLiteral("删除不可用"));
-    if (summary.isEmpty()) summary.append(QStringLiteral("能力已协商"));
+    if (summary.isEmpty()) {
+        m_runtimeCapabilityStatus->setText(QStringLiteral("能力未知"));
+        m_runtimeCapabilityStatus->setToolTip(
+            QStringLiteral("降级矩阵未形成可识别的安全状态；依赖能力保持只读门控"));
+        m_runtimeCapabilityStatus->setStyleSheet(
+            QStringLiteral("border:none; color:#b54708; font-size:10px; font-weight:600;"));
+        return;
+    }
     m_runtimeCapabilityStatus->setText(summary.join(QStringLiteral(" · ")));
     m_runtimeCapabilityStatus->setToolTip(
         QStringLiteral("运行时能力声明已加载；不可用功能不会显示为成功"));
@@ -2966,6 +3479,9 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
         clearContextItems();
         m_itemLabels.clear();
         m_itemArtifactButtons.clear();
+        m_itemKinds.clear();
+        m_itemRoles.clear();
+        m_itemStates.clear();
         m_commandArtifactRequests.clear();
         while (m_timelineLayout && m_timelineLayout->count() > 2) {
             QLayoutItem *item = m_timelineLayout->takeAt(1);
@@ -6925,6 +7441,14 @@ void AgentWorkbenchWidget::showEditorFallback(const QString &path,
 void AgentWorkbenchWidget::setMode(const QString &mode)
 {
     if (mode == m_mode) return;
+    if (m_turnRunning) {
+        if (m_modeGroup) {
+            for (QAbstractButton *button : m_modeGroup->buttons()) {
+                button->setChecked(button->property("mode").toString() == m_mode);
+            }
+        }
+        return;
+    }
     m_mode = mode;
     requestModelCapabilityCheck();
     updateContextStrip();
@@ -8766,8 +9290,10 @@ void AgentWorkbenchWidget::populateSessionList(const QJsonObject &result)
         const QJsonObject deletion = session.value(QStringLiteral("deletion")).toObject();
         const QJsonObject runtime = session.value(QStringLiteral("runtime")).toObject();
         if (!runtime.isEmpty()) storeSessionRuntimeBinding(id, runtime);
-        const QJsonObject workspace = session.value(QStringLiteral("workspace")).toObject();
-        storeSessionWorkspaceBinding(id, workspace);
+        if (session.contains(QStringLiteral("workspace"))) {
+            const QJsonObject workspace = session.value(QStringLiteral("workspace")).toObject();
+            storeSessionWorkspaceBinding(id, workspace);
+        }
         const QJsonArray matchedFields = session.value(QStringLiteral("matched_fields")).toArray();
         if (status == QStringLiteral("archived")) m_archivedSessionIds.insert(id);
         if (recoveryRequired) m_recoverySessionIds.insert(id);
@@ -8877,9 +9403,8 @@ void AgentWorkbenchWidget::loadSessionFromList(QListWidgetItem *item)
     }
     if (!m_sessionReadRequestId.isEmpty()) return;
     resetSessionHistoryPagination();
-    const QString requestId = m_runtime->readSession(sessionId);
+    const QString requestId = requestSessionHistory(sessionId);
     if (requestId.isEmpty()) return;
-    m_sessionReadRequestId = requestId;
     addNotice(QStringLiteral("正在恢复会话…"));
 }
 
@@ -8895,21 +9420,65 @@ void AgentWorkbenchWidget::loadOlderSessionHistory()
     m_sessionHistoryAppending = true;
     m_sessionHistoryMoreButton->setText(QStringLiteral("正在加载…"));
     m_sessionHistoryMoreButton->setEnabled(false);
-    const QString requestId = m_runtime->readSession(
-        m_sessionHistoryId, m_sessionHistoryCursor, 100);
+    const QString requestId = requestSessionHistory(
+        m_sessionHistoryId, m_sessionHistoryCursor, 100, true);
     if (requestId.isEmpty()) {
         m_sessionHistoryAppending = false;
         m_sessionHistoryMoreButton->setText(QStringLiteral("加载更早记录"));
         m_sessionHistoryMoreButton->setEnabled(true);
         return;
     }
+}
+
+QString AgentWorkbenchWidget::requestSessionHistory(const QString &sessionId,
+                                                     const QString &cursor,
+                                                     int limit,
+                                                     bool appending)
+{
+    if (!m_runtime || !m_runtime->isReady() || !m_sessionReadRequestId.isEmpty()
+            || sessionId.isEmpty() || limit < 1 || limit > kMaxTimelinePageItems) {
+        return {};
+    }
+    if (appending) {
+        const QString expectedCursor = QStringLiteral("before:%1")
+            .arg(m_sessionHistoryFirstSequence);
+        if (sessionId != m_sessionHistoryId || cursor != m_sessionHistoryCursor
+                || m_sessionHistoryFirstSequence <= 1 || cursor != expectedCursor) {
+            return {};
+        }
+    } else if (!cursor.isEmpty()) {
+        return {};
+    }
+
+    const QString requestId = m_runtime->readSession(sessionId, cursor, limit);
+    if (requestId.isEmpty()) return {};
     m_sessionReadRequestId = requestId;
+    m_sessionReadSessionId = sessionId;
+    m_sessionReadCursor = cursor;
+    m_sessionReadLimit = limit;
+    m_sessionReadExpectedFirstSequence = m_sessionHistoryFirstSequence;
+    m_sessionReadExpectedLatestSequence = m_sessionHistoryLatestSequence;
+    m_sessionHistoryAppending = appending;
+    return requestId;
+}
+
+void AgentWorkbenchWidget::clearSessionReadRequest()
+{
+    m_sessionReadRequestId.clear();
+    m_sessionReadSessionId.clear();
+    m_sessionReadCursor.clear();
+    m_sessionReadLimit = 0;
+    m_sessionReadExpectedFirstSequence = 0;
+    m_sessionReadExpectedLatestSequence = 0;
 }
 
 void AgentWorkbenchWidget::resetSessionHistoryPagination()
 {
+    clearSessionReadRequest();
     m_sessionHistoryId.clear();
     m_sessionHistoryCursor.clear();
+    m_sessionHistoryFirstSequence = 0;
+    m_sessionHistoryLatestSequence = 0;
     m_sessionHistoryAppending = false;
     m_sessionHistoryScrollValue = 0;
     m_sessionHistoryScrollMaximum = 0;
@@ -8922,8 +9491,18 @@ void AgentWorkbenchWidget::resetSessionHistoryPagination()
 
 void AgentWorkbenchWidget::submitPrompt()
 {
+    // Same-turn steering has a distinct protocol path. Until that UI path exists,
+    // the keyboard shortcut must never start a second Turn.
+    if (m_turnRunning) return;
     const QString prompt = m_composer->toPlainText().trimmed();
     if (prompt.isEmpty()) return;
+    if (m_runtimeDegradationState != RuntimeDegradationState::Valid) {
+        addNotice(m_runtimeDegradationState == RuntimeDegradationState::Pending
+                ? QStringLiteral("正在检查运行时能力，暂不能开始新任务。")
+                : QStringLiteral("运行时能力未知，暂不能开始新任务。"),
+            true);
+        return;
+    }
     if (!m_runtime->isReady()) {
         addNotice(QStringLiteral("本地运行时尚未就绪。"), true);
         return;
@@ -8965,6 +9544,7 @@ void AgentWorkbenchWidget::submitPrompt()
 void AgentWorkbenchWidget::startPendingTurnIfReady()
 {
     if (m_pendingPrompt.isEmpty() || !m_runtime || !m_runtime->isReady()
+            || m_runtimeDegradationState != RuntimeDegradationState::Valid
             || m_runtimeRecoveryMode || currentOperationStatusBlocked()) {
         return;
     }
@@ -8998,6 +9578,11 @@ void AgentWorkbenchWidget::cancelActiveTurn()
 void AgentWorkbenchWidget::updateTurnAction()
 {
     if (!m_sendButton) return;
+    if (m_modeGroup) {
+        for (QAbstractButton *button : m_modeGroup->buttons()) {
+            button->setEnabled(!m_turnRunning);
+        }
+    }
     if (m_turnRunning) {
         m_sendButton->setText(m_turnCancelling ? QStringLiteral("正在停止")
                                                : QStringLiteral("停止"));
@@ -9006,6 +9591,17 @@ void AgentWorkbenchWidget::updateTurnAction()
             ? QStringLiteral("已请求停止，正在等待运行时确认终态")
             : QStringLiteral("停止当前任务"));
         m_sendButton->setEnabled(m_runtime->isReady() && !m_turnCancelling);
+        return;
+    }
+    if (m_runtimeDegradationState != RuntimeDegradationState::Valid) {
+        const bool pending = m_runtimeDegradationState == RuntimeDegradationState::Pending;
+        m_sendButton->setText(pending ? QStringLiteral("能力检查中")
+                                      : QStringLiteral("能力未知"));
+        m_sendButton->setIcon(QIcon(QStringLiteral(":/icons/lucide/rotate-ccw.svg")));
+        m_sendButton->setToolTip(pending
+            ? QStringLiteral("运行时能力检查完成前不能开始新任务")
+            : QStringLiteral("缺少有效的运行时能力声明，不能开始新任务"));
+        m_sendButton->setEnabled(false);
         return;
     }
     const QString sessionId = m_mode == QStringLiteral("work")
@@ -10277,6 +10873,239 @@ QJsonArray AgentWorkbenchWidget::includedTurnContext() const
         result.append(context);
     }
     return result;
+}
+
+bool AgentWorkbenchWidget::validateTimelineItem(
+    const QJsonObject &item, const QString &expectedSessionId,
+    const QString &expectedTurnId, QHash<QString, QString> *itemKinds,
+    QHash<QString, QString> *itemRoles) const
+{
+    if (!itemKinds || !itemRoles) return false;
+    const QSet<QString> requiredKeys{
+        QStringLiteral("id"), QStringLiteral("kind"), QStringLiteral("role"),
+        QStringLiteral("state"), QStringLiteral("content"),
+    };
+    QSet<QString> allowedKeys = requiredKeys;
+    allowedKeys.insert(QStringLiteral("data"));
+    allowedKeys.insert(QStringLiteral("sequence"));
+    const QStringList keys = item.keys();
+    if (keys.size() < requiredKeys.size() || keys.size() > allowedKeys.size()
+            || std::any_of(requiredKeys.cbegin(), requiredKeys.cend(),
+                           [&item](const QString &key) { return !item.contains(key); })
+            || std::any_of(keys.cbegin(), keys.cend(), [&allowedKeys](const QString &key) {
+                return !allowedKeys.contains(key);
+            })) {
+        return false;
+    }
+
+    if (!isBoundedDiagnosticText(item.value(QStringLiteral("id")),
+                                 kMaxTimelineIdentityBytes)
+            || !isBoundedDiagnosticText(item.value(QStringLiteral("kind")), 32)
+            || !isBoundedDiagnosticText(item.value(QStringLiteral("role")), 32)
+            || !isBoundedDiagnosticText(item.value(QStringLiteral("state")), 32)
+            || !isBoundedTimelineContent(item.value(QStringLiteral("content")),
+                                        kMaxTimelineContentBytes)) {
+        return false;
+    }
+    if (item.contains(QStringLiteral("sequence"))
+            && !isPositiveSafeJsonInteger(item.value(QStringLiteral("sequence")))) {
+        return false;
+    }
+
+    QJsonObject data;
+    if (item.contains(QStringLiteral("data"))) {
+        const QJsonValue dataValue = item.value(QStringLiteral("data"));
+        if (!dataValue.isObject()) return false;
+        data = dataValue.toObject();
+        if (QJsonDocument(data).toJson(QJsonDocument::Compact).size()
+                > kMaxTimelineDataBytes) {
+            return false;
+        }
+        const QJsonValue dataSession = data.value(QStringLiteral("session_id"));
+        if (!dataSession.isUndefined()
+                && (!dataSession.isString() || expectedSessionId.isEmpty()
+                    || dataSession.toString() != expectedSessionId)) {
+            return false;
+        }
+        const QJsonValue dataTurn = data.value(QStringLiteral("turn_id"));
+        if (!dataTurn.isUndefined()
+                && (!dataTurn.isString() || expectedTurnId.isEmpty()
+                    || dataTurn.toString() != expectedTurnId)) {
+            return false;
+        }
+    }
+
+    const QString id = item.value(QStringLiteral("id")).toString();
+    const QString kind = item.value(QStringLiteral("kind")).toString();
+    const QString role = item.value(QStringLiteral("role")).toString();
+    const QString state = item.value(QStringLiteral("state")).toString();
+    const bool validCombination =
+        (kind == QStringLiteral("message")
+         && ((role == QStringLiteral("user") && state == QStringLiteral("completed"))
+             || ((role == QStringLiteral("agent") || role == QStringLiteral("assistant"))
+                 && (state == QStringLiteral("delta")
+                     || state == QStringLiteral("completed")))))
+        || (kind == QStringLiteral("command") && role == QStringLiteral("tool")
+            && (state == QStringLiteral("started") || state == QStringLiteral("delta")
+                || state == QStringLiteral("completed")))
+        || (kind == QStringLiteral("diagnostic") && role == QStringLiteral("tool")
+            && state == QStringLiteral("completed"))
+        || (kind == QStringLiteral("usage") && role == QStringLiteral("system")
+            && (state == QStringLiteral("updated") || state == QStringLiteral("truncated")))
+        || (kind == QStringLiteral("diff") && role == QStringLiteral("tool")
+            && (state == QStringLiteral("updated") || state == QStringLiteral("truncated")))
+        || (kind == QStringLiteral("plan") && role == QStringLiteral("agent")
+            && (state == QStringLiteral("updated") || state == QStringLiteral("truncated")))
+        || (kind == QStringLiteral("error") && role == QStringLiteral("system")
+            && (state == QStringLiteral("updated") || state == QStringLiteral("completed")));
+    if (!validCombination) return false;
+
+    const auto kindIt = itemKinds->constFind(id);
+    const auto roleIt = itemRoles->constFind(id);
+    if ((kindIt != itemKinds->cend() && kindIt.value() != kind)
+            || (roleIt != itemRoles->cend() && roleIt.value() != role)
+            || (kindIt == itemKinds->cend()) != (roleIt == itemRoles->cend())) {
+        return false;
+    }
+    itemKinds->insert(id, kind);
+    itemRoles->insert(id, role);
+    return true;
+}
+
+bool AgentWorkbenchWidget::validateTimelineEvent(
+    const QJsonObject &event, QJsonObject *validatedItem) const
+{
+    const QSet<QString> eventKeys{
+        QStringLiteral("sequence"), QStringLiteral("timestamp_ms"),
+        QStringLiteral("session_id"), QStringLiteral("turn_id"),
+        QStringLiteral("event"), QStringLiteral("item"),
+    };
+    if (!hasExactJsonKeys(event, eventKeys)
+            || !isPositiveSafeJsonInteger(event.value(QStringLiteral("sequence")))
+            || !isPositiveSafeJsonInteger(event.value(QStringLiteral("timestamp_ms")))
+            || !isBoundedDiagnosticText(event.value(QStringLiteral("session_id")),
+                                        kMaxTimelineIdentityBytes)
+            || !isBoundedDiagnosticText(event.value(QStringLiteral("turn_id")),
+                                        kMaxTimelineIdentityBytes)
+            || !isBoundedDiagnosticText(event.value(QStringLiteral("event")), 64)) {
+        return false;
+    }
+    const QString sessionId = event.value(QStringLiteral("session_id")).toString();
+    const QString turnId = event.value(QStringLiteral("turn_id")).toString();
+    const QString eventName = event.value(QStringLiteral("event")).toString();
+    const quint64 sequence = static_cast<quint64>(
+        event.value(QStringLiteral("sequence")).toDouble());
+    const QString visibleSessionId = m_mode == QStringLiteral("work")
+        ? m_workSessionId : m_chatSessionId;
+    if (visibleSessionId.isEmpty() || sessionId != visibleSessionId) return false;
+    if (sequence != m_lastTimelineEventSequences.value(sessionId, 0) + 1) return false;
+
+    const bool starting = eventName == QStringLiteral("turn.started");
+    const QString turnKey = timelineTurnKey(sessionId, turnId);
+    const QString durableTurnState = m_turnStates.value(turnKey);
+    if (starting) {
+        if (m_turnRunning || !durableTurnState.isEmpty()) return false;
+    } else if (!m_turnRunning || sessionId != m_activeTurnSessionId
+               || turnId != m_activeTurnId
+               || durableTurnState != QStringLiteral("running")) {
+        return false;
+    }
+
+    const QJsonValue itemValue = event.value(QStringLiteral("item"));
+    const bool hasItem = itemValue.isObject();
+    if (!hasItem && !itemValue.isNull()) return false;
+    const QJsonObject item = hasItem ? itemValue.toObject() : QJsonObject{};
+    const auto matchesItem = [&item](const QString &kind, const QString &role,
+                                     const QString &state) {
+        return item.value(QStringLiteral("kind")).toString() == kind
+            && item.value(QStringLiteral("role")).toString() == role
+            && item.value(QStringLiteral("state")).toString() == state;
+    };
+
+    bool validEvent = false;
+    if (eventName == QStringLiteral("turn.started")
+            || eventName == QStringLiteral("turn.completed")
+            || eventName == QStringLiteral("turn.interrupted")
+            || eventName == QStringLiteral("turn.steering-acknowledged")
+            || eventName == QStringLiteral("turn.cancellation-acknowledged")
+            || eventName == QStringLiteral("turn.error-observed.truncated")) {
+        validEvent = !hasItem;
+    } else if (eventName == QStringLiteral("item.started")) {
+        validEvent = hasItem && item.value(QStringLiteral("state")).toString()
+            == QStringLiteral("started");
+    } else if (eventName == QStringLiteral("item.delta")) {
+        validEvent = hasItem && item.value(QStringLiteral("state")).toString()
+            == QStringLiteral("delta");
+    } else if (eventName == QStringLiteral("item.completed")) {
+        validEvent = hasItem && item.value(QStringLiteral("state")).toString()
+            == QStringLiteral("completed");
+    } else if (eventName == QStringLiteral("diagnostics.observed")) {
+        validEvent = hasItem && matchesItem(QStringLiteral("diagnostic"),
+                                           QStringLiteral("tool"),
+                                           QStringLiteral("completed"));
+    } else if (eventName == QStringLiteral("usage.updated")) {
+        validEvent = hasItem && matchesItem(QStringLiteral("usage"),
+                                           QStringLiteral("system"),
+                                           QStringLiteral("updated"));
+    } else if (eventName == QStringLiteral("usage.truncated")) {
+        validEvent = hasItem && matchesItem(QStringLiteral("usage"),
+                                           QStringLiteral("system"),
+                                           QStringLiteral("truncated"));
+    } else if (eventName == QStringLiteral("turn.diff.updated")) {
+        validEvent = hasItem && matchesItem(QStringLiteral("diff"),
+                                           QStringLiteral("tool"),
+                                           QStringLiteral("updated"));
+    } else if (eventName == QStringLiteral("turn.diff.truncated")) {
+        validEvent = hasItem && matchesItem(QStringLiteral("diff"),
+                                           QStringLiteral("tool"),
+                                           QStringLiteral("truncated"));
+    } else if (eventName == QStringLiteral("turn.plan.updated")) {
+        validEvent = hasItem && matchesItem(QStringLiteral("plan"),
+                                           QStringLiteral("agent"),
+                                           QStringLiteral("updated"));
+    } else if (eventName == QStringLiteral("turn.plan.truncated")) {
+        validEvent = hasItem && matchesItem(QStringLiteral("plan"),
+                                           QStringLiteral("agent"),
+                                           QStringLiteral("truncated"));
+    } else if (eventName == QStringLiteral("turn.error-observed")) {
+        validEvent = hasItem && matchesItem(QStringLiteral("error"),
+                                           QStringLiteral("system"),
+                                           QStringLiteral("updated"));
+    } else if (eventName == QStringLiteral("turn.steering-requested")) {
+        validEvent = hasItem && matchesItem(QStringLiteral("message"),
+                                           QStringLiteral("user"),
+                                           QStringLiteral("completed"));
+    } else if (eventName == QStringLiteral("turn.failed")
+               || eventName == QStringLiteral("turn.persistence-failed")
+               || eventName == QStringLiteral("turn.steering-failed")
+               || eventName == QStringLiteral("turn.cancellation-failed")) {
+        validEvent = hasItem && matchesItem(QStringLiteral("error"),
+                                           QStringLiteral("system"),
+                                           QStringLiteral("completed"));
+    }
+    if (!validEvent) return false;
+    if (hasItem) {
+        QHash<QString, QString> kinds = m_itemKinds;
+        QHash<QString, QString> roles = m_itemRoles;
+        if (!validateTimelineItem(item, sessionId, turnId, &kinds, &roles)) return false;
+        const QString id = item.value(QStringLiteral("id")).toString();
+        const QString kind = item.value(QStringLiteral("kind")).toString();
+        const QString state = item.value(QStringLiteral("state")).toString();
+        const QString previousState = m_itemStates.value(id);
+        const bool validTransition = previousState.isEmpty()
+            ? (kind != QStringLiteral("command") || state == QStringLiteral("started"))
+            : previousState == QStringLiteral("started")
+                ? (state == QStringLiteral("delta") || state == QStringLiteral("completed"))
+            : previousState == QStringLiteral("delta")
+                ? (state == QStringLiteral("delta") || state == QStringLiteral("completed"))
+            : previousState == QStringLiteral("updated")
+                ? (state == QStringLiteral("updated") || state == QStringLiteral("truncated")
+                   || state == QStringLiteral("completed"))
+            : false;
+        if (!validTransition) return false;
+    }
+    if (validatedItem) *validatedItem = item;
+    return true;
 }
 
 void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend)

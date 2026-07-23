@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-23
+Last updated: 2026-07-24
 
 ## Mandatory First Step
 
@@ -62,17 +62,30 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user terminal is active. Qt polls `runtime/health`, exposes exited/unavailable
   state, and provides a guarded `重启 Codex` action. Full crash-loop recovery UI and
   cross-platform recovery evidence remain under task `7.2`.
-  AAP `runtime/degradations` provides explicit, content-free feature states for
-  read-only Agent mutation, metadata-only provider items, blocked provider
-  delete/compact, and the background/multi-agent/unattended-write release gates
-  so clients do not simulate unavailable behavior. The autonomy entries are
+  AAP `runtime-degradations/0.2` binds its content-free feature states to the exact
+  vendored Codex `0.144.5` v2 schema hash, complete `87/68/18`
+  request/notification/item classification, and a deterministic matrix identity.
+  It reports read-only Agent mutation, metadata-only provider items, blocked
+  provider delete/compact, runtime-only desktop gaps, and the
+  background/multi-agent/unattended-write release gates so clients do not simulate
+  unavailable behavior. The autonomy entries are
   `availability=not-advertised`, `stable_enabled=false`, and
   `override_available=false`, with bounded missing-task IDs; no hidden stable
   or experimental switch can enable them.
-  Qt now requests this versioned response after initialization and renders a
-  compact capability status (`Agent 只读`, metadata/deletion/compact unavailable,
-  or provider unavailable). Invalid schemas or request failures return to an
-  explicit unknown/read-only gate; no provider delete/compact action is exposed.
+  Provider thread list/read `0.2` return only bounded content-free metadata and
+  domain-separated identities; names, previews, cwd/path, model-provider/source
+  text, raw items, and content are omitted. Unknown Codex notifications are retained
+  only as bounded method SHA-256/count diagnostics in `runtime/health` and never
+  mapped into ordinary Timeline Items. User-input server requests receive a fixed
+  unsupported error rather than fabricated empty answers.
+  Qt requests the degradation snapshot after initialization and renders a compact
+  capability status. Not-requested, pending, invalid, or failed snapshots disable
+  all new-Turn paths, including queued Session creation, while an active Stop remains
+  usable. Live and replay Timeline inputs share strict item/event validation;
+  unknown or cross-bound events, malformed pages, duplicate identities, and
+  kind/role drift are inert, and replay changes UI only after whole-page validation.
+  No provider delete/compact action is exposed. Full capability negotiation and all
+  runtime-only desktop surfaces remain open under task `7.9`.
   The internal `docs/AAP-PROTOCOL-GUIDE.md` records the stable AAP handshake,
   lifecycle/error/cancel/degradation/replay examples and the current read-only
   security boundary. It is intentionally an internal guide tied to checked-in
@@ -2570,7 +2583,19 @@ Implemented visual baseline:
 - Do not layer Qt-Material, QDarkStyleSheet, or Fluent QSS over the current 400+
   local style rules. Continue consolidating local QSS into semantic components.
 
-## Verification Snapshot (2026-07-23)
+## Verification Snapshot (2026-07-24)
+
+- The Codex degradation/provider hardening stage passes 630 `aegisy-agentd`
+  library tests with one ignored live fixture, 63 protocol tests, and 21 stdio/Codex
+  tests. Runtime event counters and Qt live cursors are Session-scoped, so a new
+  Session starts at sequence one and returning to an earlier Session continues its
+  own cursor; Chat/Work mode switching is blocked while the single active Turn is
+  running. Duplicate, decreasing, and gapped events remain inert. Rust formatting,
+  `git diff --check`, the focused Qt degradation/Timeline run, and the ordinary Qt
+  render run pass. Public event persistence, reconnect replay, unknown-event cursor
+  diagnostics, Windows evidence, complete vendor capability negotiation, and
+  remaining runtime-only desktop surfaces are still absent, so OpenSpec `3.4`,
+  `3.5`, and `7.9` remain unchecked.
 
 - The Rust workspace passes `cargo fmt --all -- --check`, `cargo test
   --workspace` (616 `aegisy-agentd` library tests passed, one ignored, 10
@@ -2595,14 +2620,14 @@ Implemented visual baseline:
 - The Qt usage-authority and context-threshold widget/render sources pass direct
   C++17 syntax compilation using the CMake compile database. The complete render
   target now passes MOC/RCC/compile/link and its focused threshold-cache mode
-  exits successfully. The ordinary render run still fails before the threshold
-  cache assertions at the existing model-profile read-only projection assertion;
-  no complete render pass is claimed.
+  exits successfully. The ordinary render run now also completes successfully on
+  this host; cross-platform validation and automatic-compaction authority remain
+  absent.
 - The focused threshold verification passes 493 library tests, 63 AAP protocol
   tests, 11 stdio/Codex tests, strict workspace Clippy, Rust format checking,
   `git diff --check`, strict OpenSpec validation, two Qt C++17 syntax checks, and
   the focused Qt cache run. This evidence is still not sufficient to mark `17.7`
-  complete without the full Qt runtime/render pass and cross-platform validation.
+  complete without cross-platform validation and the remaining compaction authority.
 - The durable Turn Trace slice now uses inner `turn-trace/0.6` with strict `0.1`
   through `0.6` version-specific replay compatibility, future `0.7+` rejection,
   and an unchanged outer `turn.trace.recorded/0.1` event.

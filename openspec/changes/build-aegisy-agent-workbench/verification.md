@@ -571,6 +571,32 @@ Current editor evidence:
   provider failures for restart, archive, unarchive, and fork, then proves only the
   operation, stable code, and recovery guidance reach labels/tooltips. This fixture
   milestone does not expose provider delete/compact or weaken the read-only adapter.
+- Task `7.9` now has a pinned `runtime-degradations/0.2` capability-matrix
+  foundation. The matrix test reads the vendored Codex `0.144.5` v2 schema and
+  proves exact `87/68/18` request/notification/item coverage plus the checked-in
+  SHA-256 and deterministic matrix identity. Provider list/read stdio fixtures
+  inject private name, preview, cwd, path, provider, session, and item sentinels;
+  their `0.2` projections contain none of those values and expose only bounded
+  content-free metadata, domain-separated hashes, and validated lossless opaque
+  cursors. Cursors above 4 KiB or containing control/credential-shaped content are
+  rejected with the complete projection rather than redacted into a different token.
+  A real Turn fixture injects an unknown notification and proves that only one
+  bounded method hash/count appears in `runtime/health`, while `session/read`
+  contains no notification record or body. A separate server-request fixture
+  proves `item/tool/requestUserInput` receives fixed `-32601` without a fabricated
+  result, answers, questions, or secret content. Qt focused coverage proves
+  pending/invalid degradation blocks every new-Turn path but not Stop, unknown or
+  cross-bound live events are inert, item identity cannot change kind/role, and a
+  malformed replay page leaves the current Timeline unchanged. Runtime event
+  counters and Qt cursors are Session-scoped: a protocol fixture proves two
+  Sessions independently emit `1..5` before the first resumes at `6`, and a Qt
+  fixture proves switching Session cursors does not create a false gap. Chat/Work
+  switching is disabled while the single active Turn is running. The full Rust
+  stage passes 630 library tests (one ignored), 63 protocol tests, and 21 stdio
+  tests; both the focused degradation/Timeline run and ordinary Qt render run pass.
+  Public event persistence/reconnect replay, unknown-event cursor diagnostics, full
+  vendor capability negotiation, and remaining desktop/dependent feature gates are
+  not complete, so `3.4`, `3.5`, and `7.9` remain unchecked.
 - Large command-output tests cover a Unicode-safe 64 KiB head/192 KiB tail,
   1 MiB artifact head/tail, exact omission metadata, 100,000 deltas, and
   content-addressed session isolation/eviction. Output is redacted before capture;

@@ -5,6 +5,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QBuffer>
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCryptographicHash>
@@ -61,6 +62,226 @@ public:
     {
         widget.m_chatSessionId = sessionId;
     }
+
+    static bool sessionListRefreshIdle(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_sessionListRequestId.isEmpty()
+            && !widget.m_sessionListRefreshPending;
+    }
+
+    static bool operationStatusRequestIdle(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_operationStatusRequestId.isEmpty();
+    }
+
+    static bool operationStatusAllowsSession(const AgentWorkbenchWidget &widget,
+                                             const QString &sessionId)
+    {
+        return widget.m_operationStatusSessionId == sessionId
+            && widget.m_operationStatusKnown && !widget.m_operationStatusBlocked;
+    }
+
+    static bool activateMode(AgentWorkbenchWidget &widget, const QString &mode)
+    {
+        if (!widget.m_modeGroup) return false;
+        for (QAbstractButton *button : widget.m_modeGroup->buttons()) {
+            if (button->property("mode").toString() != mode) continue;
+            button->click();
+            return widget.m_mode == mode;
+        }
+        return false;
+    }
+
+    static QString currentMode(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_mode;
+    }
+
+    static void prepareOperationStatusSession(AgentWorkbenchWidget &widget,
+                                              const QString &sessionId)
+    {
+        widget.m_operationStatusSessionId = sessionId;
+        widget.m_operationStatusKnown = false;
+        widget.m_operationStatusBlocked = false;
+    }
+
+    static bool activeTurnSubmitIsInert(AgentWorkbenchWidget &widget,
+                                        QTextEdit *composer,
+                                        QPushButton *sendButton)
+    {
+        if (!composer || !sendButton) return false;
+        const bool previousRunning = widget.m_turnRunning;
+        const bool previousCancelling = widget.m_turnCancelling;
+        const QString previousSessionId = widget.m_activeTurnSessionId;
+        const QString previousTurnId = widget.m_activeTurnId;
+        const QString previousText = composer->toPlainText();
+        widget.m_turnRunning = true;
+        widget.m_turnCancelling = false;
+        widget.m_activeTurnSessionId = QStringLiteral("active-session");
+        widget.m_activeTurnId = QStringLiteral("active-turn");
+        composer->setPlainText(QStringLiteral("must-not-start-another-turn"));
+        widget.updateTurnAction();
+        widget.submitPrompt();
+        const bool inert = composer->toPlainText()
+                == QStringLiteral("must-not-start-another-turn")
+            && sendButton->text() == QStringLiteral("停止")
+            && widget.m_activeTurnSessionId == QStringLiteral("active-session")
+            && widget.m_activeTurnId == QStringLiteral("active-turn");
+        widget.m_turnRunning = previousRunning;
+        widget.m_turnCancelling = previousCancelling;
+        widget.m_activeTurnSessionId = previousSessionId;
+        widget.m_activeTurnId = previousTurnId;
+        composer->setPlainText(previousText);
+        widget.updateTurnAction();
+        return inert;
+    }
+
+    static void setPendingPrompt(AgentWorkbenchWidget &widget, const QString &prompt)
+    {
+        widget.m_pendingPrompt = prompt;
+    }
+
+    static QString pendingPrompt(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_pendingPrompt;
+    }
+
+    static void prepareRuntimeDegradationRequest(AgentWorkbenchWidget &widget,
+                                                 const QString &requestId)
+    {
+        widget.m_runtimeDegradationState =
+            AgentWorkbenchWidget::RuntimeDegradationState::Pending;
+        widget.m_runtimeDegradationRequestId = requestId;
+        widget.m_runtimeDegradationStates.clear();
+        widget.updateRuntimeCapabilityUi();
+        widget.updateTurnAction();
+    }
+
+    static QString runtimeDegradationRequestId(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_runtimeDegradationRequestId;
+    }
+
+    static bool runtimeDegradationPending(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_runtimeDegradationState
+            == AgentWorkbenchWidget::RuntimeDegradationState::Pending;
+    }
+
+    static void tryStartPendingTurn(AgentWorkbenchWidget &widget)
+    {
+        widget.startPendingTurnIfReady();
+    }
+
+    static void submitPrompt(AgentWorkbenchWidget &widget)
+    {
+        widget.submitPrompt();
+    }
+
+    static bool turnRunning(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_turnRunning;
+    }
+
+    static bool turnCancelling(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_turnCancelling;
+    }
+
+    static quint64 lastTimelineSequence(const AgentWorkbenchWidget &widget)
+    {
+        const QString sessionId = widget.m_mode == QStringLiteral("work")
+            ? widget.m_workSessionId : widget.m_chatSessionId;
+        return widget.m_lastTimelineEventSequences.value(sessionId, 0);
+    }
+
+    static quint64 timelineSequenceForSession(const AgentWorkbenchWidget &widget,
+                                              const QString &sessionId)
+    {
+        return widget.m_lastTimelineEventSequences.value(sessionId, 0);
+    }
+
+    static void resetTimelineValidation(AgentWorkbenchWidget &widget)
+    {
+        widget.m_turnRunning = false;
+        widget.m_turnCancelling = false;
+        widget.m_activeTurnSessionId.clear();
+        widget.m_activeTurnId.clear();
+        widget.m_lastTimelineEventSequences.clear();
+        widget.m_turnStates.clear();
+        widget.m_itemKinds.clear();
+        widget.m_itemRoles.clear();
+        widget.m_itemStates.clear();
+    }
+
+    static bool hasTimelineItem(const AgentWorkbenchWidget &widget, const QString &id)
+    {
+        return widget.m_itemLabels.contains(id);
+    }
+
+    static QString timelineItemText(const AgentWorkbenchWidget &widget, const QString &id)
+    {
+        const QLabel *label = widget.m_itemLabels.value(id, nullptr);
+        return label ? label->text() : QString();
+    }
+
+    static void prepareSessionRead(AgentWorkbenchWidget &widget, const QString &requestId,
+                                   const QString &sessionId, bool appending,
+                                   const QString &cursor = QString(), int limit = 100,
+                                   quint64 firstSequence = 0,
+                                   quint64 latestSequence = 0)
+    {
+        widget.m_sessionReadRequestId = requestId;
+        widget.m_sessionReadSessionId = sessionId;
+        widget.m_sessionReadCursor = cursor;
+        widget.m_sessionReadLimit = limit;
+        widget.m_sessionReadExpectedFirstSequence = firstSequence;
+        widget.m_sessionReadExpectedLatestSequence = latestSequence;
+        widget.m_sessionHistoryAppending = appending;
+        widget.m_sessionHistoryId = appending ? sessionId : QString();
+        widget.m_sessionHistoryCursor = cursor;
+        widget.m_sessionHistoryFirstSequence = firstSequence;
+        widget.m_sessionHistoryLatestSequence = latestSequence;
+    }
+
+    static void setRequestedHistoryCursor(AgentWorkbenchWidget &widget,
+                                          const QString &cursor)
+    {
+        widget.m_sessionReadCursor = cursor;
+    }
+
+    static QString historyCursor(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_sessionHistoryCursor;
+    }
+
+    static quint64 historyFirstSequence(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_sessionHistoryFirstSequence;
+    }
+
+    static quint64 historyLatestSequence(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_sessionHistoryLatestSequence;
+    }
+
+    static QString gitPinGateState(const AgentWorkbenchWidget &widget)
+    {
+        return QStringLiteral(
+            "ready=%1 recovery=%2 sessionRecovery=%3 deletion=%4 operationBlocked=%5 "
+            "project=%6 pinned=%7 git=%8 gitRequest=%9 mutation=%10 diffRequest=%11")
+            .arg(widget.m_runtime && widget.m_runtime->isReady())
+            .arg(widget.m_runtimeRecoveryMode)
+            .arg(widget.currentSessionRecoveryRequired())
+            .arg(widget.currentSessionDeletionPending())
+            .arg(widget.currentOperationStatusBlocked())
+            .arg(!widget.m_projectId.isEmpty())
+            .arg(widget.m_pinnedContextAvailable)
+            .arg(widget.m_gitContextAvailable)
+            .arg(!widget.m_gitContextRequestId.isEmpty())
+            .arg(!widget.m_pinnedContextMutationRequestId.isEmpty())
+            .arg(!widget.m_gitDiffRequestId.isEmpty());
+    }
 };
 
 namespace {
@@ -115,6 +336,790 @@ bool isLightPixel(const QImage &image, const QPoint &point)
     if (!image.rect().contains(point)) return false;
     const QColor color = image.pixelColor(point);
     return color.red() > 180 && color.green() > 180 && color.blue() > 180;
+}
+
+QJsonObject ordinaryDegradation(const QString &feature, const QString &state,
+                                const QString &scope)
+{
+    return QJsonObject{
+        {QStringLiteral("feature"), feature},
+        {QStringLiteral("state"), state},
+        {QStringLiteral("reason"), QStringLiteral("bounded fixture reason")},
+        {QStringLiteral("scope"), scope},
+        {QStringLiteral("authority_granted"), false},
+    };
+}
+
+QJsonObject autonomyDegradation(const QString &feature, const QJsonArray &missingGates)
+{
+    QJsonObject degradation = ordinaryDegradation(
+        feature, QStringLiteral("disabled"), QStringLiteral("runtime"));
+    degradation.insert(QStringLiteral("availability"), QStringLiteral("not-advertised"));
+    degradation.insert(QStringLiteral("stable_enabled"), false);
+    degradation.insert(QStringLiteral("override_available"), false);
+    degradation.insert(QStringLiteral("missing_gates"), missingGates);
+    return degradation;
+}
+
+QJsonObject runtimeOnlyDegradation(const QString &feature)
+{
+    QJsonObject degradation = ordinaryDegradation(
+        feature, QStringLiteral("runtime-only"), QStringLiteral("provider"));
+    degradation.insert(QStringLiteral("runtime_supported"), true);
+    degradation.insert(QStringLiteral("desktop_surface_available"), false);
+    return degradation;
+}
+
+QJsonObject validCodexRuntimeDegradationSnapshot()
+{
+    return QJsonObject{
+        {QStringLiteral("schema_version"), QStringLiteral("runtime-degradations/0.2")},
+        {QStringLiteral("backend"), QJsonObject{
+            {QStringLiteral("kind"), QStringLiteral("codex")},
+            {QStringLiteral("adapter"), QStringLiteral("codex-app-server")},
+            {QStringLiteral("version"), QStringLiteral("codex-cli 0.144.5")},
+            {QStringLiteral("status"), QStringLiteral("ready")},
+        }},
+        {QStringLiteral("capability_matrix"), QJsonObject{
+            {QStringLiteral("schema_version"),
+             QStringLiteral("codex-capability-matrix/0.1")},
+            {QStringLiteral("identity"),
+             QStringLiteral("codex-capability-matrix:sha256:"
+                            "473ddd66cd30b903778c248f28aa55d3cfb2ff37123c4831a23a263703362d04")},
+            {QStringLiteral("adapter"), QStringLiteral("codex-app-server")},
+            {QStringLiteral("codex_version"), QStringLiteral("codex-cli 0.144.5")},
+            {QStringLiteral("vendor_schema_version"), QStringLiteral("v2")},
+            {QStringLiteral("vendor_schema_sha256"),
+             QStringLiteral("e66ff6063c146734a92c9a018e43efefb079278ee597782f30674edcccedbdb2")},
+            {QStringLiteral("client_request_count"), 87},
+            {QStringLiteral("server_notification_count"), 68},
+            {QStringLiteral("thread_item_count"), 18},
+            {QStringLiteral("complete"), true},
+        }},
+        {QStringLiteral("complete"), true},
+        {QStringLiteral("degradations"), QJsonArray{
+            ordinaryDegradation(QStringLiteral("agent-mutation"),
+                                QStringLiteral("disabled"), QStringLiteral("runtime")),
+            ordinaryDegradation(QStringLiteral("provider-thread-item-content"),
+                                QStringLiteral("metadata-only"), QStringLiteral("provider")),
+            ordinaryDegradation(QStringLiteral("provider-thread-delete"),
+                                QStringLiteral("blocked"), QStringLiteral("provider")),
+            ordinaryDegradation(QStringLiteral("provider-thread-compact"),
+                                QStringLiteral("blocked"), QStringLiteral("provider")),
+            runtimeOnlyDegradation(QStringLiteral("turn.steer.same-turn")),
+            runtimeOnlyDegradation(QStringLiteral("session.provider.lifecycle.list-read")),
+            autonomyDegradation(QStringLiteral("background-jobs"),
+                                QJsonArray{QStringLiteral("21.2"), QStringLiteral("21.8")}),
+            autonomyDegradation(QStringLiteral("multi-agent"),
+                                QJsonArray{QStringLiteral("21.3"), QStringLiteral("21.5")}),
+            autonomyDegradation(QStringLiteral("unattended-writes"),
+                                QJsonArray{QStringLiteral("15.3"), QStringLiteral("18.4")}),
+        }},
+    };
+}
+
+QJsonObject validRuntimeDegradationSnapshotForBackend(const QString &kind)
+{
+    QJsonObject snapshot = validCodexRuntimeDegradationSnapshot();
+    if (kind == QStringLiteral("codex")) return snapshot;
+    QJsonObject backend;
+    QJsonObject backendEntry;
+    if (kind == QStringLiteral("preview")) {
+        backend = QJsonObject{{QStringLiteral("kind"), kind},
+                              {QStringLiteral("adapter"), QStringLiteral("preview")},
+                              {QStringLiteral("version"), QStringLiteral("0.1.0")},
+                              {QStringLiteral("status"), QStringLiteral("ready")}};
+        backendEntry = ordinaryDegradation(
+            QStringLiteral("codex-provider"), QStringLiteral("unavailable"),
+            QStringLiteral("runtime"));
+    } else if (kind == QStringLiteral("recovery")) {
+        backend = QJsonObject{
+            {QStringLiteral("kind"), kind},
+            {QStringLiteral("adapter"), QStringLiteral("aegisy-workbench-store")},
+            {QStringLiteral("version"), QStringLiteral("workbench-recovery-diagnostic/0.1")},
+            {QStringLiteral("status"), QStringLiteral("read-only-recovery")}};
+        backendEntry = ordinaryDegradation(
+            QStringLiteral("workbench-mutation"), QStringLiteral("disabled"),
+            QStringLiteral("runtime"));
+    } else {
+        backend = QJsonObject{{QStringLiteral("kind"), QStringLiteral("unavailable")},
+                              {QStringLiteral("adapter"), QStringLiteral("codex-app-server")},
+                              {QStringLiteral("version"), QStringLiteral("codex-cli 0.144.5")},
+                              {QStringLiteral("status"), QStringLiteral("unavailable")}};
+        backendEntry = ordinaryDegradation(
+            QStringLiteral("runtime-adapter"), QStringLiteral("unavailable"),
+            QStringLiteral("runtime"));
+    }
+    const QJsonArray codexEntries = snapshot.value(QStringLiteral("degradations")).toArray();
+    snapshot.insert(QStringLiteral("backend"), backend);
+    snapshot.insert(QStringLiteral("degradations"), QJsonArray{
+        backendEntry, codexEntries.at(6), codexEntries.at(7), codexEntries.at(8),
+    });
+    return snapshot;
+}
+
+QJsonObject mutateDegradation(QJsonObject snapshot, int index,
+                              const QString &key, const QJsonValue &value,
+                              bool remove = false)
+{
+    QJsonArray degradations = snapshot.value(QStringLiteral("degradations")).toArray();
+    QJsonObject degradation = degradations.at(index).toObject();
+    if (remove) degradation.remove(key);
+    else degradation.insert(key, value);
+    degradations.replace(index, degradation);
+    snapshot.insert(QStringLiteral("degradations"), degradations);
+    return snapshot;
+}
+
+QJsonObject timelineEnvelope(const QString &event, const QString &sessionId,
+                             const QString &turnId,
+                             const QJsonValue &item = QJsonValue(QJsonValue::Null),
+                             quint64 explicitSequence = 0)
+{
+    static QHash<QString, quint64> nextSequences;
+    const quint64 sequence = explicitSequence == 0
+        ? ++nextSequences[sessionId] : explicitSequence;
+    return QJsonObject{
+        {QStringLiteral("sequence"), static_cast<double>(sequence)},
+        {QStringLiteral("timestamp_ms"), 1'000.0 + static_cast<double>(sequence)},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("turn_id"), turnId},
+        {QStringLiteral("event"), event},
+        {QStringLiteral("item"), item},
+    };
+}
+
+QJsonObject timelineMessage(const QString &id, const QString &state,
+                            const QString &content,
+                            const QString &role = QStringLiteral("agent"))
+{
+    return QJsonObject{
+        {QStringLiteral("id"), id},
+        {QStringLiteral("kind"), QStringLiteral("message")},
+        {QStringLiteral("role"), role},
+        {QStringLiteral("state"), state},
+        {QStringLiteral("content"), content},
+    };
+}
+
+QJsonObject replaySnapshot(const QString &sessionId, const QJsonArray &items,
+                           int firstSequence, int lastSequence, int latestSequence,
+                           int limit = 100)
+{
+    const bool empty = items.isEmpty();
+    const bool hasOlder = !empty && firstSequence > 1;
+    return QJsonObject{
+        {QStringLiteral("session"), QJsonObject{
+            {QStringLiteral("id"), sessionId},
+            {QStringLiteral("mode"), QStringLiteral("chat")},
+            {QStringLiteral("project_id"), QJsonValue::Null},
+            {QStringLiteral("title"), QStringLiteral("Timeline fixture")},
+        }},
+        {QStringLiteral("status"), QStringLiteral("active")},
+        {QStringLiteral("items"), items},
+        {QStringLiteral("history_page"), QJsonObject{
+            {QStringLiteral("limit"), limit},
+            {QStringLiteral("first_sequence"), empty
+                ? QJsonValue(QJsonValue::Null) : QJsonValue(firstSequence)},
+            {QStringLiteral("last_sequence"), empty
+                ? QJsonValue(QJsonValue::Null) : QJsonValue(lastSequence)},
+            {QStringLiteral("latest_sequence"), latestSequence},
+            {QStringLiteral("has_older"), hasOlder},
+            {QStringLiteral("older_cursor"), hasOlder
+                ? QJsonValue(QStringLiteral("before:%1").arg(firstSequence))
+                : QJsonValue(QJsonValue::Null)},
+        }},
+    };
+}
+
+bool verifyRuntimeDegradationFailures(QApplication &application,
+                                      AgentWorkbenchWidget &workbench,
+                                      AgentRuntimeClient *runtimeClient,
+                                      QLabel *runtimeCapability)
+{
+    if (!runtimeClient || !runtimeCapability) return false;
+    const QJsonObject valid = validCodexRuntimeDegradationSnapshot();
+    const QList<QPair<QString, QString>> validBackends{
+        {QStringLiteral("codex"), QStringLiteral("Agent 只读")},
+        {QStringLiteral("preview"), QStringLiteral("Provider 不可用")},
+        {QStringLiteral("recovery"), QStringLiteral("工作台只读")},
+        {QStringLiteral("unavailable"), QStringLiteral("Runtime 不可用")},
+    };
+    for (const auto &fixture : validBackends) {
+        const QString requestId = QStringLiteral("valid-") + fixture.first;
+        AgentWorkbenchWidgetTestAccess::prepareRuntimeDegradationRequest(
+            workbench, requestId);
+        runtimeClient->runtimeDegradationsRead(
+            requestId,
+            validRuntimeDegradationSnapshotForBackend(fixture.first));
+        application.processEvents();
+        if (!expect(runtimeCapability->text().contains(fixture.second),
+                    qPrintable(QStringLiteral("valid backend matrix was rejected: %1")
+                                   .arg(fixture.first)))) {
+            return false;
+        }
+    }
+    QList<QPair<QString, QJsonObject>> invalid;
+    QJsonObject candidate = valid;
+    candidate.remove(QStringLiteral("degradations"));
+    invalid.append({QStringLiteral("missing-array"), candidate});
+    candidate = valid;
+    candidate.insert(QStringLiteral("degradations"), QJsonObject{});
+    invalid.append({QStringLiteral("non-array"), candidate});
+    candidate = valid;
+    candidate.insert(QStringLiteral("degradations"), QJsonArray{});
+    invalid.append({QStringLiteral("empty-array"), candidate});
+    candidate = valid;
+    QJsonArray degradations = candidate.value(QStringLiteral("degradations")).toArray();
+    degradations.replace(0, QStringLiteral("not-an-object"));
+    candidate.insert(QStringLiteral("degradations"), degradations);
+    invalid.append({QStringLiteral("non-object-entry"), candidate});
+    candidate = valid;
+    degradations = candidate.value(QStringLiteral("degradations")).toArray();
+    degradations.replace(8, degradations.at(0));
+    candidate.insert(QStringLiteral("degradations"), degradations);
+    invalid.append({QStringLiteral("duplicate-identical"), candidate});
+    candidate = valid;
+    degradations = candidate.value(QStringLiteral("degradations")).toArray();
+    QJsonObject contradictory = degradations.at(0).toObject();
+    contradictory.insert(QStringLiteral("state"), QStringLiteral("blocked"));
+    degradations.replace(8, contradictory);
+    candidate.insert(QStringLiteral("degradations"), degradations);
+    invalid.append({QStringLiteral("duplicate-contradictory"), candidate});
+    invalid.append({QStringLiteral("unknown-feature"), mutateDegradation(
+                        valid, 0, QStringLiteral("feature"), QStringLiteral("unknown"))});
+    invalid.append({QStringLiteral("unknown-state"), mutateDegradation(
+                        valid, 0, QStringLiteral("state"), QStringLiteral("unknown"))});
+    invalid.append({QStringLiteral("wrong-scope"), mutateDegradation(
+                        valid, 0, QStringLiteral("scope"), QStringLiteral("provider"))});
+    invalid.append({QStringLiteral("missing-autonomy-boolean"), mutateDegradation(
+                        valid, 6, QStringLiteral("stable_enabled"), {}, true)});
+    invalid.append({QStringLiteral("stable-enabled"), mutateDegradation(
+                        valid, 6, QStringLiteral("stable_enabled"), true)});
+    invalid.append({QStringLiteral("override-available"), mutateDegradation(
+                        valid, 6, QStringLiteral("override_available"), true)});
+    invalid.append({QStringLiteral("missing-gates-empty"), mutateDegradation(
+                        valid, 6, QStringLiteral("missing_gates"), QJsonArray{})});
+    candidate = valid;
+    QJsonObject matrix = candidate.value(QStringLiteral("capability_matrix")).toObject();
+    matrix.insert(QStringLiteral("vendor_schema_sha256"), QString(64, QLatin1Char('0')));
+    candidate.insert(QStringLiteral("capability_matrix"), matrix);
+    invalid.append({QStringLiteral("schema-hash-drift"), candidate});
+    candidate = valid;
+    matrix = candidate.value(QStringLiteral("capability_matrix")).toObject();
+    matrix.insert(QStringLiteral("identity"),
+                  QStringLiteral("codex-capability-matrix:sha256:")
+                      + QString(64, QLatin1Char('0')));
+    candidate.insert(QStringLiteral("capability_matrix"), matrix);
+    invalid.append({QStringLiteral("matrix-identity-drift"), candidate});
+    candidate = valid;
+    matrix = candidate.value(QStringLiteral("capability_matrix")).toObject();
+    matrix.insert(QStringLiteral("server_notification_count"), 69);
+    candidate.insert(QStringLiteral("capability_matrix"), matrix);
+    invalid.append({QStringLiteral("schema-count-drift"), candidate});
+    candidate = valid;
+    matrix = candidate.value(QStringLiteral("capability_matrix")).toObject();
+    matrix.insert(QStringLiteral("complete"), false);
+    candidate.insert(QStringLiteral("capability_matrix"), matrix);
+    invalid.append({QStringLiteral("incomplete-matrix"), candidate});
+    candidate = valid;
+    candidate.insert(QStringLiteral("complete"), false);
+    invalid.append({QStringLiteral("incomplete-snapshot"), candidate});
+    candidate = valid;
+    QJsonObject backend = candidate.value(QStringLiteral("backend")).toObject();
+    backend.insert(QStringLiteral("version"), QStringLiteral("codex-cli 0.144.6"));
+    candidate.insert(QStringLiteral("backend"), backend);
+    invalid.append({QStringLiteral("backend-version-drift"), candidate});
+    candidate = valid;
+    backend = candidate.value(QStringLiteral("backend")).toObject();
+    backend.insert(QStringLiteral("kind"), QStringLiteral("preview"));
+    backend.insert(QStringLiteral("adapter"), QStringLiteral("preview"));
+    backend.insert(QStringLiteral("version"), QStringLiteral("0.1.0"));
+    candidate.insert(QStringLiteral("backend"), backend);
+    invalid.append({QStringLiteral("backend-feature-set-mismatch"), candidate});
+
+    for (const auto &fixture : invalid) {
+        AgentWorkbenchWidgetTestAccess::prepareRuntimeDegradationRequest(
+            workbench, fixture.first);
+        runtimeClient->runtimeDegradationsRead(fixture.first, fixture.second);
+        application.processEvents();
+        if (!expect(runtimeCapability->text() == QStringLiteral("能力未知")
+                        && !runtimeCapability->text().contains(QStringLiteral("能力已协商"))
+                        && runtimeCapability->toolTip().contains(QStringLiteral("只读门控")),
+                    qPrintable(QStringLiteral("runtime degradation fixture did not fail closed: %1")
+                                   .arg(fixture.first)))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool verifyRuntimeHealthDegradationRefresh(QApplication &application,
+                                           AgentWorkbenchWidget &workbench,
+                                           AgentRuntimeClient *runtimeClient,
+                                           QLabel *runtimeCapability,
+                                           QTextEdit *composer,
+                                           QPushButton *sendButton)
+{
+    if (!runtimeClient || !runtimeCapability || !composer || !sendButton) return false;
+    AgentWorkbenchWidgetTestAccess::setPendingPrompt(
+        workbench, QStringLiteral("queued-health-turn"));
+    runtimeClient->runtimeHealthRead(QJsonObject{
+        {QStringLiteral("state"), QStringLiteral("exited")},
+        {QStringLiteral("restart_required"), true},
+    });
+    if (!expect(runtimeCapability->text() == QStringLiteral("能力未知")
+                    && sendButton->text() == QStringLiteral("能力未知")
+                    && !sendButton->isEnabled()
+                    && AgentWorkbenchWidgetTestAccess::pendingPrompt(workbench)
+                        == QStringLiteral("queued-health-turn"),
+                "unhealthy Runtime did not invalidate capabilities and gate queued Turns")) {
+        return false;
+    }
+    runtimeClient->runtimeDegradationsRead(
+        QStringLiteral("stale-before-restart"), validCodexRuntimeDegradationSnapshot());
+    AgentWorkbenchWidgetTestAccess::tryStartPendingTurn(workbench);
+    if (!expect(runtimeCapability->text() == QStringLiteral("能力未知")
+                    && AgentWorkbenchWidgetTestAccess::pendingPrompt(workbench)
+                        == QStringLiteral("queued-health-turn")
+                    && AgentWorkbenchWidgetTestAccess::activeTurnSubmitIsInert(
+                        workbench, composer, sendButton),
+                "stale degradation snapshot reopened Turn authority or hid active Stop")) {
+        return false;
+    }
+
+    runtimeClient->runtimeRestarted(QStringLiteral("restart-health-fixture"), QJsonObject{
+        {QStringLiteral("health"), QJsonObject{
+            {QStringLiteral("state"), QStringLiteral("running")},
+            {QStringLiteral("restart_required"), false},
+        }},
+    });
+    QString freshRequestId =
+        AgentWorkbenchWidgetTestAccess::runtimeDegradationRequestId(workbench);
+    if (freshRequestId.isEmpty()) {
+        // Direct signal fixtures do not change AgentRuntimeClient::m_ready, so seed the
+        // correlation identity that a real successful restart request supplies.
+        freshRequestId = QStringLiteral("fresh-after-restart");
+        AgentWorkbenchWidgetTestAccess::prepareRuntimeDegradationRequest(
+            workbench, freshRequestId);
+    }
+    if (!expect(!freshRequestId.isEmpty()
+                    && AgentWorkbenchWidgetTestAccess::runtimeDegradationPending(workbench)
+                    && sendButton->text() == QStringLiteral("能力检查中")
+                    && !sendButton->isEnabled()
+                    && AgentWorkbenchWidgetTestAccess::pendingPrompt(workbench)
+                        == QStringLiteral("queued-health-turn"),
+                "successful Runtime restart did not request a fresh correlated snapshot")) {
+        return false;
+    }
+    runtimeClient->runtimeDegradationsRead(
+        QStringLiteral("stale-after-restart"), validCodexRuntimeDegradationSnapshot());
+    if (!expect(AgentWorkbenchWidgetTestAccess::runtimeDegradationPending(workbench)
+                    && AgentWorkbenchWidgetTestAccess::pendingPrompt(workbench)
+                        == QStringLiteral("queued-health-turn"),
+                "uncorrelated post-restart snapshot reopened Turn authority")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::setPendingPrompt(workbench, QString());
+    runtimeClient->runtimeDegradationsRead(
+        freshRequestId, validCodexRuntimeDegradationSnapshot());
+    application.processEvents();
+    return expect(runtimeCapability->text().contains(QStringLiteral("Agent 只读"))
+                      && sendButton->text() != QStringLiteral("能力检查中"),
+                  "fresh correlated degradation snapshot did not restore Turn gating");
+}
+
+bool verifyStrictTimelineValidation(QApplication &application,
+                                    AgentWorkbenchWidget &workbench,
+                                    AgentRuntimeClient *runtimeClient)
+{
+    if (!runtimeClient) return false;
+    const QString sessionId = QStringLiteral("timeline-validation-session");
+    const QString turnId = QStringLiteral("timeline-validation-turn");
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, sessionId);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), sessionId, turnId, QJsonValue(QJsonValue::Null), 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("partial")), 2));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.cancellation-acknowledged"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 3));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
+                    && AgentWorkbenchWidgetTestAccess::turnCancelling(workbench)
+                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 3
+                    && AgentWorkbenchWidgetTestAccess::timelineItemText(
+                           workbench, QStringLiteral("live-item")) == QStringLiteral("partial"),
+                "valid bound live event was rejected")) {
+        return false;
+    }
+
+    // Duplicate, decreasing, and gapped envelopes must leave every live state untouched.
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 3));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 2));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 5));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("unknown.event"), sessionId, turnId,
+        timelineMessage(QStringLiteral("unknown-event-item"),
+                        QStringLiteral("delta"), QStringLiteral("must-not-render")), 4));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), QStringLiteral("other-session"), turnId,
+        QJsonValue(QJsonValue::Null), 4));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionId, QStringLiteral("other-turn"),
+        QJsonValue(QJsonValue::Null), 4));
+    application.processEvents();
+    if (!expect(!AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("unknown-event-item"))
+                    && AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
+                    && AgentWorkbenchWidgetTestAccess::turnCancelling(workbench)
+                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 3,
+                "rejected envelope mutated the Timeline, cancellation, Turn, or sequence")) {
+        return false;
+    }
+
+    const QList<QJsonObject> invalidItems{
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("bad-kind")},
+                    {QStringLiteral("kind"), QStringLiteral("unknown")},
+                    {QStringLiteral("role"), QStringLiteral("agent")},
+                    {QStringLiteral("state"), QStringLiteral("delta")},
+                    {QStringLiteral("content"), QStringLiteral("bad")}},
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("bad-role")},
+                    {QStringLiteral("kind"), QStringLiteral("message")},
+                    {QStringLiteral("role"), QStringLiteral("unknown")},
+                    {QStringLiteral("state"), QStringLiteral("delta")},
+                    {QStringLiteral("content"), QStringLiteral("bad")}},
+        QJsonObject{{QStringLiteral("id"), QStringLiteral("bad-state")},
+                    {QStringLiteral("kind"), QStringLiteral("message")},
+                    {QStringLiteral("role"), QStringLiteral("agent")},
+                    {QStringLiteral("state"), QStringLiteral("unknown")},
+                    {QStringLiteral("content"), QStringLiteral("bad")}},
+        timelineMessage(QString(257, QLatin1Char('i')), QStringLiteral("delta"),
+                        QStringLiteral("bad")),
+        timelineMessage(QStringLiteral("oversized-content"), QStringLiteral("delta"),
+                        QString(65 * 1024, QLatin1Char('x'))),
+    };
+    for (const QJsonObject &item : invalidItems) {
+        runtimeClient->timelineEvent(timelineEnvelope(
+            QStringLiteral("item.delta"), sessionId, turnId, item, 4));
+    }
+    QJsonObject oversizedData = timelineMessage(
+        QStringLiteral("oversized-data"), QStringLiteral("delta"), QStringLiteral("bad"));
+    oversizedData.insert(QStringLiteral("data"), QJsonObject{
+        {QStringLiteral("payload"), QString(257 * 1024, QLatin1Char('d'))},
+    });
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId, oversizedData, 4));
+    application.processEvents();
+    for (const QString &id : {QStringLiteral("bad-kind"), QStringLiteral("bad-role"),
+                              QStringLiteral("bad-state"),
+                              QStringLiteral("oversized-content"),
+                              QStringLiteral("oversized-data")}) {
+        if (!expect(!AgentWorkbenchWidgetTestAccess::hasTimelineItem(workbench, id),
+                    "malformed or oversized live item was rendered")) {
+            return false;
+        }
+    }
+
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("completed"),
+                        QStringLiteral("complete")), 4));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineItemText(
+                    workbench, QStringLiteral("live-item")) == QStringLiteral("complete")
+                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 4,
+                "valid Item completion was rejected after malformed envelopes")) {
+        return false;
+    }
+
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("regressed")), 5));
+    QJsonObject driftItem{
+        {QStringLiteral("id"), QStringLiteral("live-item")},
+        {QStringLiteral("kind"), QStringLiteral("error")},
+        {QStringLiteral("role"), QStringLiteral("system")},
+        {QStringLiteral("state"), QStringLiteral("completed")},
+        {QStringLiteral("content"), QStringLiteral("identity drift")},
+    };
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.failed"), sessionId, turnId, driftItem, 5));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineItemText(
+                    workbench, QStringLiteral("live-item")) == QStringLiteral("complete")
+                    && AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
+                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 4,
+                "terminal Item regressed, identity drift ended the Turn, or rejection consumed sequence")) {
+        return false;
+    }
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 5));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 6));
+    application.processEvents();
+    if (!expect(!AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
+                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 5,
+                "completed Turn reopened under the same identity")) {
+        return false;
+    }
+
+    QJsonObject replayGood = timelineMessage(
+        QStringLiteral("replay-good"), QStringLiteral("completed"),
+        QStringLiteral("replayed"));
+    replayGood.insert(QStringLiteral("sequence"), 3);
+    QJsonObject replayBad = timelineMessage(
+        QStringLiteral("replay-bad"), QStringLiteral("completed"),
+        QStringLiteral("bad"));
+    replayBad.insert(QStringLiteral("sequence"), 4);
+    replayBad.insert(QStringLiteral("kind"), QStringLiteral("unknown"));
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("malformed-replay"), sessionId, false);
+    runtimeClient->sessionRead(
+        QStringLiteral("malformed-replay"),
+        replaySnapshot(sessionId, QJsonArray{replayGood, replayBad}, 3, 4, 4));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("live-item"))
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("replay-good")),
+                "malformed replay cleared the existing Timeline or partially rendered")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("forged-tail"), sessionId, false);
+    runtimeClient->sessionRead(
+        QStringLiteral("forged-tail"),
+        replaySnapshot(sessionId, QJsonArray{replayGood}, 3, 3, 4));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("live-item"))
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("replay-good")),
+                "initial replay accepted a last/latest boundary mismatch")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("wrong-initial-limit"), sessionId, false);
+    runtimeClient->sessionRead(
+        QStringLiteral("wrong-initial-limit"),
+        replaySnapshot(sessionId, QJsonArray{replayGood}, 3, 3, 3, 99));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("live-item")),
+                "initial replay accepted a different limit than requested")) {
+        return false;
+    }
+
+    QJsonObject replayDuplicate = replayGood;
+    replayDuplicate.insert(QStringLiteral("sequence"), 4);
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("duplicate-initial"), sessionId, false);
+    runtimeClient->sessionRead(
+        QStringLiteral("duplicate-initial"),
+        replaySnapshot(sessionId, QJsonArray{replayGood, replayDuplicate}, 3, 4, 4));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("live-item"))
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("replay-good")),
+                "duplicate Item IDs partially replaced the initial Timeline")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("valid-replay"), sessionId, false);
+    runtimeClient->sessionRead(
+        QStringLiteral("valid-replay"),
+        replaySnapshot(sessionId, QJsonArray{replayGood}, 3, 3, 3));
+    application.processEvents();
+    if (!expect(!AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("live-item"))
+                    && AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("replay-good"))
+                    && AgentWorkbenchWidgetTestAccess::historyCursor(workbench)
+                        == QStringLiteral("before:3")
+                    && AgentWorkbenchWidgetTestAccess::historyFirstSequence(workbench) == 3
+                    && AgentWorkbenchWidgetTestAccess::historyLatestSequence(workbench) == 3,
+                "valid replay did not atomically replace the Timeline")) {
+        return false;
+    }
+
+    QJsonObject olderGood = timelineMessage(
+        QStringLiteral("older-good"), QStringLiteral("completed"),
+        QStringLiteral("older"), QStringLiteral("assistant"));
+    olderGood.insert(QStringLiteral("sequence"), 1);
+    QJsonObject olderBad = timelineMessage(
+        QStringLiteral("older-bad"), QStringLiteral("completed"),
+        QStringLiteral("bad"));
+    olderBad.insert(QStringLiteral("sequence"), 2);
+    olderBad.insert(QStringLiteral("state"), QStringLiteral("unknown"));
+    QJsonObject olderSecond = timelineMessage(
+        QStringLiteral("older-second"), QStringLiteral("completed"),
+        QStringLiteral("older second"));
+    olderSecond.insert(QStringLiteral("sequence"), 2);
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("malformed-older-page"), sessionId, true,
+        QStringLiteral("before:3"), 100, 3, 3);
+    runtimeClient->sessionRead(
+        QStringLiteral("malformed-older-page"),
+        replaySnapshot(sessionId, QJsonArray{olderGood, olderBad}, 1, 2, 3));
+    application.processEvents();
+    if (!expect(!AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("older-good"))
+                    && AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("replay-good"))
+                    && AgentWorkbenchWidgetTestAccess::historyCursor(workbench)
+                        == QStringLiteral("before:3"),
+                "malformed older replay page partially prepended or changed the cursor")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("wrong-older-boundary"), sessionId, true,
+        QStringLiteral("before:3"), 100, 3, 3);
+    runtimeClient->sessionRead(
+        QStringLiteral("wrong-older-boundary"),
+        replaySnapshot(sessionId, QJsonArray{olderGood}, 1, 1, 3));
+    application.processEvents();
+    if (!expect(!AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("older-good"))
+                    && AgentWorkbenchWidgetTestAccess::historyCursor(workbench)
+                        == QStringLiteral("before:3"),
+                "older replay accepted the wrong previous-page boundary")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("wrong-older-cursor"), sessionId, true,
+        QStringLiteral("before:3"), 100, 3, 3);
+    AgentWorkbenchWidgetTestAccess::setRequestedHistoryCursor(
+        workbench, QStringLiteral("before:4"));
+    runtimeClient->sessionRead(
+        QStringLiteral("wrong-older-cursor"),
+        replaySnapshot(sessionId, QJsonArray{olderGood, olderSecond}, 1, 2, 3));
+    application.processEvents();
+    if (!expect(!AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("older-good"))
+                    && AgentWorkbenchWidgetTestAccess::historyCursor(workbench)
+                        == QStringLiteral("before:3"),
+                "older replay accepted a request cursor that was not bound to the page")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("wrong-older-limit"), sessionId, true,
+        QStringLiteral("before:3"), 100, 3, 3);
+    runtimeClient->sessionRead(
+        QStringLiteral("wrong-older-limit"),
+        replaySnapshot(sessionId, QJsonArray{olderGood, olderSecond}, 1, 2, 3, 99));
+    application.processEvents();
+    if (!expect(!AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("older-good"))
+                    && AgentWorkbenchWidgetTestAccess::historyCursor(workbench)
+                        == QStringLiteral("before:3"),
+                "older replay accepted a different limit than requested")) {
+        return false;
+    }
+
+    QJsonObject olderDuplicate = olderGood;
+    olderDuplicate.insert(QStringLiteral("sequence"), 2);
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("duplicate-older"), sessionId, true,
+        QStringLiteral("before:3"), 100, 3, 3);
+    runtimeClient->sessionRead(
+        QStringLiteral("duplicate-older"),
+        replaySnapshot(sessionId, QJsonArray{olderGood, olderDuplicate}, 1, 2, 3));
+    application.processEvents();
+    if (!expect(!AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("older-good"))
+                    && AgentWorkbenchWidgetTestAccess::historyCursor(workbench)
+                        == QStringLiteral("before:3"),
+                "duplicate older Item IDs partially changed the Timeline")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("valid-older"), sessionId, true,
+        QStringLiteral("before:3"), 100, 3, 3);
+    runtimeClient->sessionRead(
+        QStringLiteral("valid-older"),
+        replaySnapshot(sessionId, QJsonArray{olderGood, olderSecond}, 1, 2, 3));
+    application.processEvents();
+    return expect(AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                      workbench, QStringLiteral("older-good"))
+                      && AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                          workbench, QStringLiteral("older-second"))
+                      && AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                          workbench, QStringLiteral("replay-good"))
+                      && AgentWorkbenchWidgetTestAccess::historyCursor(workbench).isEmpty()
+                      && AgentWorkbenchWidgetTestAccess::historyFirstSequence(workbench) == 1
+                      && AgentWorkbenchWidgetTestAccess::historyLatestSequence(workbench) == 3,
+                  "valid older page did not prepend atomically or close pagination");
+}
+
+bool verifySessionScopedTimelineSequences(QApplication &application,
+                                          AgentWorkbenchWidget &workbench,
+                                          AgentRuntimeClient *runtimeClient)
+{
+    if (!runtimeClient) return false;
+    const QString firstSession = QStringLiteral("timeline-session-first");
+    const QString secondSession = QStringLiteral("timeline-session-second");
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, firstSession);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), firstSession, QStringLiteral("turn-first"),
+        QJsonValue(QJsonValue::Null), 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), firstSession, QStringLiteral("turn-first"),
+        QJsonValue(QJsonValue::Null), 2));
+
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, secondSession);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), secondSession, QStringLiteral("turn-second"),
+        QJsonValue(QJsonValue::Null), 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), secondSession, QStringLiteral("turn-second"),
+        QJsonValue(QJsonValue::Null), 2));
+
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, firstSession);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), firstSession, QStringLiteral("turn-first-resumed"),
+        QJsonValue(QJsonValue::Null), 3));
+    application.processEvents();
+    const bool modeSwitchBlocked = !AgentWorkbenchWidgetTestAccess::activateMode(
+                                       workbench, QStringLiteral("work"))
+        && AgentWorkbenchWidgetTestAccess::currentMode(workbench) == QStringLiteral("chat");
+    const bool scoped = AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                            workbench, firstSession) == 3
+        && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+               workbench, secondSession) == 2
+        && AgentWorkbenchWidgetTestAccess::turnRunning(workbench) && modeSwitchBlocked;
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), firstSession,
+        QStringLiteral("turn-first-resumed"), QJsonValue(QJsonValue::Null), 4));
+    application.processEvents();
+    return expect(scoped
+                      && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                             workbench, firstSession) == 4
+                      && !AgentWorkbenchWidgetTestAccess::turnRunning(workbench),
+                  "Timeline sequence cursor was not isolated per Session");
 }
 
 bool runGit(const QString &executable, const QString &root, const QStringList &arguments,
@@ -187,6 +1192,82 @@ int main(int argc, char *argv[])
             });
         return verifyBoundedContextThresholdCache(workbench, protectedSessionId) ? 0 : 1;
     }
+    if (qEnvironmentVariableIsSet("AEGISY_RUNTIME_DEGRADATION_TEST_ONLY")) {
+        AgentRuntimeClient *runtimeClient = workbench.findChild<AgentRuntimeClient *>();
+        QLabel *runtimeCapability = workbench.findChild<QLabel *>(
+            QStringLiteral("agentRuntimeCapabilityStatus"));
+        QTextEdit *composer = workbench.findChild<QTextEdit *>(
+            QStringLiteral("agentComposer"));
+        QPushButton *sendButton = workbench.findChild<QPushButton *>(
+            QStringLiteral("agentSendButton"));
+        if (!expect(runtimeClient && runtimeCapability && composer && sendButton,
+                    "focused degradation fixture could not find workbench controls")) {
+            return 1;
+        }
+        runtimeClient->runtimeInitialized(QJsonObject{
+            {QStringLiteral("backend"), QJsonObject{
+                {QStringLiteral("status"), QStringLiteral("ready")},
+            }},
+        });
+        application.processEvents();
+        composer->setPlainText(QStringLiteral("must-wait-for-capability-check"));
+        AgentWorkbenchWidgetTestAccess::submitPrompt(workbench);
+        AgentWorkbenchWidgetTestAccess::setPendingPrompt(
+            workbench, QStringLiteral("pending-turn-must-wait"));
+        AgentWorkbenchWidgetTestAccess::tryStartPendingTurn(workbench);
+        if (!expect(sendButton->text() == QStringLiteral("能力检查中")
+                        && !sendButton->isEnabled()
+                        && composer->toPlainText()
+                            == QStringLiteral("must-wait-for-capability-check")
+                        && AgentWorkbenchWidgetTestAccess::pendingPrompt(workbench)
+                            == QStringLiteral("pending-turn-must-wait"),
+                    "pending degradation negotiation did not block every new-Turn path")) {
+            return 1;
+        }
+        runtimeClient->runtimeDegradationsRead(
+            QStringLiteral("invalid-before-valid"), QJsonObject{});
+        application.processEvents();
+        if (!expect(sendButton->text() == QStringLiteral("能力未知")
+                        && !sendButton->isEnabled(),
+                    "invalid degradation response did not fail closed")) {
+            return 1;
+        }
+        AgentWorkbenchWidgetTestAccess::prepareRuntimeDegradationRequest(
+            workbench, QStringLiteral("degradation-request"));
+        runtimeClient->requestFailed(QStringLiteral("degradation-request"),
+                                     QStringLiteral("runtime/degradations"),
+                                     QStringLiteral("bounded failure"), -32000);
+        application.processEvents();
+        if (!expect(sendButton->text() == QStringLiteral("能力未知")
+                        && !sendButton->isEnabled(),
+                    "degradation request failure did not fail closed")) {
+            return 1;
+        }
+        AgentWorkbenchWidgetTestAccess::setPendingPrompt(workbench, QString());
+        AgentWorkbenchWidgetTestAccess::prepareRuntimeDegradationRequest(
+            workbench, QStringLiteral("valid-codex"));
+        runtimeClient->runtimeDegradationsRead(
+            QStringLiteral("valid-codex"), validCodexRuntimeDegradationSnapshot());
+        application.processEvents();
+        return expect(runtimeCapability
+                          && runtimeCapability->text().contains(QStringLiteral("Agent 只读")),
+                      "valid Codex degradation matrix was rejected")
+                && expect(AgentWorkbenchWidgetTestAccess::activeTurnSubmitIsInert(
+                              workbench, composer, sendButton),
+                          "active-turn submit was not inert")
+                && verifyRuntimeHealthDegradationRefresh(
+                    application, workbench, runtimeClient, runtimeCapability,
+                    composer, sendButton)
+                && verifyStrictTimelineValidation(application, workbench, runtimeClient)
+                && verifySessionScopedTimelineSequences(
+                    application, workbench, runtimeClient)
+                && verifyRuntimeDegradationFailures(
+                    application, workbench, runtimeClient, runtimeCapability)
+                && expect(AgentWorkbenchWidgetTestAccess::activeTurnSubmitIsInert(
+                              workbench, composer, sendButton),
+                          "invalid degradation state hid or disabled the active Stop action")
+            ? 0 : 1;
+    }
 
     QPushButton *runtimeRestart = workbench.findChild<QPushButton *>(
         QStringLiteral("agentRuntimeRestartButton"));
@@ -211,8 +1292,9 @@ int main(int argc, char *argv[])
     }
     QTextEdit *composer = workbench.findChild<QTextEdit *>(QStringLiteral("agentComposer"));
     QPushButton *send = workbench.findChild<QPushButton *>(QStringLiteral("agentSendButton"));
-    if (!expect(composer && send && send->isEnabled(),
-                "ready runtime did not enable the composer")) {
+    if (!expect(composer && send
+                    && waitUntil(application, [send]() { return send->isEnabled(); }),
+                "validated runtime capabilities did not enable the composer")) {
         return 1;
     }
     composer->setPlainText(QStringLiteral("验证 AAP 对话链路"));
@@ -526,10 +1608,10 @@ int main(int argc, char *argv[])
     application.processEvents();
     if (!expect(!recoveryBanner->isHidden()
                     && recoveryBanner->text().contains(QStringLiteral("只读诊断"))
-                    && sendButton->text() == QStringLiteral("只读恢复")
+                    && sendButton->text() == QStringLiteral("能力检查中")
                     && !sendButton->isEnabled() && !newSession->isEnabled()
                     && !openFolder->isEnabled() && !importSession->isEnabled(),
-                "whole-store recovery did not expose and enforce the blocking UI")) {
+                "pending degradation negotiation did not override recovery with a safe gate")) {
         return 1;
     }
     if (!expect(runtimeCapability->text() == QStringLiteral("能力未知")
@@ -537,11 +1619,32 @@ int main(int argc, char *argv[])
                 "runtime capability status did not fail closed in recovery mode")) {
         return 1;
     }
+    const QJsonObject modelProfileFixture{
+        {QStringLiteral("schema_version"), QStringLiteral("model-profile-list/0.1")},
+        {QStringLiteral("store_schema_version"), QStringLiteral("model-profile-store/0.1")},
+        {QStringLiteral("profiles"), QJsonArray{QJsonObject{
+            {QStringLiteral("profile_id"), QStringLiteral("fixture-profile")},
+            {QStringLiteral("revision"), 0},
+        }}},
+        {QStringLiteral("selection_allowed"), false},
+        {QStringLiteral("routing_authority"), false},
+        {QStringLiteral("token_issued"), false},
+        {QStringLiteral("turn_started"), false},
+    };
+    runtimeClient->modelProfilesListed(QStringLiteral("profile-list-unnegotiated"),
+                                       modelProfileFixture);
+    application.processEvents();
+    if (!expect(!modelPicker->toolTip().contains(QStringLiteral("Profile 元数据只读")),
+                "unnegotiated model-profile metadata became visible")) {
+        return 1;
+    }
     runtimeClient->runtimeInitialized(QJsonObject{
         {QStringLiteral("backend"), QJsonObject{
             {QStringLiteral("status"), QStringLiteral("ready")},
         }},
         {QStringLiteral("capabilities"), QJsonArray{
+            QStringLiteral("background-job.recovery.inspect"),
+            QStringLiteral("background-notification.outbox.read-only"),
             QStringLiteral("session.compaction.checkpoint-review"),
             QStringLiteral("turn.context.pinned-selected"),
             QStringLiteral("workspace.git-context.read-only"),
@@ -549,19 +1652,11 @@ int main(int argc, char *argv[])
             QStringLiteral("workspace.image.preview"),
             QStringLiteral("model.catalog.cache.read-only"),
             QStringLiteral("model.catalog.refresh.status.read-only"),
+            QStringLiteral("model.profile.read-only"),
         }},
     });
-    runtimeClient->runtimeDegradationsRead(QStringLiteral("degradation-fixture"), QJsonObject{
-        {QStringLiteral("schema_version"), QStringLiteral("runtime-degradations/0.1")},
-        {QStringLiteral("degradations"), QJsonArray{
-            QJsonObject{{QStringLiteral("feature"), QStringLiteral("agent-mutation")},
-                         {QStringLiteral("state"), QStringLiteral("disabled")}},
-            QJsonObject{{QStringLiteral("feature"), QStringLiteral("provider-thread-compact")},
-                         {QStringLiteral("state"), QStringLiteral("blocked")}},
-            QJsonObject{{QStringLiteral("feature"), QStringLiteral("provider-thread-delete")},
-                         {QStringLiteral("state"), QStringLiteral("blocked")}},
-        }},
-    });
+    runtimeClient->runtimeDegradationsRead(
+        QStringLiteral("degradation-fixture"), validCodexRuntimeDegradationSnapshot());
     runtimeClient->projectionRecoveryStatusRead(QJsonObject{
         {QStringLiteral("startup"), QJsonObject{
             {QStringLiteral("rebuilt_sessions"), 2},
@@ -728,24 +1823,25 @@ int main(int argc, char *argv[])
                 "runtime degradations were not projected into a fail-closed capability state")) {
         return 1;
     }
-    runtimeClient->modelProfilesListed(QStringLiteral("profile-list-fixture"), QJsonObject{
-        {QStringLiteral("schema_version"), QStringLiteral("model-profile-list/0.1")},
-        {QStringLiteral("store_schema_version"), QStringLiteral("model-profile-store/0.1")},
-        {QStringLiteral("profiles"), QJsonArray{QJsonObject{
-            {QStringLiteral("profile_id"), QStringLiteral("fixture-profile")},
-            {QStringLiteral("revision"), 0},
-        }}},
-        {QStringLiteral("selection_allowed"), false},
-        {QStringLiteral("routing_authority"), false},
-        {QStringLiteral("token_issued"), false},
-        {QStringLiteral("turn_started"), false},
-    });
+    if (!expect(AgentWorkbenchWidgetTestAccess::activeTurnSubmitIsInert(
+                    workbench, operationComposer, sendButton),
+                "active-turn Ctrl+Enter path could start a second turn or hide Stop")) {
+        return 1;
+    }
+    if (!verifyRuntimeDegradationFailures(
+            application, workbench, runtimeClient, runtimeCapability)) {
+        return 1;
+    }
+    runtimeClient->modelProfilesListed(QStringLiteral("profile-list-fixture"),
+                                       modelProfileFixture);
     application.processEvents();
     if (!expect(modelPicker->toolTip().contains(QStringLiteral("Profile 元数据只读"))
                     && modelPicker->toolTip().contains(QStringLiteral("1 个")),
                 "model profile metadata did not remain an explicit read-only projection")) {
         return 1;
     }
+    AgentWorkbenchWidgetTestAccess::prepareRuntimeDegradationRequest(
+        workbench, QStringLiteral("degradation-invalid"));
     runtimeClient->runtimeDegradationsRead(QStringLiteral("degradation-invalid"), QJsonObject{
         {QStringLiteral("schema_version"), QStringLiteral("runtime-degradations/unknown")},
     });
@@ -755,6 +1851,12 @@ int main(int argc, char *argv[])
                 "invalid runtime degradation schema did not fail closed")) {
         return 1;
     }
+    AgentWorkbenchWidgetTestAccess::prepareRuntimeDegradationRequest(
+        workbench, QStringLiteral("degradation-restored-before-recovery"));
+    runtimeClient->runtimeDegradationsRead(
+        QStringLiteral("degradation-restored-before-recovery"),
+        validCodexRuntimeDegradationSnapshot());
+    application.processEvents();
     runtimeClient->sessionStarted(QStringLiteral("recovery-render-session"), QJsonObject{
         {QStringLiteral("id"), QStringLiteral("session-recovery-render")},
         {QStringLiteral("mode"), QStringLiteral("chat")},
@@ -853,6 +1955,12 @@ int main(int argc, char *argv[])
             workbench, QStringLiteral("session-recovery-render"))) {
         return 1;
     }
+    if (!expect(waitUntil(application, [&workbench]() {
+                    return AgentWorkbenchWidgetTestAccess::sessionListRefreshIdle(workbench);
+                }),
+                "synthetic session fixture did not drain real session-list refreshes")) {
+        return 1;
+    }
     runtimeClient->sessionRecoveryStatusRead(QJsonObject{
         {QStringLiteral("session_id"), QStringLiteral("session-recovery-render")},
         {QStringLiteral("recovery_required"), true},
@@ -880,7 +1988,11 @@ int main(int argc, char *argv[])
     if (!expect(recoveryBanner->text().contains(QStringLiteral("当前会话"))
                     && sendButton->text() == QStringLiteral("只读恢复")
                     && !sendButton->isEnabled(),
-                "session quarantine did not disable the active composer")) {
+                qPrintable(QStringLiteral(
+                    "session quarantine did not disable the active composer: banner=%1 send=%2 enabled=%3")
+                    .arg(recoveryBanner->text(), sendButton->text(),
+                         sendButton->isEnabled() ? QStringLiteral("true")
+                                                 : QStringLiteral("false"))))) {
         return 1;
     }
     runtimeClient->sessionRecoveryStatusRead(QJsonObject{
@@ -1028,6 +2140,12 @@ int main(int argc, char *argv[])
                 "Codex reconnect failure leaked raw provider detail or lost recovery state")) {
         return 1;
     }
+    AgentWorkbenchWidgetTestAccess::prepareRuntimeDegradationRequest(
+        workbench, QStringLiteral("post-health-render-fixture"));
+    runtimeClient->runtimeDegradationsRead(
+        QStringLiteral("post-health-render-fixture"),
+        validCodexRuntimeDegradationSnapshot());
+    application.processEvents();
 
     const QJsonObject commandBase{
         {QStringLiteral("id"), QStringLiteral("command-render-fixture")},
@@ -1035,21 +2153,25 @@ int main(int argc, char *argv[])
         {QStringLiteral("role"), QStringLiteral("tool")},
         {QStringLiteral("content"), QStringLiteral("$ printf '<unsafe>'\n")},
     };
+    const QString timelineSessionId = QStringLiteral("session-render-fixture");
+    const QString timelineTurnId = QStringLiteral("turn-render-fixture");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, timelineSessionId);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), timelineSessionId, timelineTurnId));
     QJsonObject startedCommand = commandBase;
     startedCommand.insert(QStringLiteral("state"), QStringLiteral("started"));
     startedCommand.insert(QStringLiteral("data"), QJsonObject{
-        {QStringLiteral("session_id"), QStringLiteral("session-render-fixture")},
+        {QStringLiteral("session_id"), timelineSessionId},
         {QStringLiteral("risk"), QJsonObject{{QStringLiteral("level"), QStringLiteral("low")}}},
         {QStringLiteral("output"), QJsonObject{{QStringLiteral("artifact"), QJsonValue::Null}}},
     });
-    runtimeClient->timelineEvent(QJsonObject{
-        {QStringLiteral("event"), QStringLiteral("item.started")},
-        {QStringLiteral("item"), startedCommand},
-    });
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.started"), timelineSessionId, timelineTurnId,
+        startedCommand));
     QJsonObject completedCommand = startedCommand;
     completedCommand.insert(QStringLiteral("state"), QStringLiteral("completed"));
     completedCommand.insert(QStringLiteral("data"), QJsonObject{
-        {QStringLiteral("session_id"), QStringLiteral("session-render-fixture")},
+        {QStringLiteral("session_id"), timelineSessionId},
         {QStringLiteral("risk"), QJsonObject{{QStringLiteral("level"), QStringLiteral("low")}}},
         {QStringLiteral("output"), QJsonObject{
             {QStringLiteral("artifact"), QJsonObject{
@@ -1058,10 +2180,9 @@ int main(int argc, char *argv[])
             }}
         }},
     });
-    runtimeClient->timelineEvent(QJsonObject{
-        {QStringLiteral("event"), QStringLiteral("item.completed")},
-        {QStringLiteral("item"), completedCommand},
-    });
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), timelineSessionId, timelineTurnId,
+        completedCommand));
     QPushButton *commandArtifactButton = workbench.findChild<QPushButton *>(
         QStringLiteral("timelineCommandArtifactButton"));
     QLabel *commandContent = workbench.findChild<QLabel *>(
@@ -1121,17 +2242,16 @@ int main(int argc, char *argv[])
             {QStringLiteral("automatic_compaction_authority"), false},
         }},
     };
-    runtimeClient->timelineEvent(QJsonObject{
-        {QStringLiteral("event"), QStringLiteral("item.completed")},
-        {QStringLiteral("item"), QJsonObject{
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("usage.updated"), timelineSessionId, timelineTurnId,
+        QJsonObject{
             {QStringLiteral("id"), QStringLiteral("usage-render-fixture")},
             {QStringLiteral("kind"), QStringLiteral("usage")},
             {QStringLiteral("role"), QStringLiteral("system")},
             {QStringLiteral("state"), QStringLiteral("updated")},
             {QStringLiteral("content"), QStringLiteral("Token usage updated")},
             {QStringLiteral("data"), QJsonObject{{QStringLiteral("authority"), usageAuthority}}},
-        }},
-    });
+        }));
     application.processEvents();
     QLabel *usagePresentation = workbench.findChild<QLabel *>(
         QStringLiteral("timelineUsageAuthority"));
@@ -1141,9 +2261,9 @@ int main(int argc, char *argv[])
                 "usage authority was not rendered as bounded read-only metadata")) {
         return 1;
     }
-    runtimeClient->timelineEvent(QJsonObject{
-        {QStringLiteral("event"), QStringLiteral("item.completed")},
-        {QStringLiteral("item"), QJsonObject{
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("usage.updated"), timelineSessionId, timelineTurnId,
+        QJsonObject{
             {QStringLiteral("id"), QStringLiteral("usage-invalid-render-fixture")},
             {QStringLiteral("kind"), QStringLiteral("usage")},
             {QStringLiteral("role"), QStringLiteral("system")},
@@ -1152,8 +2272,7 @@ int main(int argc, char *argv[])
             {QStringLiteral("data"), QJsonObject{{QStringLiteral("authority"), QJsonObject{
                 {QStringLiteral("schema_version"), QStringLiteral("usage-authority/9.9")},
             }}}},
-        }},
-    });
+        }));
     application.processEvents();
     const QList<QLabel *> usagePresentations = workbench.findChildren<QLabel *>(
         QStringLiteral("timelineUsageAuthority"));
@@ -1165,43 +2284,66 @@ int main(int argc, char *argv[])
                 "malformed usage authority did not fail closed in Qt")) {
         return 1;
     }
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), timelineSessionId, timelineTurnId));
 
-    runtimeClient->timelineEvent(QJsonObject{
-        {QStringLiteral("session_id"), QStringLiteral("session-cancel-fixture")},
-        {QStringLiteral("turn_id"), QStringLiteral("turn-cancel-fixture")},
-        {QStringLiteral("event"), QStringLiteral("turn.started")},
+    const QString cancelSessionId = QStringLiteral("session-cancel-fixture");
+    const QString cancelTurnId = QStringLiteral("turn-cancel-fixture");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, cancelSessionId);
+    if (!expect(waitUntil(application, [&workbench]() {
+                    return AgentWorkbenchWidgetTestAccess::operationStatusRequestIdle(workbench);
+                }),
+                "synthetic cancellation fixture did not drain operation status request")) {
+        return 1;
+    }
+    AgentWorkbenchWidgetTestAccess::prepareOperationStatusSession(workbench,
+                                                                  cancelSessionId);
+    runtimeClient->operationStatusRead({}, QJsonObject{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("operation-reconciliation-status/0.1")},
+        {QStringLiteral("session_id"), cancelSessionId},
+        {QStringLiteral("blocked"), false},
+        {QStringLiteral("operation"), QJsonValue::Null},
+        {QStringLiteral("recovery_action_available"), false},
     });
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::operationStatusAllowsSession(
+                    workbench, cancelSessionId),
+                "synthetic cancellation fixture did not establish an unblocked operation state")) {
+        return 1;
+    }
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), cancelSessionId, cancelTurnId));
     application.processEvents();
     if (!expect(sendButton->text() == QStringLiteral("停止") && sendButton->isEnabled()
                     && sendButton->width() == 84,
                 "running turn did not expose a stable stop action")) {
         return 1;
     }
-    runtimeClient->timelineEvent(QJsonObject{
-        {QStringLiteral("session_id"), QStringLiteral("session-cancel-fixture")},
-        {QStringLiteral("turn_id"), QStringLiteral("turn-cancel-fixture")},
-        {QStringLiteral("event"), QStringLiteral("turn.cancellation-acknowledged")},
-    });
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.cancellation-acknowledged"), cancelSessionId,
+        cancelTurnId));
     application.processEvents();
     if (!expect(sendButton->text() == QStringLiteral("正在停止") && !sendButton->isEnabled(),
                 "accepted cancellation was incorrectly presented as a terminal state")) {
         return 1;
     }
-    runtimeClient->timelineEvent(QJsonObject{
-        {QStringLiteral("session_id"), QStringLiteral("session-cancel-fixture")},
-        {QStringLiteral("turn_id"), QStringLiteral("turn-cancel-fixture")},
-        {QStringLiteral("event"), QStringLiteral("turn.interrupted")},
-    });
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.interrupted"), cancelSessionId, cancelTurnId));
     application.processEvents();
     if (!expect(sendButton->text() == QStringLiteral("发送") && sendButton->isEnabled(),
-                "interrupted turn did not restore the composer action")) {
+                qPrintable(QStringLiteral(
+                    "interrupted turn did not restore the composer action: send=%1 enabled=%2")
+                    .arg(sendButton->text(), sendButton->isEnabled()
+                            ? QStringLiteral("true") : QStringLiteral("false"))))) {
         return 1;
     }
-    runtimeClient->timelineEvent(QJsonObject{
-        {QStringLiteral("session_id"), QStringLiteral("session-cancel-fixture")},
-        {QStringLiteral("turn_id"), QStringLiteral("turn-failed-fixture")},
-        {QStringLiteral("event"), QStringLiteral("turn.failed")},
-        {QStringLiteral("item"), QJsonObject{
+    const QString failedTurnId = QStringLiteral("turn-failed-fixture");
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), cancelSessionId, failedTurnId));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.failed"), cancelSessionId, failedTurnId,
+        QJsonObject{
             {QStringLiteral("id"), QStringLiteral("runtime-error-fixture")},
             {QStringLiteral("kind"), QStringLiteral("error")},
             {QStringLiteral("role"), QStringLiteral("system")},
@@ -1212,8 +2354,7 @@ int main(int argc, char *argv[])
                 {QStringLiteral("class"), QStringLiteral("transport")},
                 {QStringLiteral("retryable"), true},
             }},
-        }},
-    });
+        }));
     application.processEvents();
     bool failureNoticeVisible = false;
     for (QLabel *label : workbench.findChildren<QLabel *>()) {
@@ -1238,13 +2379,17 @@ int main(int argc, char *argv[])
         {QStringLiteral("budget"), QStringLiteral("预算")},
         {QStringLiteral("adapter"), QStringLiteral("适配器")},
     };
+    const QString errorClassSessionId = QStringLiteral("session-error-class-fixture");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench,
+                                                          errorClassSessionId);
     for (int index = 0; index < stableErrorClasses.size(); ++index) {
         const auto &errorClass = stableErrorClasses.at(index);
-        runtimeClient->timelineEvent(QJsonObject{
-            {QStringLiteral("session_id"), QStringLiteral("session-error-class-fixture")},
-            {QStringLiteral("turn_id"), QStringLiteral("turn-error-class-%1").arg(index)},
-            {QStringLiteral("event"), QStringLiteral("turn.failed")},
-            {QStringLiteral("item"), QJsonObject{
+        const QString errorTurnId = QStringLiteral("turn-error-class-%1").arg(index);
+        runtimeClient->timelineEvent(timelineEnvelope(
+            QStringLiteral("turn.started"), errorClassSessionId, errorTurnId));
+        runtimeClient->timelineEvent(timelineEnvelope(
+            QStringLiteral("turn.failed"), errorClassSessionId, errorTurnId,
+            QJsonObject{
                 {QStringLiteral("id"), QStringLiteral("runtime-error-class-%1").arg(index)},
                 {QStringLiteral("kind"), QStringLiteral("error")},
                 {QStringLiteral("role"), QStringLiteral("system")},
@@ -1255,8 +2400,7 @@ int main(int argc, char *argv[])
                     {QStringLiteral("class"), errorClass.first},
                     {QStringLiteral("retryable"), false},
                 }},
-            }},
-        });
+            }));
     }
     application.processEvents();
     for (const auto &errorClass : stableErrorClasses) {
@@ -1319,11 +2463,15 @@ int main(int argc, char *argv[])
         {QStringLiteral("raw_output_ref"), QStringLiteral(
             "diagnostic-raw:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")},
     };
-    runtimeClient->timelineEvent(QJsonObject{
-        {QStringLiteral("session_id"), QStringLiteral("session-command-diagnostic")},
-        {QStringLiteral("turn_id"), QStringLiteral("turn-command-diagnostic")},
-        {QStringLiteral("event"), QStringLiteral("diagnostics.observed")},
-        {QStringLiteral("item"), QJsonObject{
+    const QString diagnosticSessionId = QStringLiteral("session-command-diagnostic");
+    const QString diagnosticTurnId = QStringLiteral("turn-command-diagnostic");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench,
+                                                          diagnosticSessionId);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), diagnosticSessionId, diagnosticTurnId));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("diagnostics.observed"), diagnosticSessionId,
+        diagnosticTurnId, QJsonObject{
             {QStringLiteral("id"), QStringLiteral("diagnostics-command-fixture")},
             {QStringLiteral("kind"), QStringLiteral("diagnostic")},
             {QStringLiteral("role"), QStringLiteral("tool")},
@@ -1336,8 +2484,10 @@ int main(int argc, char *argv[])
                     QStringLiteral("raw_output_ref"))},
                 {QStringLiteral("diagnostics"), QJsonArray{commandDiagnostic}},
             }},
-        }},
-    });
+        }));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), diagnosticSessionId,
+        diagnosticTurnId));
     application.processEvents();
     if (!expect(languageDiagnostics->topLevelItemCount() == 1
                     && languageDiagnostics->topLevelItem(0)->text(1)
@@ -1486,24 +2636,40 @@ int main(int argc, char *argv[])
                 "could not read the Git fixture branch")) {
         return 1;
     }
-    runtime->gitOverview(openedProjectId);
-    if (!expect(waitUntil(application, [executionContext, &fixtureBranch]() {
-                    return executionContext->text().contains(QStringLiteral("项目 "))
-                        && executionContext->text().contains(
-                            QStringLiteral("分支 %1").arg(fixtureBranch));
-                }),
-                "execution-context strip did not project the read-only Git branch")) {
+    gitRefresh->click();
+    if (!expect(waitUntil(application, [gitSummary, &fixtureBranch]() {
+                    return gitSummary->text().contains(fixtureBranch);
+                })
+                    && !executionContext->text().contains(
+                        QStringLiteral("分支 %1").arg(fixtureBranch)),
+                "live Git observation overwrote the active Session Workspace binding")) {
         return 1;
     }
     if (!expect(retentionSettings->isEnabled(),
                 "project retention settings did not enable for an opened project")) {
         return 1;
     }
+    // Synthetic Timeline fixtures above bypass the sidecar and use their own
+    // sequence space. Start the real sidecar workflow with a clean client view.
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
     runtime->startSession(QStringLiteral("work"), openedProjectId);
     if (!expect(waitUntil(application, [&previewSessionId]() {
                     return !previewSessionId.isEmpty();
                 }),
                 "workspace edit preview fixture did not create a Work session")) {
+        return 1;
+    }
+    if (!expect(AgentWorkbenchWidgetTestAccess::activateMode(
+                    workbench, QStringLiteral("work")),
+                "workspace fixture could not activate its new Work session")) {
+        return 1;
+    }
+    if (!expect(waitUntil(application, [&workbench, &previewSessionId]() {
+                    return AgentWorkbenchWidgetTestAccess::operationStatusRequestIdle(workbench)
+                        && AgentWorkbenchWidgetTestAccess::operationStatusAllowsSession(
+                            workbench, previewSessionId);
+                }),
+                "new Work session did not complete operation-status reconciliation")) {
         return 1;
     }
     if (!expect(QMetaObject::invokeMethod(
@@ -1580,7 +2746,9 @@ int main(int argc, char *argv[])
                         && gitDiff->toPlainText().contains(QStringLiteral("worktree change"))
                         && gitPinDiff->isEnabled();
                 }, 10000),
-                "real Git worktree diff did not enable persistent pinning")) {
+                qPrintable(QStringLiteral(
+                    "real Git worktree diff did not enable persistent pinning: %1")
+                    .arg(AgentWorkbenchWidgetTestAccess::gitPinGateState(workbench))))) {
         return 1;
     }
     gitPinDiff->click();

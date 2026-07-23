@@ -9,6 +9,7 @@ pub mod child_task;
 pub mod child_task_state;
 pub mod child_worktree_gate;
 pub(crate) mod codex_adapter;
+mod codex_capability_matrix;
 mod command_action;
 mod command_artifact;
 mod command_diagnostics;
@@ -185,7 +186,7 @@ pub struct Runtime {
     initialized: bool,
     client_ready: bool,
     shutdown: bool,
-    sequence: u64,
+    session_sequences: HashMap<String, u64>,
     next_id: u64,
     control: RuntimeControl,
     projects: HashMap<String, Project>,
@@ -214,6 +215,219 @@ pub struct Runtime {
     model_profile_store: Option<model_profile_store::ModelProfileStore>,
     model_catalog_cache: Option<model_catalog_cache::ModelCatalogCacheStore>,
     backend: Backend,
+}
+
+#[cfg(test)]
+mod capability_matrix_integration_tests {
+    use super::Runtime;
+    use serde_json::{json, Value};
+
+    fn call(runtime: &mut Runtime, id: &str, method: &str) -> Vec<Value> {
+        runtime.handle_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": if method == "initialize" {
+                    json!({
+                        "protocol_version": "0.1",
+                        "client": {"name": "capability-test", "version": "1"}
+                    })
+                } else {
+                    json!({})
+                }
+            })
+            .to_string(),
+        )
+    }
+
+    #[test]
+    fn unavailable_initialize_and_degradation_snapshot_do_not_claim_provider_reachability() {
+        let mut runtime = Runtime::unavailable("sensitive startup detail");
+        let initialized = call(&mut runtime, "initialize", "initialize");
+        assert_eq!(
+            initialized[0]["result"]["backend"]["adapter"],
+            "codex-app-server"
+        );
+        assert_eq!(
+            initialized[0]["result"]["backend"]["version"],
+            "codex-cli 0.144.5"
+        );
+        let capabilities = initialized[0]["result"]["capabilities"].as_array().unwrap();
+        assert!(!capabilities.iter().any(|capability| {
+            capability
+                .as_str()
+                .is_some_and(|value| value.starts_with("timeline.") || value.contains("provider"))
+        }));
+        assert!(runtime
+            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized"}"#)
+            .is_empty());
+
+        let response = call(&mut runtime, "degradations", "runtime/degradations");
+        let snapshot = &response[0]["result"];
+        assert_eq!(snapshot["schema_version"], "runtime-degradations/0.2");
+        assert_eq!(snapshot["backend"]["kind"], "unavailable");
+        assert_eq!(snapshot["backend"]["version"], "codex-cli 0.144.5");
+        assert_eq!(
+            snapshot["capability_matrix"]["identity"],
+            "codex-capability-matrix:sha256:473ddd66cd30b903778c248f28aa55d3cfb2ff37123c4831a23a263703362d04"
+        );
+        assert_eq!(snapshot["complete"], true);
+        assert_eq!(snapshot["degradations"].as_array().unwrap().len(), 4);
+        assert!(snapshot["degradations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|feature| feature["scope"] != "provider"
+                && !feature["feature"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("timeline.")));
+        assert!(!serde_json::to_string(snapshot)
+            .unwrap()
+            .contains("sensitive startup detail"));
+    }
+}
+
+#[cfg(test)]
+mod provider_thread_projection_tests {
+    use super::{provider_optional_opaque_text, provider_thread_summary, provider_turn_summaries};
+    use serde_json::json;
+
+    #[test]
+    fn provider_thread_projection_omits_dynamic_content_and_paths() {
+        let secret = "sk-provider-thread-private";
+        let thread = json!({
+            "id": "thread-1",
+            "sessionId": "session-private",
+            "name": format!("Private title {secret}"),
+            "preview": format!("Private preview {secret}"),
+            "cwd": "/private/workspace/source",
+            "path": "/private/provider/rollout.jsonl",
+            "modelProvider": "private-provider-name",
+            "source": {"custom": format!("private-source-{secret}")},
+            "status": {
+                "type": "active",
+                "activeFlags": ["waitingOnApproval", "private-dynamic-flag"]
+            },
+            "createdAt": 10,
+            "updatedAt": 20,
+            "recencyAt": 21,
+            "ephemeral": false,
+            "forkedFromId": "private-parent-thread",
+            "turns": [{
+                "id": "turn-1",
+                "status": "completed",
+                "startedAt": 10,
+                "completedAt": 20,
+                "durationMs": 10,
+                "items": [{"type": "userMessage", "content": secret}],
+                "error": null
+            }]
+        });
+
+        let summary = provider_thread_summary(&thread).unwrap();
+        assert_eq!(summary["thread_id"], "thread-1");
+        assert_eq!(summary["source_kind"], "custom");
+        assert_eq!(summary["status"]["state"], "active");
+        assert_eq!(summary["status"]["waiting_on_approval"], true);
+        assert_eq!(summary["name_present"], true);
+        assert_eq!(summary["preview_present"], true);
+        assert_eq!(summary["path_present"], true);
+        assert_eq!(summary["turn_count"], 1);
+        assert_eq!(summary["content_omitted"], true);
+        assert!(summary["workspace_identity"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        let turns = provider_turn_summaries(&thread).unwrap();
+        assert_eq!(turns[0]["turn_id"], "turn-1");
+        assert_eq!(turns[0]["status"], "completed");
+        assert_eq!(turns[0]["item_count"], 1);
+        assert_eq!(turns[0]["content_omitted"], true);
+
+        let encoded = serde_json::to_string(&(summary, turns)).unwrap();
+        for forbidden in [
+            secret,
+            "Private title",
+            "Private preview",
+            "/private/workspace/source",
+            "/private/provider/rollout.jsonl",
+            "private-provider-name",
+            "private-source",
+            "private-dynamic-flag",
+            "private-parent-thread",
+            "userMessage",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "projection leaked {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_cursor_projection_is_lossless_or_fails_closed() {
+        let ordinary_cursor = json!("opaque:provider:cursor:1");
+        assert_eq!(
+            provider_optional_opaque_text(
+                Some(&ordinary_cursor),
+                "Codex thread/list nextCursor",
+                4 * 1024,
+            )
+            .unwrap()
+            .as_deref(),
+            Some("opaque:provider:cursor:1")
+        );
+
+        for invalid in [
+            json!("opaque-cursor Authorization: Bearer ghp_123456789012345678901234567890"),
+            json!("opaque\ncursor"),
+            json!("x".repeat(4 * 1024 + 1)),
+        ] {
+            assert!(provider_optional_opaque_text(
+                Some(&invalid),
+                "Codex thread/list nextCursor",
+                4 * 1024,
+            )
+            .is_err());
+        }
+        assert_eq!(
+            provider_optional_opaque_text(None, "Codex thread/list nextCursor", 4 * 1024).unwrap(),
+            None
+        );
+        assert_eq!(
+            provider_optional_opaque_text(
+                Some(&serde_json::Value::Null),
+                "Codex thread/list nextCursor",
+                4 * 1024,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_turn_ids_are_exact_or_the_complete_projection_is_rejected() {
+        let prefix = "t".repeat(256);
+        let colliding_if_truncated = json!({
+            "turns": [
+                {"id": format!("{prefix}a"), "status": "completed", "items": []},
+                {"id": format!("{prefix}b"), "status": "completed", "items": []}
+            ]
+        });
+        assert!(provider_turn_summaries(&colliding_if_truncated).is_err());
+
+        for invalid_id in [
+            "turn\ncontrol".to_owned(),
+            "Authorization: Bearer ghp_123456789012345678901234567890".to_owned(),
+        ] {
+            let thread = json!({
+                "turns": [{"id": invalid_id, "status": "completed", "items": []}]
+            });
+            assert!(provider_turn_summaries(&thread).is_err());
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1913,89 +2127,139 @@ fn bounded_provider_text(value: &str, byte_limit: usize) -> String {
     redacted[..end].to_owned()
 }
 
-fn provider_optional_text(value: Option<&Value>, byte_limit: usize) -> Option<String> {
-    value
-        .and_then(Value::as_str)
-        .map(|value| bounded_provider_text(value, byte_limit))
+fn validate_provider_opaque_text<'a>(
+    value: &'a str,
+    field: &str,
+    byte_limit: usize,
+) -> Result<&'a str, String> {
+    if value.is_empty()
+        || value.len() > byte_limit
+        || value.chars().any(char::is_control)
+        || output_redaction::redact_complete(value) != value
+    {
+        return Err(format!("{field} is invalid"));
+    }
+    Ok(value)
 }
 
-fn provider_thread_source(value: Option<&Value>) -> String {
+fn provider_optional_opaque_text(
+    value: Option<&Value>,
+    field: &str,
+    byte_limit: usize,
+) -> Result<Option<String>, String> {
     match value {
-        Some(Value::String(source)) => bounded_provider_text(source, 64),
-        Some(Value::Object(source)) => source
-            .get("custom")
-            .and_then(Value::as_str)
-            .map(|custom| bounded_provider_text(custom, 64))
-            .unwrap_or_else(|| "sub-agent".into()),
-        _ => "unknown".into(),
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => validate_provider_opaque_text(value, field, byte_limit)
+            .map(|value| Some(value.to_owned())),
+        Some(_) => Err(format!("{field} is invalid")),
+    }
+}
+
+fn provider_content_identity(domain: &str, value: &str) -> String {
+    let mut input = String::with_capacity(domain.len() + value.len() + 1);
+    input.push_str(domain);
+    input.push('\0');
+    input.push_str(value);
+    format!("sha256:{}", ContentHash::for_bytes(input.as_bytes()).sha256)
+}
+
+fn provider_thread_source_kind(value: Option<&Value>) -> &'static str {
+    match value {
+        Some(Value::String(source)) => match source.as_str() {
+            "cli" => "cli",
+            "vscode" => "vscode",
+            "exec" => "exec",
+            "appServer" => "app-server",
+            "unknown" => "unknown",
+            _ => "unknown",
+        },
+        Some(Value::Object(source)) if source.contains_key("custom") => "custom",
+        Some(Value::Object(source)) if source.contains_key("subAgent") => "sub-agent",
+        _ => "unknown",
     }
 }
 
 fn provider_thread_status(value: Option<&Value>) -> Value {
-    let state = value
+    let state = match value
         .and_then(|status| status.get("type"))
         .and_then(Value::as_str)
-        .map(|state| bounded_provider_text(state, 32))
-        .unwrap_or_else(|| "unknown".into());
-    let active_flags = value
+    {
+        Some("notLoaded") => "not-loaded",
+        Some("idle") => "idle",
+        Some("systemError") => "system-error",
+        Some("active") => "active",
+        _ => "unknown",
+    };
+    let flags = value
         .and_then(|status| status.get("activeFlags"))
-        .and_then(Value::as_array)
-        .map(|flags| {
-            flags
-                .iter()
-                .filter_map(Value::as_str)
-                .take(16)
-                .map(|flag| bounded_provider_text(flag, 64))
-                .collect::<Vec<_>>()
+        .and_then(Value::as_array);
+    json!({
+        "state": state,
+        "active_flag_count": flags.map_or(0, |flags| flags.len().min(16)),
+        "active_flags_truncated": flags.is_some_and(|flags| flags.len() > 16),
+        "waiting_on_approval": flags.is_some_and(|flags| {
+            flags.iter().any(|flag| flag.as_str() == Some("waitingOnApproval"))
+        }),
+        "waiting_on_user_input": flags.is_some_and(|flags| {
+            flags.iter().any(|flag| flag.as_str() == Some("waitingOnUserInput"))
         })
-        .unwrap_or_default();
-    json!({ "state": state, "active_flags": active_flags })
+    })
+}
+
+fn provider_turn_status(value: Option<&Value>) -> &'static str {
+    match value.and_then(Value::as_str) {
+        Some("completed") => "completed",
+        Some("interrupted") => "interrupted",
+        Some("failed") => "failed",
+        Some("inProgress") => "in-progress",
+        _ => "unknown",
+    }
+}
+
+fn provider_nonnegative_integer(value: Option<&Value>) -> Option<u64> {
+    value
+        .and_then(Value::as_i64)
+        .and_then(|value| u64::try_from(value).ok())
 }
 
 fn provider_thread_summary(thread: &Value) -> Result<Value, String> {
     let id = thread
         .get("id")
         .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(|id| bounded_provider_text(id, 256))
         .ok_or_else(|| "Codex thread metadata is missing id".to_owned())?;
+    let id = validate_provider_opaque_text(id, "Codex thread metadata id", 256)?.to_owned();
     let session_id = thread
         .get("sessionId")
         .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .map(|id| bounded_provider_text(id, 256))
         .ok_or_else(|| "Codex thread metadata is missing sessionId".to_owned())?;
+    let session_id =
+        validate_provider_opaque_text(session_id, "Codex thread metadata sessionId", 256)?;
     let cwd = thread
         .get("cwd")
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.is_empty())
-        .map(|cwd| bounded_provider_text(cwd, 4 * 1024))
+        .filter(|cwd| cwd.len() <= 16 * 1024 && !cwd.chars().any(char::is_control))
         .ok_or_else(|| "Codex thread metadata is missing cwd".to_owned())?;
-    let model_provider = thread
-        .get("modelProvider")
-        .and_then(Value::as_str)
-        .filter(|provider| !provider.is_empty())
-        .map(|provider| bounded_provider_text(provider, 256))
-        .ok_or_else(|| "Codex thread metadata is missing modelProvider".to_owned())?;
-    let turns = thread
-        .get("turns")
-        .and_then(Value::as_array)
-        .map_or(0, |turns| turns.len().min(2_000));
+    let turns = thread.get("turns").and_then(Value::as_array);
     Ok(json!({
         "thread_id": id,
-        "provider_session_id": session_id,
-        "title": provider_optional_text(thread.get("name"), 512),
-        "preview": provider_optional_text(thread.get("preview"), 8 * 1024).unwrap_or_default(),
-        "cwd": cwd,
-        "model_provider": model_provider,
-        "source": provider_thread_source(thread.get("source")),
+        "provider_session_identity": provider_content_identity("provider-session/0.1", session_id),
+        "workspace_identity": provider_content_identity("provider-thread-workspace/0.1", cwd),
+        "name_present": thread.get("name").is_some_and(Value::is_string),
+        "preview_present": thread.get("preview").is_some_and(Value::is_string),
+        "path_present": thread.get("path").is_some_and(Value::is_string),
+        "model_provider_present": thread.get("modelProvider").is_some_and(Value::is_string),
+        "source_kind": provider_thread_source_kind(thread.get("source")),
         "status": provider_thread_status(thread.get("status")),
-        "created_at_s": thread.get("createdAt").and_then(Value::as_i64),
-        "updated_at_s": thread.get("updatedAt").and_then(Value::as_i64),
-        "recency_at_s": thread.get("recencyAt").and_then(Value::as_i64),
+        "created_at_s": provider_nonnegative_integer(thread.get("createdAt")),
+        "updated_at_s": provider_nonnegative_integer(thread.get("updatedAt")),
+        "recency_at_s": provider_nonnegative_integer(thread.get("recencyAt")),
         "ephemeral": thread.get("ephemeral").and_then(Value::as_bool).unwrap_or(false),
-        "forked_from_thread_id": provider_optional_text(thread.get("forkedFromId"), 256),
-        "turn_count": turns
+        "forked_from_present": thread.get("forkedFromId").is_some_and(Value::is_string),
+        "parent_thread_present": thread.get("parentThreadId").is_some_and(Value::is_string),
+        "turn_count": turns.map_or(0, |turns| turns.len().min(2_000)),
+        "turn_count_truncated": turns.is_some_and(|turns| turns.len() > 2_000),
+        "content_omitted": true
     }))
 }
 
@@ -2011,26 +2275,19 @@ fn provider_turn_summaries(thread: &Value) -> Result<Vec<Value>, String> {
             let id = turn
                 .get("id")
                 .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .map(|id| bounded_provider_text(id, 256))
                 .ok_or_else(|| "Codex turn metadata is missing id".to_owned())?;
-            let status = turn
-                .get("status")
-                .and_then(Value::as_str)
-                .map(|status| bounded_provider_text(status, 32))
-                .unwrap_or_else(|| "unknown".into());
-            let item_count = turn
-                .get("items")
-                .and_then(Value::as_array)
-                .map_or(0, |items| items.len().min(10_000));
+            let id = validate_provider_opaque_text(id, "Codex turn metadata id", 256)?;
+            let items = turn.get("items").and_then(Value::as_array);
             Ok(json!({
                 "turn_id": id,
-                "status": status,
-                "started_at_s": turn.get("startedAt").and_then(Value::as_i64),
-                "completed_at_s": turn.get("completedAt").and_then(Value::as_i64),
-                "duration_ms": turn.get("durationMs").and_then(Value::as_i64),
-                "item_count": item_count,
-                "error_present": turn.get("error").is_some_and(|error| !error.is_null())
+                "status": provider_turn_status(turn.get("status")),
+                "started_at_s": provider_nonnegative_integer(turn.get("startedAt")),
+                "completed_at_s": provider_nonnegative_integer(turn.get("completedAt")),
+                "duration_ms": provider_nonnegative_integer(turn.get("durationMs")),
+                "item_count": items.map_or(0, |items| items.len().min(10_000)),
+                "item_count_truncated": items.is_some_and(|items| items.len() > 10_000),
+                "error_present": turn.get("error").is_some_and(|error| !error.is_null()),
+                "content_omitted": true
             }))
         })
         .collect()
@@ -3624,7 +3881,7 @@ impl Runtime {
             initialized: false,
             client_ready: false,
             shutdown: false,
-            sequence: 0,
+            session_sequences: HashMap::new(),
             next_id: 0,
             control: RuntimeControl::default(),
             projects,
@@ -4029,6 +4286,7 @@ impl Runtime {
                     "process_id": health.process_id,
                     "exit_code": health.exit_code,
                     "stderr": health.stderr,
+                    "unknown_notifications": health.unknown_notifications,
                     "restart_required": restart_required
                 })
             }
@@ -4131,60 +4389,33 @@ impl Runtime {
         }
     }
 
-    fn runtime_degradations(&self, request: Request) -> Vec<Value> {
-        let mut degradations = match &self.backend {
-            Backend::Codex(_) => vec![
-                json!({
-                    "feature": "agent-mutation",
-                    "state": "disabled",
-                    "reason": "Aegisy Codex sessions use read-only sandbox and never approve writes or mutating commands",
-                    "scope": "runtime"
-                }),
-                json!({
-                    "feature": "provider-thread-item-content",
-                    "state": "metadata-only",
-                    "reason": "provider thread list/read omit raw rollout items until stable AAP item mappings exist",
-                    "scope": "provider"
-                }),
-                json!({
-                    "feature": "provider-thread-delete",
-                    "state": "blocked",
-                    "reason": "requires scoped user review, recovery, retention, and compensation",
-                    "scope": "provider"
-                }),
-                json!({
-                    "feature": "provider-thread-compact",
-                    "state": "blocked",
-                    "reason": "requires a durable checkpoint, preservation review, and failure recovery",
-                    "scope": "provider"
-                }),
-            ],
-            Backend::Preview => vec![json!({
-                "feature": "codex-provider",
-                "state": "unavailable",
-                "reason": "preview runtime does not launch a provider adapter",
-                "scope": "runtime"
-            })],
-            Backend::Recovery(_) => vec![json!({
-                "feature": "workbench-mutation",
-                "state": "disabled",
-                "reason": "workbench is in read-only recovery",
-                "scope": "runtime"
-            })],
-            Backend::Unavailable(_) => vec![json!({
-                "feature": "codex-provider",
-                "state": "unavailable",
-                "reason": "provider adapter failed before becoming ready",
-                "scope": "runtime"
-            })],
+    fn runtime_degradations(&mut self, request: Request) -> Vec<Value> {
+        let snapshot = match &mut self.backend {
+            Backend::Codex(adapter) => {
+                if adapter.health().state == "running" {
+                    codex_capability_matrix::codex_snapshot()
+                } else {
+                    codex_capability_matrix::unavailable_snapshot()
+                }
+            }
+            Backend::Preview => codex_capability_matrix::preview_snapshot(),
+            Backend::Recovery(diagnostic) => {
+                match codex_capability_matrix::recovery_snapshot(&diagnostic.schema_version) {
+                    Ok(snapshot) => snapshot,
+                    Err(_) => {
+                        return self.error_for(
+                            &request,
+                            -32120,
+                            "recovery diagnostic schema version mismatch",
+                        )
+                    }
+                }
+            }
+            Backend::Unavailable(_) => codex_capability_matrix::unavailable_snapshot(),
         };
-        degradations.extend(Self::autonomy_degradations());
         self.success_for(
             &request,
-            json!({
-                "schema_version": "runtime-degradations/0.1",
-                "degradations": degradations
-            }),
+            serde_json::to_value(snapshot).expect("runtime degradation snapshot serialization"),
         )
     }
 
@@ -4450,41 +4681,6 @@ impl Runtime {
         catalog
     }
 
-    fn autonomy_degradations() -> Vec<Value> {
-        vec![
-            json!({
-                "feature": "background-jobs",
-                "state": "disabled",
-                "availability": "not-advertised",
-                "stable_enabled": false,
-                "override_available": false,
-                "scope": "runtime",
-                "reason": "durable scheduling, recovery, budgets, notifications, and release evidence are incomplete",
-                "missing_gates": ["21.2", "21.6", "21.8", "21.9", "20.9"]
-            }),
-            json!({
-                "feature": "multi-agent",
-                "state": "disabled",
-                "availability": "not-advertised",
-                "stable_enabled": false,
-                "override_available": false,
-                "scope": "runtime",
-                "reason": "child contracts, isolated worktrees, approvals, budgets, recovery, and review are incomplete",
-                "missing_gates": ["18.3", "21.3", "21.4", "21.5", "21.6", "21.10"]
-            }),
-            json!({
-                "feature": "unattended-writes",
-                "state": "disabled",
-                "availability": "not-advertised",
-                "stable_enabled": false,
-                "override_available": false,
-                "scope": "runtime",
-                "reason": "Agent mutation remains read-only until permission, sandbox, approval, checkpoint, and recovery gates complete",
-                "missing_gates": ["15.3", "16.7", "18.3", "18.4", "18.5", "18.6"]
-            }),
-        ]
-    }
-
     fn recovery_diagnostic(&self, request: Request, export: bool) -> Vec<Value> {
         let Backend::Recovery(diagnostic) = &self.backend else {
             return self.error_for(&request, -32121, "workbench recovery mode is not active");
@@ -4523,8 +4719,18 @@ impl Runtime {
         if params.protocol_version != PROTOCOL_VERSION {
             return self.error_for(&request, -32003, "unsupported AAP protocol version");
         }
+        if let Backend::Recovery(diagnostic) = &self.backend {
+            if diagnostic.schema_version != codex_capability_matrix::RECOVERY_VERSION {
+                return self.error_for(
+                    &request,
+                    -32120,
+                    "recovery diagnostic schema version mismatch",
+                );
+            }
+        }
         self.initialized = true;
-        let recovery_mode = self.is_recovery_mode();
+        let local_workbench_available =
+            matches!(&self.backend, Backend::Preview | Backend::Codex(_));
         let (backend, mut capabilities) = match &self.backend {
             Backend::Preview => (
                 BackendDescriptor {
@@ -4534,31 +4740,28 @@ impl Runtime {
                 },
                 vec!["runtime.preview".into()],
             ),
-            Backend::Codex(adapter) => {
-                let info = adapter.info();
-                (
-                    BackendDescriptor {
-                        adapter: info.adapter,
-                        status: "ready".into(),
-                        version: info.version,
-                    },
-                    vec![
-                        "runtime.codex-app-server".into(),
-                        "runtime.restart".into(),
-                        "timeline.command.structured.read-only".into(),
-                        "turn.cancel.interrupt".into(),
-                        "turn.steer.same-turn".into(),
-                        "session.provider.lifecycle.archive".into(),
-                        "session.provider.lifecycle.unarchive".into(),
-                        "session.provider.lifecycle.list-read".into(),
-                    ],
-                )
-            }
-            Backend::Recovery(diagnostic) => (
+            Backend::Codex(_) => (
+                BackendDescriptor {
+                    adapter: codex_capability_matrix::CODEX_ADAPTER.into(),
+                    status: "ready".into(),
+                    version: codex_capability_matrix::CODEX_VERSION.into(),
+                },
+                vec![
+                    "runtime.codex-app-server".into(),
+                    "runtime.restart".into(),
+                    "timeline.command.structured.read-only".into(),
+                    "turn.cancel.interrupt".into(),
+                    "turn.steer.same-turn".into(),
+                    "session.provider.lifecycle.archive".into(),
+                    "session.provider.lifecycle.unarchive".into(),
+                    "session.provider.lifecycle.list-read".into(),
+                ],
+            ),
+            Backend::Recovery(_) => (
                 BackendDescriptor {
                     adapter: "aegisy-workbench-store".into(),
                     status: "read-only-recovery".into(),
-                    version: diagnostic.schema_version.clone(),
+                    version: codex_capability_matrix::RECOVERY_VERSION.into(),
                 },
                 vec![
                     "runtime.recovery.read-only".into(),
@@ -4572,16 +4775,21 @@ impl Runtime {
                     "permission.read-only".into(),
                 ],
             ),
-            Backend::Unavailable(error) => (
+            Backend::Unavailable(_) => (
                 BackendDescriptor {
-                    adapter: "codex-app-server".into(),
+                    adapter: codex_capability_matrix::CODEX_ADAPTER.into(),
                     status: "unavailable".into(),
-                    version: error.clone(),
+                    version: codex_capability_matrix::CODEX_VERSION.into(),
                 },
-                vec!["runtime.unavailable".into(), "runtime.restart".into()],
+                vec![
+                    "runtime.unavailable".into(),
+                    "runtime.restart".into(),
+                    "runtime.health".into(),
+                    "runtime.degradations".into(),
+                ],
             ),
         };
-        if !recovery_mode {
+        if local_workbench_available {
             capabilities.extend([
                 "project.open".into(),
                 "project.list".into(),
@@ -6533,12 +6741,10 @@ impl Runtime {
                 "provider thread list limit must be between 1 and 100",
             );
         }
-        if params
-            .cursor
-            .as_deref()
-            .is_some_and(|cursor| cursor.len() > 4 * 1024 || cursor.chars().any(char::is_control))
-        {
-            return self.error_for(&request, -32602, "provider thread cursor is invalid");
+        if let Some(cursor) = params.cursor.as_deref() {
+            if validate_provider_opaque_text(cursor, "provider thread cursor", 4 * 1024).is_err() {
+                return self.error_for(&request, -32602, "provider thread cursor is invalid");
+            }
         }
         let cwd = match self.provider_project_cwd(params.project_id.as_deref()) {
             Ok(cwd) => cwd,
@@ -6578,17 +6784,36 @@ impl Runtime {
                 Err(error) => return self.error_for(&request, -32143, error),
             }
         }
+        let next_cursor = match provider_optional_opaque_text(
+            result.get("nextCursor"),
+            "Codex thread/list nextCursor",
+            4 * 1024,
+        ) {
+            Ok(cursor) => cursor,
+            Err(error) => return self.error_for(&request, -32143, error),
+        };
+        let backwards_cursor = match provider_optional_opaque_text(
+            result.get("backwardsCursor"),
+            "Codex thread/list backwardsCursor",
+            4 * 1024,
+        ) {
+            Ok(cursor) => cursor,
+            Err(error) => return self.error_for(&request, -32143, error),
+        };
         self.success_for(
             &request,
             json!({
-                "schema_version": "provider-thread-list/0.1",
+                "schema_version": "provider-thread-list/0.2",
                 "adapter": "codex-app-server",
                 "project_id": params.project_id,
                 "threads": threads,
-                "next_cursor": provider_optional_text(result.get("nextCursor"), 4 * 1024),
-                "backwards_cursor": provider_optional_text(result.get("backwardsCursor"), 4 * 1024),
+                "next_cursor": next_cursor,
+                "backwards_cursor": backwards_cursor,
+                "cursor_projection": "validated-lossless-opaque",
+                "cursor_byte_limit": 4 * 1024,
                 "provider_state_only": true,
-                "content_projection": "metadata-only"
+                "content_projection": "content-free-metadata",
+                "content_omitted": true
             }),
         )
     }
@@ -6601,11 +6826,11 @@ impl Runtime {
                 return self.error_for(&request, -32602, format!("invalid params: {error}"))
             }
         };
-        let thread_id = params.thread_id.trim();
-        if thread_id.is_empty() || thread_id.len() > 256 || thread_id.chars().any(char::is_control)
-        {
-            return self.error_for(&request, -32602, "provider thread ID is invalid");
-        }
+        let thread_id =
+            match validate_provider_opaque_text(&params.thread_id, "provider thread ID", 256) {
+                Ok(thread_id) => thread_id,
+                Err(_) => return self.error_for(&request, -32602, "provider thread ID is invalid"),
+            };
         let result = match &mut self.backend {
             Backend::Codex(adapter) => adapter.read_thread(thread_id, params.include_turns),
             Backend::Preview => {
@@ -6643,13 +6868,14 @@ impl Runtime {
         self.success_for(
             &request,
             json!({
-                "schema_version": "provider-thread-read/0.1",
+                "schema_version": "provider-thread-read/0.2",
                 "thread": summary,
                 "turns": turns,
                 "include_turns": params.include_turns,
                 "provider_state_only": true,
-                "content_projection": "metadata-only",
-                "provider_items_omitted": true
+                "content_projection": "content-free-metadata",
+                "provider_items_omitted": true,
+                "content_omitted": true
             }),
         )
     }
@@ -15060,12 +15286,16 @@ impl Runtime {
         event: &str,
         item: Option<TimelineItem>,
     ) -> Value {
-        self.sequence += 1;
+        let sequence = self
+            .session_sequences
+            .entry(session_id.to_owned())
+            .and_modify(|sequence| *sequence += 1)
+            .or_insert(1);
         serde_json::to_value(Notification {
             jsonrpc: JSONRPC_VERSION,
             method: "event",
             params: EventEnvelope {
-                sequence: self.sequence,
+                sequence: *sequence,
                 timestamp_ms: now_ms(),
                 session_id: session_id.to_owned(),
                 turn_id: turn_id.map(str::to_owned),

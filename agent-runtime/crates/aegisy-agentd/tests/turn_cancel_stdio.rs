@@ -13,6 +13,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 #[cfg(target_os = "macos")]
 use base64::Engine;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -143,10 +144,28 @@ while IFS= read -r line; do
       printf '{"id":%s,"result":{"thread":{"id":"thread-fixture"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
       ;;
     *'"method":"thread/list"'*)
-      printf '{"id":%s,"result":{"data":[{"id":"thread-fixture","sessionId":"session-fixture","name":"Fixture session","preview":"Read-only fixture preview","cwd":"/tmp/provider-fixture","modelProvider":"fixture","source":"appServer","status":{"type":"idle"},"createdAt":10,"updatedAt":20,"recencyAt":20,"ephemeral":false,"forkedFromId":null,"turns":[]}],"nextCursor":null,"backwardsCursor":null}}\n' "$id"
+      case "$line" in
+        *'"cursor":"cursor-next-1"'*)
+          printf '{"id":%s,"result":{"data":[],"nextCursor":null,"backwardsCursor":"cursor-next-1"}}\n' "$id"
+          ;;
+        *'"cursor":"fixture-sensitive-output"'*)
+          printf '{"id":%s,"result":{"data":[],"nextCursor":"Authorization: Bearer ghp_123456789012345678901234567890","backwardsCursor":null}}\n' "$id"
+          ;;
+        *)
+          printf '{"id":%s,"result":{"data":[{"id":"thread-fixture","sessionId":"provider-session-private-sentinel","name":"provider-name-private-sentinel","preview":"provider-preview-private-sentinel","cwd":"/private/provider-workspace-sentinel","path":"/private/provider-rollout-sentinel.jsonl","modelProvider":"provider-model-private-sentinel","source":"appServer","status":{"type":"idle"},"createdAt":10,"updatedAt":20,"recencyAt":20,"ephemeral":false,"forkedFromId":null,"turns":[]}],"nextCursor":"cursor-next-1","backwardsCursor":"cursor-previous-1"}}\n' "$id"
+          ;;
+      esac
       ;;
     *'"method":"thread/read"'*)
-      printf '{"id":%s,"result":{"thread":{"id":"thread-fixture","sessionId":"session-fixture","name":"Fixture session","preview":"Read-only fixture preview","cwd":"/tmp/provider-fixture","modelProvider":"fixture","source":"appServer","status":{"type":"idle"},"createdAt":10,"updatedAt":20,"recencyAt":20,"ephemeral":false,"forkedFromId":null,"turns":[{"id":"turn-fixture","items":[],"status":"completed","startedAt":10,"completedAt":20,"durationMs":10}]}}}\n' "$id"
+      case "$line" in
+        *'"threadId":"thread-long-turn-ids"'*)
+          turn_prefix=$(printf '%0256d' 0)
+          printf '{"id":%s,"result":{"thread":{"id":"thread-long-turn-ids","sessionId":"provider-session","cwd":"/private/provider-workspace-sentinel","turns":[{"id":"%sa","items":[],"status":"completed"},{"id":"%sb","items":[],"status":"completed"}]}}}\n' "$id" "$turn_prefix" "$turn_prefix"
+          ;;
+        *)
+          printf '{"id":%s,"result":{"thread":{"id":"thread-fixture","sessionId":"provider-session-private-sentinel","name":"provider-name-private-sentinel","preview":"provider-preview-private-sentinel","cwd":"/private/provider-workspace-sentinel","path":"/private/provider-rollout-sentinel.jsonl","modelProvider":"provider-model-private-sentinel","source":"appServer","status":{"type":"idle"},"createdAt":10,"updatedAt":20,"recencyAt":20,"ephemeral":false,"forkedFromId":null,"turns":[{"id":"turn-fixture","items":[{"type":"userMessage","content":"provider-item-private-sentinel"}],"status":"completed","startedAt":10,"completedAt":20,"durationMs":10}]}}}\n' "$id"
+          ;;
+      esac
       ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-fixture"}}}\n' "$id"
@@ -157,6 +176,13 @@ while IFS= read -r line; do
           printf '{"method":"turn/plan/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","explanation":"Inspect then verify","plan":[{"status":"inProgress","step":"Inspect"},{"status":"pending","step":"Verify"}]}}\n'
           printf '{"method":"turn/diff/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","diff":"@@ -1 +1 @@\\n-old\\n+new\\n"}}\n'
           printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
+          ;;
+        *'emit unknown diagnostics'*)
+          printf '{"method":"future/private-method-sk-never-log","params":{"threadId":"thread-fixture","turnId":"turn-fixture","body":"ghp_unknown_notification_private_body","path":"/private/unknown/source.rs","content":"private provider content"}}\n'
+          printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
+          ;;
+        *'request unsupported user input'*)
+          printf '{"id":"user-input-request-sentinel","method":"item/tool/requestUserInput","params":{"threadId":"thread-fixture","turnId":"turn-fixture","itemId":"user-input-item-private-sentinel","questions":[{"header":"user-input-header-private-sentinel","question":"user-input-question-private-sentinel","options":[{"label":"user-input-option-private-sentinel","description":"ghp_user_input_private_sentinel"}]}]}}\n'
           ;;
         *'emit incomplete command'*)
           tool_started_at_ms="$(date +%s)999"
@@ -196,6 +222,10 @@ while IFS= read -r line; do
           printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","tokenUsage":{"last":{"cachedInputTokens":1,"inputTokens":8,"outputTokens":2,"reasoningOutputTokens":1,"totalTokens":10},"total":{"cachedInputTokens":1,"inputTokens":8,"outputTokens":2,"reasoningOutputTokens":1,"totalTokens":10},"modelContextWindow":128000}}}\n'
           ;;
       esac
+      ;;
+    *'"id":"user-input-request-sentinel"'*)
+      printf '%s\n' "$line" > "$fixture_directory/user-input-response.json"
+      printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
       ;;
     *'"method":"turn/steer"'*)
       printf '{"id":%s,"result":{"turnId":"turn-fixture"}}\n' "$id"
@@ -1085,6 +1115,19 @@ fn stdio_codex_startup_crash_loop_is_bounded_and_unavailable() {
 
     send(
         &mut stdin,
+        &request("startup-degradations", "runtime/degradations", json!({})),
+    );
+    let degradations = receive_until(&receiver, |message| message["id"] == "startup-degradations");
+    assert_eq!(degradations["result"]["backend"]["kind"], "unavailable");
+    assert_eq!(degradations["result"]["backend"]["status"], "unavailable");
+    assert!(degradations["result"]["degradations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry["scope"] != "provider"));
+
+    send(
+        &mut stdin,
         &request("startup-shutdown", "shutdown", json!({})),
     );
     receive_until(&receiver, |message| message["id"] == "startup-shutdown");
@@ -1167,11 +1210,54 @@ fn stdio_codex_restart_recovers_after_later_process_exit() {
 
     send(
         &mut stdin,
+        &request(
+            "restart-exited-degradations",
+            "runtime/degradations",
+            json!({}),
+        ),
+    );
+    let exited_degradations = receive_until(&receiver, |message| {
+        message["id"] == "restart-exited-degradations"
+    });
+    assert_eq!(
+        exited_degradations["result"]["schema_version"],
+        "runtime-degradations/0.2"
+    );
+    assert_eq!(
+        exited_degradations["result"]["backend"]["kind"],
+        "unavailable"
+    );
+    assert_eq!(
+        exited_degradations["result"]["backend"]["status"],
+        "unavailable"
+    );
+    assert!(exited_degradations["result"]["degradations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entry| entry["scope"] != "provider"));
+
+    send(
+        &mut stdin,
         &request("restart", "runtime/restart", json!({})),
     );
     let restarted = receive_until(&receiver, |message| message["id"] == "restart");
     assert_eq!(restarted["result"]["status"], "restarted");
     assert_eq!(restarted["result"]["health"]["state"], "running");
+
+    send(
+        &mut stdin,
+        &request(
+            "restart-running-degradations",
+            "runtime/degradations",
+            json!({}),
+        ),
+    );
+    let running_degradations = receive_until(&receiver, |message| {
+        message["id"] == "restart-running-degradations"
+    });
+    assert_eq!(running_degradations["result"]["backend"]["kind"], "codex");
+    assert_eq!(running_degradations["result"]["backend"]["status"], "ready");
 
     send(
         &mut stdin,
@@ -3967,9 +4053,104 @@ fn stdio_provider_thread_list_and_read_are_bounded_metadata_projections() {
         listed["result"]["threads"][0]["thread_id"],
         "thread-fixture"
     );
-    assert_eq!(listed["result"]["content_projection"], "metadata-only");
+    assert_eq!(
+        listed["result"]["schema_version"],
+        "provider-thread-list/0.2"
+    );
+    assert_eq!(
+        listed["result"]["content_projection"],
+        "content-free-metadata"
+    );
     assert_eq!(listed["result"]["provider_state_only"], true);
-    assert!(listed["result"]["threads"][0].get("path").is_none());
+    assert_eq!(listed["result"]["content_omitted"], true);
+    assert_eq!(
+        listed["result"]["cursor_projection"],
+        "validated-lossless-opaque"
+    );
+    assert_eq!(listed["result"]["cursor_byte_limit"], 4 * 1024);
+    assert_eq!(listed["result"]["next_cursor"], "cursor-next-1");
+    assert_eq!(listed["result"]["backwards_cursor"], "cursor-previous-1");
+
+    send(
+        &mut stdin,
+        &request(
+            "provider-list-next-page",
+            "session/provider-list",
+            json!({ "limit": 10, "cursor": listed["result"]["next_cursor"] }),
+        ),
+    );
+    let next_page = receive_until(&receiver, |message| {
+        message["id"] == "provider-list-next-page"
+    });
+    assert_eq!(next_page["result"]["threads"], json!([]));
+    assert_eq!(next_page["result"]["next_cursor"], Value::Null);
+    assert_eq!(next_page["result"]["backwards_cursor"], "cursor-next-1");
+    let listed_thread = listed["result"]["threads"][0].as_object().unwrap();
+    for forbidden in [
+        "title", "name", "preview", "cwd", "path", "source", "items", "content",
+    ] {
+        assert!(
+            !listed_thread.contains_key(forbidden),
+            "provider list leaked forbidden field {forbidden}"
+        );
+    }
+
+    for (id, cursor) in [
+        (
+            "provider-list-sensitive-request",
+            "Authorization: Bearer ghp_123456789012345678901234567890".to_owned(),
+        ),
+        ("provider-list-control-request", "cursor\nnext".to_owned()),
+        ("provider-list-oversized-request", "x".repeat(4 * 1024 + 1)),
+    ] {
+        send(
+            &mut stdin,
+            &request(
+                id,
+                "session/provider-list",
+                json!({ "limit": 10, "cursor": cursor }),
+            ),
+        );
+        let rejected = receive_until(&receiver, |message| message["id"] == id);
+        assert_eq!(rejected["error"]["code"], -32602);
+    }
+
+    send(
+        &mut stdin,
+        &request(
+            "provider-list-sensitive-output",
+            "session/provider-list",
+            json!({ "limit": 10, "cursor": "fixture-sensitive-output" }),
+        ),
+    );
+    let sensitive_output = receive_until(&receiver, |message| {
+        message["id"] == "provider-list-sensitive-output"
+    });
+    assert_eq!(sensitive_output["error"]["code"], -32143);
+    assert!(!serde_json::to_string(&sensitive_output)
+        .unwrap()
+        .contains("ghp_123456789012345678901234567890"));
+    assert_eq!(listed_thread["name_present"], true);
+    assert_eq!(listed_thread["preview_present"], true);
+    assert_eq!(listed_thread["content_omitted"], true);
+    assert!(listed_thread["workspace_identity"]
+        .as_str()
+        .unwrap()
+        .starts_with("sha256:"));
+    let listed_json = serde_json::to_string(&listed).unwrap();
+    for forbidden in [
+        "provider-session-private-sentinel",
+        "provider-name-private-sentinel",
+        "provider-preview-private-sentinel",
+        "/private/provider-workspace-sentinel",
+        "/private/provider-rollout-sentinel.jsonl",
+        "provider-model-private-sentinel",
+    ] {
+        assert!(
+            !listed_json.contains(forbidden),
+            "provider list response leaked {forbidden}"
+        );
+    }
 
     send(
         &mut stdin,
@@ -3982,7 +4163,55 @@ fn stdio_provider_thread_list_and_read_are_bounded_metadata_projections() {
     let read = receive_until(&receiver, |message| message["id"] == "provider-read");
     assert_eq!(read["result"]["thread"]["thread_id"], "thread-fixture");
     assert_eq!(read["result"]["turns"][0]["turn_id"], "turn-fixture");
+    assert_eq!(read["result"]["schema_version"], "provider-thread-read/0.2");
     assert_eq!(read["result"]["provider_items_omitted"], true);
+    assert_eq!(read["result"]["content_omitted"], true);
+    let read_thread = read["result"]["thread"].as_object().unwrap();
+    for forbidden in [
+        "title", "name", "preview", "cwd", "path", "source", "items", "content",
+    ] {
+        assert!(
+            !read_thread.contains_key(forbidden),
+            "provider read leaked forbidden field {forbidden}"
+        );
+    }
+    let read_turn = read["result"]["turns"][0].as_object().unwrap();
+    for forbidden in ["items", "content", "error"] {
+        assert!(
+            !read_turn.contains_key(forbidden),
+            "provider turn summary leaked forbidden field {forbidden}"
+        );
+    }
+    let read_json = serde_json::to_string(&read).unwrap();
+    for forbidden in [
+        "provider-session-private-sentinel",
+        "provider-name-private-sentinel",
+        "provider-preview-private-sentinel",
+        "/private/provider-workspace-sentinel",
+        "/private/provider-rollout-sentinel.jsonl",
+        "provider-model-private-sentinel",
+        "provider-item-private-sentinel",
+        "userMessage",
+    ] {
+        assert!(
+            !read_json.contains(forbidden),
+            "provider read response leaked {forbidden}"
+        );
+    }
+
+    send(
+        &mut stdin,
+        &request(
+            "provider-read-colliding-turn-prefixes",
+            "session/provider-read",
+            json!({ "thread_id": "thread-long-turn-ids", "include_turns": true }),
+        ),
+    );
+    let colliding_turns = receive_until(&receiver, |message| {
+        message["id"] == "provider-read-colliding-turn-prefixes"
+    });
+    assert_eq!(colliding_turns["error"]["code"], -32143);
+    assert!(colliding_turns.get("result").is_none());
 
     send(
         &mut stdin,
@@ -3991,6 +4220,192 @@ fn stdio_provider_thread_list_and_read_are_bounded_metadata_projections() {
     receive_until(&receiver, |message| {
         message["id"] == "provider-read-shutdown"
     });
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_unknown_codex_notification_is_only_a_bounded_health_diagnostic() {
+    let codex = fake_codex();
+    let data_root = codex
+        .parent()
+        .unwrap()
+        .join("unknown-notification-workbench");
+    let (mut child, mut stdin, receiver, reader, session_id) =
+        start_codex_runtime(&codex, &data_root, "unknown-notification");
+
+    send(
+        &mut stdin,
+        &request(
+            "unknown-notification-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "emit unknown diagnostics",
+                "idempotency_key": "unknown-notification-turn"
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| {
+        message["id"] == "unknown-notification-turn"
+    });
+    receive_until(&receiver, |message| {
+        message["method"] == "event" && message["params"]["event"] == "turn.completed"
+    });
+
+    send(
+        &mut stdin,
+        &request("unknown-notification-health", "runtime/health", json!({})),
+    );
+    let health = receive_until(&receiver, |message| {
+        message["id"] == "unknown-notification-health"
+    });
+    let diagnostics = &health["result"]["unknown_notifications"];
+    assert_eq!(
+        diagnostics["schema_version"],
+        "codex-unknown-notification-diagnostics/0.1"
+    );
+    assert_eq!(diagnostics["total_count"], 1);
+    assert_eq!(diagnostics["unretained_count"], 0);
+    assert_eq!(diagnostics["methods"].as_array().map(Vec::len), Some(1));
+    assert_eq!(diagnostics["methods"][0]["count"], 1);
+    assert_eq!(
+        diagnostics["methods"][0]["method_sha256"],
+        format!(
+            "sha256:{:x}",
+            Sha256::digest(b"future/private-method-sk-never-log")
+        )
+    );
+
+    send(
+        &mut stdin,
+        &request(
+            "unknown-notification-read",
+            "session/read",
+            json!({ "session_id": session_id, "limit": 100 }),
+        ),
+    );
+    let replay = receive_until(&receiver, |message| {
+        message["id"] == "unknown-notification-read"
+    });
+    let combined = serde_json::to_string(&(&health, &replay)).unwrap();
+    for forbidden in [
+        "future/private-method-sk-never-log",
+        "ghp_unknown_notification_private_body",
+        "/private/unknown/source.rs",
+        "private provider content",
+    ] {
+        assert!(
+            !combined.contains(forbidden),
+            "unknown notification diagnostic leaked {forbidden}"
+        );
+    }
+    assert!(!combined.contains("\"kind\":\"unknown-notification\""));
+    let replay_json = serde_json::to_string(&replay).unwrap();
+    assert!(!replay_json.contains("method_sha256"));
+    assert!(!replay_json.contains("codex-unknown-notification-diagnostics/0.1"));
+
+    send(
+        &mut stdin,
+        &request("unknown-notification-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| {
+        message["id"] == "unknown-notification-shutdown"
+    });
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_user_input_server_request_returns_unsupported_without_fake_answers() {
+    let codex = fake_codex();
+    let response_path = codex.parent().unwrap().join("user-input-response.json");
+    let data_root = codex.parent().unwrap().join("user-input-workbench");
+    let (mut child, mut stdin, receiver, reader, session_id) =
+        start_codex_runtime(&codex, &data_root, "user-input");
+
+    send(
+        &mut stdin,
+        &request(
+            "user-input-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "request unsupported user input",
+                "idempotency_key": "user-input-turn"
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| message["id"] == "user-input-turn");
+    receive_until(&receiver, |message| {
+        message["method"] == "event" && message["params"]["event"] == "turn.completed"
+    });
+
+    let provider_response: Value =
+        serde_json::from_str(&fs::read_to_string(&response_path).unwrap()).unwrap();
+    assert_eq!(provider_response["id"], "user-input-request-sentinel");
+    assert_eq!(provider_response["error"]["code"], -32601);
+    assert_eq!(
+        provider_response["error"]["message"],
+        "user input request is unsupported"
+    );
+    assert!(provider_response.get("result").is_none());
+    let response_json = serde_json::to_string(&provider_response).unwrap();
+    for forbidden in [
+        "answers",
+        "questions",
+        "user-input-item-private-sentinel",
+        "user-input-header-private-sentinel",
+        "user-input-question-private-sentinel",
+        "user-input-option-private-sentinel",
+        "ghp_user_input_private_sentinel",
+    ] {
+        assert!(
+            !response_json.contains(forbidden),
+            "user input response leaked or fabricated {forbidden}"
+        );
+    }
+
+    send(
+        &mut stdin,
+        &request("user-input-health", "runtime/health", json!({})),
+    );
+    let health = receive_until(&receiver, |message| message["id"] == "user-input-health");
+    assert_eq!(health["result"]["unknown_notifications"]["total_count"], 0);
+    send(
+        &mut stdin,
+        &request(
+            "user-input-read",
+            "session/read",
+            json!({ "session_id": session_id, "limit": 100 }),
+        ),
+    );
+    let replay = receive_until(&receiver, |message| message["id"] == "user-input-read");
+    let replay_json = serde_json::to_string(&replay).unwrap();
+    for forbidden in [
+        "answers",
+        "questions",
+        "user-input-item-private-sentinel",
+        "user-input-header-private-sentinel",
+        "user-input-question-private-sentinel",
+        "user-input-option-private-sentinel",
+        "ghp_user_input_private_sentinel",
+    ] {
+        assert!(
+            !replay_json.contains(forbidden),
+            "user input request entered the Timeline as {forbidden}"
+        );
+    }
+
+    send(
+        &mut stdin,
+        &request("user-input-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| message["id"] == "user-input-shutdown");
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();

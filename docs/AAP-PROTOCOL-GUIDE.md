@@ -301,20 +301,30 @@ text.
 `runtime/degradations` is a versioned, content-free explanation for features that
 are unavailable, metadata-only, or blocked. The current Codex adapter reports
 read-only Agent mutation, metadata-only provider thread items, blocked provider
-delete/compact, and the release gate for background/multi-agent autonomy. The
+delete/compact, runtime-only desktop gaps, and the release gate for
+background/multi-agent autonomy. Version `0.2` binds the complete declaration to
+the pinned Codex `0.144.5` schema through a fixed capability-matrix identity and
+exact request/notification/item counts. The
 autonomy entries use `availability: not-advertised`, `stable_enabled: false`,
 `override_available: false`, and bounded `missing_gates`; there is no hidden
 experimental switch. A client must fail closed when the schema is unknown or the
-request fails.
+request fails, and it must not start a new Turn until the complete snapshot is
+validated.
 
 ```jsonl
 {"jsonrpc":"2.0","id":"6","method":"runtime/degradations","params":{}}
-{"jsonrpc":"2.0","id":"6","result":{"schema_version":"runtime-degradations/0.1","degradations":[{"feature":"agent-mutation","state":"disabled","scope":"runtime"},{"feature":"provider-thread-item-content","state":"metadata-only","scope":"provider"},{"feature":"provider-thread-compact","state":"blocked","scope":"provider"},{"feature":"background-jobs","state":"disabled","availability":"not-advertised","stable_enabled":false,"override_available":false,"scope":"runtime","missing_gates":["21.2","21.6","21.8","21.9","20.9"]},{"feature":"multi-agent","state":"disabled","availability":"not-advertised","stable_enabled":false,"override_available":false,"scope":"runtime","missing_gates":["18.3","21.3","21.4","21.5","21.6","21.10"]},{"feature":"unattended-writes","state":"disabled","availability":"not-advertised","stable_enabled":false,"override_available":false,"scope":"runtime","missing_gates":["15.3","16.7","18.3","18.4","18.5","18.6"]}]}}
+{"jsonrpc":"2.0","id":"6","result":{"schema_version":"runtime-degradations/0.2","backend":{"kind":"codex","adapter":"codex-app-server","version":"codex-cli 0.144.5","status":"ready"},"capability_matrix":{"schema_version":"codex-capability-matrix/0.1","identity":"codex-capability-matrix:sha256:473ddd66cd30b903778c248f28aa55d3cfb2ff37123c4831a23a263703362d04","adapter":"codex-app-server","codex_version":"codex-cli 0.144.5","vendor_schema_version":"v2","vendor_schema_sha256":"e66ff6063c146734a92c9a018e43efefb079278ee597782f30674edcccedbdb2","client_request_count":87,"server_notification_count":68,"thread_item_count":18,"complete":true},"complete":true,"degradations":[{"feature":"agent-mutation","state":"disabled","reason":"Aegisy Codex sessions use read-only sandbox and never approve writes or mutating commands","scope":"runtime","authority_granted":false},{"feature":"provider-thread-item-content","state":"metadata-only","reason":"provider thread list/read omit raw rollout items until stable AAP item mappings exist","scope":"provider","authority_granted":false},{"feature":"provider-thread-delete","state":"blocked","reason":"requires scoped user review, recovery, retention, and compensation","scope":"provider","authority_granted":false},{"feature":"provider-thread-compact","state":"blocked","reason":"requires a durable checkpoint, preservation review, and failure recovery","scope":"provider","authority_granted":false},{"feature":"turn.steer.same-turn","state":"runtime-only","reason":"Codex runtime supports same-turn steering but the desktop surface is not complete","scope":"provider","authority_granted":false,"runtime_supported":true,"desktop_surface_available":false},{"feature":"session.provider.lifecycle.list-read","state":"runtime-only","reason":"Codex runtime supports provider list/read metadata but the desktop surface is not complete","scope":"provider","authority_granted":false,"runtime_supported":true,"desktop_surface_available":false},{"feature":"background-jobs","state":"disabled","reason":"durable scheduling, recovery, budgets, notifications, and release evidence are incomplete","scope":"runtime","authority_granted":false,"availability":"not-advertised","stable_enabled":false,"override_available":false,"missing_gates":["21.2","21.6","21.8","21.9","20.9"]},{"feature":"multi-agent","state":"disabled","reason":"child contracts, isolated worktrees, approvals, budgets, recovery, and review are incomplete","scope":"runtime","authority_granted":false,"availability":"not-advertised","stable_enabled":false,"override_available":false,"missing_gates":["18.3","21.3","21.4","21.5","21.6","21.10"]},{"feature":"unattended-writes","state":"disabled","reason":"Agent mutation remains read-only until permission, sandbox, approval, checkpoint, and recovery gates complete","scope":"runtime","authority_granted":false,"availability":"not-advertised","stable_enabled":false,"override_available":false,"missing_gates":["15.3","16.7","18.3","18.4","18.5","18.6"]}]}}
 ```
 
 No degradation response grants write, command, Hook, network, deletion, or
 compaction authority. The Qt host displays the state and does not expose an
 action that would simulate a blocked provider operation.
+
+Provider list pagination treats a cursor as an opaque Provider token. A cursor
+that is at most 4 KiB and contains neither controls nor credential-shaped content
+is returned and sent back byte-for-byte. An invalid request or response cursor
+fails the operation; it is never truncated, redacted, or replaced with a token
+that could change Provider pagination semantics.
 
 ## Model Catalog Boundary
 

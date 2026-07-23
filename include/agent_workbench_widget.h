@@ -96,6 +96,11 @@ private:
     bool currentSessionDeletionPending() const;
     void loadSessionFromList(QListWidgetItem *item);
     void loadOlderSessionHistory();
+    QString requestSessionHistory(const QString &sessionId,
+                                  const QString &cursor = QString(),
+                                  int limit = 100,
+                                  bool appending = false);
+    void clearSessionReadRequest();
     void resetSessionHistoryPagination();
     void submitPrompt();
     void cancelActiveTurn();
@@ -136,6 +141,13 @@ private:
     void clearContextItems();
     QJsonArray includedTurnContext() const;
     void addTimelineItem(const QJsonObject &item, bool prepend = false);
+    bool validateTimelineItem(const QJsonObject &item,
+                              const QString &expectedSessionId,
+                              const QString &expectedTurnId,
+                              QHash<QString, QString> *itemKinds,
+                              QHash<QString, QString> *itemRoles) const;
+    bool validateTimelineEvent(const QJsonObject &event,
+                               QJsonObject *validatedItem = nullptr) const;
     void addNotice(const QString &text, bool error = false);
     bool storeSessionRuntimeBinding(const QString &sessionId, const QJsonObject &runtime);
     bool storeSessionContextThreshold(const QString &sessionId,
@@ -369,6 +381,10 @@ private:
     QTimer *m_runtimeHealthTimer = nullptr;
     QHash<QString, QLabel *> m_itemLabels;
     QHash<QString, QPushButton *> m_itemArtifactButtons;
+    QHash<QString, QString> m_itemKinds;
+    QHash<QString, QString> m_itemRoles;
+    QHash<QString, QString> m_itemStates;
+    QHash<QString, QString> m_turnStates;
     QHash<QString, QString> m_commandArtifactRequests;
     QHash<QString, QTreeWidgetItem *> m_treeItems;
     QHash<QString, QString> m_workspaceListRequests;
@@ -482,6 +498,13 @@ private:
     QString m_retentionScopeLabel;
     QString m_sessionHistoryId;
     QString m_sessionHistoryCursor;
+    quint64 m_sessionHistoryFirstSequence = 0;
+    quint64 m_sessionHistoryLatestSequence = 0;
+    QString m_sessionReadSessionId;
+    QString m_sessionReadCursor;
+    int m_sessionReadLimit = 0;
+    quint64 m_sessionReadExpectedFirstSequence = 0;
+    quint64 m_sessionReadExpectedLatestSequence = 0;
     QString m_chatSessionId;
     QString m_chatSessionProjectId;
     QString m_workSessionId;
@@ -495,6 +518,7 @@ private:
     QString m_pendingPrompt;
     QString m_activeTurnSessionId;
     QString m_activeTurnId;
+    QHash<QString, quint64> m_lastTimelineEventSequences;
     QString m_turnCancelRequestId;
     QString m_contextInspectRequestId;
     QString m_pinnedContextListRequestId;
@@ -529,7 +553,15 @@ private:
     bool m_pinnedContextAvailable = false;
     bool m_imageContextAvailable = false;
     bool m_gitContextAvailable = false;
-    bool m_runtimeDegradationsAvailable = false;
+    enum class RuntimeDegradationState {
+        NotRequested,
+        Pending,
+        Valid,
+        Invalid,
+    };
+    RuntimeDegradationState m_runtimeDegradationState =
+        RuntimeDegradationState::NotRequested;
+    QString m_runtimeDegradationRequestId;
     QHash<QString, QString> m_runtimeDegradationStates;
     quint64 m_startupRebuiltSessionCount = 0;
     quint64 m_quarantinedSessionCount = 0;

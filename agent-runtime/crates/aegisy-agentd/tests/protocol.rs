@@ -240,7 +240,25 @@ fn runtime_degradations_are_explicit_for_preview() {
     let messages = runtime.handle_line(&request("degradations", "runtime/degradations", json!({})));
     assert_eq!(
         messages[0]["result"]["schema_version"],
-        "runtime-degradations/0.1"
+        "runtime-degradations/0.2"
+    );
+    assert_eq!(messages[0]["result"]["complete"], true);
+    assert_eq!(messages[0]["result"]["backend"]["kind"], "preview");
+    assert_eq!(
+        messages[0]["result"]["capability_matrix"]["identity"],
+        "codex-capability-matrix:sha256:473ddd66cd30b903778c248f28aa55d3cfb2ff37123c4831a23a263703362d04"
+    );
+    assert_eq!(
+        messages[0]["result"]["capability_matrix"]["client_request_count"],
+        87
+    );
+    assert_eq!(
+        messages[0]["result"]["capability_matrix"]["server_notification_count"],
+        68
+    );
+    assert_eq!(
+        messages[0]["result"]["capability_matrix"]["thread_item_count"],
+        18
     );
     assert_eq!(
         messages[0]["result"]["degradations"][0]["feature"],
@@ -420,10 +438,21 @@ fn codex_provider_lifecycle_failure_fixture_is_redacted_and_recoverable() {
         .find(|message| message["result"]["degradations"].is_array())
         .unwrap();
     assert_eq!(
-        compact["result"]["degradations"][0]["feature"],
-        "provider-thread-compact"
+        compact["result"]["schema_version"],
+        "runtime-degradations/0.2"
     );
-    assert_eq!(compact["result"]["degradations"][0]["state"], "blocked");
+    assert_eq!(
+        compact["result"]["capability_matrix"]["identity"],
+        "codex-capability-matrix:sha256:473ddd66cd30b903778c248f28aa55d3cfb2ff37123c4831a23a263703362d04"
+    );
+    let compact_feature = compact["result"]["degradations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|feature| feature["feature"] == "provider-thread-compact")
+        .expect("complete degradation fixture must retain provider compact denial");
+    assert_eq!(compact_feature["state"], "blocked");
+    assert_eq!(compact_feature["authority_granted"], false);
 
     let health_states = messages
         .iter()
@@ -3381,6 +3410,35 @@ fn emits_ordered_turn_lifecycle() {
                 < pair[1]["params"]["sequence"].as_u64().unwrap()
         );
     }
+
+    let second_session =
+        runtime.handle_line(&request("4", "session/start", json!({ "mode": "chat" })));
+    let second_session_id = second_session[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap();
+    let second_messages = runtime.handle_line(&request(
+        "5",
+        "turn/start",
+        json!({
+            "session_id": second_session_id,
+            "input": "second session",
+            "idempotency_key": "turn-client-2"
+        }),
+    ));
+    assert_eq!(second_messages[1]["params"]["sequence"], 1);
+    assert_eq!(second_messages[5]["params"]["sequence"], 5);
+
+    let resumed_messages = runtime.handle_line(&request(
+        "6",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "resume first session",
+            "idempotency_key": "turn-client-3"
+        }),
+    ));
+    assert_eq!(resumed_messages[1]["params"]["sequence"], 6);
+    assert_eq!(resumed_messages[5]["params"]["sequence"], 10);
 }
 
 #[test]
