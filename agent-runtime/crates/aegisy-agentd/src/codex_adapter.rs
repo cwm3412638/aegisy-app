@@ -5,7 +5,7 @@ use crate::session_environment::{EnvironmentSummary, ProcessEnvironment, Session
 use crate::turn_trace::{
     configured_runtime_approval_policy_identity, effective_runtime_approval_policy_identity,
     provider_thread_identity, ApprovalPolicyPermissionProfile, ApprovalPolicyReviewer,
-    ApprovalPolicySandbox, RuntimeApprovalPolicy, TurnTraceError,
+    ApprovalPolicySandbox, RuntimeApprovalPolicy, RuntimeDenialRequestKind, TurnTraceError,
 };
 use crate::{TurnCancellationHandle, TurnSteerRequest, TurnSteeringHandle};
 use serde::Serialize;
@@ -32,6 +32,8 @@ const MAX_CODEX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const CODEX_ADAPTER_IDENTITY: &str = "codex-app-server";
 const CODEX_TRACE_RUNTIME_VERSION: &str = "0.144.5";
 const PINNED_CODEX_VERSION: &str = "codex-cli 0.144.5";
+const MAX_SERVER_REQUEST_ID_BYTES: usize = 128;
+const MAX_SERVER_REQUEST_ITEM_ID_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BackendInfo {
@@ -307,6 +309,48 @@ pub(crate) struct CodexTurnRequest<'a> {
     pub input: &'a str,
     pub local_images: &'a [PathBuf],
     pub idempotency_key: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodexRuntimeDenialRequest {
+    pub request_kind: RuntimeDenialRequestKind,
+    pub provider_request_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CodexRuntimeDenialFailure {
+    Preflight(String),
+    ResponseWrite(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CodexTurnFailure {
+    Reusable(String),
+    RestartRequired(String),
+}
+
+impl CodexTurnFailure {
+    pub(crate) fn restart_required(&self) -> bool {
+        matches!(self, Self::RestartRequired(_))
+    }
+
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Reusable(message) | Self::RestartRequired(message) => message,
+        }
+    }
+}
+
+impl From<String> for CodexTurnFailure {
+    fn from(message: String) -> Self {
+        Self::Reusable(message)
+    }
+}
+
+impl From<&str> for CodexTurnFailure {
+    fn from(message: &str) -> Self {
+        Self::Reusable(message.to_owned())
+    }
 }
 
 impl CodexAdapter {
@@ -647,15 +691,20 @@ pub(crate) fn codex_approval_policy_binding(
 }
 
 impl CodexAdapter {
-    pub(crate) fn run_turn<F>(
+    pub(crate) fn run_turn<F, D>(
         &mut self,
         request: CodexTurnRequest<'_>,
         cancellation: &TurnCancellationHandle,
         steering: &TurnSteeringHandle,
         mut emit: F,
-    ) -> Result<(), String>
+        mut deny_runtime_request: D,
+    ) -> Result<(), CodexTurnFailure>
     where
         F: FnMut(CodexEvent),
+        D: FnMut(
+            CodexRuntimeDenialRequest,
+            &mut dyn FnMut() -> Result<(), String>,
+        ) -> Result<(), CodexRuntimeDenialFailure>,
     {
         let request_id = self.write_request("turn/start", turn_start_params(&request))?;
         let response = self.wait_for_response(request_id, REQUEST_TIMEOUT)?;
@@ -701,6 +750,16 @@ impl CodexAdapter {
             else {
                 continue;
             };
+            if let Some(request_kind) = runtime_denial_request_kind(&message) {
+                self.handle_turn_runtime_denial_request(
+                    &message,
+                    request.thread_id,
+                    &turn_id,
+                    request_kind,
+                    &mut deny_runtime_request,
+                )?;
+                continue;
+            }
             if self.handle_server_request(&message)? {
                 continue;
             }
@@ -899,13 +958,30 @@ impl CodexAdapter {
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             return Ok(false);
         };
+        if matches!(
+            method,
+            "item/commandExecution/requestApproval"
+                | "item/fileChange/requestApproval"
+                | "item/permissions/requestApproval"
+        ) {
+            let id = message
+                .get("id")
+                .filter(|value| valid_server_request_id(value))
+                .cloned()
+                .unwrap_or(Value::Null);
+            self.write_message(&json!({
+                "id": id,
+                "error": {
+                    "code": -32602,
+                    "message": "approval request requires an active bound turn"
+                }
+            }))?;
+            return Err("Codex approval request arrived without an active bound turn".into());
+        }
         let Some(id) = message.get("id").cloned() else {
             return Ok(false);
         };
         let result = match method {
-            "item/commandExecution/requestApproval"
-            | "item/fileChange/requestApproval"
-            | "item/permissions/requestApproval" => json!({ "decision": "decline" }),
             "item/tool/requestUserInput" => json!({ "answers": {} }),
             _ => {
                 self.write_message(&json!({
@@ -919,6 +995,99 @@ impl CodexAdapter {
         Ok(true)
     }
 
+    fn handle_turn_runtime_denial_request<D>(
+        &mut self,
+        message: &Value,
+        active_thread_id: &str,
+        active_turn_id: &str,
+        request_kind: RuntimeDenialRequestKind,
+        deny_runtime_request: &mut D,
+    ) -> Result<(), CodexTurnFailure>
+    where
+        D: FnMut(
+            CodexRuntimeDenialRequest,
+            &mut dyn FnMut() -> Result<(), String>,
+        ) -> Result<(), CodexRuntimeDenialFailure>,
+    {
+        let Some(id) = message
+            .get("id")
+            .filter(|value| valid_server_request_id(value))
+            .cloned()
+        else {
+            self.write_message(&invalid_runtime_denial_request_error())
+                .map_err(CodexTurnFailure::RestartRequired)?;
+            return Err(CodexTurnFailure::RestartRequired(
+                "Codex approval request has an invalid request ID".to_owned(),
+            ));
+        };
+        let Some(params) = message.get("params").and_then(Value::as_object) else {
+            self.write_message(&invalid_runtime_denial_request_error())
+                .map_err(CodexTurnFailure::RestartRequired)?;
+            return Err(CodexTurnFailure::RestartRequired(
+                "Codex approval request params are invalid".to_owned(),
+            ));
+        };
+        let thread_matches =
+            params.get("threadId").and_then(Value::as_str) == Some(active_thread_id);
+        let turn_matches = params.get("turnId").and_then(Value::as_str) == Some(active_turn_id);
+        let item_valid = params
+            .get("itemId")
+            .and_then(Value::as_str)
+            .is_some_and(|item| !item.is_empty() && item.len() <= MAX_SERVER_REQUEST_ITEM_ID_BYTES);
+        let started_at_valid = params
+            .get("startedAtMs")
+            .and_then(Value::as_i64)
+            .is_some_and(|value| value >= 0);
+        if !thread_matches || !turn_matches || !item_valid || !started_at_valid {
+            self.write_message(&json!({
+                "id": id,
+                "error": {
+                    "code": -32602,
+                    "message": "approval request does not match the active turn"
+                }
+            }))
+            .map_err(CodexTurnFailure::RestartRequired)?;
+            return Err(CodexTurnFailure::Reusable(
+                "Codex approval request does not match the active turn".to_owned(),
+            ));
+        }
+        let provider_request_identity = match codex_runtime_denial_request_identity(message) {
+            Ok(identity) => identity,
+            Err(error) => {
+                self.write_message(&runtime_denial_preflight_error(id))
+                    .map_err(CodexTurnFailure::RestartRequired)?;
+                return Err(CodexTurnFailure::Reusable(error));
+            }
+        };
+        let result = match request_kind {
+            RuntimeDenialRequestKind::CommandExecution | RuntimeDenialRequestKind::FileChange => {
+                json!({ "decision": "decline" })
+            }
+            RuntimeDenialRequestKind::Permissions => {
+                json!({ "permissions": {}, "scope": "turn" })
+            }
+        };
+        let response = json!({ "id": id, "result": result });
+        let mut write_denial = || self.write_message(&response);
+        match deny_runtime_request(
+            CodexRuntimeDenialRequest {
+                request_kind,
+                provider_request_identity,
+            },
+            &mut write_denial,
+        ) {
+            Ok(()) => Ok(()),
+            Err(CodexRuntimeDenialFailure::Preflight(error)) => {
+                self.write_message(&runtime_denial_preflight_error(id))
+                    .map_err(CodexTurnFailure::RestartRequired)?;
+                Err(CodexTurnFailure::Reusable(error))
+            }
+            Err(CodexRuntimeDenialFailure::ResponseWrite(error)) => {
+                Err(CodexTurnFailure::RestartRequired(error))
+            }
+        }
+    }
+
     fn write_message(&mut self, message: &Value) -> Result<(), String> {
         serde_json::to_writer(&mut self.stdin, message)
             .map_err(|error| format!("cannot encode Codex request: {error}"))?;
@@ -927,6 +1096,56 @@ impl CodexAdapter {
             .and_then(|_| self.stdin.flush())
             .map_err(|error| format!("cannot write to Codex App Server: {error}"))
     }
+}
+
+fn runtime_denial_request_kind(message: &Value) -> Option<RuntimeDenialRequestKind> {
+    match message.get("method").and_then(Value::as_str) {
+        Some("item/commandExecution/requestApproval") => {
+            Some(RuntimeDenialRequestKind::CommandExecution)
+        }
+        Some("item/fileChange/requestApproval") => Some(RuntimeDenialRequestKind::FileChange),
+        Some("item/permissions/requestApproval") => Some(RuntimeDenialRequestKind::Permissions),
+        _ => None,
+    }
+}
+
+fn valid_server_request_id(value: &Value) -> bool {
+    value.as_i64().is_some()
+        || value.as_str().is_some_and(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_SERVER_REQUEST_ID_BYTES
+                && !value.chars().any(char::is_control)
+        })
+}
+
+fn invalid_runtime_denial_request_error() -> Value {
+    json!({
+        "id": Value::Null,
+        "error": {
+            "code": -32602,
+            "message": "approval request is invalid"
+        }
+    })
+}
+
+fn runtime_denial_preflight_error(id: Value) -> Value {
+    json!({
+        "id": id,
+        "error": {
+            "code": -32000,
+            "message": "runtime denial could not be recorded"
+        }
+    })
+}
+
+fn codex_runtime_denial_request_identity(message: &Value) -> Result<String, String> {
+    let bytes = serde_json::to_vec(message)
+        .map_err(|_| "Codex approval request cannot be fingerprinted".to_owned())?;
+    let mut digest = Sha256::new();
+    digest.update(b"aegisy-codex-runtime-denial-request/0.1\0");
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+    Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
 fn translate_command_notification(

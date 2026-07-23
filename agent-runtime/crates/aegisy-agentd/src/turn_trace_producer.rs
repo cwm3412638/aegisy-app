@@ -10,10 +10,11 @@ use crate::turn_trace::{
     durable_record_payload, ApprovalDecisionAttribution, ApprovalPolicyPermissionProfile,
     ApprovalPolicyReviewer, ApprovalPolicySandbox, AuthorityLabel, CompletionDomain,
     CompletionEvidence, ErrorClass, EvidenceRef, EvidenceSource, ModelReason, ModelRole,
-    RedactionSummary, RuntimeApprovalPolicy, RuntimeState, SessionMode, TerminalEvidence,
-    TerminalState, ToolProviderStatus, ToolState, ToolTimelineBinding, TraceBinding, TracePayload,
-    TurnAccess, TurnKind, TurnTrace, TurnTraceError, UsageAccounting, UsageAttribution,
-    UsageReportScope, MAX_DURABLE_EVENT_BYTES,
+    RedactionSummary, RuntimeApprovalPolicy, RuntimeDenialAttribution, RuntimeDenialRequestKind,
+    RuntimeDenialResponseState, RuntimeState, SessionMode, TerminalEvidence, TerminalState,
+    ToolProviderStatus, ToolState, ToolTimelineBinding, TraceBinding, TracePayload, TurnAccess,
+    TurnKind, TurnTrace, TurnTraceError, UsageAccounting, UsageAttribution, UsageReportScope,
+    MAX_DURABLE_EVENT_BYTES, MAX_RUNTIME_DENIALS,
 };
 use crate::usage_authority::{UsageAuthorityError, UsageAuthorityReport};
 use sha2::{Digest, Sha256};
@@ -111,9 +112,31 @@ pub struct UsageSnapshotMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDenialRequestMetadata {
+    pub request_kind: RuntimeDenialRequestKind,
+    pub provider_request_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeDenialTraceObservation {
+    at_ms: u64,
+    payload: TracePayload,
+}
+
+/// A non-serializable, single-use reservation. It is created before the
+/// adapter writes a denial and committed only after that write has flushed.
+#[derive(Debug)]
+pub struct PreparedRuntimeDenial {
+    expected_delivery_ordinal: u64,
+    next_delivery_ordinal: u64,
+    observation: RuntimeDenialTraceObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DeferredObservation {
     Tool(Box<ToolTraceObservation>),
     Usage(UsageSnapshotMetadata),
+    RuntimeDenial(Box<RuntimeDenialTraceObservation>),
 }
 
 #[derive(Debug)]
@@ -128,6 +151,7 @@ impl DeferredObservation {
         match self {
             Self::Tool(observation) => observation.at_ms,
             Self::Usage(snapshot) => snapshot.observed_at_ms,
+            Self::RuntimeDenial(observation) => observation.at_ms,
         }
     }
 }
@@ -167,7 +191,7 @@ impl From<UsageAuthorityError> for TurnTraceProducerError {
 /// Terminal methods consume the accumulator. This makes a second terminal
 /// transition impossible through this API and gives the Store one complete,
 /// terminal-last `TurnTrace` value.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CodexTurnTraceAccumulator {
     trace: TurnTrace,
     session_mode: SessionMode,
@@ -175,8 +199,28 @@ pub struct CodexTurnTraceAccumulator {
     completion_basis: EvidenceRef,
     tool_observations: Vec<(u64, ToolTraceObservation)>,
     latest_usage_snapshot: Option<(u64, UsageSnapshotMetadata)>,
+    runtime_denial_observations: Vec<(u64, RuntimeDenialTraceObservation)>,
     next_delivery_ordinal: u64,
     terminal_persistence_denied: BTreeSet<String>,
+}
+
+impl Clone for CodexTurnTraceAccumulator {
+    fn clone(&self) -> Self {
+        let mut runtime_denial_observations = self.runtime_denial_observations.clone();
+        runtime_denial_observations
+            .reserve_exact(MAX_RUNTIME_DENIALS.saturating_sub(runtime_denial_observations.len()));
+        Self {
+            trace: self.trace.clone(),
+            session_mode: self.session_mode,
+            intent_identity: self.intent_identity.clone(),
+            completion_basis: self.completion_basis.clone(),
+            tool_observations: self.tool_observations.clone(),
+            latest_usage_snapshot: self.latest_usage_snapshot.clone(),
+            runtime_denial_observations,
+            next_delivery_ordinal: self.next_delivery_ordinal,
+            terminal_persistence_denied: self.terminal_persistence_denied.clone(),
+        }
+    }
 }
 
 impl CodexTurnTraceAccumulator {
@@ -301,6 +345,7 @@ impl CodexTurnTraceAccumulator {
             completion_basis,
             tool_observations: Vec::new(),
             latest_usage_snapshot: None,
+            runtime_denial_observations: Vec::with_capacity(MAX_RUNTIME_DENIALS),
             next_delivery_ordinal: 1,
             terminal_persistence_denied: BTreeSet::new(),
         };
@@ -322,13 +367,148 @@ impl CodexTurnTraceAccumulator {
     ) -> Result<(), TurnTraceProducerError> {
         let future_ordinals = self.open_tool_action_identities()?.len();
         let (ordinal, next_ordinal) = self.allocate_delivery_ordinal(future_ordinals)?;
-        self.validate_deferred_candidate(None, Some((ordinal, snapshot.clone())))?;
+        self.validate_deferred_candidate(None, Some((ordinal, snapshot.clone())), None)?;
         let mut candidate = self.clone();
         candidate.latest_usage_snapshot = Some((ordinal, snapshot));
         candidate.next_delivery_ordinal = next_ordinal;
         candidate.validate_durable_reservation(true)?;
         *self = candidate;
         Ok(())
+    }
+
+    /// Preflight one active-turn Provider approval request before a denial is
+    /// written. The returned ticket contains content-free identities only and
+    /// does not change the accumulator, so a failed write leaves no denial.
+    pub fn prepare_runtime_denial(
+        &self,
+        request: RuntimeDenialRequestMetadata,
+    ) -> Result<PreparedRuntimeDenial, TurnTraceProducerError> {
+        if !is_hash_identity(&request.provider_request_identity) {
+            return Err(producer_error(
+                "turn-trace-runtime-denial-provider-request-invalid",
+                "Runtime denial requires a SHA-256 Provider request identity",
+            ));
+        }
+        if self.runtime_denial_observations.len() >= MAX_RUNTIME_DENIALS {
+            return Err(producer_error(
+                "turn-trace-runtime-denial-limit",
+                "turn trace Runtime denial limit exceeded",
+            ));
+        }
+        let (
+            runtime_identity,
+            adapter_identity,
+            runtime_version,
+            provider_thread_identity,
+            policy_authority_identity,
+        ) = self.runtime_approval_policy_binding()?;
+        let request_identity = crate::turn_trace::runtime_denial_request_identity(
+            &self.trace.binding,
+            &provider_thread_identity,
+            &policy_authority_identity,
+            request.request_kind,
+            &request.provider_request_identity,
+        );
+        if self.runtime_denial_observations.iter().any(|(_, value)| {
+            matches!(
+                &value.payload,
+                TracePayload::RuntimeDenial {
+                    request_identity: existing,
+                    ..
+                } if existing == &request_identity
+            )
+        }) {
+            return Err(producer_error(
+                "turn-trace-runtime-denial-duplicate",
+                "the Provider approval request already has a Runtime denial observation",
+            ));
+        }
+        let future_ordinals = self.open_tool_action_identities()?.len();
+        let (ordinal, next_ordinal) = self.allocate_delivery_ordinal(future_ordinals)?;
+        let response_state = RuntimeDenialResponseState::DeclineFlushed;
+        let denial_identity = crate::turn_trace::runtime_denial_identity(
+            &self.trace.binding,
+            request.request_kind,
+            &request_identity,
+            &policy_authority_identity,
+            response_state,
+        );
+        let observation = RuntimeDenialTraceObservation {
+            at_ms: u64::MAX,
+            payload: TracePayload::RuntimeDenial {
+                request_kind: request.request_kind,
+                request_identity,
+                denial_identity: denial_identity.clone(),
+                runtime_identity,
+                adapter_identity,
+                runtime_version,
+                provider_thread_identity,
+                policy_authority_identity,
+                response_state,
+                attribution: RuntimeDenialAttribution::RuntimePolicy,
+                user_decision_observed: false,
+                approval_authority_observed: false,
+                execution_authority: false,
+                evidence: observed(EvidenceSource::Runtime, denial_identity, u64::MAX),
+                redaction: RedactionSummary::metadata_only(),
+            },
+        };
+        self.validate_deferred_candidate(None, None, Some((ordinal, observation.clone())))?;
+        let mut candidate = self.clone();
+        candidate
+            .runtime_denial_observations
+            .push((ordinal, observation.clone()));
+        candidate.next_delivery_ordinal = next_ordinal;
+        candidate.validate_durable_reservation(true)?;
+        Ok(PreparedRuntimeDenial {
+            expected_delivery_ordinal: ordinal,
+            next_delivery_ordinal: next_ordinal,
+            observation,
+        })
+    }
+
+    /// Commit a successfully flushed denial. `prepare_runtime_denial` reserves
+    /// all fallible work; this transition only moves the ticket into the
+    /// preallocated accumulator and normalizes its timestamp for trace order.
+    pub fn commit_runtime_denial(
+        &mut self,
+        mut prepared: PreparedRuntimeDenial,
+        observed_at_ms: u64,
+    ) {
+        assert_eq!(
+            self.next_delivery_ordinal, prepared.expected_delivery_ordinal,
+            "Runtime denial reservation must commit without interleaved observations"
+        );
+        assert!(
+            self.runtime_denial_observations.len() < MAX_RUNTIME_DENIALS,
+            "Runtime denial reservation must retain preallocated capacity"
+        );
+        let ordered_at_ms = self
+            .trace
+            .events
+            .last()
+            .map(|event| event.at_ms)
+            .into_iter()
+            .chain(self.tool_observations.iter().map(|(_, value)| value.at_ms))
+            .chain(
+                self.latest_usage_snapshot
+                    .iter()
+                    .map(|(_, value)| value.observed_at_ms),
+            )
+            .chain(
+                self.runtime_denial_observations
+                    .iter()
+                    .map(|(_, value)| value.at_ms),
+            )
+            .fold(observed_at_ms, u64::max);
+        prepared.observation.at_ms = ordered_at_ms;
+        let TracePayload::RuntimeDenial { evidence, .. } = &mut prepared.observation.payload else {
+            unreachable!("prepared Runtime denial ticket must contain RuntimeDenial")
+        };
+        evidence.observed_at_ms = Some(ordered_at_ms);
+        self.runtime_denial_observations
+            .push((prepared.expected_delivery_ordinal, prepared.observation));
+        self.next_delivery_ordinal = prepared.next_delivery_ordinal;
     }
 
     /// Retain one provider-observed, content-free Tool lifecycle observation.
@@ -362,7 +542,7 @@ impl CodexTurnTraceAccumulator {
             open_actions.remove(&action_identity);
         }
         let (ordinal, next_ordinal) = self.allocate_delivery_ordinal(open_actions.len())?;
-        self.validate_deferred_candidate(Some((ordinal, observation.clone())), None)?;
+        self.validate_deferred_candidate(Some((ordinal, observation.clone())), None, None)?;
         let mut candidate = self.clone();
         candidate.tool_observations.push((ordinal, observation));
         candidate.next_delivery_ordinal = next_ordinal;
@@ -432,6 +612,37 @@ impl CodexTurnTraceAccumulator {
             open.remove(denied);
         }
         Ok(open)
+    }
+
+    fn runtime_approval_policy_binding(
+        &self,
+    ) -> Result<(String, String, String, String, String), TurnTraceProducerError> {
+        self.trace
+            .events
+            .iter()
+            .find_map(|event| match &event.payload {
+                TracePayload::RuntimeApprovalPolicy {
+                    runtime_identity,
+                    adapter_identity,
+                    runtime_version,
+                    provider_thread_identity,
+                    policy_authority_identity,
+                    ..
+                } => Some((
+                    runtime_identity.clone(),
+                    adapter_identity.clone(),
+                    runtime_version.clone(),
+                    provider_thread_identity.clone(),
+                    policy_authority_identity.clone(),
+                )),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                producer_error(
+                    "turn-trace-runtime-denial-policy-missing",
+                    "Runtime denial requires the bound Runtime approval-policy observation",
+                )
+            })
     }
 
     /// Finalize a provider, adapter, transport, policy, tool, or Runtime
@@ -559,6 +770,7 @@ impl CodexTurnTraceAccumulator {
         &self,
         tool: Option<(u64, ToolTraceObservation)>,
         usage: Option<(u64, UsageSnapshotMetadata)>,
+        denial: Option<(u64, RuntimeDenialTraceObservation)>,
     ) -> Result<(), TurnTraceProducerError> {
         let mut candidate = self.trace.clone();
         let mut observations = self.deferred_observations();
@@ -568,6 +780,12 @@ impl CodexTurnTraceAccumulator {
         if let Some(usage) = usage {
             observations.retain(|(_, value)| !matches!(value, DeferredObservation::Usage(_)));
             observations.push((usage.0, DeferredObservation::Usage(usage.1)));
+        }
+        if let Some(denial) = denial {
+            observations.push((
+                denial.0,
+                DeferredObservation::RuntimeDenial(Box::new(denial.1)),
+            ));
         }
         append_sorted_observations(&mut candidate, observations)?;
         candidate.validate_open()?;
@@ -584,6 +802,9 @@ impl CodexTurnTraceAccumulator {
         if let Some((ordinal, snapshot)) = self.latest_usage_snapshot.as_ref() {
             observations.push((*ordinal, DeferredObservation::Usage(snapshot.clone())));
         }
+        observations.extend(self.runtime_denial_observations.iter().cloned().map(
+            |(ordinal, value)| (ordinal, DeferredObservation::RuntimeDenial(Box::new(value))),
+        ));
         observations
     }
 
@@ -592,6 +813,7 @@ impl CodexTurnTraceAccumulator {
         append_sorted_observations(&mut self.trace, observations)?;
         self.tool_observations.clear();
         self.latest_usage_snapshot = None;
+        self.runtime_denial_observations.clear();
         Ok(())
     }
 
@@ -883,9 +1105,25 @@ fn append_sorted_observations(
                     usage_report_payload(&snapshot)?,
                 )?;
             }
+            DeferredObservation::RuntimeDenial(observation) => {
+                let observation = *observation;
+                trace.append(
+                    format!("runtime-denial-{ordinal}"),
+                    observation.at_ms,
+                    observation.payload,
+                )?;
+            }
         }
     }
     Ok(())
+}
+
+fn is_hash_identity(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn usage_report_payload(
@@ -1370,11 +1608,100 @@ mod tests {
     #[test]
     fn no_persisted_usage_snapshot_emits_no_usage_report() {
         let trace = accumulator().finalize_completed(20, terminal()).unwrap();
-        assert_eq!(trace.schema_version, "turn-trace/0.5");
+        assert_eq!(trace.schema_version, "turn-trace/0.6");
         assert!(trace
             .events
             .iter()
             .all(|event| !matches!(event.payload, TracePayload::UsageReport { .. })));
+    }
+
+    #[test]
+    fn runtime_denial_is_preflighted_before_write_and_committed_without_allocation() {
+        let request = RuntimeDenialRequestMetadata {
+            request_kind: RuntimeDenialRequestKind::CommandExecution,
+            provider_request_identity: hash('7'),
+        };
+        let without_commit = accumulator();
+        let abandoned = without_commit
+            .prepare_runtime_denial(request.clone())
+            .unwrap();
+        assert!(without_commit
+            .open_trace()
+            .events
+            .iter()
+            .all(|event| !matches!(event.payload, TracePayload::RuntimeDenial { .. })));
+        drop(abandoned);
+        let trace = without_commit.finalize_interrupted(20, terminal()).unwrap();
+        assert!(trace
+            .events
+            .iter()
+            .all(|event| !matches!(event.payload, TracePayload::RuntimeDenial { .. })));
+
+        let mut committed = accumulator();
+        let prepared = committed.prepare_runtime_denial(request.clone()).unwrap();
+        let allocation = committed.runtime_denial_observations.as_ptr();
+        committed.commit_runtime_denial(prepared, 15);
+        assert_eq!(committed.runtime_denial_observations.as_ptr(), allocation);
+        assert_eq!(committed.runtime_denial_observations.len(), 1);
+        assert_eq!(
+            committed.prepare_runtime_denial(request).unwrap_err().code,
+            "turn-trace-runtime-denial-duplicate"
+        );
+        let trace = committed.finalize_completed(20, terminal()).unwrap();
+        let denials = trace
+            .events
+            .iter()
+            .filter(|event| matches!(event.payload, TracePayload::RuntimeDenial { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(denials.len(), 1);
+        let TracePayload::RuntimeDenial {
+            request_kind: RuntimeDenialRequestKind::CommandExecution,
+            response_state: RuntimeDenialResponseState::DeclineFlushed,
+            attribution: RuntimeDenialAttribution::RuntimePolicy,
+            user_decision_observed: false,
+            approval_authority_observed: false,
+            execution_authority: false,
+            ..
+        } = &denials[0].payload
+        else {
+            panic!("committed denial must retain exact false-authority semantics")
+        };
+    }
+
+    #[test]
+    fn runtime_denial_budget_exhaustion_happens_before_commit() {
+        let mut accumulator = accumulator();
+        let mut denied = None;
+        for index in 0..MAX_RUNTIME_DENIALS {
+            let mut digest = Sha256::new();
+            digest.update(b"runtime-denial-budget-test\0");
+            digest.update((index as u64).to_be_bytes());
+            let request = RuntimeDenialRequestMetadata {
+                request_kind: RuntimeDenialRequestKind::Permissions,
+                provider_request_identity: format!("sha256:{:x}", digest.finalize()),
+            };
+            match accumulator.prepare_runtime_denial(request) {
+                Ok(prepared) => accumulator.commit_runtime_denial(prepared, 15 + index as u64),
+                Err(error) => {
+                    denied = Some((error.code, accumulator.runtime_denial_observations.len()));
+                    break;
+                }
+            }
+        }
+        let (code, retained) = denied.expect("durable event budget must bound Runtime denials");
+        assert_eq!(code, "turn-trace-durable-budget-exhausted");
+        assert!(retained > 0 && retained < MAX_RUNTIME_DENIALS);
+        let trace = accumulator
+            .finalize_interrupted(u64::MAX, terminal())
+            .unwrap();
+        assert_eq!(
+            trace
+                .events
+                .iter()
+                .filter(|event| matches!(event.payload, TracePayload::RuntimeDenial { .. }))
+                .count(),
+            retained
+        );
     }
 
     #[test]

@@ -15,7 +15,8 @@ pub const LEGACY_SCHEMA_VERSION: &str = "turn-trace/0.1";
 pub const V0_2_SCHEMA_VERSION: &str = "turn-trace/0.2";
 pub const V0_3_SCHEMA_VERSION: &str = "turn-trace/0.3";
 pub const V0_4_SCHEMA_VERSION: &str = "turn-trace/0.4";
-pub const SCHEMA_VERSION: &str = "turn-trace/0.5";
+pub const V0_5_SCHEMA_VERSION: &str = "turn-trace/0.5";
+pub const SCHEMA_VERSION: &str = "turn-trace/0.6";
 pub(crate) const MAX_DURABLE_EVENT_BYTES: usize = 72 * 1024;
 pub(crate) const TURN_TRACE_RECORDED_SCHEMA_VERSION: &str = "turn.trace.recorded/0.1";
 
@@ -28,6 +29,7 @@ const MAX_CHANGED_FILES: u32 = 100_000;
 const MAX_TEST_CASES: u32 = 100_000;
 const MAX_DOMAIN_OBSERVATIONS: u32 = 100_000;
 const MAX_TOOL_ACTIONS: usize = 128;
+pub(crate) const MAX_RUNTIME_DENIALS: usize = 128;
 const MAX_TOOL_DURATION_MS: u64 = i64::MAX as u64;
 const MAX_RAW_PROVIDER_THREAD_ID_BYTES: usize = 4 * 1024;
 
@@ -359,6 +361,26 @@ pub enum ApprovalDecisionAttribution {
     NoUserDecision,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeDenialRequestKind {
+    CommandExecution,
+    FileChange,
+    Permissions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeDenialResponseState {
+    DeclineFlushed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeDenialAttribution {
+    RuntimePolicy,
+}
+
 impl RuntimeApprovalPolicy {
     fn as_str(self) -> &'static str {
         match self {
@@ -389,6 +411,24 @@ impl ApprovalPolicyPermissionProfile {
     fn as_str(self) -> &'static str {
         match self {
             Self::ReadOnly => "read-only",
+        }
+    }
+}
+
+impl RuntimeDenialRequestKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CommandExecution => "command-execution",
+            Self::FileChange => "file-change",
+            Self::Permissions => "permissions",
+        }
+    }
+}
+
+impl RuntimeDenialResponseState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DeclineFlushed => "decline-flushed",
         }
     }
 }
@@ -477,6 +517,48 @@ pub fn runtime_approval_policy_authority_identity(
             provider_thread_identity,
             configured_policy_identity,
             effective_policy_identity,
+        ],
+    )
+}
+
+pub fn runtime_denial_request_identity(
+    binding: &TraceBinding,
+    provider_thread_identity: &str,
+    policy_authority_identity: &str,
+    request_kind: RuntimeDenialRequestKind,
+    provider_request_identity: &str,
+) -> String {
+    framed_hash_identity(
+        b"aegisy-runtime-denial-request/0.1\0",
+        &[
+            &binding.session_id,
+            &binding.turn_id,
+            binding.project_id.as_deref().unwrap_or(""),
+            binding.environment_identity.as_deref().unwrap_or(""),
+            provider_thread_identity,
+            policy_authority_identity,
+            request_kind.as_str(),
+            provider_request_identity,
+        ],
+    )
+}
+
+pub fn runtime_denial_identity(
+    binding: &TraceBinding,
+    request_kind: RuntimeDenialRequestKind,
+    request_identity: &str,
+    policy_authority_identity: &str,
+    response_state: RuntimeDenialResponseState,
+) -> String {
+    framed_hash_identity(
+        b"aegisy-runtime-denial/0.1\0",
+        &[
+            &binding.session_id,
+            &binding.turn_id,
+            request_kind.as_str(),
+            request_identity,
+            policy_authority_identity,
+            response_state.as_str(),
         ],
     )
 }
@@ -805,7 +887,8 @@ impl TerminalEvidence {
                     ));
                 }
             }
-            V0_2_SCHEMA_VERSION | V0_3_SCHEMA_VERSION | V0_4_SCHEMA_VERSION | SCHEMA_VERSION => {
+            V0_2_SCHEMA_VERSION | V0_3_SCHEMA_VERSION | V0_4_SCHEMA_VERSION
+            | V0_5_SCHEMA_VERSION | SCHEMA_VERSION => {
                 if self.workspace_identity.is_some()
                     || self.git_state_identity.is_some()
                     || self.verification_identity.is_some()
@@ -878,6 +961,23 @@ pub enum TracePayload {
         policy_authority_identity: String,
         decision_attribution: ApprovalDecisionAttribution,
         user_decision_observed: bool,
+        execution_authority: bool,
+        evidence: EvidenceRef,
+        redaction: RedactionSummary,
+    },
+    RuntimeDenial {
+        request_kind: RuntimeDenialRequestKind,
+        request_identity: String,
+        denial_identity: String,
+        runtime_identity: String,
+        adapter_identity: String,
+        runtime_version: String,
+        provider_thread_identity: String,
+        policy_authority_identity: String,
+        response_state: RuntimeDenialResponseState,
+        attribution: RuntimeDenialAttribution,
+        user_decision_observed: bool,
+        approval_authority_observed: bool,
         execution_authority: bool,
         evidence: EvidenceRef,
         redaction: RedactionSummary,
@@ -1004,6 +1104,7 @@ impl TracePayload {
                     V0_2_SCHEMA_VERSION
                         | V0_3_SCHEMA_VERSION
                         | V0_4_SCHEMA_VERSION
+                        | V0_5_SCHEMA_VERSION
                         | SCHEMA_VERSION
                 ) {
                     return Err(error(
@@ -1063,10 +1164,10 @@ impl TracePayload {
                 evidence,
                 redaction,
             } => {
-                if schema_version != SCHEMA_VERSION {
+                if !matches!(schema_version, V0_5_SCHEMA_VERSION | SCHEMA_VERSION) {
                     return Err(error(
                         "turn-trace-runtime-approval-policy-version-invalid",
-                        "Runtime approval-policy observations require turn-trace/0.5",
+                        "Runtime approval-policy observations require turn-trace/0.5 or newer",
                     ));
                 }
                 validate_identity(runtime_identity, "approval-policy runtime identity")?;
@@ -1151,6 +1252,76 @@ impl TracePayload {
                     ));
                 }
             }
+            Self::RuntimeDenial {
+                request_identity,
+                denial_identity,
+                runtime_identity,
+                adapter_identity,
+                runtime_version,
+                provider_thread_identity,
+                policy_authority_identity,
+                attribution,
+                user_decision_observed,
+                approval_authority_observed,
+                execution_authority,
+                evidence,
+                redaction,
+                ..
+            } => {
+                if schema_version != SCHEMA_VERSION {
+                    return Err(error(
+                        "turn-trace-runtime-denial-version-invalid",
+                        "Runtime denial observations require turn-trace/0.6",
+                    ));
+                }
+                validate_hash_identity(request_identity, "Runtime denial request identity")?;
+                validate_hash_identity(denial_identity, "Runtime denial identity")?;
+                validate_identity(runtime_identity, "Runtime denial Runtime identity")?;
+                validate_identity(adapter_identity, "Runtime denial adapter identity")?;
+                validate_label(runtime_version, "Runtime denial Runtime version")?;
+                validate_hash_identity(
+                    provider_thread_identity,
+                    "Runtime denial Provider thread identity",
+                )?;
+                validate_hash_identity(
+                    policy_authority_identity,
+                    "Runtime denial policy authority identity",
+                )?;
+                if *attribution != RuntimeDenialAttribution::RuntimePolicy {
+                    return Err(error(
+                        "turn-trace-runtime-denial-attribution-invalid",
+                        "Runtime denial must be attributed only to Runtime policy",
+                    ));
+                }
+                if *user_decision_observed || *approval_authority_observed {
+                    return Err(error(
+                        "turn-trace-runtime-denial-user-authority-invalid",
+                        "Runtime denial cannot claim a user or Approval-authority decision",
+                    ));
+                }
+                if *execution_authority {
+                    return Err(error(
+                        "turn-trace-runtime-denial-execution-authority-invalid",
+                        "Runtime denial cannot grant execution authority",
+                    ));
+                }
+                validate_source(evidence, &[EvidenceSource::Runtime])?;
+                if evidence.authority != AuthorityLabel::Observed
+                    || evidence.identity.as_deref() != Some(denial_identity.as_str())
+                {
+                    return Err(error(
+                        "turn-trace-runtime-denial-evidence-invalid",
+                        "Runtime denial requires Runtime-observed evidence bound to its denial identity",
+                    ));
+                }
+                validate_common(evidence, redaction)?;
+                if *redaction != RedactionSummary::metadata_only() {
+                    return Err(error(
+                        "turn-trace-runtime-denial-redaction-invalid",
+                        "Runtime denial must be content-free metadata",
+                    ));
+                }
+            }
             Self::Model {
                 model_identity,
                 provider_identity,
@@ -1210,7 +1381,10 @@ impl TracePayload {
                 evidence,
                 redaction,
             } => {
-                if !matches!(schema_version, V0_4_SCHEMA_VERSION | SCHEMA_VERSION) {
+                if !matches!(
+                    schema_version,
+                    V0_4_SCHEMA_VERSION | V0_5_SCHEMA_VERSION | SCHEMA_VERSION
+                ) {
                     if provider_status.is_some()
                         || source.is_some()
                         || item_binding.is_some()
@@ -1378,10 +1552,10 @@ impl TracePayload {
                 redaction,
                 ..
             } => {
-                if schema_version == SCHEMA_VERSION {
+                if matches!(schema_version, V0_5_SCHEMA_VERSION | SCHEMA_VERSION) {
                     return Err(error(
                         "turn-trace-v0-5-approval-producer-unavailable",
-                        "turn-trace/0.5 cannot record Approval without the durable approval authority producer",
+                        "turn-trace/0.5 and newer cannot record Approval without the durable approval authority producer",
                     ));
                 }
                 validate_identity(approval_identity, "approval identity")?;
@@ -1401,7 +1575,10 @@ impl TracePayload {
             } => {
                 if matches!(
                     schema_version,
-                    V0_3_SCHEMA_VERSION | V0_4_SCHEMA_VERSION | SCHEMA_VERSION
+                    V0_3_SCHEMA_VERSION
+                        | V0_4_SCHEMA_VERSION
+                        | V0_5_SCHEMA_VERSION
+                        | SCHEMA_VERSION
                 ) {
                     return Err(error(
                         "turn-trace-v0-3-attempt-usage-invalid",
@@ -1434,7 +1611,10 @@ impl TracePayload {
             } => {
                 if !matches!(
                     schema_version,
-                    V0_3_SCHEMA_VERSION | V0_4_SCHEMA_VERSION | SCHEMA_VERSION
+                    V0_3_SCHEMA_VERSION
+                        | V0_4_SCHEMA_VERSION
+                        | V0_5_SCHEMA_VERSION
+                        | SCHEMA_VERSION
                 ) {
                     return Err(error(
                         "turn-trace-usage-report-version-invalid",
@@ -1699,7 +1879,10 @@ impl TraceEvent {
                 ));
             }
         }
-        if matches!(schema_version, V0_4_SCHEMA_VERSION | SCHEMA_VERSION) {
+        if matches!(
+            schema_version,
+            V0_4_SCHEMA_VERSION | V0_5_SCHEMA_VERSION | SCHEMA_VERSION
+        ) {
             if let TracePayload::Tool { evidence, .. } = &self.payload {
                 if evidence.observed_at_ms != Some(self.at_ms) {
                     return Err(error(
@@ -1714,6 +1897,14 @@ impl TraceEvent {
                 return Err(error(
                     "turn-trace-runtime-approval-policy-time-mismatch",
                     "Runtime approval-policy event and evidence times must match exactly",
+                ));
+            }
+        }
+        if let TracePayload::RuntimeDenial { evidence, .. } = &self.payload {
+            if evidence.observed_at_ms != Some(self.at_ms) {
+                return Err(error(
+                    "turn-trace-runtime-denial-time-mismatch",
+                    "Runtime denial event and evidence times must match exactly",
                 ));
             }
         }
@@ -1770,6 +1961,15 @@ impl TurnTrace {
         binding.validate()?;
         Ok(Self {
             schema_version: V0_4_SCHEMA_VERSION.to_owned(),
+            binding,
+            events: Vec::new(),
+        })
+    }
+
+    pub fn new_v0_5(binding: TraceBinding) -> Result<Self, TurnTraceError> {
+        binding.validate()?;
+        Ok(Self {
+            schema_version: V0_5_SCHEMA_VERSION.to_owned(),
             binding,
             events: Vec::new(),
         })
@@ -1845,6 +2045,7 @@ impl TurnTrace {
                 | V0_2_SCHEMA_VERSION
                 | V0_3_SCHEMA_VERSION
                 | V0_4_SCHEMA_VERSION
+                | V0_5_SCHEMA_VERSION
                 | SCHEMA_VERSION
         ) {
             return Err(error(
@@ -1865,9 +2066,12 @@ impl TurnTrace {
         let mut intent_count = 0usize;
         let mut usage_report_count = 0usize;
         let mut runtime_approval_policy_count = 0usize;
+        let mut runtime_denial_count = 0usize;
+        let mut runtime_denial_requests = BTreeSet::new();
         let mut error_seen = false;
         let mut intent = None;
         let mut runtime_binding = None;
+        let mut runtime_approval_policy_binding = None;
         let mut runtime_approval_policy_window_closed = false;
         let mut terminal_state = None;
         let mut tool_lifecycles = BTreeMap::<String, ToolLifecycleObservation>::new();
@@ -1991,6 +2195,82 @@ impl TurnTrace {
                             "approval-policy authority identity does not bind the Trace and Runtime evidence",
                         ));
                     }
+                    runtime_approval_policy_binding = Some((
+                        runtime_identity.as_str(),
+                        adapter_identity.as_str(),
+                        runtime_version.as_str(),
+                        provider_thread_identity.as_str(),
+                        policy_authority_identity.as_str(),
+                    ));
+                }
+                TracePayload::RuntimeDenial {
+                    request_kind,
+                    request_identity,
+                    denial_identity,
+                    runtime_identity,
+                    adapter_identity,
+                    runtime_version,
+                    provider_thread_identity,
+                    policy_authority_identity,
+                    response_state,
+                    ..
+                } => {
+                    if error_seen {
+                        return Err(error(
+                            "turn-trace-runtime-denial-order-invalid",
+                            "Runtime denial evidence must precede Error and Terminal events",
+                        ));
+                    }
+                    runtime_denial_count += 1;
+                    if runtime_denial_count > MAX_RUNTIME_DENIALS {
+                        return Err(error(
+                            "turn-trace-runtime-denial-limit",
+                            "turn trace Runtime denial limit exceeded",
+                        ));
+                    }
+                    if !runtime_denial_requests.insert(request_identity.as_str()) {
+                        return Err(error(
+                            "turn-trace-runtime-denial-duplicate",
+                            "a Provider approval request can have at most one Runtime denial observation",
+                        ));
+                    }
+                    let Some((
+                        policy_runtime,
+                        policy_adapter,
+                        policy_version,
+                        policy_provider_thread,
+                        policy_authority,
+                    )) = runtime_approval_policy_binding
+                    else {
+                        return Err(error(
+                            "turn-trace-runtime-denial-policy-missing",
+                            "Runtime denial requires an earlier Runtime approval-policy observation",
+                        ));
+                    };
+                    if policy_runtime != runtime_identity
+                        || policy_adapter != adapter_identity
+                        || policy_version != runtime_version
+                        || policy_provider_thread != provider_thread_identity
+                        || policy_authority != policy_authority_identity
+                    {
+                        return Err(error(
+                            "turn-trace-runtime-denial-policy-mismatch",
+                            "Runtime denial must bind the exact Runtime approval-policy observation",
+                        ));
+                    }
+                    let expected_denial = runtime_denial_identity(
+                        &self.binding,
+                        *request_kind,
+                        request_identity,
+                        policy_authority_identity,
+                        *response_state,
+                    );
+                    if *denial_identity != expected_denial {
+                        return Err(error(
+                            "turn-trace-runtime-denial-identity-mismatch",
+                            "Runtime denial identity does not bind the Trace, request, policy, and response state",
+                        ));
+                    }
                 }
                 TracePayload::Change {
                     state: ChangeState::Applied,
@@ -2007,7 +2287,7 @@ impl TurnTrace {
                     ..
                 } if matches!(
                     self.schema_version.as_str(),
-                    V0_4_SCHEMA_VERSION | SCHEMA_VERSION
+                    V0_4_SCHEMA_VERSION | V0_5_SCHEMA_VERSION | SCHEMA_VERSION
                 ) =>
                 {
                     if error_seen {
@@ -2122,10 +2402,14 @@ impl TurnTrace {
                 }
             }
         }
-        if self.schema_version == SCHEMA_VERSION && runtime_approval_policy_count != 1 {
+        if matches!(
+            self.schema_version.as_str(),
+            V0_5_SCHEMA_VERSION | SCHEMA_VERSION
+        ) && runtime_approval_policy_count != 1
+        {
             return Err(error(
                 "turn-trace-runtime-approval-policy-count-invalid",
-                "turn-trace/0.5 requires exactly one Runtime approval-policy observation",
+                "turn-trace/0.5 and newer require exactly one Runtime approval-policy observation",
             ));
         }
         match self.schema_version.as_str() {
@@ -2135,7 +2419,8 @@ impl TurnTrace {
                     "turn-trace/0.1 cannot contain an intent event",
                 ));
             }
-            V0_2_SCHEMA_VERSION | V0_3_SCHEMA_VERSION | V0_4_SCHEMA_VERSION | SCHEMA_VERSION
+            V0_2_SCHEMA_VERSION | V0_3_SCHEMA_VERSION | V0_4_SCHEMA_VERSION
+            | V0_5_SCHEMA_VERSION | SCHEMA_VERSION
                 if intent_count != 1 =>
             {
                 return Err(error(
@@ -2147,7 +2432,11 @@ impl TurnTrace {
         }
         if matches!(
             self.schema_version.as_str(),
-            V0_2_SCHEMA_VERSION | V0_3_SCHEMA_VERSION | V0_4_SCHEMA_VERSION | SCHEMA_VERSION
+            V0_2_SCHEMA_VERSION
+                | V0_3_SCHEMA_VERSION
+                | V0_4_SCHEMA_VERSION
+                | V0_5_SCHEMA_VERSION
+                | SCHEMA_VERSION
         ) {
             let intent = intent.expect("validated current turn trace intent count");
             if intent.0 == SessionMode::Work && self.binding.project_id.is_none() {
@@ -2190,7 +2479,7 @@ impl TurnTrace {
         }
         if matches!(
             self.schema_version.as_str(),
-            V0_4_SCHEMA_VERSION | SCHEMA_VERSION
+            V0_4_SCHEMA_VERSION | V0_5_SCHEMA_VERSION | SCHEMA_VERSION
         ) && tool_lifecycles
             .values()
             .any(|lifecycle| lifecycle.terminal_state.is_none())
@@ -2619,6 +2908,62 @@ mod tests {
         }
     }
 
+    fn runtime_denial_payload(
+        binding: &TraceBinding,
+        request_kind: RuntimeDenialRequestKind,
+        provider_request_identity: &str,
+        at_ms: u64,
+    ) -> TracePayload {
+        let TracePayload::RuntimeApprovalPolicy {
+            runtime_identity,
+            adapter_identity,
+            runtime_version,
+            provider_thread_identity,
+            policy_authority_identity,
+            ..
+        } = runtime_approval_policy_payload(binding, at_ms)
+        else {
+            unreachable!("helper must construct Runtime approval-policy evidence")
+        };
+        let request_identity = runtime_denial_request_identity(
+            binding,
+            &provider_thread_identity,
+            &policy_authority_identity,
+            request_kind,
+            provider_request_identity,
+        );
+        let response_state = RuntimeDenialResponseState::DeclineFlushed;
+        let denial_identity = runtime_denial_identity(
+            binding,
+            request_kind,
+            &request_identity,
+            &policy_authority_identity,
+            response_state,
+        );
+        TracePayload::RuntimeDenial {
+            request_kind,
+            request_identity,
+            denial_identity: denial_identity.clone(),
+            runtime_identity,
+            adapter_identity,
+            runtime_version,
+            provider_thread_identity,
+            policy_authority_identity,
+            response_state,
+            attribution: RuntimeDenialAttribution::RuntimePolicy,
+            user_decision_observed: false,
+            approval_authority_observed: false,
+            execution_authority: false,
+            evidence: EvidenceRef {
+                authority: AuthorityLabel::Observed,
+                source: EvidenceSource::Runtime,
+                identity: Some(denial_identity),
+                observed_at_ms: Some(at_ms),
+            },
+            redaction: RedactionSummary::metadata_only(),
+        }
+    }
+
     fn tool_evidence(at_ms: u64, byte: char) -> EvidenceRef {
         EvidenceRef {
             authority: AuthorityLabel::Observed,
@@ -2757,7 +3102,7 @@ mod tests {
     #[test]
     fn v0_5_runtime_approval_policy_is_content_free_and_not_a_user_decision() {
         let binding = binding();
-        let mut trace = TurnTrace::new(binding.clone()).unwrap();
+        let mut trace = TurnTrace::new_v0_5(binding.clone()).unwrap();
         append_read_only_intent(&mut trace);
         trace
             .append("runtime-1".into(), 10, runtime_payload())
@@ -3051,6 +3396,149 @@ mod tests {
                 .unwrap_err()
                 .code,
             "turn-trace-runtime-approval-policy-version-invalid"
+        );
+    }
+
+    #[test]
+    fn v0_6_runtime_denial_is_content_free_and_distinct_from_user_approval() {
+        let binding = binding();
+        let mut trace = TurnTrace::new(binding.clone()).unwrap();
+        append_read_only_intent(&mut trace);
+        trace
+            .append("runtime-1".into(), 10, runtime_payload())
+            .unwrap();
+        trace
+            .append(
+                "runtime-approval-policy-1".into(),
+                10,
+                runtime_approval_policy_payload(&binding, 10),
+            )
+            .unwrap();
+        trace
+            .append(
+                "runtime-denial-1".into(),
+                11,
+                runtime_denial_payload(
+                    &binding,
+                    RuntimeDenialRequestKind::CommandExecution,
+                    &hash_identity("sha256:", '8'),
+                    11,
+                ),
+            )
+            .unwrap();
+        trace
+            .append(
+                "terminal-1".into(),
+                12,
+                noncompleted_terminal(TerminalState::Interrupted),
+            )
+            .unwrap();
+        trace.validate_complete().unwrap();
+
+        let TracePayload::RuntimeDenial {
+            request_identity,
+            denial_identity,
+            response_state: RuntimeDenialResponseState::DeclineFlushed,
+            attribution: RuntimeDenialAttribution::RuntimePolicy,
+            user_decision_observed: false,
+            approval_authority_observed: false,
+            execution_authority: false,
+            evidence,
+            redaction,
+            ..
+        } = &trace.events[3].payload
+        else {
+            panic!("current trace must retain one Runtime denial")
+        };
+        assert!(request_identity.starts_with("sha256:"));
+        assert!(denial_identity.starts_with("sha256:"));
+        assert_eq!(evidence.source, EvidenceSource::Runtime);
+        assert_eq!(evidence.identity.as_deref(), Some(denial_identity.as_str()));
+        assert_eq!(*redaction, RedactionSummary::metadata_only());
+        assert!(trace
+            .events
+            .iter()
+            .all(|event| !matches!(event.payload, TracePayload::Approval { .. })));
+        let serialized = serde_json::to_string(&trace).unwrap();
+        for forbidden in [
+            "rm -rf project-data",
+            "command-approval",
+            "provider-thread-1",
+            "/Users/alice/project",
+        ] {
+            assert!(!serialized.contains(forbidden), "found {forbidden}");
+        }
+    }
+
+    #[test]
+    fn v0_6_runtime_denial_rejects_legacy_injection_tampering_and_duplicates() {
+        let binding = binding();
+        let denial = runtime_denial_payload(
+            &binding,
+            RuntimeDenialRequestKind::FileChange,
+            &hash_identity("sha256:", '7'),
+            11,
+        );
+        let mut v0_5 = TurnTrace::new_v0_5(binding.clone()).unwrap();
+        assert_eq!(
+            v0_5.append("runtime-denial-1".into(), 11, denial.clone())
+                .unwrap_err()
+                .code,
+            "turn-trace-runtime-denial-version-invalid"
+        );
+
+        let mut current = TurnTrace::new(binding.clone()).unwrap();
+        append_read_only_intent(&mut current);
+        current
+            .append("runtime-1".into(), 10, runtime_payload())
+            .unwrap();
+        current
+            .append(
+                "runtime-approval-policy-1".into(),
+                10,
+                runtime_approval_policy_payload(&binding, 10),
+            )
+            .unwrap();
+        current
+            .append("runtime-denial-1".into(), 11, denial.clone())
+            .unwrap();
+        current
+            .append("runtime-denial-2".into(), 11, denial)
+            .unwrap();
+        assert_eq!(
+            current.validate_open().unwrap_err().code,
+            "turn-trace-runtime-denial-duplicate"
+        );
+
+        let mut valid = current.clone();
+        valid.events.remove(4);
+        valid.validate_open().unwrap();
+        let mut tampered = valid.clone();
+        if let TracePayload::RuntimeDenial {
+            denial_identity,
+            evidence,
+            ..
+        } = &mut tampered.events[3].payload
+        {
+            *denial_identity = hash_identity("sha256:", '6');
+            evidence.identity = Some(denial_identity.clone());
+        }
+        assert_eq!(
+            tampered.validate_open().unwrap_err().code,
+            "turn-trace-runtime-denial-identity-mismatch"
+        );
+
+        let mut user_claim = valid;
+        if let TracePayload::RuntimeDenial {
+            user_decision_observed,
+            ..
+        } = &mut user_claim.events[3].payload
+        {
+            *user_decision_observed = true;
+        }
+        assert_eq!(
+            user_claim.validate_open().unwrap_err().code,
+            "turn-trace-runtime-denial-user-authority-invalid"
         );
     }
 
@@ -4023,7 +4511,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut v0_5 = TurnTrace::new(binding()).unwrap();
+        let mut v0_5 = TurnTrace::new_v0_5(binding()).unwrap();
         v0_5.append(
             "usage-report-1".into(),
             20,
@@ -4031,8 +4519,17 @@ mod tests {
         )
         .unwrap();
 
+        let mut current = TurnTrace::new(binding()).unwrap();
+        current
+            .append(
+                "usage-report-1".into(),
+                20,
+                usage_report_payload(20, "item-usage-1"),
+            )
+            .unwrap();
+
         let mut future = TurnTrace::new(binding()).unwrap();
-        future.schema_version = "turn-trace/0.6".into();
+        future.schema_version = "turn-trace/0.7".into();
         assert_eq!(
             future.validate_open().unwrap_err().code,
             "turn-trace-schema-invalid"

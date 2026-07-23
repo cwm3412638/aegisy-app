@@ -1354,11 +1354,11 @@ Known limitations:
   from replayed or uncertain evidence. The additive Session projection is
   consumed by Qt, whose deterministic threshold cache is capped at 128 entries.
   Compaction activation, provider compact, and automatic authority remain absent.
-- `turn-trace/0.5` retains the existing Intent/completion-domain, final Provider-
-  thread Usage authority, and Codex Tool contracts. Strict five-version fixtures
-  preserve hand-written `0.1` failed/completed JSON and the version-specific behavior
-  and fixed identities of `0.1` through `0.4`; cross-version fields and future `0.6`
-  fail closed. The outer
+- `turn-trace/0.6` retains the existing Intent/completion-domain, final Provider-
+  thread Usage authority, Codex Tool, and Runtime approval-policy contracts. Strict
+  compatibility preserves hand-written `0.1` failed/completed JSON and the
+  version-specific behavior and fixed identities of `0.1` through `0.5`;
+  cross-version fields and future `0.7+` versions fail closed. The outer
   event remains `turn.trace.recorded/0.1`, SQLite remains v13, and no migration,
   backfill, or legacy event rewrite is introduced.
 - The `0.3` contract/producer/Store verification scope covers deterministic
@@ -1446,7 +1446,7 @@ Known limitations:
   hash is recomputed. The fixed producing Runtime identity preserves existing `0.5`
   replay after a future binary version change; any new producer version requires an
   explicit Trace contract revision or reviewed compatibility entry.
-- `turn-trace/0.5` rejects all `Approval` payloads before mutation until a durable
+- `turn-trace/0.5` and `0.6` reject all `Approval` payloads before mutation until a durable
   approval-authority producer and exact ledger binding exist. Runtime policy,
   Runtime denial, and Provider Tool state therefore cannot fabricate an allowed,
   denied, or not-required user decision.
@@ -1454,21 +1454,61 @@ Known limitations:
   independently require the durable Session Runtime binding, exact adapter and
   version, exact read-only permission profile, and a Provider-thread identity
   recomputed from the non-null durable backend thread. Seven focused `v0_5` tests
-  and all 117 `workbench_store::tests` pass, including
+  and all 120 `workbench_store::tests` pass, including
   missing binding/thread and hash-consistent adapter, version, and backend-thread
   tampering across every read/replay/restart path.
+- `0.6` adds a separate content-free `RuntimeDenial` payload for three active-Turn
+  Codex request classes. Command-execution and file-change requests receive the fixed
+  local response `{"decision":"decline"}`; permissions requests receive
+  `{"permissions":{},"scope":"turn"}`, an empty grant interpreted as Runtime denial
+  rather than a literal decline decision. Requests require a valid bounded request ID,
+  exact active thread/Turn, bounded non-empty Item ID, and non-negative start time.
+  Mismatched active-Turn requests receive `-32602`, fail the Turn, and produce no
+  `RuntimeDenial` or `Approval`.
+- The checked-in generated Codex `0.144.5` schema does not include these three
+  `ServerRequest` definitions. No generated-schema validation is claimed for their
+  shapes; current contract evidence comes from the same-version App Server protocol
+  source and deterministic real-stdio fixtures, which must be re-reviewed on a pin
+  upgrade.
+- The adapter hashes the complete bounded Provider request message and persists only
+  its identity. The durable request identity also binds `request_kind`, Trace,
+  Provider-thread, and policy authority. Runtime first prepares a non-serializable
+  ticket by checking identity, duplicates, the 128-denial ceiling, delivery ordinal,
+  and the exact durable budget. The adapter then writes and flushes the fixed response;
+  Runtime commits only after successful flush. A failed write or abandoned ticket
+  produces no denial and remains on the fail-closed adapter/Turn error path. A
+  reservation/preflight failure sends a fixed content-free JSON-RPC error and reuses
+  the backend only after that error flush succeeds. Denial-response or fallback-error
+  write failure marks the adapter unavailable/restart-required. Missing/invalid IDs
+  and malformed params use a fixed `id:null`, `-32602` response and discard the
+  backend, while a safely echoable binding mismatch may reuse it after a successful
+  error flush.
+  `decline-flushed` proves only the local child stdin write/flush, not Provider receipt
+  or action. No prompt, Provider request/response body, path, command, output,
+  credential, raw request ID, or raw Item ID enters the Trace.
+- Every Runtime denial carries Runtime-observed metadata-only evidence and fixes
+  runtime-policy attribution, user-decision, approval-authority, and execution-
+  authority flags to false. It participates in Tool/Usage delivery ordering and must
+  precede Error/Terminal. Terminal admission, direct read, projection replay, and
+  startup quarantine recheck the exact durable Runtime/adapter/version/Provider-
+  thread/policy binding, duplicate request identities, denial identity, evidence
+  time/source, false-authority flags, and metadata-only redaction. Focused fixtures
+  cover command, file, and permissions denials in order, sensitive request content
+  absence, mismatched-Turn `-32602`, semantic tamper, and restart quarantine. Focused
+  stdio recovery fixtures additionally cover budget preflight, invalid/malformed
+  request rejection, response-pipe failure, backend reuse/discard state, and absence
+  of a fabricated denial; their pass result is recorded only by the current gate run.
 - Runtime denial, Provider `declined`, and genuine user Approval remain distinct.
-  The current approval-request denial path records the Runtime policy observation
-  plus failed Error/Terminal evidence and no Trace `Approval`; Provider `declined`
-  is produced only as a terminal Tool observation; the read-only adapter has no
-  genuine user-Approval producer. A future Approval producer must carry separate
-  Approval-authority evidence and cannot derive a decision from either denial class
-  or `approvalPolicy=never`.
-- The complete `0.5` verification passes 596 library tests with one ignored live
-  fixture, 10 threshold contract tests, 63 protocol tests, 15 stdio tests,
-  formatting, strict Clippy, `git diff --check`, and strict OpenSpec validation.
-  Complete genuine-user Approval/Change/Test production, Runtime-denial trace
-  production, non-command Tool families,
+  Provider `declined` is produced only as a terminal Tool observation, and
+  `approvalPolicy=never` alone is only Runtime policy evidence. The read-only adapter
+  has no genuine-user Approval producer. A future Approval producer must carry
+  separate Approval-authority evidence and cannot derive a decision from either
+  denial class or policy observation.
+- The complete `0.6` gate passes 603 library tests with one ignored live fixture,
+  10 threshold contract tests, 63 protocol tests, 19 stdio tests, formatting, strict
+  Clippy, `git diff --check`, and strict OpenSpec validation. Complete genuine-user
+  Approval/Change/Test production, non-command
+  Tool families,
   authoritative per-Attempt/Retry Usage, and any AAP/Qt trace read,
   audit/export, or retention surface remain absent, so tasks 20.1 and 20.2 stay
   incomplete.

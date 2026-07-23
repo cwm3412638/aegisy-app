@@ -608,9 +608,9 @@
 ## 20. Observability, Diagnostics, and Evaluation
 
 - [ ] 20.1 Implement structured local turn trace with source-qualified runtime/model/context/tool/approval/usage/change/test/error data
-  - Partial internal `turn-trace/0.4` contract keeps strict four-version reads for
-    durable `0.1`, `0.2`, `0.3`, and `0.4` records while preserving fixed legacy
-    serialization identities. Future `0.5+` records and cross-version fields fail
+  - Partial internal `turn-trace/0.6` contract keeps strict version-specific reads
+    for durable `0.1` through `0.6` records while preserving fixed legacy
+    serialization identities. Future `0.7+` records and cross-version fields fail
     closed. `0.2` added one immutable Runtime-observed Intent for
     Chat conversation, Work read-only inspection, or future Work mutation. A
     completed terminal binds that exact Intent and classifies workspace change,
@@ -673,19 +673,44 @@
     pairs, semantic tampering, exact-budget exhaustion, command Item insertion failure,
     and Provider completion with an unmatched Started. Each failure retains Started +
     Error + failed Terminal without a terminal Tool, command Item, Blob reference, or
-    object. Provider `declined` is a Tool state; Runtime denial and
-    `approvalPolicy=never` observation remain future producers, and none is a user
-    Approval decision.
-  - Current Codex Runtime produces `0.4` traces for completed, failed, and
-    interrupted Turns with one idempotent terminal-write retry. Stdio fixtures
-    prove Chat and read-only Work completion, exact Intent/domain binding, restart
-    equality, transport/provider failure, interruption, and no fabricated
-    Workspace/Git/Test evidence or content. Store admission, direct read, and
+    object. Provider `declined` remains only a Tool state and is not a Runtime denial
+    or user Approval decision.
+  - `0.5` adds exactly one content-free Runtime approval-policy observation. It binds
+    the pinned Codex adapter/runtime, fixed producing Runtime identity, durable
+    Provider-thread binding, configured/effective `approvalPolicy=never`, read-only
+    sandbox, and read-only permission profile. It records no user decision and grants
+    no execution authority. Store admission, read, replay, and startup revalidate the
+    complete durable binding; `0.5` and `0.6` reject every `Approval` payload until a
+    genuine-user authority producer and consumption ledger exist.
+  - `0.6` adds a distinct content-free Runtime-denial producer for active-Turn Codex
+    command-execution, file-change, and permissions approval requests. The complete
+    bounded request is hashed only in memory; durable identities bind request kind,
+    Trace, Provider thread, and Runtime policy without prompt, body, path, command,
+    output, PID, credential, or raw request/Item IDs. Runtime prepares and
+    budget-checks a non-serializable ticket, the adapter writes and flushes the fixed
+    denial response, and Runtime commits only after a successful local write. Failed
+    writes produce no denial, mark the adapter restart-required, and
+    `decline-flushed` does not claim Provider receipt. Trace preflight failure sends a
+    fixed content-free error before the Turn fails and permits backend reuse only
+    after that error flush succeeds.
+    Invalid active-Turn bindings receive a content-free `-32602`, fail closed, and
+    produce no Runtime denial or Approval. Store admission, read, replay, and startup
+    quarantine revalidate denial identity, ordering, authority, time, redaction, and
+    the durable Runtime/adapter/version/Provider-thread/policy binding.
+    The checked-in generated Codex `0.144.5` schema does not define these three
+    `ServerRequest` shapes; current evidence is the same-version App Server protocol
+    source plus deterministic real-stdio fixtures, not generated-schema validation.
+  - Current Codex Runtime produces `0.6` traces for completed, failed, and
+    interrupted Turns. Provider-terminal persistence has one idempotent terminal-write
+    retry; structured adapter failures use a separate single-write fail-closed path.
+    Stdio fixtures prove Chat and read-only Work completion, exact Intent/domain
+    binding, restart equality, transport/provider failure, interruption, and no
+    fabricated Workspace/Git/Test evidence or content. Store admission, direct read, and
     projection replay require project/environment plus the current Intent mode to
     equal the persisted Session binding while
     leaving legacy `0.1` mode-less records readable; semantic mode substitution
-    fails closed. Complete Approval/Change/Test producers, non-command Tool families,
-    authoritative approval policy observation, per-Attempt and Retry
+    fails closed. Complete genuine-user Approval/Change/Test producers, non-command
+    Tool families, per-Attempt and Retry
     Usage authority, and Timeline trace projection, AAP/Qt, audit, retention, and
     export surfaces remain absent. Terminal admission and projection replay also
     still repeat the bounded historical scan for long Sessions; single-pass replay
@@ -699,7 +724,7 @@
     projection plus a validated authority report: provider-reported token and
     context-window/reasoning fields are observed, cost is unknown, and
     unreconciled provider totals are not rewritten. The report now has a
-    deterministic metadata identity used by `turn-trace/0.3` and `0.4`; it remains a Codex
+    deterministic metadata identity used by `turn-trace/0.3` through `0.6`; it remains a Codex
     Provider-thread absolute snapshot and does not claim Turn Attempt or Retry
     attribution. Qt now renders a strict
     metadata-only summary and rejects malformed/unknown versions. This remains

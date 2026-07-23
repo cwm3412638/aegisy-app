@@ -10,6 +10,6 @@
 {"jsonrpc":"2.0","method":"event","params":{"event":"turn.cancellation-acknowledged","session_id":"session-fixture","turn_id":"turn-fixture"}}
 {"jsonrpc":"2.0","method":"event","params":{"event":"turn.interrupted","session_id":"session-fixture","turn_id":"turn-fixture"}}
 {"jsonrpc":"2.0","id":"compact","method":"thread/compact/start","params":{"threadId":"thread-fixture"}}
-{"jsonrpc":"2.0","id":99,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-fixture","turnId":"turn-fixture","itemId":"command-fixture","command":"rm -rf project-data","risk":"high"}}
+{"jsonrpc":"2.0","id":99,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-fixture","turnId":"turn-fixture","itemId":"command-fixture","startedAtMs":1700000000150,"command":"rm -rf project-data","risk":"high"}}
 {"jsonrpc":"2.0","id":99,"result":{"decision":"decline"}}
 {"jsonrpc":"2.0","method":"event","params":{"event":"turn.failed","session_id":"session-fixture","turn_id":"turn-approval","item":{"kind":"error","role":"system","state":"completed","content":"provider rejected after approval denial","data":{"schema_version":"runtime-error/0.1","class":"provider","retryable":false}}}}

@@ -84,8 +84,8 @@ use background_scheduler::{recovery_entry_identity, BackgroundJobScheduler};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use codex_adapter::{
-    BackendInfo, CodexAdapter, CodexApprovalPolicyBinding, CodexEvent, CodexSession,
-    CodexTurnRequest, CommandItem,
+    BackendInfo, CodexAdapter, CodexApprovalPolicyBinding, CodexEvent, CodexRuntimeDenialFailure,
+    CodexRuntimeDenialRequest, CodexSession, CodexTurnRequest, CommandItem,
 };
 #[cfg(test)]
 use codex_adapter::{CommandSource, CommandStatus, ProviderCommandInputFingerprint};
@@ -128,6 +128,7 @@ use turn_trace_producer::{
     ApprovalPolicyMetadata as TraceApprovalPolicyMetadata, CodexTurnTraceAccumulator,
     ErrorMetadata as TraceErrorMetadata, IntentMetadata as TraceIntentMetadata,
     ModelMetadata as TraceModelMetadata, PreparedContextSummary as TraceContextSummary,
+    RuntimeDenialRequestMetadata as TraceRuntimeDenialRequestMetadata,
     RuntimeMetadata as TraceRuntimeMetadata, TerminalMetadata as TraceTerminalMetadata,
     ToolObservationAdmission, UsageSnapshotMetadata as TraceUsageSnapshotMetadata,
 };
@@ -10410,7 +10411,7 @@ impl Runtime {
             .expect("active turn steering handle");
         let mut started = false;
         let mut started_turn_id: Option<String> = None;
-        let mut turn_trace_accumulator: Option<CodexTurnTraceAccumulator> = None;
+        let turn_trace_accumulator = Mutex::new(None::<CodexTurnTraceAccumulator>);
         let mut pending_terminal: Option<PendingTurnTerminal> = None;
         let mut terminal_persisted = false;
         let mut persistence_error: Option<String> = None;
@@ -10472,7 +10473,9 @@ impl Runtime {
                             }
                             started = true;
                             started_turn_id = Some(turn_id.clone());
-                            turn_trace_accumulator = Some(accumulator);
+                            *turn_trace_accumulator
+                                .lock()
+                                .expect("turn trace accumulator lock") = Some(accumulator);
                             self.control.identify_turn(&params.session_id, &turn_id);
                             if let Err(error) =
                                 self.persist_item(&params.session_id, Some(&turn_id), &user_item)
@@ -10614,7 +10617,10 @@ impl Runtime {
                                         return;
                                     }
                                 };
-                                let Some(accumulator) = turn_trace_accumulator.as_mut() else {
+                                let mut trace_guard = turn_trace_accumulator
+                                    .lock()
+                                    .expect("turn trace accumulator lock");
+                                let Some(accumulator) = trace_guard.as_mut() else {
                                     persistence_error = Some(
                                         "cannot bind command start without its turn trace"
                                             .to_owned(),
@@ -10686,7 +10692,10 @@ impl Runtime {
                                             return;
                                         }
                                     };
-                                    let Some(accumulator) = turn_trace_accumulator.as_ref() else {
+                                    let trace_guard = turn_trace_accumulator
+                                        .lock()
+                                        .expect("turn trace accumulator lock");
+                                    let Some(accumulator) = trace_guard.as_ref() else {
                                         persistence_error = Some(
                                             "cannot preflight persisted command without its turn trace"
                                                 .to_owned(),
@@ -10695,6 +10704,7 @@ impl Runtime {
                                         return;
                                     };
                                     let mut candidate = accumulator.clone();
+                                    drop(trace_guard);
                                     match candidate.record_tool_observation(observation) {
                                         Ok(ToolObservationAdmission::Recorded) => {
                                             trace_candidate = Some(candidate);
@@ -10740,7 +10750,9 @@ impl Runtime {
                                         cancellation.request();
                                         return;
                                     };
-                                    turn_trace_accumulator = Some(candidate);
+                                    *turn_trace_accumulator
+                                        .lock()
+                                        .expect("turn trace accumulator lock") = Some(candidate);
                                 }
                                 if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                     state.items.push(item.clone());
@@ -10844,7 +10856,10 @@ impl Runtime {
                                 };
                                 let mut trace_candidate = None;
                                 if let Some(report) = report {
-                                    let Some(accumulator) = turn_trace_accumulator.as_ref() else {
+                                    let trace_guard = turn_trace_accumulator
+                                        .lock()
+                                        .expect("turn trace accumulator lock");
+                                    let Some(accumulator) = trace_guard.as_ref() else {
                                         persistence_error = Some(
                                             "cannot preflight persisted usage without its turn trace"
                                                 .to_owned(),
@@ -10853,6 +10868,7 @@ impl Runtime {
                                         return;
                                     };
                                     let mut candidate = accumulator.clone();
+                                    drop(trace_guard);
                                     if let Err(cause) = candidate.record_persisted_usage_snapshot(
                                         TraceUsageSnapshotMetadata {
                                             persisted_item_id: item.id.clone(),
@@ -10879,7 +10895,9 @@ impl Runtime {
                                 }
                                 context_threshold_status = next_context_threshold_status;
                                 if let Some(candidate) = trace_candidate {
-                                    turn_trace_accumulator = Some(candidate);
+                                    *turn_trace_accumulator
+                                        .lock()
+                                        .expect("turn trace accumulator lock") = Some(candidate);
                                 }
                                 if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                     state.items.push(item.clone());
@@ -11052,7 +11070,12 @@ impl Runtime {
                         }
                         CodexEvent::TurnCompleted { turn_id } => {
                             let terminal_at_ms = now_ms();
-                            let Some(accumulator) = turn_trace_accumulator.as_ref() else {
+                            let Some(accumulator) = turn_trace_accumulator
+                                .lock()
+                                .expect("turn trace accumulator lock")
+                                .as_ref()
+                                .cloned()
+                            else {
                                 persistence_error = Some(
                                     "cannot persist completed turn without its trace accumulator"
                                         .into(),
@@ -11076,7 +11099,9 @@ impl Runtime {
                                     return;
                                 }
                             };
-                            turn_trace_accumulator = None;
+                            *turn_trace_accumulator
+                                .lock()
+                                .expect("turn trace accumulator lock") = None;
                             pending_terminal = Some(PendingTurnTerminal {
                                 turn_id: turn_id.clone(),
                                 state: "completed",
@@ -11191,7 +11216,12 @@ impl Runtime {
                         }
                         CodexEvent::TurnInterrupted { turn_id } => {
                             let terminal_at_ms = now_ms();
-                            let Some(accumulator) = turn_trace_accumulator.as_ref() else {
+                            let Some(accumulator) = turn_trace_accumulator
+                                .lock()
+                                .expect("turn trace accumulator lock")
+                                .as_ref()
+                                .cloned()
+                            else {
                                 persistence_error = Some(
                                     "cannot persist interrupted turn without its trace accumulator"
                                         .into(),
@@ -11215,7 +11245,9 @@ impl Runtime {
                                     return;
                                 }
                             };
-                            turn_trace_accumulator = None;
+                            *turn_trace_accumulator
+                                .lock()
+                                .expect("turn trace accumulator lock") = None;
                             pending_terminal = Some(PendingTurnTerminal {
                                 turn_id: turn_id.clone(),
                                 state: "interrupted",
@@ -11269,7 +11301,12 @@ impl Runtime {
                                     (class, class, retryable, TraceEvidenceSource::Runtime)
                                 });
                             let terminal_at_ms = now_ms();
-                            let Some(accumulator) = turn_trace_accumulator.as_ref() else {
+                            let Some(accumulator) = turn_trace_accumulator
+                                .lock()
+                                .expect("turn trace accumulator lock")
+                                .as_ref()
+                                .cloned()
+                            else {
                                 persistence_error = Some(
                                     "cannot persist failed turn without its trace accumulator"
                                         .into(),
@@ -11296,7 +11333,9 @@ impl Runtime {
                                     return;
                                 }
                             };
-                            turn_trace_accumulator = None;
+                            *turn_trace_accumulator
+                                .lock()
+                                .expect("turn trace accumulator lock") = None;
                             let item = TimelineItem {
                                 id: self.allocate_id("error"),
                                 kind: "error".into(),
@@ -11346,12 +11385,46 @@ impl Runtime {
                         }
                     }
                 },
+                |request: CodexRuntimeDenialRequest, write_denial| {
+                    let mut trace_guard = turn_trace_accumulator
+                        .lock()
+                        .expect("turn trace accumulator lock");
+                    let accumulator = trace_guard.as_mut().ok_or_else(|| {
+                        CodexRuntimeDenialFailure::Preflight(
+                            "cannot prepare Runtime denial without its turn trace".to_owned(),
+                        )
+                    })?;
+                    let prepared = accumulator
+                        .prepare_runtime_denial(TraceRuntimeDenialRequestMetadata {
+                            request_kind: request.request_kind,
+                            provider_request_identity: request.provider_request_identity,
+                        })
+                        .map_err(|cause| {
+                            CodexRuntimeDenialFailure::Preflight(format!(
+                                "cannot reserve Runtime denial trace: {}: {}",
+                                cause.code, cause.message
+                            ))
+                        })?;
+                    write_denial().map_err(CodexRuntimeDenialFailure::ResponseWrite)?;
+                    accumulator.commit_runtime_denial(prepared, now_ms());
+                    Ok(())
+                },
             ),
             Backend::Preview | Backend::Recovery(_) | Backend::Unavailable(_) => {
                 unreachable!("backend was checked before turn execution")
             }
         };
-        self.backend = backend;
+        let backend_restart_required = result
+            .as_ref()
+            .is_err_and(codex_adapter::CodexTurnFailure::restart_required);
+        let result = result.map_err(codex_adapter::CodexTurnFailure::into_message);
+        self.backend = if backend_restart_required {
+            Backend::Unavailable(
+                "Codex App Server response channel is unavailable; restart is required".into(),
+            )
+        } else {
+            backend
+        };
         self.control.finish_turn(&params.session_id);
         if let Some(state) = self.sessions.get_mut(&params.session_id) {
             state.context_threshold_status = context_threshold_status;
@@ -11394,8 +11467,11 @@ impl Runtime {
             && !terminal_persisted
             && pending_terminal.is_none()
         {
-            let terminal_result = match (started_turn_id.as_deref(), turn_trace_accumulator.take())
-            {
+            let accumulator = turn_trace_accumulator
+                .lock()
+                .expect("turn trace accumulator lock")
+                .take();
+            let terminal_result = match (started_turn_id.as_deref(), accumulator) {
                 (Some(turn_id), Some(accumulator)) => {
                     let terminal_at_ms = now_ms();
                     accumulator
@@ -11494,6 +11570,8 @@ impl Runtime {
                     return;
                 };
                 let terminal_result = turn_trace_accumulator
+                    .lock()
+                    .expect("turn trace accumulator lock")
                     .take()
                     .ok_or_else(|| {
                         "turn trace accumulator is unavailable after adapter failure".to_owned()

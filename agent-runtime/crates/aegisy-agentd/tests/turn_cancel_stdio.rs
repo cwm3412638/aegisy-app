@@ -2,6 +2,7 @@
 
 use aegisy_agentd::turn_trace::{
     CompletionDomain, ErrorClass as TraceErrorClass, EvidenceSource as TraceEvidenceSource,
+    RuntimeDenialAttribution, RuntimeDenialRequestKind, RuntimeDenialResponseState,
     SessionMode as TraceSessionMode, TerminalState as TraceTerminalState, ToolProviderStatus,
     ToolSource, ToolState, ToolTimelineBinding, TracePayload, TurnAccess as TraceTurnAccess,
     TurnKind as TraceTurnKind, UsageAccounting, UsageAttribution, UsageReportScope,
@@ -45,6 +46,68 @@ where
             return message;
         }
     }
+}
+
+fn start_codex_runtime(
+    codex: &PathBuf,
+    data_root: &PathBuf,
+    prefix: &str,
+) -> (
+    std::process::Child,
+    ChildStdin,
+    mpsc::Receiver<Value>,
+    thread::JoinHandle<()>,
+    String,
+) {
+    fs::create_dir_all(data_root).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", data_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    let initialize_id = format!("{prefix}-initialize");
+    send(
+        &mut stdin,
+        &request(
+            &initialize_id,
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| message["id"] == initialize_id);
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    let session_id = format!("{prefix}-session");
+    send(
+        &mut stdin,
+        &request(&session_id, "session/start", json!({ "mode": "chat" })),
+    );
+    let session = receive_until(&receiver, |message| message["id"] == session_id);
+    let session_id = session["result"]["session"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("session did not start: {session}"))
+        .to_owned();
+    (child, stdin, receiver, reader, session_id)
 }
 
 fn fake_codex() -> PathBuf {
@@ -433,11 +496,238 @@ while IFS= read -r line; do
       ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-approval"}}}\n' "$id"
-      printf '{"id":99,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-approval","turnId":"turn-approval","itemId":"command-approval","command":"rm -rf project-data","risk":"high"}}\n'
+      printf '{"id":"runtime-denial-request-id-sentinel","method":"item/commandExecution/requestApproval","params":{"threadId":"thread-approval","turnId":"turn-approval","itemId":"runtime-denial-command-item-sentinel","startedAtMs":10,"command":"runtime-denial-command-sentinel","risk":"high","unknown":{"path":"/runtime-denial-command-path-sentinel","pid":4815162342,"credential":"runtime-denial-credential-sentinel","userId":"runtime-denial-user-id-sentinel"}}}\n'
       ;;
-    *'"id":99,"result":{"decision":"decline"}'*)
-      printf '%s' "decline" > "$decision_file"
+    *'"id":"runtime-denial-request-id-sentinel","result":{"decision":"decline"}'*)
+      printf '%s' "command" > "$decision_file"
+      printf '{"id":"runtime-denial-file-request-sentinel","method":"item/fileChange/requestApproval","params":{"threadId":"thread-approval","turnId":"turn-approval","itemId":"runtime-denial-file-item-sentinel","startedAtMs":11,"reason":"runtime-denial-file-reason-sentinel","grantRoot":"/runtime-denial-grant-root-sentinel"}}\n'
+      ;;
+    *'"id":"runtime-denial-file-request-sentinel","result":{"decision":"decline"}'*)
+      printf '%s' ",file" >> "$decision_file"
+      printf '{"id":101,"method":"item/permissions/requestApproval","params":{"threadId":"thread-approval","turnId":"turn-approval","itemId":"runtime-denial-permissions-item-sentinel","startedAtMs":12,"cwd":"/runtime-denial-cwd-sentinel","permissions":{"write":["/runtime-denial-permission-path-sentinel"]},"environmentId":"runtime-denial-environment-sentinel","reason":"runtime-denial-permissions-reason-sentinel"}}\n'
+      ;;
+    *'"id":101,"result":{"permissions":{},"scope":"turn"}'*)
+      printf '%s' ",permissions" >> "$decision_file"
       printf '{"method":"turn/completed","params":{"threadId":"thread-approval","turn":{"id":"turn-approval","status":"failed","error":{"message":"provider rejected after approval denial"}}}}\n'
+      ;;
+    *'"method":"shutdown"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    executable
+}
+
+fn mismatched_approval_codex() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("aegisy-mismatched-approval-{nonce}"));
+    fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("codex-mismatched-approval.sh");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.144.5"
+  exit 0
+fi
+decision_file="$0.decision"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"thread-mismatch"},"modelProvider":"fixture","model":"fixture","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":false}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-active"}}}\n' "$id"
+      printf '{"id":99,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-mismatch","turnId":"turn-stale","itemId":"command-stale","startedAtMs":10,"command":"private command"}}\n'
+      ;;
+    *'"id":99'*'"code":-32602'*|*'"code":-32602'*'"id":99'*)
+      printf '%s' "rejected" > "$decision_file"
+      ;;
+    *'"method":"shutdown"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    executable
+}
+
+fn denial_budget_codex() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("aegisy-denial-budget-{nonce}"));
+    fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("codex-denial-budget.sh");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.144.5"
+  exit 0
+fi
+request_index=0
+turn_index=0
+base_timestamp_ms="$(date +%s)000"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"thread-denial-budget"},"modelProvider":"fixture","model":"fixture","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":false}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      turn_index=$((turn_index + 1))
+      printf '{"id":%s,"result":{"turn":{"id":"turn-denial-budget-%s"}}}\n' "$id" "$turn_index"
+      if [ "$turn_index" -eq 1 ]; then
+        printf '{"id":700,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-denial-budget","turnId":"turn-denial-budget-1","itemId":"approval-0","startedAtMs":%s,"command":"private-command-0"}}\n' "$base_timestamp_ms"
+      else
+        printf '{"method":"turn/completed","params":{"threadId":"thread-denial-budget","turn":{"id":"turn-denial-budget-%s","status":"completed"}}}\n' "$turn_index"
+      fi
+      ;;
+    *'"result":{"decision":"decline"}'*)
+      request_index=$((request_index + 1))
+      request_id=$((700 + request_index))
+      started_at_ms=$((base_timestamp_ms + request_index))
+      printf '{"id":%s,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-denial-budget","turnId":"turn-denial-budget-1","itemId":"approval-%s","startedAtMs":%s,"command":"private-command-%s"}}\n' "$request_id" "$request_index" "$started_at_ms" "$request_index"
+      ;;
+    *'"code":-32000'*)
+      printf '%s' "$request_index" > "$0.preflight-count"
+      ;;
+    *'"method":"shutdown"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    executable
+}
+
+fn invalid_approval_codex(case: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("aegisy-invalid-approval-{nonce}"));
+    fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("codex-invalid-approval.sh");
+    fs::write(executable.with_extension("sh.case"), case).unwrap();
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.144.5"
+  exit 0
+fi
+count_file="$0.instances"
+count=$(cat "$count_file" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+fixture_case=$(cat "$0.case")
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"thread-invalid-approval"},"modelProvider":"fixture","model":"fixture","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":false}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-invalid-approval-%s"}}}\n' "$id" "$count"
+      if [ "$count" -eq 1 ]; then
+        if [ "$fixture_case" = "missing-id" ]; then
+          printf '{"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-invalid-approval","turnId":"turn-invalid-approval-1","itemId":"missing-id","startedAtMs":10}}\n'
+        else
+          printf '{"id":77,"method":"item/commandExecution/requestApproval","params":[]}\n'
+        fi
+      else
+        printf '{"method":"turn/completed","params":{"threadId":"thread-invalid-approval","turn":{"id":"turn-invalid-approval-%s","status":"completed"}}}\n' "$count"
+      fi
+      ;;
+    *'"id":null'*'"code":-32602'*|*'"code":-32602'*'"id":null'*)
+      printf '%s' "$fixture_case" > "$0.invalid-response"
+      ;;
+    *'"method":"shutdown"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      exit 0
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    executable
+}
+
+fn denial_write_failure_codex() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("aegisy-denial-write-failure-{nonce}"));
+    fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("codex-denial-write-failure.sh");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.144.5"
+  exit 0
+fi
+count_file="$0.instances"
+count=$(cat "$count_file" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"thread-denial-write"},"modelProvider":"fixture","model":"fixture","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":false}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-denial-write-%s"}}}\n' "$id" "$count"
+      if [ "$count" -eq 1 ]; then
+        printf '{"id":88,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-denial-write","turnId":"turn-denial-write-1","itemId":"write-failure","startedAtMs":10}}\n'
+        exit 23
+      else
+        printf '{"method":"turn/completed","params":{"threadId":"thread-denial-write","turn":{"id":"turn-denial-write-%s","status":"completed"}}}\n' "$count"
+      fi
       ;;
     *'"method":"shutdown"'*)
       printf '{"id":%s,"result":{}}\n' "$id"
@@ -586,7 +876,7 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
         .read_turn_trace(&session_id, "turn-fixture")
         .unwrap()
         .expect("metadata completion must persist a terminal trace");
-    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.5");
+    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.6");
     let usage_trace_events = completed_trace
         .trace
         .events
@@ -1120,7 +1410,7 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
         .unwrap()
         .expect("recovered completion must persist a terminal trace");
     assert_eq!(completed_trace.state, "completed");
-    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.5");
+    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.6");
     assert_eq!(completed_trace.trace.binding.session_id, session_id);
     assert_eq!(completed_trace.trace.binding.turn_id, "turn-reconnect-2");
     assert!(completed_trace
@@ -1516,8 +1806,13 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
     });
     assert_eq!(failed["params"]["item"]["data"]["class"], "provider");
     assert_eq!(failed["params"]["item"]["data"]["retryable"], false);
-    assert_eq!(fs::read_to_string(&decision).unwrap(), "decline");
-    assert!(!failed.to_string().contains("rm -rf"));
+    assert_eq!(
+        fs::read_to_string(&decision).unwrap(),
+        "command,file,permissions"
+    );
+    assert!(!failed
+        .to_string()
+        .contains("runtime-denial-command-sentinel"));
 
     send(
         &mut stdin,
@@ -1533,7 +1828,7 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
         .read_turn_trace(&session_id, "turn-approval")
         .unwrap()
         .expect("approval-request failure must persist a terminal Trace");
-    assert_eq!(trace.trace.schema_version, "turn-trace/0.5");
+    assert_eq!(trace.trace.schema_version, "turn-trace/0.6");
     let policy_events = trace
         .trace
         .events
@@ -1542,6 +1837,11 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
         .collect::<Vec<_>>();
     assert_eq!(policy_events.len(), 1);
     let TracePayload::RuntimeApprovalPolicy {
+        runtime_identity: policy_runtime_identity,
+        adapter_identity: policy_adapter_identity,
+        runtime_version: policy_runtime_version,
+        provider_thread_identity: policy_provider_thread_identity,
+        policy_authority_identity,
         user_decision_observed,
         execution_authority,
         evidence,
@@ -1553,14 +1853,499 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
     assert!(!user_decision_observed);
     assert!(!execution_authority);
     assert_eq!(evidence.source, TraceEvidenceSource::Runtime);
+    let denial_events = trace
+        .trace
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, TracePayload::RuntimeDenial { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(denial_events.len(), 3);
+    let TracePayload::RuntimeDenial {
+        request_kind: RuntimeDenialRequestKind::CommandExecution,
+        request_identity,
+        denial_identity,
+        runtime_identity,
+        adapter_identity,
+        runtime_version,
+        provider_thread_identity,
+        policy_authority_identity: denial_policy_authority_identity,
+        response_state: RuntimeDenialResponseState::DeclineFlushed,
+        attribution: RuntimeDenialAttribution::RuntimePolicy,
+        user_decision_observed: false,
+        approval_authority_observed: false,
+        execution_authority: false,
+        evidence: denial_evidence,
+        ..
+    } = &denial_events[0].payload
+    else {
+        panic!("approval request must produce one exact Runtime denial observation")
+    };
+    assert!(request_identity.starts_with("sha256:"));
+    assert!(denial_identity.starts_with("sha256:"));
+    assert_eq!(runtime_identity, policy_runtime_identity);
+    assert_eq!(adapter_identity, policy_adapter_identity);
+    assert_eq!(runtime_version, policy_runtime_version);
+    assert_eq!(provider_thread_identity, policy_provider_thread_identity);
+    assert_eq!(denial_policy_authority_identity, policy_authority_identity);
+    assert_eq!(denial_evidence.source, TraceEvidenceSource::Runtime);
+    assert_eq!(
+        denial_evidence.identity.as_deref(),
+        Some(denial_identity.as_str())
+    );
+    assert_eq!(denial_evidence.observed_at_ms, Some(denial_events[0].at_ms));
+    assert!(matches!(
+        &denial_events[1].payload,
+        TracePayload::RuntimeDenial {
+            request_kind: RuntimeDenialRequestKind::FileChange,
+            response_state: RuntimeDenialResponseState::DeclineFlushed,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &denial_events[2].payload,
+        TracePayload::RuntimeDenial {
+            request_kind: RuntimeDenialRequestKind::Permissions,
+            response_state: RuntimeDenialResponseState::DeclineFlushed,
+            ..
+        }
+    ));
     assert!(trace
         .trace
         .events
         .iter()
         .all(|event| !matches!(event.payload, TracePayload::Approval { .. })));
+    let request_sentinels = [
+        "runtime-denial-request-id-sentinel",
+        "runtime-denial-command-item-sentinel",
+        "runtime-denial-command-sentinel",
+        "runtime-denial-command-path-sentinel",
+        "4815162342",
+        "runtime-denial-credential-sentinel",
+        "runtime-denial-user-id-sentinel",
+        "runtime-denial-file-request-sentinel",
+        "runtime-denial-file-item-sentinel",
+        "runtime-denial-file-reason-sentinel",
+        "runtime-denial-grant-root-sentinel",
+        "runtime-denial-permissions-item-sentinel",
+        "runtime-denial-cwd-sentinel",
+        "runtime-denial-permission-path-sentinel",
+        "runtime-denial-environment-sentinel",
+        "runtime-denial-permissions-reason-sentinel",
+    ];
     let serialized = serde_json::to_string(&trace).unwrap();
-    assert!(!serialized.contains("rm -rf"));
+    for sentinel in request_sentinels {
+        assert!(
+            !serialized.contains(sentinel),
+            "Runtime denial Trace persisted Provider request sentinel {sentinel}"
+        );
+    }
     assert!(!serialized.contains("request a destructive command"));
+    drop(store);
+
+    for entry in fs::read_dir(&data_root).unwrap() {
+        let path = entry.unwrap().path();
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = fs::read(&path).unwrap();
+        for sentinel in request_sentinels {
+            assert!(
+                !bytes
+                    .windows(sentinel.len())
+                    .any(|window| window == sentinel.as_bytes()),
+                "Workbench file persisted Provider request sentinel {sentinel}"
+            );
+        }
+    }
+
+    let reopened = WorkbenchStore::open(&data_root).unwrap();
+    let replayed = reopened
+        .read_turn_trace(&session_id, "turn-approval")
+        .unwrap()
+        .expect("Runtime denial Trace must replay after restart");
+    let replayed = serde_json::to_string(&replayed).unwrap();
+    for sentinel in request_sentinels {
+        assert!(
+            !replayed.contains(sentinel),
+            "replayed Runtime denial Trace exposed Provider request sentinel {sentinel}"
+        );
+    }
+    drop(reopened);
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_codex_approval_request_must_match_the_active_turn() {
+    let codex = mismatched_approval_codex();
+    let decision = codex.with_extension("sh.decision");
+    let data_root = codex
+        .parent()
+        .unwrap()
+        .join("mismatched-approval-workbench");
+    fs::create_dir_all(&data_root).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "mismatch-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| message["id"] == "mismatch-initialize");
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    send(
+        &mut stdin,
+        &request(
+            "mismatch-session",
+            "session/start",
+            json!({ "mode": "chat" }),
+        ),
+    );
+    let session = receive_until(&receiver, |message| message["id"] == "mismatch-session");
+    let session_id = session["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send(
+        &mut stdin,
+        &request(
+            "mismatch-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "inspect only",
+                "idempotency_key": "mismatch-turn"
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| {
+        message["method"] == "event" && message["params"]["event"] == "turn.failed"
+    });
+    for _ in 0..100 {
+        if decision.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fs::read_to_string(&decision).unwrap(), "rejected");
+
+    send(
+        &mut stdin,
+        &request("mismatch-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| message["id"] == "mismatch-shutdown");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    let trace = store
+        .read_turn_trace(&session_id, "turn-active")
+        .unwrap()
+        .expect("mismatched approval request must fail with a durable Trace");
+    assert_eq!(trace.trace.schema_version, "turn-trace/0.6");
+    assert!(trace.trace.events.iter().all(|event| !matches!(
+        event.payload,
+        TracePayload::RuntimeDenial { .. } | TracePayload::Approval { .. }
+    )));
+    assert!(!serde_json::to_string(&trace)
+        .unwrap()
+        .contains("private command"));
+    drop(store);
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_runtime_denial_budget_error_resolves_request_and_reuses_backend() {
+    let codex = denial_budget_codex();
+    let preflight_count = codex.with_extension("sh.preflight-count");
+    let data_root = codex.parent().unwrap().join("denial-budget-workbench");
+    let (mut child, mut stdin, receiver, reader, session_id) =
+        start_codex_runtime(&codex, &data_root, "denial-budget");
+
+    send(
+        &mut stdin,
+        &request(
+            "denial-budget-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "exercise bounded denial metadata",
+                "idempotency_key": "denial-budget-first"
+            }),
+        ),
+    );
+    let failed = receive_until(&receiver, |message| {
+        message["method"] == "event"
+            && message["params"]["event"] == "turn.failed"
+            && message["params"]["turn_id"] == "turn-denial-budget-1"
+    });
+    assert_eq!(failed["params"]["item"]["data"]["class"], "budget");
+    for _ in 0..100 {
+        if preflight_count.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let accepted_denials = fs::read_to_string(&preflight_count)
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    assert!(accepted_denials > 0);
+
+    send(
+        &mut stdin,
+        &request("denial-budget-health", "runtime/health", json!({})),
+    );
+    let health = receive_until(&receiver, |message| message["id"] == "denial-budget-health");
+    assert_eq!(health["result"]["state"], "running");
+    assert_eq!(health["result"]["restart_required"], false);
+    send(
+        &mut stdin,
+        &request(
+            "denial-budget-next-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "verify the same backend remains usable",
+                "idempotency_key": "denial-budget-second"
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| {
+        message["method"] == "event"
+            && message["params"]["event"] == "turn.completed"
+            && message["params"]["turn_id"] == "turn-denial-budget-2"
+    });
+
+    send(
+        &mut stdin,
+        &request("denial-budget-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| {
+        message["id"] == "denial-budget-shutdown"
+    });
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    let trace = store
+        .read_turn_trace(&session_id, "turn-denial-budget-1")
+        .unwrap()
+        .expect("budget failure must persist a terminal Trace");
+    let denial_count = trace
+        .trace
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, TracePayload::RuntimeDenial { .. }))
+        .count();
+    assert_eq!(denial_count, accepted_denials);
+    assert!(trace.trace.events.iter().any(|event| matches!(
+        event.payload,
+        TracePayload::Error {
+            stable_class: TraceErrorClass::Budget,
+            ..
+        }
+    )));
+    drop(store);
+    let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_invalid_runtime_denial_requests_discard_backend_and_restart_cleanly() {
+    for fixture_case in ["missing-id", "malformed-params"] {
+        let codex = invalid_approval_codex(fixture_case);
+        let invalid_response = codex.with_extension("sh.invalid-response");
+        let instances = codex.with_extension("sh.instances");
+        let data_root = codex.parent().unwrap().join("invalid-approval-workbench");
+        let (mut child, mut stdin, receiver, reader, session_id) =
+            start_codex_runtime(&codex, &data_root, fixture_case);
+
+        send(
+            &mut stdin,
+            &request(
+                &format!("{fixture_case}-turn"),
+                "turn/start",
+                json!({
+                    "session_id": session_id,
+                    "input": "emit malformed approval request",
+                    "idempotency_key": format!("{fixture_case}-first")
+                }),
+            ),
+        );
+        receive_until(&receiver, |message| {
+            message["method"] == "event"
+                && message["params"]["event"] == "turn.failed"
+                && message["params"]["turn_id"] == "turn-invalid-approval-1"
+        });
+        for _ in 0..100 {
+            if invalid_response.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(fs::read_to_string(&invalid_response).unwrap(), fixture_case);
+
+        let health_id = format!("{fixture_case}-health");
+        send(
+            &mut stdin,
+            &request(&health_id, "runtime/health", json!({})),
+        );
+        let health = receive_until(&receiver, |message| message["id"] == health_id);
+        assert_eq!(health["result"]["state"], "unavailable");
+        assert_eq!(health["result"]["restart_required"], true);
+        let restart_id = format!("{fixture_case}-restart");
+        send(
+            &mut stdin,
+            &request(&restart_id, "runtime/restart", json!({})),
+        );
+        let restarted = receive_until(&receiver, |message| message["id"] == restart_id);
+        assert_eq!(restarted["result"]["status"], "restarted");
+        send(
+            &mut stdin,
+            &request(
+                &format!("{fixture_case}-next-turn"),
+                "turn/start",
+                json!({
+                    "session_id": session_id,
+                    "input": "verify restart",
+                    "idempotency_key": format!("{fixture_case}-second")
+                }),
+            ),
+        );
+        receive_until(&receiver, |message| {
+            message["method"] == "event"
+                && message["params"]["event"] == "turn.completed"
+                && message["params"]["turn_id"] == "turn-invalid-approval-2"
+        });
+        assert_eq!(fs::read_to_string(&instances).unwrap(), "2");
+
+        let shutdown_id = format!("{fixture_case}-shutdown");
+        send(&mut stdin, &request(&shutdown_id, "shutdown", json!({})));
+        receive_until(&receiver, |message| message["id"] == shutdown_id);
+        drop(stdin);
+        assert!(child.wait().unwrap().success());
+        reader.join().unwrap();
+
+        let store = WorkbenchStore::open(&data_root).unwrap();
+        let trace = store
+            .read_turn_trace(&session_id, "turn-invalid-approval-1")
+            .unwrap()
+            .expect("invalid approval request must persist a failed Trace");
+        assert!(trace.trace.events.iter().all(|event| !matches!(
+            event.payload,
+            TracePayload::RuntimeDenial { .. } | TracePayload::Approval { .. }
+        )));
+        drop(store);
+        let _ = fs::remove_dir_all(codex.parent().unwrap());
+    }
+}
+
+#[test]
+fn stdio_runtime_denial_write_failure_discards_backend_until_restart() {
+    let codex = denial_write_failure_codex();
+    let instances = codex.with_extension("sh.instances");
+    let data_root = codex.parent().unwrap().join("denial-write-workbench");
+    let (mut child, mut stdin, receiver, reader, session_id) =
+        start_codex_runtime(&codex, &data_root, "denial-write");
+
+    send(
+        &mut stdin,
+        &request(
+            "denial-write-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "force denial response write failure",
+                "idempotency_key": "denial-write-first"
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| {
+        message["method"] == "event"
+            && message["params"]["event"] == "turn.failed"
+            && message["params"]["turn_id"] == "turn-denial-write-1"
+    });
+    send(
+        &mut stdin,
+        &request("denial-write-health", "runtime/health", json!({})),
+    );
+    let health = receive_until(&receiver, |message| message["id"] == "denial-write-health");
+    assert_eq!(health["result"]["state"], "unavailable");
+    assert_eq!(health["result"]["restart_required"], true);
+    send(
+        &mut stdin,
+        &request("denial-write-restart", "runtime/restart", json!({})),
+    );
+    let restarted = receive_until(&receiver, |message| message["id"] == "denial-write-restart");
+    assert_eq!(restarted["result"]["status"], "restarted");
+    send(
+        &mut stdin,
+        &request(
+            "denial-write-next-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "verify restarted backend",
+                "idempotency_key": "denial-write-second"
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| {
+        message["method"] == "event"
+            && message["params"]["event"] == "turn.completed"
+            && message["params"]["turn_id"] == "turn-denial-write-2"
+    });
+    assert_eq!(fs::read_to_string(&instances).unwrap(), "2");
+
+    send(
+        &mut stdin,
+        &request("denial-write-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| {
+        message["id"] == "denial-write-shutdown"
+    });
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    let trace = store
+        .read_turn_trace(&session_id, "turn-denial-write-1")
+        .unwrap()
+        .expect("write failure must persist a failed Trace");
+    assert!(trace.trace.events.iter().all(|event| !matches!(
+        event.payload,
+        TracePayload::RuntimeDenial { .. } | TracePayload::Approval { .. }
+    )));
     drop(store);
     let _ = fs::remove_dir_all(codex.parent().unwrap());
 }
@@ -1785,7 +2570,7 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
         .read_turn_trace(&session_id, "turn-fixture")
         .unwrap()
         .expect("read-only Work completion must persist a terminal trace");
-    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.5");
+    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.6");
     let tool_events = completed_trace
         .trace
         .events
@@ -2030,7 +2815,7 @@ fn stdio_command_completed_and_declined_preserve_exact_provider_tool_states() {
             .read_turn_trace(&session_id, "turn-fixture")
             .unwrap()
             .expect("terminal command Turn must persist its Trace");
-        assert_eq!(trace.trace.schema_version, "turn-trace/0.5");
+        assert_eq!(trace.trace.schema_version, "turn-trace/0.6");
         let tool_events = trace
             .trace
             .events
@@ -2230,7 +3015,7 @@ fn stdio_completed_turn_with_incomplete_command_fails_durably_and_restarts_start
         .unwrap()
         .expect("incomplete command must produce an authoritative failed Trace");
     assert_eq!(first_read.state, "failed");
-    assert_eq!(first_read.trace.schema_version, "turn-trace/0.5");
+    assert_eq!(first_read.trace.schema_version, "turn-trace/0.6");
     let tool_events = first_read
         .trace
         .events
@@ -2428,7 +3213,7 @@ fn stdio_command_persistence_failure_retains_started_without_terminal_tool_or_bl
         .unwrap()
         .expect("persistence failure must retain an authoritative failed Trace");
     assert_eq!(trace.state, "failed");
-    assert_eq!(trace.trace.schema_version, "turn-trace/0.5");
+    assert_eq!(trace.trace.schema_version, "turn-trace/0.6");
     let tool_events = trace
         .trace
         .events

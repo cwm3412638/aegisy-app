@@ -107,18 +107,18 @@ its component semantics, Aegisy preserves the original bounded total but does
 not silently copy it into the authoritative field.
 
 The sidecar also contains internal `context-threshold/0.1` and
-`turn-trace/0.5` validation contracts. Neither is currently an AAP capability.
+`turn-trace/0.6` validation contracts. Neither is currently an AAP capability.
 Codex usage Timeline metadata may include a `compaction_threshold` decision
 computed from provider-observed last-input/context-window values. Runtime can
 restore its hysteresis latch from complete bounded usage history and projects a
 content-free Session summary; `automatic_compaction_authority` is always false.
 The Workbench Store atomically persists validated terminal traces and strictly
-replays inner `turn-trace/0.1` through `turn-trace/0.5` without rewriting legacy
-events. Existing `0.1` through `0.4` records retain their version-specific
+replays inner `turn-trace/0.1` through `turn-trace/0.6` without rewriting legacy
+events. Existing `0.1` through `0.5` records retain their version-specific
 compatibility and fixed legacy identities; cross-version fields, unknown fields,
-and future versions fail closed. The outer durable
+and future `0.7+` versions fail closed. The outer durable
 envelope remains `turn.trace.recorded/0.1`, and the Workbench Store remains SQLite
-schema v13. The pinned Codex Runtime produces `0.5` traces for completed, failed,
+schema v13. The pinned Codex Runtime produces `0.6` traces for completed, failed,
 and interrupted Turns.
 One immutable Intent identifies Chat conversation or current Work read-only
 inspection. Completed terminal metadata binds that Intent and independently marks
@@ -134,7 +134,7 @@ environment, and current Intent Chat/Work mode to match the durable Session bind
 legacy `0.1` traces retain their mode-less Intent semantics but still bind Session,
 Turn, project, and environment. A mismatch fails closed rather than reclassifying
 completion. Trace
-versions `0.3` through `0.5` may additionally contain one `usage-report` event. It embeds the validated
+versions `0.3` through `0.6` may additionally contain one `usage-report` event. It embeds the validated
 `usage-authority/0.1` report as the latest successfully validated and persisted
 Codex Provider-thread snapshot, with `scope: provider-thread`,
 `accounting: absolute-snapshot`,
@@ -167,7 +167,7 @@ Usage with a removed authority report is rejected as a semantic downgrade rather
 than treated as malformed input. Initial-state and cross-Turn hysteresis substitution
 therefore fail closed even when Item and Event hashes are recomputed.
 
-Trace versions `0.4` and `0.5` also record a content-free Tool lifecycle for
+Trace versions `0.4` through `0.6` also record a content-free Tool lifecycle for
 observed Codex command Items. A Started Tool binds the closed provider status/source, provider
 timestamp, action identity, and stable input identity while explicitly declaring that
 no Timeline Item has been persisted. Stable input identity is computed only from a
@@ -192,7 +192,7 @@ interval, and contradictory exit status fail closed. Completed and cancelled Tur
 cannot retain an unterminated Started Tool; failed and interrupted Turns may retain it
 without fabricating terminal authority. Provider `declined` is a Tool observation.
 
-Trace version `0.5` adds exactly one content-free Runtime approval-policy
+Trace versions `0.5` and `0.6` contain exactly one content-free Runtime approval-policy
 observation before Model or Context metadata. For the pinned Codex adapter it binds
 the exact Runtime, `codex-app-server` adapter, `0.144.5` Runtime version, durable
 adapter version `codex-cli 0.144.5`, fixed producing Runtime identity
@@ -206,16 +206,70 @@ recompute this binding from the durable Session Runtime row. The event always ha
 Approval request, decision, denial, or grant.
 The fixed producing Runtime identity keeps existing `0.5` records replayable across
 future binary upgrades; a new producer version must explicitly revise the Trace
-contract or add a reviewed compatibility entry. `turn-trace/0.5` rejects every
-`Approval` payload until a durable approval-authority producer and ledger binding
-exist.
+contract or add a reviewed compatibility entry. Both `turn-trace/0.5` and `0.6`
+reject every `Approval` payload until a durable approval-authority producer and
+ledger binding exist.
 
-Runtime-side denial of a Provider approval request remains a separate failure path
-and currently produces no Trace `Approval` event. Provider `declined` command state
-is produced only as a terminal Tool observation. A genuine user Approval remains
-without a producer in the current read-only adapter; any future producer must use
-separate Approval-authority evidence and cannot be inferred from Runtime policy,
-Runtime denial, or Provider Tool state.
+Trace version `0.6` adds a distinct content-free `RuntimeDenial` observation for an
+actual approval request bound to the active Codex Turn. The recognized request
+classes and fixed local responses are:
+
+- `item/commandExecution/requestApproval` -> `{"decision":"decline"}`.
+- `item/fileChange/requestApproval` -> `{"decision":"decline"}`.
+- `item/permissions/requestApproval` -> `{"permissions":{},"scope":"turn"}`.
+
+The permissions response is an empty permission grant interpreted by Runtime as a
+denial; it is not a literal `decision: decline` response. The adapter requires a
+valid bounded request ID, the exact active Provider thread and Turn, a non-empty
+bounded Item ID, and a non-negative `startedAtMs`. A mismatch receives JSON-RPC
+`-32602`, fails the Turn, and creates neither `RuntimeDenial` nor `Approval`.
+Approval requests received outside an active bound Turn are likewise errors rather
+than denial observations.
+
+The checked-in generated Codex `0.144.5` schema does not define these three
+`ServerRequest` shapes, so this stage does not claim generated-schema validation for
+them. The current evidence is the same-version App Server protocol source together
+with deterministic real-stdio fixtures that match each request and response shape.
+Any Codex pin upgrade must re-review those sources and fixtures before changing the
+adapter contract.
+
+The Provider request identity is a SHA-256 hash of the complete bounded request
+message. The durable request identity additionally binds the Trace, Provider-thread
+and policy-authority identities, and `request_kind`; changing a command request into
+a file or permissions request cannot preserve identity. Runtime preflights that
+identity, duplicate detection, the 128-observation ceiling, delivery order, and the
+exact 72 KiB durable reservation into a non-serializable prepared ticket. Only then
+does the adapter write and flush the fixed response. Runtime commits the prepared
+observation after that flush succeeds, using preallocated storage and a monotonic
+timestamp. A failed write or abandoned ticket records no denial; the normal
+fail-closed adapter/Turn error path handles the failure without inventing response
+evidence. If Trace preflight fails after a valid request is bound, the adapter writes
+and flushes a fixed content-free JSON-RPC error before failing the Turn; that backend
+is reusable only after the error write succeeds. A denial-response or fallback-error
+write/flush failure marks the adapter unavailable and restart-required instead of
+returning a potentially blocked protocol channel to the next Turn. Missing/invalid
+request IDs and malformed params receive a fixed `id:null`, `-32602` error and also
+discard the backend; safely bound thread/Turn/Item/time mismatches echo only the
+validated request ID and may reuse the channel after the error flush succeeds.
+
+`response_state=decline-flushed` proves only that Aegisy wrote and flushed the local
+JSON response into the Codex child-process stdin. It does not prove that a Provider
+received, processed, or acted on the response. Every denial is attributed to
+`runtime-policy`, fixes `user_decision_observed=false`,
+`approval_authority_observed=false`, and `execution_authority=false`, and carries
+Runtime-observed metadata-only evidence. Denials share delivery ordering with Tool
+and Usage observations and must precede Error and Terminal evidence. Store terminal
+admission, direct Trace read, projection replay, and startup quarantine independently
+recompute the exact Runtime/adapter/version/Provider-thread/policy binding, reject
+duplicate request identities and identity/authority/redaction drift, and fail closed
+on invalid denial ordering.
+
+Provider `declined` remains only a terminal Tool observation. An observed
+`approvalPolicy=never` remains only Runtime policy evidence. Neither is a
+`RuntimeDenial`, and none of these three facts is a genuine user `Approval`. The
+current read-only adapter still has no genuine-user Approval producer; any future
+producer must use separate Approval-authority evidence and cannot be inferred from
+Runtime policy, Runtime denial, or Provider Tool state.
 
 Every producer admission serializes the complete outer
 `turn.trace.recorded/0.1` envelope and enforces the exact 72 KiB durable limit. It
@@ -228,7 +282,9 @@ terminal follows the same failed compensation path. Store independently rechecks
 72 KiB limit on admission, direct read, projection replay, and restart; oversized
 records fail closed even if producer logic regresses.
 
-Trace records are not Timeline Items and have no AAP/Qt read,
+Trace records persist only metadata and identities: no prompt, Provider request or
+response body, path, command, output, diff, credential, raw request ID, or raw Item ID
+enters the Trace. Trace records are not Timeline Items and have no AAP/Qt read,
 audit/export, or retention surface. Clients must not infer task success, automatic
 compaction, trace visibility, or trace export from these fields.
 
