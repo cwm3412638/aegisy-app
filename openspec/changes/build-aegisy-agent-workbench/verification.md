@@ -208,9 +208,31 @@ Model profile foundation evidence:
   idempotent, and rechecks the content-hashed snapshot after restart. Seven
   focused fixtures cover create/reopen, revision conflicts, removal, duplicate
   IDs, secret rejection, tamper detection, invalid project IDs, and private
-  bounded storage. The store is not Workbench-SQLite event-backed or writable
-  through AAP/Qt, and is not bound to catalog capability checks or routing;
-  `10.3` and `10.4` therefore remain unchecked.
+  bounded storage. This snapshot store is not itself Workbench-SQLite event-backed
+  or writable through AAP/Qt, and is not bound to catalog capability checks or
+  routing; it remains the current Runtime read authority. `10.3` and `10.4`
+  therefore remain unchecked.
+- SQLite schema v14 adds a separate `model_profiles` projection with one global
+  scope and bounded historical project scopes. Save/update/remove uses exact
+  revision CAS, monotonic generation and event sequence, idempotent retries, and
+  one `IMMEDIATE` transaction for the lifecycle event plus projection. Startup
+  revalidates canonical profile JSON/hash/identity, the complete bounded event
+  chain and cursor, current-lifecycle creation time, project ownership, orphan
+  streams, and fixed false selection/routing/token/Turn authority. Capacity is
+  enforced before commit for 256 active profiles, 1,025 historical scopes, and
+  10,000 lifecycle events; active profile IDs remain globally unique across scopes.
+  Fixtures cover event rollback, silently ignored projection writes, event-capacity
+  rejection, duplicate active IDs, secret-shaped metadata, semantic/timestamp/cursor
+  tampering, orphan cursors, dedicated hashed streams, v13 backup migration, restart
+  durability, exclusion of model-profile streams from Session recovery, and
+  side-effect-free rejection of the reserved stream namespace by ordinary Session
+  creation, portable import, and projection rebuild. This
+  stage does not migrate or delete the snapshot,
+  connect Runtime/AAP/Qt to the SQLite projection, select a model, route a request,
+  issue a token, or start a Turn; tasks `5.1`, `5.2`, `10.3`, and `10.4` remain
+  unchecked. The complete stage passes 616 library tests with one ignored live
+  fixture, 10 context-threshold tests, 63 protocol tests, and 19 stdio tests, plus
+  formatting, strict Clippy, strict OpenSpec validation, and `git diff --check`.
 - Runtime now opens the validated Profile Store when durable storage is healthy
   and negotiates `model.profile.read-only`. AAP `model/profile/list` returns a
   bounded snapshot generation/identity and metadata-only profile views, with an
@@ -778,8 +800,8 @@ Current editor evidence:
   bounded user-gesture ID; read-only profiles and managed denials fail before any
   SQLite row is written. This remains an internal policy/issuer foundation and is
   not connected to AAP, Qt, native execution, or a production user-gesture bridge.
-- The SQLite store now carries schema version 12 project/session/Blob/retention/job/
-  lease/notification-outbox metadata and turn/item projections:
+- The SQLite store now carries schema version 14 project/session/Blob/retention/job/
+  lease/notification-outbox/model-profile metadata and turn/item projections:
   canonical project roots and access, Chat/Work session mode, project binding,
   environment identity, `new`/`resume`/`fork` lineage, active/archived/failed/
   interrupted status, and archive/unarchive transitions. Turns bind to an active
@@ -789,11 +811,12 @@ Current editor evidence:
   sequence gaps and payload tampering; terminal turns reject late items. Work sessions cannot be
   created without a project; lineage parents must match project and mode; invalid
   rows are rejected before insertion. Reopen tests verify metadata durability and
-  transactional v1→v12 through v11→v12 migrations. The v3 path rebuilds the event table
+  transactional v1-through-v13 source migrations into v14. The v3 path rebuilds the event table
   with nullable project binding while preserving every existing event field, hash,
   and sequence; a new Chat session then proves a typed event can carry no project.
-  The complete
-  extensions/model-profile/checkpoint and complete scheduler/job recovery schema remains unchecked. Runtime
+  The complete extensions/checkpoint and scheduler/job recovery schema remains
+  unchecked; model profiles have only the authority-free projection described
+  above. Runtime
   integration now persists project/session metadata, Preview turns, and completed
   Codex timeline items under the Qt host's platform application-data Workbench root;
   `AEGISY_WORKBENCH_DATA_ROOT` remains an explicit developer/test override;
@@ -805,7 +828,7 @@ Current editor evidence:
   event-source version 1; v3-migrated sessions have no marker and remain explicitly
   legacy/non-rebuildable. Richer runtime/environment reconstruction and future
   mutation event coverage remain unchecked.
-- Every supported v1/v2/v3/v4/v5/v6/v7/v8/v9/v10 source receives a WAL-consistent SQLite Online
+- Every supported v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13 source receives a WAL-consistent SQLite Online
   Backup before migration. The standalone DELETE-journal backup and bounded JSON
   manifest bind source/target schema, application ID, exact bytes, SHA-256,
   creation time, and integrity state under a private no-clobber directory. Admission

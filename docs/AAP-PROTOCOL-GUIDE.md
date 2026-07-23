@@ -118,8 +118,9 @@ events. Existing `0.1` through `0.5` records retain their version-specific
 compatibility and fixed legacy identities; cross-version fields, unknown fields,
 and future `0.7+` versions fail closed. The outer durable
 envelope remains `turn.trace.recorded/0.1`, and the Workbench Store remains SQLite
-schema v13. The pinned Codex Runtime produces `0.6` traces for completed, failed,
-and interrupted Turns.
+schema v14. Turn Trace itself required no schema migration; v14 was introduced
+later for the authority-free model-profile projection. The pinned Codex Runtime
+produces `0.6` traces for completed, failed, and interrupted Turns.
 One immutable Intent identifies Chat conversation or current Work read-only
 inspection. Completed terminal metadata binds that Intent and independently marks
 Workspace change, Git change, and verification as not-applicable, applicable,
@@ -377,13 +378,25 @@ still `unknown` or `estimated` remains an unknown check.
 {"jsonrpc":"2.0","id":"8","result":{"schema_version":"model-capability-check/0.1","model_id":"local:deterministic-echo","catalog_state":"offline","decision":"unknown","selection_allowed":false,"checks":[{"capability":"runtime","required":{"adapter":"preview","version":"0.1.0"},"observed":{"schema_version":"model-runtime-compatibility/0.1","adapter_family":"native","adapter":"preview","protocol":"aap-native","exact_versions":["0.1.0"],"state":"unknown","authority":"unknown"},"authority":"unknown","result":"unknown"}],"mismatches":[]}}
 ```
 
-The internal `model-profile/0.1` contract is metadata-only and is not an AAP
-method. It validates global/project scope and explicit role bindings for Agent,
-plan, apply, review, utility, embedding, and rerank. The single-model default
-binds only Agent; an unconfigured role is disabled rather than silently using
-the default model. Profiles contain no credential, token, routing, or turn
-authority and remain unavailable to the Qt picker until the signed catalog and
-durable profile gates are complete.
+The internal `model-profile/0.1` contract is metadata-only and has no writable
+AAP method. It validates global/project scope and explicit role bindings for
+Agent, plan, apply, review, utility, embedding, and rerank. The single-model
+default binds only Agent; an unconfigured role is disabled rather than silently
+using the default model. The existing private snapshot remains Runtime read
+authority and supplies the negotiated read-only `model/profile/list` and
+`model/profile/read` projections.
+
+SQLite schema v14 separately persists a bounded event-backed `model_profiles`
+projection with revision CAS, monotonic generation/sequence, idempotent retries,
+atomic projection/event writes, globally unique active profile IDs, and startup
+chain/cursor ownership verification. Every row and lifecycle event fixes model
+selection, routing, token issuance, and Turn start
+authority to false. Runtime/AAP/Qt do not consume or mutate this SQLite projection,
+and it does not replace the snapshot. The derived `model-profile-stream-*`
+namespace is reserved for these internal lifecycle streams; ordinary Session create,
+portable import, and projection rebuild reject it before writing. Profiles remain unavailable to the Qt picker
+until the signed catalog, profile switching, token/routing, immutable change-event,
+and cross-platform gates are complete.
 
 ## Structured Plan Boundary
 

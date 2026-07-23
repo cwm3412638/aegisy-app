@@ -262,11 +262,35 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   a private, atomically replaced snapshot outside project roots. It validates
   scope and secret-free profile metadata, rejects duplicate profile IDs,
   requires exact revision CAS for updates/removals, makes identical retries
-  idempotent, and revalidates the snapshot identity after restart. It is not
-  Workbench-SQLite event-backed or writable through AAP/Qt. Its validated
-  snapshot is now consumed by the read-only AAP list/read projection described
-  above, but remains disconnected from catalog capability checks and
-  routing/token/turn authority; keep OpenSpec `10.3` and `10.4` unchecked.
+  idempotent, and revalidates the snapshot identity after restart. This snapshot
+  store is not itself Workbench-SQLite event-backed or writable through AAP/Qt.
+  Its validated snapshot remains Runtime read authority and is consumed by the
+  read-only AAP list/read projection described above, but remains disconnected
+  from catalog capability checks and routing/token/turn authority; keep OpenSpec
+  `10.3` and `10.4` unchecked.
+- Model profile SQLite projection foundation (2026-07-23): Workbench schema v14
+  adds one global and bounded historical project `model_profiles` projection.
+  Save/update/remove requires revision CAS, monotonic generation and event sequence,
+  idempotent retries, and commits the lifecycle event plus projection in one
+  `IMMEDIATE` transaction. Startup revalidates canonical profile JSON/hash/identity,
+  the complete bounded event chain and cursor, current-lifecycle creation time,
+  project ownership, and orphan streams. Admission caps 256 active profiles, 1,025
+  historical scopes, and 10,000 lifecycle events before projection or sequence
+  mutation; active profile IDs remain globally unique across scopes. Every row and
+  event fixes `selection_allowed`, `routing_authority`,
+  `token_issued`, and `turn_started` to false. The dedicated model-profile streams
+  are excluded from Session recovery and cannot create false Session quarantine.
+  Ordinary Session creation, portable import, and projection rebuild reject the
+  reserved `model-profile-stream-*` namespace before any database write, so a
+  Session cannot commit a cursor that makes the next Store open fail ownership
+  verification.
+  This projection does not migrate/delete the existing snapshot and has no Runtime,
+  AAP, Qt, model-selection, routing, token, or Turn integration. OpenSpec `5.1` and
+  `5.2` remain unchecked because extensions, Git-checkpoint projections, complete
+  scheduler/job recovery schema, and complete mutation-ack coverage remain absent.
+  The complete stage passes 616 library tests with one ignored live fixture, 10
+  context-threshold tests, 63 protocol tests, and 19 stdio tests, plus formatting,
+  strict Clippy, strict OpenSpec validation, and `git diff --check`.
 - OpenSpec task `21.1` is complete: background jobs, multi-agent execution, and
   unattended writes remain unadvertised and disabled until their prerequisite
   security, recovery, budget, evaluation, and release gates are recorded. The
@@ -1001,9 +1025,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   producer and ledger binding exist.
   `WorkbenchStore::finish_turn_with_trace` still writes the unchanged outer
   `turn.trace.recorded/0.1` event immediately before the terminal event in one SQLite
-  transaction. Store schema remains v13 with no migration, backfill, or legacy event
-  rewrite. The Trace remains content-free: no prompt, provider body, path, command,
-  diff, output, or credential content is recorded. Complete genuine-user
+  transaction. Turn Trace itself required no migration, backfill, or legacy event
+  rewrite; the Store is now schema v14 for the separate model-profile projection.
+  The Trace remains content-free: no prompt, provider body, path, command, diff,
+  output, or credential content is recorded. Complete genuine-user
   Approval/Change/Test production, non-command Tool families,
   per-Attempt/Retry Usage authority, Timeline projection, AAP/Qt,
   audit/export, and retention remain absent; keep `20.1` and `20.2` unchecked.
@@ -1120,15 +1145,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user-gesture ID for explicit approvals; it refuses read-only or managed-denied
   Git actions before SQLite mutation. This remains an internal foundation, not an
   AAP/Qt approval bridge or native execution grant.
-- `WorkbenchStore` schema version 13 now persists canonical projects and roots plus
+- `WorkbenchStore` schema version 14 now persists canonical projects and roots plus
   Chat/Work sessions with project binding, environment identity, new/resume/fork
   lineage, and active/archived/failed/interrupted status. Work sessions require a
   project, lineage parents must match project and mode, archive/unarchive is
   timestamp-guarded, and reopen plus v1-to-v2 migration fixtures pass. Turns now
   have bounded idempotency/input hashes and terminal states; items have session
   sequences, turn binding, bounded redacted JSON payloads, and content hashes with
-  tamper/gap replay checks. Transactional
-  v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12-to-v13 migrations pass; the v3
+  tamper/gap replay checks. Transactional v1-through-v13 source migrations into v14
+  pass; the v3
   path preserves existing events while allowing projectless Chat event streams, and
   v4 adds only the durable Blob schema. The v11 background-job and scheduler-lease
   projections plus the v12 notification outbox are
@@ -1141,12 +1166,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   portable import, and fork commit this binding with their other Session projections;
   Work Session observation occurs before provider thread creation, and a later Store
   failure best-effort archives the newly created Codex thread. Event failure rolls
-  back all local rows. The normal WAL-consistent migration backup covers
-  v12-to-v13, and final two-phase Session purge removes the binding in the same
-  transaction as Turns, Items, and events. No repository absolute path, permission,
+  back all local rows. Schema v14 adds the bounded authority-free model-profile
+  projection and full-chain verification described above. The normal WAL-consistent
+  migration backup covers v12-to-v13 and v13-to-v14. Final two-phase Session purge
+  removes the binding in the same transaction as Turns, Items, and events. No
+  repository absolute path, permission,
   dedicated-worktree claim, or mutation authority enters the binding. Extensions,
-  model profiles, Git checkpoint projections, and complete scheduler/recovery state
-  are still future work. Runtime durable
+  Git checkpoint projections, complete scheduler/recovery state, and Runtime/AAP/Qt
+  use of the model-profile projection are still future work. Runtime durable
   replay is now partially integrated: the Qt host's platform data root enables
   SQLite persistence for project/session creation, Preview turns, and completed
   Codex items/terminal states; `session/list` exposes bounded metadata filters and
@@ -2546,7 +2573,7 @@ Implemented visual baseline:
 ## Verification Snapshot (2026-07-23)
 
 - The Rust workspace passes `cargo fmt --all -- --check`, `cargo test
-  --workspace` (603 `aegisy-agentd` library tests passed, one ignored, 10
+  --workspace` (616 `aegisy-agentd` library tests passed, one ignored, 10
   context-threshold contract tests, 63 AAP protocol tests, and 19 stdio/Codex
   tests), and strict workspace Clippy.
 - The previously verified bundled application Node runtime passes both local gateway

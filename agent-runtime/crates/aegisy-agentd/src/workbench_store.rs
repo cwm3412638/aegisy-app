@@ -20,6 +20,9 @@ use crate::git_workflow_authorization::{
     GitWorkflowDecisionReference,
 };
 use crate::git_workflow_state::{validate_record, GitWorkflowRecord};
+use crate::model_profile::{
+    ModelProfile, ProfileScope, SCHEMA_VERSION as MODEL_PROFILE_SCHEMA_VERSION,
+};
 use crate::operation_reconciliation::{
     reconcile as reconcile_operation, EventState, ReconciliationInput, ReconciliationResult,
 };
@@ -62,7 +65,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = crate::turn_trace::MAX_DURABLE_EVENT_BYTES;
@@ -80,6 +83,13 @@ const MAX_OPERATION_RECONCILIATIONS: usize = 10_000;
 const MAX_BACKGROUND_JOBS: usize = 10_000;
 const MAX_BACKGROUND_RECOVERY_DECISIONS: usize = 10_000;
 const MAX_BACKGROUND_NOTIFICATIONS: usize = 10_000;
+// Keep active rows representable by model-profile-store/0.1 while retaining
+// one bounded historical projection per supported global/project scope.
+const MAX_ACTIVE_MODEL_PROFILES: usize = 256;
+const MAX_MODEL_PROFILE_PROJECTIONS: usize = 1_025;
+const MAX_MODEL_PROFILE_EVENTS: usize = 10_000;
+const MAX_MODEL_PROFILE_JSON_BYTES: usize = 64 * 1024;
+const MODEL_PROFILE_EVENT_STREAM_PREFIX: &str = "model-profile-stream-";
 const MAX_BACKGROUND_NOTIFICATION_PAGE: usize = 100;
 const MAX_BACKGROUND_NOTIFICATION_JSON_BYTES: usize = 32 * 1024;
 const MAX_TURN_USAGE_ITEMS: usize = 32;
@@ -136,6 +146,12 @@ const REQUIRED_BACKGROUND_NOTIFICATION_TABLES: [&str; 1] = ["background_notifica
 const REQUIRED_BACKGROUND_NOTIFICATION_INDEXES: [&str; 2] = [
     "background_notification_outbox_session_idx",
     "background_notification_outbox_job_idx",
+];
+const REQUIRED_MODEL_PROFILE_TABLES: [&str; 1] = ["model_profiles"];
+const REQUIRED_MODEL_PROFILE_INDEXES: [&str; 3] = [
+    "model_profiles_project_idx",
+    "model_profiles_state_updated_idx",
+    "model_profiles_active_profile_id_idx",
 ];
 const REQUIRED_SESSION_SEARCH_INDEXES: [&str; 4] = [
     "sessions_status_updated_idx",
@@ -523,6 +539,48 @@ const BACKGROUND_NOTIFICATION_OUTBOX_SCHEMA_SQL: &str = "
     CREATE INDEX IF NOT EXISTS background_notification_outbox_job_idx
         ON background_notification_outbox(job_id, recorded_at_ms, intent_identity);
 ";
+const MODEL_PROFILE_SCHEMA_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS model_profiles (
+        scope_key TEXT PRIMARY KEY,
+        scope TEXT NOT NULL CHECK(scope IN ('global','project')),
+        project_id TEXT,
+        profile_id TEXT NOT NULL,
+        profile_schema_version TEXT NOT NULL CHECK(profile_schema_version = 'model-profile/0.1'),
+        revision INTEGER NOT NULL CHECK(revision >= 0),
+        generation INTEGER NOT NULL CHECK(generation >= 1),
+        state TEXT NOT NULL CHECK(state IN ('active','removed')),
+        profile_json TEXT NOT NULL,
+        profile_sha256 TEXT NOT NULL CHECK(length(profile_sha256) = 64),
+        profile_bytes INTEGER NOT NULL CHECK(profile_bytes > 0),
+        profile_identity TEXT NOT NULL,
+        event_stream_id TEXT NOT NULL,
+        event_sequence INTEGER NOT NULL CHECK(event_sequence >= 1),
+        created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+        updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= created_at_ms),
+        removed_at_ms INTEGER,
+        selection_allowed INTEGER NOT NULL CHECK(selection_allowed = 0),
+        routing_authority INTEGER NOT NULL CHECK(routing_authority = 0),
+        token_issued INTEGER NOT NULL CHECK(token_issued = 0),
+        turn_started INTEGER NOT NULL CHECK(turn_started = 0),
+        CHECK(
+            (scope = 'global' AND project_id IS NULL) OR
+            (scope = 'project' AND project_id IS NOT NULL)
+        ),
+        CHECK(
+            (state = 'active' AND removed_at_ms IS NULL) OR
+            (state = 'removed' AND removed_at_ms IS NOT NULL)
+        ),
+        FOREIGN KEY(project_id) REFERENCES projects(project_id),
+        FOREIGN KEY(event_stream_id, event_sequence)
+            REFERENCES events(session_id, sequence)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS model_profiles_project_idx
+        ON model_profiles(project_id, scope_key);
+    CREATE INDEX IF NOT EXISTS model_profiles_state_updated_idx
+        ON model_profiles(state, updated_at_ms DESC, scope_key ASC);
+    CREATE UNIQUE INDEX IF NOT EXISTS model_profiles_active_profile_id_idx
+        ON model_profiles(profile_id) WHERE state = 'active';
+";
 
 #[derive(Debug)]
 pub struct WorkbenchStore {
@@ -621,6 +679,69 @@ pub struct StoredBackgroundNotification {
     pub delivery_state: BackgroundNotificationDeliveryState,
     pub delivery_attempt_count: u32,
     pub recorded_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelProfileProjectionState {
+    Active,
+    Removed,
+}
+
+impl ModelProfileProjectionState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Removed => "removed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelProfileProjectionWrite {
+    Created,
+    Updated,
+    Removed,
+    Idempotent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredModelProfileProjection {
+    pub schema_version: String,
+    pub profile: ModelProfile,
+    pub profile_hash: ContentHash,
+    pub profile_identity: String,
+    pub generation: u64,
+    pub state: ModelProfileProjectionState,
+    pub event_stream_id: String,
+    pub event_sequence: u64,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub removed_at_ms: Option<u64>,
+    pub selection_allowed: bool,
+    pub routing_authority: bool,
+    pub token_issued: bool,
+    pub turn_started: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ModelProfileEventPayload {
+    schema_version: String,
+    scope: String,
+    project_id: Option<String>,
+    profile_id: String,
+    profile_identity: String,
+    profile_hash: ContentHash,
+    previous_profile_identity: Option<String>,
+    revision: u64,
+    generation: u64,
+    state: String,
+    selection_allowed: bool,
+    routing_authority: bool,
+    token_issued: bool,
+    turn_started: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2268,6 +2389,374 @@ impl WorkbenchStore {
         Ok(report)
     }
 
+    pub fn save_model_profile(
+        &mut self,
+        profile: &ModelProfile,
+        expected_revision: Option<u64>,
+        observed_at_ms: u64,
+    ) -> Result<(ModelProfileProjectionWrite, StoredModelProfileProjection), WorkbenchStoreError>
+    {
+        let (scope_key, event_stream_id) =
+            model_profile_scope(profile.scope, profile.project_id.as_deref())?;
+        if let Some(project_id) = profile.project_id.as_deref() {
+            self.ensure_model_profile_project_writable(project_id)?;
+        }
+        let (profile_json, profile_hash, profile_identity) = canonical_model_profile(profile)?;
+        let current = load_model_profile_projection_row(&self.connection, &scope_key)?;
+        let (write, generation, created_at_ms, previous_profile_identity) = match &current {
+            None => {
+                if expected_revision.is_some() || profile.revision != 0 {
+                    return Err(coded_error(
+                        "model-profile-cas-mismatch",
+                        "new model profile revision is invalid",
+                    ));
+                }
+                (
+                    ModelProfileProjectionWrite::Created,
+                    1,
+                    observed_at_ms,
+                    None,
+                )
+            }
+            Some(existing) if existing.state == ModelProfileProjectionState::Active => {
+                if expected_revision != Some(existing.profile.revision) {
+                    return Err(coded_error(
+                        "model-profile-cas-mismatch",
+                        "model profile revision changed",
+                    ));
+                }
+                if existing.profile_identity == profile_identity {
+                    return Ok((ModelProfileProjectionWrite::Idempotent, existing.clone()));
+                }
+                if profile.profile_id != existing.profile.profile_id
+                    || profile.revision != existing.profile.revision.saturating_add(1)
+                {
+                    return Err(coded_error(
+                        "model-profile-revision-mismatch",
+                        "model profile revision transition is invalid",
+                    ));
+                }
+                (
+                    ModelProfileProjectionWrite::Updated,
+                    existing.generation.checked_add(1).ok_or_else(|| {
+                        coded_error(
+                            "model-profile-generation-exhausted",
+                            "model profile generation is exhausted",
+                        )
+                    })?,
+                    existing.created_at_ms,
+                    Some(existing.profile_identity.clone()),
+                )
+            }
+            Some(existing) => {
+                if expected_revision.is_some() || profile.revision != 0 {
+                    return Err(coded_error(
+                        "model-profile-cas-mismatch",
+                        "removed model profile must be recreated from revision zero",
+                    ));
+                }
+                (
+                    ModelProfileProjectionWrite::Created,
+                    existing.generation.checked_add(1).ok_or_else(|| {
+                        coded_error(
+                            "model-profile-generation-exhausted",
+                            "model profile generation is exhausted",
+                        )
+                    })?,
+                    observed_at_ms,
+                    Some(existing.profile_identity.clone()),
+                )
+            }
+        };
+        if current
+            .as_ref()
+            .is_some_and(|existing| observed_at_ms < existing.updated_at_ms)
+        {
+            return Err(coded_error(
+                "model-profile-clock-regressed",
+                "model profile observation time regressed",
+            ));
+        }
+        let event_kind = match write {
+            ModelProfileProjectionWrite::Created => "model-profile.created",
+            ModelProfileProjectionWrite::Updated => "model-profile.updated",
+            ModelProfileProjectionWrite::Removed | ModelProfileProjectionWrite::Idempotent => {
+                unreachable!()
+            }
+        };
+        let transaction = self.begin_database_write("cannot start model profile transaction")?;
+        if load_model_profile_projection_row(&transaction, &scope_key)? != current {
+            return Err(coded_error(
+                "model-profile-cas-mismatch",
+                "model profile changed before commit",
+            ));
+        }
+        let duplicate_profile_id = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM model_profiles
+                    WHERE profile_id = ?1 AND state = 'active' AND scope_key != ?2
+                 )",
+                params![profile.profile_id, scope_key],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|_| error("cannot inspect active model profile IDs"))?;
+        if duplicate_profile_id {
+            return Err(coded_error(
+                "model-profile-duplicate-id",
+                "active model profile ID is already in use",
+            ));
+        }
+        let activates_profile = current
+            .as_ref()
+            .is_none_or(|profile| profile.state == ModelProfileProjectionState::Removed);
+        ensure_model_profile_write_capacity(&transaction, activates_profile, current.is_none())?;
+        let payload = model_profile_event_payload(
+            profile,
+            &profile_hash,
+            &profile_identity,
+            previous_profile_identity,
+            generation,
+            ModelProfileProjectionState::Active,
+        );
+        let event_id = model_profile_event_id(event_kind, generation, &profile_identity);
+        let correlation_id = model_profile_correlation_id(&scope_key);
+        let event = append_event_tx(
+            &transaction,
+            EventInput {
+                session_id: &event_stream_id,
+                event_id: &event_id,
+                timestamp_ms: observed_at_ms,
+                correlation_id: &correlation_id,
+                event_kind,
+                project_id: profile.project_id.as_deref(),
+                operation_id: &profile.profile_id,
+                generation,
+                payload: serde_json::to_value(&payload)
+                    .map_err(|_| error("cannot serialize model profile event"))?,
+            },
+        )?;
+        let affected = transaction
+            .execute(
+                "INSERT INTO model_profiles (
+                    scope_key, scope, project_id, profile_id, profile_schema_version,
+                    revision, generation, state, profile_json, profile_sha256,
+                    profile_bytes, profile_identity, event_stream_id, event_sequence,
+                    created_at_ms, updated_at_ms, removed_at_ms,
+                    selection_allowed, routing_authority, token_issued, turn_started
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?9, ?10, ?11,
+                    ?12, ?13, ?14, ?15, NULL, 0, 0, 0, 0
+                 ) ON CONFLICT(scope_key) DO UPDATE SET
+                    scope = excluded.scope,
+                    project_id = excluded.project_id,
+                    profile_id = excluded.profile_id,
+                    profile_schema_version = excluded.profile_schema_version,
+                    revision = excluded.revision,
+                    generation = excluded.generation,
+                    state = excluded.state,
+                    profile_json = excluded.profile_json,
+                    profile_sha256 = excluded.profile_sha256,
+                    profile_bytes = excluded.profile_bytes,
+                    profile_identity = excluded.profile_identity,
+                    event_stream_id = excluded.event_stream_id,
+                    event_sequence = excluded.event_sequence,
+                    created_at_ms = excluded.created_at_ms,
+                    updated_at_ms = excluded.updated_at_ms,
+                    removed_at_ms = NULL,
+                    selection_allowed = 0,
+                    routing_authority = 0,
+                    token_issued = 0,
+                    turn_started = 0",
+                params![
+                    scope_key,
+                    model_profile_scope_name(profile.scope),
+                    profile.project_id,
+                    profile.profile_id,
+                    MODEL_PROFILE_SCHEMA_VERSION,
+                    to_i64(profile.revision, "model profile revision")?,
+                    to_i64(generation, "model profile generation")?,
+                    profile_json,
+                    profile_hash.sha256,
+                    to_i64(profile_hash.bytes, "model profile byte count")?,
+                    profile_identity,
+                    event_stream_id,
+                    to_i64(event.sequence, "model profile event sequence")?,
+                    to_i64(created_at_ms, "model profile creation time")?,
+                    to_i64(observed_at_ms, "model profile update time")?,
+                ],
+            )
+            .map_err(|_| error("cannot persist model profile projection"))?;
+        if affected != 1 {
+            return Err(error("model profile projection write was not applied"));
+        }
+        let stored = load_model_profile_projection_row(&transaction, &scope_key)?
+            .ok_or_else(|| error("model profile projection is missing after write"))?;
+        if &stored.profile != profile
+            || stored.profile_hash != profile_hash
+            || stored.profile_identity != profile_identity
+            || stored.generation != generation
+            || stored.state != ModelProfileProjectionState::Active
+            || stored.event_stream_id != event_stream_id
+            || stored.event_sequence != event.sequence
+            || stored.created_at_ms != created_at_ms
+            || stored.updated_at_ms != observed_at_ms
+            || stored.removed_at_ms.is_some()
+            || stored.selection_allowed
+            || stored.routing_authority
+            || stored.token_issued
+            || stored.turn_started
+        {
+            return Err(error("model profile projection write is inconsistent"));
+        }
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit model profile projection"))?;
+        Ok((write, stored))
+    }
+
+    pub fn remove_model_profile(
+        &mut self,
+        scope: ProfileScope,
+        project_id: Option<&str>,
+        expected_revision: u64,
+        observed_at_ms: u64,
+    ) -> Result<(ModelProfileProjectionWrite, StoredModelProfileProjection), WorkbenchStoreError>
+    {
+        let (scope_key, event_stream_id) = model_profile_scope(scope, project_id)?;
+        if let Some(project_id) = project_id {
+            self.ensure_model_profile_project_writable(project_id)?;
+        }
+        let current = load_model_profile_projection_row(&self.connection, &scope_key)?
+            .ok_or_else(|| coded_error("model-profile-not-found", "model profile is missing"))?;
+        if expected_revision != current.profile.revision {
+            return Err(coded_error(
+                "model-profile-cas-mismatch",
+                "model profile revision changed",
+            ));
+        }
+        if current.state == ModelProfileProjectionState::Removed {
+            return Ok((ModelProfileProjectionWrite::Idempotent, current));
+        }
+        if observed_at_ms < current.updated_at_ms {
+            return Err(coded_error(
+                "model-profile-clock-regressed",
+                "model profile observation time regressed",
+            ));
+        }
+        let generation = current.generation.checked_add(1).ok_or_else(|| {
+            coded_error(
+                "model-profile-generation-exhausted",
+                "model profile generation is exhausted",
+            )
+        })?;
+        let transaction =
+            self.begin_database_write("cannot start model profile removal transaction")?;
+        if load_model_profile_projection_row(&transaction, &scope_key)? != Some(current.clone()) {
+            return Err(coded_error(
+                "model-profile-cas-mismatch",
+                "model profile changed before removal",
+            ));
+        }
+        ensure_model_profile_write_capacity(&transaction, false, false)?;
+        let payload = model_profile_event_payload(
+            &current.profile,
+            &current.profile_hash,
+            &current.profile_identity,
+            Some(current.profile_identity.clone()),
+            generation,
+            ModelProfileProjectionState::Removed,
+        );
+        let event_kind = "model-profile.removed";
+        let event_id = model_profile_event_id(event_kind, generation, &current.profile_identity);
+        let correlation_id = model_profile_correlation_id(&scope_key);
+        let event = append_event_tx(
+            &transaction,
+            EventInput {
+                session_id: &event_stream_id,
+                event_id: &event_id,
+                timestamp_ms: observed_at_ms,
+                correlation_id: &correlation_id,
+                event_kind,
+                project_id,
+                operation_id: &current.profile.profile_id,
+                generation,
+                payload: serde_json::to_value(&payload)
+                    .map_err(|_| error("cannot serialize model profile removal event"))?,
+            },
+        )?;
+        transaction
+            .execute(
+                "UPDATE model_profiles SET
+                    generation = ?1,
+                    state = 'removed',
+                    event_sequence = ?2,
+                    updated_at_ms = ?3,
+                    removed_at_ms = ?3,
+                    selection_allowed = 0,
+                    routing_authority = 0,
+                    token_issued = 0,
+                    turn_started = 0
+                 WHERE scope_key = ?4 AND state = 'active' AND revision = ?5",
+                params![
+                    to_i64(generation, "model profile generation")?,
+                    to_i64(event.sequence, "model profile event sequence")?,
+                    to_i64(observed_at_ms, "model profile removal time")?,
+                    scope_key,
+                    to_i64(expected_revision, "model profile revision")?,
+                ],
+            )
+            .map_err(|_| error("cannot remove model profile projection"))?;
+        let stored = load_model_profile_projection_row(&transaction, &scope_key)?
+            .ok_or_else(|| error("model profile projection is missing after removal"))?;
+        if stored.state != ModelProfileProjectionState::Removed {
+            return Err(error("model profile removal did not update the projection"));
+        }
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit model profile removal"))?;
+        Ok((ModelProfileProjectionWrite::Removed, stored))
+    }
+
+    pub fn read_model_profile(
+        &self,
+        scope: ProfileScope,
+        project_id: Option<&str>,
+    ) -> Result<Option<StoredModelProfileProjection>, WorkbenchStoreError> {
+        let (scope_key, _) = model_profile_scope(scope, project_id)?;
+        Ok(
+            load_model_profile_projection_row(&self.connection, &scope_key)?
+                .filter(|profile| profile.state == ModelProfileProjectionState::Active),
+        )
+    }
+
+    fn ensure_model_profile_project_writable(
+        &self,
+        project_id: &str,
+    ) -> Result<(), WorkbenchStoreError> {
+        self.ensure_project_writable(project_id)?;
+        let state = self
+            .connection
+            .query_row(
+                "SELECT state FROM projects WHERE project_id = ?1",
+                [project_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot inspect model profile project"))?;
+        match state.as_deref() {
+            Some("active") => Ok(()),
+            Some(_) => Err(coded_error(
+                "model-profile-project-unavailable",
+                "model profile project is not active",
+            )),
+            None => Err(coded_error(
+                "model-profile-project-missing",
+                "model profile project does not exist",
+            )),
+        }
+    }
+
     pub fn create_project(
         &mut self,
         request: StoredProjectCreate,
@@ -3180,14 +3669,14 @@ impl WorkbenchStore {
         runtime_binding: Option<StoredSessionRuntimeBindingCreate>,
         workspace_binding: Option<StoredSessionWorkspaceBindingCreate>,
     ) -> Result<StoredSession, WorkbenchStoreError> {
-        validate_identifier(&request.session_id, "session ID")?;
+        validate_session_identifier(&request.session_id, "session ID")?;
         if let Some(project_id) = &request.project_id {
             validate_identifier(project_id, "session project ID")?;
             self.ensure_project_writable(project_id)?;
         }
         validate_text(&request.title, 256, "session title")?;
         if let Some(parent_session_id) = &request.parent_session_id {
-            validate_identifier(parent_session_id, "parent session ID")?;
+            validate_session_identifier(parent_session_id, "parent session ID")?;
             self.ensure_session_writable(parent_session_id)?;
         }
         if request.mode == StoredSessionMode::Work && request.project_id.is_none() {
@@ -4750,7 +5239,7 @@ impl WorkbenchStore {
             workspace_binding,
             imported_at_ms,
         } = command;
-        validate_identifier(target_session_id, "portable import target session ID")?;
+        validate_session_identifier(target_session_id, "portable import target session ID")?;
         validate_identifier(import_id, "portable import ID")?;
         if let Some(environment_identity) = target_environment_identity {
             validate_identity_text(
@@ -6890,6 +7379,7 @@ impl WorkbenchStore {
                      SELECT session_id FROM events
                         WHERE event_kind NOT LIKE 'project.%'
                           AND event_kind NOT LIKE 'retention.%'
+                          AND event_kind NOT LIKE 'model-profile.%'
                      ORDER BY session_id
                      LIMIT ?1",
                 )
@@ -8700,7 +9190,7 @@ impl WorkbenchStore {
         &mut self,
         candidate: &SessionProjectionCandidate,
     ) -> Result<(), WorkbenchStoreError> {
-        validate_identifier(&candidate.session_id, "session ID")?;
+        validate_session_identifier(&candidate.session_id, "session ID")?;
         let session = candidate
             .session
             .as_ref()
@@ -10230,6 +10720,22 @@ impl WorkbenchStore {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
+        if version == 13 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start model profile schema migration"))?;
+            transaction
+                .execute_batch(MODEL_PROFILE_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply model profile schema migration"))?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit model profile schema migration"));
+        }
         if version == 12 {
             let transaction = self
                 .connection
@@ -10604,6 +11110,7 @@ impl WorkbenchStore {
         verify_background_scheduler_lease_store(&self.connection)?;
         verify_background_recovery_decision_store(&self.connection)?;
         verify_background_notification_store(&self.connection)?;
+        verify_model_profile_store(self)?;
         verify_session_workspace_binding_store(self)
     }
 
@@ -14221,6 +14728,417 @@ fn project_event_stream_id(project_id: &str) -> String {
     derived_event_id("project-stream", project_id.as_bytes())
 }
 
+fn model_profile_scope_name(scope: ProfileScope) -> &'static str {
+    match scope {
+        ProfileScope::Global => "global",
+        ProfileScope::Project => "project",
+    }
+}
+
+fn model_profile_scope(
+    scope: ProfileScope,
+    project_id: Option<&str>,
+) -> Result<(String, String), WorkbenchStoreError> {
+    let scope_key = match (scope, project_id) {
+        (ProfileScope::Global, None) => "global".to_owned(),
+        (ProfileScope::Project, Some(project_id)) => {
+            validate_identifier(project_id, "model profile project ID")?;
+            validate_persisted_text(project_id, "model profile project ID")?;
+            format!("project:{project_id}")
+        }
+        (ProfileScope::Global, Some(_)) => {
+            return Err(coded_error(
+                "model-profile-global-project-invalid",
+                "global model profile cannot bind a project",
+            ));
+        }
+        (ProfileScope::Project, None) => {
+            return Err(coded_error(
+                "model-profile-project-missing",
+                "project model profile requires a project",
+            ));
+        }
+    };
+    let event_stream_id = derived_event_id("model-profile-stream", scope_key.as_bytes());
+    Ok((scope_key, event_stream_id))
+}
+
+fn model_profile_correlation_id(scope_key: &str) -> String {
+    derived_event_id("model-profile-correlation", scope_key.as_bytes())
+}
+
+fn model_profile_event_id(event_kind: &str, generation: u64, profile_identity: &str) -> String {
+    derived_event_id(
+        "model-profile-event",
+        format!("{event_kind}\0{generation}\0{profile_identity}").as_bytes(),
+    )
+}
+
+fn canonical_model_profile(
+    profile: &ModelProfile,
+) -> Result<(String, ContentHash, String), WorkbenchStoreError> {
+    profile
+        .validate()
+        .map_err(|cause| coded_error(cause.code, "model profile is invalid"))?;
+    let value = serde_json::to_value(profile)
+        .map_err(|_| error("cannot serialize model profile metadata"))?;
+    validate_persisted_payload(&value, "model profile metadata")?;
+    let profile_json = serde_json::to_string(profile)
+        .map_err(|_| error("cannot serialize model profile metadata"))?;
+    if profile_json.is_empty() || profile_json.len() > MAX_MODEL_PROFILE_JSON_BYTES {
+        return Err(coded_error(
+            "model-profile-size-invalid",
+            "model profile metadata exceeds its size limit",
+        ));
+    }
+    let profile_hash = ContentHash::for_bytes(profile_json.as_bytes());
+    let profile_identity = profile
+        .identity()
+        .map_err(|cause| coded_error(cause.code, "cannot identify model profile"))?;
+    let expected_identity = format!("model-profile:sha256:{}", profile_hash.sha256);
+    if profile_identity != expected_identity {
+        return Err(error(
+            "model profile identity does not match canonical metadata",
+        ));
+    }
+    Ok((profile_json, profile_hash, profile_identity))
+}
+
+fn model_profile_event_payload(
+    profile: &ModelProfile,
+    profile_hash: &ContentHash,
+    profile_identity: &str,
+    previous_profile_identity: Option<String>,
+    generation: u64,
+    state: ModelProfileProjectionState,
+) -> ModelProfileEventPayload {
+    ModelProfileEventPayload {
+        schema_version: "model-profile-event/0.1".into(),
+        scope: model_profile_scope_name(profile.scope).into(),
+        project_id: profile.project_id.clone(),
+        profile_id: profile.profile_id.clone(),
+        profile_identity: profile_identity.into(),
+        profile_hash: profile_hash.clone(),
+        previous_profile_identity,
+        revision: profile.revision,
+        generation,
+        state: state.as_str().into(),
+        selection_allowed: false,
+        routing_authority: false,
+        token_issued: false,
+        turn_started: false,
+    }
+}
+
+fn load_model_profile_projection_row(
+    connection: &Connection,
+    scope_key: &str,
+) -> Result<Option<StoredModelProfileProjection>, WorkbenchStoreError> {
+    let row = connection
+        .query_row(
+            "SELECT scope, project_id, profile_id, profile_schema_version,
+                    revision, generation, state, profile_json, profile_sha256,
+                    profile_bytes, profile_identity, event_stream_id, event_sequence,
+                    created_at_ms, updated_at_ms, removed_at_ms,
+                    selection_allowed, routing_authority, token_issued, turn_started
+             FROM model_profiles WHERE scope_key = ?1",
+            [scope_key],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, i64>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, Option<i64>>(15)?,
+                    row.get::<_, bool>(16)?,
+                    row.get::<_, bool>(17)?,
+                    row.get::<_, bool>(18)?,
+                    row.get::<_, bool>(19)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot read model profile projection"))?;
+    let Some((
+        scope,
+        project_id,
+        profile_id,
+        profile_schema_version,
+        revision,
+        generation,
+        state,
+        profile_json,
+        profile_sha256,
+        profile_bytes,
+        profile_identity,
+        event_stream_id,
+        event_sequence,
+        created_at_ms,
+        updated_at_ms,
+        removed_at_ms,
+        selection_allowed,
+        routing_authority,
+        token_issued,
+        turn_started,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    let profile: ModelProfile = serde_json::from_str(&profile_json)
+        .map_err(|_| error("model profile projection JSON is invalid"))?;
+    let (canonical_json, canonical_hash, canonical_identity) = canonical_model_profile(&profile)?;
+    let stored_hash = ContentHash {
+        sha256: profile_sha256,
+        bytes: to_u64(profile_bytes, "model profile byte count")?,
+    };
+    let revision = to_u64(revision, "model profile revision")?;
+    let generation = to_u64(generation, "model profile generation")?;
+    let event_sequence = to_u64(event_sequence, "model profile event sequence")?;
+    let created_at_ms = to_u64(created_at_ms, "model profile creation time")?;
+    let updated_at_ms = to_u64(updated_at_ms, "model profile update time")?;
+    let removed_at_ms = removed_at_ms
+        .map(|value| to_u64(value, "model profile removal time"))
+        .transpose()?;
+    let projection_state = match state.as_str() {
+        "active" => ModelProfileProjectionState::Active,
+        "removed" => ModelProfileProjectionState::Removed,
+        _ => return Err(error("model profile projection state is invalid")),
+    };
+    let (expected_scope_key, expected_event_stream_id) =
+        model_profile_scope(profile.scope, profile.project_id.as_deref())?;
+    if scope_key != expected_scope_key
+        || scope != model_profile_scope_name(profile.scope)
+        || project_id != profile.project_id
+        || profile_id != profile.profile_id
+        || profile_schema_version != MODEL_PROFILE_SCHEMA_VERSION
+        || revision != profile.revision
+        || generation == 0
+        || event_sequence != generation
+        || canonical_json != profile_json
+        || canonical_hash != stored_hash
+        || canonical_identity != profile_identity
+        || expected_event_stream_id != event_stream_id
+        || updated_at_ms < created_at_ms
+        || (projection_state == ModelProfileProjectionState::Active && removed_at_ms.is_some())
+        || (projection_state == ModelProfileProjectionState::Removed
+            && removed_at_ms != Some(updated_at_ms))
+        || selection_allowed
+        || routing_authority
+        || token_issued
+        || turn_started
+    {
+        return Err(coded_error(
+            "model-profile-durable-integrity-invalid",
+            "model profile projection integrity is invalid",
+        ));
+    }
+    let stored = StoredModelProfileProjection {
+        schema_version: "model-profile-projection/0.1".into(),
+        profile,
+        profile_hash: stored_hash,
+        profile_identity,
+        generation,
+        state: projection_state,
+        event_stream_id,
+        event_sequence,
+        created_at_ms,
+        updated_at_ms,
+        removed_at_ms,
+        selection_allowed,
+        routing_authority,
+        token_issued,
+        turn_started,
+    };
+    validate_model_profile_projection_event(connection, &stored)?;
+    Ok(Some(stored))
+}
+
+fn validate_model_profile_projection_event(
+    connection: &Connection,
+    projection: &StoredModelProfileProjection,
+) -> Result<(), WorkbenchStoreError> {
+    let event = load_model_profile_event(
+        connection,
+        &projection.event_stream_id,
+        projection.event_sequence,
+    )?;
+    let payload = parse_model_profile_event(&event)?;
+    let expected_kind = match projection.state {
+        ModelProfileProjectionState::Active if projection.generation == 1 => {
+            "model-profile.created"
+        }
+        ModelProfileProjectionState::Active => match payload.previous_profile_identity.as_ref() {
+            Some(_) if payload.revision == 0 => "model-profile.created",
+            Some(_) => "model-profile.updated",
+            None => return Err(error("model profile event predecessor is missing")),
+        },
+        ModelProfileProjectionState::Removed => "model-profile.removed",
+    };
+    if event.event_kind != expected_kind
+        || event.generation != projection.generation
+        || event.timestamp_ms != projection.updated_at_ms
+        || event.project_id != projection.profile.project_id
+        || event.operation_id != projection.profile.profile_id
+        || payload.scope != model_profile_scope_name(projection.profile.scope)
+        || payload.project_id != projection.profile.project_id
+        || payload.profile_id != projection.profile.profile_id
+        || payload.profile_identity != projection.profile_identity
+        || payload.profile_hash != projection.profile_hash
+        || payload.revision != projection.profile.revision
+        || payload.generation != projection.generation
+        || payload.state != projection.state.as_str()
+    {
+        return Err(coded_error(
+            "model-profile-event-integrity-invalid",
+            "model profile event does not match its projection",
+        ));
+    }
+    Ok(())
+}
+
+fn load_model_profile_event(
+    connection: &Connection,
+    stream_id: &str,
+    sequence: u64,
+) -> Result<WorkbenchEvent, WorkbenchStoreError> {
+    let row = connection
+        .query_row(
+            "SELECT event_id, timestamp_ms, correlation_id, event_kind, project_id,
+                    operation_id, generation, payload_json, payload_sha256, payload_bytes
+             FROM events WHERE session_id = ?1 AND sequence = ?2",
+            params![stream_id, to_i64(sequence, "model profile event sequence")?],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot read model profile event"))?
+        .ok_or_else(|| error("model profile event is missing"))?;
+    let (
+        event_id,
+        timestamp_ms,
+        correlation_id,
+        event_kind,
+        project_id,
+        operation_id,
+        generation,
+        payload_json,
+        payload_sha256,
+        payload_bytes,
+    ) = row;
+    let payload: Value = serde_json::from_str(&payload_json)
+        .map_err(|_| error("model profile event JSON is invalid"))?;
+    validate_persisted_payload(&payload, "model profile event")?;
+    let payload_hash = ContentHash {
+        sha256: payload_sha256,
+        bytes: to_u64(payload_bytes, "model profile event byte count")?,
+    };
+    if ContentHash::for_bytes(payload_json.as_bytes()) != payload_hash {
+        return Err(error("model profile event payload integrity check failed"));
+    }
+    Ok(WorkbenchEvent {
+        schema_version: "workbench-event/0.1".into(),
+        session_id: stream_id.into(),
+        sequence,
+        event_id,
+        timestamp_ms: to_u64(timestamp_ms, "model profile event timestamp")?,
+        correlation_id,
+        event_kind,
+        project_id,
+        operation_id,
+        generation: to_u64(generation, "model profile event generation")?,
+        payload,
+        payload_hash,
+    })
+}
+
+fn parse_model_profile_event(
+    event: &WorkbenchEvent,
+) -> Result<ModelProfileEventPayload, WorkbenchStoreError> {
+    let payload: ModelProfileEventPayload = serde_json::from_value(event.payload.clone())
+        .map_err(|_| error("model profile event payload is invalid"))?;
+    if payload.schema_version != "model-profile-event/0.1"
+        || !matches!(
+            event.event_kind.as_str(),
+            "model-profile.created" | "model-profile.updated" | "model-profile.removed"
+        )
+        || payload.generation == 0
+        || payload.generation != event.generation
+        || payload.profile_hash.bytes == 0
+        || payload.profile_hash.sha256.len() != 64
+        || !payload
+            .profile_hash
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || payload.profile_identity
+            != format!("model-profile:sha256:{}", payload.profile_hash.sha256)
+        || payload.selection_allowed
+        || payload.routing_authority
+        || payload.token_issued
+        || payload.turn_started
+        || !matches!(payload.state.as_str(), "active" | "removed")
+    {
+        return Err(error("model profile event semantics are invalid"));
+    }
+    let scope = match payload.scope.as_str() {
+        "global" => ProfileScope::Global,
+        "project" => ProfileScope::Project,
+        _ => return Err(error("model profile event scope is invalid")),
+    };
+    let (scope_key, expected_stream_id) =
+        model_profile_scope(scope, payload.project_id.as_deref())?;
+    if event.session_id != expected_stream_id
+        || event.correlation_id != model_profile_correlation_id(&scope_key)
+        || event.operation_id != payload.profile_id
+        || event.project_id != payload.project_id
+        || event.event_id
+            != model_profile_event_id(
+                &event.event_kind,
+                payload.generation,
+                &payload.profile_identity,
+            )
+        || event.sequence != payload.generation
+        || (event.event_kind == "model-profile.removed" && payload.state != "removed")
+        || (event.event_kind != "model-profile.removed" && payload.state != "active")
+        || (event.event_kind == "model-profile.updated" && payload.revision == 0)
+        || (event.event_kind == "model-profile.created" && payload.revision != 0)
+        || (event.event_kind == "model-profile.removed"
+            && payload.previous_profile_identity.as_deref()
+                != Some(payload.profile_identity.as_str()))
+    {
+        return Err(error("model profile event binding is invalid"));
+    }
+    if let Some(previous) = &payload.previous_profile_identity {
+        if !previous.starts_with("model-profile:sha256:") || previous.len() != 85 {
+            return Err(error("model profile predecessor identity is invalid"));
+        }
+    }
+    Ok(payload)
+}
+
 fn pinned_context_operation_id(project_id: &str, set_identity: &str) -> String {
     derived_event_id(
         "pinned-context-operation",
@@ -14803,13 +15721,13 @@ fn stored_session_workspace_binding_from_row(
 }
 
 fn validate_rebuilt_session(session: &StoredSession) -> Result<(), WorkbenchStoreError> {
-    validate_identifier(&session.session_id, "session ID")?;
+    validate_session_identifier(&session.session_id, "session ID")?;
     if let Some(project_id) = &session.project_id {
         validate_identifier(project_id, "session project ID")?;
     }
     validate_text(&session.title, 256, "session title")?;
     if let Some(parent_session_id) = &session.parent_session_id {
-        validate_identifier(parent_session_id, "parent session ID")?;
+        validate_session_identifier(parent_session_id, "parent session ID")?;
     }
     if let Some(environment_identity) = &session.environment_identity {
         validate_identity_text(environment_identity, "session environment identity")?;
@@ -15371,7 +16289,10 @@ fn apply_session_search_indexes(connection: &Connection) -> Result<(), Workbench
         .map_err(|_| error("cannot apply background lease schema migration"))?;
     connection
         .execute_batch(BACKGROUND_NOTIFICATION_OUTBOX_SCHEMA_SQL)
-        .map_err(|_| error("cannot apply background notification schema migration"))
+        .map_err(|_| error("cannot apply background notification schema migration"))?;
+    connection
+        .execute_batch(MODEL_PROFILE_SCHEMA_SQL)
+        .map_err(|_| error("cannot apply model profile schema migration"))
 }
 
 fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreError> {
@@ -15388,6 +16309,7 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         .chain(REQUIRED_BACKGROUND_JOB_TABLES)
         .chain(REQUIRED_BACKGROUND_LEASE_TABLES)
         .chain(REQUIRED_BACKGROUND_NOTIFICATION_TABLES)
+        .chain(REQUIRED_MODEL_PROFILE_TABLES)
     {
         let exists: Option<String> = connection
             .query_row(
@@ -15463,6 +16385,250 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
                 "workbench database background notification indexes are incomplete",
             ));
         }
+    }
+    for index in REQUIRED_MODEL_PROFILE_INDEXES {
+        let exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot verify workbench model profile indexes"))?;
+        if exists.as_deref() != Some(index) {
+            return Err(error(
+                "workbench database model profile indexes are incomplete",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_model_profile_store(store: &WorkbenchStore) -> Result<(), WorkbenchStoreError> {
+    let mut statement = store
+        .connection
+        .prepare("SELECT scope_key FROM model_profiles ORDER BY scope_key LIMIT ?1")
+        .map_err(|_| error("cannot prepare model profile verification"))?;
+    let limit = i64::try_from(MAX_MODEL_PROFILE_PROJECTIONS.saturating_add(1))
+        .map_err(|_| error("model profile verification limit is invalid"))?;
+    let scope_keys = statement
+        .query_map([limit], |row| row.get::<_, String>(0))
+        .map_err(|_| error("cannot scan model profile projections"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("model profile projection row is invalid"))?;
+    if scope_keys.len() > MAX_MODEL_PROFILE_PROJECTIONS {
+        return Err(coded_error(
+            "model-profile-limit-exceeded",
+            "model profile projection limit is exceeded",
+        ));
+    }
+    let active_count = query_global_count(
+        &store.connection,
+        "SELECT COUNT(*) FROM model_profiles WHERE state = 'active'",
+        "cannot count active model profile projections",
+    )?;
+    if active_count > MAX_ACTIVE_MODEL_PROFILES as u64 {
+        return Err(coded_error(
+            "model-profile-active-limit-exceeded",
+            "active model profile projection limit is exceeded",
+        ));
+    }
+    drop(statement);
+
+    let mut expected_streams = BTreeSet::new();
+    let mut active_profile_ids = BTreeSet::new();
+    let mut total_events = 0_usize;
+    for scope_key in scope_keys {
+        let projection = load_model_profile_projection_row(&store.connection, &scope_key)?
+            .ok_or_else(|| error("model profile projection disappeared during verification"))?;
+        if projection.state == ModelProfileProjectionState::Active
+            && !active_profile_ids.insert(projection.profile.profile_id.clone())
+        {
+            return Err(error("active model profile ID is duplicated"));
+        }
+        if let Some(project_id) = projection.profile.project_id.as_deref() {
+            let exists = store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projects WHERE project_id = ?1)",
+                    [project_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|_| error("cannot verify model profile project"))?;
+            if !exists {
+                return Err(error("model profile project binding is invalid"));
+            }
+        }
+        if !expected_streams.insert(projection.event_stream_id.clone()) {
+            return Err(error("model profile event stream is duplicated"));
+        }
+        let event_count = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE session_id = ?1",
+                [&projection.event_stream_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|_| error("cannot count model profile events"))?;
+        let event_count = usize::try_from(event_count)
+            .map_err(|_| error("model profile event count is invalid"))?;
+        total_events = total_events
+            .checked_add(event_count)
+            .ok_or_else(|| error("model profile event count overflowed"))?;
+        if event_count != projection.generation as usize || total_events > MAX_MODEL_PROFILE_EVENTS
+        {
+            return Err(coded_error(
+                "model-profile-event-limit-invalid",
+                "model profile event stream is incomplete or over limit",
+            ));
+        }
+        let next_sequence = store
+            .connection
+            .query_row(
+                "SELECT next_sequence FROM session_sequences WHERE session_id = ?1",
+                [&projection.event_stream_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot read model profile event cursor"))?
+            .map(|value| to_u64(value, "model profile event cursor"))
+            .transpose()?;
+        if next_sequence != projection.generation.checked_add(1) {
+            return Err(error("model profile event cursor is invalid"));
+        }
+        let mut previous: Option<ModelProfileEventPayload> = None;
+        let mut previous_timestamp = 0_u64;
+        let mut active_created_at_ms = None;
+        for sequence in 1..=projection.generation {
+            let event =
+                load_model_profile_event(&store.connection, &projection.event_stream_id, sequence)?;
+            let payload = parse_model_profile_event(&event)?;
+            if event.timestamp_ms < previous_timestamp {
+                return Err(error("model profile event clock regressed"));
+            }
+            match (&previous, event.event_kind.as_str()) {
+                (None, "model-profile.created")
+                    if payload.previous_profile_identity.is_none() && payload.revision == 0 =>
+                {
+                    active_created_at_ms = Some(event.timestamp_ms);
+                }
+                (Some(prior), "model-profile.created")
+                    if prior.state == "removed"
+                        && payload.revision == 0
+                        && payload.previous_profile_identity.as_deref()
+                            == Some(prior.profile_identity.as_str()) =>
+                {
+                    active_created_at_ms = Some(event.timestamp_ms);
+                }
+                (Some(prior), "model-profile.updated")
+                    if prior.state == "active"
+                        && payload.scope == prior.scope
+                        && payload.project_id == prior.project_id
+                        && payload.profile_id == prior.profile_id
+                        && payload.revision == prior.revision.saturating_add(1)
+                        && payload.previous_profile_identity.as_deref()
+                            == Some(prior.profile_identity.as_str()) => {}
+                (Some(prior), "model-profile.removed")
+                    if prior.state == "active"
+                        && payload.scope == prior.scope
+                        && payload.project_id == prior.project_id
+                        && payload.profile_id == prior.profile_id
+                        && payload.revision == prior.revision
+                        && payload.profile_identity == prior.profile_identity
+                        && payload.profile_hash == prior.profile_hash
+                        && payload.previous_profile_identity.as_deref()
+                            == Some(prior.profile_identity.as_str()) => {}
+                _ => return Err(error("model profile event transition is invalid")),
+            }
+            previous_timestamp = event.timestamp_ms;
+            previous = Some(payload);
+        }
+        if active_created_at_ms != Some(projection.created_at_ms) {
+            return Err(error(
+                "model profile creation time does not match its current lifecycle",
+            ));
+        }
+    }
+
+    let mut statement = store
+        .connection
+        .prepare(
+            "SELECT DISTINCT session_id FROM events
+             WHERE event_kind IN (
+                'model-profile.created','model-profile.updated','model-profile.removed'
+             ) ORDER BY session_id LIMIT ?1",
+        )
+        .map_err(|_| error("cannot prepare model profile event stream verification"))?;
+    let limit = i64::try_from(MAX_MODEL_PROFILE_PROJECTIONS.saturating_add(1))
+        .map_err(|_| error("model profile event stream limit is invalid"))?;
+    let actual_streams = statement
+        .query_map([limit], |row| row.get::<_, String>(0))
+        .map_err(|_| error("cannot scan model profile event streams"))?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|_| error("model profile event stream is invalid"))?;
+    if actual_streams.len() > MAX_MODEL_PROFILE_PROJECTIONS || actual_streams != expected_streams {
+        return Err(error("model profile event stream ownership is invalid"));
+    }
+    let mut statement = store
+        .connection
+        .prepare(
+            "SELECT session_id FROM session_sequences
+             WHERE session_id LIKE 'model-profile-stream-%'
+             ORDER BY session_id LIMIT ?1",
+        )
+        .map_err(|_| error("cannot prepare model profile cursor ownership verification"))?;
+    let cursor_streams = statement
+        .query_map([limit], |row| row.get::<_, String>(0))
+        .map_err(|_| error("cannot scan model profile event cursors"))?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|_| error("model profile event cursor is invalid"))?;
+    if cursor_streams.len() > MAX_MODEL_PROFILE_PROJECTIONS || cursor_streams != expected_streams {
+        return Err(error("model profile event cursor ownership is invalid"));
+    }
+    Ok(())
+}
+
+fn ensure_model_profile_write_capacity(
+    connection: &Connection,
+    activates_profile: bool,
+    creates_projection: bool,
+) -> Result<(), WorkbenchStoreError> {
+    let profile_count = query_global_count(
+        connection,
+        "SELECT COUNT(*) FROM model_profiles",
+        "cannot count model profile projections",
+    )?;
+    if creates_projection && profile_count >= MAX_MODEL_PROFILE_PROJECTIONS as u64 {
+        return Err(coded_error(
+            "model-profile-limit-exceeded",
+            "model profile projection limit is exceeded",
+        ));
+    }
+    let active_count = query_global_count(
+        connection,
+        "SELECT COUNT(*) FROM model_profiles WHERE state = 'active'",
+        "cannot count active model profile projections",
+    )?;
+    if activates_profile && active_count >= MAX_ACTIVE_MODEL_PROFILES as u64 {
+        return Err(coded_error(
+            "model-profile-active-limit-exceeded",
+            "active model profile projection limit is exceeded",
+        ));
+    }
+    let event_count = query_global_count(
+        connection,
+        "SELECT COUNT(*) FROM events
+         WHERE event_kind IN (
+             'model-profile.created','model-profile.updated','model-profile.removed'
+         )",
+        "cannot count model profile events",
+    )?;
+    if event_count >= MAX_MODEL_PROFILE_EVENTS as u64 {
+        return Err(coded_error(
+            "model-profile-event-limit-invalid",
+            "model profile event limit is exceeded",
+        ));
     }
     Ok(())
 }
@@ -16259,6 +17425,17 @@ fn validate_identifier(value: &str, label: &str) -> Result<(), WorkbenchStoreErr
         return Err(error(format!("{label} is invalid")));
     }
     validate_persisted_text(value, label)?;
+    Ok(())
+}
+
+fn validate_session_identifier(value: &str, label: &str) -> Result<(), WorkbenchStoreError> {
+    validate_identifier(value, label)?;
+    if value.starts_with(MODEL_PROFILE_EVENT_STREAM_PREFIX) {
+        return Err(coded_error(
+            "session-id-reserved",
+            format!("{label} uses a reserved internal event-stream namespace"),
+        ));
+    }
     Ok(())
 }
 
@@ -20364,6 +21541,676 @@ mod tests {
     }
 
     #[test]
+    fn reserved_model_profile_stream_prefix_is_rejected_for_sessions_without_side_effects() {
+        let root = Root::new("model-profile-reserved-session-prefix");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let reserved_session_id = "model-profile-stream-ordinary-session";
+
+        let error = store
+            .create_session(StoredSessionCreate {
+                session_id: reserved_session_id.into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Reserved session".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 100,
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "session-id-reserved");
+
+        let content = PortableSessionContent {
+            schema_version: "aegisy-portable-session-content/0.1".into(),
+            source_session_id: "portable-source".into(),
+            source_had_project: false,
+            mode: StoredSessionMode::Chat,
+            title: "Portable source".into(),
+            source_created_at_ms: 1,
+            source_updated_at_ms: 1,
+            items: Vec::new(),
+        };
+        let package = PortableSessionPackage {
+            schema_version: "aegisy-portable-session/0.1".into(),
+            exported_at_ms: 2,
+            content_hash: ContentHash::for_bytes(&serde_json::to_vec(&content).unwrap()),
+            content,
+            redacted_value_count: 0,
+            excluded_field_count: 0,
+        };
+        let error = store
+            .import_portable_session(PortableSessionImportCommand {
+                target_session_id: reserved_session_id,
+                import_id: "reserved-import",
+                package: &package,
+                target_project_id: None,
+                reject_source_collisions: false,
+                target_environment_identity: None,
+                runtime_binding: None,
+                workspace_binding: None,
+                imported_at_ms: 200,
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "session-id-reserved");
+
+        let rebuilt = StoredSession {
+            session_id: reserved_session_id.into(),
+            project_id: None,
+            mode: StoredSessionMode::Chat,
+            title: "Rebuilt session".into(),
+            parent_session_id: None,
+            lineage_kind: StoredSessionLineage::New,
+            status: "active".into(),
+            environment_identity: None,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        assert_eq!(
+            validate_rebuilt_session(&rebuilt).unwrap_err().code,
+            "session-id-reserved"
+        );
+
+        for table in ["sessions", "events", "session_sequences"] {
+            let count = query_global_count(
+                &store.connection,
+                &format!("SELECT COUNT(*) FROM {table}"),
+                "cannot count reserved-prefix side effects",
+            )
+            .unwrap();
+            assert_eq!(count, 0, "unexpected {table} side effect");
+        }
+        drop(store);
+        WorkbenchStore::open(&root.path).unwrap();
+    }
+
+    #[test]
+    fn model_profile_projection_is_atomic_cas_idempotent_durable_and_authority_free() {
+        let root = Root::new("model-profile-durable");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let mut profile = ModelProfile::single_model(
+            "global-default",
+            ProfileScope::Global,
+            None,
+            "aegisy-model",
+            "user",
+        )
+        .unwrap();
+
+        let (write, created) = store.save_model_profile(&profile, None, 100).unwrap();
+        assert_eq!(write, ModelProfileProjectionWrite::Created);
+        assert_eq!(created.generation, 1);
+        assert_eq!(created.event_sequence, 1);
+        assert!(!created.selection_allowed);
+        assert!(!created.routing_authority);
+        assert!(!created.token_issued);
+        assert!(!created.turn_started);
+        assert_eq!(
+            created.event_stream_id,
+            derived_event_id("model-profile-stream", b"global")
+        );
+        let events = store
+            .read_session_events(&created.event_stream_id, 0, 20)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_kind, "model-profile.created");
+        assert_eq!(
+            events[0].payload.get("selection_allowed"),
+            Some(&json!(false))
+        );
+        assert!(events[0].payload.get("default_model_id").is_none());
+        assert!(events[0].payload.get("roles").is_none());
+
+        let (write, identical) = store.save_model_profile(&profile, Some(0), 110).unwrap();
+        assert_eq!(write, ModelProfileProjectionWrite::Idempotent);
+        assert_eq!(identical, created);
+        assert_eq!(
+            store
+                .read_session_events(&created.event_stream_id, 0, 20)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        profile.name = "Updated profile".into();
+        profile.revision = 1;
+        let (write, updated) = store.save_model_profile(&profile, Some(0), 200).unwrap();
+        assert_eq!(write, ModelProfileProjectionWrite::Updated);
+        assert_eq!(updated.generation, 2);
+        assert_eq!(updated.profile, profile);
+        assert_eq!(
+            store
+                .save_model_profile(&profile, Some(0), 210)
+                .unwrap_err()
+                .code,
+            "model-profile-cas-mismatch"
+        );
+
+        let (write, removed) = store
+            .remove_model_profile(ProfileScope::Global, None, 1, 300)
+            .unwrap();
+        assert_eq!(write, ModelProfileProjectionWrite::Removed);
+        assert_eq!(removed.generation, 3);
+        assert_eq!(removed.state, ModelProfileProjectionState::Removed);
+        assert!(store
+            .read_model_profile(ProfileScope::Global, None)
+            .unwrap()
+            .is_none());
+        let (write, repeated) = store
+            .remove_model_profile(ProfileScope::Global, None, 1, 310)
+            .unwrap();
+        assert_eq!(write, ModelProfileProjectionWrite::Idempotent);
+        assert_eq!(repeated, removed);
+        drop(store);
+
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(reopened.startup_projection_recovery().checked_sessions, 0);
+        assert_eq!(
+            reopened.startup_projection_recovery().quarantined_sessions,
+            0
+        );
+        let removed_after_restart =
+            load_model_profile_projection_row(&reopened.connection, "global")
+                .unwrap()
+                .unwrap();
+        assert_eq!(removed_after_restart, removed);
+        let recreated = ModelProfile::single_model(
+            "global-replacement",
+            ProfileScope::Global,
+            None,
+            "replacement-model",
+            "user",
+        )
+        .unwrap();
+        let (write, recreated) = reopened.save_model_profile(&recreated, None, 400).unwrap();
+        assert_eq!(write, ModelProfileProjectionWrite::Created);
+        assert_eq!(recreated.generation, 4);
+        drop(reopened);
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .read_model_profile(ProfileScope::Global, None)
+                .unwrap()
+                .unwrap(),
+            recreated
+        );
+    }
+
+    #[test]
+    fn project_model_profile_uses_a_dedicated_hashed_event_stream() {
+        let root = Root::new("project-model-profile-stream");
+        let project_root = root.parent.join("project");
+        fs::create_dir(&project_root).unwrap();
+        let project_root = project_root.canonicalize().unwrap();
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_project(StoredProjectCreate {
+                project_id: "profile-project".into(),
+                root_id: "root-1".into(),
+                canonical_root: project_root.to_string_lossy().into_owned(),
+                root_identity: background_job_identity("root:sha256:", '4'),
+                display_name: "Profile project".into(),
+                root_access: "read".into(),
+                created_at_ms: 10,
+            })
+            .unwrap();
+        let profile = ModelProfile::single_model(
+            "project-default",
+            ProfileScope::Project,
+            Some("profile-project".into()),
+            "project-model",
+            "user",
+        )
+        .unwrap();
+        let (_, stored) = store.save_model_profile(&profile, None, 20).unwrap();
+        assert_eq!(
+            stored.event_stream_id,
+            derived_event_id("model-profile-stream", b"project:profile-project")
+        );
+        assert_ne!(
+            stored.event_stream_id,
+            project_event_stream_id("profile-project")
+        );
+        assert_ne!(stored.event_stream_id, "profile-project");
+        assert_eq!(
+            store
+                .read_model_profile(ProfileScope::Project, Some("profile-project"))
+                .unwrap()
+                .unwrap(),
+            stored
+        );
+    }
+
+    #[test]
+    fn active_model_profile_ids_are_unique_across_scopes() {
+        let root = Root::new("model-profile-active-id-unique");
+        let project_root = root.parent.join("project");
+        fs::create_dir(&project_root).unwrap();
+        let project_root = project_root.canonicalize().unwrap();
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_project(StoredProjectCreate {
+                project_id: "profile-project".into(),
+                root_id: "root-1".into(),
+                canonical_root: project_root.to_string_lossy().into_owned(),
+                root_identity: background_job_identity("root:sha256:", '5'),
+                display_name: "Profile project".into(),
+                root_access: "read".into(),
+                created_at_ms: 10,
+            })
+            .unwrap();
+        let global = ModelProfile::single_model(
+            "shared-profile-id",
+            ProfileScope::Global,
+            None,
+            "global-model",
+            "user",
+        )
+        .unwrap();
+        store.save_model_profile(&global, None, 20).unwrap();
+        let project = ModelProfile::single_model(
+            "shared-profile-id",
+            ProfileScope::Project,
+            Some("profile-project".into()),
+            "project-model",
+            "user",
+        )
+        .unwrap();
+
+        assert_eq!(
+            store
+                .save_model_profile(&project, None, 30)
+                .unwrap_err()
+                .code,
+            "model-profile-duplicate-id"
+        );
+        assert!(store
+            .read_model_profile(ProfileScope::Project, Some("profile-project"))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM events WHERE event_kind LIKE 'model-profile.%'",
+                "count model profile events",
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn model_profile_event_failure_rolls_back_projection_and_sequence() {
+        let root = Root::new("model-profile-event-rollback");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_model_profile_event
+                 BEFORE INSERT ON events
+                 WHEN NEW.event_kind = 'model-profile.created'
+                 BEGIN SELECT RAISE(ABORT, 'injected model profile event failure'); END;",
+            )
+            .unwrap();
+        let profile = ModelProfile::single_model(
+            "rollback-profile",
+            ProfileScope::Global,
+            None,
+            "rollback-model",
+            "user",
+        )
+        .unwrap();
+        assert!(store.save_model_profile(&profile, None, 100).is_err());
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM model_profiles",
+                "count model profiles",
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM session_sequences
+                 WHERE session_id LIKE 'model-profile-stream-%'",
+                "count model profile sequences",
+            )
+            .unwrap(),
+            0
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_model_profile_event")
+            .unwrap();
+        store.save_model_profile(&profile, None, 110).unwrap();
+    }
+
+    #[test]
+    fn ignored_model_profile_upsert_rolls_back_event_and_cursor() {
+        let root = Root::new("model-profile-upsert-ignore");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let mut profile = ModelProfile::single_model(
+            "upsert-profile",
+            ProfileScope::Global,
+            None,
+            "upsert-model",
+            "user",
+        )
+        .unwrap();
+        let (_, created) = store.save_model_profile(&profile, None, 100).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER ignore_model_profile_update
+                 BEFORE UPDATE ON model_profiles
+                 WHEN OLD.scope_key = 'global'
+                 BEGIN SELECT RAISE(IGNORE); END;",
+            )
+            .unwrap();
+        profile.name = "Updated profile".into();
+        profile.revision = 1;
+
+        assert!(store.save_model_profile(&profile, Some(0), 200).is_err());
+        assert_eq!(
+            load_model_profile_projection_row(&store.connection, "global")
+                .unwrap()
+                .unwrap(),
+            created
+        );
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM events WHERE event_kind LIKE 'model-profile.%'",
+                "count model profile events",
+            )
+            .unwrap(),
+            1
+        );
+        let next_sequence: i64 = store
+            .connection
+            .query_row(
+                "SELECT next_sequence FROM session_sequences WHERE session_id = ?1",
+                [&created.event_stream_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(next_sequence, 2);
+        store
+            .connection
+            .execute_batch("DROP TRIGGER ignore_model_profile_update")
+            .unwrap();
+        let (_, updated) = store.save_model_profile(&profile, Some(0), 210).unwrap();
+        assert_eq!(updated.generation, 2);
+    }
+
+    #[test]
+    fn model_profile_event_limit_rejects_before_projection_or_sequence_write() {
+        let root = Root::new("model-profile-event-limit");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let payload_hash = ContentHash::for_bytes(b"{}");
+        store
+            .connection
+            .execute(
+                "WITH RECURSIVE event_number(value) AS (
+                    VALUES(1)
+                    UNION ALL
+                    SELECT value + 1 FROM event_number WHERE value < ?1
+                 )
+                 INSERT INTO events (
+                    session_id, sequence, event_id, timestamp_ms, correlation_id,
+                    event_kind, project_id, operation_id, generation,
+                    payload_json, payload_sha256, payload_bytes
+                 )
+                 SELECT
+                    'capacity-stream', value, printf('capacity-event-%05d', value),
+                    value, 'capacity-correlation', 'model-profile.created', NULL,
+                    'capacity-operation', value, '{}', ?2, 2
+                 FROM event_number",
+                params![MAX_MODEL_PROFILE_EVENTS as i64, payload_hash.sha256],
+            )
+            .unwrap();
+        let profile = ModelProfile::single_model(
+            "capacity-profile",
+            ProfileScope::Global,
+            None,
+            "capacity-model",
+            "user",
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .save_model_profile(&profile, None, 100)
+                .unwrap_err()
+                .code,
+            "model-profile-event-limit-invalid"
+        );
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM model_profiles",
+                "count model profiles",
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            query_global_count(
+                &store.connection,
+                "SELECT COUNT(*) FROM session_sequences
+                 WHERE session_id LIKE 'model-profile-stream-%'",
+                "count model profile sequences",
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn model_profile_secret_is_rejected_without_database_side_effects() {
+        let root = Root::new("model-profile-secret-rejection");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let mut profile = ModelProfile::single_model(
+            "secret-profile",
+            ProfileScope::Global,
+            None,
+            "safe-model",
+            "user",
+        )
+        .unwrap();
+        profile.name = "token=sk-secret-value".into();
+        assert_eq!(
+            store
+                .save_model_profile(&profile, None, 100)
+                .unwrap_err()
+                .code,
+            "model-profile-secret-shaped"
+        );
+        for table in ["model_profiles", "events", "session_sequences"] {
+            let sql = format!("SELECT COUNT(*) FROM {table}");
+            assert_eq!(
+                query_global_count(&store.connection, &sql, "count rejected profile rows").unwrap(),
+                0,
+                "secret-shaped profile changed {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_profile_hash_consistent_semantic_tampering_fails_reopen() {
+        let root = Root::new("model-profile-semantic-tamper");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let profile = ModelProfile::single_model(
+            "tamper-profile",
+            ProfileScope::Global,
+            None,
+            "tamper-model",
+            "user",
+        )
+        .unwrap();
+        store.save_model_profile(&profile, None, 100).unwrap();
+        drop(store);
+
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        let mut value = serde_json::to_value(&profile).unwrap();
+        value["roles"]["agent"]["enabled"] = json!(false);
+        let tampered_json = serde_json::to_string(&value).unwrap();
+        let tampered_hash = ContentHash::for_bytes(tampered_json.as_bytes());
+        connection
+            .execute(
+                "UPDATE model_profiles SET
+                    profile_json = ?1,
+                    profile_sha256 = ?2,
+                    profile_bytes = ?3,
+                    profile_identity = ?4
+                 WHERE scope_key = 'global'",
+                params![
+                    tampered_json,
+                    tampered_hash.sha256,
+                    to_i64(tampered_hash.bytes, "tampered profile bytes").unwrap(),
+                    format!("model-profile:sha256:{}", tampered_hash.sha256),
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(WorkbenchStore::open(&root.path).is_err());
+    }
+
+    #[test]
+    fn model_profile_creation_time_tampering_fails_reopen() {
+        let root = Root::new("model-profile-created-at-tamper");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let profile = ModelProfile::single_model(
+            "time-profile",
+            ProfileScope::Global,
+            None,
+            "time-model",
+            "user",
+        )
+        .unwrap();
+        store.save_model_profile(&profile, None, 100).unwrap();
+        drop(store);
+
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute(
+                "UPDATE model_profiles SET created_at_ms = 99 WHERE scope_key = 'global'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(WorkbenchStore::open(&root.path).is_err());
+    }
+
+    #[test]
+    fn model_profile_event_cursor_tampering_fails_reopen() {
+        let root = Root::new("model-profile-event-cursor-tamper");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let profile = ModelProfile::single_model(
+            "cursor-profile",
+            ProfileScope::Global,
+            None,
+            "cursor-model",
+            "user",
+        )
+        .unwrap();
+        let (_, stored) = store.save_model_profile(&profile, None, 100).unwrap();
+        drop(store);
+
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute(
+                "UPDATE session_sequences SET next_sequence = 9 WHERE session_id = ?1",
+                [&stored.event_stream_id],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(WorkbenchStore::open(&root.path).is_err());
+    }
+
+    #[test]
+    fn orphan_model_profile_event_cursor_fails_reopen() {
+        let root = Root::new("model-profile-orphan-event-cursor");
+        let store = WorkbenchStore::open(&root.path).unwrap();
+        let stream_id = derived_event_id("model-profile-stream", b"global");
+        store
+            .connection
+            .execute(
+                "INSERT INTO session_sequences(session_id, next_sequence) VALUES (?1, 2)",
+                [&stream_id],
+            )
+            .unwrap();
+        drop(store);
+
+        assert!(WorkbenchStore::open(&root.path).is_err());
+    }
+
+    #[test]
+    fn upgrades_schema_v13_to_model_profiles_after_backup() {
+        let root = Root::new("schema-v13-model-profiles");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "session-v13".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Preserved from v13".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        drop(store);
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch("DROP TABLE model_profiles; PRAGMA user_version = 13;")
+            .unwrap();
+        drop(connection);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        let version: i64 = reopened
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(
+            reopened.load_session("session-v13").unwrap().title,
+            "Preserved from v13"
+        );
+        for table in REQUIRED_MODEL_PROFILE_TABLES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                     )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing model profile table {table}");
+        }
+        for index in REQUIRED_MODEL_PROFILE_INDEXES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1
+                     )",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing model profile index {index}");
+        }
+        let manifests = migration_backup_manifests(&root.path).unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].source_schema_version, 13);
+        assert_eq!(manifests[0].target_schema_version, SCHEMA_VERSION as u64);
+    }
+
+    #[test]
     fn upgrades_schema_v12_to_session_workspace_bindings_after_backup() {
         let root = Root::new("schema-v12-session-workspace-bindings");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
@@ -20385,6 +22232,7 @@ mod tests {
             .execute_batch(
                 "DROP INDEX session_workspace_binding_branch_idx;
                  DROP TABLE session_workspace_bindings;
+                 DROP TABLE model_profiles;
                  PRAGMA user_version = 12;",
             )
             .unwrap();
@@ -20412,6 +22260,19 @@ mod tests {
                 )
                 .unwrap();
             assert!(exists, "missing session workspace binding table {table}");
+        }
+        for table in REQUIRED_MODEL_PROFILE_TABLES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                     )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing model profile table {table}");
         }
         let manifests = migration_backup_manifests(&root.path).unwrap();
         assert_eq!(manifests.len(), 1);
