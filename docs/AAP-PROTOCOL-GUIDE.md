@@ -107,17 +107,18 @@ its component semantics, Aegisy preserves the original bounded total but does
 not silently copy it into the authoritative field.
 
 The sidecar also contains internal `context-threshold/0.1` and
-`turn-trace/0.3` validation contracts. Neither is currently an AAP capability.
+`turn-trace/0.4` validation contracts. Neither is currently an AAP capability.
 Codex usage Timeline metadata may include a `compaction_threshold` decision
 computed from provider-observed last-input/context-window values. Runtime can
 restore its hysteresis latch from complete bounded usage history and projects a
 content-free Session summary; `automatic_compaction_authority` is always false.
 The Workbench Store atomically persists validated terminal traces and strictly
-replays inner `turn-trace/0.1`, `turn-trace/0.2`, and `turn-trace/0.3` without
+replays inner `turn-trace/0.1`, `turn-trace/0.2`, `turn-trace/0.3`, and
+`turn-trace/0.4` without
 rewriting legacy events. Fixed `0.1` and `0.2` serialization identities remain
 unchanged; unknown fields and future versions fail closed. The outer durable
 envelope remains `turn.trace.recorded/0.1`, and the Workbench Store remains SQLite
-schema v13. The pinned Codex Runtime produces `0.3` traces for completed, failed,
+schema v13. The pinned Codex Runtime produces `0.4` traces for completed, failed,
 and interrupted Turns.
 One immutable Intent identifies Chat conversation or current Work read-only
 inspection. Completed terminal metadata binds that Intent and independently marks
@@ -133,7 +134,7 @@ environment, and current Intent Chat/Work mode to match the durable Session bind
 legacy `0.1` traces retain their mode-less Intent semantics but still bind Session,
 Turn, project, and environment. A mismatch fails closed rather than reclassifying
 completion. Trace
-version `0.3` may additionally contain one `usage-report` event. It embeds the validated
+versions `0.3` and `0.4` may additionally contain one `usage-report` event. It embeds the validated
 `usage-authority/0.1` report as the latest successfully validated and persisted
 Codex Provider-thread snapshot, with `scope: provider-thread`,
 `accounting: absolute-snapshot`,
@@ -141,8 +142,9 @@ and both Attempt and Retry attribution explicitly `unavailable`. Provider thread
 totals are not an Aegisy Turn Attempt total, so snapshots are never summed and no
 Attempt or Retry identity is manufactured.
 
-Runtime first commits the ordinary Usage Timeline Item. Only after that commit may
-the trace accumulator retain its exact Item ID and authority report. At terminal
+Runtime first clone-preflights the candidate Trace with the Usage Item identity and
+authority report, then commits the ordinary Usage Timeline Item, and replaces the
+authoritative accumulator only after that commit succeeds. At terminal
 finalization it emits at most the latest retained snapshot, binds the report's
 deterministic metadata identity, observation time, and exact persisted Usage Item,
 and places it before any Error and the terminal event. Completed, failed, and
@@ -164,6 +166,44 @@ a Trace Usage candidate, but advances the review latch to conservative
 Usage with a removed authority report is rejected as a semantic downgrade rather
 than treated as malformed input. Initial-state and cross-Turn hysteresis substitution
 therefore fail closed even when Item and Event hashes are recomputed.
+
+Trace version `0.4` also records a content-free Tool lifecycle for observed Codex
+command Items. A Started Tool binds the closed provider status/source, provider
+timestamp, action identity, and stable input identity while explicitly declaring that
+no Timeline Item has been persisted. Stable input identity is computed only from a
+fixed, compile-time-known projection of command, cwd, action type, and the recognized
+typed action fields. Unknown Provider keys and values never enter that identity.
+Object keys are canonicalized, while action-array order remains semantic.
+
+The adapter separately compares an opaque memory-only SHA-256 fingerprint of the
+complete untruncated Provider command/actions/cwd, including unknown fields, before
+accepting a terminal notification. That fingerprint is neither serialized nor
+persisted. A terminal completed, failed, or declined observation is first constructed
+from the exact would-be sanitized persisted Item returned by Store preview and is
+preflighted on an accumulator clone. The command Item and any Artifact/Blob reference
+then commit, and only a successful commit replaces the authoritative accumulator. The
+Tool binds a Session/Turn/Item domain-separated Item identity, never the raw Provider
+Item ID, plus the complete sanitized Item payload SHA-256, output identity, duration,
+exit status, and terminal timestamp. Neither command, cwd/path, action content, output,
+process ID, Provider body, raw Item ID, nor raw fingerprint enters the Trace. Invalid
+status/source changes, input drift,
+duplicate or missing lifecycle events, reverse time, duration outside the observed
+interval, and contradictory exit status fail closed. Completed and cancelled Turns
+cannot retain an unterminated Started Tool; failed and interrupted Turns may retain it
+without fabricating terminal authority. Provider `declined` is a Tool observation.
+Runtime denial and `approvalPolicy=never` observation remain future producers; none of
+these states may be represented as a user Approval decision.
+
+Every producer admission serializes the complete outer
+`turn.trace.recorded/0.1` envelope and enforces the exact 72 KiB durable limit. It
+reserves the worst legal terminal for every open Tool, the worst failed Error and
+completed/failed/interrupted Terminal, and one emergency Started while admission
+remains open. At exhaustion the emergency Started is still emitted and retained, its
+terminal is denied before Item/Blob persistence, and Runtime durably fails the Turn
+with Started + Error + failed Terminal. A Provider-completed Turn with a missing Tool
+terminal follows the same failed compensation path. Store independently rechecks the
+72 KiB limit on admission, direct read, projection replay, and restart; oversized
+records fail closed even if producer logic regresses.
 
 Trace records are not Timeline Items and have no AAP/Qt read,
 audit/export, or retention surface. Clients must not infer task success, automatic

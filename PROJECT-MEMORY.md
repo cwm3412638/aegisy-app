@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-22
+Last updated: 2026-07-23
 
 ## Mandatory First Step
 
@@ -889,7 +889,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   plus a validated report: provider token, context-window, and reasoning fields
   are observed, cost is unknown, and unreconciled totals are not rewritten. A
   deterministic metadata identity canonicalizes the complete validated report for
-  `turn-trace/0.3`; the report remains a Provider-thread absolute snapshot and
+  `turn-trace/0.3` and `0.4`; the report remains a Provider-thread absolute snapshot and
   grants no Turn Attempt or Retry attribution.
   Qt validates the schema, complete metric set, authority flags/value kinds,
   and false automatic-compaction authority before rendering fixed labels and
@@ -897,10 +897,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   no provider text. This remains Codex-only and is not connected to catalog
   pricing, cross-provider correlation, billing, routing, or durable cross-turn
   threshold state; keep task `20.2` unchecked.
-- OpenSpec task `20.1` now has an internal `turn-trace/0.3` contract with strict
-  durable reads for `turn-trace/0.1`, `0.2`, and `0.3`. Fixed hand-written legacy
-  JSON and `0.1`/`0.2` identities remain unchanged; future versions and cross-version
-  fields fail closed. The `0.2` Intent/completion-domain contract remains intact:
+- OpenSpec task `20.1` now has an internal `turn-trace/0.4` contract with strict
+  durable reads for `turn-trace/0.1`, `0.2`, `0.3`, and `0.4`. Fixed hand-written
+  legacy JSON and legacy identities remain unchanged; future `0.5+` versions and
+  cross-version fields fail closed. The `0.2` Intent/completion-domain contract remains intact:
   one immutable Runtime-observed Intent identifies Chat conversation, Work read-only
   inspection, or future Work mutation, and completion never implies file changes,
   Git state, or passing tests.
@@ -908,8 +908,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   validated and persisted Codex Provider-thread `usage-authority/0.1` snapshot,
   exact Timeline Item, deterministic report identity, observation time,
   `scope=provider-thread`, and `accounting=absolute-snapshot`; Attempt and Retry
-  attribution remain explicitly unavailable. Runtime persists the ordinary Usage
-  Item before retaining it in the Trace accumulator. Later valid notifications
+  attribution remain explicitly unavailable. Runtime clone-preflights the candidate
+  Trace, persists the ordinary Usage Item, and replaces the authoritative accumulator
+  only after commit. Later valid notifications
   replace the retained absolute snapshot rather than being summed. Completed,
   failed, and interrupted traces retain the snapshot before Error/Terminal, while a
   Turn with no valid persisted authority report emits no fabricated Usage event.
@@ -928,12 +929,39 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Initial-latch substitution, cross-Turn hysteresis downgrade, earlier-valid-snapshot
   substitution, raw/threshold tampering, binding substitution, and restart replay all
   fail closed or quarantine the Session.
+  `0.4` adds content-free Codex command Tool lifecycle production. Started binds the
+  closed Provider status/source, timestamp, action, and a stable identity over the
+  fixed compile-time-known command/cwd/action projection while declaring
+  `not-persisted`; unknown Provider keys and values do not enter this identity. JSON
+  object keys are canonicalized and action-array order remains semantic. The adapter
+  separately compares an opaque memory-only SHA-256 fingerprint of the complete
+  untruncated Provider command/actions/cwd, including unknown fields. It is never
+  serialized or persisted. Terminal observations are built from Store's exact
+  would-be sanitized Item, preflighted on an accumulator clone, and become
+  authoritative only after the command Item and any Artifact/Blob transaction commits.
+  They bind a Session/Turn/Item domain-separated identity instead of the raw Provider
+  Item ID, the complete sanitized payload SHA-256, output identity, duration, exit
+  status, and terminal timestamp. Neither raw fingerprint, raw Item ID, command,
+  cwd/path, action content, output, PID, Provider body, nor credential content enters
+  the Trace.
+  Producer admission serializes the complete outer durable envelope against the exact
+  72 KiB limit, reserving every open Tool's worst terminal, worst legal failed/terminal
+  metadata, and one emergency Started while admission is open. Capacity exhaustion
+  retains and emits that Started, denies its terminal Item/Blob before persistence,
+  and durably fails the Turn. Store independently rejects oversized Trace events on
+  admission, direct read, projection replay, and restart. Fixtures also prove SQLite
+  command Item failure and Provider completion with an unmatched Started retain
+  Started + Error + failed Terminal with no terminal Tool, command Item, Blob
+  reference, or object after restart. Provider `declined` is a Tool observation;
+  Runtime denial and `approvalPolicy=never` observation remain future producers, and
+  none may be represented as a user Approval decision.
   `WorkbenchStore::finish_turn_with_trace` still writes the unchanged outer
   `turn.trace.recorded/0.1` event immediately before the terminal event in one SQLite
   transaction. Store schema remains v13 with no migration, backfill, or legacy event
   rewrite. The Trace remains content-free: no prompt, provider body, path, command,
-  diff, output, or credential content is recorded. Complete Tool/Approval/Change/Test
-  production, per-Attempt/Retry Usage authority, Timeline projection, AAP/Qt,
+  diff, output, or credential content is recorded. Complete Approval/Change/Test
+  production, non-command Tool families, authoritative approval policy observation,
+  per-Attempt/Retry Usage authority, Timeline projection, AAP/Qt,
   audit/export, and retention remain absent; keep `20.1` and `20.2` unchecked.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
   at most three retries for transient output-channel, transport, write, read, or
@@ -1271,8 +1299,8 @@ git diff --check
 ```
 
 Current verified baseline: the last complete desktop run remains 16 tests; the
-current Rust run has 539 passed sidecar unit tests plus one explicitly ignored live
-Codex fixture, 63 Rust protocol tests, ten context-threshold contract tests, eleven
+current Rust run has 586 passed sidecar unit tests plus one explicitly ignored live
+Codex fixture, 63 Rust protocol tests, ten context-threshold contract tests, thirteen
 macOS sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
@@ -2471,11 +2499,11 @@ Implemented visual baseline:
 - Do not layer Qt-Material, QDarkStyleSheet, or Fluent QSS over the current 400+
   local style rules. Continue consolidating local QSS into semantic components.
 
-## Verification Snapshot (2026-07-22)
+## Verification Snapshot (2026-07-23)
 
 - The Rust workspace passes `cargo fmt --all -- --check`, `cargo test
-  --workspace` (539 `aegisy-agentd` library tests passed, one ignored, 10
-  context-threshold contract tests, 63 AAP protocol tests, and 11 stdio/Codex
+  --workspace` (586 `aegisy-agentd` library tests passed, one ignored, 10
+  context-threshold contract tests, 63 AAP protocol tests, and 15 stdio/Codex
   tests), and strict workspace Clippy.
 - The previously verified bundled application Node runtime passes both local gateway
   integration suites and JavaScript syntax checks. The current Homebrew OpenSpec CLI
@@ -2504,8 +2532,9 @@ Implemented visual baseline:
   `git diff --check`, strict OpenSpec validation, two Qt C++17 syntax checks, and
   the focused Qt cache run. This evidence is still not sufficient to mark `17.7`
   complete without the full Qt runtime/render pass and cross-platform validation.
-- The durable Turn Trace slice now uses inner `turn-trace/0.3` with strict `0.1` and
-  `0.2` replay compatibility and an unchanged outer `turn.trace.recorded/0.1` event.
+- The durable Turn Trace slice now uses inner `turn-trace/0.4` with strict `0.1`,
+  `0.2`, and `0.3` replay compatibility and an unchanged outer
+  `turn.trace.recorded/0.1` event.
   Producer/adapter/Store and stdio coverage preserves exact Intent/domain/terminal
   binding and adds the final valid Provider-thread Usage snapshot described above.
   Tests prove completed/failed/interrupted retention, no-Usage behavior, latest-only
@@ -2525,11 +2554,19 @@ Implemented visual baseline:
   Sessions still repeat this bounded historical scan at terminal admission, and
   projection replay currently rebuilds the same prefix per Trace. A verified-prefix
   cache and single-pass replay remain required before the large-Session performance
-  gate. The complete Rust
-  workspace passes 539 library tests
-  (one ignored live fixture), 10 threshold tests, 63 protocol tests, 11 stdio tests,
+  gate. Codex command Tool lifecycle now binds Started plus completed/failed/declined
+  status, source, time, closed-projection input identity, output identity, duration,
+  exit status, and the exact sanitized persisted terminal Item payload. Full raw input
+  drift is checked only through an opaque memory-owned fingerprint; no raw Item ID,
+  command/path/output/PID enters the Trace. Exact 72 KiB producer reservation plus
+  independent Store admission/read/replay/restart limits are covered. Budget
+  exhaustion, SQLite insertion failure, and Provider completion after an unmatched
+  Started all durably retain Started + Error + failed Terminal with no terminal Tool,
+  command Item, Blob reference, or object. The complete Rust workspace passes 586
+  library tests (one ignored live fixture), 10 threshold tests, 63 protocol tests, 15 stdio tests,
   formatting, and strict Clippy. Strict OpenSpec validation and `git diff --check`
-  pass. Complete Tool/Approval/Change/Test production, per-Attempt/Retry Usage, and
+  pass. Complete Approval/Change/Test production, non-command Tool families,
+  authoritative approval policy observation, per-Attempt/Retry Usage, and
   any AAP/Qt, audit/export, or retention surface remain absent, so `20.1` and `20.2`
   stay unchecked.
 
@@ -2566,9 +2603,9 @@ Implemented visual baseline:
    permission, sandbox, budget, and release gates pass. Keep automatic lease
    acquisition/renewal, process adoption, retry, approval, recovery mutation, and
    dispatch unavailable until those gates pass.
-11. Continue `20.1` in dependency order with content-free Tool lifecycle production
-    and exact persisted Timeline Item binding, then add Approval policy observation.
-    Do not record command/path/output content or treat Runtime denial as user approval.
+11. Continue `20.1` in dependency order with content-free Approval policy
+    observation and exact authority binding. Do not record prompts/provider bodies or
+    treat Runtime denial, Provider `declined`, or `approvalPolicy=never` as user approval.
 12. Continue with the next unchecked database/event, durable project/session, typed
     timeline, permission/approval, structured patch/checkpoint, terminal, and Git
     milestones in dependency order.

@@ -7,13 +7,16 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::usage_authority::UsageAuthorityReport;
 
 pub const LEGACY_SCHEMA_VERSION: &str = "turn-trace/0.1";
 pub const V0_2_SCHEMA_VERSION: &str = "turn-trace/0.2";
-pub const SCHEMA_VERSION: &str = "turn-trace/0.3";
+pub const V0_3_SCHEMA_VERSION: &str = "turn-trace/0.3";
+pub const SCHEMA_VERSION: &str = "turn-trace/0.4";
+pub(crate) const MAX_DURABLE_EVENT_BYTES: usize = 72 * 1024;
+pub(crate) const TURN_TRACE_RECORDED_SCHEMA_VERSION: &str = "turn.trace.recorded/0.1";
 
 const MAX_ID_BYTES: usize = 128;
 const MAX_LABEL_BYTES: usize = 96;
@@ -23,6 +26,25 @@ const MAX_CONTEXT_ITEMS: u32 = 16_384;
 const MAX_CHANGED_FILES: u32 = 100_000;
 const MAX_TEST_CASES: u32 = 100_000;
 const MAX_DOMAIN_OBSERVATIONS: u32 = 100_000;
+const MAX_TOOL_ACTIONS: usize = 128;
+const MAX_TOOL_DURATION_MS: u64 = i64::MAX as u64;
+
+pub(crate) fn durable_record_payload(
+    trace: &TurnTrace,
+    trace_identity: &str,
+    state: &str,
+    recorded_at_ms: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": TURN_TRACE_RECORDED_SCHEMA_VERSION,
+        "trace": trace,
+        "trace_identity": trace_identity,
+        "state": state,
+        "recorded_at_ms": recorded_at_ms,
+        "content_included": false,
+        "execution_authority": false
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnTraceError {
@@ -72,6 +94,7 @@ pub enum EvidenceSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvidenceRef {
     pub authority: AuthorityLabel,
     pub source: EvidenceSource,
@@ -125,6 +148,7 @@ impl EvidenceRef {
 
 /// Counts and hashes describing redaction, with no raw content field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RedactionSummary {
     pub content_included: bool,
     pub raw_bytes: u64,
@@ -168,6 +192,7 @@ impl RedactionSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TraceBinding {
     pub session_id: String,
     pub turn_id: String,
@@ -254,7 +279,37 @@ pub enum ToolState {
     Started,
     Completed,
     Failed,
+    Declined,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolProviderStatus {
+    InProgress,
+    Completed,
+    Failed,
+    Declined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolSource {
+    Agent,
+    UserShell,
+    UnifiedExecStartup,
+    UnifiedExecInteraction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(deny_unknown_fields)]
+pub enum ToolTimelineBinding {
+    NotPersisted,
+    Persisted {
+        item_identity: String,
+        payload_identity: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,6 +471,7 @@ pub enum TerminalState {
 /// are explicit alternatives so absence is never interpreted as proof.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
+#[serde(deny_unknown_fields)]
 pub enum CompletionDomain {
     NotApplicable {
         evidence: EvidenceRef,
@@ -513,6 +569,7 @@ impl CompletionDomain {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompletionEvidence {
     /// Binds terminal domain classifications to the immutable start intent.
     pub intent_identity: String,
@@ -533,6 +590,7 @@ impl CompletionEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TerminalEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_identity: Option<String>,
@@ -578,7 +636,7 @@ impl TerminalEvidence {
                     ));
                 }
             }
-            V0_2_SCHEMA_VERSION | SCHEMA_VERSION => {
+            V0_2_SCHEMA_VERSION | V0_3_SCHEMA_VERSION | SCHEMA_VERSION => {
                 if self.workspace_identity.is_some()
                     || self.git_state_identity.is_some()
                     || self.verification_identity.is_some()
@@ -586,7 +644,7 @@ impl TerminalEvidence {
                 {
                     return Err(error(
                         "turn-trace-v0-2-legacy-completion-invalid",
-                        "turn-trace/0.2 and turn-trace/0.3 cannot contain legacy completion evidence",
+                        "current turn traces cannot contain legacy completion evidence",
                     ));
                 }
                 match (state, &self.completion) {
@@ -594,7 +652,7 @@ impl TerminalEvidence {
                     (TerminalState::Completed, None) => {
                         return Err(error(
                             "turn-trace-completion-domains-missing",
-                            "completed turn-trace/0.2 and turn-trace/0.3 require explicit completion domains",
+                            "completed current turn traces require explicit completion domains",
                         ));
                     }
                     (_, None) => {}
@@ -619,6 +677,7 @@ impl TerminalEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(deny_unknown_fields)]
 pub enum TracePayload {
     Intent {
         session_mode: SessionMode,
@@ -660,9 +719,19 @@ pub enum TracePayload {
         action_identity: String,
         state: ToolState,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_status: Option<ToolProviderStatus>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<ToolSource>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         input_identity: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_identity: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_binding: Option<ToolTimelineBinding>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i64>,
         evidence: EvidenceRef,
         redaction: RedactionSummary,
     },
@@ -743,7 +812,10 @@ impl TracePayload {
                 evidence,
                 redaction,
             } => {
-                if !matches!(schema_version, V0_2_SCHEMA_VERSION | SCHEMA_VERSION) {
+                if !matches!(
+                    schema_version,
+                    V0_2_SCHEMA_VERSION | V0_3_SCHEMA_VERSION | SCHEMA_VERSION
+                ) {
                     return Err(error(
                         "turn-trace-v0-1-intent-invalid",
                         "turn-trace/0.1 cannot contain an intent event",
@@ -831,18 +903,176 @@ impl TracePayload {
             Self::Tool {
                 tool_identity,
                 action_identity,
+                state,
+                provider_status,
+                source,
                 input_identity,
                 output_identity,
+                item_binding,
+                duration_ms,
+                exit_code,
                 evidence,
                 redaction,
-                ..
             } => {
-                validate_identity(tool_identity, "tool identity")?;
-                validate_identity(action_identity, "tool action identity")?;
-                validate_optional_identity(input_identity, "tool input identity")?;
-                validate_optional_identity(output_identity, "tool output identity")?;
+                if schema_version != SCHEMA_VERSION {
+                    if provider_status.is_some()
+                        || source.is_some()
+                        || item_binding.is_some()
+                        || duration_ms.is_some()
+                        || exit_code.is_some()
+                        || *state == ToolState::Declined
+                    {
+                        return Err(error(
+                            "turn-trace-tool-version-invalid",
+                            "turn-trace/0.4 Tool lifecycle metadata cannot appear in an older trace",
+                        ));
+                    }
+                    validate_identity(tool_identity, "tool identity")?;
+                    validate_identity(action_identity, "tool action identity")?;
+                    validate_optional_identity(input_identity, "tool input identity")?;
+                    validate_optional_identity(output_identity, "tool output identity")?;
+                    validate_source(evidence, &[EvidenceSource::ToolRuntime])?;
+                    validate_common(evidence, redaction)?;
+                    return Ok(());
+                }
+
+                validate_hash_identity(tool_identity, "tool identity")?;
+                validate_hash_identity(action_identity, "tool action identity")?;
+                let input_identity = input_identity.as_deref().ok_or_else(|| {
+                    error(
+                        "turn-trace-tool-input-identity-missing",
+                        "turn-trace/0.4 Tool events require an input identity",
+                    )
+                })?;
+                validate_hash_identity(input_identity, "tool input identity")?;
                 validate_source(evidence, &[EvidenceSource::ToolRuntime])?;
+                if evidence.authority != AuthorityLabel::Observed {
+                    return Err(error(
+                        "turn-trace-tool-authority-invalid",
+                        "turn-trace/0.4 Tool lifecycle evidence must be provider-observed",
+                    ));
+                }
                 validate_common(evidence, redaction)?;
+                if *redaction != RedactionSummary::metadata_only() {
+                    return Err(error(
+                        "turn-trace-tool-redaction-invalid",
+                        "turn-trace/0.4 Tool lifecycle events must be metadata-only",
+                    ));
+                }
+
+                let provider_status = provider_status.ok_or_else(|| {
+                    error(
+                        "turn-trace-tool-provider-status-missing",
+                        "turn-trace/0.4 Tool events require a provider status",
+                    )
+                })?;
+                source.ok_or_else(|| {
+                    error(
+                        "turn-trace-tool-source-missing",
+                        "turn-trace/0.4 Tool events require a provider source",
+                    )
+                })?;
+                let item_binding = item_binding.as_ref().ok_or_else(|| {
+                    error(
+                        "turn-trace-tool-item-binding-missing",
+                        "turn-trace/0.4 Tool events require an explicit Timeline binding state",
+                    )
+                })?;
+                if duration_ms.is_some_and(|value| value > MAX_TOOL_DURATION_MS) {
+                    return Err(error(
+                        "turn-trace-tool-duration-invalid",
+                        "Tool duration exceeds the provider int64 bound",
+                    ));
+                }
+                if exit_code.is_some_and(|value| i32::try_from(value).is_err()) {
+                    return Err(error(
+                        "turn-trace-tool-exit-code-invalid",
+                        "Tool exit code exceeds the provider int32 bound",
+                    ));
+                }
+
+                match state {
+                    ToolState::Started => {
+                        if provider_status != ToolProviderStatus::InProgress
+                            || output_identity.is_some()
+                            || !matches!(item_binding, ToolTimelineBinding::NotPersisted)
+                            || duration_ms.is_some()
+                            || exit_code.is_some()
+                        {
+                            return Err(error(
+                                "turn-trace-tool-started-invalid",
+                                "a started Tool must be in progress and not yet persisted or terminal",
+                            ));
+                        }
+                    }
+                    ToolState::Completed | ToolState::Failed | ToolState::Declined => {
+                        let expected_status = match state {
+                            ToolState::Completed => ToolProviderStatus::Completed,
+                            ToolState::Failed => ToolProviderStatus::Failed,
+                            ToolState::Declined => ToolProviderStatus::Declined,
+                            _ => unreachable!("matched terminal Tool state"),
+                        };
+                        if provider_status != expected_status {
+                            return Err(error(
+                                "turn-trace-tool-terminal-status-mismatch",
+                                "Tool terminal state does not match the provider status",
+                            ));
+                        }
+                        match state {
+                            ToolState::Completed if exit_code.is_some_and(|code| code != 0) => {
+                                return Err(error(
+                                    "turn-trace-tool-exit-code-status-mismatch",
+                                    "a completed Tool cannot carry a nonzero exit code",
+                                ));
+                            }
+                            ToolState::Failed if *exit_code == Some(0) => {
+                                return Err(error(
+                                    "turn-trace-tool-exit-code-status-mismatch",
+                                    "a failed Tool cannot carry a successful exit code",
+                                ));
+                            }
+                            ToolState::Declined if duration_ms.is_some() || exit_code.is_some() => {
+                                return Err(error(
+                                    "turn-trace-tool-declined-execution-invalid",
+                                    "a declined Tool cannot claim execution duration or exit status",
+                                ));
+                            }
+                            ToolState::Completed | ToolState::Failed | ToolState::Declined => {}
+                            _ => unreachable!("matched terminal Tool state"),
+                        }
+                        let output_identity = output_identity.as_deref().ok_or_else(|| {
+                            error(
+                                "turn-trace-tool-output-identity-missing",
+                                "terminal Tool events require an output identity",
+                            )
+                        })?;
+                        validate_hash_identity(output_identity, "tool output identity")?;
+                        let ToolTimelineBinding::Persisted {
+                            item_identity,
+                            payload_identity,
+                        } = item_binding
+                        else {
+                            return Err(error(
+                                "turn-trace-tool-terminal-item-missing",
+                                "terminal Tool events require an exact persisted Timeline item binding",
+                            ));
+                        };
+                        validate_hash_identity(
+                            item_identity,
+                            "persisted Tool Timeline item identity",
+                        )?;
+                        validate_hash_identity(
+                            payload_identity,
+                            "persisted Tool Timeline payload identity",
+                        )?;
+                    }
+                    ToolState::Requested | ToolState::Cancelled => {
+                        return Err(error(
+                            "turn-trace-tool-state-invalid",
+                            "turn-trace/0.4 Codex Tool lifecycle does not infer requested or cancelled states",
+                        ));
+                    }
+                }
             }
             Self::Approval {
                 approval_identity,
@@ -867,10 +1097,10 @@ impl TracePayload {
                 redaction,
                 ..
             } => {
-                if schema_version == SCHEMA_VERSION {
+                if matches!(schema_version, V0_3_SCHEMA_VERSION | SCHEMA_VERSION) {
                     return Err(error(
                         "turn-trace-v0-3-attempt-usage-invalid",
-                        "turn-trace/0.3 cannot contain per-attempt usage without authoritative attempt attribution",
+                        "current usage-report traces cannot contain per-attempt usage without authoritative attempt attribution",
                     ));
                 }
                 validate_identity(usage_identity, "usage identity")?;
@@ -897,10 +1127,10 @@ impl TracePayload {
                 evidence,
                 redaction,
             } => {
-                if schema_version != SCHEMA_VERSION {
+                if !matches!(schema_version, V0_3_SCHEMA_VERSION | SCHEMA_VERSION) {
                     return Err(error(
                         "turn-trace-usage-report-version-invalid",
-                        "provider thread usage reports require turn-trace/0.3",
+                        "provider thread usage reports require turn-trace/0.3 or turn-trace/0.4",
                     ));
                 }
                 validate_usage_report_identity(report_identity)?;
@@ -1132,6 +1362,7 @@ fn validate_source(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TraceEvent {
     pub event_id: String,
     pub sequence: u32,
@@ -1160,15 +1391,35 @@ impl TraceEvent {
                 ));
             }
         }
+        if schema_version == SCHEMA_VERSION {
+            if let TracePayload::Tool { evidence, .. } = &self.payload {
+                if evidence.observed_at_ms != Some(self.at_ms) {
+                    return Err(error(
+                        "turn-trace-tool-time-mismatch",
+                        "Tool event and provider-observed evidence times must match exactly",
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnTrace {
     pub schema_version: String,
     pub binding: TraceBinding,
     pub events: Vec<TraceEvent>,
+}
+
+#[derive(Debug)]
+struct ToolLifecycleObservation {
+    tool_identity: String,
+    input_identity: String,
+    source: ToolSource,
+    started_at_ms: u64,
+    terminal_state: Option<ToolState>,
 }
 
 impl TurnTrace {
@@ -1185,6 +1436,15 @@ impl TurnTrace {
         binding.validate()?;
         Ok(Self {
             schema_version: V0_2_SCHEMA_VERSION.to_owned(),
+            binding,
+            events: Vec::new(),
+        })
+    }
+
+    pub fn new_v0_3(binding: TraceBinding) -> Result<Self, TurnTraceError> {
+        binding.validate()?;
+        Ok(Self {
+            schema_version: V0_3_SCHEMA_VERSION.to_owned(),
             binding,
             events: Vec::new(),
         })
@@ -1256,7 +1516,7 @@ impl TurnTrace {
     pub fn validate(&self, require_terminal: bool) -> Result<(), TurnTraceError> {
         if !matches!(
             self.schema_version.as_str(),
-            LEGACY_SCHEMA_VERSION | V0_2_SCHEMA_VERSION | SCHEMA_VERSION
+            LEGACY_SCHEMA_VERSION | V0_2_SCHEMA_VERSION | V0_3_SCHEMA_VERSION | SCHEMA_VERSION
         ) {
             return Err(error(
                 "turn-trace-schema-invalid",
@@ -1277,6 +1537,8 @@ impl TurnTrace {
         let mut usage_report_count = 0usize;
         let mut error_seen = false;
         let mut intent = None;
+        let mut terminal_state = None;
+        let mut tool_lifecycles = BTreeMap::<String, ToolLifecycleObservation>::new();
         let mut applied_workspace_identities = Vec::new();
         let mut previous_time = None;
         for (index, event) in self.events.iter().enumerate() {
@@ -1309,6 +1571,9 @@ impl TurnTrace {
                         "exactly one terminal event must be last",
                     ));
                 }
+                if let TracePayload::Terminal { state, .. } = &event.payload {
+                    terminal_state = Some(*state);
+                }
             }
             match &event.payload {
                 TracePayload::Intent {
@@ -1326,6 +1591,92 @@ impl TurnTrace {
                     workspace_identity,
                     ..
                 } => applied_workspace_identities.push(workspace_identity.as_str()),
+                TracePayload::Tool {
+                    tool_identity,
+                    action_identity,
+                    state,
+                    source,
+                    input_identity,
+                    duration_ms,
+                    ..
+                } if self.schema_version == SCHEMA_VERSION => {
+                    if error_seen {
+                        return Err(error(
+                            "turn-trace-tool-order-invalid",
+                            "Tool lifecycle evidence must precede Error and Terminal events",
+                        ));
+                    }
+                    let source = source.expect("validated turn-trace/0.4 Tool source");
+                    let input_identity = input_identity
+                        .as_ref()
+                        .expect("validated turn-trace/0.4 Tool input identity");
+                    match state {
+                        ToolState::Started => {
+                            if let Some(previous) = tool_lifecycles.get(action_identity) {
+                                let code = if previous.terminal_state.is_some() {
+                                    "turn-trace-tool-started-after-terminal"
+                                } else {
+                                    "turn-trace-tool-started-duplicate"
+                                };
+                                return Err(error(
+                                    code,
+                                    "a Tool action cannot have more than one started observation",
+                                ));
+                            }
+                            if tool_lifecycles.len() >= MAX_TOOL_ACTIONS {
+                                return Err(error(
+                                    "turn-trace-tool-action-limit",
+                                    "turn trace Tool action limit exceeded",
+                                ));
+                            }
+                            tool_lifecycles.insert(
+                                action_identity.clone(),
+                                ToolLifecycleObservation {
+                                    tool_identity: tool_identity.clone(),
+                                    input_identity: input_identity.clone(),
+                                    source,
+                                    started_at_ms: event.at_ms,
+                                    terminal_state: None,
+                                },
+                            );
+                        }
+                        ToolState::Completed | ToolState::Failed | ToolState::Declined => {
+                            let lifecycle = tool_lifecycles.get_mut(action_identity).ok_or_else(|| {
+                                error(
+                                    "turn-trace-tool-terminal-without-start",
+                                    "a Tool terminal observation requires an earlier started observation",
+                                )
+                            })?;
+                            if lifecycle.terminal_state.is_some() {
+                                return Err(error(
+                                    "turn-trace-tool-terminal-duplicate",
+                                    "a Tool action cannot have more than one terminal observation",
+                                ));
+                            }
+                            if lifecycle.tool_identity != *tool_identity
+                                || lifecycle.input_identity != *input_identity
+                                || lifecycle.source != source
+                            {
+                                return Err(error(
+                                    "turn-trace-tool-lifecycle-binding-mismatch",
+                                    "Tool started and terminal observations do not bind the same action metadata",
+                                ));
+                            }
+                            if duration_ms.is_some_and(|duration| {
+                                duration > event.at_ms.saturating_sub(lifecycle.started_at_ms)
+                            }) {
+                                return Err(error(
+                                    "turn-trace-tool-duration-interval-invalid",
+                                    "Tool duration exceeds its observed lifecycle interval",
+                                ));
+                            }
+                            lifecycle.terminal_state = Some(*state);
+                        }
+                        ToolState::Requested | ToolState::Cancelled => {
+                            unreachable!("validated turn-trace/0.4 Tool state")
+                        }
+                    }
+                }
                 TracePayload::Error { .. } => error_seen = true,
                 TracePayload::UsageReport { .. } => {
                     usage_report_count += 1;
@@ -1360,17 +1711,17 @@ impl TurnTrace {
                     "turn-trace/0.1 cannot contain an intent event",
                 ));
             }
-            V0_2_SCHEMA_VERSION | SCHEMA_VERSION if intent_count != 1 => {
+            V0_2_SCHEMA_VERSION | V0_3_SCHEMA_VERSION | SCHEMA_VERSION if intent_count != 1 => {
                 return Err(error(
                     "turn-trace-intent-count-invalid",
-                    "turn-trace/0.2 and turn-trace/0.3 require exactly one intent event",
+                    "current turn traces require exactly one intent event",
                 ));
             }
             _ => {}
         }
         if matches!(
             self.schema_version.as_str(),
-            V0_2_SCHEMA_VERSION | SCHEMA_VERSION
+            V0_2_SCHEMA_VERSION | V0_3_SCHEMA_VERSION | SCHEMA_VERSION
         ) {
             let intent = intent.expect("validated current turn trace intent count");
             if intent.0 == SessionMode::Work && self.binding.project_id.is_none() {
@@ -1410,6 +1761,20 @@ impl TurnTrace {
                     &applied_workspace_identities,
                 )?;
             }
+        }
+        if self.schema_version == SCHEMA_VERSION
+            && tool_lifecycles
+                .values()
+                .any(|lifecycle| lifecycle.terminal_state.is_none())
+            && !matches!(
+                terminal_state,
+                Some(TerminalState::Failed | TerminalState::Interrupted) | None
+            )
+        {
+            return Err(error(
+                "turn-trace-tool-incomplete-on-terminal",
+                "only failed or interrupted Turns can retain an unterminated Tool action",
+            ));
         }
         if require_terminal && terminal_count != 1 {
             return Err(error(
@@ -1777,6 +2142,600 @@ mod tests {
         }
     }
 
+    fn tool_evidence(at_ms: u64, byte: char) -> EvidenceRef {
+        EvidenceRef {
+            authority: AuthorityLabel::Observed,
+            source: EvidenceSource::ToolRuntime,
+            identity: Some(hash_identity("sha256:", byte)),
+            observed_at_ms: Some(at_ms),
+        }
+    }
+
+    fn started_tool(at_ms: u64) -> TracePayload {
+        TracePayload::Tool {
+            tool_identity: hash_identity("sha256:", '5'),
+            action_identity: hash_identity("sha256:", '6'),
+            state: ToolState::Started,
+            provider_status: Some(ToolProviderStatus::InProgress),
+            source: Some(ToolSource::Agent),
+            input_identity: Some(hash_identity("sha256:", '7')),
+            output_identity: None,
+            item_binding: Some(ToolTimelineBinding::NotPersisted),
+            duration_ms: None,
+            exit_code: None,
+            evidence: tool_evidence(at_ms, '8'),
+            redaction: redaction(),
+        }
+    }
+
+    fn terminal_tool(at_ms: u64, state: ToolState) -> TracePayload {
+        let provider_status = match state {
+            ToolState::Completed => ToolProviderStatus::Completed,
+            ToolState::Failed => ToolProviderStatus::Failed,
+            ToolState::Declined => ToolProviderStatus::Declined,
+            _ => panic!("terminal Tool helper requires a terminal state"),
+        };
+        TracePayload::Tool {
+            tool_identity: hash_identity("sha256:", '5'),
+            action_identity: hash_identity("sha256:", '6'),
+            state,
+            provider_status: Some(provider_status),
+            source: Some(ToolSource::Agent),
+            input_identity: Some(hash_identity("sha256:", '7')),
+            output_identity: Some(hash_identity("sha256:", '9')),
+            item_binding: Some(ToolTimelineBinding::Persisted {
+                item_identity: hash_identity("sha256:", 'a'),
+                payload_identity: hash_identity("sha256:", 'a'),
+            }),
+            duration_ms: (state != ToolState::Declined).then_some(1),
+            exit_code: match state {
+                ToolState::Completed => Some(0),
+                ToolState::Failed => Some(1),
+                ToolState::Declined => None,
+                _ => unreachable!("matched terminal Tool state"),
+            },
+            evidence: tool_evidence(at_ms, 'c'),
+            redaction: redaction(),
+        }
+    }
+
+    fn indexed_hash_identity(namespace: u64, index: usize) -> String {
+        format!("sha256:{:064x}", namespace + index as u64)
+    }
+
+    fn indexed_tool(index: usize, at_ms: u64, state: ToolState) -> TracePayload {
+        let terminal = match state {
+            ToolState::Started => None,
+            ToolState::Completed => Some(ToolProviderStatus::Completed),
+            ToolState::Failed => Some(ToolProviderStatus::Failed),
+            ToolState::Declined => Some(ToolProviderStatus::Declined),
+            ToolState::Requested | ToolState::Cancelled => {
+                panic!("indexed Tool helper requires a supported provider state")
+            }
+        };
+        TracePayload::Tool {
+            tool_identity: indexed_hash_identity(1_000, index),
+            action_identity: indexed_hash_identity(2_000, index),
+            state,
+            provider_status: terminal.or(Some(ToolProviderStatus::InProgress)),
+            source: Some(ToolSource::Agent),
+            input_identity: Some(indexed_hash_identity(3_000, index)),
+            output_identity: terminal.map(|_| indexed_hash_identity(4_000, index)),
+            item_binding: Some(if terminal.is_some() {
+                ToolTimelineBinding::Persisted {
+                    item_identity: indexed_hash_identity(5_000, index),
+                    payload_identity: indexed_hash_identity(5_000, index),
+                }
+            } else {
+                ToolTimelineBinding::NotPersisted
+            }),
+            duration_ms: terminal
+                .filter(|status| *status != ToolProviderStatus::Declined)
+                .map(|_| 1),
+            exit_code: terminal.and_then(|status| match status {
+                ToolProviderStatus::Completed => Some(0),
+                ToolProviderStatus::Failed => Some(1),
+                ToolProviderStatus::Declined => None,
+                ToolProviderStatus::InProgress => unreachable!("matched terminal Tool status"),
+            }),
+            evidence: EvidenceRef {
+                authority: AuthorityLabel::Observed,
+                source: EvidenceSource::ToolRuntime,
+                identity: Some(indexed_hash_identity(6_000, index)),
+                observed_at_ms: Some(at_ms),
+            },
+            redaction: redaction(),
+        }
+    }
+
+    fn noncompleted_terminal(state: TerminalState) -> TracePayload {
+        TracePayload::Terminal {
+            state,
+            evidence: TerminalEvidence {
+                workspace_identity: None,
+                git_state_identity: None,
+                verification_identity: None,
+                observed_verification_count: 0,
+                evidence: evidence(EvidenceSource::Runtime),
+                completion: None,
+            },
+            redaction: redaction(),
+        }
+    }
+
+    fn append_read_only_intent(trace: &mut TurnTrace) {
+        trace
+            .append(
+                "intent-1".into(),
+                10,
+                intent_payload(
+                    SessionMode::Work,
+                    TurnKind::ReadOnlyInspection,
+                    TurnAccess::ReadOnly,
+                ),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn v0_4_tool_lifecycle_is_content_free_and_binds_the_persisted_item() {
+        let mut trace = TurnTrace::new(binding()).unwrap();
+        append_read_only_intent(&mut trace);
+        trace
+            .append("tool-started-1".into(), 11, started_tool(11))
+            .unwrap();
+        trace
+            .append(
+                "tool-completed-1".into(),
+                12,
+                terminal_tool(12, ToolState::Completed),
+            )
+            .unwrap();
+        trace
+            .append(
+                "terminal-1".into(),
+                13,
+                completed_terminal(read_only_completion(CompletionDomain::Unknown {
+                    evidence: unknown_evidence(EvidenceSource::Runtime),
+                })),
+            )
+            .unwrap();
+        trace.validate_complete().unwrap();
+
+        let value = serde_json::to_value(&trace).unwrap();
+        assert_eq!(value["schema_version"], "turn-trace/0.4");
+        assert_eq!(
+            value["events"][1]["payload"]["provider_status"],
+            "in-progress"
+        );
+        assert_eq!(value["events"][1]["payload"]["source"], "agent");
+        assert_eq!(
+            value["events"][1]["payload"]["item_binding"]["kind"],
+            "not-persisted"
+        );
+        assert_eq!(
+            value["events"][2]["payload"]["item_binding"]["item_identity"],
+            hash_identity("sha256:", 'a')
+        );
+        assert_eq!(
+            value["events"][2]["payload"]["item_binding"]["kind"],
+            "persisted"
+        );
+        let serialized = serde_json::to_string(&trace).unwrap();
+        for forbidden in [
+            "git status --short",
+            "/Users/alice/project",
+            "M src/main.rs",
+            "sk-secret-value",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn v0_4_tool_terminal_states_map_exactly_to_provider_status() {
+        for (state, status) in [
+            (ToolState::Completed, ToolProviderStatus::Completed),
+            (ToolState::Failed, ToolProviderStatus::Failed),
+            (ToolState::Declined, ToolProviderStatus::Declined),
+        ] {
+            let mut trace = TurnTrace::new(binding()).unwrap();
+            append_read_only_intent(&mut trace);
+            trace
+                .append("tool-started-1".into(), 11, started_tool(11))
+                .unwrap();
+            let terminal = terminal_tool(12, state);
+            trace
+                .append("tool-terminal-1".into(), 12, terminal)
+                .unwrap();
+            trace.validate_open().unwrap();
+
+            let mut mismatch = terminal_tool(12, state);
+            if let TracePayload::Tool {
+                provider_status, ..
+            } = &mut mismatch
+            {
+                *provider_status = Some(match status {
+                    ToolProviderStatus::Completed => ToolProviderStatus::Failed,
+                    _ => ToolProviderStatus::Completed,
+                });
+            }
+            assert_eq!(
+                TurnTrace::new(binding())
+                    .unwrap()
+                    .append("tool-terminal-1".into(), 12, mismatch)
+                    .unwrap_err()
+                    .code,
+                "turn-trace-tool-terminal-status-mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn v0_4_tool_terminal_execution_semantics_fail_closed() {
+        for (state, duration, exit_code, expected_code) in [
+            (
+                ToolState::Completed,
+                Some(2),
+                Some(1),
+                "turn-trace-tool-exit-code-status-mismatch",
+            ),
+            (
+                ToolState::Failed,
+                Some(2),
+                Some(0),
+                "turn-trace-tool-exit-code-status-mismatch",
+            ),
+            (
+                ToolState::Declined,
+                Some(1),
+                None,
+                "turn-trace-tool-declined-execution-invalid",
+            ),
+            (
+                ToolState::Declined,
+                None,
+                Some(1),
+                "turn-trace-tool-declined-execution-invalid",
+            ),
+        ] {
+            let mut trace = TurnTrace::new(binding()).unwrap();
+            append_read_only_intent(&mut trace);
+            trace
+                .append("tool-started-1".into(), 10, started_tool(10))
+                .unwrap();
+            let mut terminal = terminal_tool(12, state);
+            if let TracePayload::Tool {
+                duration_ms,
+                exit_code: actual_exit_code,
+                ..
+            } = &mut terminal
+            {
+                *duration_ms = duration;
+                *actual_exit_code = exit_code;
+            }
+            assert_eq!(
+                trace
+                    .append("tool-terminal-1".into(), 12, terminal)
+                    .unwrap_err()
+                    .code,
+                expected_code
+            );
+        }
+
+        let mut trace = TurnTrace::new(binding()).unwrap();
+        append_read_only_intent(&mut trace);
+        trace
+            .append("tool-started-1".into(), 10, started_tool(10))
+            .unwrap();
+        let mut terminal = terminal_tool(12, ToolState::Completed);
+        if let TracePayload::Tool { duration_ms, .. } = &mut terminal {
+            *duration_ms = Some(3);
+        }
+        trace
+            .append("tool-terminal-1".into(), 12, terminal)
+            .unwrap();
+        assert_eq!(
+            trace.validate_open().unwrap_err().code,
+            "turn-trace-tool-duration-interval-invalid"
+        );
+    }
+
+    #[test]
+    fn v0_4_tool_action_limit_accepts_128_complete_actions_and_rejects_129() {
+        let mut trace = TurnTrace::new(binding()).unwrap();
+        append_read_only_intent(&mut trace);
+        for index in 0..MAX_TOOL_ACTIONS {
+            let started_at_ms = 11 + (index as u64 * 2);
+            trace
+                .append(
+                    format!("tool-started-{index}"),
+                    started_at_ms,
+                    indexed_tool(index, started_at_ms, ToolState::Started),
+                )
+                .unwrap();
+            trace
+                .append(
+                    format!("tool-completed-{index}"),
+                    started_at_ms + 1,
+                    indexed_tool(index, started_at_ms + 1, ToolState::Completed),
+                )
+                .unwrap();
+        }
+        trace.validate_open().unwrap();
+
+        let mut overflow = trace.clone();
+        let overflow_at_ms = 11 + (MAX_TOOL_ACTIONS as u64 * 2);
+        overflow
+            .append(
+                "tool-started-overflow".into(),
+                overflow_at_ms,
+                indexed_tool(MAX_TOOL_ACTIONS, overflow_at_ms, ToolState::Started),
+            )
+            .unwrap();
+        assert_eq!(
+            overflow.validate_open().unwrap_err().code,
+            "turn-trace-tool-action-limit"
+        );
+
+        trace
+            .append(
+                "terminal-1".into(),
+                overflow_at_ms,
+                completed_terminal(read_only_completion(CompletionDomain::Unknown {
+                    evidence: unknown_evidence(EvidenceSource::Runtime),
+                })),
+            )
+            .unwrap();
+        trace.validate_complete().unwrap();
+    }
+
+    #[test]
+    fn v0_4_tool_state_machine_rejects_invalid_transitions_and_binding_drift() {
+        let mut terminal_without_start = TurnTrace::new(binding()).unwrap();
+        append_read_only_intent(&mut terminal_without_start);
+        terminal_without_start
+            .append(
+                "tool-terminal-1".into(),
+                12,
+                terminal_tool(12, ToolState::Failed),
+            )
+            .unwrap();
+        assert_eq!(
+            terminal_without_start.validate_open().unwrap_err().code,
+            "turn-trace-tool-terminal-without-start"
+        );
+
+        let mut duplicate_start = TurnTrace::new(binding()).unwrap();
+        append_read_only_intent(&mut duplicate_start);
+        duplicate_start
+            .append("tool-started-1".into(), 11, started_tool(11))
+            .unwrap();
+        duplicate_start
+            .append("tool-started-2".into(), 12, started_tool(12))
+            .unwrap();
+        assert_eq!(
+            duplicate_start.validate_open().unwrap_err().code,
+            "turn-trace-tool-started-duplicate"
+        );
+
+        let mut duplicate_terminal = TurnTrace::new(binding()).unwrap();
+        append_read_only_intent(&mut duplicate_terminal);
+        duplicate_terminal
+            .append("tool-started-1".into(), 11, started_tool(11))
+            .unwrap();
+        duplicate_terminal
+            .append(
+                "tool-terminal-1".into(),
+                12,
+                terminal_tool(12, ToolState::Failed),
+            )
+            .unwrap();
+        duplicate_terminal
+            .append(
+                "tool-terminal-2".into(),
+                13,
+                terminal_tool(13, ToolState::Failed),
+            )
+            .unwrap();
+        assert_eq!(
+            duplicate_terminal.validate_open().unwrap_err().code,
+            "turn-trace-tool-terminal-duplicate"
+        );
+
+        let mut started_after_terminal = duplicate_terminal.clone();
+        started_after_terminal.events.pop();
+        started_after_terminal
+            .append("tool-started-2".into(), 13, started_tool(13))
+            .unwrap();
+        assert_eq!(
+            started_after_terminal.validate_open().unwrap_err().code,
+            "turn-trace-tool-started-after-terminal"
+        );
+
+        let mut drift = TurnTrace::new(binding()).unwrap();
+        append_read_only_intent(&mut drift);
+        drift
+            .append("tool-started-1".into(), 11, started_tool(11))
+            .unwrap();
+        let mut terminal = terminal_tool(12, ToolState::Completed);
+        if let TracePayload::Tool { input_identity, .. } = &mut terminal {
+            *input_identity = Some(hash_identity("sha256:", 'd'));
+        }
+        drift
+            .append("tool-terminal-1".into(), 12, terminal)
+            .unwrap();
+        assert_eq!(
+            drift.validate_open().unwrap_err().code,
+            "turn-trace-tool-lifecycle-binding-mismatch"
+        );
+    }
+
+    #[test]
+    fn v0_4_completed_turn_requires_tool_terminal_but_failure_may_retain_started() {
+        let mut completed = TurnTrace::new(binding()).unwrap();
+        append_read_only_intent(&mut completed);
+        completed
+            .append("tool-started-1".into(), 11, started_tool(11))
+            .unwrap();
+        completed
+            .append(
+                "terminal-1".into(),
+                12,
+                completed_terminal(read_only_completion(CompletionDomain::Unknown {
+                    evidence: unknown_evidence(EvidenceSource::Runtime),
+                })),
+            )
+            .unwrap();
+        assert_eq!(
+            completed.validate_complete().unwrap_err().code,
+            "turn-trace-tool-incomplete-on-terminal"
+        );
+
+        for terminal_state in [TerminalState::Failed, TerminalState::Interrupted] {
+            let mut trace = TurnTrace::new(binding()).unwrap();
+            append_read_only_intent(&mut trace);
+            trace
+                .append("tool-started-1".into(), 11, started_tool(11))
+                .unwrap();
+            trace
+                .append(
+                    "terminal-1".into(),
+                    12,
+                    noncompleted_terminal(terminal_state),
+                )
+                .unwrap();
+            trace.validate_complete().unwrap();
+        }
+
+        let mut cancelled = TurnTrace::new(binding()).unwrap();
+        append_read_only_intent(&mut cancelled);
+        cancelled
+            .append("tool-started-1".into(), 11, started_tool(11))
+            .unwrap();
+        cancelled
+            .append(
+                "terminal-1".into(),
+                12,
+                noncompleted_terminal(TerminalState::Cancelled),
+            )
+            .unwrap();
+        assert_eq!(
+            cancelled.validate_complete().unwrap_err().code,
+            "turn-trace-tool-incomplete-on-terminal"
+        );
+    }
+
+    #[test]
+    fn v0_4_tool_requires_exact_time_observed_authority_and_metadata_only_redaction() {
+        let mut wrong_time = started_tool(11);
+        if let TracePayload::Tool { evidence, .. } = &mut wrong_time {
+            evidence.observed_at_ms = Some(10);
+        }
+        assert_eq!(
+            TurnTrace::new(binding())
+                .unwrap()
+                .append("tool-started-1".into(), 11, wrong_time)
+                .unwrap_err()
+                .code,
+            "turn-trace-tool-time-mismatch"
+        );
+
+        let mut estimated = started_tool(11);
+        if let TracePayload::Tool { evidence, .. } = &mut estimated {
+            evidence.authority = AuthorityLabel::Estimated;
+        }
+        assert_eq!(
+            TurnTrace::new(binding())
+                .unwrap()
+                .append("tool-started-1".into(), 11, estimated)
+                .unwrap_err()
+                .code,
+            "turn-trace-tool-authority-invalid"
+        );
+
+        let mut nonmetadata = terminal_tool(12, ToolState::Completed);
+        if let TracePayload::Tool { redaction, .. } = &mut nonmetadata {
+            redaction.raw_bytes = 1;
+        }
+        assert_eq!(
+            TurnTrace::new(binding())
+                .unwrap()
+                .append("tool-terminal-1".into(), 12, nonmetadata)
+                .unwrap_err()
+                .code,
+            "turn-trace-tool-redaction-invalid"
+        );
+
+        let mut not_persisted = terminal_tool(12, ToolState::Completed);
+        if let TracePayload::Tool { item_binding, .. } = &mut not_persisted {
+            *item_binding = Some(ToolTimelineBinding::NotPersisted);
+        }
+        assert_eq!(
+            TurnTrace::new(binding())
+                .unwrap()
+                .append("tool-terminal-1".into(), 12, not_persisted)
+                .unwrap_err()
+                .code,
+            "turn-trace-tool-terminal-item-missing"
+        );
+    }
+
+    #[test]
+    fn older_tool_contracts_keep_their_shape_and_reject_v0_4_fields() {
+        let old_tool = || TracePayload::Tool {
+            tool_identity: "tool-1".into(),
+            action_identity: "action-1".into(),
+            state: ToolState::Completed,
+            provider_status: None,
+            source: None,
+            input_identity: Some("input-1".into()),
+            output_identity: Some("output-1".into()),
+            item_binding: None,
+            duration_ms: None,
+            exit_code: None,
+            evidence: evidence(EvidenceSource::ToolRuntime),
+            redaction: redaction(),
+        };
+        let mut v0_3 = TurnTrace::new_v0_3(binding()).unwrap();
+        append_read_only_intent(&mut v0_3);
+        v0_3.append("tool-1".into(), 10, old_tool()).unwrap();
+        v0_3.validate_open().unwrap();
+        let serialized = serde_json::to_value(&v0_3.events[1].payload).unwrap();
+        for absent in [
+            "provider_status",
+            "source",
+            "item_binding",
+            "duration_ms",
+            "exit_code",
+        ] {
+            assert!(serialized.get(absent).is_none());
+        }
+
+        let mut cross_version = old_tool();
+        if let TracePayload::Tool {
+            provider_status, ..
+        } = &mut cross_version
+        {
+            *provider_status = Some(ToolProviderStatus::Completed);
+        }
+        assert_eq!(
+            v0_3.append("tool-2".into(), 11, cross_version)
+                .unwrap_err()
+                .code,
+            "turn-trace-tool-version-invalid"
+        );
+
+        let mut declined = old_tool();
+        if let TracePayload::Tool { state, .. } = &mut declined {
+            *state = ToolState::Declined;
+        }
+        assert_eq!(
+            v0_3.append("tool-3".into(), 11, declined).unwrap_err().code,
+            "turn-trace-tool-version-invalid"
+        );
+    }
+
     #[test]
     fn valid_trace_covers_source_qualified_metadata_and_terminal_evidence() {
         let mut trace = TurnTrace::new(binding()).unwrap();
@@ -2019,7 +2978,7 @@ mod tests {
 
     #[test]
     fn v0_3_usage_report_binds_schema_source_time_item_and_report() {
-        let mut trace = TurnTrace::new(binding()).unwrap();
+        let mut trace = TurnTrace::new_v0_3(binding()).unwrap();
         trace
             .append(
                 "intent-1".into(),
@@ -2103,7 +3062,7 @@ mod tests {
 
     #[test]
     fn v0_3_usage_report_rejects_semantic_tampering_and_nonmetadata_redaction() {
-        let mut trace = TurnTrace::new(binding()).unwrap();
+        let mut trace = TurnTrace::new_v0_3(binding()).unwrap();
         trace
             .append(
                 "intent-1".into(),
@@ -2144,7 +3103,7 @@ mod tests {
 
     #[test]
     fn v0_3_allows_at_most_one_usage_report_before_error_and_terminal() {
-        let mut duplicate = TurnTrace::new(binding()).unwrap();
+        let mut duplicate = TurnTrace::new_v0_3(binding()).unwrap();
         duplicate
             .append(
                 "intent-1".into(),
@@ -2175,7 +3134,7 @@ mod tests {
             "turn-trace-usage-report-duplicate"
         );
 
-        let mut after_error = TurnTrace::new(binding()).unwrap();
+        let mut after_error = TurnTrace::new_v0_3(binding()).unwrap();
         after_error
             .append(
                 "intent-1".into(),
@@ -2213,7 +3172,7 @@ mod tests {
             "turn-trace-usage-report-order-invalid"
         );
 
-        let mut valid = TurnTrace::new(binding()).unwrap();
+        let mut valid = TurnTrace::new_v0_3(binding()).unwrap();
         valid
             .append(
                 "intent-1".into(),
@@ -2245,7 +3204,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_report_is_v0_3_only_and_future_versions_fail_closed() {
+    fn usage_report_is_v0_3_and_v0_4_only_and_future_versions_fail_closed() {
         let mut legacy = TurnTrace::new_legacy(binding()).unwrap();
         assert_eq!(
             legacy
@@ -2271,8 +3230,24 @@ mod tests {
             "turn-trace-usage-report-version-invalid"
         );
 
+        let mut v0_3 = TurnTrace::new_v0_3(binding()).unwrap();
+        v0_3.append(
+            "usage-report-1".into(),
+            20,
+            usage_report_payload(20, "item-usage-1"),
+        )
+        .unwrap();
+
+        let mut v0_4 = TurnTrace::new(binding()).unwrap();
+        v0_4.append(
+            "usage-report-1".into(),
+            20,
+            usage_report_payload(20, "item-usage-1"),
+        )
+        .unwrap();
+
         let mut future = TurnTrace::new(binding()).unwrap();
-        future.schema_version = "turn-trace/0.4".into();
+        future.schema_version = "turn-trace/0.5".into();
         assert_eq!(
             future.validate_open().unwrap_err().code,
             "turn-trace-schema-invalid"
@@ -2641,7 +3616,7 @@ mod tests {
     }
 
     #[test]
-    fn versioned_serialization_preserves_legacy_and_v0_2_golden_shapes() {
+    fn versioned_serialization_preserves_legacy_v0_2_and_v0_3_golden_shapes() {
         let mut legacy = TurnTrace::new_legacy(binding()).unwrap();
         legacy
             .append("terminal-1".into(), 10, legacy_completed_terminal())
@@ -2688,100 +3663,176 @@ mod tests {
             "turn-trace:sha256:a9f787c2e3e40c6adf4ee8bf15a2bb46c9865a4291ff4b45ac4ea3f884b9aaa7"
         );
         let value = serde_json::to_value(&v0_2).unwrap();
-        assert_eq!(
-            value,
-            json!({
-                "schema_version": "turn-trace/0.2",
-                "binding": {
-                    "session_id": "session-1",
-                    "turn_id": "turn-1",
-                    "project_id": "project-1",
-                    "environment_identity": hash_identity("environment:sha256:", 'a')
+        let v0_2_golden = json!({
+            "schema_version": "turn-trace/0.2",
+            "binding": {
+                "session_id": "session-1",
+                "turn_id": "turn-1",
+                "project_id": "project-1",
+                "environment_identity": hash_identity("environment:sha256:", 'a')
+            },
+            "events": [
+                {
+                    "event_id": "intent-1",
+                    "sequence": 1,
+                    "at_ms": 10,
+                    "payload": {
+                        "kind": "intent",
+                        "session_mode": "work",
+                        "turn_kind": "read-only-inspection",
+                        "access": "read-only",
+                        "intent_identity": hash_identity("sha256:", '1'),
+                        "evidence": {
+                            "authority": "observed",
+                            "source": "runtime",
+                            "identity": hash_identity("sha256:", 'b'),
+                            "observed_at_ms": 10
+                        },
+                        "redaction": {
+                            "content_included": false,
+                            "raw_bytes": 0,
+                            "retained_bytes": 0,
+                            "redacted_fields": 0,
+                            "omitted_fields": 0
+                        }
+                    }
                 },
-                "events": [
-                    {
-                        "event_id": "intent-1",
-                        "sequence": 1,
-                        "at_ms": 10,
-                        "payload": {
-                            "kind": "intent",
-                            "session_mode": "work",
-                            "turn_kind": "read-only-inspection",
-                            "access": "read-only",
-                            "intent_identity": hash_identity("sha256:", '1'),
+                {
+                    "event_id": "terminal-1",
+                    "sequence": 2,
+                    "at_ms": 11,
+                    "payload": {
+                        "kind": "terminal",
+                        "state": "completed",
+                        "evidence": {
+                            "observed_verification_count": 0,
                             "evidence": {
                                 "authority": "observed",
                                 "source": "runtime",
                                 "identity": hash_identity("sha256:", 'b'),
                                 "observed_at_ms": 10
                             },
-                            "redaction": {
-                                "content_included": false,
-                                "raw_bytes": 0,
-                                "retained_bytes": 0,
-                                "redacted_fields": 0,
-                                "omitted_fields": 0
-                            }
-                        }
-                    },
-                    {
-                        "event_id": "terminal-1",
-                        "sequence": 2,
-                        "at_ms": 11,
-                        "payload": {
-                            "kind": "terminal",
-                            "state": "completed",
-                            "evidence": {
-                                "observed_verification_count": 0,
-                                "evidence": {
-                                    "authority": "observed",
-                                    "source": "runtime",
-                                    "identity": hash_identity("sha256:", 'b'),
-                                    "observed_at_ms": 10
+                            "completion": {
+                                "intent_identity": hash_identity("sha256:", '1'),
+                                "workspace_change": {
+                                    "state": "not-applicable",
+                                    "evidence": {
+                                        "authority": "observed",
+                                        "source": "runtime",
+                                        "identity": hash_identity("sha256:", '2'),
+                                        "observed_at_ms": 10
+                                    }
                                 },
-                                "completion": {
-                                    "intent_identity": hash_identity("sha256:", '1'),
-                                    "workspace_change": {
-                                        "state": "not-applicable",
-                                        "evidence": {
-                                            "authority": "observed",
-                                            "source": "runtime",
-                                            "identity": hash_identity("sha256:", '2'),
-                                            "observed_at_ms": 10
-                                        }
-                                    },
-                                    "git_change": {
-                                        "state": "not-applicable",
-                                        "evidence": {
-                                            "authority": "observed",
-                                            "source": "runtime",
-                                            "identity": hash_identity("sha256:", '3'),
-                                            "observed_at_ms": 10
-                                        }
-                                    },
-                                    "verification": {
-                                        "state": "unknown",
-                                        "evidence": {
-                                            "authority": "unknown",
-                                            "source": "runtime"
-                                        }
+                                "git_change": {
+                                    "state": "not-applicable",
+                                    "evidence": {
+                                        "authority": "observed",
+                                        "source": "runtime",
+                                        "identity": hash_identity("sha256:", '3'),
+                                        "observed_at_ms": 10
+                                    }
+                                },
+                                "verification": {
+                                    "state": "unknown",
+                                    "evidence": {
+                                        "authority": "unknown",
+                                        "source": "runtime"
                                     }
                                 }
-                            },
-                            "redaction": {
-                                "content_included": false,
-                                "raw_bytes": 0,
-                                "retained_bytes": 0,
-                                "redacted_fields": 0,
-                                "omitted_fields": 0
                             }
+                        },
+                        "redaction": {
+                            "content_included": false,
+                            "raw_bytes": 0,
+                            "retained_bytes": 0,
+                            "redacted_fields": 0,
+                            "omitted_fields": 0
                         }
                     }
-                ]
-            })
-        );
+                }
+            ]
+        });
+        assert_eq!(value, v0_2_golden);
         let round_trip: TurnTrace = serde_json::from_value(value).unwrap();
         round_trip.validate_complete().unwrap();
         assert_eq!(round_trip, v0_2);
+
+        let mut v0_3 = TurnTrace::new_v0_3(binding()).unwrap();
+        v0_3.append(
+            "intent-1".into(),
+            10,
+            intent_payload(
+                SessionMode::Work,
+                TurnKind::ReadOnlyInspection,
+                TurnAccess::ReadOnly,
+            ),
+        )
+        .unwrap();
+        v0_3.append(
+            "usage-report-1".into(),
+            20,
+            usage_report_payload(20, "item-usage-1"),
+        )
+        .unwrap();
+        v0_3.append(
+            "terminal-1".into(),
+            21,
+            completed_terminal(read_only_completion(CompletionDomain::Unknown {
+                evidence: unknown_evidence(EvidenceSource::Runtime),
+            })),
+        )
+        .unwrap();
+        v0_3.validate_complete().unwrap();
+        let report = usage_report(20);
+        let report_identity = report.metadata_identity().unwrap();
+        assert_eq!(
+            report_identity,
+            "usage-authority:sha256:d6830e09f43717129286d1d84741811b352f30ba9bec54bef25c7f5e4918b39d"
+        );
+        assert_eq!(
+            v0_3.metadata_identity().unwrap(),
+            "turn-trace:sha256:60b3d5716ad0d7866f55746ab3fbc92eb79845db84c7102817cb18defeb5ec19"
+        );
+
+        let mut v0_3_golden = v0_2_golden;
+        v0_3_golden["schema_version"] = json!("turn-trace/0.3");
+        let events = v0_3_golden["events"].as_array_mut().unwrap();
+        let mut terminal = events.pop().unwrap();
+        terminal["sequence"] = json!(3);
+        terminal["at_ms"] = json!(21);
+        events.push(json!({
+            "event_id": "usage-report-1",
+            "sequence": 2,
+            "at_ms": 20,
+            "payload": {
+                "kind": "usage-report",
+                "report_identity": report_identity,
+                "persisted_item_id": "item-usage-1",
+                "scope": "provider-thread",
+                "accounting": "absolute-snapshot",
+                "attempt_attribution": "unavailable",
+                "retry_attribution": "unavailable",
+                "report": serde_json::to_value(report).unwrap(),
+                "evidence": {
+                    "authority": "observed",
+                    "source": "usage-provider",
+                    "identity": report_identity,
+                    "observed_at_ms": 20
+                },
+                "redaction": {
+                    "content_included": false,
+                    "raw_bytes": 0,
+                    "retained_bytes": 0,
+                    "redacted_fields": 0,
+                    "omitted_fields": 0
+                }
+            }
+        }));
+        events.push(terminal);
+        let v0_3_value = serde_json::to_value(&v0_3).unwrap();
+        assert_eq!(v0_3_value, v0_3_golden);
+        let v0_3_round_trip: TurnTrace = serde_json::from_value(v0_3_value).unwrap();
+        v0_3_round_trip.validate_complete().unwrap();
+        assert_eq!(v0_3_round_trip, v0_3);
     }
 }

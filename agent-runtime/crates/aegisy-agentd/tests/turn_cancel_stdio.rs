@@ -2,9 +2,9 @@
 
 use aegisy_agentd::turn_trace::{
     CompletionDomain, ErrorClass as TraceErrorClass, EvidenceSource as TraceEvidenceSource,
-    SessionMode as TraceSessionMode, TerminalState as TraceTerminalState, TracePayload,
-    TurnAccess as TraceTurnAccess, TurnKind as TraceTurnKind, UsageAccounting, UsageAttribution,
-    UsageReportScope,
+    SessionMode as TraceSessionMode, TerminalState as TraceTerminalState, ToolProviderStatus,
+    ToolSource, ToolState, ToolTimelineBinding, TracePayload, TurnAccess as TraceTurnAccess,
+    TurnKind as TraceTurnKind, UsageAccounting, UsageAttribution, UsageReportScope,
 };
 use aegisy_agentd::workbench_store::WorkbenchStore;
 #[cfg(target_os = "macos")]
@@ -62,6 +62,7 @@ if [ "$1" = "--version" ]; then
   echo "codex-cli 0.144.5"
   exit 0
 fi
+fixture_directory=$(CDPATH= cd -P "${0%/*}" && pwd -P)
 printf 'warning: fixture stderr Authorization: Bearer ghp_123456789012345678901234567890\n' >&2
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
@@ -94,10 +95,38 @@ while IFS= read -r line; do
           printf '{"method":"turn/diff/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","diff":"@@ -1 +1 @@\\n-old\\n+new\\n"}}\n'
           printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
           ;;
+        *'emit incomplete command'*)
+          tool_started_at_ms="$(date +%s)999"
+          sleep 1
+          printf '{"method":"item/started","params":{"threadId":"thread-fixture","turnId":"turn-fixture","startedAtMs":%s,"item":{"id":"command-incomplete","type":"commandExecution","command":"printf pending","commandActions":[{"type":"unknown","command":"printf pending"}],"cwd":"%s/tool-project","status":"inProgress","source":"agent"}}}\n' "$tool_started_at_ms" "$fixture_directory"
+          printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
+          ;;
         *'emit diagnostics'*)
-          printf '{"method":"item/started","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"id":"command-fixture","type":"commandExecution","command":"cargo check","commandActions":[{"type":"unknown"}],"cwd":"%s","status":"inProgress","source":"agent"}}}\n' "$AEGISY_FIXTURE_ROOT"
+          tool_started_at_ms="$(date +%s)999"
+          tool_completed_at_ms=$((tool_started_at_ms + 12))
+          sleep 1
+          printf '{"method":"item/started","params":{"threadId":"thread-fixture","turnId":"turn-fixture","startedAtMs":%s,"item":{"id":"command-fixture","type":"commandExecution","command":"cargo check","commandActions":[{"type":"unknown","command":"cargo check"}],"cwd":"%s/project","status":"inProgress","source":"agent"}}}\n' "$tool_started_at_ms" "$fixture_directory"
           printf '{"method":"item/commandExecution/outputDelta","params":{"threadId":"thread-fixture","turnId":"turn-fixture","itemId":"command-fixture","delta":"error[E0425]: cannot find function missing\\n --> src/main.rs:2:5\\n"}}\n'
-          printf '{"method":"item/completed","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"id":"command-fixture","type":"commandExecution","command":"cargo check","commandActions":[{"type":"unknown"}],"cwd":"%s","status":"failed","aggregatedOutput":"error[E0425]: cannot find function missing\\n --> src/main.rs:2:5\\n","durationMs":12,"exitCode":101,"source":"agent"}}}\n' "$AEGISY_FIXTURE_ROOT"
+          sleep 1
+          printf '{"method":"item/completed","params":{"threadId":"thread-fixture","turnId":"turn-fixture","completedAtMs":%s,"item":{"id":"command-fixture","type":"commandExecution","command":"cargo check","commandActions":[{"type":"unknown","command":"cargo check"}],"cwd":"%s/project","status":"failed","aggregatedOutput":"error[E0425]: cannot find function missing\\n --> src/main.rs:2:5\\n","durationMs":12,"exitCode":101,"source":"agent"}}}\n' "$tool_completed_at_ms" "$fixture_directory"
+          printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
+          ;;
+        *'emit completed command'*)
+          tool_started_at_ms="$(date +%s)999"
+          tool_completed_at_ms=$((tool_started_at_ms + 12))
+          sleep 1
+          printf '{"method":"item/started","params":{"threadId":"thread-fixture","turnId":"turn-fixture","startedAtMs":%s,"item":{"id":"command-completed","type":"commandExecution","command":"printf done","commandActions":[{"type":"unknown","command":"printf done"}],"cwd":"%s/tool-project","status":"inProgress","source":"agent"}}}\n' "$tool_started_at_ms" "$fixture_directory"
+          sleep 1
+          printf '{"method":"item/completed","params":{"threadId":"thread-fixture","turnId":"turn-fixture","completedAtMs":%s,"item":{"id":"command-completed","type":"commandExecution","command":"printf done","commandActions":[{"type":"unknown","command":"printf done"}],"cwd":"%s/tool-project","status":"completed","aggregatedOutput":"done\\n","durationMs":12,"exitCode":0,"source":"agent"}}}\n' "$tool_completed_at_ms" "$fixture_directory"
+          printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
+          ;;
+        *'emit declined command'*)
+          tool_started_at_ms="$(date +%s)999"
+          tool_completed_at_ms=$((tool_started_at_ms + 1))
+          sleep 1
+          printf '{"method":"item/started","params":{"threadId":"thread-fixture","turnId":"turn-fixture","startedAtMs":%s,"item":{"id":"command-declined","type":"commandExecution","command":"blocked-command","commandActions":[{"type":"unknown","command":"blocked-command"}],"cwd":"%s/tool-project","status":"inProgress","source":"agent"}}}\n' "$tool_started_at_ms" "$fixture_directory"
+          sleep 1
+          printf '{"method":"item/completed","params":{"threadId":"thread-fixture","turnId":"turn-fixture","completedAtMs":%s,"item":{"id":"command-declined","type":"commandExecution","command":"blocked-command","commandActions":[{"type":"unknown","command":"blocked-command"}],"cwd":"%s/tool-project","status":"declined","aggregatedOutput":null,"durationMs":null,"exitCode":null,"source":"agent"}}}\n' "$tool_completed_at_ms" "$fixture_directory"
           printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
           ;;
         *'wait for cancellation'*)
@@ -111,6 +140,91 @@ while IFS= read -r line; do
     *'"method":"turn/interrupt"'*)
       printf '{"id":%s,"result":{}}\n' "$id"
       printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"interrupted"}}}\n'
+      ;;
+  esac
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    executable
+}
+
+fn trace_budget_codex() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("aegisy-trace-budget-fixture-{nonce}"));
+    fs::create_dir_all(&directory).unwrap();
+    let executable = directory.join("codex-trace-budget-fixture.sh");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.144.5"
+  exit 0
+fi
+stop_file="$0.stop"
+lock_directory="$0.stdout-lock"
+generator_pid=""
+rm -f "$stop_file"
+rmdir "$lock_directory" 2>/dev/null || true
+
+emit_budget_commands() {
+  # The Trace binds provider timestamps after the Runtime-observed Turn start.
+  # Cross a wall-clock second before sampling the fixture epoch so truncating
+  # `date +%s` to milliseconds cannot make the first Tool precede the Turn.
+  sleep 1
+  base_timestamp_ms="$(date +%s)000"
+  command_index=0
+  while [ "$command_index" -lt 96 ] && [ ! -f "$stop_file" ]; do
+    if [ "$command_index" -eq 0 ]; then
+      provider_item_id="command-canary-alice-project-zero"
+    else
+      provider_item_id="command-$command_index"
+    fi
+    started_at_ms=$((base_timestamp_ms + command_index * 2))
+    completed_at_ms=$((started_at_ms + 1))
+    printf '{"method":"item/started","params":{"threadId":"thread-budget","turnId":"turn-budget","startedAtMs":%s,"item":{"id":"%s","type":"commandExecution","command":"printf done","commandActions":[{"type":"unknown","command":"printf done"}],"cwd":"/tmp/provider-workspace","status":"inProgress","source":"agent"}}}\n' "$started_at_ms" "$provider_item_id"
+    while ! mkdir "$lock_directory" 2>/dev/null; do sleep 0.01; done
+    printf '{"method":"item/completed","params":{"threadId":"thread-budget","turnId":"turn-budget","completedAtMs":%s,"item":{"id":"%s","type":"commandExecution","command":"printf done","commandActions":[{"type":"unknown","command":"printf done"}],"cwd":"/tmp/provider-workspace","status":"completed","aggregatedOutput":"done-%s\\n","durationMs":1,"exitCode":0,"source":"agent"}}}\n' "$completed_at_ms" "$provider_item_id" "$command_index"
+    rmdir "$lock_directory"
+    command_index=$((command_index + 1))
+  done
+  if [ ! -f "$stop_file" ]; then
+    printf '{"method":"turn/completed","params":{"threadId":"thread-budget","turn":{"id":"turn-budget","status":"completed"}}}\n'
+  fi
+}
+
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"thread-budget"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn-budget"}}}\n' "$id"
+      emit_budget_commands &
+      generator_pid=$!
+      ;;
+    *'"method":"turn/interrupt"'*)
+      touch "$stop_file"
+      while ! mkdir "$lock_directory" 2>/dev/null; do sleep 0.01; done
+      printf '{"id":%s,"result":{}}\n' "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"thread-budget","turn":{"id":"turn-budget","status":"interrupted"}}}\n'
+      rmdir "$lock_directory"
+      ;;
+    *'"method":"shutdown"'*)
+      touch "$stop_file"
+      if [ -n "$generator_pid" ]; then wait "$generator_pid"; fi
+      printf '{"id":%s,"result":{}}\n' "$id"
+      exit 0
       ;;
   esac
 done
@@ -408,7 +522,7 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
         ),
     );
     receive_until(&receiver, |message| message["id"] == "metadata-turn");
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
     let mut events = Vec::new();
     while !events
         .iter()
@@ -472,7 +586,7 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
         .read_turn_trace(&session_id, "turn-fixture")
         .unwrap()
         .expect("metadata completion must persist a terminal trace");
-    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.3");
+    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.4");
     let usage_trace_events = completed_trace
         .trace
         .events
@@ -1006,7 +1120,7 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
         .unwrap()
         .expect("recovered completion must persist a terminal trace");
     assert_eq!(completed_trace.state, "completed");
-    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.3");
+    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.4");
     assert_eq!(completed_trace.trace.binding.session_id, session_id);
     assert_eq!(completed_trace.trace.binding.turn_id, "turn-reconnect-2");
     assert!(completed_trace
@@ -1429,7 +1543,6 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
     let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
         .env("AEGISY_CODEX_PATH", &codex)
         .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
-        .env("AEGISY_FIXTURE_ROOT", &project_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1505,7 +1618,7 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
         ),
     );
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
     let mut command_output_ref = None;
     let mut diagnostic_data = None;
     let mut command_started_data = None;
@@ -1553,7 +1666,30 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
         "vendor-command-item-does-not-report-child-environment"
     );
     assert_eq!(command_started_data["risk"]["level"], "medium");
+    assert_eq!(
+        command_started_data["schema_version"],
+        "command-timeline/0.1"
+    );
+    assert_eq!(command_started_data["status"], "inProgress");
+    assert_eq!(command_started_data["source"], "agent");
+    let command_started_at_ms = command_started_data["started_at_ms"]
+        .as_u64()
+        .expect("command start must retain the provider Unix timestamp");
+    assert_eq!(command_started_data["completed_at_ms"], Value::Null);
+    assert_eq!(
+        command_completed_data["schema_version"],
+        "command-timeline/0.1"
+    );
     assert_eq!(command_completed_data["status"], "failed");
+    assert_eq!(command_completed_data["source"], "agent");
+    assert_eq!(
+        command_completed_data["started_at_ms"],
+        command_started_at_ms
+    );
+    let command_completed_at_ms = command_completed_data["completed_at_ms"]
+        .as_u64()
+        .expect("command completion must retain the provider Unix timestamp");
+    assert_eq!(command_completed_at_ms - command_started_at_ms, 12);
     assert_eq!(command_completed_data["duration_ms"], 12);
     assert_eq!(command_completed_data["exit_code"], 101);
     assert_eq!(diagnostic_data["diagnostics"][0]["path"], "src/main.rs");
@@ -1611,6 +1747,69 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
         .read_turn_trace(&session_id, "turn-fixture")
         .unwrap()
         .expect("read-only Work completion must persist a terminal trace");
+    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.4");
+    let tool_events = completed_trace
+        .trace
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, TracePayload::Tool { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(tool_events.len(), 2);
+    let TracePayload::Tool {
+        tool_identity: started_tool_identity,
+        action_identity: started_action_identity,
+        state: ToolState::Started,
+        provider_status: Some(ToolProviderStatus::InProgress),
+        source: Some(ToolSource::Agent),
+        input_identity: Some(started_input_identity),
+        output_identity: None,
+        item_binding: Some(ToolTimelineBinding::NotPersisted),
+        duration_ms: None,
+        exit_code: None,
+        evidence: started_evidence,
+        ..
+    } = &tool_events[0].payload
+    else {
+        panic!("command start must produce one provider-observed Started Tool")
+    };
+    assert_eq!(tool_events[0].at_ms, command_started_at_ms);
+    assert_eq!(started_evidence.source, TraceEvidenceSource::ToolRuntime);
+    assert_eq!(started_evidence.observed_at_ms, Some(command_started_at_ms));
+    let TracePayload::Tool {
+        tool_identity,
+        action_identity,
+        state: ToolState::Failed,
+        provider_status: Some(ToolProviderStatus::Failed),
+        source: Some(ToolSource::Agent),
+        input_identity: Some(input_identity),
+        output_identity: Some(output_identity),
+        item_binding:
+            Some(ToolTimelineBinding::Persisted {
+                item_identity,
+                payload_identity,
+            }),
+        duration_ms: Some(12),
+        exit_code: Some(101),
+        evidence: terminal_evidence,
+        ..
+    } = &tool_events[1].payload
+    else {
+        panic!("failed command completion must produce one persisted Failed Tool")
+    };
+    assert_eq!(tool_events[1].at_ms, command_completed_at_ms);
+    assert_eq!(tool_identity, started_tool_identity);
+    assert_eq!(action_identity, started_action_identity);
+    assert_eq!(input_identity, started_input_identity);
+    assert!(output_identity.starts_with("sha256:"));
+    assert!(item_identity.starts_with("sha256:"));
+    assert_eq!(item_identity.len(), 71);
+    assert_ne!(item_identity, "command-fixture");
+    assert!(payload_identity.starts_with("sha256:"));
+    assert_eq!(terminal_evidence.source, TraceEvidenceSource::ToolRuntime);
+    assert_eq!(
+        terminal_evidence.observed_at_ms,
+        Some(command_completed_at_ms)
+    );
     let intent_identity = completed_trace
         .trace
         .events
@@ -1654,8 +1853,892 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
         event.payload,
         TracePayload::Change { .. } | TracePayload::Test { .. }
     )));
+    let serialized_trace = serde_json::to_string(&completed_trace.trace).unwrap();
+    for forbidden in [
+        "cargo check",
+        "cannot find function missing",
+        "src/main.rs",
+        "aegisy-cancel-fixture",
+    ] {
+        assert!(!serialized_trace.contains(forbidden), "found {forbidden}");
+    }
     drop(store);
     let _ = fs::remove_dir_all(codex.parent().unwrap());
+}
+
+#[test]
+fn stdio_command_completed_and_declined_preserve_exact_provider_tool_states() {
+    for (
+        input,
+        item_id,
+        expected_elapsed_ms,
+        expected_state,
+        expected_status,
+        expected_duration_ms,
+        expected_exit_code,
+        forbidden_content,
+    ) in [
+        (
+            "emit completed command",
+            "command-completed",
+            12,
+            ToolState::Completed,
+            ToolProviderStatus::Completed,
+            Some(12),
+            Some(0),
+            "printf done",
+        ),
+        (
+            "emit declined command",
+            "command-declined",
+            1,
+            ToolState::Declined,
+            ToolProviderStatus::Declined,
+            None,
+            None,
+            "blocked-command",
+        ),
+    ] {
+        let codex = fake_codex();
+        let data_root = codex.parent().unwrap().join("tool-terminal-workbench");
+        fs::create_dir_all(&data_root).unwrap();
+        let project_root = codex.parent().unwrap().join("tool-project");
+        fs::create_dir_all(&project_root).unwrap();
+        let project_root = project_root.canonicalize().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+            .env("AEGISY_CODEX_PATH", &codex)
+            .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Ok(message) = serde_json::from_str(&line) {
+                    if sender.send(message).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        send(
+            &mut stdin,
+            &request(
+                "tool-initialize",
+                "initialize",
+                json!({
+                    "protocol_version": "0.1",
+                    "client": { "name": "test", "version": "1" }
+                }),
+            ),
+        );
+        receive_until(&receiver, |message| message["id"] == "tool-initialize");
+        send(
+            &mut stdin,
+            &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        );
+        send(
+            &mut stdin,
+            &request(
+                "tool-project",
+                "project/open",
+                json!({ "root": project_root }),
+            ),
+        );
+        let project = receive_until(&receiver, |message| message["id"] == "tool-project");
+        let project_id = project["result"]["project"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        send(
+            &mut stdin,
+            &request(
+                "tool-session",
+                "session/start",
+                json!({ "mode": "work", "project_id": project_id }),
+            ),
+        );
+        let session = receive_until(&receiver, |message| message["id"] == "tool-session");
+        let session_id = session["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        send(
+            &mut stdin,
+            &request(
+                "tool-turn",
+                "turn/start",
+                json!({
+                    "session_id": session_id,
+                    "input": input,
+                    "idempotency_key": format!("{item_id}-turn")
+                }),
+            ),
+        );
+        receive_until(&receiver, |message| message["id"] == "tool-turn");
+        send(&mut stdin, &request("tool-shutdown", "shutdown", json!({})));
+        receive_until(&receiver, |message| message["id"] == "tool-shutdown");
+        drop(stdin);
+        assert!(child.wait().unwrap().success());
+        reader.join().unwrap();
+
+        let store = WorkbenchStore::open(&data_root).unwrap();
+        let trace = store
+            .read_turn_trace(&session_id, "turn-fixture")
+            .unwrap()
+            .expect("terminal command Turn must persist its Trace");
+        assert_eq!(trace.trace.schema_version, "turn-trace/0.4");
+        let tool_events = trace
+            .trace
+            .events
+            .iter()
+            .filter(|event| matches!(event.payload, TracePayload::Tool { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(tool_events.len(), 2);
+        let TracePayload::Tool {
+            tool_identity: started_tool_identity,
+            action_identity: started_action_identity,
+            state: ToolState::Started,
+            provider_status: Some(ToolProviderStatus::InProgress),
+            source: Some(ToolSource::Agent),
+            input_identity: Some(started_input_identity),
+            output_identity: None,
+            item_binding: Some(ToolTimelineBinding::NotPersisted),
+            duration_ms: None,
+            exit_code: None,
+            ..
+        } = &tool_events[0].payload
+        else {
+            panic!("provider command must begin with exact Started authority")
+        };
+        let started_at_ms = tool_events[0].at_ms;
+        let TracePayload::Tool {
+            tool_identity,
+            action_identity,
+            state,
+            provider_status,
+            source: Some(ToolSource::Agent),
+            input_identity: Some(input_identity),
+            output_identity: Some(output_identity),
+            item_binding:
+                Some(ToolTimelineBinding::Persisted {
+                    item_identity: persisted_item_identity,
+                    payload_identity,
+                }),
+            duration_ms,
+            exit_code,
+            ..
+        } = &tool_events[1].payload
+        else {
+            panic!("provider terminal command must bind one persisted Timeline Item")
+        };
+        let completed_at_ms = tool_events[1].at_ms;
+        assert_eq!(completed_at_ms - started_at_ms, expected_elapsed_ms);
+        assert_eq!(*state, expected_state);
+        assert_eq!(*provider_status, Some(expected_status));
+        assert_eq!(tool_identity, started_tool_identity);
+        assert_eq!(action_identity, started_action_identity);
+        assert_eq!(input_identity, started_input_identity);
+        assert!(output_identity.starts_with("sha256:"));
+        assert!(persisted_item_identity.starts_with("sha256:"));
+        assert_eq!(persisted_item_identity.len(), 71);
+        assert_ne!(persisted_item_identity, item_id);
+        assert!(payload_identity.starts_with("sha256:"));
+        assert_eq!(*duration_ms, expected_duration_ms);
+        assert_eq!(*exit_code, expected_exit_code);
+        assert!(trace.trace.events.iter().all(|event| !matches!(
+            event.payload,
+            TracePayload::Approval { .. }
+                | TracePayload::Tool {
+                    state: ToolState::Requested | ToolState::Cancelled,
+                    ..
+                }
+        )));
+        let serialized = serde_json::to_string(&trace.trace).unwrap();
+        for forbidden in [
+            forbidden_content,
+            "done\\n",
+            "user-denied",
+            "policy-denied",
+            "cancelled",
+            "aegisy-cancel-fixture",
+        ] {
+            assert!(!serialized.contains(forbidden), "found {forbidden}");
+        }
+        drop(store);
+        let _ = fs::remove_dir_all(codex.parent().unwrap());
+    }
+}
+
+#[test]
+fn stdio_completed_turn_with_incomplete_command_fails_durably_and_restarts_started_only() {
+    let codex = fake_codex();
+    let fixture_root = codex.parent().unwrap();
+    let data_root = fixture_root.join("tool-incomplete-workbench");
+    let project_root = fixture_root.join("tool-project");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    let project_root = project_root.canonicalize().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "tool-incomplete-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| {
+        message["id"] == "tool-incomplete-initialize"
+    });
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    send(
+        &mut stdin,
+        &request(
+            "tool-incomplete-project",
+            "project/open",
+            json!({ "root": project_root }),
+        ),
+    );
+    let project = receive_until(&receiver, |message| {
+        message["id"] == "tool-incomplete-project"
+    });
+    let project_id = project["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send(
+        &mut stdin,
+        &request(
+            "tool-incomplete-session",
+            "session/start",
+            json!({ "mode": "work", "project_id": project_id }),
+        ),
+    );
+    let session = receive_until(&receiver, |message| {
+        message["id"] == "tool-incomplete-session"
+    });
+    let session_id = session["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send(
+        &mut stdin,
+        &request(
+            "tool-incomplete-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "emit incomplete command",
+                "idempotency_key": "tool-incomplete-turn"
+            }),
+        ),
+    );
+    let started = receive_until(&receiver, |message| {
+        message["params"]["event"] == "item.started"
+            && message["params"]["item"]["id"] == "command-incomplete"
+    });
+    assert_eq!(started["params"]["item"]["state"], "started");
+    let failed = receive_until(&receiver, |message| {
+        message["params"]["event"] == "turn.failed"
+    });
+    assert_eq!(failed["params"]["item"]["data"]["terminal_persisted"], true);
+
+    send(
+        &mut stdin,
+        &request("tool-incomplete-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| {
+        message["id"] == "tool-incomplete-shutdown"
+    });
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    let first_read = store
+        .read_turn_trace(&session_id, "turn-fixture")
+        .unwrap()
+        .expect("incomplete command must produce an authoritative failed Trace");
+    assert_eq!(first_read.state, "failed");
+    assert_eq!(first_read.trace.schema_version, "turn-trace/0.4");
+    let tool_events = first_read
+        .trace
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, TracePayload::Tool { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(tool_events.len(), 1);
+    assert!(matches!(
+        tool_events[0].payload,
+        TracePayload::Tool {
+            state: ToolState::Started,
+            item_binding: Some(ToolTimelineBinding::NotPersisted),
+            output_identity: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        first_read
+            .trace
+            .events
+            .get(first_read.trace.events.len() - 2)
+            .map(|event| &event.payload),
+        Some(TracePayload::Error { .. })
+    ));
+    assert!(matches!(
+        first_read.trace.events.last().map(|event| &event.payload),
+        Some(TracePayload::Terminal {
+            state: TraceTerminalState::Failed,
+            ..
+        })
+    ));
+    assert!(store
+        .read_session_items(&session_id, 0, 100)
+        .unwrap()
+        .iter()
+        .all(|item| item.item_kind != "command"));
+    let blob_scan = store.scan_durable_blobs().unwrap();
+    assert!(blob_scan.consistent);
+    assert_eq!(blob_scan.checked_objects, 0);
+    assert_eq!(blob_scan.checked_references, 0);
+    assert_eq!(blob_scan.disk_objects, 0);
+    let first_trace_json = serde_json::to_string(&first_read.trace).unwrap();
+    for forbidden in [
+        "printf pending",
+        "tool-project",
+        "command-incomplete",
+        "aegisy-cancel-fixture",
+    ] {
+        assert!(!first_trace_json.contains(forbidden), "found {forbidden}");
+    }
+    drop(store);
+
+    let restarted = WorkbenchStore::open(&data_root).unwrap();
+    let restarted_read = restarted
+        .read_turn_trace(&session_id, "turn-fixture")
+        .unwrap()
+        .expect("restart must retain the incomplete command failure Trace");
+    assert_eq!(restarted_read.state, "failed");
+    assert_eq!(restarted_read.trace, first_read.trace);
+    assert!(restarted
+        .read_session_items(&session_id, 0, 100)
+        .unwrap()
+        .iter()
+        .all(|item| item.item_kind != "command"));
+    drop(restarted);
+    let _ = fs::remove_dir_all(fixture_root);
+}
+
+#[test]
+fn stdio_command_persistence_failure_retains_started_without_terminal_tool_or_blob() {
+    let codex = fake_codex();
+    let fixture_root = codex.parent().unwrap();
+    let data_root = fixture_root.join("tool-persistence-failure-workbench");
+    fs::create_dir_all(&data_root).unwrap();
+    let project_root = fixture_root.join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(
+        project_root.join("src/main.rs"),
+        "fn main() {\n    missing();\n}\n",
+    )
+    .unwrap();
+    let project_root = project_root.canonicalize().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "tool-failure-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| {
+        message["id"] == "tool-failure-initialize"
+    });
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    send(
+        &mut stdin,
+        &request(
+            "tool-failure-project",
+            "project/open",
+            json!({ "root": project_root }),
+        ),
+    );
+    let project = receive_until(&receiver, |message| message["id"] == "tool-failure-project");
+    let project_id = project["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send(
+        &mut stdin,
+        &request(
+            "tool-failure-session",
+            "session/start",
+            json!({ "mode": "work", "project_id": project_id }),
+        ),
+    );
+    let session = receive_until(&receiver, |message| message["id"] == "tool-failure-session");
+    let session_id = session["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let connection = rusqlite::Connection::open(data_root.join("aegisy-workbench.sqlite3"))
+        .expect("open fixture Workbench database");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_command_item_before_insert
+             BEFORE INSERT ON items WHEN NEW.item_kind = 'command'
+             BEGIN SELECT RAISE(ABORT, 'injected command Item persistence failure'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    send(
+        &mut stdin,
+        &request(
+            "tool-failure-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "emit diagnostics",
+                "idempotency_key": "tool-persistence-failure-turn"
+            }),
+        ),
+    );
+    let failed = receive_until(&receiver, |message| {
+        message["params"]["event"] == "turn.failed"
+    });
+    assert_eq!(
+        failed["params"]["item"]["data"]["class"], "storage",
+        "unexpected budget failure: {failed:#}"
+    );
+    assert_eq!(failed["params"]["item"]["data"]["terminal_persisted"], true);
+
+    send(
+        &mut stdin,
+        &request("tool-failure-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| {
+        message["id"] == "tool-failure-shutdown"
+    });
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    let trace = store
+        .read_turn_trace(&session_id, "turn-fixture")
+        .unwrap()
+        .expect("persistence failure must retain an authoritative failed Trace");
+    assert_eq!(trace.state, "failed");
+    assert_eq!(trace.trace.schema_version, "turn-trace/0.4");
+    let tool_events = trace
+        .trace
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, TracePayload::Tool { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(tool_events.len(), 1);
+    assert!(matches!(
+        tool_events[0].payload,
+        TracePayload::Tool {
+            state: ToolState::Started,
+            item_binding: Some(ToolTimelineBinding::NotPersisted),
+            output_identity: None,
+            ..
+        }
+    ));
+    assert!(trace.trace.events.iter().all(|event| !matches!(
+        event.payload,
+        TracePayload::Tool {
+            state: ToolState::Completed | ToolState::Failed | ToolState::Declined,
+            ..
+        }
+    )));
+    assert!(matches!(
+        trace.trace.events.last().map(|event| &event.payload),
+        Some(TracePayload::Terminal {
+            state: TraceTerminalState::Failed,
+            ..
+        })
+    ));
+    let items = store.read_session_items(&session_id, 0, 100).unwrap();
+    assert!(items.iter().all(|item| item.item_kind != "command"));
+    let blob_scan = store.scan_durable_blobs().unwrap();
+    assert!(blob_scan.consistent);
+    assert_eq!(blob_scan.checked_objects, 0);
+    assert_eq!(blob_scan.checked_references, 0);
+    assert_eq!(blob_scan.disk_objects, 0);
+    let serialized = serde_json::to_string(&trace.trace).unwrap();
+    for forbidden in [
+        "cargo check",
+        "cannot find function missing",
+        "src/main.rs",
+        "aegisy-cancel-fixture",
+    ] {
+        assert!(!serialized.contains(forbidden), "found {forbidden}");
+    }
+    drop(store);
+    let _ = fs::remove_dir_all(fixture_root);
+}
+
+#[test]
+fn stdio_trace_budget_exhaustion_fails_durably_before_command_terminal_persistence() {
+    const MALICIOUS_PROVIDER_ITEM_ID: &str = "command-canary-alice-project-zero";
+
+    let codex = trace_budget_codex();
+    let fixture_root = codex.parent().unwrap();
+    let data_root = fixture_root.join("trace-budget-workbench");
+    let project_root = fixture_root.join("project");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(project_root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let project_root = project_root.canonicalize().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        &request(
+            "budget-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| message["id"] == "budget-initialize");
+    send(
+        &mut stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    send(
+        &mut stdin,
+        &request(
+            "budget-project",
+            "project/open",
+            json!({ "root": project_root }),
+        ),
+    );
+    let project = receive_until(&receiver, |message| message["id"] == "budget-project");
+    let project_id = project["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send(
+        &mut stdin,
+        &request(
+            "budget-session",
+            "session/start",
+            json!({ "mode": "work", "project_id": project_id }),
+        ),
+    );
+    let session = receive_until(&receiver, |message| message["id"] == "budget-session");
+    let session_id = session["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send(
+        &mut stdin,
+        &request(
+            "budget-turn",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "exhaust durable trace budget",
+                "idempotency_key": "trace-budget-fixture-turn"
+            }),
+        ),
+    );
+    receive_until(&receiver, |message| message["id"] == "budget-turn");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    let mut live_events = Vec::new();
+    let failed = loop {
+        let message = receiver
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("sidecar did not exhaust the durable Trace budget");
+        if message["params"]["event"].is_string() {
+            live_events.push(message.clone());
+        }
+        if message["params"]["event"] == "turn.failed" {
+            break message;
+        }
+    };
+    assert_eq!(
+        failed["params"]["item"]["data"]["class"], "storage",
+        "unexpected budget failure: {failed:#}"
+    );
+    assert_eq!(failed["params"]["item"]["data"]["terminal_persisted"], true);
+    let live_started = live_events
+        .iter()
+        .filter(|event| {
+            event["params"]["event"] == "item.started"
+                && event["params"]["item"]["kind"] == "command"
+        })
+        .count();
+    let live_completed = live_events
+        .iter()
+        .filter(|event| {
+            event["params"]["event"] == "item.completed"
+                && event["params"]["item"]["kind"] == "command"
+        })
+        .count();
+    assert!(
+        live_completed >= 20,
+        "only {live_completed} command terminals completed before failure: {failed:#}"
+    );
+    assert_eq!(live_started, live_completed + 1);
+
+    send(
+        &mut stdin,
+        &request(
+            "budget-live-read",
+            "session/read",
+            json!({ "session_id": session_id, "limit": 200 }),
+        ),
+    );
+    let live_read = receive_until(&receiver, |message| message["id"] == "budget-live-read");
+    assert!(live_read["result"].is_object());
+
+    send(
+        &mut stdin,
+        &request("budget-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&receiver, |message| message["id"] == "budget-shutdown");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    let trace = store
+        .read_turn_trace(&session_id, "turn-budget")
+        .unwrap()
+        .expect("Trace budget exhaustion must retain an authoritative failed Trace");
+    let durable_turn = store.load_turn("turn-budget").unwrap();
+    assert_eq!(durable_turn.session_id, session_id);
+    assert_eq!(durable_turn.state, "failed");
+    assert_eq!(trace.state, "failed");
+    assert!(matches!(
+        trace.trace.events.last().map(|event| &event.payload),
+        Some(TracePayload::Terminal {
+            state: TraceTerminalState::Failed,
+            ..
+        })
+    ));
+    let started_actions = trace
+        .trace
+        .events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            TracePayload::Tool {
+                action_identity,
+                state: ToolState::Started,
+                item_binding: Some(ToolTimelineBinding::NotPersisted),
+                ..
+            } => Some(action_identity),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let terminal_actions = trace
+        .trace
+        .events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            TracePayload::Tool {
+                action_identity,
+                state: ToolState::Completed | ToolState::Failed | ToolState::Declined,
+                item_binding: Some(ToolTimelineBinding::Persisted { .. }),
+                ..
+            } => Some(action_identity),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(started_actions.len(), terminal_actions.len() + 1);
+    let unmatched_started = started_actions
+        .iter()
+        .filter(|action| !terminal_actions.contains(action))
+        .count();
+    assert_eq!(unmatched_started, 1);
+
+    let items = store.read_session_items(&session_id, 0, 200).unwrap();
+    let command_items = items
+        .iter()
+        .filter(|item| item.item_kind == "command")
+        .collect::<Vec<_>>();
+    assert_eq!(command_items.len(), terminal_actions.len());
+    let events = store.read_session_events(&session_id, 0, 200).unwrap();
+    let command_item_events = events
+        .iter()
+        .filter(|event| {
+            event.event_kind == "item.appended" && event.payload["item"]["item_kind"] == "command"
+        })
+        .count();
+    assert_eq!(command_item_events, command_items.len());
+    let trace_event = events
+        .iter()
+        .find(|event| event.event_kind == "turn.trace.recorded")
+        .expect("the failed Turn must retain its durable Trace event");
+    let blob_scan = store.scan_durable_blobs().unwrap();
+    assert!(blob_scan.consistent);
+    assert_eq!(blob_scan.checked_references, 0);
+    assert_eq!(blob_scan.checked_objects, 0);
+    assert_eq!(blob_scan.disk_objects, 0);
+    let durable_json = serde_json::to_string(&json!({
+        "trace": trace,
+        "trace_event": trace_event,
+        "blob_scan": blob_scan
+    }))
+    .unwrap();
+    assert!(!durable_json.contains(MALICIOUS_PROVIDER_ITEM_ID));
+    drop(store);
+
+    let mut restarted = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_CODEX_PATH", &codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut restarted_stdin = restarted.stdin.take().unwrap();
+    let restarted_stdout = restarted.stdout.take().unwrap();
+    let (restarted_sender, restarted_receiver) = mpsc::channel();
+    let restarted_reader = thread::spawn(move || {
+        for line in BufReader::new(restarted_stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if restarted_sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    send(
+        &mut restarted_stdin,
+        &request(
+            "budget-restart-initialize",
+            "initialize",
+            json!({
+                "protocol_version": "0.1",
+                "client": { "name": "test", "version": "1" }
+            }),
+        ),
+    );
+    receive_until(&restarted_receiver, |message| {
+        message["id"] == "budget-restart-initialize"
+    });
+    send(
+        &mut restarted_stdin,
+        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+    );
+    send(
+        &mut restarted_stdin,
+        &request(
+            "budget-restart-read",
+            "session/read",
+            json!({ "session_id": session_id, "limit": 200 }),
+        ),
+    );
+    let replay = receive_until(&restarted_receiver, |message| {
+        message["id"] == "budget-restart-read"
+    });
+    assert!(replay["result"].is_object());
+    assert_eq!(
+        replay["result"]["session"]["id"].as_str(),
+        Some(session_id.as_str())
+    );
+    send(
+        &mut restarted_stdin,
+        &request("budget-restart-shutdown", "shutdown", json!({})),
+    );
+    receive_until(&restarted_receiver, |message| {
+        message["id"] == "budget-restart-shutdown"
+    });
+    drop(restarted_stdin);
+    assert!(restarted.wait().unwrap().success());
+    restarted_reader.join().unwrap();
+    let _ = fs::remove_dir_all(fixture_root);
 }
 
 #[test]

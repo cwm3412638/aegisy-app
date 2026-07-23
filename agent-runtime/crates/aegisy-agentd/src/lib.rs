@@ -60,6 +60,7 @@ mod terminal;
 #[path = "terminal_unsupported.rs"]
 mod terminal;
 mod tokenizer;
+mod tool_trace_authority;
 mod turn_context;
 pub mod turn_trace;
 mod turn_trace_producer;
@@ -85,6 +86,8 @@ use base64::Engine;
 use codex_adapter::{
     BackendInfo, CodexAdapter, CodexEvent, CodexSession, CodexTurnRequest, CommandItem,
 };
+#[cfg(test)]
+use codex_adapter::{CommandSource, CommandStatus, ProviderCommandInputFingerprint};
 use diagnostic_store::DiagnosticStore;
 use git_query::{
     commit as git_commit, diff as git_diff, log as git_log, overview as git_overview,
@@ -123,7 +126,8 @@ use turn_trace_producer::{
     CodexTurnTraceAccumulator, ErrorMetadata as TraceErrorMetadata,
     IntentMetadata as TraceIntentMetadata, ModelMetadata as TraceModelMetadata,
     PreparedContextSummary as TraceContextSummary, RuntimeMetadata as TraceRuntimeMetadata,
-    TerminalMetadata as TraceTerminalMetadata, UsageSnapshotMetadata as TraceUsageSnapshotMetadata,
+    TerminalMetadata as TraceTerminalMetadata, ToolObservationAdmission,
+    UsageSnapshotMetadata as TraceUsageSnapshotMetadata,
 };
 use usage_authority::from_provider_token_usage;
 use workbench_store::{
@@ -8987,27 +8991,17 @@ impl Runtime {
     fn persist_item_with_command_artifact(
         &mut self,
         session_id: &str,
-        turn_id: Option<&str>,
+        item_append: StoredItemAppend,
         item: &TimelineItem,
         artifact: Option<&command_artifact::CommandOutputArtifact>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<StoredItem>, String> {
         let Some(store) = self.workbench_store.as_mut() else {
-            return Ok(());
-        };
-        let item_append = StoredItemAppend {
-            session_id: session_id.into(),
-            turn_id: turn_id.map(str::to_owned),
-            item_id: item.id.clone(),
-            item_kind: item.kind.clone(),
-            role: item.role.clone(),
-            state: item.state.clone(),
-            payload: json!({ "content": item.content, "data": item.data }),
-            created_at_ms: now_ms(),
+            return Ok(None);
         };
         let Some(artifact) = artifact else {
             return store
                 .append_item(item_append)
-                .map(|_| ())
+                .map(Some)
                 .map_err(|cause| cause.message);
         };
         let project_id = self
@@ -9058,7 +9052,7 @@ impl Runtime {
                     retain_until_ms,
                 },
             )
-            .map(|_| ())
+            .map(|(item, _)| Some(item))
             .map_err(|cause| cause.message)
     }
 
@@ -10474,17 +10468,149 @@ impl Runtime {
                                 artifact.as_ref(),
                                 &params.session_id,
                             );
-                            if lifecycle == "completed" {
-                                if let Err(error) = self.persist_item_with_command_artifact(
+                            if lifecycle == "started" && self.workbench_store.is_some() {
+                                let observation = match tool_trace_authority::started_observation(
                                     &params.session_id,
-                                    Some(&turn_id),
+                                    &turn_id,
+                                    &item,
+                                ) {
+                                    Ok(observation) => observation,
+                                    Err(cause) => {
+                                        persistence_error = Some(format!(
+                                            "cannot bind command start to the turn trace: {}: {}",
+                                            cause.code, cause.message
+                                        ));
+                                        cancellation.request();
+                                        return;
+                                    }
+                                };
+                                let Some(accumulator) = turn_trace_accumulator.as_mut() else {
+                                    persistence_error = Some(
+                                        "cannot bind command start without its turn trace"
+                                            .to_owned(),
+                                    );
+                                    cancellation.request();
+                                    return;
+                                };
+                                match accumulator.record_tool_observation(observation) {
+                                    Ok(ToolObservationAdmission::Recorded) => {}
+                                    Ok(ToolObservationAdmission::TerminalPersistenceDenied) => {
+                                        emit(self.event(
+                                            &params.session_id,
+                                            Some(&turn_id),
+                                            "item.started",
+                                            Some(item),
+                                        ));
+                                        persistence_error = Some(
+                                            "cannot persist another command terminal within the durable turn trace budget"
+                                                .to_owned(),
+                                        );
+                                        cancellation.request();
+                                        return;
+                                    }
+                                    Err(cause) => {
+                                        persistence_error = Some(format!(
+                                            "cannot retain command start in the turn trace: {}: {}",
+                                            cause.code, cause.message
+                                        ));
+                                        cancellation.request();
+                                        return;
+                                    }
+                                }
+                            } else if lifecycle == "completed" {
+                                let item_append = StoredItemAppend {
+                                    session_id: params.session_id.clone(),
+                                    turn_id: Some(turn_id.clone()),
+                                    item_id: item.id.clone(),
+                                    item_kind: item.kind.clone(),
+                                    role: item.role.clone(),
+                                    state: item.state.clone(),
+                                    payload: json!({ "content": item.content, "data": item.data }),
+                                    created_at_ms: now_ms(),
+                                };
+                                let mut trace_candidate = None;
+                                if let Some(store) = self.workbench_store.as_ref() {
+                                    let preview = match store.preview_item_append(&item_append) {
+                                        Ok(preview) => preview,
+                                        Err(error) => {
+                                            persistence_error = Some(format!(
+                                                "cannot prepare command item: {}",
+                                                error.message
+                                            ));
+                                            cancellation.request();
+                                            return;
+                                        }
+                                    };
+                                    let observation = match tool_trace_authority::terminal_observation(
+                                        &params.session_id,
+                                        &turn_id,
+                                        &preview,
+                                    ) {
+                                        Ok(observation) => observation,
+                                        Err(cause) => {
+                                            persistence_error = Some(format!(
+                                                "cannot preflight command trace binding: {}: {}",
+                                                cause.code, cause.message
+                                            ));
+                                            cancellation.request();
+                                            return;
+                                        }
+                                    };
+                                    let Some(accumulator) = turn_trace_accumulator.as_ref() else {
+                                        persistence_error = Some(
+                                            "cannot preflight persisted command without its turn trace"
+                                                .to_owned(),
+                                        );
+                                        cancellation.request();
+                                        return;
+                                    };
+                                    let mut candidate = accumulator.clone();
+                                    match candidate.record_tool_observation(observation) {
+                                        Ok(ToolObservationAdmission::Recorded) => {
+                                            trace_candidate = Some(candidate);
+                                        }
+                                        Ok(ToolObservationAdmission::TerminalPersistenceDenied) => {
+                                            persistence_error = Some(
+                                                "command terminal persistence was denied by the durable turn trace budget"
+                                                    .to_owned(),
+                                            );
+                                            cancellation.request();
+                                            return;
+                                        }
+                                        Err(cause) => {
+                                            persistence_error = Some(format!(
+                                                "cannot preflight command terminal in the turn trace: {}: {}",
+                                                cause.code, cause.message
+                                            ));
+                                            cancellation.request();
+                                            return;
+                                        }
+                                    }
+                                }
+                                let stored_item = match self.persist_item_with_command_artifact(
+                                    &params.session_id,
+                                    item_append,
                                     &item,
                                     artifact.as_ref(),
                                 ) {
-                                    persistence_error =
-                                        Some(format!("cannot persist command item: {error}"));
-                                    cancellation.request();
-                                    return;
+                                    Ok(stored_item) => stored_item,
+                                    Err(error) => {
+                                        persistence_error =
+                                            Some(format!("cannot persist command item: {error}"));
+                                        cancellation.request();
+                                        return;
+                                    }
+                                };
+                                if stored_item.is_some() {
+                                    let Some(candidate) = trace_candidate else {
+                                        persistence_error = Some(
+                                            "cannot commit a command without its preflighted turn trace"
+                                                .to_owned(),
+                                        );
+                                        cancellation.request();
+                                        return;
+                                    };
+                                    turn_trace_accumulator = Some(candidate);
                                 }
                                 if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                     state.items.push(item.clone());
@@ -10586,6 +10712,33 @@ impl Runtime {
                                     content: "Token usage updated".into(),
                                     data: Some(usage),
                                 };
+                                let mut trace_candidate = None;
+                                if let Some(report) = report {
+                                    let Some(accumulator) = turn_trace_accumulator.as_ref() else {
+                                        persistence_error = Some(
+                                            "cannot preflight persisted usage without its turn trace"
+                                                .to_owned(),
+                                        );
+                                        cancellation.request();
+                                        return;
+                                    };
+                                    let mut candidate = accumulator.clone();
+                                    if let Err(cause) = candidate.record_persisted_usage_snapshot(
+                                        TraceUsageSnapshotMetadata {
+                                            persisted_item_id: item.id.clone(),
+                                            report,
+                                            observed_at_ms,
+                                        },
+                                    ) {
+                                        persistence_error = Some(format!(
+                                            "cannot preflight persisted usage in the turn trace: {}: {}",
+                                            cause.code, cause.message
+                                        ));
+                                        cancellation.request();
+                                        return;
+                                    }
+                                    trace_candidate = Some(candidate);
+                                }
                                 if let Err(error) =
                                     self.persist_item(&params.session_id, Some(&turn_id), &item)
                                 {
@@ -10595,29 +10748,8 @@ impl Runtime {
                                     return;
                                 }
                                 context_threshold_status = next_context_threshold_status;
-                                if let Some(report) = report {
-                                    let Some(accumulator) = turn_trace_accumulator.as_mut() else {
-                                        persistence_error = Some(
-                                            "cannot bind persisted usage to the turn trace"
-                                                .to_owned(),
-                                        );
-                                        cancellation.request();
-                                        return;
-                                    };
-                                    if let Err(cause) = accumulator.record_persisted_usage_snapshot(
-                                        TraceUsageSnapshotMetadata {
-                                            persisted_item_id: item.id.clone(),
-                                            report,
-                                            observed_at_ms,
-                                        },
-                                    ) {
-                                        persistence_error = Some(format!(
-                                            "cannot bind persisted usage to the turn trace: {}: {}",
-                                            cause.code, cause.message
-                                        ));
-                                        cancellation.request();
-                                        return;
-                                    }
+                                if let Some(candidate) = trace_candidate {
+                                    turn_trace_accumulator = Some(candidate);
                                 }
                                 if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                     state.items.push(item.clone());
@@ -10790,14 +10922,14 @@ impl Runtime {
                         }
                         CodexEvent::TurnCompleted { turn_id } => {
                             let terminal_at_ms = now_ms();
-                            let Some(accumulator) = turn_trace_accumulator.take() else {
+                            let Some(accumulator) = turn_trace_accumulator.as_ref() else {
                                 persistence_error = Some(
                                     "cannot persist completed turn without its trace accumulator"
                                         .into(),
                                 );
                                 return;
                             };
-                            let trace = match accumulator.finalize_completed(
+                            let trace = match accumulator.clone().finalize_completed(
                                 terminal_at_ms,
                                 trace_terminal_metadata(
                                     &turn_id,
@@ -10814,6 +10946,7 @@ impl Runtime {
                                     return;
                                 }
                             };
+                            turn_trace_accumulator = None;
                             pending_terminal = Some(PendingTurnTerminal {
                                 turn_id: turn_id.clone(),
                                 state: "completed",
@@ -10928,14 +11061,14 @@ impl Runtime {
                         }
                         CodexEvent::TurnInterrupted { turn_id } => {
                             let terminal_at_ms = now_ms();
-                            let Some(accumulator) = turn_trace_accumulator.take() else {
+                            let Some(accumulator) = turn_trace_accumulator.as_ref() else {
                                 persistence_error = Some(
                                     "cannot persist interrupted turn without its trace accumulator"
                                         .into(),
                                 );
                                 return;
                             };
-                            let trace = match accumulator.finalize_interrupted(
+                            let trace = match accumulator.clone().finalize_interrupted(
                                 terminal_at_ms,
                                 trace_terminal_metadata(
                                     &turn_id,
@@ -10952,6 +11085,7 @@ impl Runtime {
                                     return;
                                 }
                             };
+                            turn_trace_accumulator = None;
                             pending_terminal = Some(PendingTurnTerminal {
                                 turn_id: turn_id.clone(),
                                 state: "interrupted",
@@ -11005,14 +11139,14 @@ impl Runtime {
                                     (class, class, retryable, TraceEvidenceSource::Runtime)
                                 });
                             let terminal_at_ms = now_ms();
-                            let Some(accumulator) = turn_trace_accumulator.take() else {
+                            let Some(accumulator) = turn_trace_accumulator.as_ref() else {
                                 persistence_error = Some(
                                     "cannot persist failed turn without its trace accumulator"
                                         .into(),
                                 );
                                 return;
                             };
-                            let trace = match accumulator.finalize_failed(
+                            let trace = match accumulator.clone().finalize_failed(
                                 terminal_at_ms,
                                 trace_error_metadata(
                                     &turn_id,
@@ -11032,6 +11166,7 @@ impl Runtime {
                                     return;
                                 }
                             };
+                            turn_trace_accumulator = None;
                             let item = TimelineItem {
                                 id: self.allocate_id("error"),
                                 kind: "error".into(),
@@ -14884,8 +15019,10 @@ fn command_timeline_item(
         .into(),
         content,
         data: Some(json!({
+            "schema_version": tool_trace_authority::COMMAND_TIMELINE_SCHEMA_VERSION,
             "command": command.command,
             "command_actions": command.command_actions,
+            "input_identity": command.trace_input_identity,
             "cwd": command.cwd,
             "environment": {
                 "environment_id": environment.environment_id,
@@ -14899,12 +15036,14 @@ fn command_timeline_item(
                 "contract": environment_contract
             },
             "risk": risk,
-            "status": command.status,
+            "status": command.status.as_str(),
             "duration_ms": command.duration_ms,
             "exit_code": command.exit_code,
             "process_id": command.process_id,
-            "source": command.source,
+            "source": command.source.as_str(),
             "session_id": session_id,
+            "started_at_ms": command.started_at_ms,
+            "completed_at_ms": command.completed_at_ms,
             "output": {
                 "head": output.head,
                 "tail": output.tail,
@@ -16560,6 +16699,18 @@ mod turn_cancel_tests {
 mod command_timeline_tests {
     use super::*;
 
+    fn command_environment() -> session_environment::EnvironmentSummary {
+        session_environment::EnvironmentSummary {
+            environment_id: "environment:sha256:test".into(),
+            variable_count: 4,
+            inherited_count: 4,
+            explicit_count: 0,
+            masked_count: 2,
+            path_entry_count: 3,
+            explicit_variable_names: Vec::new(),
+        }
+    }
+
     #[test]
     fn command_timeline_keeps_structured_authority_and_bounded_display() {
         let mut command = CommandItem {
@@ -16570,25 +16721,21 @@ mod command_timeline_tests {
                 "command": "git status --short"
             }]),
             cwd: "/tmp/project".into(),
-            status: "completed".into(),
+            status: CommandStatus::Completed,
             output: command_output::CommandOutputCapture::default(),
             redactor: output_redaction::OutputRedactor::default(),
             duration_ms: Some(42),
             exit_code: Some(0),
             process_id: Some("pty-1".into()),
-            source: "agent".into(),
+            source: CommandSource::Agent,
+            started_at_ms: 10,
+            completed_at_ms: Some(52),
+            provider_input_fingerprint: ProviderCommandInputFingerprint([1; 32]),
+            trace_input_identity: format!("sha256:{}", "1".repeat(64)),
         };
         codex_adapter::append_bounded_output(&mut command, &"界".repeat(200_000));
         codex_adapter::finish_bounded_output(&mut command);
-        let environment = session_environment::EnvironmentSummary {
-            environment_id: "environment:sha256:test".into(),
-            variable_count: 4,
-            inherited_count: 4,
-            explicit_count: 0,
-            masked_count: 2,
-            path_entry_count: 3,
-            explicit_variable_names: Vec::new(),
-        };
+        let environment = command_environment();
         let item = command_timeline_item(
             &command,
             "completed",
@@ -16608,6 +16755,72 @@ mod command_timeline_tests {
         );
         assert!(item.content.len() < command.output.snapshot().total_bytes as usize);
         assert!(item.content.contains("Aegisy omitted"));
+    }
+
+    #[test]
+    fn started_command_timeline_item_is_valid_tool_trace_authority() {
+        let command = CommandItem {
+            item_id: "command-fixture".into(),
+            command: "cargo check".into(),
+            command_actions: json!([{"type": "unknown"}]),
+            cwd: "/tmp/project".into(),
+            status: CommandStatus::InProgress,
+            output: command_output::CommandOutputCapture::default(),
+            redactor: output_redaction::OutputRedactor::default(),
+            duration_ms: None,
+            exit_code: None,
+            process_id: None,
+            source: CommandSource::Agent,
+            started_at_ms: 100,
+            completed_at_ms: None,
+            provider_input_fingerprint: ProviderCommandInputFingerprint([2; 32]),
+            trace_input_identity: format!("sha256:{}", "2".repeat(64)),
+        };
+        let item = command_timeline_item(
+            &command,
+            "started",
+            &command_environment(),
+            "codex-adapter-launch-contract",
+            None,
+            "session-2",
+        );
+        let observation =
+            tool_trace_authority::started_observation("session-2", "turn-fixture", &item).unwrap();
+        assert_eq!(observation.at_ms, 100);
+        assert!(matches!(
+            &observation.payload,
+            turn_trace::TracePayload::Tool {
+                state: turn_trace::ToolState::Started,
+                provider_status: Some(turn_trace::ToolProviderStatus::InProgress),
+                item_binding: Some(turn_trace::ToolTimelineBinding::NotPersisted),
+                ..
+            }
+        ));
+
+        let prepared_context =
+            turn_context::prepare_turn_context(&[], Some(Path::new("/tmp"))).unwrap();
+        let backend_info = BackendInfo {
+            adapter: "codex-app-server".into(),
+            version: "0.144.5".into(),
+            provider: Some("fixture".into()),
+            model: Some("fixture".into()),
+            permission_profile: "read-only".into(),
+            environment: None,
+        };
+        let mut accumulator = codex_turn_trace_accumulator(
+            TraceBinding {
+                session_id: "session-2".into(),
+                turn_id: "turn-fixture".into(),
+                project_id: Some("project-1".into()),
+                environment_identity: Some(format!("environment:sha256:{}", "a".repeat(64))),
+            },
+            &SessionMode::Work,
+            &backend_info,
+            &prepared_context,
+            80,
+        )
+        .unwrap();
+        accumulator.record_tool_observation(observation).unwrap();
     }
 
     #[test]
@@ -16684,13 +16897,17 @@ mod command_timeline_tests {
             command: "print diagnostics".into(),
             command_actions: json!([{"type": "unknown"}]),
             cwd: "/tmp/project".into(),
-            status: "completed".into(),
+            status: CommandStatus::Completed,
             output: command_output::CommandOutputCapture::default(),
             redactor: output_redaction::OutputRedactor::default(),
             duration_ms: Some(10),
             exit_code: Some(0),
             process_id: None,
-            source: "agent".into(),
+            source: CommandSource::Agent,
+            started_at_ms: 10,
+            completed_at_ms: Some(20),
+            provider_input_fingerprint: ProviderCommandInputFingerprint([3; 32]),
+            trace_input_identity: format!("sha256:{}", "3".repeat(64)),
         };
         codex_adapter::append_bounded_output(&mut command, &format!("API_KEY={first_secret}\n"));
         codex_adapter::append_bounded_output(&mut command, &"x".repeat(3 * 1024 * 1024));
@@ -16848,13 +17065,17 @@ mod command_timeline_tests {
             command: format!("cargo check --token {secret}"),
             command_actions: json!([{"type": "unknown"}]),
             cwd: canonical_root.to_string_lossy().into(),
-            status: "failed".into(),
+            status: CommandStatus::Failed,
             output: command_output::CommandOutputCapture::default(),
             redactor: output_redaction::OutputRedactor::default(),
             duration_ms: Some(1),
             exit_code: Some(101),
             process_id: None,
-            source: "agent".into(),
+            source: CommandSource::Agent,
+            started_at_ms: 10,
+            completed_at_ms: Some(11),
+            provider_input_fingerprint: ProviderCommandInputFingerprint([4; 32]),
+            trace_input_identity: format!("sha256:{}", "4".repeat(64)),
         };
         let mut output = format!(
             "error[E0425]: cannot find function `missing`\n --> src/main.rs:2:5\n\
@@ -17414,8 +17635,18 @@ mod durable_runtime_tests {
                 "artifact": {"reference": artifact.reference}
             })),
         };
+        let item_append = StoredItemAppend {
+            session_id: session_id.clone(),
+            turn_id: None,
+            item_id: item.id.clone(),
+            item_kind: item.kind.clone(),
+            role: item.role.clone(),
+            state: item.state.clone(),
+            payload: json!({ "content": item.content, "data": item.data }),
+            created_at_ms: now_ms(),
+        };
         runtime
-            .persist_item_with_command_artifact(&session_id, None, &item, Some(&artifact))
+            .persist_item_with_command_artifact(&session_id, item_append, &item, Some(&artifact))
             .unwrap();
         let reference = artifact.reference.clone();
         drop(runtime);

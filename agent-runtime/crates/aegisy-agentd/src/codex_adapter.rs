@@ -5,8 +5,10 @@ use crate::session_environment::{EnvironmentSummary, ProcessEnvironment, Session
 use crate::{TurnCancellationHandle, TurnSteerRequest, TurnSteeringHandle};
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
+use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -81,19 +83,121 @@ pub struct CodexSession {
     pub model: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandStatus {
+    InProgress,
+    Completed,
+    Failed,
+    Declined,
+}
+
+impl Serialize for CommandStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl CommandStatus {
+    fn parse(value: &Value) -> Option<Self> {
+        match value.as_str()? {
+            "inProgress" => Some(Self::InProgress),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "declined" => Some(Self::Declined),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::InProgress => "inProgress",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Declined => "declined",
+        }
+    }
+
+    const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Declined)
+    }
+}
+
+impl fmt::Display for CommandStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandSource {
+    Agent,
+    UserShell,
+    UnifiedExecStartup,
+    UnifiedExecInteraction,
+}
+
+impl Serialize for CommandSource {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl CommandSource {
+    fn parse_optional(value: Option<&Value>) -> Option<Self> {
+        match value {
+            None => Some(Self::Agent),
+            Some(value) => match value.as_str()? {
+                "agent" => Some(Self::Agent),
+                "userShell" => Some(Self::UserShell),
+                "unifiedExecStartup" => Some(Self::UnifiedExecStartup),
+                "unifiedExecInteraction" => Some(Self::UnifiedExecInteraction),
+                _ => None,
+            },
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::UserShell => "userShell",
+            Self::UnifiedExecStartup => "unifiedExecStartup",
+            Self::UnifiedExecInteraction => "unifiedExecInteraction",
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ProviderCommandInputFingerprint(pub(crate) [u8; 32]);
+
+impl std::fmt::Debug for ProviderCommandInputFingerprint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<redacted-provider-command-input>")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandItem {
     pub item_id: String,
     pub command: String,
     pub command_actions: Value,
     pub cwd: String,
-    pub status: String,
+    pub(crate) status: CommandStatus,
     pub output: CommandOutputCapture,
     pub redactor: OutputRedactor,
     pub duration_ms: Option<u64>,
     pub exit_code: Option<i64>,
     pub process_id: Option<String>,
-    pub source: String,
+    pub(crate) source: CommandSource,
+    pub started_at_ms: u64,
+    pub completed_at_ms: Option<u64>,
+    pub(crate) provider_input_fingerprint: ProviderCommandInputFingerprint,
+    pub(crate) trace_input_identity: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -555,7 +659,7 @@ impl CodexAdapter {
                 "item/started" | "item/commandExecution/outputDelta" | "item/completed"
             ) {
                 if let Some(event) =
-                    translate_command_notification(method, &params, &turn_id, &mut commands)
+                    translate_command_notification(method, &params, &turn_id, &mut commands)?
                 {
                     emit(event);
                     continue;
@@ -726,42 +830,149 @@ fn translate_command_notification(
     params: &Value,
     turn_id: &str,
     commands: &mut HashMap<String, CommandItem>,
-) -> Option<CodexEvent> {
+) -> Result<Option<CodexEvent>, String> {
+    if params.get("turnId").and_then(Value::as_str) != Some(turn_id) {
+        return Ok(None);
+    }
     match method {
         "item/started" => {
-            let command = command_item(params.get("item")?, None)?;
+            let Some(item) = params.get("item") else {
+                return Err(command_protocol_error("started item is missing"));
+            };
+            if item.get("type").and_then(Value::as_str) != Some("commandExecution") {
+                return Ok(None);
+            }
+            if params.get("completedAtMs").is_some() {
+                return Err(command_protocol_error(
+                    "started notification carries a completion timestamp",
+                ));
+            }
+            let started_at_ms = required_command_timestamp(params, "startedAtMs")?;
+            let status = item
+                .get("status")
+                .and_then(CommandStatus::parse)
+                .ok_or_else(|| command_protocol_error("started item status is invalid"))?;
+            if status != CommandStatus::InProgress {
+                return Err(command_protocol_error(
+                    "started item status is not in progress",
+                ));
+            }
+            let command = command_item(item, None, started_at_ms, None)
+                .ok_or_else(|| command_protocol_error("started item is invalid"))?;
+            if commands.contains_key(&command.item_id) {
+                return Err(command_protocol_error(
+                    "command item started more than once",
+                ));
+            }
             commands.insert(command.item_id.clone(), command.clone());
-            Some(CodexEvent::CommandUpdated {
+            Ok(Some(CodexEvent::CommandUpdated {
                 turn_id: turn_id.into(),
                 command: Box::new(command),
                 lifecycle: "started".into(),
-            })
+            }))
         }
         "item/commandExecution/outputDelta" => {
-            let item_id = params.get("itemId").and_then(Value::as_str)?;
-            let delta = params.get("delta").and_then(Value::as_str).unwrap_or("");
-            let command = commands.get_mut(item_id)?;
+            let item_id = params
+                .get("itemId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| command_protocol_error("output delta item identity is missing"))?;
+            let delta = params
+                .get("delta")
+                .and_then(Value::as_str)
+                .ok_or_else(|| command_protocol_error("output delta is missing"))?;
+            let command = commands
+                .get_mut(item_id)
+                .ok_or_else(|| command_protocol_error("output delta has no started command"))?;
+            if command.status != CommandStatus::InProgress || command.completed_at_ms.is_some() {
+                return Err(command_protocol_error(
+                    "output delta arrived after command completion",
+                ));
+            }
             append_bounded_output(command, delta);
-            Some(CodexEvent::CommandUpdated {
+            Ok(Some(CodexEvent::CommandUpdated {
                 turn_id: turn_id.into(),
                 command: Box::new(command.clone()),
                 lifecycle: "delta".into(),
-            })
+            }))
         }
         "item/completed" => {
-            let item = params.get("item")?;
-            let item_id = item.get("id").and_then(Value::as_str).unwrap_or("");
-            let mut command = command_item(item, commands.get(item_id))?;
+            let Some(item) = params.get("item") else {
+                return Err(command_protocol_error("completed item is missing"));
+            };
+            if item.get("type").and_then(Value::as_str) != Some("commandExecution") {
+                return Ok(None);
+            }
+            let item_id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| command_protocol_error("completed item identity is missing"))?;
+            let previous = commands
+                .get(item_id)
+                .ok_or_else(|| command_protocol_error("completed item has no started command"))?;
+            if previous.status != CommandStatus::InProgress || previous.completed_at_ms.is_some() {
+                return Err(command_protocol_error(
+                    "command item completed more than once",
+                ));
+            }
+            let completed_at_ms = required_command_timestamp(params, "completedAtMs")?;
+            if completed_at_ms < previous.started_at_ms {
+                return Err(command_protocol_error(
+                    "command completion timestamp precedes its start",
+                ));
+            }
+            let status = item
+                .get("status")
+                .and_then(CommandStatus::parse)
+                .ok_or_else(|| command_protocol_error("completed item status is invalid"))?;
+            if !status.is_terminal() {
+                return Err(command_protocol_error(
+                    "completed item does not carry a terminal status",
+                ));
+            }
+            let mut command = command_item(
+                item,
+                Some(previous),
+                previous.started_at_ms,
+                Some(completed_at_ms),
+            )
+            .ok_or_else(|| command_protocol_error("completed item is invalid"))?;
+            if command.source != previous.source {
+                return Err(command_protocol_error(
+                    "command source changed during its lifecycle",
+                ));
+            }
+            if command.provider_input_fingerprint != previous.provider_input_fingerprint
+                || command.command != previous.command
+                || command.command_actions != previous.command_actions
+                || command.cwd != previous.cwd
+            {
+                return Err(command_protocol_error(
+                    "command input changed during its lifecycle",
+                ));
+            }
             finish_bounded_output(&mut command);
             commands.insert(command.item_id.clone(), command.clone());
-            Some(CodexEvent::CommandUpdated {
+            Ok(Some(CodexEvent::CommandUpdated {
                 turn_id: turn_id.into(),
                 command: Box::new(command),
                 lifecycle: "completed".into(),
-            })
+            }))
         }
-        _ => None,
+        _ => Ok(None),
     }
+}
+
+fn required_command_timestamp(params: &Value, field: &str) -> Result<u64, String> {
+    let value = params
+        .get(field)
+        .and_then(Value::as_i64)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| command_protocol_error("lifecycle timestamp is invalid"))?;
+    Ok(value)
+}
+
+fn command_protocol_error(reason: &str) -> String {
+    format!("Codex command lifecycle protocol error: {reason}")
 }
 
 fn translate_turn_notification(method: &str, params: &Value, turn_id: &str) -> Option<CodexEvent> {
@@ -832,36 +1043,72 @@ fn bounded_token_usage(value: &Value) -> Option<Value> {
     }))
 }
 
-fn command_item(item: &Value, previous: Option<&CommandItem>) -> Option<CommandItem> {
+fn command_item(
+    item: &Value,
+    previous: Option<&CommandItem>,
+    started_at_ms: u64,
+    completed_at_ms: Option<u64>,
+) -> Option<CommandItem> {
     if item.get("type").and_then(Value::as_str) != Some("commandExecution") {
         return None;
     }
     let item_id = item.get("id").and_then(Value::as_str)?;
     let command = item.get("command").and_then(Value::as_str)?;
+    let command_actions = item.get("commandActions")?;
+    command_actions.as_array()?;
     let cwd = item.get("cwd").and_then(Value::as_str)?;
+    let status = CommandStatus::parse(item.get("status")?)?;
+    let source = CommandSource::parse_optional(item.get("source"))?;
+    if completed_at_ms.is_some() != status.is_terminal() {
+        return None;
+    }
+    let duration_ms = match item.get("durationMs") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(u64::try_from(value.as_i64()?).ok()?),
+    };
+    let exit_code = match item.get("exitCode") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(i64::from(i32::try_from(value.as_i64()?).ok()?)),
+    };
+    let process_id = match item.get("processId") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(bounded_string(value.as_str()?, 512)),
+    };
+    if !command_terminal_metadata_is_valid(status, duration_ms, exit_code) {
+        return None;
+    }
+    if let (Some(completed_at_ms), Some(duration_ms)) = (completed_at_ms, duration_ms) {
+        if duration_ms > completed_at_ms.checked_sub(started_at_ms)? {
+            return None;
+        }
+    }
+    let provider_input_fingerprint = ProviderCommandInputFingerprint(
+        raw_command_input_fingerprint(command, command_actions, cwd)?,
+    );
+    let trace_input_digest = trace_command_input_fingerprint(command, command_actions, cwd)?;
+    let trace_input_identity = format!(
+        "sha256:{}",
+        trace_input_digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
     let mut result = CommandItem {
         item_id: bounded_string(item_id, 512),
         command: bounded_string(&redact_complete(command), 32 * 1024),
         command_actions: bounded_command_actions(item.get("commandActions")),
         cwd: bounded_string(cwd, 4 * 1024),
-        status: item
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("inProgress")
-            .to_owned(),
+        status,
         output: CommandOutputCapture::default(),
         redactor: OutputRedactor::default(),
-        duration_ms: item.get("durationMs").and_then(Value::as_u64),
-        exit_code: item.get("exitCode").and_then(Value::as_i64),
-        process_id: item
-            .get("processId")
-            .and_then(Value::as_str)
-            .map(|value| bounded_string(value, 512)),
-        source: item
-            .get("source")
-            .and_then(Value::as_str)
-            .unwrap_or("agent")
-            .to_owned(),
+        duration_ms,
+        exit_code,
+        process_id,
+        source,
+        started_at_ms,
+        completed_at_ms,
+        provider_input_fingerprint,
+        trace_input_identity,
     };
     if let Some(output) = item.get("aggregatedOutput").and_then(Value::as_str) {
         append_bounded_output(&mut result, output);
@@ -870,6 +1117,109 @@ fn command_item(item: &Value, previous: Option<&CommandItem>) -> Option<CommandI
         result.redactor = previous.redactor.clone();
     }
     Some(result)
+}
+
+fn raw_command_input_fingerprint(
+    command: &str,
+    command_actions: &Value,
+    cwd: &str,
+) -> Option<[u8; 32]> {
+    let actions = serde_json::to_vec(command_actions).ok()?;
+
+    let mut digest = Sha256::new();
+    digest.update(b"aegisy-codex-command-raw-input/0.1\0");
+    update_digest_component(&mut digest, command.as_bytes());
+    update_digest_component(&mut digest, &actions);
+    update_digest_component(&mut digest, cwd.as_bytes());
+    Some(digest.finalize().into())
+}
+
+fn trace_command_input_fingerprint(
+    command: &str,
+    command_actions: &Value,
+    cwd: &str,
+) -> Option<[u8; 32]> {
+    let projection = trace_command_actions_projection(command_actions)?;
+    let actions = serde_json::to_vec(&projection).ok()?;
+    let mut digest = Sha256::new();
+    digest.update(b"aegisy-codex-command-trace-input/0.2\0");
+    update_digest_component(&mut digest, redact_complete(command).as_bytes());
+    update_digest_component(&mut digest, &actions);
+    update_digest_component(&mut digest, redact_complete(cwd).as_bytes());
+    Some(digest.finalize().into())
+}
+
+fn trace_command_actions_projection(value: &Value) -> Option<Value> {
+    let actions = value.as_array()?;
+    actions
+        .iter()
+        .map(trace_command_action_projection)
+        .collect::<Option<Vec<_>>>()
+        .map(Value::Array)
+}
+
+fn trace_command_action_projection(value: &Value) -> Option<Value> {
+    let action = value.as_object()?;
+    let action_type = action.get("type")?.as_str()?;
+    let command = redact_complete(action.get("command")?.as_str()?);
+    let mut projection = serde_json::Map::new();
+    projection.insert("command".into(), Value::String(command));
+    projection.insert("type".into(), Value::String(action_type.into()));
+    match action_type {
+        "read" => {
+            projection.insert(
+                "name".into(),
+                Value::String(redact_complete(action.get("name")?.as_str()?)),
+            );
+            projection.insert(
+                "path".into(),
+                Value::String(redact_complete(action.get("path")?.as_str()?)),
+            );
+        }
+        "listFiles" => {
+            insert_optional_redacted_string(&mut projection, action, "path")?;
+        }
+        "search" => {
+            insert_optional_redacted_string(&mut projection, action, "path")?;
+            insert_optional_redacted_string(&mut projection, action, "query")?;
+        }
+        "unknown" => {}
+        _ => return None,
+    }
+    Some(Value::Object(projection))
+}
+
+fn insert_optional_redacted_string(
+    projection: &mut serde_json::Map<String, Value>,
+    action: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Option<()> {
+    match action.get(field) {
+        None | Some(Value::Null) => Some(()),
+        Some(Value::String(value)) => {
+            projection.insert(field.into(), Value::String(redact_complete(value)));
+            Some(())
+        }
+        Some(_) => None,
+    }
+}
+
+fn update_digest_component(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
+}
+
+fn command_terminal_metadata_is_valid(
+    status: CommandStatus,
+    duration_ms: Option<u64>,
+    exit_code: Option<i64>,
+) -> bool {
+    match status {
+        CommandStatus::InProgress => duration_ms.is_none() && exit_code.is_none(),
+        CommandStatus::Completed => exit_code.is_none_or(|code| code == 0),
+        CommandStatus::Failed => exit_code != Some(0),
+        CommandStatus::Declined => duration_ms.is_none() && exit_code.is_none(),
+    }
 }
 
 pub(crate) fn append_bounded_output(command: &mut CommandItem, delta: &str) {
@@ -1638,7 +1988,11 @@ mod tests {
             "processId": "pty-1",
             "source": "agent"
         });
-        let mut command = command_item(&fixture, None).unwrap();
+        let mut command = command_item(&fixture, None, 10, None).unwrap();
+        assert_eq!(command.status, CommandStatus::InProgress);
+        assert_eq!(command.source, CommandSource::Agent);
+        assert_eq!(command.started_at_ms, 10);
+        assert_eq!(command.completed_at_ms, None);
         append_bounded_output(&mut command, "M src/main.rs\n");
         assert_eq!(command.command_actions[0]["type"], "listFiles");
         assert_eq!(command.output.snapshot().head, "M src/main.rs\n");
@@ -1709,11 +2063,15 @@ mod tests {
         ];
         let lifecycles = events
             .into_iter()
-            .map(|event| match event.unwrap() {
+            .map(|event| match event.unwrap().unwrap() {
                 CodexEvent::CommandUpdated {
                     command, lifecycle, ..
                 } => {
                     if lifecycle == "completed" {
+                        assert_eq!(command.status, CommandStatus::Completed);
+                        assert_eq!(command.source, CommandSource::Agent);
+                        assert_eq!(command.started_at_ms, 10);
+                        assert_eq!(command.completed_at_ms, Some(52));
                         assert_eq!(command.duration_ms, Some(42));
                         assert_eq!(command.exit_code, Some(0));
                         assert_eq!(command.output.snapshot().head, "M src/main.rs\n");
@@ -1725,6 +2083,663 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(lifecycles, ["started", "delta", "completed"]);
         assert_eq!(commands.len(), 1);
+    }
+
+    fn command_fixture(status: &str, source: Option<&str>) -> Value {
+        let mut item = json!({
+            "id": "command-1",
+            "type": "commandExecution",
+            "command": "git status --short",
+            "commandActions": [],
+            "cwd": "/tmp/project",
+            "status": status
+        });
+        if let Some(source) = source {
+            item["source"] = json!(source);
+        }
+        item
+    }
+
+    fn started_command_notification(item: Value, started_at_ms: Value) -> Value {
+        json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "startedAtMs": started_at_ms,
+            "item": item
+        })
+    }
+
+    fn completed_command_notification(item: Value, completed_at_ms: Value) -> Value {
+        json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "completedAtMs": completed_at_ms,
+            "item": item
+        })
+    }
+
+    fn start_command(
+        commands: &mut HashMap<String, CommandItem>,
+        source: Option<&str>,
+        started_at_ms: u64,
+    ) -> CommandItem {
+        let notification = started_command_notification(
+            command_fixture("inProgress", source),
+            json!(started_at_ms),
+        );
+        match translate_command_notification("item/started", &notification, "turn-1", commands)
+            .unwrap()
+            .unwrap()
+        {
+            CodexEvent::CommandUpdated { command, .. } => *command,
+            _ => panic!("unexpected command event"),
+        }
+    }
+
+    #[test]
+    fn command_statuses_map_only_the_pinned_lifecycle_values() {
+        let mut commands = HashMap::new();
+        let started = start_command(&mut commands, None, 10);
+        assert_eq!(started.status, CommandStatus::InProgress);
+        assert_eq!(started.status.as_str(), "inProgress");
+        assert_eq!(started.source, CommandSource::Agent);
+
+        for (wire_status, expected) in [
+            ("completed", CommandStatus::Completed),
+            ("failed", CommandStatus::Failed),
+            ("declined", CommandStatus::Declined),
+        ] {
+            let mut commands = HashMap::new();
+            start_command(&mut commands, None, 10);
+            let notification =
+                completed_command_notification(command_fixture(wire_status, None), json!(11));
+            let event = translate_command_notification(
+                "item/completed",
+                &notification,
+                "turn-1",
+                &mut commands,
+            )
+            .unwrap()
+            .unwrap();
+            let CodexEvent::CommandUpdated { command, .. } = event else {
+                panic!("unexpected command event");
+            };
+            assert_eq!(command.status, expected);
+            assert_eq!(command.status.as_str(), wire_status);
+            assert_eq!(command.started_at_ms, 10);
+            assert_eq!(command.completed_at_ms, Some(11));
+        }
+    }
+
+    #[test]
+    fn command_status_rejects_missing_unknown_and_wrong_lifecycle_values() {
+        let mut missing = command_fixture("inProgress", None);
+        missing.as_object_mut().unwrap().remove("status");
+        for item in [
+            missing,
+            command_fixture("cancelled", None),
+            {
+                let mut item = command_fixture("inProgress", None);
+                item["status"] = Value::Null;
+                item
+            },
+            command_fixture("completed", None),
+        ] {
+            let mut commands = HashMap::new();
+            let error = translate_command_notification(
+                "item/started",
+                &started_command_notification(item, json!(10)),
+                "turn-1",
+                &mut commands,
+            )
+            .unwrap_err();
+            assert!(error.contains("command lifecycle protocol error"));
+            assert!(commands.is_empty());
+        }
+
+        let mut commands = HashMap::new();
+        start_command(&mut commands, None, 10);
+        let error = translate_command_notification(
+            "item/completed",
+            &completed_command_notification(command_fixture("inProgress", None), json!(11)),
+            "turn-1",
+            &mut commands,
+        )
+        .unwrap_err();
+        assert!(error.contains("terminal status"));
+    }
+
+    #[test]
+    fn command_execution_metadata_is_type_and_status_consistent() {
+        let mut started_with_duration = command_fixture("inProgress", None);
+        started_with_duration["durationMs"] = json!(1);
+        assert!(translate_command_notification(
+            "item/started",
+            &started_command_notification(started_with_duration, json!(10)),
+            "turn-1",
+            &mut HashMap::new(),
+        )
+        .unwrap_err()
+        .contains("started item is invalid"));
+
+        for terminal in [
+            {
+                let mut item = command_fixture("completed", None);
+                item["exitCode"] = json!(1);
+                item
+            },
+            {
+                let mut item = command_fixture("failed", None);
+                item["exitCode"] = json!(0);
+                item
+            },
+            {
+                let mut item = command_fixture("declined", None);
+                item["durationMs"] = json!(1);
+                item
+            },
+            {
+                let mut item = command_fixture("completed", None);
+                item["durationMs"] = json!(2);
+                item
+            },
+            {
+                let mut item = command_fixture("completed", None);
+                item["exitCode"] = json!((i32::MAX as i64) + 1);
+                item
+            },
+            {
+                let mut item = command_fixture("completed", None);
+                item["processId"] = json!({"unexpected": true});
+                item
+            },
+        ] {
+            let mut commands = HashMap::new();
+            start_command(&mut commands, None, 10);
+            let error = translate_command_notification(
+                "item/completed",
+                &completed_command_notification(terminal, json!(11)),
+                "turn-1",
+                &mut commands,
+            )
+            .unwrap_err();
+            assert!(error.contains("completed item is invalid"));
+        }
+    }
+
+    #[test]
+    fn command_started_item_rejects_missing_pinned_required_fields() {
+        for field in ["id", "command", "commandActions", "cwd", "status"] {
+            let mut item = command_fixture("inProgress", None);
+            item.as_object_mut().unwrap().remove(field);
+            let mut commands = HashMap::new();
+            let error = translate_command_notification(
+                "item/started",
+                &started_command_notification(item, json!(10)),
+                "turn-1",
+                &mut commands,
+            )
+            .unwrap_err();
+            assert!(error.contains("command lifecycle protocol error"));
+            assert!(commands.is_empty());
+        }
+
+        let mut item = command_fixture("inProgress", None);
+        item["commandActions"] = json!({});
+        assert!(translate_command_notification(
+            "item/started",
+            &started_command_notification(item, json!(10)),
+            "turn-1",
+            &mut HashMap::new(),
+        )
+        .unwrap_err()
+        .contains("started item is invalid"));
+    }
+
+    #[test]
+    fn command_sources_map_only_the_pinned_values_and_default_only_when_absent() {
+        for (wire_source, expected) in [
+            ("agent", CommandSource::Agent),
+            ("userShell", CommandSource::UserShell),
+            ("unifiedExecStartup", CommandSource::UnifiedExecStartup),
+            (
+                "unifiedExecInteraction",
+                CommandSource::UnifiedExecInteraction,
+            ),
+        ] {
+            let mut commands = HashMap::new();
+            let command = start_command(&mut commands, Some(wire_source), 10);
+            assert_eq!(command.source, expected);
+            assert_eq!(command.source.as_str(), wire_source);
+        }
+
+        let mut commands = HashMap::new();
+        assert_eq!(
+            start_command(&mut commands, None, 10).source,
+            CommandSource::Agent
+        );
+
+        for source in [json!("runtime"), Value::Null, json!(1)] {
+            let mut item = command_fixture("inProgress", None);
+            item["source"] = source;
+            let mut commands = HashMap::new();
+            let error = translate_command_notification(
+                "item/started",
+                &started_command_notification(item, json!(10)),
+                "turn-1",
+                &mut commands,
+            )
+            .unwrap_err();
+            assert!(error.contains("started item is invalid"));
+        }
+    }
+
+    #[test]
+    fn command_source_cannot_drift_between_started_and_terminal_items() {
+        let mut commands = HashMap::new();
+        start_command(&mut commands, Some("userShell"), 10);
+        let error = translate_command_notification(
+            "item/completed",
+            &completed_command_notification(command_fixture("completed", Some("agent")), json!(11)),
+            "turn-1",
+            &mut commands,
+        )
+        .unwrap_err();
+        assert!(error.contains("source changed"));
+    }
+
+    #[test]
+    fn command_input_cannot_drift_between_started_and_terminal_items() {
+        for field in ["command", "commandActions", "cwd"] {
+            let mut commands = HashMap::new();
+            let started = start_command(&mut commands, None, 10);
+            let mut terminal = command_fixture("completed", None);
+            terminal[field] = match field {
+                "command" => json!("git diff --stat"),
+                "commandActions" => {
+                    json!([{"type": "unknown", "command": "git diff --stat"}])
+                }
+                "cwd" => json!("/tmp/other-project"),
+                _ => unreachable!(),
+            };
+            let error = translate_command_notification(
+                "item/completed",
+                &completed_command_notification(terminal, json!(11)),
+                "turn-1",
+                &mut commands,
+            )
+            .unwrap_err();
+            assert!(error.contains("input changed"));
+            assert_eq!(commands.get("command-1"), Some(&started));
+        }
+    }
+
+    #[test]
+    fn command_input_drift_beyond_display_bounds_is_rejected() {
+        let long_command_prefix = "c".repeat(32 * 1024);
+        let long_cwd_prefix = format!("/{}", "w".repeat((4 * 1024) - 1));
+        let actions = (0..33)
+            .map(|index| json!({"type": "unknown", "command": format!("action-{index}")}))
+            .collect::<Vec<_>>();
+        let cases = [
+            (
+                {
+                    let mut item = command_fixture("inProgress", None);
+                    item["command"] = json!(format!("{long_command_prefix}a"));
+                    item
+                },
+                {
+                    let mut item = command_fixture("completed", None);
+                    item["command"] = json!(format!("{long_command_prefix}b"));
+                    item
+                },
+            ),
+            (
+                {
+                    let mut item = command_fixture("inProgress", None);
+                    item["cwd"] = json!(format!("{long_cwd_prefix}a"));
+                    item
+                },
+                {
+                    let mut item = command_fixture("completed", None);
+                    item["cwd"] = json!(format!("{long_cwd_prefix}b"));
+                    item
+                },
+            ),
+            (
+                {
+                    let mut item = command_fixture("inProgress", None);
+                    item["commandActions"] = json!(actions.clone());
+                    item
+                },
+                {
+                    let mut changed = actions.clone();
+                    changed[32]["command"] = json!("changed-after-visible-bound");
+                    let mut item = command_fixture("completed", None);
+                    item["commandActions"] = json!(changed);
+                    item
+                },
+            ),
+            (
+                {
+                    let mut item = command_fixture("inProgress", None);
+                    item["commandActions"] = json!([{
+                        "type": "unknown",
+                        "command": "opaque-command",
+                        "providerOpaqueField": "first"
+                    }]);
+                    item
+                },
+                {
+                    let mut item = command_fixture("completed", None);
+                    item["commandActions"] = json!([{
+                        "type": "unknown",
+                        "command": "opaque-command",
+                        "providerOpaqueField": "second"
+                    }]);
+                    item
+                },
+            ),
+        ];
+
+        for (started_item, terminal_item) in cases {
+            let mut commands = HashMap::new();
+            translate_command_notification(
+                "item/started",
+                &started_command_notification(started_item, json!(10)),
+                "turn-1",
+                &mut commands,
+            )
+            .unwrap()
+            .unwrap();
+            let error = translate_command_notification(
+                "item/completed",
+                &completed_command_notification(terminal_item, json!(11)),
+                "turn-1",
+                &mut commands,
+            )
+            .unwrap_err();
+            assert!(error.contains("input changed"));
+            assert_eq!(commands.len(), 1);
+        }
+    }
+
+    #[test]
+    fn command_trace_input_identity_uses_closed_redacted_projection_without_content() {
+        let secret = "ghp_123456789012345678901234567890";
+        let mut item = command_fixture("inProgress", None);
+        item["command"] = json!(format!("tool --token {secret}"));
+        item["commandActions"] = json!([{
+            "type": "unknown",
+            "command": format!("tool --token {secret}"),
+            "providerOpaqueField": secret,
+            "fullField": "x".repeat(8 * 1024)
+        }]);
+        let mut commands = HashMap::new();
+        let event = translate_command_notification(
+            "item/started",
+            &started_command_notification(item, json!(10)),
+            "turn-1",
+            &mut commands,
+        )
+        .unwrap()
+        .unwrap();
+        let CodexEvent::CommandUpdated { command, .. } = event else {
+            panic!("unexpected command event");
+        };
+        assert!(command.trace_input_identity.starts_with("sha256:"));
+        assert_eq!(command.trace_input_identity.len(), 71);
+        assert!(!command.trace_input_identity.contains(secret));
+        assert!(!format!("{:?}", command.provider_input_fingerprint).contains(secret));
+        assert_eq!(
+            format!("{:?}", command.provider_input_fingerprint),
+            "<redacted-provider-command-input>"
+        );
+    }
+
+    #[test]
+    fn command_trace_projection_excludes_unknown_fields_but_raw_drift_guard_retains_them() {
+        let mut first = command_fixture("inProgress", None);
+        first["commandActions"] = json!([{
+            "type": "unknown",
+            "command": "printf stable",
+            "authorization: ghp_123456789012345678901234567890": "first-private-value"
+        }]);
+        let mut second = first.clone();
+        second["commandActions"] = json!([{
+            "type": "unknown",
+            "command": "printf stable",
+            "another-private-provider-key": "second-private-value"
+        }]);
+        let without_extension = json!([{
+            "type": "unknown",
+            "command": "printf stable"
+        }]);
+
+        let first = command_item(&first, None, 10, None).unwrap();
+        let second = command_item(&second, None, 10, None).unwrap();
+        let mut baseline = command_fixture("inProgress", None);
+        baseline["commandActions"] = without_extension;
+        let baseline = command_item(&baseline, None, 10, None).unwrap();
+
+        assert_eq!(first.trace_input_identity, second.trace_input_identity);
+        assert_eq!(first.trace_input_identity, baseline.trace_input_identity);
+        assert_ne!(
+            first.provider_input_fingerprint,
+            second.provider_input_fingerprint
+        );
+        assert_ne!(
+            first.provider_input_fingerprint,
+            baseline.provider_input_fingerprint
+        );
+        let debug = format!("{first:?}{second:?}");
+        assert!(!debug.contains("authorization"));
+        assert!(!debug.contains("first-private-value"));
+        assert!(!debug.contains("second-private-value"));
+    }
+
+    #[test]
+    fn command_trace_projection_is_closed_typed_and_canonical() {
+        let mut absent = command_fixture("inProgress", None);
+        absent["commandActions"] = json!([{
+            "type": "search",
+            "command": "rg symbol"
+        }]);
+        let mut null = absent.clone();
+        null["commandActions"] = json!([{
+            "type": "search",
+            "command": "rg symbol",
+            "path": null,
+            "query": null
+        }]);
+        let absent = command_item(&absent, None, 10, None).unwrap();
+        let null = command_item(&null, None, 10, None).unwrap();
+        assert_eq!(absent.trace_input_identity, null.trace_input_identity);
+
+        let mut changed = command_fixture("inProgress", None);
+        changed["commandActions"] = json!([{
+            "type": "search",
+            "command": "rg different",
+            "query": "different"
+        }]);
+        let changed = command_item(&changed, None, 10, None).unwrap();
+        assert_ne!(absent.trace_input_identity, changed.trace_input_identity);
+
+        let mut unsupported = command_fixture("inProgress", None);
+        unsupported["commandActions"] = json!([{
+            "type": "futureAction",
+            "command": "printf future"
+        }]);
+        assert!(command_item(&unsupported, None, 10, None).is_none());
+    }
+
+    #[test]
+    fn command_input_identity_ignores_object_key_order_but_preserves_action_order() {
+        let actions_first: Value = serde_json::from_str(
+            r#"[
+                {"type":"unknown","command":"printf first","extension":{"z":1,"a":2}},
+                {"type":"unknown","command":"printf second"}
+            ]"#,
+        )
+        .unwrap();
+        let actions_reordered_keys: Value = serde_json::from_str(
+            r#"[
+                {"extension":{"a":2,"z":1},"command":"printf first","type":"unknown"},
+                {"command":"printf second","type":"unknown"}
+            ]"#,
+        )
+        .unwrap();
+        let actions_reordered_array: Value = serde_json::from_str(
+            r#"[
+                {"type":"unknown","command":"printf second"},
+                {"type":"unknown","command":"printf first","extension":{"a":2,"z":1}}
+            ]"#,
+        )
+        .unwrap();
+
+        let mut first = command_fixture("inProgress", None);
+        first["commandActions"] = actions_first;
+        let mut reordered_keys = command_fixture("inProgress", None);
+        reordered_keys["commandActions"] = actions_reordered_keys;
+        let mut reordered_array = command_fixture("inProgress", None);
+        reordered_array["commandActions"] = actions_reordered_array;
+
+        let first = command_item(&first, None, 10, None).unwrap();
+        let reordered_keys = command_item(&reordered_keys, None, 10, None).unwrap();
+        let reordered_array = command_item(&reordered_array, None, 10, None).unwrap();
+
+        assert_eq!(
+            first.provider_input_fingerprint,
+            reordered_keys.provider_input_fingerprint
+        );
+        assert_eq!(
+            first.trace_input_identity,
+            reordered_keys.trace_input_identity
+        );
+        assert_ne!(
+            first.provider_input_fingerprint,
+            reordered_array.provider_input_fingerprint
+        );
+        assert_ne!(
+            first.trace_input_identity,
+            reordered_array.trace_input_identity
+        );
+    }
+
+    #[test]
+    fn command_lifecycle_timestamps_accept_int64_boundaries_and_preserve_exact_values() {
+        let mut zero_commands = HashMap::new();
+        let zero = start_command(&mut zero_commands, None, 0);
+        assert_eq!(zero.started_at_ms, 0);
+
+        let boundary = i64::MAX as u64;
+        let mut commands = HashMap::new();
+        let started = start_command(&mut commands, None, boundary);
+        assert_eq!(started.started_at_ms, boundary);
+        let event = translate_command_notification(
+            "item/completed",
+            &completed_command_notification(command_fixture("declined", None), json!(boundary)),
+            "turn-1",
+            &mut commands,
+        )
+        .unwrap()
+        .unwrap();
+        let CodexEvent::CommandUpdated { command, .. } = event else {
+            panic!("unexpected command event");
+        };
+        assert_eq!(command.started_at_ms, boundary);
+        assert_eq!(command.completed_at_ms, Some(boundary));
+    }
+
+    #[test]
+    fn command_lifecycle_timestamps_reject_missing_non_int64_and_reverse_time() {
+        let mut missing_started =
+            started_command_notification(command_fixture("inProgress", None), json!(10));
+        missing_started
+            .as_object_mut()
+            .unwrap()
+            .remove("startedAtMs");
+        let too_large = (i64::MAX as u64) + 1;
+        for notification in [
+            missing_started,
+            started_command_notification(command_fixture("inProgress", None), json!(-1)),
+            started_command_notification(command_fixture("inProgress", None), json!(too_large)),
+            started_command_notification(command_fixture("inProgress", None), json!(1.5)),
+            started_command_notification(command_fixture("inProgress", None), json!("10")),
+        ] {
+            let mut commands = HashMap::new();
+            let error = translate_command_notification(
+                "item/started",
+                &notification,
+                "turn-1",
+                &mut commands,
+            )
+            .unwrap_err();
+            assert!(error.contains("timestamp is invalid"));
+            assert!(commands.is_empty());
+        }
+
+        let mut started_with_completion =
+            started_command_notification(command_fixture("inProgress", None), json!(10));
+        started_with_completion["completedAtMs"] = json!(10);
+        assert!(translate_command_notification(
+            "item/started",
+            &started_with_completion,
+            "turn-1",
+            &mut HashMap::new(),
+        )
+        .unwrap_err()
+        .contains("completion timestamp"));
+
+        for completed_at_ms in [
+            Value::Null,
+            json!(-1),
+            json!(too_large),
+            json!(1.5),
+            json!("10"),
+        ] {
+            let mut commands = HashMap::new();
+            start_command(&mut commands, None, 10);
+            let error = translate_command_notification(
+                "item/completed",
+                &completed_command_notification(
+                    command_fixture("completed", None),
+                    completed_at_ms,
+                ),
+                "turn-1",
+                &mut commands,
+            )
+            .unwrap_err();
+            assert!(error.contains("timestamp is invalid"));
+        }
+
+        let mut missing_completed =
+            completed_command_notification(command_fixture("completed", None), json!(11));
+        missing_completed
+            .as_object_mut()
+            .unwrap()
+            .remove("completedAtMs");
+        let mut commands = HashMap::new();
+        start_command(&mut commands, None, 10);
+        assert!(translate_command_notification(
+            "item/completed",
+            &missing_completed,
+            "turn-1",
+            &mut commands,
+        )
+        .unwrap_err()
+        .contains("timestamp is invalid"));
+
+        let mut commands = HashMap::new();
+        start_command(&mut commands, None, 10);
+        assert!(translate_command_notification(
+            "item/completed",
+            &completed_command_notification(command_fixture("failed", None), json!(9)),
+            "turn-1",
+            &mut commands,
+        )
+        .unwrap_err()
+        .contains("precedes its start"));
     }
 
     #[test]
@@ -1804,11 +2819,12 @@ mod tests {
             "id": "command-secret",
             "type": "commandExecution",
             "command": "print diagnostics",
+            "commandActions": [],
             "cwd": "/tmp/project",
             "status": "inProgress"
         });
         let secret = "ghp_123456789012345678901234567890";
-        let mut command = command_item(&fixture, None).unwrap();
+        let mut command = command_item(&fixture, None, 10, None).unwrap();
         append_bounded_output(&mut command, "Authorization: Bearer ");
         append_bounded_output(&mut command, secret);
         finish_bounded_output(&mut command);
@@ -1850,12 +2866,13 @@ mod tests {
             "command": format!("tool --token {secret}"),
             "commandActions": [{
                 "type": "search",
+                "command": format!("rg --api-key={secret}"),
                 "query": format!("--api-key={secret}")
             }],
             "cwd": "/tmp/project",
             "status": "inProgress"
         });
-        let command = command_item(&fixture, None).unwrap();
+        let command = command_item(&fixture, None, 10, None).unwrap();
         let serialized = format!("{}\n{}", command.command, command.command_actions);
         assert!(!serialized.contains(secret));
         assert!(serialized.contains("[REDACTED]"));

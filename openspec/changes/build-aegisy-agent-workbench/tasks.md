@@ -608,9 +608,10 @@
 ## 20. Observability, Diagnostics, and Evaluation
 
 - [ ] 20.1 Implement structured local turn trace with source-qualified runtime/model/context/tool/approval/usage/change/test/error data
-  - Partial internal `turn-trace/0.3` contract keeps strict three-version reads for
-    durable `0.1`, `0.2`, and `0.3` records while preserving fixed `0.1`/`0.2`
-    serialization identities. `0.2` added one immutable Runtime-observed Intent for
+  - Partial internal `turn-trace/0.4` contract keeps strict four-version reads for
+    durable `0.1`, `0.2`, `0.3`, and `0.4` records while preserving fixed legacy
+    serialization identities. Future `0.5+` records and cross-version fields fail
+    closed. `0.2` added one immutable Runtime-observed Intent for
     Chat conversation, Work read-only inspection, or future Work mutation. A
     completed terminal binds that exact Intent and classifies workspace change,
     Git change, and verification independently as not-applicable, applicable,
@@ -629,8 +630,9 @@
   - `0.3` adds at most one final `usage-report`: the latest successfully validated
     and persisted Codex Provider-thread `usage-authority/0.1` report, explicitly
     scoped as an `absolute-snapshot` with unavailable Attempt and Retry attribution.
-    Runtime commits the ordinary Usage Timeline Item before updating the trace accumulator;
-    each later successful notification replaces the retained snapshot rather than
+    Runtime clone-preflights the candidate Trace, commits the ordinary Usage Timeline
+    Item, and replaces the authoritative accumulator only after commit; each later
+    successful notification replaces the retained snapshot rather than
     being summed. At terminal finalization the retained report binds its deterministic
     identity, observation time, and exact persisted Usage Item and is ordered before
     Error/Terminal. Completed, failed, and interrupted traces retain observed Usage.
@@ -647,7 +649,34 @@
     `PreviewRequired`, while removal of an authority report from valid raw Usage fails
     closed as a semantic downgrade. First-state and cross-Turn hysteresis substitution
     fail admission and quarantine hash-consistent replay tampering.
-  - Current Codex Runtime produces `0.3` traces for completed, failed, and
+  - `0.4` adds a content-free Codex command Tool lifecycle. Started observations bind
+    the exact provider status/source/time and a stable identity over a fixed closed
+    projection of command/cwd/action type and recognized typed action fields; unknown
+    Provider keys/values never enter the stable Trace identity. Object keys are
+    canonical and action-array order remains semantic. A separate opaque memory-only
+    SHA-256 fingerprint covers the complete untruncated Provider command/actions/cwd,
+    including unknown fields, and detects lifecycle drift without serialization or
+    persistence. Terminal observations are constructed from the exact would-be
+    sanitized persisted Item, preflighted on an accumulator clone, and made
+    authoritative only after the command Item and Artifact/Blob transaction commits.
+    They bind a Session/Turn/Item domain-separated identity rather than the raw
+    Provider Item ID, the complete sanitized Item payload SHA-256, output identity,
+    duration, and exit status.
+  - Producer admission serializes the complete outer `turn.trace.recorded/0.1`
+    envelope and enforces the exact 72 KiB durable limit. It reserves every open
+    Tool's worst legal terminal, worst failed Error and each terminal state, plus one
+    emergency Started while admission is open. Exhaustion retains and emits that
+    Started, denies terminal Item/Blob persistence, and durably fails the Turn.
+    Store independently rejects oversized Trace events on terminal admission, direct
+    read, projection replay, and restart. Contract, adapter, Store, and stdio fixtures
+    reject invalid status/source/time/duration/exit/binding/order, duplicate/missing
+    pairs, semantic tampering, exact-budget exhaustion, command Item insertion failure,
+    and Provider completion with an unmatched Started. Each failure retains Started +
+    Error + failed Terminal without a terminal Tool, command Item, Blob reference, or
+    object. Provider `declined` is a Tool state; Runtime denial and
+    `approvalPolicy=never` observation remain future producers, and none is a user
+    Approval decision.
+  - Current Codex Runtime produces `0.4` traces for completed, failed, and
     interrupted Turns with one idempotent terminal-write retry. Stdio fixtures
     prove Chat and read-only Work completion, exact Intent/domain binding, restart
     equality, transport/provider failure, interruption, and no fabricated
@@ -655,7 +684,8 @@
     projection replay require project/environment plus the current Intent mode to
     equal the persisted Session binding while
     leaving legacy `0.1` mode-less records readable; semantic mode substitution
-    fails closed. Complete Tool/Approval/Change/Test producers, per-Attempt and Retry
+    fails closed. Complete Approval/Change/Test producers, non-command Tool families,
+    authoritative approval policy observation, per-Attempt and Retry
     Usage authority, and Timeline trace projection, AAP/Qt, audit, retention, and
     export surfaces remain absent. Terminal admission and projection replay also
     still repeat the bounded historical scan for long Sessions; single-pass replay
@@ -669,7 +699,7 @@
     projection plus a validated authority report: provider-reported token and
     context-window/reasoning fields are observed, cost is unknown, and
     unreconciled provider totals are not rewritten. The report now has a
-    deterministic metadata identity used by `turn-trace/0.3`; it remains a Codex
+    deterministic metadata identity used by `turn-trace/0.3` and `0.4`; it remains a Codex
     Provider-thread absolute snapshot and does not claim Turn Attempt or Retry
     attribution. Qt now renders a strict
     metadata-only summary and rejects malformed/unknown versions. This remains

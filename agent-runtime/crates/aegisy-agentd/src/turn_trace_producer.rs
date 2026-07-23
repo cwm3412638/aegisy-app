@@ -5,13 +5,17 @@
 //! prompt, response, command, path, diff, terminal output, or credential field.
 //! The accumulator is created only after Codex has returned the real Turn ID.
 
+use crate::tool_trace_authority::ToolTraceObservation;
 use crate::turn_trace::{
-    AuthorityLabel, CompletionDomain, CompletionEvidence, ErrorClass, EvidenceRef, EvidenceSource,
-    ModelReason, ModelRole, RedactionSummary, RuntimeState, SessionMode, TerminalEvidence,
-    TerminalState, TraceBinding, TracePayload, TurnAccess, TurnKind, TurnTrace, TurnTraceError,
-    UsageAccounting, UsageAttribution, UsageReportScope,
+    durable_record_payload, AuthorityLabel, CompletionDomain, CompletionEvidence, ErrorClass,
+    EvidenceRef, EvidenceSource, ModelReason, ModelRole, RedactionSummary, RuntimeState,
+    SessionMode, TerminalEvidence, TerminalState, ToolProviderStatus, ToolState,
+    ToolTimelineBinding, TraceBinding, TracePayload, TurnAccess, TurnKind, TurnTrace,
+    TurnTraceError, UsageAccounting, UsageAttribution, UsageReportScope, MAX_DURABLE_EVENT_BYTES,
 };
 use crate::usage_authority::{UsageAuthorityError, UsageAuthorityReport};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 const INTENT_EVENT_ID: &str = "intent-1";
 const RUNTIME_EVENT_ID: &str = "runtime-1";
@@ -20,6 +24,8 @@ const CONTEXT_EVENT_ID: &str = "context-1";
 const USAGE_REPORT_EVENT_ID: &str = "usage-report-1";
 const ERROR_EVENT_ID: &str = "error-1";
 const TERMINAL_EVENT_ID: &str = "terminal-1";
+const RESERVED_DELIVERY_ORDINAL_BASE: u64 = 1_u64 << 63;
+const EMERGENCY_STARTED_ORDINAL: u64 = u64::MAX;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeMetadata {
@@ -90,9 +96,37 @@ pub struct UsageSnapshotMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum DeferredObservation {
+    Tool(Box<ToolTraceObservation>),
+    Usage(UsageSnapshotMetadata),
+}
+
+#[derive(Debug)]
+struct DurableReservation {
+    completed: Option<TurnTrace>,
+    failed: TurnTrace,
+    interrupted: TurnTrace,
+}
+
+impl DeferredObservation {
+    fn observed_at_ms(&self) -> u64 {
+        match self {
+            Self::Tool(observation) => observation.at_ms,
+            Self::Usage(snapshot) => snapshot.observed_at_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnTraceProducerError {
     pub code: &'static str,
     pub message: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolObservationAdmission {
+    Recorded,
+    TerminalPersistenceDenied,
 }
 
 impl From<TurnTraceError> for TurnTraceProducerError {
@@ -118,13 +152,16 @@ impl From<UsageAuthorityError> for TurnTraceProducerError {
 /// Terminal methods consume the accumulator. This makes a second terminal
 /// transition impossible through this API and gives the Store one complete,
 /// terminal-last `TurnTrace` value.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CodexTurnTraceAccumulator {
     trace: TurnTrace,
     session_mode: SessionMode,
     intent_identity: String,
     completion_basis: EvidenceRef,
-    latest_usage_snapshot: Option<UsageSnapshotMetadata>,
+    tool_observations: Vec<(u64, ToolTraceObservation)>,
+    latest_usage_snapshot: Option<(u64, UsageSnapshotMetadata)>,
+    next_delivery_ordinal: u64,
+    terminal_persistence_denied: BTreeSet<String>,
 }
 
 impl CodexTurnTraceAccumulator {
@@ -215,13 +252,18 @@ impl CodexTurnTraceAccumulator {
             },
         )?;
         trace.validate_open()?;
-        Ok(Self {
+        let accumulator = Self {
             trace,
             session_mode: intent.session_mode,
             intent_identity,
             completion_basis,
+            tool_observations: Vec::new(),
             latest_usage_snapshot: None,
-        })
+            next_delivery_ordinal: 1,
+            terminal_persistence_denied: BTreeSet::new(),
+        };
+        accumulator.validate_durable_reservation(true)?;
+        Ok(accumulator)
     }
 
     #[cfg(test)]
@@ -236,15 +278,118 @@ impl CodexTurnTraceAccumulator {
         &mut self,
         snapshot: UsageSnapshotMetadata,
     ) -> Result<(), TurnTraceProducerError> {
-        let mut candidate = self.trace.clone();
-        candidate.append(
-            USAGE_REPORT_EVENT_ID.into(),
-            snapshot.observed_at_ms,
-            usage_report_payload(&snapshot)?,
-        )?;
-        candidate.validate_open()?;
-        self.latest_usage_snapshot = Some(snapshot);
+        let future_ordinals = self.open_tool_action_identities()?.len();
+        let (ordinal, next_ordinal) = self.allocate_delivery_ordinal(future_ordinals)?;
+        self.validate_deferred_candidate(None, Some((ordinal, snapshot.clone())))?;
+        let mut candidate = self.clone();
+        candidate.latest_usage_snapshot = Some((ordinal, snapshot));
+        candidate.next_delivery_ordinal = next_ordinal;
+        candidate.validate_durable_reservation(true)?;
+        *self = candidate;
         Ok(())
+    }
+
+    /// Retain one provider-observed, content-free Tool lifecycle observation.
+    /// Terminal observations are accepted only after Runtime has successfully
+    /// committed the corresponding command Timeline Item and supplied its exact
+    /// persisted binding.
+    pub fn record_tool_observation(
+        &mut self,
+        observation: ToolTraceObservation,
+    ) -> Result<ToolObservationAdmission, TurnTraceProducerError> {
+        let (state, action_identity) = tool_observation_state(&observation)?;
+        let action_identity = action_identity.to_owned();
+        if state == ToolState::Started && !self.terminal_persistence_denied.is_empty() {
+            return Err(producer_error(
+                "turn-trace-tool-admission-closed",
+                "Tool admission is closed after the durable trace budget was exhausted",
+            ));
+        }
+        if state != ToolState::Started
+            && self.terminal_persistence_denied.contains(&action_identity)
+        {
+            return Err(producer_error(
+                "turn-trace-tool-terminal-persistence-denied",
+                "the Tool terminal Item was denied before persistence by the durable trace budget",
+            ));
+        }
+        let mut open_actions = self.open_tool_action_identities()?;
+        if state == ToolState::Started {
+            open_actions.insert(action_identity.clone());
+        } else {
+            open_actions.remove(&action_identity);
+        }
+        let (ordinal, next_ordinal) = self.allocate_delivery_ordinal(open_actions.len())?;
+        self.validate_deferred_candidate(Some((ordinal, observation.clone())), None)?;
+        let mut candidate = self.clone();
+        candidate.tool_observations.push((ordinal, observation));
+        candidate.next_delivery_ordinal = next_ordinal;
+        if candidate.validate_durable_reservation(true).is_ok() {
+            *self = candidate;
+            return Ok(ToolObservationAdmission::Recorded);
+        }
+        if state != ToolState::Started {
+            return Err(producer_error(
+                "turn-trace-durable-budget-exhausted",
+                "the Tool terminal observation exceeds the reserved durable trace budget",
+            ));
+        }
+        candidate
+            .terminal_persistence_denied
+            .insert(action_identity);
+        candidate.validate_durable_reservation(false)?;
+        *self = candidate;
+        Ok(ToolObservationAdmission::TerminalPersistenceDenied)
+    }
+
+    fn allocate_delivery_ordinal(
+        &self,
+        future_ordinals: usize,
+    ) -> Result<(u64, u64), TurnTraceProducerError> {
+        if self.next_delivery_ordinal >= RESERVED_DELIVERY_ORDINAL_BASE {
+            return Err(producer_error(
+                "turn-trace-delivery-ordinal-exhausted",
+                "the Tool and Usage delivery ordinal namespace is exhausted",
+            ));
+        }
+        let next = self.next_delivery_ordinal.checked_add(1).ok_or_else(|| {
+            producer_error(
+                "turn-trace-delivery-ordinal-exhausted",
+                "the Tool and Usage delivery ordinal namespace is exhausted",
+            )
+        })?;
+        let future_ordinals = u64::try_from(future_ordinals).map_err(|_| {
+            producer_error(
+                "turn-trace-delivery-ordinal-exhausted",
+                "the Tool and Usage delivery ordinal namespace is exhausted",
+            )
+        })?;
+        if next
+            .checked_add(future_ordinals)
+            .is_none_or(|required| required > RESERVED_DELIVERY_ORDINAL_BASE)
+        {
+            return Err(producer_error(
+                "turn-trace-delivery-ordinal-exhausted",
+                "the Tool and Usage delivery ordinal namespace cannot cover open Tool terminals",
+            ));
+        }
+        Ok((self.next_delivery_ordinal, next))
+    }
+
+    fn open_tool_action_identities(&self) -> Result<BTreeSet<String>, TurnTraceProducerError> {
+        let mut open = BTreeSet::new();
+        for (_, observation) in &self.tool_observations {
+            let (state, action_identity) = tool_observation_state(observation)?;
+            if state == ToolState::Started {
+                open.insert(action_identity.to_owned());
+            } else {
+                open.remove(action_identity);
+            }
+        }
+        for denied in &self.terminal_persistence_denied {
+            open.remove(denied);
+        }
+        Ok(open)
     }
 
     /// Finalize a provider, adapter, transport, policy, tool, or Runtime
@@ -256,7 +401,7 @@ impl CodexTurnTraceAccumulator {
         error: ErrorMetadata,
         terminal: TerminalMetadata,
     ) -> Result<TurnTrace, TurnTraceProducerError> {
-        self.append_latest_usage_snapshot()?;
+        self.append_deferred_observations()?;
         self.trace.append(
             ERROR_EVENT_ID.into(),
             terminal_at_ms,
@@ -280,7 +425,7 @@ impl CodexTurnTraceAccumulator {
                 },
             },
         )?;
-        self.append_terminal(TerminalState::Failed, terminal_at_ms, terminal, None)
+        self.append_terminal_event(TerminalState::Failed, terminal_at_ms, terminal, None)
     }
 
     pub fn finalize_interrupted(
@@ -333,7 +478,17 @@ impl CodexTurnTraceAccumulator {
         terminal: TerminalMetadata,
         completion: Option<CompletionEvidence>,
     ) -> Result<TurnTrace, TurnTraceProducerError> {
-        self.append_latest_usage_snapshot()?;
+        self.append_deferred_observations()?;
+        self.append_terminal_event(state, terminal_at_ms, terminal, completion)
+    }
+
+    fn append_terminal_event(
+        mut self,
+        state: TerminalState,
+        terminal_at_ms: u64,
+        terminal: TerminalMetadata,
+        completion: Option<CompletionEvidence>,
+    ) -> Result<TurnTrace, TurnTraceProducerError> {
         self.trace.append(
             TERMINAL_EVENT_ID.into(),
             terminal_at_ms,
@@ -358,17 +513,337 @@ impl CodexTurnTraceAccumulator {
         Ok(self.trace)
     }
 
-    fn append_latest_usage_snapshot(&mut self) -> Result<(), TurnTraceProducerError> {
-        let Some(snapshot) = self.latest_usage_snapshot.take() else {
-            return Ok(());
-        };
-        self.trace.append(
-            USAGE_REPORT_EVENT_ID.into(),
-            snapshot.observed_at_ms,
-            usage_report_payload(&snapshot)?,
-        )?;
+    fn validate_deferred_candidate(
+        &self,
+        tool: Option<(u64, ToolTraceObservation)>,
+        usage: Option<(u64, UsageSnapshotMetadata)>,
+    ) -> Result<(), TurnTraceProducerError> {
+        let mut candidate = self.trace.clone();
+        let mut observations = self.deferred_observations();
+        if let Some(tool) = tool {
+            observations.push((tool.0, DeferredObservation::Tool(Box::new(tool.1))));
+        }
+        if let Some(usage) = usage {
+            observations.retain(|(_, value)| !matches!(value, DeferredObservation::Usage(_)));
+            observations.push((usage.0, DeferredObservation::Usage(usage.1)));
+        }
+        append_sorted_observations(&mut candidate, observations)?;
+        candidate.validate_open()?;
         Ok(())
     }
+
+    fn deferred_observations(&self) -> Vec<(u64, DeferredObservation)> {
+        let mut observations = self
+            .tool_observations
+            .iter()
+            .cloned()
+            .map(|(ordinal, value)| (ordinal, DeferredObservation::Tool(Box::new(value))))
+            .collect::<Vec<_>>();
+        if let Some((ordinal, snapshot)) = self.latest_usage_snapshot.as_ref() {
+            observations.push((*ordinal, DeferredObservation::Usage(snapshot.clone())));
+        }
+        observations
+    }
+
+    fn append_deferred_observations(&mut self) -> Result<(), TurnTraceProducerError> {
+        let observations = self.deferred_observations();
+        append_sorted_observations(&mut self.trace, observations)?;
+        self.tool_observations.clear();
+        self.latest_usage_snapshot = None;
+        Ok(())
+    }
+
+    fn validate_durable_reservation(
+        &self,
+        reserve_emergency_started: bool,
+    ) -> Result<(), TurnTraceProducerError> {
+        let reservation = self.build_durable_reservation(reserve_emergency_started)?;
+        if let Some(completed) = reservation.completed.as_ref() {
+            validate_durable_trace_size(completed, "completed")?;
+        }
+        validate_durable_trace_size(&reservation.failed, "failed")?;
+        validate_durable_trace_size(&reservation.interrupted, "interrupted")
+    }
+
+    fn build_durable_reservation(
+        &self,
+        reserve_emergency_started: bool,
+    ) -> Result<DurableReservation, TurnTraceProducerError> {
+        let mut reserved = self.clone();
+        let mut starts = BTreeMap::<String, ToolTraceObservation>::new();
+        let mut terminals = BTreeSet::<String>::new();
+        let mut occupied_actions = BTreeSet::<String>::new();
+        for (_, observation) in &reserved.tool_observations {
+            let (state, action_identity) = tool_observation_state(observation)?;
+            occupied_actions.insert(action_identity.to_owned());
+            if state == ToolState::Started {
+                starts.insert(action_identity.to_owned(), observation.clone());
+            } else {
+                terminals.insert(action_identity.to_owned());
+            }
+        }
+        let mut reservation_ordinal = RESERVED_DELIVERY_ORDINAL_BASE;
+        for (action_identity, started) in starts {
+            if terminals.contains(&action_identity)
+                || reserved
+                    .terminal_persistence_denied
+                    .contains(&action_identity)
+            {
+                continue;
+            }
+            reserved.tool_observations.push((
+                reservation_ordinal,
+                reserved_terminal_observation(&started)?,
+            ));
+            reservation_ordinal = reservation_ordinal.checked_add(1).ok_or_else(|| {
+                producer_error(
+                    "turn-trace-reservation-ordinal-exhausted",
+                    "the durable Tool reservation ordinal namespace is exhausted",
+                )
+            })?;
+            if reservation_ordinal == EMERGENCY_STARTED_ORDINAL {
+                return Err(producer_error(
+                    "turn-trace-reservation-ordinal-exhausted",
+                    "the durable Tool reservation ordinal namespace is exhausted",
+                ));
+            }
+        }
+
+        let completed = reserved
+            .terminal_persistence_denied
+            .is_empty()
+            .then(|| {
+                reserved
+                    .clone()
+                    .finalize_completed(u64::MAX, maximal_terminal_metadata())
+            })
+            .transpose()?;
+
+        let mut failed = reserved.clone();
+        if reserve_emergency_started && reserved.terminal_persistence_denied.is_empty() {
+            failed.tool_observations.push((
+                EMERGENCY_STARTED_ORDINAL,
+                emergency_started_observation(&failed.trace, u64::MAX, &occupied_actions)?,
+            ));
+        }
+        let failed = failed.finalize_failed(
+            u64::MAX,
+            maximal_error_metadata(),
+            maximal_terminal_metadata(),
+        )?;
+
+        let mut interrupted = reserved;
+        if reserve_emergency_started && interrupted.terminal_persistence_denied.is_empty() {
+            interrupted.tool_observations.push((
+                EMERGENCY_STARTED_ORDINAL,
+                emergency_started_observation(&interrupted.trace, u64::MAX, &occupied_actions)?,
+            ));
+        }
+        let interrupted =
+            interrupted.finalize_interrupted(u64::MAX, maximal_terminal_metadata())?;
+        Ok(DurableReservation {
+            completed,
+            failed,
+            interrupted,
+        })
+    }
+}
+
+fn tool_observation_state(
+    observation: &ToolTraceObservation,
+) -> Result<(ToolState, &str), TurnTraceProducerError> {
+    match &observation.payload {
+        TracePayload::Tool {
+            state,
+            action_identity,
+            ..
+        } => Ok((*state, action_identity)),
+        _ => Err(producer_error(
+            "turn-trace-tool-observation-invalid",
+            "a Tool observation must contain a Tool payload",
+        )),
+    }
+}
+
+fn reserved_terminal_observation(
+    started: &ToolTraceObservation,
+) -> Result<ToolTraceObservation, TurnTraceProducerError> {
+    let TracePayload::Tool {
+        tool_identity,
+        action_identity,
+        source,
+        input_identity,
+        ..
+    } = &started.payload
+    else {
+        return Err(producer_error(
+            "turn-trace-tool-observation-invalid",
+            "a Tool reservation requires a Tool start payload",
+        ));
+    };
+    let duration_ms = u64::MAX.saturating_sub(started.at_ms).min(i64::MAX as u64);
+    Ok(ToolTraceObservation {
+        at_ms: u64::MAX,
+        payload: TracePayload::Tool {
+            tool_identity: tool_identity.clone(),
+            action_identity: action_identity.clone(),
+            state: ToolState::Failed,
+            provider_status: Some(ToolProviderStatus::Failed),
+            source: *source,
+            input_identity: input_identity.clone(),
+            output_identity: Some(maximal_hash_identity('b')),
+            item_binding: Some(ToolTimelineBinding::Persisted {
+                item_identity: maximal_hash_identity('c'),
+                payload_identity: maximal_hash_identity('d'),
+            }),
+            duration_ms: Some(duration_ms),
+            exit_code: Some(i32::MIN.into()),
+            evidence: observed(
+                EvidenceSource::ToolRuntime,
+                maximal_hash_identity('e'),
+                u64::MAX,
+            ),
+            redaction: RedactionSummary::metadata_only(),
+        },
+    })
+}
+
+fn emergency_started_observation(
+    trace: &TurnTrace,
+    at_ms: u64,
+    occupied_actions: &BTreeSet<String>,
+) -> Result<ToolTraceObservation, TurnTraceProducerError> {
+    let action_identity = (0..=occupied_actions.len())
+        .map(|nonce| emergency_action_identity(trace, nonce as u64))
+        .find(|identity| !occupied_actions.contains(identity))
+        .ok_or_else(|| {
+            producer_error(
+                "turn-trace-emergency-action-exhausted",
+                "a collision-free emergency Tool action identity is unavailable",
+            )
+        })?;
+    Ok(ToolTraceObservation {
+        at_ms,
+        payload: TracePayload::Tool {
+            tool_identity: maximal_hash_identity('f'),
+            action_identity,
+            state: ToolState::Started,
+            provider_status: Some(ToolProviderStatus::InProgress),
+            source: Some(crate::turn_trace::ToolSource::UnifiedExecInteraction),
+            input_identity: Some(maximal_hash_identity('a')),
+            output_identity: None,
+            item_binding: Some(ToolTimelineBinding::NotPersisted),
+            duration_ms: None,
+            exit_code: None,
+            evidence: observed(
+                EvidenceSource::ToolRuntime,
+                maximal_hash_identity('9'),
+                at_ms,
+            ),
+            redaction: RedactionSummary::metadata_only(),
+        },
+    })
+}
+
+fn emergency_action_identity(trace: &TurnTrace, nonce: u64) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"aegisy-turn-trace-emergency-tool/0.2\0");
+    digest.update(trace.binding.session_id.as_bytes());
+    digest.update([0]);
+    digest.update(trace.binding.turn_id.as_bytes());
+    digest.update(nonce.to_be_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+fn maximal_error_metadata() -> ErrorMetadata {
+    ErrorMetadata {
+        error_identity: maximal_identity('1'),
+        stable_class: ErrorClass::Transport,
+        source_class: "x".repeat(96),
+        retryable: false,
+        evidence_source: EvidenceSource::ToolRuntime,
+        evidence_identity: maximal_identity('2'),
+        source_bytes: 16 * 1024 * 1024,
+        redacted_fields: u32::MAX,
+        omitted_fields: u32::MAX,
+    }
+}
+
+fn maximal_terminal_metadata() -> TerminalMetadata {
+    TerminalMetadata {
+        evidence_source: EvidenceSource::ApprovalAuthority,
+        evidence_identity: maximal_identity('3'),
+    }
+}
+
+fn maximal_identity(byte: char) -> String {
+    byte.to_string().repeat(128)
+}
+
+fn maximal_hash_identity(byte: char) -> String {
+    format!("sha256:{}", byte.to_string().repeat(64))
+}
+
+fn validate_durable_trace_size(
+    trace: &TurnTrace,
+    state: &str,
+) -> Result<(), TurnTraceProducerError> {
+    let trace_identity = trace.metadata_identity()?;
+    let payload = durable_record_payload(trace, &trace_identity, state, u64::MAX);
+    let bytes = serde_json::to_vec(&payload).map_err(|_| {
+        producer_error(
+            "turn-trace-durable-payload-invalid",
+            "the durable turn trace payload cannot be serialized",
+        )
+    })?;
+    if bytes.len() > MAX_DURABLE_EVENT_BYTES {
+        return Err(producer_error(
+            "turn-trace-durable-budget-exhausted",
+            "the durable turn trace payload exceeds the Workbench event limit",
+        ));
+    }
+    Ok(())
+}
+
+fn producer_error(code: &'static str, message: &'static str) -> TurnTraceProducerError {
+    TurnTraceProducerError { code, message }
+}
+
+fn append_sorted_observations(
+    trace: &mut TurnTrace,
+    mut observations: Vec<(u64, DeferredObservation)>,
+) -> Result<(), TurnTraceProducerError> {
+    let mut ordinals = BTreeSet::new();
+    if observations
+        .iter()
+        .any(|(ordinal, _)| !ordinals.insert(*ordinal))
+    {
+        return Err(producer_error(
+            "turn-trace-delivery-ordinal-duplicate",
+            "Tool and Usage observations must have unique delivery ordinals",
+        ));
+    }
+    observations.sort_by_key(|(ordinal, observation)| (observation.observed_at_ms(), *ordinal));
+    for (ordinal, observation) in observations {
+        match observation {
+            DeferredObservation::Tool(observation) => {
+                let observation = *observation;
+                trace.append(
+                    format!("tool-{ordinal}"),
+                    observation.at_ms,
+                    observation.payload,
+                )?;
+            }
+            DeferredObservation::Usage(snapshot) => {
+                trace.append(
+                    USAGE_REPORT_EVENT_ID.into(),
+                    snapshot.observed_at_ms,
+                    usage_report_payload(&snapshot)?,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn usage_report_payload(
@@ -413,6 +888,7 @@ fn unknown(source: EvidenceSource) -> EvidenceRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::turn_trace::{ToolProviderStatus, ToolSource, ToolState, ToolTimelineBinding};
 
     fn hash(byte: char) -> String {
         format!("sha256:{}", byte.to_string().repeat(64))
@@ -551,6 +1027,86 @@ mod tests {
         }
     }
 
+    fn started_tool(action: char, observed_at_ms: u64) -> ToolTraceObservation {
+        ToolTraceObservation {
+            at_ms: observed_at_ms,
+            payload: TracePayload::Tool {
+                tool_identity: hash('5'),
+                action_identity: hash(action),
+                state: ToolState::Started,
+                provider_status: Some(ToolProviderStatus::InProgress),
+                source: Some(ToolSource::Agent),
+                input_identity: Some(hash('7')),
+                output_identity: None,
+                item_binding: Some(ToolTimelineBinding::NotPersisted),
+                duration_ms: None,
+                exit_code: None,
+                evidence: observed(EvidenceSource::ToolRuntime, hash('8'), observed_at_ms),
+                redaction: RedactionSummary::metadata_only(),
+            },
+        }
+    }
+
+    fn completed_tool(action: char, observed_at_ms: u64) -> ToolTraceObservation {
+        ToolTraceObservation {
+            at_ms: observed_at_ms,
+            payload: TracePayload::Tool {
+                tool_identity: hash('5'),
+                action_identity: hash(action),
+                state: ToolState::Completed,
+                provider_status: Some(ToolProviderStatus::Completed),
+                source: Some(ToolSource::Agent),
+                input_identity: Some(hash('7')),
+                output_identity: Some(hash('9')),
+                item_binding: Some(ToolTimelineBinding::Persisted {
+                    item_identity: hash('a'),
+                    payload_identity: hash('a'),
+                }),
+                duration_ms: Some(4),
+                exit_code: Some(0),
+                evidence: observed(EvidenceSource::ToolRuntime, hash('b'), observed_at_ms),
+                redaction: RedactionSummary::metadata_only(),
+            },
+        }
+    }
+
+    fn indexed_tool_observation(
+        index: usize,
+        observed_at_ms: u64,
+        state: ToolState,
+    ) -> ToolTraceObservation {
+        let identity = |namespace: usize| format!("sha256:{:064x}", namespace + index);
+        let terminal = state != ToolState::Started;
+        ToolTraceObservation {
+            at_ms: observed_at_ms,
+            payload: TracePayload::Tool {
+                tool_identity: identity(1_000),
+                action_identity: identity(2_000),
+                state,
+                provider_status: Some(if terminal {
+                    ToolProviderStatus::Completed
+                } else {
+                    ToolProviderStatus::InProgress
+                }),
+                source: Some(crate::turn_trace::ToolSource::Agent),
+                input_identity: Some(identity(3_000)),
+                output_identity: terminal.then(|| identity(4_000)),
+                item_binding: Some(if terminal {
+                    ToolTimelineBinding::Persisted {
+                        item_identity: identity(5_000),
+                        payload_identity: identity(6_000),
+                    }
+                } else {
+                    ToolTimelineBinding::NotPersisted
+                }),
+                duration_ms: terminal.then_some(1),
+                exit_code: terminal.then_some(0),
+                evidence: observed(EvidenceSource::ToolRuntime, identity(7_000), observed_at_ms),
+                redaction: RedactionSummary::metadata_only(),
+            },
+        }
+    }
+
     fn transport_error() -> ErrorMetadata {
         ErrorMetadata {
             error_identity: hash('4'),
@@ -568,22 +1124,106 @@ mod tests {
     fn assert_content_free(trace: &TurnTrace) {
         let serialized = serde_json::to_string(trace).unwrap();
         for forbidden in [
-            "prompt",
-            "response",
-            "command",
-            "cwd",
-            "path",
-            "diff",
-            "output",
+            "private prompt",
+            "private response",
+            "\"command\":",
+            "\"cwd\":",
+            "\"path\":",
+            "\"diff\":",
+            "\"output\":",
             "credential",
-            "authorization",
-            "process_id",
+            "\"authorization\":",
+            "\"process_id\":",
             "Bearer",
             "private provider body",
         ] {
             assert!(!serialized.contains(forbidden), "found {forbidden}");
         }
         assert!(serialized.contains("\"content_included\":false"));
+    }
+
+    fn durable_payload_bytes(trace: &TurnTrace, state: &str) -> usize {
+        let identity = trace.metadata_identity().unwrap();
+        serde_json::to_vec(&durable_record_payload(trace, &identity, state, u64::MAX))
+            .unwrap()
+            .len()
+    }
+
+    fn assert_unique_event_ids(trace: &TurnTrace) {
+        let ids = trace
+            .events
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), trace.events.len());
+    }
+
+    #[test]
+    fn durable_reservation_uses_the_longest_legal_serialized_sources_and_error_class() {
+        let evidence_sources = [
+            EvidenceSource::Runtime,
+            EvidenceSource::ModelCatalog,
+            EvidenceSource::Provider,
+            EvidenceSource::ContextBuilder,
+            EvidenceSource::ToolRuntime,
+            EvidenceSource::ApprovalAuthority,
+            EvidenceSource::UsageProvider,
+            EvidenceSource::Workspace,
+            EvidenceSource::Git,
+            EvidenceSource::TestRunner,
+            EvidenceSource::Aap,
+            EvidenceSource::LocalRuntime,
+        ];
+        let reserved_source_bytes = serde_json::to_vec(&EvidenceSource::ApprovalAuthority)
+            .unwrap()
+            .len();
+        assert!(evidence_sources
+            .iter()
+            .all(|source| serde_json::to_vec(source).unwrap().len() <= reserved_source_bytes));
+
+        let error_classes = [
+            ErrorClass::Runtime,
+            ErrorClass::Protocol,
+            ErrorClass::Provider,
+            ErrorClass::Transport,
+            ErrorClass::Timeout,
+            ErrorClass::Sandbox,
+            ErrorClass::Policy,
+            ErrorClass::Tool,
+            ErrorClass::Storage,
+            ErrorClass::Workspace,
+            ErrorClass::Git,
+            ErrorClass::Budget,
+            ErrorClass::Unknown,
+        ];
+        let reserved_class_bytes = serde_json::to_vec(&ErrorClass::Transport).unwrap().len();
+        assert!(error_classes
+            .iter()
+            .all(|class| serde_json::to_vec(class).unwrap().len() <= reserved_class_bytes));
+        assert_eq!(
+            maximal_terminal_metadata().evidence_source,
+            EvidenceSource::ApprovalAuthority
+        );
+        let error_sources = [
+            EvidenceSource::Aap,
+            EvidenceSource::Runtime,
+            EvidenceSource::Provider,
+            EvidenceSource::ToolRuntime,
+        ];
+        let reserved_error_source_bytes = serde_json::to_vec(&EvidenceSource::ToolRuntime)
+            .unwrap()
+            .len();
+        assert!(error_sources.iter().all(|source| {
+            serde_json::to_vec(source).unwrap().len() <= reserved_error_source_bytes
+        }));
+        assert_eq!(
+            maximal_error_metadata().evidence_source,
+            EvidenceSource::ToolRuntime
+        );
+        assert_eq!(maximal_error_metadata().error_identity.len(), 128);
+        assert_eq!(maximal_error_metadata().evidence_identity.len(), 128);
+        assert_eq!(maximal_terminal_metadata().evidence_identity.len(), 128);
+        assert_eq!(maximal_hash_identity('0').len(), 71);
     }
 
     #[test]
@@ -623,11 +1263,269 @@ mod tests {
     #[test]
     fn no_persisted_usage_snapshot_emits_no_usage_report() {
         let trace = accumulator().finalize_completed(20, terminal()).unwrap();
-        assert_eq!(trace.schema_version, "turn-trace/0.3");
+        assert_eq!(trace.schema_version, "turn-trace/0.4");
         assert!(trace
             .events
             .iter()
             .all(|event| !matches!(event.payload, TracePayload::UsageReport { .. })));
+    }
+
+    #[test]
+    fn tool_and_usage_observations_are_sorted_by_time_then_delivery_order() {
+        let mut accumulator = accumulator();
+        accumulator
+            .record_tool_observation(started_tool('6', 12))
+            .unwrap();
+        accumulator
+            .record_persisted_usage_snapshot(usage_snapshot("item-usage", 18, 24))
+            .unwrap();
+        accumulator
+            .record_tool_observation(completed_tool('6', 16))
+            .unwrap();
+
+        let trace = accumulator.finalize_completed(20, terminal()).unwrap();
+        assert_eq!(trace.events[4].event_id, "tool-1");
+        assert_eq!(trace.events[4].at_ms, 12);
+        assert_eq!(trace.events[5].event_id, "tool-3");
+        assert_eq!(trace.events[5].at_ms, 16);
+        assert_eq!(trace.events[6].event_id, USAGE_REPORT_EVENT_ID);
+        assert_eq!(trace.events[6].at_ms, 18);
+        assert!(matches!(
+            trace.events[7].payload,
+            TracePayload::Terminal {
+                state: TerminalState::Completed,
+                ..
+            }
+        ));
+        assert_content_free(&trace);
+    }
+
+    #[test]
+    fn durable_budget_keeps_emergency_started_and_rejects_its_terminal_before_persistence() {
+        let mut accumulator = accumulator();
+        let mut maximal_completed = accumulator.clone();
+        let mut completed_actions = 0_usize;
+        loop {
+            let started_at_ms = 12 + completed_actions as u64 * 2;
+            match accumulator
+                .record_tool_observation(indexed_tool_observation(
+                    completed_actions,
+                    started_at_ms,
+                    ToolState::Started,
+                ))
+                .unwrap()
+            {
+                ToolObservationAdmission::Recorded => {
+                    assert_eq!(
+                        accumulator
+                            .record_tool_observation(indexed_tool_observation(
+                                completed_actions,
+                                started_at_ms + 1,
+                                ToolState::Completed,
+                            ))
+                            .unwrap(),
+                        ToolObservationAdmission::Recorded
+                    );
+                    completed_actions += 1;
+                    maximal_completed = accumulator.clone();
+                }
+                ToolObservationAdmission::TerminalPersistenceDenied => break,
+            }
+        }
+        assert!((20..128).contains(&completed_actions));
+
+        let mut terminal_attempt = accumulator.clone();
+        let cause = terminal_attempt
+            .record_tool_observation(indexed_tool_observation(
+                completed_actions,
+                13 + completed_actions as u64 * 2,
+                ToolState::Completed,
+            ))
+            .unwrap_err();
+        assert_eq!(cause.code, "turn-trace-tool-terminal-persistence-denied");
+
+        let reservation = maximal_completed.build_durable_reservation(true).unwrap();
+        let completed = reservation
+            .completed
+            .as_ref()
+            .expect("a reservation without denied terminals must cover completion");
+        for (trace, state) in [
+            (completed, "completed"),
+            (&reservation.failed, "failed"),
+            (&reservation.interrupted, "interrupted"),
+        ] {
+            trace.validate_complete().unwrap();
+            assert_unique_event_ids(trace);
+            let bytes = durable_payload_bytes(trace, state);
+            assert!(
+                bytes <= MAX_DURABLE_EVENT_BYTES,
+                "reserved {state} payload is {bytes} bytes"
+            );
+        }
+        assert!(reservation.failed.events.iter().any(|event| {
+            event.event_id == format!("tool-{EMERGENCY_STARTED_ORDINAL}")
+                && matches!(
+                    event.payload,
+                    TracePayload::Tool {
+                        state: ToolState::Started,
+                        ..
+                    }
+                )
+        }));
+
+        let denied_reservation = accumulator.build_durable_reservation(false).unwrap();
+        assert!(denied_reservation.completed.is_none());
+        for (trace, state) in [
+            (&denied_reservation.failed, "failed"),
+            (&denied_reservation.interrupted, "interrupted"),
+        ] {
+            assert_unique_event_ids(trace);
+            assert!(durable_payload_bytes(trace, state) <= MAX_DURABLE_EVENT_BYTES);
+        }
+
+        let trace = accumulator
+            .finalize_failed(
+                u64::MAX,
+                maximal_error_metadata(),
+                maximal_terminal_metadata(),
+            )
+            .unwrap();
+        let bytes = durable_payload_bytes(&trace, "failed");
+        assert!(
+            bytes <= MAX_DURABLE_EVENT_BYTES,
+            "reserved payload is {bytes} bytes"
+        );
+        assert!(matches!(
+            trace.events[trace.events.len() - 3].payload,
+            TracePayload::Tool {
+                state: ToolState::Started,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn emergency_started_reservation_avoids_a_real_action_identity_collision() {
+        let mut accumulator = accumulator();
+        let colliding_identity = emergency_action_identity(&accumulator.trace, 0);
+        let mut real_started = started_tool('6', 12);
+        let TracePayload::Tool {
+            action_identity, ..
+        } = &mut real_started.payload
+        else {
+            unreachable!("the helper always returns a Tool observation")
+        };
+        *action_identity = colliding_identity.clone();
+        assert_eq!(
+            accumulator.record_tool_observation(real_started).unwrap(),
+            ToolObservationAdmission::Recorded
+        );
+
+        let occupied = BTreeSet::from([colliding_identity]);
+        let emergency =
+            emergency_started_observation(&accumulator.trace, u64::MAX, &occupied).unwrap();
+        let TracePayload::Tool {
+            action_identity, ..
+        } = emergency.payload
+        else {
+            unreachable!("the emergency reservation is always a Tool observation")
+        };
+        assert!(!occupied.contains(&action_identity));
+        accumulator.validate_durable_reservation(true).unwrap();
+    }
+
+    #[test]
+    fn delivery_ordinals_are_unique_and_cannot_enter_the_reservation_namespace() {
+        let mut boundary = accumulator();
+        boundary.next_delivery_ordinal = RESERVED_DELIVERY_ORDINAL_BASE - 2;
+        let started_at_ms = 12;
+        assert_eq!(
+            boundary
+                .record_tool_observation(started_tool('6', started_at_ms))
+                .unwrap(),
+            ToolObservationAdmission::Recorded
+        );
+        let completed = completed_tool('6', started_at_ms + 4);
+        assert_eq!(
+            boundary.record_tool_observation(completed.clone()).unwrap(),
+            ToolObservationAdmission::Recorded
+        );
+        let trace = boundary.finalize_completed(20, terminal()).unwrap();
+        assert!(trace.events.iter().any(|event| {
+            event.event_id == format!("tool-{}", RESERVED_DELIVERY_ORDINAL_BASE - 2)
+        }));
+        assert!(trace.events.iter().any(|event| {
+            event.event_id == format!("tool-{}", RESERVED_DELIVERY_ORDINAL_BASE - 1)
+        }));
+        assert_unique_event_ids(&trace);
+
+        let mut exhausted = accumulator();
+        exhausted.next_delivery_ordinal = RESERVED_DELIVERY_ORDINAL_BASE - 1;
+        let before = exhausted.clone();
+        let cause = exhausted
+            .record_tool_observation(started_tool('6', 12))
+            .unwrap_err();
+        assert_eq!(cause.code, "turn-trace-delivery-ordinal-exhausted");
+        assert_eq!(exhausted.tool_observations, before.tool_observations);
+        assert_eq!(
+            exhausted.next_delivery_ordinal,
+            before.next_delivery_ordinal
+        );
+
+        let mut duplicate_target = accumulator().trace;
+        let duplicate_error = append_sorted_observations(
+            &mut duplicate_target,
+            vec![
+                (
+                    7,
+                    DeferredObservation::Tool(Box::new(started_tool('6', 12))),
+                ),
+                (
+                    7,
+                    DeferredObservation::Usage(usage_snapshot("item-usage", 13, 24)),
+                ),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            duplicate_error.code,
+            "turn-trace-delivery-ordinal-duplicate"
+        );
+        assert_eq!(duplicate_target.events.len(), 4);
+    }
+
+    #[test]
+    fn completed_turn_rejects_started_only_tool_but_interruption_preserves_it() {
+        let mut completed = accumulator();
+        completed
+            .record_tool_observation(started_tool('6', 12))
+            .unwrap();
+        let error = completed.finalize_completed(20, terminal()).unwrap_err();
+        assert_eq!(error.code, "turn-trace-tool-incomplete-on-terminal");
+
+        let mut interrupted = accumulator();
+        interrupted
+            .record_tool_observation(started_tool('6', 12))
+            .unwrap();
+        let trace = interrupted.finalize_interrupted(20, terminal()).unwrap();
+        assert!(matches!(
+            trace.events[4].payload,
+            TracePayload::Tool {
+                state: ToolState::Started,
+                ..
+            }
+        ));
+        trace.validate_complete().unwrap();
+    }
+
+    #[test]
+    fn terminal_tool_without_started_observation_is_rejected_before_mutation() {
+        let mut accumulator = accumulator();
+        let error = accumulator
+            .record_tool_observation(completed_tool('6', 16))
+            .unwrap_err();
+        assert_eq!(error.code, "turn-trace-tool-terminal-without-start");
+        assert_eq!(accumulator.open_trace().events.len(), 4);
     }
 
     #[test]
@@ -861,6 +1759,64 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(identity_error.code, "turn-trace-identity-invalid");
+    }
+
+    #[test]
+    fn observation_and_terminal_time_extremes_fail_closed_without_partial_admission() {
+        let mut before_start = accumulator();
+        let tool_error = before_start
+            .record_tool_observation(started_tool('6', 9))
+            .unwrap_err();
+        assert_eq!(tool_error.code, "turn-trace-time-order-invalid");
+        assert!(before_start.tool_observations.is_empty());
+        let usage_error = before_start
+            .record_persisted_usage_snapshot(usage_snapshot("item-usage", 9, 24))
+            .unwrap_err();
+        assert_eq!(usage_error.code, "turn-trace-time-order-invalid");
+        assert!(before_start.latest_usage_snapshot.is_none());
+        assert_eq!(before_start.next_delivery_ordinal, 1);
+
+        let mut after_terminal = accumulator();
+        after_terminal
+            .record_tool_observation(started_tool('6', 12))
+            .unwrap();
+        after_terminal
+            .record_tool_observation(completed_tool('6', 16))
+            .unwrap();
+        let terminal_error = after_terminal
+            .clone()
+            .finalize_completed(15, terminal())
+            .unwrap_err();
+        assert_eq!(terminal_error.code, "turn-trace-time-order-invalid");
+        assert_eq!(after_terminal.tool_observations.len(), 2);
+
+        let mut at_maximum = CodexTurnTraceAccumulator::started(
+            binding(),
+            u64::MAX,
+            work_intent(),
+            runtime(),
+            Some(model()),
+            context(),
+        )
+        .unwrap();
+        at_maximum
+            .record_tool_observation(started_tool('6', u64::MAX))
+            .unwrap();
+        at_maximum
+            .record_persisted_usage_snapshot(usage_snapshot("item-usage-max", u64::MAX, 24))
+            .unwrap();
+        let mut completed = completed_tool('6', u64::MAX);
+        let TracePayload::Tool { duration_ms, .. } = &mut completed.payload else {
+            unreachable!("the helper always returns a Tool observation")
+        };
+        *duration_ms = Some(0);
+        at_maximum.record_tool_observation(completed).unwrap();
+        let trace = at_maximum
+            .finalize_completed(u64::MAX, maximal_terminal_metadata())
+            .unwrap();
+        assert!(trace.events.iter().all(|event| event.at_ms == u64::MAX));
+        assert_unique_event_ids(&trace);
+        trace.validate_complete().unwrap();
     }
 
     #[test]

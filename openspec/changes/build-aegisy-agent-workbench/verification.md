@@ -1354,10 +1354,10 @@ Known limitations:
   from replayed or uncertain evidence. The additive Session projection is
   consumed by Qt, whose deterministic threshold cache is capped at 128 entries.
   Compaction activation, provider compact, and automatic authority remain absent.
-- `turn-trace/0.3` retains the existing Intent/completion-domain contract and adds
-  one final Provider-thread Usage authority snapshot. Strict three-version fixtures
-  preserve hand-written `0.1` failed/completed JSON and the fixed `0.1` and `0.2`
-  trace identities; cross-version fields and future `0.4` fail closed. The outer
+- `turn-trace/0.4` retains the existing Intent/completion-domain and final Provider-
+  thread Usage authority contracts. Strict four-version fixtures preserve hand-written
+  `0.1` failed/completed JSON and fixed legacy trace identities; cross-version fields
+  and future `0.5` fail closed. The outer
   event remains `turn.trace.recorded/0.1`, SQLite remains v13, and no migration,
   backfill, or legacy event rewrite is introduced.
 - The `0.3` contract/producer/Store verification scope covers deterministic
@@ -1403,10 +1403,38 @@ Known limitations:
   rejects a hash-consistent mode substitution immediately, and projection replay
   quarantines it while retaining mode-less
   legacy `0.1` compatibility.
-- The complete `0.3` verification passes 539 library tests with one ignored live
-  fixture, 10 threshold contract tests, 63 protocol tests, 11 stdio tests,
+- `0.4` adds one content-free Tool pair for each observed Codex command lifecycle.
+  Started records bind the closed provider status/source enums, provider timestamp,
+  action, and stable identity from a fixed closed typed projection with
+  `item_binding=not-persisted`; unknown Provider keys/values are excluded. Object-key
+  order is canonical and action-array order is semantic. A completed, failed, or
+  declined Tool is preflighted from Store's exact would-be sanitized persisted Item
+  and becomes authoritative only after the Item/Artifact transaction commits. It
+  binds a Session/Turn/Item domain-separated identity rather than the raw Provider
+  Item ID, the complete sanitized payload SHA-256, output identity, duration, exit
+  status, and terminal timestamp. Completed/nonzero, failed/zero,
+  declined execution metadata, reverse time, and duration beyond the observed interval
+  fail closed. Completed/cancelled Turns reject Started-only Tools; failed/interrupted
+  Turns may retain Started without fabricating a terminal observation.
+- The adapter compares a memory-only SHA-256 fingerprint over the complete original
+  command/actions/cwd, including unknown fields, before display truncation. It is not
+  serialized or persisted; neither it nor command/path/action content enters Trace.
+  Tests cover long command/cwd suffixes, the 33rd action, opaque fields, object-key
+  canonicalization, action-order sensitivity, secret redaction, and exact lifecycle
+  drift.
+  Store admission, direct read, projection replay, and restart reconstruct the Started
+  and terminal observations from the exact command Item. Producer admission measures
+  the complete outer durable envelope against exactly 72 KiB while reserving every
+  open Tool terminal, worst legal failed/terminal metadata, and one emergency Started.
+  Store independently rejects oversized Trace events at admission/read/replay/restart.
+  Exact-budget exhaustion, a SQLite trigger failure, and Provider completion after an
+  unmatched Started all produce a durable Started + Error + failed Terminal Trace and
+  leave no terminal Tool, command Item, Blob reference, or disk object after restart.
+- The complete `0.4` verification passes 586 library tests with one ignored live
+  fixture, 10 threshold contract tests, 63 protocol tests, 15 stdio tests,
   formatting, strict Clippy, `git diff --check`, and strict OpenSpec validation.
-  Complete Tool/Approval/Change/Test production,
+  Complete Approval/Change/Test production, non-command Tool families, authoritative
+  approval policy observation,
   authoritative per-Attempt/Retry Usage, and any AAP/Qt trace read,
   audit/export, or retention surface remain absent, so task 20.1 stays incomplete.
 - Direct C++17 syntax checks pass for the Qt widget and render fixture, and the
