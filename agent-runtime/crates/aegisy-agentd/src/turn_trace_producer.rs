@@ -7,11 +7,13 @@
 
 use crate::tool_trace_authority::ToolTraceObservation;
 use crate::turn_trace::{
-    durable_record_payload, AuthorityLabel, CompletionDomain, CompletionEvidence, ErrorClass,
-    EvidenceRef, EvidenceSource, ModelReason, ModelRole, RedactionSummary, RuntimeState,
-    SessionMode, TerminalEvidence, TerminalState, ToolProviderStatus, ToolState,
-    ToolTimelineBinding, TraceBinding, TracePayload, TurnAccess, TurnKind, TurnTrace,
-    TurnTraceError, UsageAccounting, UsageAttribution, UsageReportScope, MAX_DURABLE_EVENT_BYTES,
+    durable_record_payload, ApprovalDecisionAttribution, ApprovalPolicyPermissionProfile,
+    ApprovalPolicyReviewer, ApprovalPolicySandbox, AuthorityLabel, CompletionDomain,
+    CompletionEvidence, ErrorClass, EvidenceRef, EvidenceSource, ModelReason, ModelRole,
+    RedactionSummary, RuntimeApprovalPolicy, RuntimeState, SessionMode, TerminalEvidence,
+    TerminalState, ToolProviderStatus, ToolState, ToolTimelineBinding, TraceBinding, TracePayload,
+    TurnAccess, TurnKind, TurnTrace, TurnTraceError, UsageAccounting, UsageAttribution,
+    UsageReportScope, MAX_DURABLE_EVENT_BYTES,
 };
 use crate::usage_authority::{UsageAuthorityError, UsageAuthorityReport};
 use sha2::{Digest, Sha256};
@@ -19,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const INTENT_EVENT_ID: &str = "intent-1";
 const RUNTIME_EVENT_ID: &str = "runtime-1";
+const RUNTIME_APPROVAL_POLICY_EVENT_ID: &str = "runtime-approval-policy-1";
 const MODEL_EVENT_ID: &str = "model-1";
 const CONTEXT_EVENT_ID: &str = "context-1";
 const USAGE_REPORT_EVENT_ID: &str = "usage-report-1";
@@ -34,6 +37,18 @@ pub struct RuntimeMetadata {
     pub version: String,
     pub state: RuntimeState,
     pub evidence_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalPolicyMetadata {
+    pub provider_thread_identity: String,
+    pub policy: RuntimeApprovalPolicy,
+    pub reviewer: ApprovalPolicyReviewer,
+    pub sandbox: ApprovalPolicySandbox,
+    pub permission_profile: ApprovalPolicyPermissionProfile,
+    pub configured_policy_identity: String,
+    pub effective_policy_identity: String,
+    pub policy_authority_identity: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +185,7 @@ impl CodexTurnTraceAccumulator {
         started_at_ms: u64,
         intent: IntentMetadata,
         runtime: RuntimeMetadata,
+        approval_policy: ApprovalPolicyMetadata,
         model: Option<ModelMetadata>,
         context: PreparedContextSummary,
     ) -> Result<Self, TurnTraceProducerError> {
@@ -196,13 +212,39 @@ impl CodexTurnTraceAccumulator {
             RUNTIME_EVENT_ID.into(),
             started_at_ms,
             TracePayload::Runtime {
-                runtime_identity: runtime.runtime_identity,
-                adapter_identity: runtime.adapter_identity,
-                version: runtime.version,
+                runtime_identity: runtime.runtime_identity.clone(),
+                adapter_identity: runtime.adapter_identity.clone(),
+                version: runtime.version.clone(),
                 state: runtime.state,
                 evidence: observed(
                     EvidenceSource::Runtime,
-                    runtime.evidence_identity,
+                    runtime.evidence_identity.clone(),
+                    started_at_ms,
+                ),
+                redaction: RedactionSummary::metadata_only(),
+            },
+        )?;
+        trace.append(
+            RUNTIME_APPROVAL_POLICY_EVENT_ID.into(),
+            started_at_ms,
+            TracePayload::RuntimeApprovalPolicy {
+                runtime_identity: runtime.runtime_identity.clone(),
+                adapter_identity: runtime.adapter_identity.clone(),
+                runtime_version: runtime.version.clone(),
+                provider_thread_identity: approval_policy.provider_thread_identity,
+                policy: approval_policy.policy,
+                reviewer: approval_policy.reviewer,
+                sandbox: approval_policy.sandbox,
+                permission_profile: approval_policy.permission_profile,
+                configured_policy_identity: approval_policy.configured_policy_identity,
+                effective_policy_identity: approval_policy.effective_policy_identity,
+                policy_authority_identity: approval_policy.policy_authority_identity.clone(),
+                decision_attribution: ApprovalDecisionAttribution::NoUserDecision,
+                user_decision_observed: false,
+                execution_authority: false,
+                evidence: observed(
+                    EvidenceSource::Runtime,
+                    approval_policy.policy_authority_identity,
                     started_at_ms,
                 ),
                 redaction: RedactionSummary::metadata_only(),
@@ -942,6 +984,52 @@ mod tests {
         }
     }
 
+    fn approval_policy(
+        binding: &TraceBinding,
+        runtime: &RuntimeMetadata,
+    ) -> ApprovalPolicyMetadata {
+        let provider_thread_identity =
+            crate::turn_trace::provider_thread_identity("provider-thread-1").unwrap();
+        let policy = RuntimeApprovalPolicy::Never;
+        let reviewer = ApprovalPolicyReviewer::User;
+        let sandbox = ApprovalPolicySandbox::ReadOnly;
+        let permission_profile = ApprovalPolicyPermissionProfile::ReadOnly;
+        let configured_policy_identity =
+            crate::turn_trace::configured_runtime_approval_policy_identity(
+                policy,
+                sandbox,
+                permission_profile,
+            );
+        let effective_policy_identity =
+            crate::turn_trace::effective_runtime_approval_policy_identity(
+                &provider_thread_identity,
+                policy,
+                reviewer,
+                sandbox,
+                permission_profile,
+            );
+        let policy_authority_identity =
+            crate::turn_trace::runtime_approval_policy_authority_identity(
+                binding,
+                &runtime.runtime_identity,
+                &runtime.adapter_identity,
+                &runtime.version,
+                &provider_thread_identity,
+                &configured_policy_identity,
+                &effective_policy_identity,
+            );
+        ApprovalPolicyMetadata {
+            provider_thread_identity,
+            policy,
+            reviewer,
+            sandbox,
+            permission_profile,
+            configured_policy_identity,
+            effective_policy_identity,
+            policy_authority_identity,
+        }
+    }
+
     fn model() -> ModelMetadata {
         ModelMetadata {
             role: ModelRole::Agent,
@@ -967,11 +1055,15 @@ mod tests {
     }
 
     fn accumulator() -> CodexTurnTraceAccumulator {
+        let binding = binding();
+        let runtime = runtime();
+        let approval_policy = approval_policy(&binding, &runtime);
         CodexTurnTraceAccumulator::started(
-            binding(),
+            binding,
             10,
             work_intent(),
-            runtime(),
+            runtime,
+            approval_policy,
             Some(model()),
             context(),
         )
@@ -979,11 +1071,15 @@ mod tests {
     }
 
     fn chat_accumulator() -> CodexTurnTraceAccumulator {
+        let binding = chat_binding();
+        let runtime = runtime();
+        let approval_policy = approval_policy(&binding, &runtime);
         CodexTurnTraceAccumulator::started(
-            chat_binding(),
+            binding,
             10,
             chat_intent(),
-            runtime(),
+            runtime,
+            approval_policy,
             Some(model()),
             context(),
         )
@@ -1227,15 +1323,16 @@ mod tests {
     }
 
     #[test]
-    fn turn_started_records_intent_runtime_model_and_context_metadata() {
+    fn turn_started_records_runtime_approval_policy_before_model_and_context() {
         let accumulator = accumulator();
         let trace = accumulator.open_trace();
         trace.validate_open().unwrap();
-        assert_eq!(trace.events.len(), 4);
+        assert_eq!(trace.events.len(), 5);
         assert_eq!(trace.events[0].sequence, 1);
         assert_eq!(trace.events[1].sequence, 2);
         assert_eq!(trace.events[2].sequence, 3);
         assert_eq!(trace.events[3].sequence, 4);
+        assert_eq!(trace.events[4].sequence, 5);
         assert!(matches!(
             trace.events[0].payload,
             TracePayload::Intent {
@@ -1251,10 +1348,20 @@ mod tests {
         ));
         assert!(matches!(
             trace.events[2].payload,
-            TracePayload::Model { .. }
+            TracePayload::RuntimeApprovalPolicy {
+                policy: RuntimeApprovalPolicy::Never,
+                decision_attribution: ApprovalDecisionAttribution::NoUserDecision,
+                user_decision_observed: false,
+                execution_authority: false,
+                ..
+            }
         ));
         assert!(matches!(
             trace.events[3].payload,
+            TracePayload::Model { .. }
+        ));
+        assert!(matches!(
+            trace.events[4].payload,
             TracePayload::Context { .. }
         ));
         assert!(trace.events.iter().all(|event| event.at_ms == 10));
@@ -1263,7 +1370,7 @@ mod tests {
     #[test]
     fn no_persisted_usage_snapshot_emits_no_usage_report() {
         let trace = accumulator().finalize_completed(20, terminal()).unwrap();
-        assert_eq!(trace.schema_version, "turn-trace/0.4");
+        assert_eq!(trace.schema_version, "turn-trace/0.5");
         assert!(trace
             .events
             .iter()
@@ -1284,14 +1391,14 @@ mod tests {
             .unwrap();
 
         let trace = accumulator.finalize_completed(20, terminal()).unwrap();
-        assert_eq!(trace.events[4].event_id, "tool-1");
-        assert_eq!(trace.events[4].at_ms, 12);
-        assert_eq!(trace.events[5].event_id, "tool-3");
-        assert_eq!(trace.events[5].at_ms, 16);
-        assert_eq!(trace.events[6].event_id, USAGE_REPORT_EVENT_ID);
-        assert_eq!(trace.events[6].at_ms, 18);
+        assert_eq!(trace.events[5].event_id, "tool-1");
+        assert_eq!(trace.events[5].at_ms, 12);
+        assert_eq!(trace.events[6].event_id, "tool-3");
+        assert_eq!(trace.events[6].at_ms, 16);
+        assert_eq!(trace.events[7].event_id, USAGE_REPORT_EVENT_ID);
+        assert_eq!(trace.events[7].at_ms, 18);
         assert!(matches!(
-            trace.events[7].payload,
+            trace.events[8].payload,
             TracePayload::Terminal {
                 state: TerminalState::Completed,
                 ..
@@ -1491,7 +1598,7 @@ mod tests {
             duplicate_error.code,
             "turn-trace-delivery-ordinal-duplicate"
         );
-        assert_eq!(duplicate_target.events.len(), 4);
+        assert_eq!(duplicate_target.events.len(), 5);
     }
 
     #[test]
@@ -1509,7 +1616,7 @@ mod tests {
             .unwrap();
         let trace = interrupted.finalize_interrupted(20, terminal()).unwrap();
         assert!(matches!(
-            trace.events[4].payload,
+            trace.events[5].payload,
             TracePayload::Tool {
                 state: ToolState::Started,
                 ..
@@ -1525,7 +1632,7 @@ mod tests {
             .record_tool_observation(completed_tool('6', 16))
             .unwrap_err();
         assert_eq!(error.code, "turn-trace-tool-terminal-without-start");
-        assert_eq!(accumulator.open_trace().events.len(), 4);
+        assert_eq!(accumulator.open_trace().events.len(), 5);
     }
 
     #[test]
@@ -1638,15 +1745,15 @@ mod tests {
             .finalize_failed(20, transport_error(), terminal())
             .unwrap();
         trace.validate_complete().unwrap();
-        assert_eq!(trace.events.len(), 6);
-        assert_eq!(trace.events[4].at_ms, 20);
+        assert_eq!(trace.events.len(), 7);
         assert_eq!(trace.events[5].at_ms, 20);
+        assert_eq!(trace.events[6].at_ms, 20);
         assert!(matches!(
-            trace.events[4].payload,
+            trace.events[5].payload,
             TracePayload::Error { .. }
         ));
         assert!(matches!(
-            trace.events[5].payload,
+            trace.events[6].payload,
             TracePayload::Terminal {
                 state: TerminalState::Failed,
                 ..
@@ -1660,7 +1767,7 @@ mod tests {
                 .count(),
             1
         );
-        let TracePayload::Terminal { evidence, .. } = &trace.events[5].payload else {
+        let TracePayload::Terminal { evidence, .. } = &trace.events[6].payload else {
             panic!("failed trace must end with terminal evidence")
         };
         assert_eq!(evidence.completion, None);
@@ -1669,10 +1776,10 @@ mod tests {
     #[test]
     fn interruption_is_terminal_last_without_fabricated_error_or_completion_evidence() {
         let trace = accumulator().finalize_interrupted(21, terminal()).unwrap();
-        assert_eq!(trace.events.len(), 5);
+        assert_eq!(trace.events.len(), 6);
         let TracePayload::Terminal {
             state, evidence, ..
-        } = &trace.events[4].payload
+        } = &trace.events[5].payload
         else {
             panic!("terminal event is missing")
         };
@@ -1749,11 +1856,14 @@ mod tests {
 
         let mut unsafe_runtime = runtime();
         unsafe_runtime.runtime_identity = "../../private/path".into();
+        let binding = binding();
+        let approval_policy = approval_policy(&binding, &unsafe_runtime);
         let identity_error = CodexTurnTraceAccumulator::started(
-            binding(),
+            binding,
             10,
             work_intent(),
             unsafe_runtime,
+            approval_policy,
             Some(model()),
             context(),
         )
@@ -1790,11 +1900,15 @@ mod tests {
         assert_eq!(terminal_error.code, "turn-trace-time-order-invalid");
         assert_eq!(after_terminal.tool_observations.len(), 2);
 
+        let binding = binding();
+        let runtime = runtime();
+        let approval_policy = approval_policy(&binding, &runtime);
         let mut at_maximum = CodexTurnTraceAccumulator::started(
-            binding(),
+            binding,
             u64::MAX,
             work_intent(),
-            runtime(),
+            runtime,
+            approval_policy,
             Some(model()),
             context(),
         )
@@ -1821,11 +1935,15 @@ mod tests {
 
     #[test]
     fn unknown_model_metadata_is_omitted_instead_of_fabricated() {
+        let binding = binding();
+        let runtime = runtime();
+        let approval_policy = approval_policy(&binding, &runtime);
         let trace = CodexTurnTraceAccumulator::started(
-            binding(),
+            binding,
             10,
             work_intent(),
-            runtime(),
+            runtime,
+            approval_policy,
             None,
             context(),
         )

@@ -107,18 +107,18 @@ its component semantics, Aegisy preserves the original bounded total but does
 not silently copy it into the authoritative field.
 
 The sidecar also contains internal `context-threshold/0.1` and
-`turn-trace/0.4` validation contracts. Neither is currently an AAP capability.
+`turn-trace/0.5` validation contracts. Neither is currently an AAP capability.
 Codex usage Timeline metadata may include a `compaction_threshold` decision
 computed from provider-observed last-input/context-window values. Runtime can
 restore its hysteresis latch from complete bounded usage history and projects a
 content-free Session summary; `automatic_compaction_authority` is always false.
 The Workbench Store atomically persists validated terminal traces and strictly
-replays inner `turn-trace/0.1`, `turn-trace/0.2`, `turn-trace/0.3`, and
-`turn-trace/0.4` without
-rewriting legacy events. Fixed `0.1` and `0.2` serialization identities remain
-unchanged; unknown fields and future versions fail closed. The outer durable
+replays inner `turn-trace/0.1` through `turn-trace/0.5` without rewriting legacy
+events. Existing `0.1` through `0.4` records retain their version-specific
+compatibility and fixed legacy identities; cross-version fields, unknown fields,
+and future versions fail closed. The outer durable
 envelope remains `turn.trace.recorded/0.1`, and the Workbench Store remains SQLite
-schema v13. The pinned Codex Runtime produces `0.4` traces for completed, failed,
+schema v13. The pinned Codex Runtime produces `0.5` traces for completed, failed,
 and interrupted Turns.
 One immutable Intent identifies Chat conversation or current Work read-only
 inspection. Completed terminal metadata binds that Intent and independently marks
@@ -134,7 +134,7 @@ environment, and current Intent Chat/Work mode to match the durable Session bind
 legacy `0.1` traces retain their mode-less Intent semantics but still bind Session,
 Turn, project, and environment. A mismatch fails closed rather than reclassifying
 completion. Trace
-versions `0.3` and `0.4` may additionally contain one `usage-report` event. It embeds the validated
+versions `0.3` through `0.5` may additionally contain one `usage-report` event. It embeds the validated
 `usage-authority/0.1` report as the latest successfully validated and persisted
 Codex Provider-thread snapshot, with `scope: provider-thread`,
 `accounting: absolute-snapshot`,
@@ -167,8 +167,8 @@ Usage with a removed authority report is rejected as a semantic downgrade rather
 than treated as malformed input. Initial-state and cross-Turn hysteresis substitution
 therefore fail closed even when Item and Event hashes are recomputed.
 
-Trace version `0.4` also records a content-free Tool lifecycle for observed Codex
-command Items. A Started Tool binds the closed provider status/source, provider
+Trace versions `0.4` and `0.5` also record a content-free Tool lifecycle for
+observed Codex command Items. A Started Tool binds the closed provider status/source, provider
 timestamp, action identity, and stable input identity while explicitly declaring that
 no Timeline Item has been persisted. Stable input identity is computed only from a
 fixed, compile-time-known projection of command, cwd, action type, and the recognized
@@ -191,8 +191,31 @@ duplicate or missing lifecycle events, reverse time, duration outside the observ
 interval, and contradictory exit status fail closed. Completed and cancelled Turns
 cannot retain an unterminated Started Tool; failed and interrupted Turns may retain it
 without fabricating terminal authority. Provider `declined` is a Tool observation.
-Runtime denial and `approvalPolicy=never` observation remain future producers; none of
-these states may be represented as a user Approval decision.
+
+Trace version `0.5` adds exactly one content-free Runtime approval-policy
+observation before Model or Context metadata. For the pinned Codex adapter it binds
+the exact Runtime, `codex-app-server` adapter, `0.144.5` Runtime version, durable
+adapter version `codex-cli 0.144.5`, fixed producing Runtime identity
+`aegisy-agentd:0.1.0`, Provider-thread identity,
+configured/effective policy identities,
+`approvalPolicy=never`, read-only sandbox, and read-only permission profile. Store
+admission, direct read, projection replay, and startup quarantine independently
+recompute this binding from the durable Session Runtime row. The event always has
+`decision_attribution=no-user-decision`, `user_decision_observed=false`, and
+`execution_authority=false`: it describes observed Runtime policy and is not an
+Approval request, decision, denial, or grant.
+The fixed producing Runtime identity keeps existing `0.5` records replayable across
+future binary upgrades; a new producer version must explicitly revise the Trace
+contract or add a reviewed compatibility entry. `turn-trace/0.5` rejects every
+`Approval` payload until a durable approval-authority producer and ledger binding
+exist.
+
+Runtime-side denial of a Provider approval request remains a separate failure path
+and currently produces no Trace `Approval` event. Provider `declined` command state
+is produced only as a terminal Tool observation. A genuine user Approval remains
+without a producer in the current read-only adapter; any future producer must use
+separate Approval-authority evidence and cannot be inferred from Runtime policy,
+Runtime denial, or Provider Tool state.
 
 Every producer admission serializes the complete outer
 `turn.trace.recorded/0.1` envelope and enforces the exact 72 KiB durable limit. It

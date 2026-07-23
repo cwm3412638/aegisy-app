@@ -897,9 +897,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   no provider text. This remains Codex-only and is not connected to catalog
   pricing, cross-provider correlation, billing, routing, or durable cross-turn
   threshold state; keep task `20.2` unchecked.
-- OpenSpec task `20.1` now has an internal `turn-trace/0.4` contract with strict
-  durable reads for `turn-trace/0.1`, `0.2`, `0.3`, and `0.4`. Fixed hand-written
-  legacy JSON and legacy identities remain unchanged; future `0.5+` versions and
+- OpenSpec task `20.1` now has an internal `turn-trace/0.5` contract with strict
+  durable reads for `turn-trace/0.1` through `0.5`. Fixed hand-written legacy JSON
+  and the version-specific behavior and identities of `0.1` through `0.4` remain
+  unchanged; future `0.6+` versions and
   cross-version fields fail closed. The `0.2` Intent/completion-domain contract remains intact:
   one immutable Runtime-observed Intent identifies Chat conversation, Work read-only
   inspection, or future Work mutation, and completion never implies file changes,
@@ -953,14 +954,32 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   command Item failure and Provider completion with an unmatched Started retain
   Started + Error + failed Terminal with no terminal Tool, command Item, Blob
   reference, or object after restart. Provider `declined` is a Tool observation;
-  Runtime denial and `approvalPolicy=never` observation remain future producers, and
-  none may be represented as a user Approval decision.
+  it is not a Runtime denial or user Approval decision.
+  `0.5` adds exactly one content-free Runtime approval-policy observation after
+  Runtime and before Model/Context/Tool metadata. The pinned Codex producer binds
+  the exact Runtime, `codex-app-server` adapter, Trace Runtime version `0.144.5`,
+  durable adapter version `codex-cli 0.144.5`, fixed producing Runtime identity
+  `aegisy-agentd:0.1.0`, domain-separated Provider-thread identity,
+  configured/effective `approvalPolicy=never` identities, reviewer,
+  read-only sandbox, and read-only permission profile. It always records
+  `decision_attribution=no-user-decision`, `user_decision_observed=false`, and
+  `execution_authority=false`. Store admission, direct read, projection replay, and
+  startup quarantine independently rebind it to the durable Session Runtime row and
+  reject missing or drifted adapter, version, permission, or Provider thread state.
+  The fixed Runtime identity preserves existing `0.5` replay across a future binary
+  version change; a new producer version must explicitly revise the Trace contract or
+  add a reviewed compatibility entry instead of silently inheriting authority.
+  Runtime denial remains a separate future Trace producer, and the current read-only
+  adapter has no genuine user Approval producer. Neither Runtime denial, Provider
+  `declined`, nor `approvalPolicy=never` may be represented as a user Approval.
+  `turn-trace/0.5` rejects every `Approval` payload until that durable authority
+  producer and ledger binding exist.
   `WorkbenchStore::finish_turn_with_trace` still writes the unchanged outer
   `turn.trace.recorded/0.1` event immediately before the terminal event in one SQLite
   transaction. Store schema remains v13 with no migration, backfill, or legacy event
   rewrite. The Trace remains content-free: no prompt, provider body, path, command,
-  diff, output, or credential content is recorded. Complete Approval/Change/Test
-  production, non-command Tool families, authoritative approval policy observation,
+  diff, output, or credential content is recorded. Complete genuine-user
+  Approval/Change/Test production, Runtime-denial production, non-command Tool families,
   per-Attempt/Retry Usage authority, Timeline projection, AAP/Qt,
   audit/export, and retention remain absent; keep `20.1` and `20.2` unchecked.
 - Codex startup supervision now has a bounded 15-second initialize deadline and
@@ -2502,7 +2521,7 @@ Implemented visual baseline:
 ## Verification Snapshot (2026-07-23)
 
 - The Rust workspace passes `cargo fmt --all -- --check`, `cargo test
-  --workspace` (586 `aegisy-agentd` library tests passed, one ignored, 10
+  --workspace` (596 `aegisy-agentd` library tests passed, one ignored, 10
   context-threshold contract tests, 63 AAP protocol tests, and 15 stdio/Codex
   tests), and strict workspace Clippy.
 - The previously verified bundled application Node runtime passes both local gateway
@@ -2532,8 +2551,8 @@ Implemented visual baseline:
   `git diff --check`, strict OpenSpec validation, two Qt C++17 syntax checks, and
   the focused Qt cache run. This evidence is still not sufficient to mark `17.7`
   complete without the full Qt runtime/render pass and cross-platform validation.
-- The durable Turn Trace slice now uses inner `turn-trace/0.4` with strict `0.1`,
-  `0.2`, and `0.3` replay compatibility and an unchanged outer
+- The durable Turn Trace slice now uses inner `turn-trace/0.5` with strict `0.1`
+  through `0.4` replay compatibility and an unchanged outer
   `turn.trace.recorded/0.1` event.
   Producer/adapter/Store and stdio coverage preserves exact Intent/domain/terminal
   binding and adds the final valid Provider-thread Usage snapshot described above.
@@ -2562,11 +2581,16 @@ Implemented visual baseline:
   independent Store admission/read/replay/restart limits are covered. Budget
   exhaustion, SQLite insertion failure, and Provider completion after an unmatched
   Started all durably retain Started + Error + failed Terminal with no terminal Tool,
-  command Item, Blob reference, or object. The complete Rust workspace passes 586
+  command Item, Blob reference, or object. `0.5` additionally records exactly one
+  content-free `approvalPolicy=never` Runtime observation with no user decision or
+  execution authority and validates its exact durable Adapter/Runtime/Provider-thread
+  binding on admission, read, replay, and restart. Runtime denial, Provider
+  `declined`, and real user Approval remain distinct semantics. The complete Rust
+  workspace passes 596
   library tests (one ignored live fixture), 10 threshold tests, 63 protocol tests, 15 stdio tests,
   formatting, and strict Clippy. Strict OpenSpec validation and `git diff --check`
-  pass. Complete Approval/Change/Test production, non-command Tool families,
-  authoritative approval policy observation, per-Attempt/Retry Usage, and
+  pass. Complete genuine-user Approval/Change/Test production, Runtime-denial
+  production, non-command Tool families, per-Attempt/Retry Usage, and
   any AAP/Qt, audit/export, or retention surface remain absent, so `20.1` and `20.2`
   stay unchecked.
 
@@ -2603,9 +2627,10 @@ Implemented visual baseline:
    permission, sandbox, budget, and release gates pass. Keep automatic lease
    acquisition/renewal, process adoption, retry, approval, recovery mutation, and
    dispatch unavailable until those gates pass.
-11. Continue `20.1` in dependency order with content-free Approval policy
-    observation and exact authority binding. Do not record prompts/provider bodies or
-    treat Runtime denial, Provider `declined`, or `approvalPolicy=never` as user approval.
+11. Continue `20.1` in dependency order with a separate content-free Runtime-denial
+    producer and, only after the production approval authority exists, a genuine-user
+    Approval producer. Do not record prompts/provider bodies or treat Runtime denial,
+    Provider `declined`, or `approvalPolicy=never` as user approval.
 12. Continue with the next unchecked database/event, durable project/session, typed
     timeline, permission/approval, structured patch/checkpoint, terminal, and Git
     milestones in dependency order.

@@ -2,6 +2,11 @@ use crate::command_output::CommandOutputCapture;
 use crate::output_redaction::{redact_complete, OutputRedactor};
 use crate::provider_error::{from_codex_error_info, ProviderError};
 use crate::session_environment::{EnvironmentSummary, ProcessEnvironment, SessionEnvironment};
+use crate::turn_trace::{
+    configured_runtime_approval_policy_identity, effective_runtime_approval_policy_identity,
+    provider_thread_identity, ApprovalPolicyPermissionProfile, ApprovalPolicyReviewer,
+    ApprovalPolicySandbox, RuntimeApprovalPolicy, TurnTraceError,
+};
 use crate::{TurnCancellationHandle, TurnSteerRequest, TurnSteeringHandle};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -24,6 +29,8 @@ const STARTUP_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 const TURN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CODEX_MESSAGE_QUEUE_CAPACITY: usize = 16;
 const MAX_CODEX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+const CODEX_ADAPTER_IDENTITY: &str = "codex-app-server";
+const CODEX_TRACE_RUNTIME_VERSION: &str = "0.144.5";
 const PINNED_CODEX_VERSION: &str = "codex-cli 0.144.5";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -81,6 +88,21 @@ pub struct CodexSession {
     pub thread_id: String,
     pub provider: String,
     pub model: String,
+    pub approval_policy: Option<CodexApprovalPolicyBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CodexApprovalPolicyBinding {
+    pub adapter_identity: String,
+    pub runtime_version: String,
+    pub adapter_version: String,
+    pub provider_thread_identity: String,
+    pub policy: RuntimeApprovalPolicy,
+    pub reviewer: ApprovalPolicyReviewer,
+    pub sandbox: ApprovalPolicySandbox,
+    pub permission_profile: ApprovalPolicyPermissionProfile,
+    pub configured_policy_identity: String,
+    pub effective_policy_identity: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,7 +429,7 @@ impl CodexAdapter {
 
     pub fn info(&self) -> BackendInfo {
         BackendInfo {
-            adapter: "codex-app-server".into(),
+            adapter: CODEX_ADAPTER_IDENTITY.into(),
             version: self.version.clone(),
             provider: None,
             model: None,
@@ -447,7 +469,7 @@ impl CodexAdapter {
 
     pub fn start_session(&mut self, cwd: &Path, chat: bool) -> Result<CodexSession, String> {
         let result = self.request("thread/start", thread_start_params(cwd, chat))?;
-        parse_codex_session(result, "thread/start")
+        parse_codex_session(result, "thread/start", true)
     }
 
     pub fn resume_session(
@@ -457,7 +479,7 @@ impl CodexAdapter {
         chat: bool,
     ) -> Result<CodexSession, String> {
         let result = self.request("thread/resume", thread_resume_params(thread_id, cwd, chat))?;
-        parse_codex_session(result, "thread/resume")
+        parse_codex_session(result, "thread/resume", true)
     }
 
     pub fn fork_session(
@@ -471,7 +493,7 @@ impl CodexAdapter {
             "thread/fork",
             thread_fork_params(thread_id, last_turn_id, cwd, chat),
         )?;
-        parse_codex_session(result, "thread/fork")
+        parse_codex_session(result, "thread/fork", true)
     }
 
     pub fn archive_session(&mut self, thread_id: &str) -> Result<(), String> {
@@ -482,7 +504,7 @@ impl CodexAdapter {
     #[allow(dead_code)]
     pub fn unarchive_session(&mut self, thread_id: &str) -> Result<CodexSession, String> {
         let result = self.request("thread/unarchive", json!({ "threadId": thread_id }))?;
-        parse_codex_session(result, "thread/unarchive")
+        parse_codex_session(result, "thread/unarchive", false)
     }
 
     #[allow(dead_code)]
@@ -520,11 +542,18 @@ impl CodexAdapter {
     }
 }
 
-fn parse_codex_session(result: Value, method: &str) -> Result<CodexSession, String> {
+fn parse_codex_session(
+    result: Value,
+    method: &str,
+    require_approval_policy: bool,
+) -> Result<CodexSession, String> {
     let thread_id = result
         .pointer("/thread/id")
         .and_then(Value::as_str)
         .ok_or_else(|| format!("Codex {method} response is missing thread.id"))?;
+    let approval_policy = require_approval_policy
+        .then(|| parse_codex_approval_policy_binding(&result, thread_id, method))
+        .transpose()?;
     let provider = result
         .get("modelProvider")
         .or_else(|| result.pointer("/thread/modelProvider"))
@@ -539,6 +568,81 @@ fn parse_codex_session(result: Value, method: &str) -> Result<CodexSession, Stri
         thread_id: thread_id.to_owned(),
         provider: provider.to_owned(),
         model: model.to_owned(),
+        approval_policy,
+    })
+}
+
+fn parse_codex_approval_policy_binding(
+    result: &Value,
+    thread_id: &str,
+    method: &str,
+) -> Result<CodexApprovalPolicyBinding, String> {
+    if result.get("approvalPolicy").and_then(Value::as_str) != Some("never") {
+        return Err(format!(
+            "Codex {method} response did not preserve approvalPolicy=never"
+        ));
+    }
+
+    let reviewer = match result.get("approvalsReviewer").and_then(Value::as_str) {
+        Some("user") => ApprovalPolicyReviewer::User,
+        Some("auto_review") => ApprovalPolicyReviewer::AutoReview,
+        Some("guardian_subagent") => ApprovalPolicyReviewer::GuardianSubagent,
+        _ => {
+            return Err(format!(
+                "Codex {method} response has a missing or unsupported approvalsReviewer"
+            ));
+        }
+    };
+
+    let sandbox = result
+        .get("sandbox")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("Codex {method} response is missing the read-only sandbox"))?;
+    if sandbox.len() != 2
+        || sandbox.get("type").and_then(Value::as_str) != Some("readOnly")
+        || sandbox.get("networkAccess").and_then(Value::as_bool) != Some(false)
+    {
+        return Err(format!(
+            "Codex {method} response did not preserve the closed read-only sandbox"
+        ));
+    }
+
+    codex_approval_policy_binding(thread_id, reviewer).map_err(|error| {
+        format!(
+            "Codex {method} response has an invalid thread identity ({})",
+            error.code
+        )
+    })
+}
+
+pub(crate) fn codex_approval_policy_binding(
+    thread_id: &str,
+    reviewer: ApprovalPolicyReviewer,
+) -> Result<CodexApprovalPolicyBinding, TurnTraceError> {
+    let policy = RuntimeApprovalPolicy::Never;
+    let sandbox = ApprovalPolicySandbox::ReadOnly;
+    let permission_profile = ApprovalPolicyPermissionProfile::ReadOnly;
+    let provider_thread_identity = provider_thread_identity(thread_id)?;
+    let configured_policy_identity =
+        configured_runtime_approval_policy_identity(policy, sandbox, permission_profile);
+    let effective_policy_identity = effective_runtime_approval_policy_identity(
+        &provider_thread_identity,
+        policy,
+        reviewer,
+        sandbox,
+        permission_profile,
+    );
+    Ok(CodexApprovalPolicyBinding {
+        adapter_identity: CODEX_ADAPTER_IDENTITY.into(),
+        runtime_version: CODEX_TRACE_RUNTIME_VERSION.into(),
+        adapter_version: PINNED_CODEX_VERSION.into(),
+        provider_thread_identity,
+        policy,
+        reviewer,
+        sandbox,
+        permission_profile,
+        configured_policy_identity,
+        effective_policy_identity,
     })
 }
 
@@ -1763,7 +1867,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_lifecycle_session_parser_accepts_thread_scoped_metadata() {
+    fn thread_lifecycle_session_parser_accepts_thread_scoped_metadata_without_new_policy_binding() {
         let session = parse_codex_session(
             json!({
                 "thread": {
@@ -1773,11 +1877,182 @@ mod tests {
                 }
             }),
             "thread/unarchive",
+            false,
         )
         .unwrap();
         assert_eq!(session.thread_id, "thread-1");
         assert_eq!(session.provider, "aegisy");
         assert_eq!(session.model, "model-1");
+        assert_eq!(session.approval_policy, None);
+    }
+
+    #[test]
+    fn session_parser_binds_closed_effective_read_only_policy() {
+        for (reviewer, expected) in [
+            ("user", ApprovalPolicyReviewer::User),
+            ("auto_review", ApprovalPolicyReviewer::AutoReview),
+            (
+                "guardian_subagent",
+                ApprovalPolicyReviewer::GuardianSubagent,
+            ),
+        ] {
+            let session = parse_codex_session(
+                json!({
+                    "thread": { "id": "thread-sensitive-1" },
+                    "modelProvider": "aegisy",
+                    "model": "model-1",
+                    "approvalPolicy": "never",
+                    "approvalsReviewer": reviewer,
+                    "sandbox": {
+                        "type": "readOnly",
+                        "networkAccess": false
+                    }
+                }),
+                "thread/start",
+                true,
+            )
+            .unwrap();
+            let binding = session.approval_policy.unwrap();
+            assert_eq!(binding.adapter_identity, CODEX_ADAPTER_IDENTITY);
+            assert_eq!(binding.runtime_version, CODEX_TRACE_RUNTIME_VERSION);
+            assert_eq!(binding.adapter_version, PINNED_CODEX_VERSION);
+            assert_eq!(binding.policy, RuntimeApprovalPolicy::Never);
+            assert_eq!(binding.reviewer, expected);
+            assert_eq!(binding.sandbox, ApprovalPolicySandbox::ReadOnly);
+            assert_eq!(
+                binding.permission_profile,
+                ApprovalPolicyPermissionProfile::ReadOnly
+            );
+            for identity in [
+                &binding.provider_thread_identity,
+                &binding.configured_policy_identity,
+                &binding.effective_policy_identity,
+            ] {
+                assert!(identity.starts_with("sha256:"));
+                assert_eq!(identity.len(), 71);
+                assert!(!identity.contains("thread-sensitive-1"));
+                assert!(!identity.contains("never"));
+                assert!(!identity.contains("readOnly"));
+            }
+            assert_ne!(
+                binding.provider_thread_identity,
+                binding.configured_policy_identity
+            );
+            assert_ne!(
+                binding.configured_policy_identity,
+                binding.effective_policy_identity
+            );
+        }
+    }
+
+    #[test]
+    fn session_parser_rejects_unclosed_or_weakened_policy_response() {
+        let valid = json!({
+            "thread": { "id": "thread-1" },
+            "modelProvider": "aegisy",
+            "model": "model-1",
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            "sandbox": {
+                "type": "readOnly",
+                "networkAccess": false
+            }
+        });
+        let invalid = [
+            {
+                let mut value = valid.clone();
+                value.as_object_mut().unwrap().remove("approvalPolicy");
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value["approvalPolicy"] = json!("on-request");
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value["approvalPolicy"] = json!({
+                    "granular": {
+                        "mcp_elicitations": false,
+                        "rules": false,
+                        "sandbox_approval": false
+                    }
+                });
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value.as_object_mut().unwrap().remove("approvalsReviewer");
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value["approvalsReviewer"] = json!("future-reviewer");
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value["sandbox"] = json!("read-only");
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value["sandbox"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("networkAccess");
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value["sandbox"]["networkAccess"] = json!(true);
+                value
+            },
+            {
+                let mut value = valid.clone();
+                value["sandbox"]["futureField"] = json!(false);
+                value
+            },
+        ];
+        for response in invalid {
+            let error = parse_codex_session(response, "thread/resume", true).unwrap_err();
+            assert!(error.contains("Codex thread/resume response"));
+        }
+    }
+
+    #[test]
+    fn approval_policy_identities_are_recomputable_and_domain_separated() {
+        let first =
+            codex_approval_policy_binding("thread-1", ApprovalPolicyReviewer::User).unwrap();
+        let repeated =
+            codex_approval_policy_binding("thread-1", ApprovalPolicyReviewer::User).unwrap();
+        let other_thread =
+            codex_approval_policy_binding("thread-2", ApprovalPolicyReviewer::User).unwrap();
+        let other_reviewer =
+            codex_approval_policy_binding("thread-1", ApprovalPolicyReviewer::AutoReview).unwrap();
+
+        assert_eq!(first, repeated);
+        assert_eq!(
+            first.configured_policy_identity,
+            other_thread.configured_policy_identity
+        );
+        assert_eq!(
+            first.configured_policy_identity,
+            other_reviewer.configured_policy_identity
+        );
+        assert_ne!(
+            first.provider_thread_identity,
+            other_thread.provider_thread_identity
+        );
+        assert_ne!(
+            first.effective_policy_identity,
+            other_thread.effective_policy_identity
+        );
+        assert_ne!(
+            first.effective_policy_identity,
+            other_reviewer.effective_policy_identity
+        );
+        assert!(codex_approval_policy_binding("", ApprovalPolicyReviewer::User).is_err());
     }
 
     #[test]

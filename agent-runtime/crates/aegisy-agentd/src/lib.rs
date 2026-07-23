@@ -84,7 +84,8 @@ use background_scheduler::{recovery_entry_identity, BackgroundJobScheduler};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use codex_adapter::{
-    BackendInfo, CodexAdapter, CodexEvent, CodexSession, CodexTurnRequest, CommandItem,
+    BackendInfo, CodexAdapter, CodexApprovalPolicyBinding, CodexEvent, CodexSession,
+    CodexTurnRequest, CommandItem,
 };
 #[cfg(test)]
 use codex_adapter::{CommandSource, CommandStatus, ProviderCommandInputFingerprint};
@@ -117,17 +118,18 @@ use turn_context::{
     prepare_turn_context_scoped_with_images, PreparedTurnContext, TurnContextItem, TurnImageContext,
 };
 use turn_trace::{
-    ErrorClass as TraceErrorClass, EvidenceSource as TraceEvidenceSource,
-    ModelReason as TraceModelReason, ModelRole as TraceModelRole,
-    RuntimeState as TraceRuntimeState, SessionMode as TraceSessionMode, TraceBinding,
-    TurnAccess as TraceTurnAccess, TurnKind as TraceTurnKind, TurnTrace,
+    runtime_approval_policy_authority_identity, ErrorClass as TraceErrorClass,
+    EvidenceSource as TraceEvidenceSource, ModelReason as TraceModelReason,
+    ModelRole as TraceModelRole, RuntimeState as TraceRuntimeState,
+    SessionMode as TraceSessionMode, TraceBinding, TurnAccess as TraceTurnAccess,
+    TurnKind as TraceTurnKind, TurnTrace,
 };
 use turn_trace_producer::{
-    CodexTurnTraceAccumulator, ErrorMetadata as TraceErrorMetadata,
-    IntentMetadata as TraceIntentMetadata, ModelMetadata as TraceModelMetadata,
-    PreparedContextSummary as TraceContextSummary, RuntimeMetadata as TraceRuntimeMetadata,
-    TerminalMetadata as TraceTerminalMetadata, ToolObservationAdmission,
-    UsageSnapshotMetadata as TraceUsageSnapshotMetadata,
+    ApprovalPolicyMetadata as TraceApprovalPolicyMetadata, CodexTurnTraceAccumulator,
+    ErrorMetadata as TraceErrorMetadata, IntentMetadata as TraceIntentMetadata,
+    ModelMetadata as TraceModelMetadata, PreparedContextSummary as TraceContextSummary,
+    RuntimeMetadata as TraceRuntimeMetadata, TerminalMetadata as TraceTerminalMetadata,
+    ToolObservationAdmission, UsageSnapshotMetadata as TraceUsageSnapshotMetadata,
 };
 use usage_authority::from_provider_token_usage;
 use workbench_store::{
@@ -190,6 +192,7 @@ pub struct Runtime {
     project_navigation: HashMap<String, workbench_store::StoredProjectNavigation>,
     project_trust_acknowledgements: HashMap<String, StoredProjectTrustAcknowledgement>,
     sessions: HashMap<String, SessionState>,
+    session_approval_policies: HashMap<String, CodexApprovalPolicyBinding>,
     session_workspace_bindings: HashMap<String, StoredSessionWorkspaceBinding>,
     workspace_watches: HashMap<String, WorkspaceWatch>,
     // Indexes and language/diagnostic state are scoped to one registered root.
@@ -2567,6 +2570,7 @@ fn codex_turn_trace_accumulator(
     binding: TraceBinding,
     session_mode: &SessionMode,
     backend_info: &BackendInfo,
+    approval_policy: &CodexApprovalPolicyBinding,
     prepared_context: &PreparedTurnContext,
     started_at_ms: u64,
 ) -> Result<CodexTurnTraceAccumulator, String> {
@@ -2574,6 +2578,11 @@ fn codex_turn_trace_accumulator(
     let turn_id = binding.turn_id.as_str();
     if backend_info.permission_profile != "read-only" {
         return Err("turn trace requires the exact read-only Runtime binding".into());
+    }
+    if approval_policy.adapter_identity != backend_info.adapter
+        || approval_policy.adapter_version != backend_info.version
+    {
+        return Err("turn trace approval policy does not match the Runtime adapter binding".into());
     }
     let permission_profile = backend_info.permission_profile.as_str();
     let manifest_bytes = serde_json::to_vec(&prepared_context.manifest)
@@ -2607,16 +2616,39 @@ fn codex_turn_trace_accumulator(
     };
     let runtime_evidence = trace_hash_identity(
         "turn-trace-runtime",
-        &["codex-app-server", "0.144.5", env!("CARGO_PKG_VERSION")],
+        &[
+            &approval_policy.adapter_identity,
+            &approval_policy.runtime_version,
+            env!("CARGO_PKG_VERSION"),
+        ],
     );
+    let runtime_identity = format!("aegisy-agentd:{}", env!("CARGO_PKG_VERSION"));
     let runtime = TraceRuntimeMetadata {
-        runtime_identity: format!("aegisy-agentd:{}", env!("CARGO_PKG_VERSION")),
-        adapter_identity: "codex-app-server".into(),
+        runtime_identity: runtime_identity.clone(),
+        adapter_identity: approval_policy.adapter_identity.clone(),
         // Adapter startup rejects every version except this exact pin before a
         // Turn can reach Runtime.
-        version: "0.144.5".into(),
+        version: approval_policy.runtime_version.clone(),
         state: TraceRuntimeState::Ready,
         evidence_identity: runtime_evidence,
+    };
+    let approval_policy_metadata = TraceApprovalPolicyMetadata {
+        provider_thread_identity: approval_policy.provider_thread_identity.clone(),
+        policy: approval_policy.policy,
+        reviewer: approval_policy.reviewer,
+        sandbox: approval_policy.sandbox,
+        permission_profile: approval_policy.permission_profile,
+        configured_policy_identity: approval_policy.configured_policy_identity.clone(),
+        effective_policy_identity: approval_policy.effective_policy_identity.clone(),
+        policy_authority_identity: runtime_approval_policy_authority_identity(
+            &binding,
+            &runtime_identity,
+            &approval_policy.adapter_identity,
+            &approval_policy.runtime_version,
+            &approval_policy.provider_thread_identity,
+            &approval_policy.configured_policy_identity,
+            &approval_policy.effective_policy_identity,
+        ),
     };
     let (trace_session_mode, turn_kind, access, mode_label) = match session_mode {
         SessionMode::Chat => (
@@ -2685,8 +2717,16 @@ fn codex_turn_trace_accumulator(
                 evidence_identity,
             }
         });
-    CodexTurnTraceAccumulator::started(binding, started_at_ms, intent, runtime, model, context)
-        .map_err(|cause| format!("{}: {}", cause.code, cause.message))
+    CodexTurnTraceAccumulator::started(
+        binding,
+        started_at_ms,
+        intent,
+        runtime,
+        approval_policy_metadata,
+        model,
+        context,
+    )
+    .map_err(|cause| format!("{}: {}", cause.code, cause.message))
 }
 
 fn trace_error_metadata(
@@ -3591,6 +3631,7 @@ impl Runtime {
             project_navigation,
             project_trust_acknowledgements: HashMap::new(),
             sessions: HashMap::new(),
+            session_approval_policies: HashMap::new(),
             session_workspace_bindings: HashMap::new(),
             workspace_watches: HashMap::new(),
             workspace_indexes: HashMap::new(),
@@ -8044,6 +8085,7 @@ impl Runtime {
             .unwrap_or_default();
         for session_id in purged_ids {
             self.sessions.remove(&session_id);
+            self.session_approval_policies.remove(&session_id);
             self.session_workspace_bindings.remove(&session_id);
             self.archived_sessions.remove(&session_id);
             self.command_artifacts.remove_session(&session_id);
@@ -8085,9 +8127,15 @@ impl Runtime {
             }
         };
         let chat = params.mode == SessionMode::Chat;
-        let backend_result: Result<(Option<String>, BackendInfo), (i64, String)> = match &mut self
-            .backend
-        {
+        type SessionStartBackendResult = Result<
+            (
+                Option<String>,
+                BackendInfo,
+                Option<CodexApprovalPolicyBinding>,
+            ),
+            (i64, String),
+        >;
+        let backend_result: SessionStartBackendResult = match &mut self.backend {
             Backend::Preview => Ok((
                 None,
                 BackendInfo {
@@ -8098,20 +8146,28 @@ impl Runtime {
                     permission_profile: "read-only".into(),
                     environment: None,
                 },
+                None,
             )),
             Backend::Codex(adapter) => match adapter.start_session(&cwd, chat) {
                 Ok(codex) => {
+                    let Some(approval_policy) = codex.approval_policy else {
+                        return self.error_for(
+                            &request,
+                            -32110,
+                            "Codex session did not return an approval policy binding",
+                        );
+                    };
                     let mut info = adapter.info();
                     info.provider = Some(codex.provider);
                     info.model = Some(codex.model);
-                    Ok((Some(codex.thread_id), info))
+                    Ok((Some(codex.thread_id), info, Some(approval_policy)))
                 }
                 Err(error) => Err((-32110, error)),
             },
             Backend::Recovery(_) => Err((-32120, "workbench is in read-only recovery mode".into())),
             Backend::Unavailable(error) => Err((-32100, error.clone())),
         };
-        let (backend_session_id, backend_info) = match backend_result {
+        let (backend_session_id, backend_info, approval_policy) = match backend_result {
             Ok(result) => result,
             Err((code, error)) => return self.error_for(&request, code, error),
         };
@@ -8154,6 +8210,10 @@ impl Runtime {
         if let Some(binding) = workspace_binding.as_ref() {
             self.session_workspace_bindings
                 .insert(id.clone(), Self::stored_workspace_binding(binding));
+        }
+        if let Some(approval_policy) = approval_policy {
+            self.session_approval_policies
+                .insert(id.clone(), approval_policy);
         }
         self.sessions.insert(
             id.clone(),
@@ -8313,7 +8373,7 @@ impl Runtime {
             }
         }
         let chat = mode == SessionMode::Chat;
-        let (backend_session_id, backend_info) = match &mut self.backend {
+        let (backend_session_id, backend_info, approval_policy) = match &mut self.backend {
             Backend::Preview if binding.adapter == "preview" => (
                 None,
                 BackendInfo {
@@ -8327,6 +8387,7 @@ impl Runtime {
                     permission_profile: "read-only".into(),
                     environment: None,
                 },
+                None,
             ),
             Backend::Codex(adapter) if binding.adapter == "codex-app-server" => {
                 if binding.adapter_version != adapter.info().version {
@@ -8354,10 +8415,17 @@ impl Runtime {
                         "Codex resume returned a different thread identity",
                     );
                 }
+                let Some(approval_policy) = resumed.approval_policy else {
+                    return self.error_for(
+                        &request,
+                        -32143,
+                        "Codex resume did not return an approval policy binding",
+                    );
+                };
                 let mut info = adapter.info();
                 info.provider = Some(resumed.provider);
                 info.model = Some(resumed.model);
-                (Some(resumed.thread_id), info)
+                (Some(resumed.thread_id), info, Some(approval_policy))
             }
             Backend::Recovery(_) => {
                 return self.error_for(&request, -32120, "workbench is in read-only recovery mode")
@@ -8410,6 +8478,10 @@ impl Runtime {
                 environment: environment.clone(),
             },
         );
+        if let Some(approval_policy) = approval_policy {
+            self.session_approval_policies
+                .insert(session.id.clone(), approval_policy);
+        }
         if let Some(binding) = stored_workspace {
             self.session_workspace_bindings
                 .insert(session.id.clone(), binding);
@@ -8549,7 +8621,9 @@ impl Runtime {
             Err(error) => return self.error_for(&request, -32144, error.message),
         };
         let chat = mode == SessionMode::Chat;
-        let (backend_session_id, backend_info, adapter_name) = match &mut self.backend {
+        let (backend_session_id, backend_info, adapter_name, approval_policy) = match &mut self
+            .backend
+        {
             Backend::Preview => (
                 None,
                 BackendInfo {
@@ -8561,6 +8635,7 @@ impl Runtime {
                     environment: None,
                 },
                 "preview",
+                None,
             ),
             Backend::Codex(adapter) => {
                 let Some(binding) = source_binding.as_ref() else {
@@ -8595,10 +8670,22 @@ impl Runtime {
                     Ok(session) => session,
                     Err(error) => return self.error_for(&request, -32143, error),
                 };
+                let Some(approval_policy) = forked.approval_policy else {
+                    return self.error_for(
+                        &request,
+                        -32143,
+                        "Codex fork did not return an approval policy binding",
+                    );
+                };
                 let mut info = adapter.info();
                 info.provider = Some(forked.provider);
                 info.model = Some(forked.model);
-                (Some(forked.thread_id), info, "codex-app-server")
+                (
+                    Some(forked.thread_id),
+                    info,
+                    "codex-app-server",
+                    Some(approval_policy),
+                )
             }
             Backend::Recovery(_) => {
                 return self.error_for(&request, -32120, "workbench is in read-only recovery mode")
@@ -8694,6 +8781,10 @@ impl Runtime {
                 environment: environment.clone(),
             },
         );
+        if let Some(approval_policy) = approval_policy {
+            self.session_approval_policies
+                .insert(target_session_id.clone(), approval_policy);
+        }
         if let Some(binding) = workspace_binding.as_ref() {
             self.session_workspace_bindings.insert(
                 target_session_id.clone(),
@@ -10231,6 +10322,44 @@ impl Runtime {
             );
             return;
         };
+        let Some(trace_approval_policy) = self
+            .session_approval_policies
+            .get(&params.session_id)
+            .cloned()
+        else {
+            self.emit_all(
+                self.error_for(
+                    &request,
+                    -32111,
+                    "Codex approval policy binding is unavailable; resume or fork is required",
+                ),
+                emit,
+            );
+            return;
+        };
+        let provider_thread_identity = match turn_trace::provider_thread_identity(&codex_thread_id)
+        {
+            Ok(identity) => identity,
+            Err(error) => {
+                self.emit_all(self.error_for(&request, -32111, error.message), emit);
+                return;
+            }
+        };
+        if trace_approval_policy.provider_thread_identity != provider_thread_identity
+            || trace_approval_policy.adapter_identity != trace_backend_info.adapter
+            || trace_approval_policy.adapter_version != trace_backend_info.version
+            || trace_backend_info.permission_profile != "read-only"
+        {
+            self.emit_all(
+                self.error_for(
+                    &request,
+                    -32111,
+                    "Codex approval policy binding does not match the active Runtime session",
+                ),
+                emit,
+            );
+            return;
+        }
 
         let execution_identity = format!(
             "execution:sha256:{}",
@@ -10318,6 +10447,7 @@ impl Runtime {
                                 },
                                 &trace_session_mode,
                                 &trace_backend_info,
+                                &trace_approval_policy,
                                 &prepared_context,
                                 started_at_ms,
                             ) {
@@ -16799,9 +16929,14 @@ mod command_timeline_tests {
 
         let prepared_context =
             turn_context::prepare_turn_context(&[], Some(Path::new("/tmp"))).unwrap();
+        let approval_policy = codex_adapter::codex_approval_policy_binding(
+            "thread-fixture",
+            turn_trace::ApprovalPolicyReviewer::User,
+        )
+        .unwrap();
         let backend_info = BackendInfo {
             adapter: "codex-app-server".into(),
-            version: "0.144.5".into(),
+            version: approval_policy.adapter_version.clone(),
             provider: Some("fixture".into()),
             model: Some("fixture".into()),
             permission_profile: "read-only".into(),
@@ -16816,6 +16951,7 @@ mod command_timeline_tests {
             },
             &SessionMode::Work,
             &backend_info,
+            &approval_policy,
             &prepared_context,
             80,
         )

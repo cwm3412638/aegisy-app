@@ -1354,10 +1354,11 @@ Known limitations:
   from replayed or uncertain evidence. The additive Session projection is
   consumed by Qt, whose deterministic threshold cache is capped at 128 entries.
   Compaction activation, provider compact, and automatic authority remain absent.
-- `turn-trace/0.4` retains the existing Intent/completion-domain and final Provider-
-  thread Usage authority contracts. Strict four-version fixtures preserve hand-written
-  `0.1` failed/completed JSON and fixed legacy trace identities; cross-version fields
-  and future `0.5` fail closed. The outer
+- `turn-trace/0.5` retains the existing Intent/completion-domain, final Provider-
+  thread Usage authority, and Codex Tool contracts. Strict five-version fixtures
+  preserve hand-written `0.1` failed/completed JSON and the version-specific behavior
+  and fixed identities of `0.1` through `0.4`; cross-version fields and future `0.6`
+  fail closed. The outer
   event remains `turn.trace.recorded/0.1`, SQLite remains v13, and no migration,
   backfill, or legacy event rewrite is introduced.
 - The `0.3` contract/producer/Store verification scope covers deterministic
@@ -1430,13 +1431,47 @@ Known limitations:
   Exact-budget exhaustion, a SQLite trigger failure, and Provider completion after an
   unmatched Started all produce a durable Started + Error + failed Terminal Trace and
   leave no terminal Tool, command Item, Blob reference, or disk object after restart.
-- The complete `0.4` verification passes 586 library tests with one ignored live
+- `0.5` adds exactly one Runtime approval-policy observation before Model/Context
+  metadata. The pinned Codex producer binds the Runtime and `codex-app-server`
+  adapter, Runtime version `0.144.5`, durable adapter version
+  `codex-cli 0.144.5`, fixed producing Runtime identity `aegisy-agentd:0.1.0`,
+  Provider-thread identity,
+  configured/effective `approvalPolicy=never`, reviewer, read-only sandbox, and
+  read-only permission profile. The observation is fixed to
+  `decision_attribution=no-user-decision`, `user_decision_observed=false`, and
+  `execution_authority=false`; it is Runtime policy evidence, not a user decision or
+  permission grant.
+- The Store independently rejects a Trace whose Runtime observation and policy
+  observation were changed together, even when every inner/outer identity and Event
+  hash is recomputed. The fixed producing Runtime identity preserves existing `0.5`
+  replay after a future binary version change; any new producer version requires an
+  explicit Trace contract revision or reviewed compatibility entry.
+- `turn-trace/0.5` rejects all `Approval` payloads before mutation until a durable
+  approval-authority producer and exact ledger binding exist. Runtime policy,
+  Runtime denial, and Provider Tool state therefore cannot fabricate an allowed,
+  denied, or not-required user decision.
+- Store admission, direct Trace read, projection replay, and startup quarantine
+  independently require the durable Session Runtime binding, exact adapter and
+  version, exact read-only permission profile, and a Provider-thread identity
+  recomputed from the non-null durable backend thread. Seven focused `v0_5` tests
+  and all 117 `workbench_store::tests` pass, including
+  missing binding/thread and hash-consistent adapter, version, and backend-thread
+  tampering across every read/replay/restart path.
+- Runtime denial, Provider `declined`, and genuine user Approval remain distinct.
+  The current approval-request denial path records the Runtime policy observation
+  plus failed Error/Terminal evidence and no Trace `Approval`; Provider `declined`
+  is produced only as a terminal Tool observation; the read-only adapter has no
+  genuine user-Approval producer. A future Approval producer must carry separate
+  Approval-authority evidence and cannot derive a decision from either denial class
+  or `approvalPolicy=never`.
+- The complete `0.5` verification passes 596 library tests with one ignored live
   fixture, 10 threshold contract tests, 63 protocol tests, 15 stdio tests,
   formatting, strict Clippy, `git diff --check`, and strict OpenSpec validation.
-  Complete Approval/Change/Test production, non-command Tool families, authoritative
-  approval policy observation,
+  Complete genuine-user Approval/Change/Test production, Runtime-denial trace
+  production, non-command Tool families,
   authoritative per-Attempt/Retry Usage, and any AAP/Qt trace read,
-  audit/export, or retention surface remain absent, so task 20.1 stays incomplete.
+  audit/export, or retention surface remain absent, so tasks 20.1 and 20.2 stay
+  incomplete.
 - Direct C++17 syntax checks pass for the Qt widget and render fixture, and the
   render target now completes MOC/RCC/compile/link on this host. A focused cache
   mode passes. The full render run currently fails earlier at the existing model-

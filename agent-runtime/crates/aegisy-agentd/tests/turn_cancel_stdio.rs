@@ -71,7 +71,7 @@ while IFS= read -r line; do
       printf '{"id":%s,"result":{}}\n' "$id"
       ;;
     *'"method":"thread/start"'*)
-      printf '{"id":%s,"result":{"thread":{"id":"thread-fixture"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
+      printf '{"id":%s,"result":{"thread":{"id":"thread-fixture"},"modelProvider":"fixture","model":"fixture","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":false}}}\n' "$id"
       ;;
     *'"method":"thread/archive"'*)
       printf '{"id":%s,"result":{}}\n' "$id"
@@ -206,7 +206,7 @@ while IFS= read -r line; do
       printf '{"id":%s,"result":{}}\n' "$id"
       ;;
     *'"method":"thread/start"'*)
-      printf '{"id":%s,"result":{"thread":{"id":"thread-budget"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
+      printf '{"id":%s,"result":{"thread":{"id":"thread-budget"},"modelProvider":"fixture","model":"fixture","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":false}}}\n' "$id"
       ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-budget"}}}\n' "$id"
@@ -334,7 +334,7 @@ while IFS= read -r line; do
       printf '{"id":%s,"result":{}}\n' "$id"
       ;;
     *'"method":"thread/start"'*)
-      printf '{"id":%s,"result":{"thread":{"id":"thread-reconnect"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
+      printf '{"id":%s,"result":{"thread":{"id":"thread-reconnect"},"modelProvider":"fixture","model":"fixture","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":false}}}\n' "$id"
       ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-reconnect-%s"}}}\n' "$id" "$count"
@@ -383,7 +383,7 @@ while IFS= read -r line; do
       printf '{"id":%s,"result":{}}\n' "$id"
       ;;
     *'"method":"thread/start"'*)
-      printf '{"id":%s,"result":{"thread":{"id":"thread-provider-failure"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
+      printf '{"id":%s,"result":{"thread":{"id":"thread-provider-failure"},"modelProvider":"fixture","model":"fixture","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":false}}}\n' "$id"
       ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-provider-failure"}}}\n' "$id"
@@ -429,7 +429,7 @@ while IFS= read -r line; do
       printf '{"id":%s,"result":{}}\n' "$id"
       ;;
     *'"method":"thread/start"'*)
-      printf '{"id":%s,"result":{"thread":{"id":"thread-approval"},"modelProvider":"fixture","model":"fixture"}}\n' "$id"
+      printf '{"id":%s,"result":{"thread":{"id":"thread-approval"},"modelProvider":"fixture","model":"fixture","approvalPolicy":"never","approvalsReviewer":"user","sandbox":{"type":"readOnly","networkAccess":false}}}\n' "$id"
       ;;
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-approval"}}}\n' "$id"
@@ -586,7 +586,7 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
         .read_turn_trace(&session_id, "turn-fixture")
         .unwrap()
         .expect("metadata completion must persist a terminal trace");
-    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.4");
+    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.5");
     let usage_trace_events = completed_trace
         .trace
         .events
@@ -1120,7 +1120,7 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
         .unwrap()
         .expect("recovered completion must persist a terminal trace");
     assert_eq!(completed_trace.state, "completed");
-    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.4");
+    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.5");
     assert_eq!(completed_trace.trace.binding.session_id, session_id);
     assert_eq!(completed_trace.trace.binding.turn_id, "turn-reconnect-2");
     assert!(completed_trace
@@ -1445,8 +1445,11 @@ fn stdio_codex_provider_failure_preserves_content_free_upstream_classification()
 fn stdio_codex_approval_request_is_declined_without_execution_authority() {
     let codex = approval_denial_codex();
     let decision = codex.with_extension("sh.decision");
+    let data_root = codex.parent().unwrap().join("approval-workbench");
+    fs::create_dir_all(&data_root).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
         .env("AEGISY_CODEX_PATH", &codex)
+        .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1524,6 +1527,41 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
     drop(stdin);
     assert!(child.wait().unwrap().success());
     reader.join().unwrap();
+
+    let store = WorkbenchStore::open(&data_root).unwrap();
+    let trace = store
+        .read_turn_trace(&session_id, "turn-approval")
+        .unwrap()
+        .expect("approval-request failure must persist a terminal Trace");
+    assert_eq!(trace.trace.schema_version, "turn-trace/0.5");
+    let policy_events = trace
+        .trace
+        .events
+        .iter()
+        .filter(|event| matches!(event.payload, TracePayload::RuntimeApprovalPolicy { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(policy_events.len(), 1);
+    let TracePayload::RuntimeApprovalPolicy {
+        user_decision_observed,
+        execution_authority,
+        evidence,
+        ..
+    } = &policy_events[0].payload
+    else {
+        unreachable!("policy event was selected above")
+    };
+    assert!(!user_decision_observed);
+    assert!(!execution_authority);
+    assert_eq!(evidence.source, TraceEvidenceSource::Runtime);
+    assert!(trace
+        .trace
+        .events
+        .iter()
+        .all(|event| !matches!(event.payload, TracePayload::Approval { .. })));
+    let serialized = serde_json::to_string(&trace).unwrap();
+    assert!(!serialized.contains("rm -rf"));
+    assert!(!serialized.contains("request a destructive command"));
+    drop(store);
     let _ = fs::remove_dir_all(codex.parent().unwrap());
 }
 
@@ -1747,7 +1785,7 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
         .read_turn_trace(&session_id, "turn-fixture")
         .unwrap()
         .expect("read-only Work completion must persist a terminal trace");
-    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.4");
+    assert_eq!(completed_trace.trace.schema_version, "turn-trace/0.5");
     let tool_events = completed_trace
         .trace
         .events
@@ -1992,7 +2030,7 @@ fn stdio_command_completed_and_declined_preserve_exact_provider_tool_states() {
             .read_turn_trace(&session_id, "turn-fixture")
             .unwrap()
             .expect("terminal command Turn must persist its Trace");
-        assert_eq!(trace.trace.schema_version, "turn-trace/0.4");
+        assert_eq!(trace.trace.schema_version, "turn-trace/0.5");
         let tool_events = trace
             .trace
             .events
@@ -2192,7 +2230,7 @@ fn stdio_completed_turn_with_incomplete_command_fails_durably_and_restarts_start
         .unwrap()
         .expect("incomplete command must produce an authoritative failed Trace");
     assert_eq!(first_read.state, "failed");
-    assert_eq!(first_read.trace.schema_version, "turn-trace/0.4");
+    assert_eq!(first_read.trace.schema_version, "turn-trace/0.5");
     let tool_events = first_read
         .trace
         .events
@@ -2390,7 +2428,7 @@ fn stdio_command_persistence_failure_retains_started_without_terminal_tool_or_bl
         .unwrap()
         .expect("persistence failure must retain an authoritative failed Trace");
     assert_eq!(trace.state, "failed");
-    assert_eq!(trace.trace.schema_version, "turn-trace/0.4");
+    assert_eq!(trace.trace.schema_version, "turn-trace/0.5");
     let tool_events = trace
         .trace
         .events
