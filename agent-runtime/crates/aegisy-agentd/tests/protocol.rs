@@ -1,3 +1,4 @@
+use aegisy_aap::MAX_AAP_FRAME_BYTES;
 use aegisy_agentd::background_job::{
     BackgroundJobRequest, BackgroundJobState, JobRetryPolicy, JobSchedule, JobScheduleKind,
 };
@@ -8,7 +9,7 @@ use aegisy_agentd::workbench_store::{
     durable_blob_reference_id, DurableBlobKind, DurableBlobWrite, StoredProjectCreate,
     StoredSessionCreate, StoredSessionLineage, StoredSessionMode, WorkbenchStore,
 };
-use aegisy_agentd::Runtime;
+use aegisy_agentd::{Runtime, STABLE_CAPABILITY_REGISTRY};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
@@ -21,6 +22,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 fn request(id: &str, method: &str, params: Value) -> String {
     json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string()
+}
+
+fn notification(method: &str, params: Value) -> String {
+    json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string()
+}
+
+fn initialize_params(client_name: &str) -> Value {
+    json!({
+        "protocol": {"minimum": "0.1", "maximum": "0.1", "preferred": "0.1"},
+        "client": {"name": client_name, "version": "1"},
+        "platform": {"os": "macos", "architecture": "arm64"},
+        "capabilities": {"stable": STABLE_CAPABILITY_REGISTRY, "experimental": []},
+        "limits": {"max_frame_bytes": MAX_AAP_FRAME_BYTES},
+        "transport_security": {
+            "transport": "stdio",
+            "local": true,
+            "authenticated": false,
+            "encrypted": false,
+            "peer_verified": false
+        }
+    })
 }
 
 fn identity(prefix: &str, byte: char) -> String {
@@ -40,138 +62,133 @@ fn image_png(width: u32, height: u32) -> Vec<u8> {
 
 fn ready_runtime() -> Runtime {
     let mut runtime = Runtime::default();
-    let messages = runtime.handle_line(&request(
-        "1",
-        "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": { "name": "test", "version": "1" }
-        }),
-    ));
-    assert_eq!(messages[0]["result"]["protocol_version"], "0.1");
+    let messages = runtime.handle_line(&request("1", "initialize", initialize_params("test")));
+    assert_eq!(messages[0]["result"]["protocol"]["selected"], "0.1");
     assert_eq!(messages[0]["result"]["backend"]["adapter"], "preview");
     assert_eq!(messages[0]["result"]["backend"]["status"], "ready");
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "workspace.index.tree-sitter"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "project.trust-review"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "project.trust-acknowledge"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "project.relink.explicit"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "workspace.diagnostics.language-server"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "workspace.diagnostics.command-output"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "workspace.edit.preview.read-only"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "turn.context.structured"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "turn.context.manifest"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "turn.context.inspect"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "workspace.instructions.discovery"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "terminal.environment.session-scoped"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "terminal.lifecycle.named"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "terminal.stop.out-of-band"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "session.history.paginated"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "session.workspace-binding.read-only"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "session.search.branch"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "operation.reconciliation"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "operation.reconciliation.probe"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "operation.reconciliation.status"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "runtime.health"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "runtime.degradations"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "model.catalog.read-only"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "model.capability-check.read-only"));
-    let capabilities = messages[0]["result"]["capabilities"].as_array().unwrap();
+    let capabilities = messages[0]["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap();
     assert!(!capabilities
         .iter()
         .any(|capability| capability == "background-notification.outbox.read-only"));
@@ -181,35 +198,35 @@ fn ready_runtime() -> Runtime {
             "gated autonomy capability must not be advertised: {gated}"
         );
     }
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "session.deletion.two-phase"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "session.portable.export"));
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "session.portable.import"));
     #[cfg(target_os = "macos")]
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "terminal.pty.macos.user-initiated"));
     #[cfg(target_os = "windows")]
-    assert!(messages[0]["result"]["capabilities"]
+    assert!(messages[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "terminal.conpty.windows.user-initiated"));
     assert!(runtime
-        .handle_line(r#"{"jsonrpc":"2.0","method":"initialized"}"#)
+        .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
         .is_empty());
     runtime
 }
@@ -718,12 +735,9 @@ fn durable_work_session_binds_and_searches_its_git_workspace() {
     runtime.handle_line(&request(
         "workspace-init",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "workspace-binding", "version": "1"}
-        }),
+        initialize_params("workspace-binding"),
     ));
-    runtime.handle_line(&request("workspace-ready", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let opened = runtime.handle_line(&request(
         "workspace-open",
         "project/open",
@@ -777,25 +791,25 @@ fn durable_work_session_binds_and_searches_its_git_workspace() {
     drop(runtime);
 
     let mut restarted = Runtime::with_store(&data_root).unwrap();
-    restarted.handle_line(&request(
+    let restarted_initialize = restarted.handle_line(&request(
         "workspace-restart-init",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "workspace-binding", "version": "1"}
-        }),
+        initialize_params("workspace-binding"),
     ));
-    restarted.handle_line(&request(
-        "workspace-restart-ready",
-        "initialized",
-        json!({}),
-    ));
+    assert!(
+        restarted_initialize[0].get("result").is_some(),
+        "restart initialize failed: {restarted_initialize:?}"
+    );
+    restarted.handle_line(&notification("initialized", json!({})));
     let search = restarted.handle_line(&request(
         "workspace-search",
         "session/search",
         json!({"project_id": project_id, "branch": branch}),
     ));
-    assert_eq!(search[0]["result"]["schema_version"], "session-search/0.2");
+    assert_eq!(
+        search[0]["result"]["schema_version"], "session-search/0.2",
+        "unexpected search response: {search:?}"
+    );
     assert_eq!(search[0]["result"]["sessions"][0]["session_id"], session_id);
     assert_eq!(
         search[0]["result"]["sessions"][0]["matched_fields"],
@@ -830,12 +844,9 @@ fn durable_work_session_binds_and_searches_its_git_workspace() {
     drifted.handle_line(&request(
         "workspace-drift-init",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "workspace-binding", "version": "1"}
-        }),
+        initialize_params("workspace-binding"),
     ));
-    drifted.handle_line(&request("workspace-drift-ready", "initialized", json!({})));
+    drifted.handle_line(&notification("initialized", json!({})));
     let rejected = drifted.handle_line(&request(
         "workspace-drift-resume",
         "session/resume",
@@ -851,25 +862,25 @@ fn durable_work_session_binds_and_searches_its_git_workspace() {
 }
 
 #[test]
-fn background_notification_inspection_requires_durable_storage() {
+fn background_notification_inspection_requires_the_negotiated_durable_capability() {
     let mut runtime = ready_runtime();
     let result = runtime.handle_line(&request(
         "notification-no-store",
         "session/background-notifications",
         json!({"session_id": "missing-session"}),
     ));
-    assert_eq!(result[0]["error"]["code"], -32024);
+    assert_eq!(result[0]["error"]["code"], -32006);
 }
 
 #[test]
-fn background_recovery_inspection_requires_durable_storage() {
+fn background_recovery_inspection_requires_the_negotiated_durable_capability() {
     let mut runtime = ready_runtime();
     let result = runtime.handle_line(&request(
         "recovery-no-store",
         "session/background-recovery",
         json!({"session_id": "missing-session"}),
     ));
-    assert_eq!(result[0]["error"]["code"], -32024);
+    assert_eq!(result[0]["error"]["code"], -32006);
 }
 
 #[test]
@@ -950,21 +961,14 @@ fn durable_background_notification_outbox_is_read_only_paged_and_restart_safe() 
     let recovery_initialized = recovery_runtime.handle_line(&request(
         "notification-recovery-initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "notification-recovery", "version": "1"}
-        }),
+        initialize_params("notification-recovery"),
     ));
-    assert!(recovery_initialized[0]["result"]["capabilities"]
+    assert!(recovery_initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "background-job.recovery.inspect"));
-    recovery_runtime.handle_line(&request(
-        "notification-recovery-ready",
-        "initialized",
-        json!({}),
-    ));
+    recovery_runtime.handle_line(&notification("initialized", json!({})));
     let recovery_page = recovery_runtime.handle_line(&request(
         "notification-recovery-page",
         "session/background-recovery",
@@ -1009,22 +1013,19 @@ fn durable_background_notification_outbox_is_read_only_paged_and_restart_safe() 
     let initialized = runtime.handle_line(&request(
         "notification-initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "notification-outbox", "version": "1"}
-        }),
+        initialize_params("notification-outbox"),
     ));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "background-notification.outbox.read-only"));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "background-job.recovery.inspect"));
-    runtime.handle_line(&request("notification-ready", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let recovery = runtime.handle_line(&request(
         "notification-recovery-empty",
         "session/background-recovery",
@@ -1127,16 +1128,9 @@ fn durable_background_notification_outbox_is_read_only_paged_and_restart_safe() 
     restarted.handle_line(&request(
         "notification-restart-initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "notification-outbox", "version": "1"}
-        }),
+        initialize_params("notification-outbox"),
     ));
-    restarted.handle_line(&request(
-        "notification-restart-ready",
-        "initialized",
-        json!({}),
-    ));
+    restarted.handle_line(&notification("initialized", json!({})));
     let after_restart = restarted.handle_line(&request(
         "notification-after-restart",
         "session/background-notifications",
@@ -1356,12 +1350,9 @@ fn durable_operation_reconciliation_survives_runtime_restart() {
     runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "operation-reconcile", "version": "1"}
-        }),
+        initialize_params("operation-reconcile"),
     ));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let started = runtime.handle_line(&request(
         "session-start",
         "session/start",
@@ -1393,12 +1384,9 @@ fn durable_operation_reconciliation_survives_runtime_restart() {
     restarted.handle_line(&request(
         "initialize-2",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "operation-reconcile", "version": "1"}
-        }),
+        initialize_params("operation-reconcile"),
     ));
-    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    restarted.handle_line(&notification("initialized", json!({})));
     let blocked = restarted.handle_line(&request(
         "blocked-after-restart",
         "turn/start",
@@ -1427,12 +1415,9 @@ fn operation_probe_uses_durable_terminal_event_when_event_is_omitted() {
     runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "operation-event-probe", "version": "1"}
-        }),
+        initialize_params("operation-event-probe"),
     ));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let opened = runtime.handle_line(&request(
         "project",
         "project/open",
@@ -1604,12 +1589,8 @@ fn project_trust_acknowledgement_survives_restart_and_invalidates_on_content_cha
     fs::write(project.join("AGENTS.md"), "review version one\n").unwrap();
 
     let mut runtime = Runtime::with_store(&data).unwrap();
-    runtime.handle_line(&request(
-        "1",
-        "initialize",
-        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
-    ));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&request("1", "initialize", initialize_params("test")));
+    runtime.handle_line(&notification("initialized", json!({})));
     let opened = runtime.handle_line(&request("2", "project/open", json!({ "root": project })));
     let project_id = opened[0]["result"]["project"]["id"]
         .as_str()
@@ -1665,12 +1646,8 @@ fn project_trust_acknowledgement_survives_restart_and_invalidates_on_content_cha
     drop(runtime);
 
     let mut restarted = Runtime::with_store(&data).unwrap();
-    restarted.handle_line(&request(
-        "5",
-        "initialize",
-        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
-    ));
-    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    restarted.handle_line(&request("5", "initialize", initialize_params("test")));
+    restarted.handle_line(&notification("initialized", json!({})));
     let reopened = restarted.handle_line(&request("6", "project/open", json!({ "root": project })));
     assert_eq!(
         reopened[0]["result"]["trust_review"]["trust_state"],
@@ -1935,27 +1912,24 @@ fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
     let initialized = runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "pinned-context", "version": "1"}
-        }),
+        initialize_params("pinned-context"),
     ));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "workspace.pinned-context.store"));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "turn.context.pinned-selected"));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "workspace.git-context.read-only"));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let opened = runtime.handle_line(&request(
         "project-open",
         "project/open",
@@ -2056,12 +2030,9 @@ fn pinned_context_aap_persists_metadata_only_sets_and_reopens() {
     restarted.handle_line(&request(
         "initialize-2",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "pinned-context", "version": "1"}
-        }),
+        initialize_params("pinned-context"),
     ));
-    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    restarted.handle_line(&notification("initialized", json!({})));
     let reopened = restarted.handle_line(&request(
         "pins-reopen",
         "workspace/pinned-context/list",
@@ -2089,9 +2060,9 @@ fn pinned_context_publication_compensation_cleans_abandoned_pointer_without_rele
     runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({"protocol_version":"0.1","client":{"name":"publication","version":"1"}}),
+        initialize_params("publication"),
     ));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let opened = runtime.handle_line(&request(
         "project-open",
         "project/open",
@@ -2153,9 +2124,9 @@ fn pinned_context_publication_compensation_cleans_abandoned_pointer_without_rele
     restarted.handle_line(&request(
         "initialize-restarted",
         "initialize",
-        json!({"protocol_version":"0.1","client":{"name":"publication","version":"1"}}),
+        initialize_params("publication"),
     ));
-    restarted.handle_line(&request("initialized-restarted", "initialized", json!({})));
+    restarted.handle_line(&notification("initialized", json!({})));
     let listed = restarted.handle_line(&request(
         "list-after-compensation",
         "workspace/pinned-context/list",
@@ -2190,9 +2161,9 @@ fn pinned_context_publication_compensation_only_cleans_after_event_commit() {
     runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({"protocol_version":"0.1","client":{"name":"publication","version":"1"}}),
+        initialize_params("publication"),
     ));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let opened = runtime.handle_line(&request(
         "project-open",
         "project/open",
@@ -2256,9 +2227,9 @@ fn pinned_context_publication_compensation_only_cleans_after_event_commit() {
     restarted.handle_line(&request(
         "initialize-restarted",
         "initialize",
-        json!({"protocol_version":"0.1","client":{"name":"publication","version":"1"}}),
+        initialize_params("publication"),
     ));
-    restarted.handle_line(&request("initialized-restarted", "initialized", json!({})));
+    restarted.handle_line(&notification("initialized", json!({})));
     let listed = restarted.handle_line(&request(
         "list-after-compensation",
         "workspace/pinned-context/list",
@@ -2300,12 +2271,9 @@ fn pinned_context_aap_validates_project_blob_metadata_without_reading_body() {
     runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "pinned-context-blob", "version": "1"}
-        }),
+        initialize_params("pinned-context-blob"),
     ));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let opened = runtime.handle_line(&request(
         "project-open",
         "project/open",
@@ -2349,12 +2317,9 @@ fn pinned_context_aap_validates_project_blob_metadata_without_reading_body() {
     runtime.handle_line(&request(
         "initialize-2",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "pinned-context-blob", "version": "1"}
-        }),
+        initialize_params("pinned-context-blob"),
     ));
-    runtime.handle_line(&request("initialized-2", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let set = json!({
         "schema_version": "pinned-context/0.1",
         "project_id": project_id.clone(),
@@ -2421,19 +2386,16 @@ fn pinned_image_import_preview_selection_and_restart_are_scope_bound() {
     let initialized = runtime.handle_line(&request(
         "initialize-image",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "pinned-image", "version": "1"}
-        }),
+        initialize_params("pinned-image"),
     ));
     for capability in ["workspace.image.import-user", "workspace.image.preview"] {
-        assert!(initialized[0]["result"]["capabilities"]
+        assert!(initialized[0]["result"]["capabilities"]["stable"]
             .as_array()
             .unwrap()
             .iter()
             .any(|value| value == capability));
     }
-    runtime.handle_line(&request("initialized-image", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let opened = runtime.handle_line(&request(
         "open-image-project",
         "project/open",
@@ -2554,16 +2516,9 @@ fn pinned_image_import_preview_selection_and_restart_are_scope_bound() {
     restarted.handle_line(&request(
         "initialize-image-restart",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "pinned-image", "version": "1"}
-        }),
+        initialize_params("pinned-image"),
     ));
-    restarted.handle_line(&request(
-        "initialized-image-restart",
-        "initialized",
-        json!({}),
-    ));
+    restarted.handle_line(&notification("initialized", json!({})));
     let resumed = restarted.handle_line(&request(
         "resume-image-session",
         "session/resume",
@@ -2658,16 +2613,9 @@ fn pinned_image_import_preview_selection_and_restart_are_scope_bound() {
     reimported_runtime.handle_line(&request(
         "initialize-image-reimport",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "pinned-image", "version": "1"}
-        }),
+        initialize_params("pinned-image"),
     ));
-    reimported_runtime.handle_line(&request(
-        "initialized-image-reimport",
-        "initialized",
-        json!({}),
-    ));
+    reimported_runtime.handle_line(&notification("initialized", json!({})));
     let resumed = reimported_runtime.handle_line(&request(
         "resume-image-session-reimport",
         "session/resume",
@@ -2709,13 +2657,9 @@ fn project_relink_requires_reviewed_identity_and_survives_restart() {
     fs::create_dir_all(&original).unwrap();
     let original = original.canonicalize().unwrap();
     let mut runtime = Runtime::with_store(&data).unwrap();
-    let initialized = runtime.handle_line(&request(
-        "1",
-        "initialize",
-        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
-    ));
+    let initialized = runtime.handle_line(&request("1", "initialize", initialize_params("test")));
     assert!(initialized[0].get("result").is_some());
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let opened = runtime.handle_line(&request("2", "project/open", json!({ "root": original })));
     let identity = opened[0]["result"]["identity"]["root_identity"]
         .as_str()
@@ -2751,13 +2695,9 @@ fn project_relink_requires_reviewed_identity_and_survives_restart() {
     ));
     assert_eq!(stale[0]["error"]["code"], -32042);
     let mut restarted = Runtime::with_store(&data).unwrap();
-    let initialized = restarted.handle_line(&request(
-        "6",
-        "initialize",
-        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
-    ));
+    let initialized = restarted.handle_line(&request("6", "initialize", initialize_params("test")));
     assert!(initialized[0].get("result").is_some());
-    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    restarted.handle_line(&notification("initialized", json!({})));
     let reopened = restarted.handle_line(&request("7", "project/open", json!({ "root": moved })));
     assert_eq!(reopened[0]["result"]["project"]["id"], "project-1");
     assert_eq!(
@@ -2781,12 +2721,8 @@ fn project_navigation_lists_pinned_state_and_unavailable_roots_after_restart() {
     fs::create_dir_all(&original).unwrap();
     let original = original.canonicalize().unwrap();
     let mut runtime = Runtime::with_store(&data).unwrap();
-    runtime.handle_line(&request(
-        "1",
-        "initialize",
-        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
-    ));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&request("1", "initialize", initialize_params("test")));
+    runtime.handle_line(&notification("initialized", json!({})));
     let opened = runtime.handle_line(&request("2", "project/open", json!({ "root": original })));
     let project_id = opened[0]["result"]["project"]["id"]
         .as_str()
@@ -2813,12 +2749,8 @@ fn project_navigation_lists_pinned_state_and_unavailable_roots_after_restart() {
     drop(runtime);
 
     let mut restarted = Runtime::with_store(&data).unwrap();
-    restarted.handle_line(&request(
-        "6",
-        "initialize",
-        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
-    ));
-    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    restarted.handle_line(&request("6", "initialize", initialize_params("test")));
+    restarted.handle_line(&notification("initialized", json!({})));
     let unavailable = restarted.handle_line(&request("7", "project/list", json!({})));
     assert_eq!(unavailable[0]["result"]["projects"][0]["pinned"], true);
     assert_eq!(
@@ -2867,12 +2799,8 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
     let data = root.join("data");
     fs::create_dir_all(&data).unwrap();
     let mut runtime = Runtime::with_store(&data).unwrap();
-    runtime.handle_line(&request(
-        "1",
-        "initialize",
-        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
-    ));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&request("1", "initialize", initialize_params("test")));
+    runtime.handle_line(&notification("initialized", json!({})));
     let started = runtime.handle_line(&request(
         "2",
         "session/start",
@@ -2894,12 +2822,8 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
     drop(runtime);
 
     let mut restarted = Runtime::with_store(&data).unwrap();
-    restarted.handle_line(&request(
-        "4",
-        "initialize",
-        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
-    ));
-    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    restarted.handle_line(&request("4", "initialize", initialize_params("test")));
+    restarted.handle_line(&notification("initialized", json!({})));
     let resumed = restarted.handle_line(&request(
         "5",
         "session/resume",
@@ -2978,12 +2902,8 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
     drop(restarted);
 
     let mut reopened = Runtime::with_store(&data).unwrap();
-    reopened.handle_line(&request(
-        "9",
-        "initialize",
-        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
-    ));
-    reopened.handle_line(&request("initialized-3", "initialized", json!({})));
+    reopened.handle_line(&request("9", "initialize", initialize_params("test")));
+    reopened.handle_line(&notification("initialized", json!({})));
     let cold_read = reopened.handle_line(&request(
         "9-read",
         "session/read",
@@ -3094,18 +3014,15 @@ fn durable_session_deletion_protocol_requires_preview_and_supports_undo() {
     let initialized = runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "deletion-protocol", "version": "1"}
-        }),
+        initialize_params("deletion-protocol"),
     ));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "session.deletion.undo"));
     assert!(runtime
-        .handle_line(r#"{"jsonrpc":"2.0","method":"initialized"}"#)
+        .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
         .is_empty());
 
     let started = runtime.handle_line(&request(
@@ -3220,18 +3137,15 @@ fn portable_session_protocol_previews_exports_validates_and_imports_a_copy() {
     let initialized = runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "portable-session-protocol", "version": "1"}
-        }),
+        initialize_params("portable-session-protocol"),
     ));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "session.portable.import"));
     assert!(runtime
-        .handle_line(r#"{"jsonrpc":"2.0","method":"initialized"}"#)
+        .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
         .is_empty());
 
     let started = runtime.handle_line(&request(
@@ -3366,13 +3280,10 @@ fn portable_session_protocol_previews_exports_validates_and_imports_a_copy() {
     let initialized = restarted.handle_line(&request(
         "restart-initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "portable-session-restart", "version": "1"}
-        }),
+        initialize_params("portable-session-restart"),
     ));
     assert_eq!(initialized[0]["result"]["backend"]["status"], "ready");
-    restarted.handle_line(r#"{"jsonrpc":"2.0","method":"initialized"}"#);
+    restarted.handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#);
     let replay = restarted.handle_line(&request(
         "restart-import-read",
         "session/read",
@@ -3798,12 +3709,9 @@ fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() 
     runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "pinned-turn", "version": "1"}
-        }),
+        initialize_params("pinned-turn"),
     ));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let opened = runtime.handle_line(&request(
         "project-open",
         "project/open",
@@ -4069,12 +3977,9 @@ fn durable_artifact_pin_reloads_after_restart_and_keeps_inspection_metadata_only
     runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "durable-artifact-pin", "version": "1"}
-        }),
+        initialize_params("durable-artifact-pin"),
     ));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let opened = runtime.handle_line(&request(
         "project-open",
         "project/open",
@@ -4136,12 +4041,9 @@ fn durable_artifact_pin_reloads_after_restart_and_keeps_inspection_metadata_only
     restarted.handle_line(&request(
         "initialize-2",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": {"name": "durable-artifact-pin", "version": "1"}
-        }),
+        initialize_params("durable-artifact-pin"),
     ));
-    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    restarted.handle_line(&notification("initialized", json!({})));
     let resumed = restarted.handle_line(&request(
         "session-resume",
         "session/resume",
@@ -5697,17 +5599,13 @@ fn session_compaction_checkpoint_is_durable_review_only_and_idempotent() {
     fs::create_dir_all(&data).unwrap();
 
     let mut runtime = Runtime::with_store(&data).unwrap();
-    let initialized = runtime.handle_line(&request(
-        "1",
-        "initialize",
-        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
-    ));
-    assert!(initialized[0]["result"]["capabilities"]
+    let initialized = runtime.handle_line(&request("1", "initialize", initialize_params("test")));
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "session.compaction.checkpoint-review"));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let session = runtime.handle_line(&request("2", "session/start", json!({ "mode": "chat" })));
     let session_id = session[0]["result"]["session"]["id"]
         .as_str()
@@ -5842,12 +5740,8 @@ fn session_compaction_checkpoint_is_durable_review_only_and_idempotent() {
     drop(runtime);
 
     let mut restarted = Runtime::with_store(&data).unwrap();
-    restarted.handle_line(&request(
-        "7",
-        "initialize",
-        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
-    ));
-    restarted.handle_line(&request("initialized-2", "initialized", json!({})));
+    restarted.handle_line(&request("7", "initialize", initialize_params("test")));
+    restarted.handle_line(&notification("initialized", json!({})));
     let replayed = restarted.handle_line(&request(
         "8",
         "session/compaction/checkpoint/read",
@@ -5891,17 +5785,13 @@ fn unavailable_compaction_store_degrades_without_blocking_runtime() {
     .unwrap();
 
     let mut runtime = Runtime::with_store(&data).unwrap();
-    let initialized = runtime.handle_line(&request(
-        "1",
-        "initialize",
-        json!({ "protocol_version": "0.1", "client": { "name": "test", "version": "1" } }),
-    ));
-    assert!(!initialized[0]["result"]["capabilities"]
+    let initialized = runtime.handle_line(&request("1", "initialize", initialize_params("test")));
+    assert!(!initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "session.compaction.checkpoint-review"));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let session = runtime.handle_line(&request("2", "session/start", json!({ "mode": "chat" })));
     let session_id = session[0]["result"]["session"]["id"].as_str().unwrap();
     let unavailable = runtime.handle_line(&request(
@@ -5921,7 +5811,7 @@ fn unavailable_compaction_store_degrades_without_blocking_runtime() {
             }
         }),
     ));
-    assert_eq!(unavailable[0]["error"]["code"], -32024);
+    assert_eq!(unavailable[0]["error"]["code"], -32006);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -5931,17 +5821,14 @@ fn model_catalog_is_read_only_and_does_not_invent_capabilities() {
     let initialized = runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": { "name": "catalog-test", "version": "1" }
-        }),
+        initialize_params("catalog-test"),
     ));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "model.catalog.read-only"));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
 
     let response = runtime.handle_line(&request("catalog", "model/catalog", json!({})));
     let catalog = &response[0]["result"];
@@ -5997,17 +5884,14 @@ fn model_catalog_cache_reports_empty_without_selection_authority() {
     let initialized = runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": { "name": "catalog-cache-test", "version": "1" }
-        }),
+        initialize_params("catalog-cache-test"),
     ));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "model.catalog.cache.read-only"));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
 
     let response = runtime.handle_line(&request("cache", "model/catalog-cache", json!({})));
     let cache = &response[0]["result"];
@@ -6023,17 +5907,14 @@ fn model_catalog_refresh_status_is_read_only_and_unconfigured() {
     let initialized = runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": { "name": "catalog-refresh-status-test", "version": "1" }
-        }),
+        initialize_params("catalog-refresh-status-test"),
     ));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "model.catalog.refresh.status.read-only"));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
 
     let response = runtime.handle_line(&request(
         "refresh-status",
@@ -6078,17 +5959,14 @@ fn model_catalog_cache_store_is_opened_for_durable_runtime_restart() {
     let initialized = runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": { "name": "catalog-cache-durable-test", "version": "1" }
-        }),
+        initialize_params("catalog-cache-durable-test"),
     ));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "model.catalog.cache.read-only"));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
     let response = runtime.handle_line(&request("cache", "model/catalog-cache", json!({})));
     assert_eq!(response[0]["result"]["availability"], "empty");
     assert_eq!(response[0]["result"]["selection_allowed"], false);
@@ -6098,17 +5976,14 @@ fn model_catalog_cache_store_is_opened_for_durable_runtime_restart() {
     let initialized = reopened.handle_line(&request(
         "initialize-reopened",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": { "name": "catalog-cache-durable-test", "version": "1" }
-        }),
+        initialize_params("catalog-cache-durable-test"),
     ));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "model.catalog.cache.read-only"));
-    reopened.handle_line(&request("initialized-reopened", "initialized", json!({})));
+    reopened.handle_line(&notification("initialized", json!({})));
     let response =
         reopened.handle_line(&request("cache-reopened", "model/catalog-cache", json!({})));
     assert_eq!(response[0]["result"]["availability"], "empty");
@@ -6130,17 +6005,14 @@ fn model_profile_aap_is_metadata_only_and_empty_snapshot_is_valid() {
     let initialized = runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": { "name": "model-profile-test", "version": "1" }
-        }),
+        initialize_params("model-profile-test"),
     ));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "model.profile.read-only"));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
 
     let listed = runtime.handle_line(&request("list", "model/profile/list", json!({})));
     let result = &listed[0]["result"];
@@ -6177,17 +6049,14 @@ fn model_capability_check_fails_closed_for_work_unknowns() {
     let initialized = runtime.handle_line(&request(
         "initialize",
         "initialize",
-        json!({
-            "protocol_version": "0.1",
-            "client": { "name": "capability-test", "version": "1" }
-        }),
+        initialize_params("capability-test"),
     ));
-    assert!(initialized[0]["result"]["capabilities"]
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "model.capability-check.read-only"));
-    runtime.handle_line(&request("initialized", "initialized", json!({})));
+    runtime.handle_line(&notification("initialized", json!({})));
 
     let response = runtime.handle_line(&request(
         "check",

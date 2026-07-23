@@ -11,20 +11,61 @@ response is one complete JSON object; a notification has no `id`.
 
 ## Connection
 
-The client must complete `initialize` before sending project, session, turn,
-workspace, terminal, or storage requests. The runtime returns a stable protocol
-version, runtime/backend identity, negotiated capabilities, and permission
-profile. The client then sends `initialized`.
+The connection uses a two-stage handshake. Before it completes, `initialize` is
+the only request the client may send. The request declares a numeric protocol
+range and preference, bounded client identity, client platform, stable and
+experimental capability sets, frame limit, and the observed transport-security
+state. The runtime returns the selected protocol, its own identity and platform,
+backend availability, the capability intersection, the effective limit, and the
+same truthful transport-security state.
 
 ```jsonl
-{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocol_version":"0.1","client":{"name":"aegisy-client","version":"fixture"}}}
-{"jsonrpc":"2.0","id":"1","result":{"protocol_version":"0.1","runtime":{"name":"aegisy-agentd","version":"0.1.0"},"backend":{"adapter":"preview","status":"ready","version":"0.1.0"},"capabilities":["runtime.preview","runtime.health","runtime.degradations","model.catalog.read-only","permission.read-only"]}}
-{"jsonrpc":"2.0","method":"initialized"}
+{"jsonrpc":"2.0","id":"initialize-compatible","method":"initialize","params":{"protocol":{"minimum":"0.1","maximum":"0.1","preferred":"0.1"},"client":{"name":"aegisy-client","version":"0.1.0"},"platform":{"os":"macos","architecture":"arm64"},"capabilities":{"stable":["permission.read-only","runtime.health","runtime.preview"],"experimental":[]},"limits":{"max_frame_bytes":4194304},"transport_security":{"transport":"stdio","local":true,"authenticated":false,"encrypted":false,"peer_verified":false}}}
+{"jsonrpc":"2.0","id":"initialize-compatible","result":{"protocol":{"minimum":"0.1","maximum":"0.1","selected":"0.1","upgrade_direction":"none"},"runtime":{"name":"aegisy-agentd","version":"0.1.0"},"platform":{"os":"macos","architecture":"arm64"},"backend":{"adapter":"preview","status":"ready","version":"0.1.0"},"capabilities":{"stable":["permission.read-only","runtime.health","runtime.preview"],"experimental":[]},"limits":{"max_frame_bytes":4194304},"transport_security":{"transport":"stdio","local":true,"authenticated":false,"encrypted":false,"peer_verified":false}}}
+{"jsonrpc":"2.0","method":"initialized","params":{}}
 ```
 
-An unsupported protocol version fails before a session is loaded. Clients must
-not infer a missing capability from a successful initialize; they must gate the
-dependent action on the explicit capability/degradation state.
+`backend.status: ready` describes Adapter availability; it does not complete the
+protocol handshake and does not grant execution authority. After validating the
+initialize response, the client sends the exact `initialized` notification above.
+The runtime accepts business requests only after consuming that notification.
+Duplicate initialize, initialized-before-initialize, initialized with an `id`, or
+initialized with non-empty/missing params fails closed.
+
+AAP `0.1` requires a non-empty stable declaration and an empty experimental set.
+The response contains only stable capabilities supported by both peers; unknown
+client capabilities are omitted. A ready or read-only-recovery backend also
+requires its exact backend marker and `permission.read-only`. Every business
+method is independently mapped to required capabilities: Qt does not send a
+method whose requirements were not negotiated, and the runtime repeats the gate,
+including for out-of-band cancellation, steering, and terminal stop. A successful
+initialize response or degradation report is never a substitute for this gate.
+
+Protocol versions are compared as numeric `major.minor` pairs, not strings. A
+non-overlapping range fails before project or session state is loaded and returns
+bounded `initialize-error/0.1` data. If the client maximum is below the runtime
+minimum, `upgrade_direction` is `client`; if the client minimum is above the
+runtime maximum, it is `runtime`:
+
+```jsonl
+{"jsonrpc":"2.0","id":"initialize-incompatible","error":{"code":-32003,"message":"AAP protocol ranges do not overlap","data":{"schema_version":"initialize-error/0.1","reason":"protocol-range-not-overlapping","client":{"minimum":"0.2","maximum":"0.3"},"runtime":{"minimum":"0.1","maximum":"0.1"},"upgrade_direction":"runtime"}}}
+```
+
+One newline-delimited JSON frame is capped at exactly 4 MiB in both directions
+for AAP `0.1`. Each peer must enforce the fixed `max_frame_bytes` before writing
+and while reading; an oversized
+frame is drained or rejected without unbounded allocation or body diagnostics.
+Negotiated inline payload sizes, chunking, and authenticated content references
+remain OpenSpec task `3.8`; they must not be inferred from this fixed frame bound.
+Current Qt-to-sidecar AAP uses child-process stdio. It is local but is not
+authenticated, encrypted, or peer-verified; the five transport-security fields
+must never claim otherwise. Authenticated Unix-socket and Windows named-pipe IPC
+remain the target of OpenSpec tasks `4.2` through `4.4`.
+
+Transport loss, runtime exit, handshake rejection, or malformed protocol input
+clears readiness, negotiated capabilities, and the negotiated limit. No cached
+capability may authorize a request after disconnect; reconnect starts a fresh
+two-stage handshake.
 
 ## Session And Turn
 
@@ -1011,6 +1052,10 @@ unavailable.
   unless a separately reviewed, bounded content reference explicitly requires it.
 - The current Agent/Codex profile is read-only. User editor saves and user
   terminals are separate, explicit operations scoped to the opened project.
+- `backend.status: ready`, capability availability, and degradation metadata do
+  not grant Agent write, command, approval, network, or background authority.
+- Current stdio is not authenticated, encrypted, or peer-verified. Do not present
+  it as the authenticated production IPC planned under tasks `4.2` through `4.4`.
 - The Qt UI consumes AAP state and does not parse vendor Codex events directly.
 - New mutation/provider methods require a schema version, capability/degradation
   entry, redacted fixture, failure/reconnect behavior, persistence implications,

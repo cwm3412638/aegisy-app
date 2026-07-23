@@ -1,5 +1,5 @@
-{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocol_version":"0.1","client":{"name":"aegisy-client","version":"fixture"}}}
-{"jsonrpc":"2.0","method":"initialized"}
+{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocol":{"minimum":"0.1","maximum":"0.1","preferred":"0.1"},"client":{"name":"aegisy-client","version":"0.1.0"},"platform":{"os":"macos","architecture":"arm64"},"capabilities":{"stable":["permission.read-only","runtime.degradations","runtime.health","session.provider.lifecycle.archive","session.provider.lifecycle.list-read","session.provider.lifecycle.unarchive"],"experimental":[]},"limits":{"max_frame_bytes":4194304},"transport_security":{"transport":"stdio","local":true,"authenticated":false,"encrypted":false,"peer_verified":false}}}
+{"jsonrpc":"2.0","method":"initialized","params":{}}
 {"jsonrpc":"2.0","id":"2","method":"runtime/health","params":{}}
 {"jsonrpc":"2.0","id":"3","method":"runtime/degradations","params":{}}
 {"jsonrpc":"2.0","id":"4","method":"session/provider-list","params":{"limit":50,"project_id":"project-fixture","archived":false}}

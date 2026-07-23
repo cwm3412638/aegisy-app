@@ -40,7 +40,8 @@ authors. The first supported execution targets remain local macOS and Windows.
 - Use Aegisy's model catalog and account services as the authority for provider
   availability, model capability, routing, usage, and billing.
 - Keep file and command execution outside the Qt UI process behind a local,
-  authenticated, versioned protocol.
+  versioned protocol, and require authenticated IPC before the production
+  transport milestone is complete.
 - Preserve user control through sandbox profiles, granular approvals, visible
   plans and diffs, cancellation, checkpoints, and crash recovery.
 - Establish quality gates that prevent background and multi-agent autonomy from
@@ -103,7 +104,9 @@ updates, desktop integration, native menus, and current management pages. Add a
 web workbench bundle inside `QWebEngineView` for Monaco editor, xterm.js terminal,
 virtualized timelines, diff rendering, and flexible split panes. Communicate with
 the Qt host through a narrow `QWebChannel` bridge and with the Agent runtime
-through the host's authenticated protocol client.
+through the host's protocol client. The current child-process stdio transport is
+explicitly unauthenticated; tasks `4.2` through `4.4` own the authenticated
+production transport.
 
 Before committing to this dependency, Milestone 0 must measure bundle size,
 startup memory, Chinese IME, accessibility, drag/drop, clipboard, Retina and
@@ -124,13 +127,20 @@ protocol. The protocol and storage decisions therefore cannot depend on Qt.
 
 ### 3. Separate `aegisy-agentd` runtime sidecar
 
-Create a Rust sidecar process named `aegisy-agentd`. The Qt host starts and
-monitors it, passes a one-time bootstrap secret through an inherited handle or
-environment value, and connects over a user-local transport:
+Create a Rust sidecar process named `aegisy-agentd`. The production transport
+target has the Qt host start and monitor it, pass a one-time bootstrap secret
+through an inherited handle, and connect over a user-local transport:
 
 - Unix domain socket on macOS.
 - Named pipe on Windows.
-- Stdio only for controlled test fixtures and runtime-adapter child processes.
+
+Tasks `4.2` through `4.4` own those socket/pipe, peer-validation, ACL, and
+bootstrap-authentication guarantees. During the current task `3.3` milestone,
+Qt launches the sidecar as a child and communicates over newline-delimited stdio.
+That transport truthfully negotiates `local: true` with `authenticated`,
+`encrypted`, and `peer_verified` all `false`. Stdio also remains appropriate for
+controlled fixtures and runtime-adapter child processes; it is not evidence that
+the authenticated production IPC target is complete.
 
 The sidecar owns Agent threads, terminals, filesystem operations, Git, sandbox
 policy, MCP processes, provider/runtime adapters, event persistence, context
@@ -161,7 +171,19 @@ types. It borrows proven primitives but remains Aegisy-owned:
 
 Protocol properties:
 
-- Initialize handshake with client/runtime versions and capability negotiation.
+- Two-stage `initialize`/`initialized` handshake with numeric client protocol
+  ranges, bounded client/runtime identity, platform, limits, and truthful
+  transport-security state. Business methods remain unavailable until the
+  runtime consumes the exact empty `initialized` notification.
+- Separate stable and experimental capability declarations. The runtime returns
+  only the supported intersection, and both the host and runtime enforce the
+  resulting per-method gates. Unknown or absent capabilities never simulate
+  success or confer authority.
+- An exact 4 MiB bidirectional frame ceiling for AAP `0.1`, with bounded
+  draining/rejection of oversized input. Negotiated inline payload sizes,
+  chunking, and content references remain owned by task `3.8`.
+- Disconnect, runtime exit, or protocol rejection clears readiness, capability,
+  and limit state; reconnect always starts a new handshake.
 - Monotonic event sequence per session, event IDs, timestamps, correlation IDs,
   and explicit terminal states.
 - Snapshot plus replay from sequence number for reconnect and crash recovery.

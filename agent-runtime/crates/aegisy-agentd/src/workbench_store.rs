@@ -28974,10 +28974,7 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": "recovery-initialize",
                 "method": "initialize",
-                "params": {
-                    "protocol_version": "0.1",
-                    "client": {"name": "recovery-test", "version": "1"}
-                }
+                "params": crate::test_initialize_params("recovery-test")
             })
             .to_string(),
         );
@@ -28985,18 +28982,20 @@ mod tests {
             initialized[0]["result"]["backend"]["status"],
             "read-only-recovery"
         );
-        let capabilities = initialized[0]["result"]["capabilities"].as_array().unwrap();
+        let capabilities = initialized[0]["result"]["capabilities"]["stable"]
+            .as_array()
+            .unwrap();
         assert!(capabilities
             .iter()
             .any(|value| value == "runtime.recovery.diagnostic-export"));
         assert!(!capabilities.iter().any(|value| value == "project.open"));
         assert!(runtime
-            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized"}"#)
+            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
             .is_empty());
         let denied = runtime.handle_line(
             r#"{"jsonrpc":"2.0","id":"project","method":"project/open","params":{"root":"/tmp"}}"#,
         );
-        assert_eq!(denied[0]["error"]["code"], -32120);
+        assert_eq!(denied[0]["error"]["code"], -32006);
         let exported = runtime.handle_line(
             r#"{"jsonrpc":"2.0","id":"export","method":"runtime/recovery/export","params":{}}"#,
         );

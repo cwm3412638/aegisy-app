@@ -4,26 +4,388 @@
   "title": "Aegisy Agent Protocol 0.1",
   "type": "object",
   "required": ["jsonrpc"],
+  "additionalProperties": false,
   "properties": {
     "jsonrpc": { "const": "2.0" },
-    "id": { "type": ["string", "integer", "null"] },
-    "method": { "type": "string" },
+    "id": { "$ref": "#/$defs/jsonRpcId" },
+    "method": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9.-]*(?:/[A-Za-z][A-Za-z0-9.-]*)*$",
+      "minLength": 1,
+      "maxLength": 128
+    },
     "params": { "type": "object" },
     "result": {},
     "error": {
-      "type": "object",
-      "required": ["code", "message"],
-      "properties": {
-        "code": { "type": "integer" },
-        "message": { "type": "string" },
-        "data": {}
-      }
+      "$ref": "#/$defs/jsonRpcError",
+      "required": ["code", "message"]
     }
   },
   "oneOf": [
-    { "required": ["id", "method"] },
-    { "required": ["method"], "not": { "required": ["id"] } },
-    { "required": ["id", "result"] },
-    { "required": ["id", "error"] }
-  ]
+    {
+      "required": ["id", "method", "params"],
+      "properties": {
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" }
+      },
+      "not": {
+        "anyOf": [
+          { "required": ["result"] },
+          { "required": ["error"] }
+        ]
+      }
+    },
+    {
+      "required": ["method", "params"],
+      "not": {
+        "anyOf": [
+          { "required": ["id"] },
+          { "required": ["result"] },
+          { "required": ["error"] }
+        ]
+      }
+    },
+    {
+      "required": ["id", "result"],
+      "properties": {
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" }
+      },
+      "not": {
+        "anyOf": [
+          { "required": ["method"] },
+          { "required": ["error"] }
+        ]
+      }
+    },
+    {
+      "required": ["id", "error"],
+      "properties": {
+        "id": { "$ref": "#/$defs/jsonRpcId" }
+      },
+      "not": {
+        "anyOf": [
+          { "required": ["method"] },
+          { "required": ["result"] }
+        ]
+      }
+    }
+  ],
+  "allOf": [
+    {
+      "if": {
+        "required": ["method"],
+        "properties": { "method": { "const": "initialize" } }
+      },
+      "then": {
+        "required": ["id", "params"],
+        "properties": {
+          "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+          "params": { "$ref": "#/$defs/initializeParams" }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["method"],
+        "properties": { "method": { "const": "initialized" } }
+      },
+      "then": {
+        "required": ["params"],
+        "not": { "required": ["id"] },
+        "properties": {
+          "params": {
+            "type": "object",
+            "maxProperties": 0,
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "jsonRpcRequestId": {
+      "type": "string",
+      "pattern": "^[!-~]+$",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "jsonRpcId": {
+      "oneOf": [
+        { "$ref": "#/$defs/jsonRpcRequestId" },
+        { "type": "null" }
+      ]
+    },
+    "jsonRpcError": {
+      "type": "object",
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "integer" },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "data": {}
+      }
+    },
+    "protocolVersion": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$",
+      "minLength": 3,
+      "maxLength": 16
+    },
+    "protocolRange": {
+      "type": "object",
+      "required": ["minimum", "maximum"],
+      "additionalProperties": false,
+      "properties": {
+        "minimum": { "$ref": "#/$defs/protocolVersion" },
+        "maximum": { "$ref": "#/$defs/protocolVersion" }
+      }
+    },
+    "protocolPreference": {
+      "type": "object",
+      "required": ["minimum", "maximum", "preferred"],
+      "additionalProperties": false,
+      "properties": {
+        "minimum": { "$ref": "#/$defs/protocolVersion" },
+        "maximum": { "$ref": "#/$defs/protocolVersion" },
+        "preferred": { "$ref": "#/$defs/protocolVersion" }
+      }
+    },
+    "negotiatedProtocol": {
+      "type": "object",
+      "required": ["minimum", "maximum", "selected", "upgrade_direction"],
+      "additionalProperties": false,
+      "properties": {
+        "minimum": { "$ref": "#/$defs/protocolVersion" },
+        "maximum": { "$ref": "#/$defs/protocolVersion" },
+        "selected": { "$ref": "#/$defs/protocolVersion" },
+        "upgrade_direction": { "const": "none" }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[!-~]+$",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "required": ["os", "architecture"],
+      "additionalProperties": false,
+      "properties": {
+        "os": {
+          "enum": ["macos", "windows", "linux", "unknown"]
+        },
+        "architecture": { "enum": ["arm64", "x86_64", "unknown"] }
+      }
+    },
+    "capabilityName": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "capabilities": {
+      "type": "object",
+      "required": ["stable", "experimental"],
+      "additionalProperties": false,
+      "properties": {
+        "stable": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capabilityName" }
+        },
+        "experimental": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "required": ["max_frame_bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "max_frame_bytes": {
+          "type": "integer",
+          "const": 4194304
+        }
+      }
+    },
+    "stdioTransportSecurity": {
+      "type": "object",
+      "required": [
+        "transport",
+        "local",
+        "authenticated",
+        "encrypted",
+        "peer_verified"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "transport": { "const": "stdio" },
+        "local": { "const": true },
+        "authenticated": { "const": false },
+        "encrypted": { "const": false },
+        "peer_verified": { "const": false }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "required": ["adapter", "status", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "status": {
+          "enum": ["ready", "unavailable", "read-only-recovery"]
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[!-~]+$",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "initializeParams": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "client",
+        "platform",
+        "capabilities",
+        "limits",
+        "transport_security"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocolPreference" },
+        "client": { "$ref": "#/$defs/identity" },
+        "platform": { "$ref": "#/$defs/platform" },
+        "capabilities": { "$ref": "#/$defs/capabilities" },
+        "limits": { "$ref": "#/$defs/limits" },
+        "transport_security": { "$ref": "#/$defs/stdioTransportSecurity" }
+      }
+    },
+    "initializeResult": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "runtime",
+        "platform",
+        "backend",
+        "capabilities",
+        "limits",
+        "transport_security"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": { "$ref": "#/$defs/negotiatedProtocol" },
+        "runtime": { "$ref": "#/$defs/identity" },
+        "platform": { "$ref": "#/$defs/platform" },
+        "backend": { "$ref": "#/$defs/backend" },
+        "capabilities": { "$ref": "#/$defs/capabilities" },
+        "limits": { "$ref": "#/$defs/limits" },
+        "transport_security": { "$ref": "#/$defs/stdioTransportSecurity" }
+      }
+    },
+    "initializeRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "method": { "const": "initialize" },
+        "params": { "$ref": "#/$defs/initializeParams" }
+      }
+    },
+    "initializeSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "result": { "$ref": "#/$defs/initializeResult" }
+      }
+    },
+    "initializedNotification": {
+      "type": "object",
+      "required": ["jsonrpc", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "initialized" },
+        "params": {
+          "type": "object",
+          "maxProperties": 0,
+          "additionalProperties": false
+        }
+      }
+    },
+    "initializeIncompatibleData": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "reason",
+        "client",
+        "runtime",
+        "upgrade_direction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "initialize-error/0.1" },
+        "reason": { "const": "protocol-range-not-overlapping" },
+        "client": { "$ref": "#/$defs/protocolRange" },
+        "runtime": { "$ref": "#/$defs/protocolRange" },
+        "upgrade_direction": { "enum": ["client", "runtime"] }
+      }
+    },
+    "initializeIncompatibleErrorResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message", "data"],
+          "additionalProperties": false,
+          "properties": {
+            "code": { "const": -32003 },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "data": { "$ref": "#/$defs/initializeIncompatibleData" }
+          }
+        }
+      }
+    }
+  }
 }

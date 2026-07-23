@@ -1,4 +1,4 @@
-{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocol_version":"0.1","client":{"name":"aegisy-client","version":"2.5.2"}}}
-{"jsonrpc":"2.0","method":"initialized"}
+{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocol":{"minimum":"0.1","maximum":"0.1","preferred":"0.1"},"client":{"name":"aegisy-client","version":"2.5.2"},"platform":{"os":"macos","architecture":"arm64"},"capabilities":{"stable":["permission.read-only","runtime.health"],"experimental":[]},"limits":{"max_frame_bytes":4194304},"transport_security":{"transport":"stdio","local":true,"authenticated":false,"encrypted":false,"peer_verified":false}}}
+{"jsonrpc":"2.0","method":"initialized","params":{}}
 {"jsonrpc":"2.0","id":"2","method":"session/start","params":{"mode":"chat","title":"AAP fixture"}}
 {"jsonrpc":"2.0","id":"3","method":"turn/start","params":{"session_id":"session-1","input":"hello","idempotency_key":"fixture-turn-1"}}

@@ -36,6 +36,51 @@ Each milestone in `roadmap.md` must attach:
 Implementation is in progress and does not claim that the full workbench, model
 catalog, sandbox, or autonomous feature set is complete.
 
+AAP 0.1 initialization and capability-negotiation evidence (`3.3`):
+
+- The stable schema, Rust types/Runtime, daemon stdio loop, Qt client, checked-in
+  fixtures, internal guide, design, and protocol delta spec agree on one strict
+  two-stage contract: `initialize` carries structured client version range,
+  identity, platform, stable/experimental capability declarations, fixed frame
+  limit, and current transport-security facts; the client becomes usable only
+  after the Runtime consumes the exact object-params `initialized` notification.
+- Protocol versions are compared as bounded `(u64, u64)` pairs rather than text.
+  Both incompatible directions return a content-free `initialize-error/0.1`
+  with the exact `client` or `runtime` upgrade direction and leave the Runtime
+  available for a corrected initialize request.
+- The Runtime returns only the declared/available stable capability intersection
+  in deterministic registry order and exactly an empty experimental list. Ready
+  or recovery state requires the matching backend marker and
+  `permission.read-only`; every ordinary method is denied until the second-stage
+  notification and when its stable capability was not negotiated. Terminal stop
+  requires lifecycle, platform, and out-of-band capabilities together.
+- Requests and notifications require object `params`; success responses require a
+  non-null bounded ASCII graphical string ID, while parse/envelope errors may use
+  `id:null`. Queue-full handling applies the same strict envelope classification.
+  The Draft 2020-12 schema tests validate both compatible/incompatible fixtures and
+  reject legacy handshake, null success IDs, empty stable declarations, non-empty
+  experimental declarations, and missing request/notification params.
+- AAP `0.1` fixes both directions at exactly 4 MiB. The daemon drains a physical
+  oversized line without parsing it, returns fixed content-free `id:null/-32005`,
+  and accepts the next frame. Oversized responses become same-ID `-32005` before
+  writing; oversized notifications close the transport with zero output instead of
+  being silently dropped. Qt rejects oversized outbound requests before adding
+  pending state and terminates on oversized or malformed inbound protocol data.
+  Tests prove a credential-shaped oversized body is neither parsed nor echoed.
+- The current local stdio transport truthfully reports `local:true` with
+  authentication, encryption, and peer verification all false. Authenticated Unix
+  sockets and Windows named pipes remain owned by `4.2` through `4.4`; no transport
+  authority, credential field, or Agent mutation permission was added by `3.3`.
+- Verified commands on 2026-07-24:
+  `cargo fmt --all --manifest-path agent-runtime/Cargo.toml -- --check`;
+  `cargo test --workspace --manifest-path agent-runtime/Cargo.toml` (8 AAP type,
+  630 sidecar library passed plus one ignored live fixture, 6 daemon main, 10
+  context-threshold, 13 handshake Runtime, 5 handshake Schema, 63 protocol, and 22
+  stdio/Codex tests); strict workspace Clippy with warnings denied; CMake builds for
+  `AegisyAgentRuntimeEnvironmentTest` and `AegisyAgentWorkbenchRenderTest`; CTest
+  `agent_runtime_protocol`, `agent_workbench_render`, and
+  `agent_runtime_environment`; strict OpenSpec validation; and `git diff --check`.
+
 Model catalog foundation evidence:
 
 - An internal `model-catalog/0.1` contract now validates bounded model identity,

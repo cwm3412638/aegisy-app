@@ -1642,17 +1642,20 @@ int main(int argc, char *argv[])
         {QStringLiteral("backend"), QJsonObject{
             {QStringLiteral("status"), QStringLiteral("ready")},
         }},
-        {QStringLiteral("capabilities"), QJsonArray{
-            QStringLiteral("background-job.recovery.inspect"),
-            QStringLiteral("background-notification.outbox.read-only"),
-            QStringLiteral("session.compaction.checkpoint-review"),
-            QStringLiteral("turn.context.pinned-selected"),
-            QStringLiteral("workspace.git-context.read-only"),
-            QStringLiteral("workspace.image.import-user"),
-            QStringLiteral("workspace.image.preview"),
-            QStringLiteral("model.catalog.cache.read-only"),
-            QStringLiteral("model.catalog.refresh.status.read-only"),
-            QStringLiteral("model.profile.read-only"),
+        {QStringLiteral("capabilities"), QJsonObject{
+            {QStringLiteral("stable"), QJsonArray{
+                QStringLiteral("background-job.recovery.inspect"),
+                QStringLiteral("background-notification.outbox.read-only"),
+                QStringLiteral("session.compaction.checkpoint-review"),
+                QStringLiteral("turn.context.pinned-selected"),
+                QStringLiteral("workspace.git-context.read-only"),
+                QStringLiteral("workspace.image.import-user"),
+                QStringLiteral("workspace.image.preview"),
+                QStringLiteral("model.catalog.cache.read-only"),
+                QStringLiteral("model.catalog.refresh.status.read-only"),
+                QStringLiteral("model.profile.read-only"),
+            }},
+            {QStringLiteral("experimental"), QJsonArray{}},
         }},
     });
     runtimeClient->runtimeDegradationsRead(

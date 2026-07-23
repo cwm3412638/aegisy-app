@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use aegisy_aap::MAX_AAP_FRAME_BYTES;
 use aegisy_agentd::turn_trace::{
     CompletionDomain, ErrorClass as TraceErrorClass, EvidenceSource as TraceEvidenceSource,
     RuntimeDenialAttribution, RuntimeDenialRequestKind, RuntimeDenialResponseState,
@@ -8,6 +9,7 @@ use aegisy_agentd::turn_trace::{
     TurnKind as TraceTurnKind, UsageAccounting, UsageAttribution, UsageReportScope,
 };
 use aegisy_agentd::workbench_store::WorkbenchStore;
+use aegisy_agentd::STABLE_CAPABILITY_REGISTRY;
 #[cfg(target_os = "macos")]
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 #[cfg(target_os = "macos")]
@@ -25,6 +27,23 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn request(id: &str, method: &str, params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+}
+
+fn initialize_params(client_name: &str) -> Value {
+    json!({
+        "protocol": {"minimum": "0.1", "maximum": "0.1", "preferred": "0.1"},
+        "client": {"name": client_name, "version": "1"},
+        "platform": {"os": "macos", "architecture": "arm64"},
+        "capabilities": {"stable": STABLE_CAPABILITY_REGISTRY, "experimental": []},
+        "limits": {"max_frame_bytes": MAX_AAP_FRAME_BYTES},
+        "transport_security": {
+            "transport": "stdio",
+            "local": true,
+            "authenticated": false,
+            "encrypted": false,
+            "peer_verified": false
+        }
+    })
 }
 
 fn send(stdin: &mut ChildStdin, message: &Value) {
@@ -84,19 +103,12 @@ fn start_codex_runtime(
     let initialize_id = format!("{prefix}-initialize");
     send(
         &mut stdin,
-        &request(
-            &initialize_id,
-            "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
-        ),
+        &request(&initialize_id, "initialize", initialize_params("test")),
     );
     receive_until(&receiver, |message| message["id"] == initialize_id);
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     let session_id = format!("{prefix}-session");
     send(
@@ -109,6 +121,63 @@ fn start_codex_runtime(
         .unwrap_or_else(|| panic!("session did not start: {session}"))
         .to_owned();
     (child, stdin, receiver, reader, session_id)
+}
+
+#[test]
+fn stdio_drains_physical_oversized_frame_reports_fixed_error_and_continues() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
+        .env("AEGISY_AGENT_BACKEND", "preview")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(message) = serde_json::from_str(&line) {
+                if sender.send(message).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    stdin
+        .write_all(&vec![
+            b'x';
+            usize::try_from(MAX_AAP_FRAME_BYTES).unwrap() + 1
+        ])
+        .unwrap();
+    stdin.write_all(b"\n").unwrap();
+    send(
+        &mut stdin,
+        &request(
+            "initialize-after-oversized",
+            "initialize",
+            initialize_params("oversized"),
+        ),
+    );
+
+    let oversized = receive_until(&receiver, |message| message["error"]["code"] == -32005);
+    assert_eq!(oversized["jsonrpc"], "2.0");
+    assert!(oversized["id"].is_null());
+    let initialized = receive_until(&receiver, |message| {
+        message["id"] == "initialize-after-oversized"
+    });
+    assert_eq!(initialized["result"]["protocol"]["selected"], "0.1");
+
+    send(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    );
+    send(&mut stdin, &request("shutdown", "shutdown", json!({})));
+    receive_until(&receiver, |message| message["id"] == "shutdown");
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
 }
 
 fn fake_codex() -> PathBuf {
@@ -805,16 +874,13 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
         &request(
             "metadata-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     receive_until(&receiver, |message| message["id"] == "metadata-initialize");
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut stdin,
@@ -1013,10 +1079,7 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
         &request(
             "metadata-reinitialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     receive_until(&restarted_receiver, |message| {
@@ -1024,7 +1087,7 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
     });
     send(
         &mut restarted_stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut restarted_stdin,
@@ -1085,16 +1148,13 @@ fn stdio_codex_startup_crash_loop_is_bounded_and_unavailable() {
         &request(
             "startup-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     let initialized = receive_until(&receiver, |message| message["id"] == "startup-initialize");
     assert_eq!(initialized["result"]["backend"]["status"], "unavailable");
     assert_eq!(
-        initialized["result"]["capabilities"][0],
+        initialized["result"]["capabilities"]["stable"][0],
         "runtime.unavailable"
     );
     let attempts_text = fs::read_to_string(&attempts).unwrap();
@@ -1102,7 +1162,7 @@ fn stdio_codex_startup_crash_loop_is_bounded_and_unavailable() {
 
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut stdin,
@@ -1166,21 +1226,18 @@ fn stdio_codex_restart_recovers_after_later_process_exit() {
         &request(
             "restart-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     let initialized = receive_until(&receiver, |message| message["id"] == "restart-initialize");
-    assert!(initialized["result"]["capabilities"]
+    assert!(initialized["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "runtime.restart"));
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
 
     let mut exited = false;
@@ -1310,16 +1367,13 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
         &request(
             "reconnect-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     receive_until(&receiver, |message| message["id"] == "reconnect-initialize");
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut stdin,
@@ -1605,10 +1659,7 @@ fn stdio_codex_provider_failure_preserves_content_free_upstream_classification()
         &request(
             "provider-failure-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     receive_until(&receiver, |message| {
@@ -1616,7 +1667,7 @@ fn stdio_codex_provider_failure_preserves_content_free_upstream_classification()
     });
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut stdin,
@@ -1849,16 +1900,13 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
         &request(
             "approval-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     receive_until(&receiver, |message| message["id"] == "approval-initialize");
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut stdin,
@@ -2095,16 +2143,13 @@ fn stdio_codex_approval_request_must_match_the_active_turn() {
         &request(
             "mismatch-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     receive_until(&receiver, |message| message["id"] == "mismatch-initialize");
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut stdin,
@@ -2475,10 +2520,7 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
         &request(
             "diagnostic-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     receive_until(&receiver, |message| {
@@ -2486,7 +2528,7 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
     });
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut stdin,
@@ -2837,19 +2879,12 @@ fn stdio_command_completed_and_declined_preserve_exact_provider_tool_states() {
 
         send(
             &mut stdin,
-            &request(
-                "tool-initialize",
-                "initialize",
-                json!({
-                    "protocol_version": "0.1",
-                    "client": { "name": "test", "version": "1" }
-                }),
-            ),
+            &request("tool-initialize", "initialize", initialize_params("test")),
         );
         receive_until(&receiver, |message| message["id"] == "tool-initialize");
         send(
             &mut stdin,
-            &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+            &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
         );
         send(
             &mut stdin,
@@ -3019,10 +3054,7 @@ fn stdio_completed_turn_with_incomplete_command_fails_durably_and_restarts_start
         &request(
             "tool-incomplete-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     receive_until(&receiver, |message| {
@@ -3030,7 +3062,7 @@ fn stdio_completed_turn_with_incomplete_command_fails_durably_and_restarts_start
     });
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut stdin,
@@ -3210,10 +3242,7 @@ fn stdio_command_persistence_failure_retains_started_without_terminal_tool_or_bl
         &request(
             "tool-failure-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     receive_until(&receiver, |message| {
@@ -3221,7 +3250,7 @@ fn stdio_command_persistence_failure_retains_started_without_terminal_tool_or_bl
     });
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut stdin,
@@ -3385,19 +3414,12 @@ fn stdio_trace_budget_exhaustion_fails_durably_before_command_terminal_persisten
 
     send(
         &mut stdin,
-        &request(
-            "budget-initialize",
-            "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
-        ),
+        &request("budget-initialize", "initialize", initialize_params("test")),
     );
     receive_until(&receiver, |message| message["id"] == "budget-initialize");
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut stdin,
@@ -3608,10 +3630,7 @@ fn stdio_trace_budget_exhaustion_fails_durably_before_command_terminal_persisten
         &request(
             "budget-restart-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     receive_until(&restarted_receiver, |message| {
@@ -3619,7 +3638,7 @@ fn stdio_trace_budget_exhaustion_fails_durably_before_command_terminal_persisten
     });
     send(
         &mut restarted_stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut restarted_stdin,
@@ -3678,34 +3697,27 @@ fn stdio_control_steers_and_cancels_a_turn_while_normal_dispatch_is_blocked() {
 
     send(
         &mut stdin,
-        &request(
-            "1",
-            "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
-        ),
+        &request("1", "initialize", initialize_params("test")),
     );
     let initialized = receive_until(&receiver, |message| message["id"] == "1");
-    assert!(initialized["result"]["capabilities"]
+    assert!(initialized["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "turn.cancel.interrupt"));
-    assert!(initialized["result"]["capabilities"]
+    assert!(initialized["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "turn.steer.same-turn"));
-    assert!(initialized["result"]["capabilities"]
+    assert!(initialized["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "session.provider.lifecycle.archive"));
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     let mut health = Value::Null;
     for index in 0..20 {
@@ -3933,16 +3945,13 @@ fn stdio_provider_archive_and_unarchive_follow_session_lifecycle() {
         &request(
             "lifecycle-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     receive_until(&receiver, |message| message["id"] == "lifecycle-initialize");
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut stdin,
@@ -4021,23 +4030,20 @@ fn stdio_provider_thread_list_and_read_are_bounded_metadata_projections() {
         &request(
             "provider-read-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     let initialized = receive_until(&receiver, |message| {
         message["id"] == "provider-read-initialize"
     });
-    assert!(initialized["result"]["capabilities"]
+    assert!(initialized["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "session.provider.lifecycle.list-read"));
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
 
     send(
@@ -4444,21 +4450,18 @@ fn stdio_control_stops_user_terminal_while_model_dispatch_is_blocked() {
         &request(
             "terminal-initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "test", "version": "1" }
-            }),
+            initialize_params("test"),
         ),
     );
     let initialized = receive_until(&receiver, |message| message["id"] == "terminal-initialize");
-    assert!(initialized["result"]["capabilities"]
+    assert!(initialized["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
         .iter()
         .any(|capability| capability == "terminal.stop.out-of-band"));
     send(
         &mut stdin,
-        &json!({ "jsonrpc": "2.0", "method": "initialized" }),
+        &json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
     );
     send(
         &mut stdin,

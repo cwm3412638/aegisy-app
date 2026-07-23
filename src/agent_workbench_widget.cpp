@@ -941,7 +941,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_gitContextAvailable = false;
         bool imageImportAvailable = false;
         bool imagePreviewAvailable = false;
-        for (const QJsonValue &capability : result.value(QStringLiteral("capabilities")).toArray()) {
+        const QJsonObject negotiatedCapabilities =
+            result.value(QStringLiteral("capabilities")).toObject();
+        for (const QJsonValue &capability :
+             negotiatedCapabilities.value(QStringLiteral("stable")).toArray()) {
             const QString name = capability.toString();
             if (name == QStringLiteral("session.compaction.checkpoint-review")) {
                 m_compactionAvailable = true;

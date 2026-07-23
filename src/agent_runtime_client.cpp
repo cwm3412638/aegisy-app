@@ -8,14 +8,746 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStandardPaths>
+#include <QSysInfo>
 #include <QTimer>
 
-#include <algorithm>
+#include <cmath>
+#include <limits>
 
 namespace {
 constexpr int kStartupTimeoutMs = 5000;
-constexpr int kMaximumFrameBytes = 8 * 1024 * 1024;
+constexpr int kMaximumFrameBytes = 4 * 1024 * 1024;
+constexpr int kMaximumIdentityBytes = 64;
+constexpr int kMaximumMethodBytes = 128;
+constexpr int kMaximumRequestIdBytes = 128;
+constexpr int kMaximumCapabilities = 128;
+constexpr int kMaximumCapabilityBytes = 128;
+constexpr int kMaximumErrorMessageBytes = 2048;
+
+// Keep the range explicit so a later compatible AAP revision changes one reviewed
+// boundary instead of weakening response validation throughout the client.
+const QString kMinimumProtocolVersion = QStringLiteral("0.1");
+const QString kMaximumProtocolVersion = QStringLiteral("0.1");
+const QString kPreferredProtocolVersion = QStringLiteral("0.1");
+const QString kRuntimeName = QStringLiteral("aegisy-agentd");
+const QString kMinimumRuntimeVersion = QStringLiteral("0.1.0");
+const QString kMaximumRuntimeVersion = QStringLiteral("0.1.0");
+const QString kPreviewAdapter = QStringLiteral("preview");
+const QString kPreviewVersion = QStringLiteral("0.1.0");
+const QString kCodexAdapter = QStringLiteral("codex-app-server");
+const QString kCodexVersion = QStringLiteral("codex-cli 0.144.5");
+const QString kRecoveryAdapter = QStringLiteral("aegisy-workbench-store");
+const QString kRecoveryVersion = QStringLiteral("workbench-recovery-diagnostic/0.1");
+
+struct ProtocolVersion
+{
+    quint64 major = 0;
+    quint64 minor = 0;
+};
+
+bool parseProtocolVersion(const QJsonValue &value, ProtocolVersion *version)
+{
+    if (!value.isString()) return false;
+    static const QRegularExpression pattern(
+        QStringLiteral("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"));
+    const QString text = value.toString();
+    if (text.toUtf8().size() > 16) return false;
+    const QRegularExpressionMatch match = pattern.match(text);
+    if (!match.hasMatch()) return false;
+    bool majorOk = false;
+    bool minorOk = false;
+    const quint64 major = match.captured(1).toULongLong(&majorOk);
+    const quint64 minor = match.captured(2).toULongLong(&minorOk);
+    if (!majorOk || !minorOk) return false;
+    if (version) *version = {major, minor};
+    return true;
+}
+
+int compareProtocolVersions(const ProtocolVersion &left, const ProtocolVersion &right)
+{
+    if (left.major != right.major) return left.major < right.major ? -1 : 1;
+    if (left.minor != right.minor) return left.minor < right.minor ? -1 : 1;
+    return 0;
+}
+
+QString platformOs()
+{
+#if defined(Q_OS_MACOS)
+    return QStringLiteral("macos");
+#elif defined(Q_OS_WIN)
+    return QStringLiteral("windows");
+#elif defined(Q_OS_LINUX)
+    return QStringLiteral("linux");
+#else
+    return QStringLiteral("unknown");
+#endif
+}
+
+QString platformArchitecture()
+{
+#if defined(Q_PROCESSOR_ARM_64)
+    return QStringLiteral("arm64");
+#elif defined(Q_PROCESSOR_X86_64)
+    return QStringLiteral("x86_64");
+#else
+    return QStringLiteral("unknown");
+#endif
+}
+
+QString terminalPlatformCapability()
+{
+#if defined(Q_OS_MACOS)
+    return QStringLiteral("terminal.pty.macos.user-initiated");
+#elif defined(Q_OS_WIN)
+    return QStringLiteral("terminal.conpty.windows.user-initiated");
+#else
+    return QStringLiteral("__unsupported_terminal_platform__");
+#endif
+}
+
+QJsonObject localPlatform()
+{
+    return {
+        {QStringLiteral("os"), platformOs()},
+        {QStringLiteral("architecture"), platformArchitecture()},
+    };
+}
+
+QJsonObject stdioTransportSecurity()
+{
+    return {
+        {QStringLiteral("transport"), QStringLiteral("stdio")},
+        {QStringLiteral("local"), true},
+        {QStringLiteral("authenticated"), false},
+        {QStringLiteral("encrypted"), false},
+        {QStringLiteral("peer_verified"), false},
+    };
+}
+
+bool hasExactKeys(const QJsonObject &object, const QStringList &keys)
+{
+    QSet<QString> expected(keys.cbegin(), keys.cend());
+    QSet<QString> actual;
+    const QStringList actualKeys = object.keys();
+    for (const QString &key : actualKeys) actual.insert(key);
+    return actual == expected;
+}
+
+bool isCanonicalRequestId(const QJsonValue &value)
+{
+    if (!value.isString()) return false;
+    static const QRegularExpression pattern(QStringLiteral("^[1-9][0-9]*$"));
+    const QString id = value.toString();
+    return id.toUtf8().size() <= kMaximumRequestIdBytes
+        && pattern.match(id).hasMatch();
+}
+
+bool isValidErrorObject(const QJsonValue &value)
+{
+    if (!value.isObject()) return false;
+    const QJsonObject error = value.toObject();
+    const bool hasData = error.contains(QStringLiteral("data"));
+    if (!hasExactKeys(error, hasData
+            ? QStringList{QStringLiteral("code"), QStringLiteral("message"),
+                          QStringLiteral("data")}
+            : QStringList{QStringLiteral("code"), QStringLiteral("message")})) {
+        return false;
+    }
+    const QJsonValue code = error.value(QStringLiteral("code"));
+    const QJsonValue message = error.value(QStringLiteral("message"));
+    if (!code.isDouble() || code.toDouble() != std::floor(code.toDouble())
+        || code.toDouble() < std::numeric_limits<int>::min()
+        || code.toDouble() > std::numeric_limits<int>::max()
+        || !message.isString()
+        || message.toString().isEmpty()
+        || message.toString().toUtf8().size() > kMaximumErrorMessageBytes) {
+        return false;
+    }
+    return !hasData || error.value(QStringLiteral("data")).isObject();
+}
+
+bool isValidMethodName(const QJsonValue &value)
+{
+    if (!value.isString()) return false;
+    static const QRegularExpression pattern(
+        QStringLiteral("^[a-z][a-z0-9.-]*(?:/[a-z][a-z0-9.-]*)*$"));
+    const QString method = value.toString();
+    return method.toUtf8().size() <= kMaximumMethodBytes
+        && pattern.match(method).hasMatch();
+}
+
+const QStringList &declaredCapabilities()
+{
+    static const QStringList capabilities = {
+        QStringLiteral("artifact.command-output.bounded"),
+        QStringLiteral("background-job.recovery.inspect"),
+        QStringLiteral("background-notification.outbox.read-only"),
+        QStringLiteral("model.capability-check.read-only"),
+        QStringLiteral("model.catalog.cache.read-only"),
+        QStringLiteral("model.catalog.read-only"),
+        QStringLiteral("model.catalog.refresh.status.read-only"),
+        QStringLiteral("model.profile.read-only"),
+        QStringLiteral("operation.reconciliation"),
+        QStringLiteral("operation.reconciliation.probe"),
+        QStringLiteral("operation.reconciliation.status"),
+        QStringLiteral("permission.read-only"),
+        QStringLiteral("project.list"),
+        QStringLiteral("project.navigation.persistent"),
+        QStringLiteral("project.open"),
+        QStringLiteral("project.relink.explicit"),
+        QStringLiteral("project.roots.scoped"),
+        QStringLiteral("project.trust-acknowledge"),
+        QStringLiteral("project.trust-review"),
+        QStringLiteral("retention.maintenance.host-triggered"),
+        QStringLiteral("retention.policy.manage"),
+        QStringLiteral("runtime.codex-app-server"),
+        QStringLiteral("runtime.degradations"),
+        QStringLiteral("runtime.health"),
+        QStringLiteral("runtime.preview"),
+        QStringLiteral("runtime.projection-recovery.status"),
+        QStringLiteral("runtime.recovery.diagnostic-export"),
+        QStringLiteral("runtime.recovery.read-only"),
+        QStringLiteral("runtime.recovery.status"),
+        QStringLiteral("runtime.restart"),
+        QStringLiteral("runtime.unavailable"),
+        QStringLiteral("session.chat"),
+        QStringLiteral("session.compaction.checkpoint-review"),
+        QStringLiteral("session.deletion.two-phase"),
+        QStringLiteral("session.deletion.undo"),
+        QStringLiteral("session.fork"),
+        QStringLiteral("session.history.paginated"),
+        QStringLiteral("session.list"),
+        QStringLiteral("session.metadata.manage"),
+        QStringLiteral("session.portable.export"),
+        QStringLiteral("session.portable.import"),
+        QStringLiteral("session.provider.lifecycle.archive"),
+        QStringLiteral("session.provider.lifecycle.list-read"),
+        QStringLiteral("session.provider.lifecycle.unarchive"),
+        QStringLiteral("session.recovery.status"),
+        QStringLiteral("session.resume"),
+        QStringLiteral("session.search.branch"),
+        QStringLiteral("session.work.preview"),
+        QStringLiteral("session.workspace-binding.read-only"),
+        QStringLiteral("terminal.conpty.windows.user-initiated"),
+        QStringLiteral("terminal.environment.session-scoped"),
+        QStringLiteral("terminal.excerpt.read"),
+        QStringLiteral("terminal.lifecycle.named"),
+        QStringLiteral("terminal.pty.macos.user-initiated"),
+        QStringLiteral("terminal.pty.unsupported"),
+        QStringLiteral("terminal.stop.out-of-band"),
+        QStringLiteral("timeline.command.structured.read-only"),
+        QStringLiteral("timeline.streaming"),
+        QStringLiteral("turn.cancel.interrupt"),
+        QStringLiteral("turn.context.inspect"),
+        QStringLiteral("turn.context.manifest"),
+        QStringLiteral("turn.context.pinned-selected"),
+        QStringLiteral("turn.context.structured"),
+        QStringLiteral("turn.steer.same-turn"),
+        QStringLiteral("workspace.definition"),
+        QStringLiteral("workspace.diagnostics.command-output"),
+        QStringLiteral("workspace.diagnostics.language-server"),
+        QStringLiteral("workspace.diagnostics.observed"),
+        QStringLiteral("workspace.diagnostics.raw-reference"),
+        QStringLiteral("workspace.edit.preview.read-only"),
+        QStringLiteral("workspace.git-context.read-only"),
+        QStringLiteral("workspace.git-query.read-only"),
+        QStringLiteral("workspace.git-status"),
+        QStringLiteral("workspace.image.import-user"),
+        QStringLiteral("workspace.image.preview"),
+        QStringLiteral("workspace.index.cancel"),
+        QStringLiteral("workspace.index.tree-sitter"),
+        QStringLiteral("workspace.instructions.discovery"),
+        QStringLiteral("workspace.language-servers"),
+        QStringLiteral("workspace.list"),
+        QStringLiteral("workspace.metadata"),
+        QStringLiteral("workspace.pinned-context.manage"),
+        QStringLiteral("workspace.pinned-context.store"),
+        QStringLiteral("workspace.read-text"),
+        QStringLiteral("workspace.references"),
+        QStringLiteral("workspace.repository-map.budgeted"),
+        QStringLiteral("workspace.save-user-text"),
+        QStringLiteral("workspace.search.bounded"),
+        QStringLiteral("workspace.search.cancel"),
+        QStringLiteral("workspace.watch.poll"),
+    };
+    return capabilities;
+}
+
+bool isBoundedString(const QJsonValue &value, const QString &expected)
+{
+    if (!value.isString()) return false;
+    const QString text = value.toString();
+    return !text.isEmpty() && text.toUtf8().size() <= kMaximumIdentityBytes
+        && text == expected;
+}
+
+bool containsCapability(const QSet<QString> &capabilities, const char *capability)
+{
+    return capabilities.contains(QString::fromLatin1(capability));
+}
+
+bool validateCapabilityArray(const QJsonValue &value,
+                             const QSet<QString> &declared,
+                             bool allowEmpty,
+                             QSet<QString> *validated,
+                             QString *reasonCode)
+{
+    if (!value.isArray()) {
+        if (reasonCode) *reasonCode = QStringLiteral("capabilities-type");
+        return false;
+    }
+    const QJsonArray array = value.toArray();
+    if ((!allowEmpty && array.isEmpty()) || array.size() > kMaximumCapabilities) {
+        if (reasonCode) *reasonCode = QStringLiteral("capabilities-count");
+        return false;
+    }
+    static const QRegularExpression pattern(
+        QStringLiteral("^[a-z0-9]+(?:[.-][a-z0-9]+)*$"));
+    QSet<QString> result;
+    for (const QJsonValue &entry : array) {
+        if (!entry.isString()) {
+            if (reasonCode) *reasonCode = QStringLiteral("capability-type");
+            return false;
+        }
+        const QString capability = entry.toString();
+        if (capability.toUtf8().size() > kMaximumCapabilityBytes
+            || !pattern.match(capability).hasMatch()) {
+            if (reasonCode) *reasonCode = QStringLiteral("capability-format");
+            return false;
+        }
+        if (!declared.contains(capability)) {
+            if (reasonCode) *reasonCode = QStringLiteral("capability-not-declared");
+            return false;
+        }
+        if (result.contains(capability)) {
+            if (reasonCode) *reasonCode = QStringLiteral("capability-duplicate");
+            return false;
+        }
+        result.insert(capability);
+    }
+    if (validated) *validated = result;
+    return true;
+}
+
+bool validateInitializeResult(const QJsonObject &result,
+                              QSet<QString> *stableCapabilities,
+                              int *maximumFrameBytes,
+                              QString *reasonCode)
+{
+    const auto fail = [reasonCode](const char *code) {
+        if (reasonCode) *reasonCode = QString::fromLatin1(code);
+        return false;
+    };
+    if (!hasExactKeys(result, {
+            QStringLiteral("protocol"),
+            QStringLiteral("runtime"),
+            QStringLiteral("platform"),
+            QStringLiteral("backend"),
+            QStringLiteral("capabilities"),
+            QStringLiteral("limits"),
+            QStringLiteral("transport_security"),
+        })) return fail("result-fields");
+
+    const QJsonValue protocolValue = result.value(QStringLiteral("protocol"));
+    if (!protocolValue.isObject()) return fail("protocol-type");
+    const QJsonObject protocol = protocolValue.toObject();
+    if (!hasExactKeys(protocol, {
+            QStringLiteral("minimum"), QStringLiteral("maximum"),
+            QStringLiteral("selected"), QStringLiteral("upgrade_direction"),
+        })) return fail("protocol-fields");
+    ProtocolVersion runtimeMinimum;
+    ProtocolVersion runtimeMaximum;
+    ProtocolVersion selected;
+    ProtocolVersion clientMinimum;
+    ProtocolVersion clientMaximum;
+    if (!parseProtocolVersion(protocol.value(QStringLiteral("minimum")), &runtimeMinimum)
+        || !parseProtocolVersion(protocol.value(QStringLiteral("maximum")), &runtimeMaximum)
+        || !parseProtocolVersion(protocol.value(QStringLiteral("selected")), &selected)
+        || !parseProtocolVersion(QJsonValue(kMinimumProtocolVersion), &clientMinimum)
+        || !parseProtocolVersion(QJsonValue(kMaximumProtocolVersion), &clientMaximum)
+        || compareProtocolVersions(runtimeMinimum, runtimeMaximum) > 0
+        || compareProtocolVersions(selected, runtimeMinimum) < 0
+        || compareProtocolVersions(selected, runtimeMaximum) > 0
+        || compareProtocolVersions(selected, clientMinimum) < 0
+        || compareProtocolVersions(selected, clientMaximum) > 0
+        || protocol.value(QStringLiteral("selected")).toString()
+            != kPreferredProtocolVersion
+        || protocol.value(QStringLiteral("upgrade_direction")).toString()
+            != QStringLiteral("none")) {
+        return fail("protocol-version");
+    }
+
+    const QJsonValue runtimeValue = result.value(QStringLiteral("runtime"));
+    if (!runtimeValue.isObject()) return fail("runtime-type");
+    const QJsonObject runtime = runtimeValue.toObject();
+    if (!hasExactKeys(runtime, {
+            QStringLiteral("name"), QStringLiteral("version"),
+        })) return fail("runtime-fields");
+    if (!isBoundedString(runtime.value(QStringLiteral("name")), kRuntimeName)
+        || !isBoundedString(runtime.value(QStringLiteral("version")),
+                            kMinimumRuntimeVersion)
+        || kMinimumRuntimeVersion != kMaximumRuntimeVersion) {
+        return fail("runtime-identity");
+    }
+
+    const QJsonValue platformValue = result.value(QStringLiteral("platform"));
+    if (!platformValue.isObject()) return fail("platform-type");
+    const QJsonObject platform = platformValue.toObject();
+    if (!hasExactKeys(platform, {
+            QStringLiteral("os"), QStringLiteral("architecture"),
+        })
+        || !isBoundedString(platform.value(QStringLiteral("os")), platformOs())
+        || !isBoundedString(platform.value(QStringLiteral("architecture")),
+                            platformArchitecture())) {
+        return fail("platform-identity");
+    }
+
+    const QJsonValue backendValue = result.value(QStringLiteral("backend"));
+    if (!backendValue.isObject()) return fail("backend-type");
+    const QJsonObject backend = backendValue.toObject();
+    const QJsonValue adapterValue = backend.value(QStringLiteral("adapter"));
+    const QJsonValue versionValue = backend.value(QStringLiteral("version"));
+    const QJsonValue statusValue = backend.value(QStringLiteral("status"));
+    if (!adapterValue.isString() || !versionValue.isString() || !statusValue.isString()
+        || !hasExactKeys(backend, {
+            QStringLiteral("adapter"), QStringLiteral("version"),
+            QStringLiteral("status"),
+        })
+        || adapterValue.toString().toUtf8().size() > kMaximumIdentityBytes
+        || versionValue.toString().toUtf8().size() > kMaximumIdentityBytes
+        || statusValue.toString().toUtf8().size() > kMaximumIdentityBytes) {
+        return fail("backend-fields");
+    }
+
+    const QJsonValue capabilitiesValue = result.value(QStringLiteral("capabilities"));
+    if (!capabilitiesValue.isObject()) return fail("capabilities-type");
+    const QJsonObject capabilityObject = capabilitiesValue.toObject();
+    if (!hasExactKeys(capabilityObject, {
+            QStringLiteral("stable"), QStringLiteral("experimental"),
+        })) return fail("capabilities-fields");
+    QSet<QString> declared;
+    for (const QString &capability : declaredCapabilities()) declared.insert(capability);
+    QSet<QString> negotiated;
+    if (!validateCapabilityArray(capabilityObject.value(QStringLiteral("stable")),
+                                 declared, false, &negotiated, reasonCode)) return false;
+    const QSet<QString> noExperimentalCapabilities;
+    QSet<QString> negotiatedExperimental;
+    if (!validateCapabilityArray(
+            capabilityObject.value(QStringLiteral("experimental")),
+            noExperimentalCapabilities, true, &negotiatedExperimental, reasonCode)
+        || !negotiatedExperimental.isEmpty()) return fail("experimental-capabilities");
+
+    const QJsonValue limitsValue = result.value(QStringLiteral("limits"));
+    if (!limitsValue.isObject()) return fail("limits-type");
+    const QJsonObject limits = limitsValue.toObject();
+    const QJsonValue frameLimit = limits.value(QStringLiteral("max_frame_bytes"));
+    if (!hasExactKeys(limits, {QStringLiteral("max_frame_bytes")})
+        || !frameLimit.isDouble()
+        || frameLimit.toDouble() != std::floor(frameLimit.toDouble())
+        || frameLimit.toDouble() != kMaximumFrameBytes) {
+        return fail("limits-frame");
+    }
+
+    const QJsonValue securityValue = result.value(QStringLiteral("transport_security"));
+    if (!securityValue.isObject()
+        || securityValue.toObject() != stdioTransportSecurity()) {
+        return fail("transport-security");
+    }
+
+    const QString adapter = adapterValue.toString();
+    const QString version = versionValue.toString();
+    const QString status = statusValue.toString();
+    const int backendMarkers = int(containsCapability(negotiated, "runtime.preview"))
+        + int(containsCapability(negotiated, "runtime.codex-app-server"))
+        + int(containsCapability(negotiated, "runtime.recovery.read-only"))
+        + int(containsCapability(negotiated, "runtime.unavailable"));
+    if (backendMarkers != 1) return fail("backend-capability-marker");
+
+    if (adapter == kPreviewAdapter) {
+        if (version != kPreviewVersion || status != QStringLiteral("ready")
+            || !containsCapability(negotiated, "runtime.preview")
+            || containsCapability(negotiated, "runtime.restart")
+            || containsCapability(negotiated,
+                                  "timeline.command.structured.read-only")
+            || containsCapability(negotiated, "turn.cancel.interrupt")
+            || containsCapability(negotiated, "turn.steer.same-turn")
+            || containsCapability(negotiated,
+                                  "session.provider.lifecycle.archive")
+            || containsCapability(negotiated,
+                                  "session.provider.lifecycle.unarchive")
+            || containsCapability(negotiated,
+                                  "session.provider.lifecycle.list-read")) {
+            return fail("backend-preview-combination");
+        }
+    } else if (adapter == kCodexAdapter) {
+        if (version != kCodexVersion) return fail("backend-codex-version");
+        if (status == QStringLiteral("ready")) {
+            if (!containsCapability(negotiated, "runtime.codex-app-server")) {
+                return fail("backend-codex-combination");
+            }
+        } else if (status == QStringLiteral("unavailable")) {
+            const QSet<QString> allowed = {
+                QStringLiteral("runtime.unavailable"),
+                QStringLiteral("runtime.restart"),
+                QStringLiteral("runtime.health"),
+                QStringLiteral("runtime.degradations"),
+            };
+            QSet<QString> unexpected = negotiated;
+            unexpected.subtract(allowed);
+            if (!containsCapability(negotiated, "runtime.unavailable")
+                || !unexpected.isEmpty()) {
+                return fail("backend-unavailable-combination");
+            }
+        } else {
+            return fail("backend-codex-status");
+        }
+    } else if (adapter == kRecoveryAdapter) {
+        const QSet<QString> allowed = {
+            QStringLiteral("runtime.recovery.read-only"),
+            QStringLiteral("runtime.health"),
+            QStringLiteral("runtime.degradations"),
+            QStringLiteral("model.catalog.read-only"),
+            QStringLiteral("model.catalog.refresh.status.read-only"),
+            QStringLiteral("model.capability-check.read-only"),
+            QStringLiteral("runtime.recovery.status"),
+            QStringLiteral("runtime.recovery.diagnostic-export"),
+            QStringLiteral("permission.read-only"),
+        };
+        QSet<QString> unexpected = negotiated;
+        unexpected.subtract(allowed);
+        if (version != kRecoveryVersion || status != QStringLiteral("read-only-recovery")
+            || !containsCapability(negotiated, "runtime.recovery.read-only")
+            || !containsCapability(negotiated, "permission.read-only")
+            || !unexpected.isEmpty()) {
+            return fail("backend-recovery-combination");
+        }
+    } else {
+        return fail("backend-adapter");
+    }
+
+    if (status == QStringLiteral("ready")
+        && !containsCapability(negotiated, "permission.read-only")) {
+        return fail("ready-security-capabilities");
+    }
+    if (stableCapabilities) *stableCapabilities = negotiated;
+    if (maximumFrameBytes) *maximumFrameBytes = int(frameLimit.toDouble());
+    return true;
+}
+
+bool validateInitializeError(const QJsonObject &error, QString *reasonCode)
+{
+    const auto fail = [reasonCode](const char *code) {
+        if (reasonCode) *reasonCode = QString::fromLatin1(code);
+        return false;
+    };
+    if (error.value(QStringLiteral("code")).toInt() != -32003) {
+        if (reasonCode) *reasonCode = QStringLiteral("runtime-rejected");
+        return true;
+    }
+    const QJsonValue dataValue = error.value(QStringLiteral("data"));
+    if (!dataValue.isObject()) return fail("initialize-error-data");
+    const QJsonObject data = dataValue.toObject();
+    if (!hasExactKeys(data, {
+            QStringLiteral("schema_version"), QStringLiteral("reason"),
+            QStringLiteral("client"), QStringLiteral("runtime"),
+            QStringLiteral("upgrade_direction"),
+        })
+        || data.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("initialize-error/0.1")
+        || data.value(QStringLiteral("reason")).toString()
+            != QStringLiteral("protocol-range-not-overlapping")) {
+        return fail("initialize-error-data");
+    }
+    const QJsonValue clientValue = data.value(QStringLiteral("client"));
+    const QJsonValue runtimeValue = data.value(QStringLiteral("runtime"));
+    if (!clientValue.isObject() || !runtimeValue.isObject()) {
+        return fail("initialize-error-ranges");
+    }
+    const QJsonObject client = clientValue.toObject();
+    const QJsonObject runtime = runtimeValue.toObject();
+    if (!hasExactKeys(client, {
+            QStringLiteral("minimum"), QStringLiteral("maximum"),
+        })
+        || !hasExactKeys(runtime, {
+            QStringLiteral("minimum"), QStringLiteral("maximum"),
+        })
+        || client.value(QStringLiteral("minimum")).toString()
+            != kMinimumProtocolVersion
+        || client.value(QStringLiteral("maximum")).toString()
+            != kMaximumProtocolVersion) {
+        return fail("initialize-error-ranges");
+    }
+    ProtocolVersion clientMinimum;
+    ProtocolVersion clientMaximum;
+    ProtocolVersion runtimeMinimum;
+    ProtocolVersion runtimeMaximum;
+    if (!parseProtocolVersion(client.value(QStringLiteral("minimum")), &clientMinimum)
+        || !parseProtocolVersion(client.value(QStringLiteral("maximum")), &clientMaximum)
+        || !parseProtocolVersion(runtime.value(QStringLiteral("minimum")), &runtimeMinimum)
+        || !parseProtocolVersion(runtime.value(QStringLiteral("maximum")), &runtimeMaximum)
+        || compareProtocolVersions(clientMinimum, clientMaximum) > 0
+        || compareProtocolVersions(runtimeMinimum, runtimeMaximum) > 0) {
+        return fail("initialize-error-ranges");
+    }
+    const QString direction = data.value(QStringLiteral("upgrade_direction")).toString();
+    if (direction == QStringLiteral("client")
+        && compareProtocolVersions(clientMaximum, runtimeMinimum) < 0) {
+        if (reasonCode) *reasonCode = QStringLiteral("upgrade-client");
+        return true;
+    }
+    if (direction == QStringLiteral("runtime")
+        && compareProtocolVersions(clientMinimum, runtimeMaximum) > 0) {
+        if (reasonCode) *reasonCode = QStringLiteral("upgrade-runtime");
+        return true;
+    }
+    return fail("initialize-error-direction");
+}
+
+QStringList requiredCapabilitiesForMethod(const QString &method,
+                                          const QJsonObject &params)
+{
+    static const QHash<QString, QString> capabilities = {
+        {QStringLiteral("runtime/health"), QStringLiteral("runtime.health")},
+        {QStringLiteral("runtime/degradations"), QStringLiteral("runtime.degradations")},
+        {QStringLiteral("model/catalog"), QStringLiteral("model.catalog.read-only")},
+        {QStringLiteral("model/catalog-cache"), QStringLiteral("model.catalog.cache.read-only")},
+        {QStringLiteral("model/catalog-refresh-status"), QStringLiteral("model.catalog.refresh.status.read-only")},
+        {QStringLiteral("model/capability-check"), QStringLiteral("model.capability-check.read-only")},
+        {QStringLiteral("model/profile/list"), QStringLiteral("model.profile.read-only")},
+        {QStringLiteral("model/profile/read"), QStringLiteral("model.profile.read-only")},
+        {QStringLiteral("runtime/restart"), QStringLiteral("runtime.restart")},
+        {QStringLiteral("project/list"), QStringLiteral("project.list")},
+        {QStringLiteral("project/navigation"), QStringLiteral("project.navigation.persistent")},
+        {QStringLiteral("project/open"), QStringLiteral("project.open")},
+        {QStringLiteral("project/relink"), QStringLiteral("project.relink.explicit")},
+        {QStringLiteral("project/trust-review"), QStringLiteral("project.trust-review")},
+        {QStringLiteral("project/trust-acknowledge"), QStringLiteral("project.trust-acknowledge")},
+        {QStringLiteral("project/root-list"), QStringLiteral("project.roots.scoped")},
+        {QStringLiteral("project/root-add"), QStringLiteral("project.roots.scoped")},
+        {QStringLiteral("project/root-remove"), QStringLiteral("project.roots.scoped")},
+        {QStringLiteral("session/resume"), QStringLiteral("session.resume")},
+        {QStringLiteral("session/fork"), QStringLiteral("session.fork")},
+        {QStringLiteral("session/list"), QStringLiteral("session.list")},
+        {QStringLiteral("session/search"), QStringLiteral("session.search.branch")},
+        {QStringLiteral("session/title"), QStringLiteral("session.metadata.manage")},
+        {QStringLiteral("session/archive"), QStringLiteral("session.metadata.manage")},
+        {QStringLiteral("session/unarchive"), QStringLiteral("session.metadata.manage")},
+        {QStringLiteral("session/delete/preview"), QStringLiteral("session.deletion.two-phase")},
+        {QStringLiteral("session/delete/schedule"), QStringLiteral("session.deletion.two-phase")},
+        {QStringLiteral("session/delete/undo"), QStringLiteral("session.deletion.undo")},
+        {QStringLiteral("session/deletion/status"), QStringLiteral("session.deletion.two-phase")},
+        {QStringLiteral("session/export/preview"), QStringLiteral("session.portable.export")},
+        {QStringLiteral("session/export"), QStringLiteral("session.portable.export")},
+        {QStringLiteral("session/import/preview"), QStringLiteral("session.portable.import")},
+        {QStringLiteral("session/import"), QStringLiteral("session.portable.import")},
+        {QStringLiteral("retention/policy/read"), QStringLiteral("retention.policy.manage")},
+        {QStringLiteral("retention/policy/set"), QStringLiteral("retention.policy.manage")},
+        {QStringLiteral("retention/policy/remove"), QStringLiteral("retention.policy.manage")},
+        {QStringLiteral("retention/maintenance/run"), QStringLiteral("retention.maintenance.host-triggered")},
+        {QStringLiteral("session/read"), QStringLiteral("session.history.paginated")},
+        {QStringLiteral("session/background-notifications"), QStringLiteral("background-notification.outbox.read-only")},
+        {QStringLiteral("session/background-recovery"), QStringLiteral("background-job.recovery.inspect")},
+        {QStringLiteral("runtime/projection-recovery/status"), QStringLiteral("runtime.projection-recovery.status")},
+        {QStringLiteral("session/recovery/status"), QStringLiteral("session.recovery.status")},
+        {QStringLiteral("operation/status"), QStringLiteral("operation.reconciliation.status")},
+        {QStringLiteral("operation/probe"), QStringLiteral("operation.reconciliation.probe")},
+        {QStringLiteral("operation/reconcile"), QStringLiteral("operation.reconciliation")},
+        {QStringLiteral("session/compaction/checkpoint/create"), QStringLiteral("session.compaction.checkpoint-review")},
+        {QStringLiteral("session/compaction/checkpoint/read"), QStringLiteral("session.compaction.checkpoint-review")},
+        {QStringLiteral("session/compaction/checkpoint/revise"), QStringLiteral("session.compaction.checkpoint-review")},
+        {QStringLiteral("runtime/recovery/status"), QStringLiteral("runtime.recovery.status")},
+        {QStringLiteral("turn/cancel"), QStringLiteral("turn.cancel.interrupt")},
+        {QStringLiteral("turn/context/inspect"), QStringLiteral("turn.context.inspect")},
+        {QStringLiteral("workspace/pinned-context/list"), QStringLiteral("workspace.pinned-context.store")},
+        {QStringLiteral("workspace/pinned-context/save"), QStringLiteral("workspace.pinned-context.manage")},
+        {QStringLiteral("workspace/pinned-context/remove"), QStringLiteral("workspace.pinned-context.manage")},
+        {QStringLiteral("workspace/image/import-user"), QStringLiteral("workspace.image.import-user")},
+        {QStringLiteral("workspace/image/read"), QStringLiteral("workspace.image.preview")},
+        {QStringLiteral("workspace/list"), QStringLiteral("workspace.list")},
+        {QStringLiteral("workspace/read"), QStringLiteral("workspace.read-text")},
+        {QStringLiteral("workspace/save-user-text"), QStringLiteral("workspace.save-user-text")},
+        {QStringLiteral("workspace/metadata"), QStringLiteral("workspace.metadata")},
+        {QStringLiteral("workspace/git-status"), QStringLiteral("workspace.git-status")},
+        {QStringLiteral("workspace/git/overview"), QStringLiteral("workspace.git-query.read-only")},
+        {QStringLiteral("workspace/git/log"), QStringLiteral("workspace.git-query.read-only")},
+        {QStringLiteral("workspace/git/commit"), QStringLiteral("workspace.git-query.read-only")},
+        {QStringLiteral("workspace/git/diff"), QStringLiteral("workspace.git-query.read-only")},
+        {QStringLiteral("workspace/git/context/read"), QStringLiteral("workspace.git-context.read-only")},
+        {QStringLiteral("workspace/search"), QStringLiteral("workspace.search.bounded")},
+        {QStringLiteral("workspace/search/cancel"), QStringLiteral("workspace.search.cancel")},
+        {QStringLiteral("workspace/index"), QStringLiteral("workspace.index.tree-sitter")},
+        {QStringLiteral("workspace/index/cancel"), QStringLiteral("workspace.index.cancel")},
+        {QStringLiteral("workspace/repository-map"), QStringLiteral("workspace.repository-map.budgeted")},
+        {QStringLiteral("workspace/language-servers"), QStringLiteral("workspace.language-servers")},
+        {QStringLiteral("workspace/language-server/start"), QStringLiteral("workspace.language-servers")},
+        {QStringLiteral("workspace/language-server/stop"), QStringLiteral("workspace.language-servers")},
+        {QStringLiteral("workspace/definition"), QStringLiteral("workspace.definition")},
+        {QStringLiteral("workspace/references"), QStringLiteral("workspace.references")},
+        {QStringLiteral("workspace/diagnostics"), QStringLiteral("workspace.diagnostics.language-server")},
+        {QStringLiteral("workspace/observed-diagnostics"), QStringLiteral("workspace.diagnostics.observed")},
+        {QStringLiteral("workspace/diagnostics/raw"), QStringLiteral("workspace.diagnostics.raw-reference")},
+        {QStringLiteral("workspace/edit/preview"), QStringLiteral("workspace.edit.preview.read-only")},
+        {QStringLiteral("workspace/edit/artifact/read"), QStringLiteral("workspace.edit.preview.read-only")},
+        {QStringLiteral("workspace/watch"), QStringLiteral("workspace.watch.poll")},
+        {QStringLiteral("workspace/watch/poll"), QStringLiteral("workspace.watch.poll")},
+        {QStringLiteral("terminal/open-user"), QStringLiteral("terminal.lifecycle.named")},
+        {QStringLiteral("terminal/list"), QStringLiteral("terminal.lifecycle.named")},
+        {QStringLiteral("terminal/attach"), QStringLiteral("terminal.lifecycle.named")},
+        {QStringLiteral("terminal/read"), QStringLiteral("terminal.lifecycle.named")},
+        {QStringLiteral("terminal/input-user"), QStringLiteral("terminal.lifecycle.named")},
+        {QStringLiteral("terminal/resize"), QStringLiteral("terminal.lifecycle.named")},
+        {QStringLiteral("terminal/signal-user"), QStringLiteral("terminal.lifecycle.named")},
+        {QStringLiteral("terminal/stop-user"), QStringLiteral("terminal.lifecycle.named")},
+        {QStringLiteral("terminal/restart-user"), QStringLiteral("terminal.lifecycle.named")},
+        {QStringLiteral("terminal/remove-user"), QStringLiteral("terminal.lifecycle.named")},
+        {QStringLiteral("terminal/excerpt/read"), QStringLiteral("terminal.excerpt.read")},
+        {QStringLiteral("artifact/read-command-output"), QStringLiteral("artifact.command-output.bounded")},
+    };
+
+    if (method == QStringLiteral("shutdown")) return {};
+    if (method == QStringLiteral("session/start")) {
+        return {params.value(QStringLiteral("mode")).toString() == QStringLiteral("chat")
+                    ? QStringLiteral("session.chat")
+                    : QStringLiteral("session.work.preview")};
+    }
+    QStringList required;
+    if (method == QStringLiteral("turn/start")) {
+        required.append(QStringLiteral("timeline.streaming"));
+    } else {
+        const auto capability = capabilities.constFind(method);
+        if (capability == capabilities.cend()) return {QStringLiteral("__unknown_method__")};
+        required.append(*capability);
+    }
+    if ((method == QStringLiteral("turn/start")
+         || method == QStringLiteral("turn/context/inspect"))
+        && !params.value(QStringLiteral("context")).toArray().isEmpty()) {
+        required.append(QStringLiteral("turn.context.structured"));
+    }
+    if ((method == QStringLiteral("turn/start")
+         || method == QStringLiteral("turn/context/inspect"))
+        && (!params.value(QStringLiteral("pinned_context_ids")).toArray().isEmpty()
+            || params.contains(QStringLiteral("pinned_context_set_identity")))) {
+        required.append(QStringLiteral("turn.context.pinned-selected"));
+    }
+    static const QSet<QString> terminalOperations = {
+        QStringLiteral("terminal/open-user"),
+        QStringLiteral("terminal/input-user"),
+        QStringLiteral("terminal/resize"),
+        QStringLiteral("terminal/signal-user"),
+        QStringLiteral("terminal/stop-user"),
+        QStringLiteral("terminal/restart-user"),
+        QStringLiteral("terminal/excerpt/read"),
+    };
+    if (terminalOperations.contains(method)) {
+        required.append(terminalPlatformCapability());
+    }
+    if (method == QStringLiteral("terminal/stop-user")) {
+        required.append(QStringLiteral("terminal.stop.out-of-band"));
+    }
+    return required;
+}
 
 bool sensitiveSidecarEnvironmentName(const QString &name)
 {
@@ -77,8 +809,7 @@ AgentRuntimeClient::AgentRuntimeClient(QObject *parent)
         if (!output.isEmpty()) emit diagnosticMessage(output);
     });
     connect(m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
-        m_ready = false;
-        m_recoveryMode = false;
+        clearNegotiationState();
         const QString detail = QStringLiteral("运行时启动失败：%1").arg(m_process->errorString());
         failPending(detail);
         emit connectionStateChanged(false, detail);
@@ -88,8 +819,7 @@ AgentRuntimeClient::AgentRuntimeClient(QObject *parent)
         m_startupTimer->stop();
         const bool expected = m_stopping;
         m_stopping = false;
-        m_ready = false;
-        m_recoveryMode = false;
+        clearNegotiationState();
         const QString detail = expected
             ? QStringLiteral("运行时已停止")
             : QStringLiteral("运行时已退出（%1，代码 %2）")
@@ -146,8 +876,7 @@ void AgentRuntimeClient::start()
         return;
     }
 
-    m_ready = false;
-    m_recoveryMode = false;
+    clearNegotiationState();
     m_stopping = false;
     m_stdoutBuffer.clear();
     m_pendingMethods.clear();
@@ -171,13 +900,27 @@ void AgentRuntimeClient::start()
     if (!m_process->waitForStarted(1000)) return;
     m_startupTimer->start(kStartupTimeoutMs);
 
-    QJsonObject client;
-    client.insert(QStringLiteral("name"), QStringLiteral("aegisy-client"));
-    client.insert(QStringLiteral("version"), QStringLiteral(AEGISY_APP_VERSION));
-    QJsonObject params;
-    params.insert(QStringLiteral("protocol_version"), QStringLiteral("0.1"));
-    params.insert(QStringLiteral("client"), client);
-    sendRequest(QStringLiteral("initialize"), params);
+    const QJsonObject params{
+        {QStringLiteral("protocol"), QJsonObject{
+            {QStringLiteral("minimum"), kMinimumProtocolVersion},
+            {QStringLiteral("maximum"), kMaximumProtocolVersion},
+            {QStringLiteral("preferred"), kPreferredProtocolVersion},
+        }},
+        {QStringLiteral("client"), QJsonObject{
+            {QStringLiteral("name"), QStringLiteral("aegisy-client")},
+            {QStringLiteral("version"), QStringLiteral(AEGISY_APP_VERSION)},
+        }},
+        {QStringLiteral("platform"), localPlatform()},
+        {QStringLiteral("capabilities"), QJsonObject{
+            {QStringLiteral("stable"), QJsonArray::fromStringList(declaredCapabilities())},
+            {QStringLiteral("experimental"), QJsonArray{}},
+        }},
+        {QStringLiteral("limits"), QJsonObject{
+            {QStringLiteral("max_frame_bytes"), kMaximumFrameBytes},
+        }},
+        {QStringLiteral("transport_security"), stdioTransportSecurity()},
+    };
+    m_initializeRequestId = sendRequest(QStringLiteral("initialize"), params);
 }
 
 void AgentRuntimeClient::stop()
@@ -1215,51 +1958,102 @@ QString AgentRuntimeClient::sendRequest(const QString &method, const QJsonObject
         emit requestFailed({}, method, QStringLiteral("本地运行时未启动"), -1);
         return {};
     }
+    if (method != QStringLiteral("initialize") && !m_handshakeComplete) {
+        emit requestFailed({}, method, QStringLiteral("本地运行时握手尚未完成"), -32003);
+        return {};
+    }
+    if (method != QStringLiteral("initialize")) {
+        const QStringList required = requiredCapabilitiesForMethod(method, params);
+        for (const QString &capability : required) {
+            if (!m_negotiatedStableCapabilities.contains(capability)) {
+                emit requestFailed({}, method,
+                                   QStringLiteral("本地运行时未协商此操作所需能力"),
+                                   -32601);
+                return {};
+            }
+        }
+    }
     const QString id = QString::number(++m_nextRequestId);
-    m_pendingMethods.insert(id, method);
-    writeMessage({
+    const int writeError = writeMessage({
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
         {QStringLiteral("id"), id},
         {QStringLiteral("method"), method},
         {QStringLiteral("params"), params},
     });
+    if (writeError != 0) {
+        emit requestFailed(
+            id, method,
+            writeError == -32005
+                ? QStringLiteral("请求超过 AAP 帧上限")
+                : QStringLiteral("无法写入本地运行时"),
+            writeError);
+        return {};
+    }
+    m_pendingMethods.insert(id, method);
     return id;
 }
 
-void AgentRuntimeClient::sendNotification(const QString &method, const QJsonObject &params)
+bool AgentRuntimeClient::sendNotification(const QString &method, const QJsonObject &params)
 {
-    writeMessage({
+    return writeMessage({
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
         {QStringLiteral("method"), method},
         {QStringLiteral("params"), params},
-    });
+    }) == 0;
 }
 
-void AgentRuntimeClient::writeMessage(const QJsonObject &message)
+int AgentRuntimeClient::writeMessage(const QJsonObject &message)
 {
     QByteArray frame = QJsonDocument(message).toJson(QJsonDocument::Compact);
+    const int maximumFrameBytes = m_handshakeComplete
+        ? m_negotiatedMaximumFrameBytes : kMaximumFrameBytes;
+    if (maximumFrameBytes <= 0 || frame.size() > maximumFrameBytes) return -32005;
     frame.append('\n');
-    m_process->write(frame);
+    return m_process->write(frame) == frame.size() ? 0 : -1;
 }
 
 void AgentRuntimeClient::processStdout()
 {
     m_stdoutBuffer.append(m_process->readAllStandardOutput());
-    if (m_stdoutBuffer.size() > kMaximumFrameBytes) {
-        emit connectionStateChanged(false, QStringLiteral("运行时返回了超限消息"));
-        m_process->kill();
-        return;
-    }
-    qsizetype newline = -1;
-    while ((newline = m_stdoutBuffer.indexOf('\n')) >= 0) {
-        const QByteArray line = m_stdoutBuffer.left(newline).trimmed();
+    while (true) {
+        const int maximumFrameBytes = m_handshakeComplete
+            ? m_negotiatedMaximumFrameBytes : kMaximumFrameBytes;
+        if (maximumFrameBytes <= 0) {
+            rejectProtocolMessage(QStringLiteral("frame-limit-unavailable"));
+            return;
+        }
+        const qsizetype newline = m_stdoutBuffer.indexOf('\n');
+        if (newline < 0) {
+            if (m_stdoutBuffer.size() > maximumFrameBytes) {
+                if (!m_handshakeComplete && !m_initializeRequestId.isEmpty()) {
+                    rejectInitializeResponse(QStringLiteral("frame-too-large"));
+                } else {
+                    rejectProtocolMessage(QStringLiteral("frame-too-large"));
+                }
+            }
+            return;
+        }
+        QByteArray line = m_stdoutBuffer.left(newline);
         m_stdoutBuffer.remove(0, newline + 1);
-        if (line.isEmpty()) continue;
+        if (line.endsWith('\r')) line.chop(1);
+        if (line.size() > maximumFrameBytes) {
+            if (!m_handshakeComplete && !m_initializeRequestId.isEmpty()) {
+                rejectInitializeResponse(QStringLiteral("frame-too-large"));
+            } else {
+                rejectProtocolMessage(QStringLiteral("frame-too-large"));
+            }
+            return;
+        }
+        if (line.trimmed().isEmpty()) continue;
         QJsonParseError error;
         const QJsonDocument document = QJsonDocument::fromJson(line, &error);
         if (error.error != QJsonParseError::NoError || !document.isObject()) {
-            emit diagnosticMessage(QStringLiteral("忽略无效 AAP 消息：%1").arg(error.errorString()));
-            continue;
+            if (!m_handshakeComplete && !m_initializeRequestId.isEmpty()) {
+                rejectInitializeResponse(QStringLiteral("invalid-json"));
+            } else {
+                rejectProtocolMessage(QStringLiteral("invalid-json"));
+            }
+            return;
         }
         processMessage(document.object());
     }
@@ -1267,66 +2061,137 @@ void AgentRuntimeClient::processStdout()
 
 void AgentRuntimeClient::processMessage(const QJsonObject &message)
 {
-    const QString method = message.value(QStringLiteral("method")).toString();
-    if (method == QStringLiteral("event")) {
-        emit timelineEvent(message.value(QStringLiteral("params")).toObject());
+    if (message.value(QStringLiteral("jsonrpc")).toString() != QStringLiteral("2.0")) {
+        if (!m_handshakeComplete && !m_initializeRequestId.isEmpty()) {
+            rejectInitializeResponse(QStringLiteral("jsonrpc-version"));
+        } else {
+            rejectProtocolMessage(QStringLiteral("jsonrpc-version"));
+        }
         return;
     }
 
-    const QString id = message.value(QStringLiteral("id")).toVariant().toString();
-    if (id.isEmpty()) return;
-    const QString pendingMethod = m_pendingMethods.take(id);
-    if (pendingMethod.isEmpty()) return;
-    const QJsonObject error = message.value(QStringLiteral("error")).toObject();
-    if (!error.isEmpty()) {
+    if (!m_handshakeComplete && !m_initializeRequestId.isEmpty()) {
+        const QJsonValue idValue = message.value(QStringLiteral("id"));
+        const bool hasResult = message.contains(QStringLiteral("result"));
+        const bool hasError = message.contains(QStringLiteral("error"));
+        if (!isCanonicalRequestId(idValue)
+            || idValue.toString() != m_initializeRequestId) {
+            rejectInitializeResponse(QStringLiteral("response-id"));
+            return;
+        }
+        if (hasResult == hasError
+            || !hasExactKeys(message, hasResult
+                ? QStringList{QStringLiteral("jsonrpc"), QStringLiteral("id"),
+                              QStringLiteral("result")}
+                : QStringList{QStringLiteral("jsonrpc"), QStringLiteral("id"),
+                              QStringLiteral("error")})) {
+            rejectInitializeResponse(QStringLiteral("response-shape"));
+            return;
+        }
+        if (hasError) {
+            if (!isValidErrorObject(message.value(QStringLiteral("error")))) {
+                rejectInitializeResponse(QStringLiteral("error-shape"));
+                return;
+            }
+            QString reasonCode;
+            if (!validateInitializeError(message.value(QStringLiteral("error")).toObject(),
+                                         &reasonCode)) {
+                rejectInitializeResponse(reasonCode);
+                return;
+            }
+            rejectInitializeResponse(reasonCode);
+            return;
+        }
+        const QJsonValue resultValue = message.value(QStringLiteral("result"));
+        if (!resultValue.isObject()) {
+            rejectInitializeResponse(QStringLiteral("result-type"));
+            return;
+        }
+        QString reasonCode;
+        QSet<QString> stableCapabilities;
+        int maximumFrameBytes = 0;
+        const QJsonObject result = resultValue.toObject();
+        if (!validateInitializeResult(result, &stableCapabilities,
+                                      &maximumFrameBytes, &reasonCode)) {
+            rejectInitializeResponse(reasonCode);
+            return;
+        }
+        m_pendingMethods.remove(m_initializeRequestId);
+        m_initializeRequestId.clear();
+        m_negotiatedStableCapabilities = stableCapabilities;
+        m_negotiatedMaximumFrameBytes = maximumFrameBytes;
+        acceptInitializeResponse(result);
+        return;
+    }
+
+    if (!m_handshakeComplete) {
+        rejectProtocolMessage(QStringLiteral("message-before-handshake"));
+        return;
+    }
+
+    if (message.contains(QStringLiteral("method"))) {
+        if (!isValidMethodName(message.value(QStringLiteral("method")))
+            || !hasExactKeys(message, {
+                QStringLiteral("jsonrpc"), QStringLiteral("method"),
+                QStringLiteral("params"),
+            })
+            || !message.value(QStringLiteral("params")).isObject()) {
+            rejectProtocolMessage(QStringLiteral("notification-shape"));
+            return;
+        }
+        const QString method = message.value(QStringLiteral("method")).toString();
+        if (method == QStringLiteral("event")) {
+            if (!m_negotiatedStableCapabilities.contains(
+                    QStringLiteral("timeline.streaming"))) {
+                rejectProtocolMessage(QStringLiteral("notification-capability"));
+                return;
+            }
+            emit timelineEvent(message.value(QStringLiteral("params")).toObject());
+        } else {
+            emit diagnosticMessage(QStringLiteral("忽略未支持的 AAP 通知"));
+        }
+        return;
+    }
+
+    const QJsonValue idValue = message.value(QStringLiteral("id"));
+    const bool hasResult = message.contains(QStringLiteral("result"));
+    const bool hasError = message.contains(QStringLiteral("error"));
+    if (!isCanonicalRequestId(idValue) || hasResult == hasError
+        || !hasExactKeys(message, hasResult
+            ? QStringList{QStringLiteral("jsonrpc"), QStringLiteral("id"),
+                          QStringLiteral("result")}
+            : QStringList{QStringLiteral("jsonrpc"), QStringLiteral("id"),
+                          QStringLiteral("error")})) {
+        rejectProtocolMessage(QStringLiteral("response-shape"));
+        return;
+    }
+    const QString id = idValue.toString();
+    const QString pendingMethod = m_pendingMethods.value(id);
+    if (pendingMethod.isEmpty()) {
+        rejectProtocolMessage(QStringLiteral("response-correlation"));
+        return;
+    }
+    if (hasError) {
+        if (!isValidErrorObject(message.value(QStringLiteral("error")))) {
+            rejectProtocolMessage(QStringLiteral("error-shape"));
+            return;
+        }
+        const QJsonObject error = message.value(QStringLiteral("error")).toObject();
+        m_pendingMethods.remove(id);
         emit requestFailed(id, pendingMethod,
                            error.value(QStringLiteral("message")).toString(),
                            error.value(QStringLiteral("code")).toInt(-1));
         return;
     }
-    const QJsonObject result = message.value(QStringLiteral("result")).toObject();
-    if (pendingMethod == QStringLiteral("initialize")) {
-        m_startupTimer->stop();
-        sendNotification(QStringLiteral("initialized"));
-        const QJsonObject runtime = result.value(QStringLiteral("runtime")).toObject();
-        const QJsonObject backend = result.value(QStringLiteral("backend")).toObject();
-        const QString backendStatus = backend.value(QStringLiteral("status")).toString();
-        m_recoveryMode = backendStatus == QStringLiteral("read-only-recovery");
-        m_ready = backendStatus == QStringLiteral("ready") || m_recoveryMode;
-        const QString detail = QStringLiteral("%1 %2 · %3 %4 · AAP %5")
-            .arg(runtime.value(QStringLiteral("name")).toString(),
-                 runtime.value(QStringLiteral("version")).toString(),
-                 backend.value(QStringLiteral("adapter")).toString(),
-                 backend.value(QStringLiteral("version")).toString(),
-                 result.value(QStringLiteral("protocol_version")).toString());
-        emit runtimeInitialized(result);
-        emit connectionStateChanged(m_ready, detail);
-        runtimeHealth();
-        runtimeDegradations();
-        modelCatalog();
-        const QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toArray();
-        const bool modelCatalogCacheAvailable = std::any_of(
-            capabilities.cbegin(), capabilities.cend(),
-            [](const QJsonValue &value) {
-                return value.toString() == QStringLiteral("model.catalog.cache.read-only");
-            });
-        if (modelCatalogCacheAvailable) modelCatalogCache();
-        const bool modelCatalogRefreshStatusAvailable = std::any_of(
-            capabilities.cbegin(), capabilities.cend(),
-            [](const QJsonValue &value) {
-                return value.toString()
-                    == QStringLiteral("model.catalog.refresh.status.read-only");
-            });
-        if (modelCatalogRefreshStatusAvailable) modelCatalogRefreshStatus();
-        const bool modelProfilesAvailable = std::any_of(
-            capabilities.cbegin(), capabilities.cend(),
-            [](const QJsonValue &value) {
-                return value.toString() == QStringLiteral("model.profile.read-only");
-            });
-        if (modelProfilesAvailable) listModelProfiles();
-        if (m_recoveryMode) runtimeRecoveryStatus();
-        else projectionRecoveryStatus();
-    } else if (pendingMethod == QStringLiteral("project/list")) {
+    const QJsonValue resultValue = message.value(QStringLiteral("result"));
+    if (!resultValue.isObject()
+        && !(pendingMethod == QStringLiteral("shutdown") && resultValue.isNull())) {
+        rejectProtocolMessage(QStringLiteral("result-type"));
+        return;
+    }
+    m_pendingMethods.remove(id);
+    const QJsonObject result = resultValue.toObject();
+    if (pendingMethod == QStringLiteral("project/list")) {
         emit projectsListed(id, result);
     } else if (pendingMethod == QStringLiteral("project/navigation")) {
         emit projectNavigationChanged(id, result);
@@ -1526,6 +2391,91 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
     } else if (pendingMethod == QStringLiteral("artifact/read-command-output")) {
         emit commandArtifactRead(id, result);
     }
+}
+
+void AgentRuntimeClient::acceptInitializeResponse(const QJsonObject &result)
+{
+    m_startupTimer->stop();
+    m_handshakeComplete = true;
+    const QJsonObject runtime = result.value(QStringLiteral("runtime")).toObject();
+    const QJsonObject backend = result.value(QStringLiteral("backend")).toObject();
+    const QString backendStatus = backend.value(QStringLiteral("status")).toString();
+    m_recoveryMode = backendStatus == QStringLiteral("read-only-recovery");
+    m_ready = backendStatus == QStringLiteral("ready") || m_recoveryMode;
+
+    if (!sendNotification(QStringLiteral("initialized"))) {
+        rejectProtocolMessage(QStringLiteral("initialized-write"));
+        return;
+    }
+    const QString detail = QStringLiteral("%1 %2 · %3 %4 · AAP %5")
+        .arg(runtime.value(QStringLiteral("name")).toString(),
+             runtime.value(QStringLiteral("version")).toString(),
+             backend.value(QStringLiteral("adapter")).toString(),
+             backend.value(QStringLiteral("version")).toString(),
+             result.value(QStringLiteral("protocol")).toObject()
+                 .value(QStringLiteral("selected")).toString());
+    emit runtimeInitialized(result);
+    emit connectionStateChanged(m_ready, detail);
+
+    if (containsCapability(m_negotiatedStableCapabilities, "runtime.health")) runtimeHealth();
+    if (containsCapability(m_negotiatedStableCapabilities, "runtime.degradations")) {
+        runtimeDegradations();
+    }
+    if (containsCapability(m_negotiatedStableCapabilities, "model.catalog.read-only")) {
+        modelCatalog();
+    }
+    if (containsCapability(m_negotiatedStableCapabilities,
+                           "model.catalog.cache.read-only")) {
+        modelCatalogCache();
+    }
+    if (containsCapability(m_negotiatedStableCapabilities,
+                           "model.catalog.refresh.status.read-only")) {
+        modelCatalogRefreshStatus();
+    }
+    if (containsCapability(m_negotiatedStableCapabilities, "model.profile.read-only")) {
+        listModelProfiles();
+    }
+    if (m_recoveryMode
+        && containsCapability(m_negotiatedStableCapabilities,
+                              "runtime.recovery.status")) {
+        runtimeRecoveryStatus();
+    } else if (!m_recoveryMode
+               && containsCapability(m_negotiatedStableCapabilities,
+                                     "runtime.projection-recovery.status")) {
+        projectionRecoveryStatus();
+    }
+}
+
+void AgentRuntimeClient::rejectInitializeResponse(const QString &reasonCode)
+{
+    m_startupTimer->stop();
+    const QString requestId = m_initializeRequestId;
+    if (!requestId.isEmpty()) m_pendingMethods.remove(requestId);
+    clearNegotiationState();
+    const QString detail = QStringLiteral("运行时握手响应无效（%1）").arg(reasonCode);
+    emit requestFailed(requestId, QStringLiteral("initialize"), detail, -32003);
+    emit connectionStateChanged(false, detail);
+    if (m_process->state() != QProcess::NotRunning) m_process->kill();
+}
+
+void AgentRuntimeClient::rejectProtocolMessage(const QString &reasonCode)
+{
+    m_startupTimer->stop();
+    clearNegotiationState();
+    const QString detail = QStringLiteral("运行时协议消息无效（%1）").arg(reasonCode);
+    failPending(detail);
+    emit connectionStateChanged(false, detail);
+    if (m_process->state() != QProcess::NotRunning) m_process->kill();
+}
+
+void AgentRuntimeClient::clearNegotiationState()
+{
+    m_ready = false;
+    m_recoveryMode = false;
+    m_handshakeComplete = false;
+    m_initializeRequestId.clear();
+    m_negotiatedStableCapabilities.clear();
+    m_negotiatedMaximumFrameBytes = 0;
 }
 
 void AgentRuntimeClient::failPending(const QString &message)

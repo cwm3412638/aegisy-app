@@ -1,9 +1,19 @@
 #include "agent_runtime_client.h"
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcessEnvironment>
+#include <QTemporaryDir>
+#include <QThread>
 
+#include <algorithm>
 #include <cstdio>
+#include <functional>
+#include <iostream>
 
 namespace {
 
@@ -13,12 +23,811 @@ bool expect(bool condition, const char *message)
     return condition;
 }
 
+bool waitUntil(const std::function<bool()> &condition, int timeoutMs = 3000)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (!condition() && timer.elapsed() < timeoutMs) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        QThread::msleep(5);
+    }
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    return condition();
+}
+
+void appendLogLine(QFile *log, const QByteArray &line)
+{
+    log->write(line);
+    log->write("\n");
+    log->flush();
+}
+
+QJsonObject testPlatform()
+{
+    QString os = QStringLiteral("unknown");
+#if defined(Q_OS_MACOS)
+    os = QStringLiteral("macos");
+#elif defined(Q_OS_WIN)
+    os = QStringLiteral("windows");
+#elif defined(Q_OS_LINUX)
+    os = QStringLiteral("linux");
+#endif
+    QString architecture = QStringLiteral("unknown");
+#if defined(Q_PROCESSOR_ARM_64)
+    architecture = QStringLiteral("arm64");
+#elif defined(Q_PROCESSOR_X86_64)
+    architecture = QStringLiteral("x86_64");
+#endif
+    return {
+        {QStringLiteral("os"), os},
+        {QStringLiteral("architecture"), architecture},
+    };
+}
+
+QJsonObject testTransportSecurity()
+{
+    return {
+        {QStringLiteral("transport"), QStringLiteral("stdio")},
+        {QStringLiteral("local"), true},
+        {QStringLiteral("authenticated"), false},
+        {QStringLiteral("encrypted"), false},
+        {QStringLiteral("peer_verified"), false},
+    };
+}
+
+QJsonObject validInitializeResult()
+{
+    return {
+        {QStringLiteral("protocol"), QJsonObject{
+            {QStringLiteral("minimum"), QStringLiteral("0.1")},
+            {QStringLiteral("maximum"), QStringLiteral("0.1")},
+            {QStringLiteral("selected"), QStringLiteral("0.1")},
+            {QStringLiteral("upgrade_direction"), QStringLiteral("none")},
+        }},
+        {QStringLiteral("runtime"), QJsonObject{
+            {QStringLiteral("name"), QStringLiteral("aegisy-agentd")},
+            {QStringLiteral("version"), QStringLiteral("0.1.0")},
+        }},
+        {QStringLiteral("platform"), testPlatform()},
+        {QStringLiteral("backend"), QJsonObject{
+            {QStringLiteral("adapter"), QStringLiteral("preview")},
+            {QStringLiteral("version"), QStringLiteral("0.1.0")},
+            {QStringLiteral("status"), QStringLiteral("ready")},
+        }},
+        {QStringLiteral("capabilities"), QJsonObject{
+            {QStringLiteral("stable"), QJsonArray{
+                QStringLiteral("runtime.preview"),
+                QStringLiteral("runtime.health"),
+                QStringLiteral("runtime.degradations"),
+                QStringLiteral("permission.read-only"),
+            }},
+            {QStringLiteral("experimental"), QJsonArray{}},
+        }},
+        {QStringLiteral("limits"), QJsonObject{
+            {QStringLiteral("max_frame_bytes"), 4 * 1024 * 1024},
+        }},
+        {QStringLiteral("transport_security"), testTransportSecurity()},
+    };
+}
+
+int runFakeRuntime(const QString &testCase)
+{
+    QFile log(qEnvironmentVariable("AEGISY_FAKE_RUNTIME_LOG"));
+    if (!log.open(QIODevice::WriteOnly | QIODevice::Append)) return 90;
+
+    std::string rawLine;
+    if (!std::getline(std::cin, rawLine)) return 91;
+    const QByteArray firstLine = QByteArray::fromStdString(rawLine);
+    appendLogLine(&log, firstLine);
+    const QJsonDocument requestDocument = QJsonDocument::fromJson(firstLine);
+    if (!requestDocument.isObject()) return 92;
+    const QJsonObject request = requestDocument.object();
+
+    QJsonObject response{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("id"), request.value(QStringLiteral("id"))},
+    };
+    QJsonObject result = validInitializeResult();
+    const auto setStableCapabilities = [&result](const QJsonArray &stable) {
+        QJsonObject capabilities = result.value(QStringLiteral("capabilities")).toObject();
+        capabilities.insert(QStringLiteral("stable"), stable);
+        result.insert(QStringLiteral("capabilities"), capabilities);
+    };
+    if (testCase == QStringLiteral("valid-list-only")) {
+        QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
+                                      .value(QStringLiteral("stable")).toArray();
+        capabilities.append(QStringLiteral("session.list"));
+        setStableCapabilities(capabilities);
+    } else if (testCase == QStringLiteral("valid-outbound-frame")) {
+        QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
+                                      .value(QStringLiteral("stable")).toArray();
+        capabilities.append(QStringLiteral("session.portable.import"));
+        setStableCapabilities(capabilities);
+    } else if (testCase == QStringLiteral("valid-codex")) {
+        result.insert(QStringLiteral("backend"), QJsonObject{
+            {QStringLiteral("adapter"), QStringLiteral("codex-app-server")},
+            {QStringLiteral("version"), QStringLiteral("codex-cli 0.144.5")},
+            {QStringLiteral("status"), QStringLiteral("ready")},
+        });
+        setStableCapabilities(QJsonArray{
+            QStringLiteral("runtime.codex-app-server"),
+            QStringLiteral("runtime.restart"),
+            QStringLiteral("timeline.command.structured.read-only"),
+            QStringLiteral("turn.cancel.interrupt"),
+            QStringLiteral("turn.steer.same-turn"),
+            QStringLiteral("session.provider.lifecycle.archive"),
+            QStringLiteral("session.provider.lifecycle.unarchive"),
+            QStringLiteral("session.provider.lifecycle.list-read"),
+            QStringLiteral("runtime.health"),
+            QStringLiteral("runtime.degradations"),
+            QStringLiteral("permission.read-only"),
+        });
+    } else if (testCase == QStringLiteral("valid-recovery")) {
+        result.insert(QStringLiteral("backend"), QJsonObject{
+            {QStringLiteral("adapter"), QStringLiteral("aegisy-workbench-store")},
+            {QStringLiteral("version"),
+             QStringLiteral("workbench-recovery-diagnostic/0.1")},
+            {QStringLiteral("status"), QStringLiteral("read-only-recovery")},
+        });
+        setStableCapabilities(QJsonArray{
+            QStringLiteral("runtime.recovery.read-only"),
+            QStringLiteral("runtime.health"),
+            QStringLiteral("runtime.degradations"),
+            QStringLiteral("model.catalog.read-only"),
+            QStringLiteral("model.catalog.refresh.status.read-only"),
+            QStringLiteral("model.capability-check.read-only"),
+            QStringLiteral("runtime.recovery.status"),
+            QStringLiteral("runtime.recovery.diagnostic-export"),
+            QStringLiteral("permission.read-only"),
+        });
+    } else if (testCase == QStringLiteral("valid-unavailable")) {
+        result.insert(QStringLiteral("backend"), QJsonObject{
+            {QStringLiteral("adapter"), QStringLiteral("codex-app-server")},
+            {QStringLiteral("version"), QStringLiteral("codex-cli 0.144.5")},
+            {QStringLiteral("status"), QStringLiteral("unavailable")},
+        });
+        setStableCapabilities(QJsonArray{
+            QStringLiteral("runtime.unavailable"),
+            QStringLiteral("runtime.restart"),
+            QStringLiteral("runtime.health"),
+            QStringLiteral("runtime.degradations"),
+        });
+    } else if (testCase == QStringLiteral("protocol-mismatch")) {
+        QJsonObject protocol = result.value(QStringLiteral("protocol")).toObject();
+        protocol.insert(QStringLiteral("minimum"), QStringLiteral("0.2"));
+        protocol.insert(QStringLiteral("maximum"), QStringLiteral("0.2"));
+        protocol.insert(QStringLiteral("selected"), QStringLiteral("0.2"));
+        protocol.insert(QStringLiteral("upgrade_direction"), QStringLiteral("client"));
+        result.insert(QStringLiteral("protocol"), protocol);
+    } else if (testCase == QStringLiteral("protocol-leading-zero")) {
+        QJsonObject protocol = result.value(QStringLiteral("protocol")).toObject();
+        protocol.insert(QStringLiteral("minimum"), QStringLiteral("00.1"));
+        result.insert(QStringLiteral("protocol"), protocol);
+    } else if (testCase == QStringLiteral("upgrade-direction")) {
+        QJsonObject protocol = result.value(QStringLiteral("protocol")).toObject();
+        protocol.insert(QStringLiteral("upgrade_direction"), QStringLiteral("runtime"));
+        result.insert(QStringLiteral("protocol"), protocol);
+    } else if (testCase == QStringLiteral("runtime-mismatch")) {
+        QJsonObject runtime = result.value(QStringLiteral("runtime")).toObject();
+        runtime.insert(QStringLiteral("version"), QStringLiteral("9.9.9-secret-sentinel"));
+        result.insert(QStringLiteral("runtime"), runtime);
+    } else if (testCase == QStringLiteral("duplicate-capability")) {
+        QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
+                                      .value(QStringLiteral("stable")).toArray();
+        capabilities.append(QStringLiteral("runtime.health"));
+        setStableCapabilities(capabilities);
+    } else if (testCase == QStringLiteral("unknown-capability")) {
+        QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
+                                      .value(QStringLiteral("stable")).toArray();
+        capabilities.append(QStringLiteral("runtime.unknown.secret-sentinel"));
+        setStableCapabilities(capabilities);
+    } else if (testCase == QStringLiteral("empty-capability")) {
+        setStableCapabilities(QJsonArray{});
+    } else if (testCase == QStringLiteral("missing-capability")) {
+        result.remove(QStringLiteral("capabilities"));
+    } else if (testCase == QStringLiteral("experimental-capability")) {
+        QJsonObject capabilities = result.value(QStringLiteral("capabilities")).toObject();
+        capabilities.insert(QStringLiteral("experimental"),
+                            QJsonArray{QStringLiteral("future.feature")});
+        result.insert(QStringLiteral("capabilities"), capabilities);
+    } else if (testCase == QStringLiteral("wrong-platform")) {
+        QJsonObject platform = result.value(QStringLiteral("platform")).toObject();
+        platform.insert(QStringLiteral("os"),
+                        platform.value(QStringLiteral("os")).toString()
+                                == QStringLiteral("windows")
+                            ? QStringLiteral("macos") : QStringLiteral("windows"));
+        result.insert(QStringLiteral("platform"), platform);
+    } else if (testCase == QStringLiteral("unsafe-transport")) {
+        QJsonObject security = result.value(QStringLiteral("transport_security")).toObject();
+        security.insert(QStringLiteral("authenticated"), true);
+        result.insert(QStringLiteral("transport_security"), security);
+    } else if (testCase == QStringLiteral("invalid-limit")) {
+        result.insert(QStringLiteral("limits"), QJsonObject{
+            {QStringLiteral("max_frame_bytes"), 4 * 1024 * 1024 + 1},
+        });
+    } else if (testCase == QStringLiteral("invalid-low-limit")) {
+        result.insert(QStringLiteral("limits"), QJsonObject{
+            {QStringLiteral("max_frame_bytes"), 1024 * 1024},
+        });
+    } else if (testCase == QStringLiteral("backend-contradiction")) {
+        QJsonObject backend = result.value(QStringLiteral("backend")).toObject();
+        backend.insert(QStringLiteral("status"), QStringLiteral("unavailable"));
+        result.insert(QStringLiteral("backend"), backend);
+    } else if (testCase == QStringLiteral("non-jsonrpc-2")) {
+        response.insert(QStringLiteral("jsonrpc"), QStringLiteral("1.0"));
+    } else if (testCase == QStringLiteral("missing-jsonrpc")) {
+        response.remove(QStringLiteral("jsonrpc"));
+    } else if (testCase == QStringLiteral("wrong-id-type")) {
+        response.insert(QStringLiteral("id"), 1);
+    }
+    if (testCase == QStringLiteral("error-response")
+        || testCase == QStringLiteral("generic-error-response")
+        || testCase == QStringLiteral("upgrade-client-error")
+        || testCase == QStringLiteral("upgrade-runtime-error")
+        || testCase == QStringLiteral("malformed-upgrade-error")) {
+        QJsonObject error{
+            {QStringLiteral("code"),
+             testCase == QStringLiteral("generic-error-response") ? -32602 : -32003},
+            {QStringLiteral("message"), QStringLiteral("secret-sentinel")},
+        };
+        if (testCase == QStringLiteral("upgrade-client-error")
+            || testCase == QStringLiteral("upgrade-runtime-error")
+            || testCase == QStringLiteral("malformed-upgrade-error")) {
+            const bool clientUpgrade = testCase != QStringLiteral("upgrade-runtime-error");
+            error.insert(QStringLiteral("data"), QJsonObject{
+                {QStringLiteral("schema_version"), QStringLiteral("initialize-error/0.1")},
+                {QStringLiteral("reason"), QStringLiteral("protocol-range-not-overlapping")},
+                {QStringLiteral("client"), QJsonObject{
+                    {QStringLiteral("minimum"), QStringLiteral("0.1")},
+                    {QStringLiteral("maximum"), QStringLiteral("0.1")},
+                }},
+                {QStringLiteral("runtime"), QJsonObject{
+                    {QStringLiteral("minimum"),
+                     clientUpgrade ? QStringLiteral("0.2") : QStringLiteral("0.0")},
+                    {QStringLiteral("maximum"),
+                     clientUpgrade ? QStringLiteral("0.2") : QStringLiteral("0.0")},
+                }},
+                {QStringLiteral("upgrade_direction"),
+                 testCase == QStringLiteral("malformed-upgrade-error")
+                     ? QStringLiteral("secret-sentinel")
+                     : (clientUpgrade ? QStringLiteral("client")
+                                      : QStringLiteral("runtime"))},
+            });
+        }
+        response.insert(QStringLiteral("error"), error);
+    } else if (testCase == QStringLiteral("wrong-result-type")) {
+        response.insert(QStringLiteral("result"), QJsonArray{});
+    } else {
+        response.insert(QStringLiteral("result"), result);
+    }
+    if (testCase == QStringLiteral("result-and-error")) {
+        response.insert(QStringLiteral("error"), QJsonObject{
+            {QStringLiteral("code"), -32003},
+            {QStringLiteral("message"), QStringLiteral("invalid")},
+        });
+    } else if (testCase == QStringLiteral("method-and-result")) {
+        response.insert(QStringLiteral("method"), QStringLiteral("event"));
+    } else if (testCase == QStringLiteral("params-and-result")) {
+        response.insert(QStringLiteral("params"), QJsonObject{});
+    }
+    std::cout << QJsonDocument(response).toJson(QJsonDocument::Compact).constData()
+              << std::endl;
+
+    bool ordinaryViolationSent = false;
+    QJsonValue combinedFirstId;
+    bool hasCombinedFirstId = false;
+    while (std::getline(std::cin, rawLine)) {
+        const QByteArray line = QByteArray::fromStdString(rawLine);
+        appendLogLine(&log, line);
+        const QJsonDocument document = QJsonDocument::fromJson(line);
+        if (!document.isObject()) continue;
+        const QJsonObject message = document.object();
+        if (message.value(QStringLiteral("method")).toString()
+                == QStringLiteral("initialized")
+            && testCase.startsWith(QStringLiteral("notification-"))) {
+            QJsonObject notification{
+                {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                {QStringLiteral("method"), QStringLiteral("event")},
+                {QStringLiteral("params"), QJsonObject{}},
+            };
+            if (testCase == QStringLiteral("notification-method-result")) {
+                notification.insert(QStringLiteral("result"), QJsonObject{});
+            } else if (testCase == QStringLiteral("notification-wrong-params")) {
+                notification.insert(QStringLiteral("params"), QJsonArray{});
+            } else if (testCase == QStringLiteral("notification-missing-params")) {
+                notification.remove(QStringLiteral("params"));
+            }
+            std::cout
+                << QJsonDocument(notification).toJson(QJsonDocument::Compact).constData()
+                << std::endl;
+            continue;
+        }
+        if (message.value(QStringLiteral("method")).toString()
+            == QStringLiteral("shutdown")) {
+            const QJsonObject shutdownResponse{
+                {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+                {QStringLiteral("result"), QJsonObject{}},
+            };
+            std::cout
+                << QJsonDocument(shutdownResponse).toJson(QJsonDocument::Compact).constData()
+                << std::endl;
+            return 0;
+        }
+        if (message.value(QStringLiteral("id")).isString()) {
+            if (testCase == QStringLiteral("combined-legal-frames")) {
+                if (!hasCombinedFirstId) {
+                    combinedFirstId = message.value(QStringLiteral("id"));
+                    hasCombinedFirstId = true;
+                    continue;
+                }
+                const QString padding(2200000, QLatin1Char('a'));
+                const QJsonObject firstResponse{
+                    {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                    {QStringLiteral("id"), combinedFirstId},
+                    {QStringLiteral("result"), QJsonObject{
+                        {QStringLiteral("padding"), padding},
+                    }},
+                };
+                const QJsonObject secondResponse{
+                    {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                    {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+                    {QStringLiteral("result"), QJsonObject{
+                        {QStringLiteral("padding"), padding},
+                    }},
+                };
+                QByteArray combined = QJsonDocument(firstResponse)
+                                          .toJson(QJsonDocument::Compact);
+                combined.append('\n');
+                combined.append(QJsonDocument(secondResponse)
+                                    .toJson(QJsonDocument::Compact));
+                combined.append("\r\n");
+                std::cout.write(combined.constData(), combined.size());
+                std::cout.flush();
+                combinedFirstId = QJsonValue();
+                hasCombinedFirstId = false;
+                continue;
+            }
+            if (testCase == QStringLiteral("ordinary-oversized-tail")
+                && !ordinaryViolationSent) {
+                ordinaryViolationSent = true;
+                const std::string oversized(4 * 1024 * 1024 + 1, 'x');
+                std::cout.write(oversized.data(), std::streamsize(oversized.size()));
+                std::cout.flush();
+                continue;
+            }
+            QJsonObject ordinaryResponse{
+                {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+                {QStringLiteral("result"), QJsonObject{}},
+            };
+            if (testCase.startsWith(QStringLiteral("ordinary-"))
+                && !ordinaryViolationSent) {
+                ordinaryViolationSent = true;
+                if (testCase == QStringLiteral("ordinary-wrong-jsonrpc")) {
+                    ordinaryResponse.insert(QStringLiteral("jsonrpc"),
+                                            QStringLiteral("1.0"));
+                } else if (testCase == QStringLiteral("ordinary-missing-jsonrpc")) {
+                    ordinaryResponse.remove(QStringLiteral("jsonrpc"));
+                } else if (testCase == QStringLiteral("ordinary-wrong-id-type")) {
+                    ordinaryResponse.insert(QStringLiteral("id"), 2);
+                } else if (testCase == QStringLiteral("ordinary-unknown-id")) {
+                    ordinaryResponse.insert(QStringLiteral("id"), QStringLiteral("999999"));
+                } else if (testCase == QStringLiteral("ordinary-result-and-error")) {
+                    ordinaryResponse.insert(QStringLiteral("error"), QJsonObject{
+                        {QStringLiteral("code"), -32000},
+                        {QStringLiteral("message"), QStringLiteral("invalid")},
+                    });
+                } else if (testCase == QStringLiteral("ordinary-method-and-result")) {
+                    ordinaryResponse.insert(QStringLiteral("method"),
+                                            QStringLiteral("event"));
+                } else if (testCase == QStringLiteral("ordinary-nonobject-result")) {
+                    ordinaryResponse.insert(QStringLiteral("result"), QJsonArray{});
+                } else if (testCase == QStringLiteral("ordinary-invalid-error")) {
+                    ordinaryResponse.remove(QStringLiteral("result"));
+                    ordinaryResponse.insert(QStringLiteral("error"), QJsonObject{
+                        {QStringLiteral("code"), QStringLiteral("-32000")},
+                        {QStringLiteral("message"), QStringLiteral("invalid")},
+                    });
+                }
+            }
+            std::cout
+                << QJsonDocument(ordinaryResponse).toJson(QJsonDocument::Compact).constData()
+                << std::endl;
+        }
+    }
+    return 0;
+}
+
+QList<QJsonObject> readLogMessages(const QString &path)
+{
+    QFile file(path);
+    QList<QJsonObject> messages;
+    if (!file.open(QIODevice::ReadOnly)) return messages;
+    for (const QByteArray &line : file.readAll().split('\n')) {
+        const QJsonDocument document = QJsonDocument::fromJson(line);
+        if (document.isObject()) messages.append(document.object());
+    }
+    return messages;
+}
+
+bool logContainsMethod(const QString &path, const QString &method)
+{
+    const QList<QJsonObject> messages = readLogMessages(path);
+    return std::any_of(messages.cbegin(), messages.cend(), [&method](const QJsonObject &message) {
+        return message.value(QStringLiteral("method")).toString() == method;
+    });
+}
+
+bool runHandshakeCase(const QString &testCase, bool expectAccepted,
+                      bool expectReady = true, bool expectRecovery = false,
+                      const QString &expectedFailureCode = QString())
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create handshake test directory")) return false;
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool initializeFailed = false;
+    QString failureMessage;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                         [&initializeFailed, &failureMessage](const QString &,
+                                                              const QString &method,
+                                                              const QString &message,
+                                                              int) {
+            if (method == QStringLiteral("initialize")) {
+                initializeFailed = true;
+                failureMessage = message;
+            }
+        });
+        client.start();
+        const QString prematureRequest = client.listProjects();
+        if (!expect(prematureRequest.isEmpty(),
+                    "business request escaped before initialize completed")) {
+            return false;
+        }
+        const bool observed = waitUntil([&]() { return initialized || initializeFailed; });
+        if (!expect(observed, "handshake case timed out")) return false;
+        if (expectAccepted) {
+            if (!expect(initialized && !initializeFailed
+                            && client.isReady() == expectReady
+                            && client.isRecoveryMode() == expectRecovery,
+                        "valid initialize response was not accepted")) {
+                return false;
+            }
+            if (!expect(waitUntil([&]() {
+                    return logContainsMethod(logPath, QStringLiteral("runtime/health"))
+                        && logContainsMethod(logPath, QStringLiteral("runtime/degradations"));
+                }), "negotiated startup requests were not sent")) {
+                return false;
+            }
+            client.stop();
+            if (expectReady) {
+                waitUntil([&]() {
+                    return logContainsMethod(logPath, QStringLiteral("shutdown"));
+                });
+            }
+        } else {
+            if (!expect(!initialized && initializeFailed && !client.isReady(),
+                        "invalid initialize response did not fail closed")) {
+                return false;
+            }
+            if (!expect(!failureMessage.contains(QStringLiteral("secret-sentinel")),
+                        "handshake diagnostic leaked response content")) {
+                return false;
+            }
+            if (!expectedFailureCode.isEmpty()
+                && !expect(failureMessage.contains(expectedFailureCode),
+                           "handshake diagnostic omitted fixed upgrade direction")) {
+                return false;
+            }
+            waitUntil([&]() { return true; }, 50);
+        }
+    }
+
+    const QList<QJsonObject> messages = readLogMessages(logPath);
+    if (!expect(!messages.isEmpty(), "fake runtime did not receive initialize")) return false;
+    const QJsonObject initialize = messages.first();
+    const QJsonObject params = initialize.value(QStringLiteral("params")).toObject();
+    const QJsonObject protocol = params.value(QStringLiteral("protocol")).toObject();
+    const QJsonObject capabilities = params.value(QStringLiteral("capabilities")).toObject();
+    const QJsonObject limits = params.value(QStringLiteral("limits")).toObject();
+    if (!expect(initialize.value(QStringLiteral("jsonrpc")).toString()
+                    == QStringLiteral("2.0")
+                && initialize.value(QStringLiteral("method")).toString()
+                    == QStringLiteral("initialize")
+                && initialize.value(QStringLiteral("id")).isString()
+                && protocol.value(QStringLiteral("minimum")).toString()
+                    == QStringLiteral("0.1")
+                && protocol.value(QStringLiteral("maximum")).toString()
+                    == QStringLiteral("0.1")
+                && protocol.value(QStringLiteral("preferred")).toString()
+                    == QStringLiteral("0.1")
+                && params.value(QStringLiteral("client")).toObject()
+                       .value(QStringLiteral("name")).toString()
+                    == QStringLiteral("aegisy-client")
+                && params.value(QStringLiteral("platform")).toObject() == testPlatform()
+                && !capabilities.value(QStringLiteral("stable")).toArray().isEmpty()
+                && capabilities.value(QStringLiteral("experimental")).toArray().isEmpty()
+                && limits.value(QStringLiteral("max_frame_bytes")).toInt()
+                    == 4 * 1024 * 1024
+                && params.value(QStringLiteral("transport_security")).toObject()
+                    == testTransportSecurity(),
+                "initialize request did not declare the bounded protocol/capability contract")) {
+        return false;
+    }
+    if (!expect(!logContainsMethod(logPath, QStringLiteral("project/list")),
+                "pre-handshake business request reached the runtime")) {
+        return false;
+    }
+    if (expectAccepted) {
+        const bool catalogExpected = testCase == QStringLiteral("valid-recovery");
+        const auto initialized = std::find_if(
+            messages.cbegin(), messages.cend(), [](const QJsonObject &message) {
+                return message.value(QStringLiteral("method")).toString()
+                    == QStringLiteral("initialized");
+            });
+        return expect(initialized != messages.cend()
+                          && initialized->value(QStringLiteral("params")).isObject()
+                          && initialized->value(QStringLiteral("params")).toObject().isEmpty()
+                          && !initialized->contains(QStringLiteral("id")),
+                      "valid response did not produce exact initialized notification")
+            && expect(logContainsMethod(logPath, QStringLiteral("model/catalog"))
+                          == catalogExpected,
+                      "client did not honor the negotiated model-catalog capability");
+    }
+    return expect(messages.size() == 1,
+                  "invalid response produced initialized or business traffic");
+}
+
+bool runOrdinaryEnvelopeCase(const QString &testCase)
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create ordinary-envelope directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool disconnected = false;
+    bool pendingFailed = false;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                         [&pendingFailed](const QString &, const QString &method,
+                                          const QString &, int) {
+            if (method == QStringLiteral("runtime/health")) pendingFailed = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized && disconnected; }),
+                    "malformed post-handshake envelope did not close the connection")) {
+            return false;
+        }
+        if (!expect(!client.isReady(),
+                    "malformed post-handshake envelope retained ready state")) {
+            return false;
+        }
+        if (!expect(pendingFailed,
+                    "malformed response consumed or abandoned the pending request")) {
+            return false;
+        }
+        const QList<QJsonObject> before = readLogMessages(logPath);
+        const int healthRequestsBefore = int(std::count_if(
+            before.cbegin(), before.cend(),
+            [](const QJsonObject &message) {
+                return message.value(QStringLiteral("method")).toString()
+                    == QStringLiteral("runtime/health");
+            }));
+        if (!expect(client.runtimeHealth().isEmpty(),
+                    "request escaped after protocol violation cleared negotiation")) {
+            return false;
+        }
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        const QList<QJsonObject> after = readLogMessages(logPath);
+        const int healthRequestsAfter = int(std::count_if(
+            after.cbegin(), after.cend(), [](const QJsonObject &message) {
+                return message.value(QStringLiteral("method")).toString()
+                    == QStringLiteral("runtime/health");
+            }));
+        if (!expect(healthRequestsAfter == healthRequestsBefore,
+                    "cleared capability was reused after protocol disconnect")) {
+            return false;
+        }
+    }
+    return expect(!logContainsMethod(logPath, QStringLiteral("project/list")),
+                  "protocol violation allowed unrelated business traffic");
+}
+
+bool runCombinedFramesCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create combined-frame directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("combined-legal-frames"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool healthRead = false;
+    bool degradationsRead = false;
+    bool disconnected = false;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::runtimeHealthRead,
+                         [&healthRead](const QJsonObject &) { healthRead = true; });
+        QObject::connect(&client, &AgentRuntimeClient::runtimeDegradationsRead,
+                         [&degradationsRead](const QString &, const QJsonObject &) {
+            degradationsRead = true;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() {
+                return initialized && healthRead && degradationsRead;
+            }, 8000), "combined legal frames were not independently accepted")) {
+            return false;
+        }
+        if (!expect(client.isReady() && !disconnected,
+                    "combined legal frames were mistaken for one oversized frame")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+    return true;
+}
+
+bool runCapabilityGateCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create capability-gate directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("valid-list-only"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool capabilityRejected = false;
+    bool searchCapabilityRejected = false;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                         [&capabilityRejected, &searchCapabilityRejected](
+                             const QString &, const QString &method,
+                             const QString &, int code) {
+            if (method == QStringLiteral("project/list") && code == -32601) {
+                capabilityRejected = true;
+            } else if (method == QStringLiteral("session/search") && code == -32601) {
+                searchCapabilityRejected = true;
+            }
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "capability-gate handshake timed out")) {
+            return false;
+        }
+        if (!expect(client.listProjects().isEmpty() && capabilityRejected,
+                    "missing optional capability did not reject the dependent method")) {
+            return false;
+        }
+        if (!expect(!client.listSessions().isEmpty(),
+                    "negotiated session.list capability did not allow session/list")) {
+            return false;
+        }
+        if (!expect(client.searchSessions(QStringLiteral("query")).isEmpty()
+                        && searchCapabilityRejected,
+                    "session.list incorrectly authorized session/search")) {
+            return false;
+        }
+        if (!expect(!client.runtimeHealth().isEmpty(),
+                    "negotiated capability did not allow its method")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+    return expect(!logContainsMethod(logPath, QStringLiteral("project/list")),
+                  "capability-rejected method reached the runtime")
+        && expect(logContainsMethod(logPath, QStringLiteral("session/list")),
+                  "negotiated session/list request did not reach the runtime")
+        && expect(!logContainsMethod(logPath, QStringLiteral("session/search")),
+                  "session/search escaped without session.search.branch");
+}
+
+bool runOutboundFrameLimitCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create outbound-frame directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("valid-outbound-frame"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool frameRejected = false;
+    bool healthReadAfterRejection = false;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                         [&frameRejected](const QString &, const QString &method,
+                                          const QString &, int code) {
+            if (method == QStringLiteral("session/import/preview") && code == -32005) {
+                frameRejected = true;
+            }
+        });
+        QObject::connect(&client, &AgentRuntimeClient::runtimeHealthRead,
+                         [&frameRejected, &healthReadAfterRejection](const QJsonObject &) {
+            if (frameRejected) healthReadAfterRejection = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "outbound-frame handshake timed out")) {
+            return false;
+        }
+        const QJsonObject package{
+            {QStringLiteral("padding"), QString(4 * 1024 * 1024, QLatin1Char('x'))},
+        };
+        if (!expect(client.previewPortableSessionImport(
+                        package, QString(), QStringLiteral("reject")).isEmpty()
+                        && frameRejected,
+                    "oversized outbound frame was not rejected locally")) {
+            return false;
+        }
+        if (!expect(client.isReady(),
+                    "local outbound frame rejection disconnected the runtime")) {
+            return false;
+        }
+        if (!expect(!client.runtimeHealth().isEmpty()
+                        && waitUntil([&]() { return healthReadAfterRejection; }),
+                    "legal request did not complete after outbound frame rejection")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+    return expect(!logContainsMethod(logPath, QStringLiteral("session/import/preview")),
+                  "oversized outbound frame reached the runtime");
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
 {
     QCoreApplication application(argc, argv);
     Q_UNUSED(application);
+
+    const QString fakeRuntimeCase = qEnvironmentVariable("AEGISY_FAKE_RUNTIME_CASE");
+    if (!fakeRuntimeCase.isEmpty()) return runFakeRuntime(fakeRuntimeCase);
 
     QProcessEnvironment input;
     input.insert(QStringLiteral("PATH"), QStringLiteral("/usr/bin"));
@@ -38,7 +847,7 @@ int main(int argc, char *argv[])
 
     const QProcessEnvironment sanitized =
         AgentRuntimeClient::sanitizedSidecarEnvironment(input);
-    const bool ok = expect(sanitized.value(QStringLiteral("PATH")) == QStringLiteral("/usr/bin"),
+    bool ok = expect(sanitized.value(QStringLiteral("PATH")) == QStringLiteral("/usr/bin"),
                            "safe environment values were not preserved")
         && expect(sanitized.value(QStringLiteral("AEGISY_WORKBENCH_DATA_ROOT"))
                       == QStringLiteral("/tmp/aegisy-workbench"),
@@ -55,5 +864,57 @@ int main(int argc, char *argv[])
                   "authenticated proxy reached the sidecar environment")
         && expect(sanitized.value(QStringLiteral("MODEL_NAME")) == QStringLiteral("aegisy-coding"),
                   "ordinary model setting was removed");
+    ok = runHandshakeCase(QStringLiteral("valid-preview"), true) && ok;
+    ok = runHandshakeCase(QStringLiteral("valid-codex"), true) && ok;
+    ok = runHandshakeCase(QStringLiteral("valid-recovery"), true, true, true) && ok;
+    ok = runHandshakeCase(QStringLiteral("valid-unavailable"), true, false, false) && ok;
+    ok = runHandshakeCase(QStringLiteral("protocol-mismatch"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("protocol-leading-zero"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("upgrade-direction"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("runtime-mismatch"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("duplicate-capability"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("unknown-capability"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("empty-capability"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("missing-capability"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("experimental-capability"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("wrong-platform"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("unsafe-transport"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("invalid-limit"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("invalid-low-limit"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("backend-contradiction"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("non-jsonrpc-2"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("missing-jsonrpc"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("wrong-id-type"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("wrong-result-type"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("result-and-error"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("method-and-result"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("params-and-result"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("error-response"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("generic-error-response"), false) && ok;
+    ok = runHandshakeCase(QStringLiteral("upgrade-client-error"), false, true, false,
+                          QStringLiteral("upgrade-client")) && ok;
+    ok = runHandshakeCase(QStringLiteral("upgrade-runtime-error"), false, true, false,
+                          QStringLiteral("upgrade-runtime")) && ok;
+    ok = runHandshakeCase(QStringLiteral("malformed-upgrade-error"), false) && ok;
+    ok = runCapabilityGateCase() && ok;
+    ok = runCombinedFramesCase() && ok;
+    ok = runOutboundFrameLimitCase() && ok;
+    ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-wrong-jsonrpc")) && ok;
+    ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-missing-jsonrpc")) && ok;
+    ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-wrong-id-type")) && ok;
+    ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-unknown-id")) && ok;
+    ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-result-and-error")) && ok;
+    ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-method-and-result")) && ok;
+    ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-nonobject-result")) && ok;
+    ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-invalid-error")) && ok;
+    ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-oversized-tail")) && ok;
+    ok = runOrdinaryEnvelopeCase(QStringLiteral("notification-method-result")) && ok;
+    ok = runOrdinaryEnvelopeCase(QStringLiteral("notification-wrong-params")) && ok;
+    ok = runOrdinaryEnvelopeCase(QStringLiteral("notification-missing-params")) && ok;
+    ok = runOrdinaryEnvelopeCase(
+             QStringLiteral("notification-event-without-capability")) && ok;
+    qunsetenv("AEGISY_AGENTD_PATH");
+    qunsetenv("AEGISY_FAKE_RUNTIME_CASE");
+    qunsetenv("AEGISY_FAKE_RUNTIME_LOG");
     return ok ? 0 : 1;
 }

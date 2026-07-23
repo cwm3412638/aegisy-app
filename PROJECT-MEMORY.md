@@ -36,6 +36,22 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   preserve streaming response bytes and backpressure.
 - Agent runtime: Rust sidecar `aegisy-agentd`, communicating with the Qt host over
   the Aegisy Agent Protocol (AAP) on stdio JSON-RPC.
+- AAP `0.1` initialization is a strict two-stage contract. `initialize` carries
+  structured client version range, bounded identity/platform, stable capabilities,
+  an exactly empty experimental declaration, the exact 4 MiB frame limit, and
+  truthful local stdio security facts; Runtime returns the deterministic stable
+  capability intersection, bounded Runtime/backend identity, and selected range.
+  Business methods remain unavailable until the exact object-params `initialized`
+  notification is consumed and fail closed when their capability is absent. Ready
+  and recovery require the corresponding backend marker plus
+  `permission.read-only`. Protocol versions compare as numeric `u64` pairs, request
+  and notification params are objects, and success response IDs are non-null bounded
+  ASCII graphical strings. Both peers enforce the 4 MiB boundary before writing;
+  physical oversized input is drained without body parsing or echo, oversized
+  responses become same-ID `-32005`, and an oversized notification closes the
+  transport instead of being dropped. The current stdio transport is local but not
+  authenticated, encrypted, or peer-verified; authenticated socket/pipe transport
+  remains under OpenSpec `4.2` through `4.4`.
 - Durable Workbench data: the Qt host passes `AEGISY_WORKBENCH_DATA_ROOT` to the
   sidecar, defaulting to the platform `AppDataLocation/workbench` directory. An
   explicit environment value remains a developer/test override; a standalone
@@ -116,9 +132,16 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 42 of 235 checkbox tasks are complete and 193 remain
+- OpenSpec task baseline: 43 of 235 checkbox tasks are complete and 192 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
+- OpenSpec task `3.3` is complete. The stable Schema, Rust Runtime/stdio daemon, Qt
+  client, lifecycle fixtures, internal guide, design, and delta spec now share the
+  structured two-stage AAP `0.1` handshake, numeric range negotiation, deterministic
+  stable capability intersection, per-method capability enforcement, fixed 4 MiB
+  bidirectional frame limit, strict envelope/ID/params rules, and fail-closed
+  disconnect cleanup. This does not complete event replay, authenticated IPC, or
+  Agent mutation authority; tasks `3.4`, `3.5`, and `4.2` through `4.4` remain open.
 - Model catalog foundation (2026-07-21): the sidecar now validates an internal
   `model-catalog/0.1` metadata contract and exposes the read-only AAP capability
   `model.catalog.read-only` with `model/catalog`. The current projection is
@@ -1383,9 +1406,12 @@ git diff --check
 ```
 
 Current verified baseline: the last complete desktop run remains 16 tests; the
-current Rust run has 603 passed sidecar unit tests plus one explicitly ignored live
-Codex fixture, 63 Rust protocol tests, ten context-threshold contract tests, nineteen
-macOS sidecar stdio/Codex contract tests, and Clippy with warnings denied. The latest unit
+current AAP `3.3` Rust run has 8 AAP type tests, 630 passed sidecar unit tests plus
+one explicitly ignored live Codex fixture, 6 daemon-main tests, 13 handshake Runtime
+tests, 5 Draft 2020-12 handshake Schema tests, 63 Rust protocol tests, ten
+context-threshold contract tests, 22 macOS sidecar stdio/Codex contract tests, and
+Clippy with warnings denied. The focused Qt `agent_runtime_protocol`,
+`agent_workbench_render`, and `agent_runtime_environment` tests pass. The latest unit
 and protocol counts include the structured-plan dependency/evidence/stale contract,
 the child-task scope/budget/handoff, lifecycle, dedicated-worktree admission,
 runtime budget-ledger, unified-execution-plan, durable-job lifecycle contracts, and
@@ -2584,6 +2610,19 @@ Implemented visual baseline:
   local style rules. Continue consolidating local QSS into semantic components.
 
 ## Verification Snapshot (2026-07-24)
+
+- The AAP initialization-negotiation stage completes OpenSpec `3.3`. Rust and Qt
+  implement the exact two-stage `initialize`/`initialized` state machine, numeric
+  version ranges and upgrade direction, bounded identities, deterministic stable
+  capability intersection, per-method gates, strict JSON-RPC envelopes, fixed 4 MiB
+  inbound/outbound frames, and disconnect cleanup. The daemon drains oversized
+  physical input without parsing or echoing it, replaces oversized responses with a
+  same-ID `-32005`, and closes on oversized notifications. The current stdio channel
+  remains explicitly unauthenticated, unencrypted, and not peer-verified; Agent/Codex
+  remains read-only. Verification passes 8 AAP type, 630 sidecar library (one live
+  fixture ignored), 6 daemon-main, 10 threshold, 13 handshake Runtime, 5 Schema, 63
+  protocol, and 22 stdio/Codex tests, strict Clippy, formatting, the focused three Qt
+  tests, strict OpenSpec validation, and `git diff --check`.
 
 - The Codex degradation/provider hardening stage passes 630 `aegisy-agentd`
   library tests with one ignored live fixture, 63 protocol tests, and 21 stdio/Codex

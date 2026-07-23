@@ -7,6 +7,7 @@
 #include <QJsonObject>
 #include <QObject>
 #include <QProcessEnvironment>
+#include <QSet>
 #include <QStringList>
 
 class QProcess;
@@ -317,10 +318,14 @@ signals:
 private:
     QString locateRuntime() const;
     QString sendRequest(const QString &method, const QJsonObject &params = {});
-    void sendNotification(const QString &method, const QJsonObject &params = {});
-    void writeMessage(const QJsonObject &message);
+    bool sendNotification(const QString &method, const QJsonObject &params = {});
+    int writeMessage(const QJsonObject &message);
     void processStdout();
     void processMessage(const QJsonObject &message);
+    void acceptInitializeResponse(const QJsonObject &result);
+    void rejectInitializeResponse(const QString &reasonCode);
+    void rejectProtocolMessage(const QString &reasonCode);
+    void clearNegotiationState();
     void failPending(const QString &message);
 
     QProcess *m_process = nullptr;
@@ -329,8 +334,12 @@ private:
     QHash<QString, QString> m_pendingMethods;
     quint64 m_nextRequestId = 0;
     quint64 m_nextTurnKey = 0;
+    QString m_initializeRequestId;
+    QSet<QString> m_negotiatedStableCapabilities;
+    int m_negotiatedMaximumFrameBytes = 0;
     bool m_ready = false;
     bool m_recoveryMode = false;
+    bool m_handshakeComplete = false;
     bool m_stopping = false;
     QString m_runtimePath;
 };

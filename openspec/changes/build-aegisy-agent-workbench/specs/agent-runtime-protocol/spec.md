@@ -2,19 +2,52 @@
 
 ### Requirement: Runtime connections negotiate versions and capabilities
 Every AAP connection SHALL complete an initialization handshake before project,
-session, turn, tool, or storage methods are accepted.
+session, turn, workspace, terminal, tool, runtime-control, or storage methods are
+accepted.
 
 #### Scenario: Compatible client initializes
-- **WHEN** the client sends supported protocol version, identity, platform, and capabilities
-- **THEN** the runtime SHALL return negotiated stable and experimental capabilities, limits, runtime identity, and transport security state
+- **WHEN** the client sends a valid numeric minimum, maximum, and preferred protocol range together with bounded identity, platform, stable and experimental capabilities, limits, and transport security state
+- **THEN** the runtime SHALL return the selected overlapping version, runtime identity and platform, backend state, supported stable and experimental capability intersection, effective limits, truthful transport security state, and `upgrade_direction: none`
 
-#### Scenario: Protocol versions are incompatible
-- **WHEN** no supported protocol range overlaps
-- **THEN** the connection SHALL fail before loading a session and SHALL identify the required client or runtime upgrade
+#### Scenario: Older client must upgrade
+- **WHEN** the client maximum protocol version is below the runtime minimum
+- **THEN** initialization SHALL fail before loading project or session state with bounded `initialize-error/0.1` data and `upgrade_direction: client`
+
+#### Scenario: Older runtime must upgrade
+- **WHEN** the client minimum protocol version is above the runtime maximum
+- **THEN** initialization SHALL fail before loading project or session state with bounded `initialize-error/0.1` data and `upgrade_direction: runtime`
+
+#### Scenario: Client acknowledges initialization
+- **WHEN** the runtime has returned a valid initialize result but has not consumed an exact `initialized` notification with no ID and empty object params
+- **THEN** the connection SHALL remain not ready and every business request SHALL fail without loading or mutating project or session state
+
+#### Scenario: Capability sets are negotiated
+- **WHEN** the client declares a non-empty stable set, an empty AAP 0.1 experimental set, and capabilities unknown to the runtime
+- **THEN** the runtime SHALL return only the supported intersection, omit unknown capabilities, require the applicable backend marker and read-only permission boundary, and SHALL NOT infer availability from a missing declaration
 
 #### Scenario: Optional capability is missing
 - **WHEN** an adapter cannot provide a feature such as steering, structured patches, Skills, or child sessions
-- **THEN** the runtime SHALL report it unavailable and the UI SHALL disable the dependent action without simulating success
+- **THEN** the runtime SHALL report it unavailable, the UI SHALL disable the dependent action, and the runtime SHALL independently reject the method without simulating success
+
+#### Scenario: Out-of-band method was not negotiated
+- **WHEN** cancellation, steering, or terminal stop is received before readiness or without its required negotiated capability
+- **THEN** the runtime SHALL reject it through the same readiness and per-method capability boundary instead of bypassing negotiation
+
+#### Scenario: Stdio security is reported truthfully
+- **WHEN** the current Qt host connects to its child sidecar over stdio
+- **THEN** both peers SHALL report `transport: stdio`, `local: true`, and `authenticated`, `encrypted`, and `peer_verified` as false and SHALL NOT treat that channel as the authenticated socket or named-pipe target
+
+#### Scenario: AAP frame reaches the transport limit
+- **WHEN** either peer would send or receives a newline-delimited JSON frame larger than the exact AAP 0.1 `max_frame_bytes` value of 4 MiB
+- **THEN** it SHALL refuse the write or drain and reject the input with bounded content-free behavior, SHALL NOT allocate an unbounded frame, and SHALL preserve framing for a later valid message when the transport remains usable
+
+#### Scenario: Negotiated connection is lost
+- **WHEN** stdio disconnects, the runtime exits, initialization fails, or either peer rejects malformed protocol input
+- **THEN** the client SHALL clear ready state, capabilities, and negotiated limits, SHALL fail pending requests, and SHALL require a complete new two-stage handshake before sending more business requests
+
+#### Scenario: Read-only backend is ready
+- **WHEN** a backend reports ready and negotiates `permission.read-only`
+- **THEN** that state SHALL NOT grant Agent file writes, commands, approvals, network access, background work, or any other mutation authority, while explicit user editor saves and user terminals remain separately scoped operations
 
 ### Requirement: Work is represented as Project, Session, Turn, and Item events
 The protocol SHALL expose typed lifecycle objects and immutable event identity for

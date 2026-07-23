@@ -77,10 +77,14 @@ mod workspace_edit_preview;
 pub mod workspace_edit_restore;
 
 use aegisy_aap::stable::v0_1::{
-    BackendDescriptor, EventEnvelope, Identity, InitializeParams, InitializeResult, Project,
-    Session, SessionMode, TimelineItem,
+    BackendDescriptor, EventEnvelope, Identity, InitializeParams, InitializeResult,
+    NegotiatedCapabilities, NegotiatedProtocol, Platform, Project, ProtocolLimits, Session,
+    SessionMode, TimelineItem, TransportSecurity,
 };
-use aegisy_aap::{Notification, Request, Response, JSONRPC_VERSION, PROTOCOL_VERSION};
+use aegisy_aap::{
+    Notification, Request, Response, JSONRPC_VERSION, MAX_AAP_FRAME_BYTES, PROTOCOL_VERSION,
+    RUNTIME_PROTOCOL_MAXIMUM, RUNTIME_PROTOCOL_MINIMUM,
+};
 use background_scheduler::{recovery_entry_identity, BackgroundJobScheduler};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -173,6 +177,125 @@ const IMAGE_CONTEXT_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const MAX_IMAGE_BASE64_CHARS: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 const MODEL_CATALOG_CACHE_STALE_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
+pub const STABLE_CAPABILITY_REGISTRY: &[&str] = &[
+    "artifact.command-output.bounded",
+    "background-job.recovery.inspect",
+    "background-notification.outbox.read-only",
+    "model.capability-check.read-only",
+    "model.catalog.cache.read-only",
+    "model.catalog.read-only",
+    "model.catalog.refresh.status.read-only",
+    "model.profile.read-only",
+    "operation.reconciliation",
+    "operation.reconciliation.probe",
+    "operation.reconciliation.status",
+    "permission.read-only",
+    "project.list",
+    "project.navigation.persistent",
+    "project.open",
+    "project.relink.explicit",
+    "project.roots.scoped",
+    "project.trust-acknowledge",
+    "project.trust-review",
+    "retention.maintenance.host-triggered",
+    "retention.policy.manage",
+    "runtime.codex-app-server",
+    "runtime.degradations",
+    "runtime.health",
+    "runtime.preview",
+    "runtime.projection-recovery.status",
+    "runtime.recovery.diagnostic-export",
+    "runtime.recovery.read-only",
+    "runtime.recovery.status",
+    "runtime.restart",
+    "runtime.unavailable",
+    "session.chat",
+    "session.compaction.checkpoint-review",
+    "session.deletion.two-phase",
+    "session.deletion.undo",
+    "session.fork",
+    "session.history.paginated",
+    "session.list",
+    "session.metadata.manage",
+    "session.portable.export",
+    "session.portable.import",
+    "session.provider.lifecycle.archive",
+    "session.provider.lifecycle.list-read",
+    "session.provider.lifecycle.unarchive",
+    "session.recovery.status",
+    "session.resume",
+    "session.search.branch",
+    "session.work.preview",
+    "session.workspace-binding.read-only",
+    "terminal.conpty.windows.user-initiated",
+    "terminal.environment.session-scoped",
+    "terminal.excerpt.read",
+    "terminal.lifecycle.named",
+    "terminal.pty.macos.user-initiated",
+    "terminal.pty.unsupported",
+    "terminal.stop.out-of-band",
+    "timeline.command.structured.read-only",
+    "timeline.streaming",
+    "turn.cancel.interrupt",
+    "turn.context.inspect",
+    "turn.context.manifest",
+    "turn.context.pinned-selected",
+    "turn.context.structured",
+    "turn.steer.same-turn",
+    "workspace.definition",
+    "workspace.diagnostics.command-output",
+    "workspace.diagnostics.language-server",
+    "workspace.diagnostics.observed",
+    "workspace.diagnostics.raw-reference",
+    "workspace.edit.preview.read-only",
+    "workspace.git-context.read-only",
+    "workspace.git-query.read-only",
+    "workspace.git-status",
+    "workspace.image.import-user",
+    "workspace.image.preview",
+    "workspace.index.cancel",
+    "workspace.index.tree-sitter",
+    "workspace.instructions.discovery",
+    "workspace.language-servers",
+    "workspace.list",
+    "workspace.metadata",
+    "workspace.pinned-context.manage",
+    "workspace.pinned-context.store",
+    "workspace.read-text",
+    "workspace.references",
+    "workspace.repository-map.budgeted",
+    "workspace.save-user-text",
+    "workspace.search.bounded",
+    "workspace.search.cancel",
+    "workspace.watch.poll",
+];
+
+#[cfg(test)]
+fn test_initialize_params(client_name: &str) -> Value {
+    json!({
+        "protocol": {"minimum": "0.1", "maximum": "0.1", "preferred": "0.1"},
+        "client": {"name": client_name, "version": "1"},
+        "platform": {"os": "macos", "architecture": "arm64"},
+        "capabilities": {
+            "stable": STABLE_CAPABILITY_REGISTRY,
+            "experimental": []
+        },
+        "limits": {"max_frame_bytes": MAX_AAP_FRAME_BYTES},
+        "transport_security": {
+            "transport": "stdio",
+            "local": true,
+            "authenticated": false,
+            "encrypted": false,
+            "peer_verified": false
+        }
+    })
+}
+
+#[cfg(test)]
+fn test_notification(method: &str, params: Value) -> String {
+    json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string()
+}
+
 const TRUST_INSTRUCTION_NAMES: &[&str] = &[
     "AGENTS.md",
     "CLAUDE.md",
@@ -182,9 +305,93 @@ const TRUST_INSTRUCTION_NAMES: &[&str] = &[
     "copilot-instructions.md",
 ];
 
+fn valid_request_id(value: &Value) -> bool {
+    match value {
+        Value::String(id) => {
+            !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_graphic())
+        }
+        _ => false,
+    }
+}
+
+fn valid_method(value: &str) -> bool {
+    if value.is_empty() || value.len() > 128 {
+        return false;
+    }
+    value.split('/').all(|segment| {
+        let mut bytes = segment.bytes();
+        bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    })
+}
+
+fn oversized_frame_response() -> Value {
+    serde_json::to_value(Response::error(
+        Value::Null,
+        -32005,
+        "AAP frame exceeds the negotiated limit",
+    ))
+    .expect("frame limit response serialization")
+}
+
+fn parse_protocol_version(value: &str) -> Option<(u64, u64)> {
+    if value.len() > 16 {
+        return None;
+    }
+    let (major, minor) = value.split_once('.')?;
+    if major.is_empty()
+        || minor.is_empty()
+        || (major.len() > 1 && major.starts_with('0'))
+        || (minor.len() > 1 && minor.starts_with('0'))
+        || !major.bytes().all(|byte| byte.is_ascii_digit())
+        || !minor.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+fn valid_identity_name(value: &str) -> bool {
+    let mut needs_segment = true;
+    for byte in value.bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            needs_segment = false;
+        } else if matches!(byte, b'.' | b'-') && !needs_segment {
+            needs_segment = true;
+        } else {
+            return false;
+        }
+    }
+    !value.is_empty() && value.len() <= 64 && !needs_segment
+}
+
+fn valid_identity_version(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn runtime_platform() -> Platform {
+    let os = match std::env::consts::OS {
+        "macos" => "macos",
+        "windows" => "windows",
+        "linux" => "linux",
+        _ => "unknown",
+    };
+    let architecture = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x86_64",
+        _ => "unknown",
+    };
+    Platform {
+        os: os.into(),
+        architecture: architecture.into(),
+    }
+}
+
 pub struct Runtime {
     initialized: bool,
     client_ready: bool,
+    negotiated_capabilities: BTreeSet<String>,
+    negotiated_max_frame_bytes: u64,
     shutdown: bool,
     session_sequences: HashMap<String, u64>,
     next_id: u64,
@@ -219,7 +426,7 @@ pub struct Runtime {
 
 #[cfg(test)]
 mod capability_matrix_integration_tests {
-    use super::Runtime;
+    use super::{test_initialize_params, Runtime};
     use serde_json::{json, Value};
 
     fn call(runtime: &mut Runtime, id: &str, method: &str) -> Vec<Value> {
@@ -229,10 +436,7 @@ mod capability_matrix_integration_tests {
                 "id": id,
                 "method": method,
                 "params": if method == "initialize" {
-                    json!({
-                        "protocol_version": "0.1",
-                        "client": {"name": "capability-test", "version": "1"}
-                    })
+                    test_initialize_params("capability-test")
                 } else {
                     json!({})
                 }
@@ -253,14 +457,16 @@ mod capability_matrix_integration_tests {
             initialized[0]["result"]["backend"]["version"],
             "codex-cli 0.144.5"
         );
-        let capabilities = initialized[0]["result"]["capabilities"].as_array().unwrap();
+        let capabilities = initialized[0]["result"]["capabilities"]["stable"]
+            .as_array()
+            .unwrap();
         assert!(!capabilities.iter().any(|capability| {
             capability
                 .as_str()
                 .is_some_and(|value| value.starts_with("timeline.") || value.contains("provider"))
         }));
         assert!(runtime
-            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized"}"#)
+            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
             .is_empty());
 
         let response = call(&mut runtime, "degradations", "runtime/degradations");
@@ -445,6 +651,8 @@ struct TerminalState {
 #[derive(Default)]
 struct RuntimeControlState {
     protocol_ready: bool,
+    negotiated_capabilities: BTreeSet<String>,
+    negotiated_max_frame_bytes: Option<u64>,
     request_ids: HashSet<String>,
     active_turn: Option<ActiveTurnControl>,
 }
@@ -545,6 +753,79 @@ impl RuntimeControl {
 
     fn set_protocol_ready(&self, ready: bool) {
         self.lock().protocol_ready = ready;
+    }
+
+    fn set_negotiated_contract(&self, capabilities: &BTreeSet<String>, max_frame_bytes: u64) {
+        let mut state = self.lock();
+        state.negotiated_capabilities = capabilities.clone();
+        state.negotiated_max_frame_bytes = Some(max_frame_bytes);
+    }
+
+    pub fn reject_oversized_line(&self, line: &str) -> Option<Vec<Value>> {
+        let limit = self
+            .lock()
+            .negotiated_max_frame_bytes
+            .unwrap_or(MAX_AAP_FRAME_BYTES);
+        if u64::try_from(line.len()).unwrap_or(u64::MAX) <= limit {
+            return None;
+        }
+        Some(vec![oversized_frame_response()])
+    }
+
+    pub fn overload_response(&self, line: &str) -> Option<Value> {
+        let envelope: Value = match serde_json::from_str(line) {
+            Ok(envelope) => envelope,
+            Err(_) => {
+                return Some(
+                    serde_json::to_value(Response::error(Value::Null, -32700, "parse error"))
+                        .expect("overload parse response serialization"),
+                )
+            }
+        };
+        let id = envelope
+            .as_object()
+            .and_then(|object| object.get("id"))
+            .cloned()?;
+        if !valid_request_id(&id) {
+            return Some(
+                serde_json::to_value(Response::error(
+                    Value::Null,
+                    -32600,
+                    "invalid JSON-RPC request envelope",
+                ))
+                .expect("overload invalid ID response serialization"),
+            );
+        }
+        let request: Request = match serde_json::from_value(envelope) {
+            Ok(request) => request,
+            Err(_) => {
+                return Some(
+                    serde_json::to_value(Response::error(
+                        Value::Null,
+                        -32600,
+                        "invalid JSON-RPC request envelope",
+                    ))
+                    .expect("overload invalid envelope response serialization"),
+                )
+            }
+        };
+        if request.jsonrpc != JSONRPC_VERSION
+            || !valid_method(&request.method)
+            || !request.params.is_object()
+        {
+            return Some(
+                serde_json::to_value(Response::error(
+                    id,
+                    -32600,
+                    "invalid JSON-RPC request envelope",
+                ))
+                .expect("overload semantic envelope response serialization"),
+            );
+        }
+        Some(
+            serde_json::to_value(Response::error(id, -32004, "AAP request queue is full"))
+                .expect("overload response serialization"),
+        )
     }
 
     fn begin_turn(&self, session_id: &str) -> TurnCancellationHandle {
@@ -823,13 +1104,40 @@ impl RuntimeControl {
     }
 
     pub fn handle_out_of_band_line(&self, line: &str) -> Option<Vec<Value>> {
-        let request: Request = serde_json::from_str(line).ok()?;
-        if !matches!(
-            request.method.as_str(),
-            "turn/cancel" | "turn/steer" | "terminal/stop-user"
-        ) {
+        if let Some(response) = self.reject_oversized_line(line) {
+            return Some(response);
+        }
+        let envelope: Value = serde_json::from_str(line).ok()?;
+        let method = envelope.get("method").and_then(Value::as_str)?;
+        if !matches!(method, "turn/cancel" | "turn/steer" | "terminal/stop-user") {
             return None;
         }
+        let Some(id) = envelope
+            .as_object()
+            .and_then(|object| object.get("id"))
+            .cloned()
+        else {
+            return Some(Vec::new());
+        };
+        if !valid_request_id(&id) || !envelope.get("params").is_some_and(Value::is_object) {
+            return Some(vec![serde_json::to_value(Response::error(
+                Value::Null,
+                -32600,
+                "invalid JSON-RPC request envelope",
+            ))
+            .expect("out-of-band envelope response serialization")]);
+        }
+        let request: Request = match serde_json::from_value(envelope) {
+            Ok(request) => request,
+            Err(_) => {
+                return Some(vec![serde_json::to_value(Response::error(
+                    id,
+                    -32600,
+                    "invalid JSON-RPC request envelope",
+                ))
+                .expect("out-of-band envelope response serialization")])
+            }
+        };
         if request.jsonrpc != JSONRPC_VERSION {
             return Some(vec![serde_json::to_value(Response::error(
                 request.id.unwrap_or(Value::Null),
@@ -838,6 +1146,45 @@ impl RuntimeControl {
             ))
             .expect("cancel protocol response serialization")]);
         }
+        let required = match request.method.as_str() {
+            "turn/cancel" => vec!["turn.cancel.interrupt"],
+            "turn/steer" => vec!["turn.steer.same-turn"],
+            "terminal/stop-user" => vec![
+                "terminal.lifecycle.named",
+                TerminalManager::capability(),
+                "terminal.stop.out-of-band",
+            ],
+            _ => unreachable!("out-of-band method was checked above"),
+        };
+        let state = self.lock();
+        if !state.protocol_ready {
+            drop(state);
+            return Some(vec![serde_json::to_value(Response::error(
+                request
+                    .id
+                    .clone()
+                    .expect("out-of-band requests require IDs"),
+                -32002,
+                "initialize handshake required",
+            ))
+            .expect("out-of-band readiness response serialization")]);
+        }
+        if required
+            .iter()
+            .any(|capability| !state.negotiated_capabilities.contains(*capability))
+        {
+            drop(state);
+            return Some(vec![serde_json::to_value(Response::error(
+                request
+                    .id
+                    .clone()
+                    .expect("out-of-band requests require IDs"),
+                -32006,
+                "required capability was not negotiated",
+            ))
+            .expect("out-of-band capability response serialization")]);
+        }
+        drop(state);
         if let Some(duplicate) = self.claim_request(&request) {
             return Some(vec![duplicate]);
         }
@@ -3880,6 +4227,8 @@ impl Runtime {
         Self {
             initialized: false,
             client_ready: false,
+            negotiated_capabilities: BTreeSet::new(),
+            negotiated_max_frame_bytes: MAX_AAP_FRAME_BYTES,
             shutdown: false,
             session_sequences: HashMap::new(),
             next_id: 0,
@@ -3924,8 +4273,18 @@ impl Runtime {
     where
         F: FnMut(Value),
     {
-        let request: Request = match serde_json::from_str(line) {
-            Ok(request) => request,
+        let frame_limit = if self.initialized {
+            self.negotiated_max_frame_bytes
+        } else {
+            MAX_AAP_FRAME_BYTES
+        };
+        if u64::try_from(line.len()).unwrap_or(u64::MAX) > frame_limit {
+            emit(oversized_frame_response());
+            return;
+        }
+
+        let envelope: Value = match serde_json::from_str(line) {
+            Ok(envelope) => envelope,
             Err(error) => {
                 emit(
                     serde_json::to_value(Response::error(
@@ -3938,6 +4297,53 @@ impl Runtime {
                 return;
             }
         };
+        let envelope_id = envelope.as_object().and_then(|object| object.get("id"));
+        if envelope_id.is_some_and(|id| !valid_request_id(id)) {
+            emit(
+                serde_json::to_value(Response::error(
+                    Value::Null,
+                    -32600,
+                    "invalid JSON-RPC request id",
+                ))
+                .expect("invalid request id response serialization"),
+            );
+            return;
+        }
+        let request: Request = match serde_json::from_value(envelope.clone()) {
+            Ok(request) => request,
+            Err(_) => {
+                if envelope.get("id").is_some() {
+                    emit(
+                        serde_json::to_value(Response::error(
+                            Value::Null,
+                            -32600,
+                            "invalid JSON-RPC request envelope",
+                        ))
+                        .expect("invalid request response serialization"),
+                    );
+                }
+                return;
+            }
+        };
+
+        if !valid_method(&request.method) {
+            self.emit_all(
+                self.error_for(&request, -32600, "invalid JSON-RPC method"),
+                &mut emit,
+            );
+            return;
+        }
+        if !request.params.is_object() {
+            self.emit_all(
+                self.error_for(&request, -32600, "JSON-RPC params must be an object"),
+                &mut emit,
+            );
+            return;
+        }
+        let is_initialized_notification = request.method == "initialized" && request.id.is_none();
+        if request.id.is_none() && !is_initialized_notification {
+            return;
+        }
 
         if request.jsonrpc != JSONRPC_VERSION {
             self.emit_all(
@@ -3949,6 +4355,18 @@ impl Runtime {
         if let Some(duplicate) = self.control.claim_request(&request) {
             emit(duplicate);
             return;
+        }
+
+        if self.initialized && self.client_ready {
+            for required in Self::required_capabilities(&request) {
+                if !self.negotiated_capabilities.contains(required) {
+                    self.emit_all(
+                        self.error_for(&request, -32006, "required capability was not negotiated"),
+                        &mut emit,
+                    );
+                    return;
+                }
+            }
         }
 
         let quarantined_session = self.initialized
@@ -4139,16 +4557,28 @@ impl Runtime {
         let messages = match request.method.as_str() {
             "initialize" => self.initialize(request),
             "initialized" => {
-                if self.initialized {
+                let params_are_empty = request
+                    .params
+                    .as_object()
+                    .is_some_and(serde_json::Map::is_empty);
+                if request.id.is_none()
+                    && self.initialized
+                    && !self.client_ready
+                    && params_are_empty
+                {
                     self.client_ready = true;
                     self.control.set_protocol_ready(true);
                 }
-                Vec::new()
+                if request.id.is_some() {
+                    self.error_for(&request, -32600, "initialized must be a notification")
+                } else {
+                    Vec::new()
+                }
             }
-            "shutdown" => self.shutdown(request),
             _ if !self.initialized || !self.client_ready => {
                 self.error_for(&request, -32002, "initialize handshake required")
             }
+            "shutdown" => self.shutdown(request),
             "runtime/recovery/status" => self.recovery_diagnostic(request, false),
             "runtime/recovery/export" => self.recovery_diagnostic(request, true),
             "runtime/restart" => self.runtime_restart(request),
@@ -4271,6 +4701,158 @@ impl Runtime {
 
     fn is_recovery_mode(&self) -> bool {
         matches!(&self.backend, Backend::Recovery(_))
+    }
+
+    fn required_capabilities(request: &Request) -> Vec<&'static str> {
+        let primary = match request.method.as_str() {
+            "runtime/recovery/status" => "runtime.recovery.status",
+            "runtime/recovery/export" => "runtime.recovery.diagnostic-export",
+            "runtime/restart" => "runtime.restart",
+            "runtime/health" => "runtime.health",
+            "runtime/degradations" => "runtime.degradations",
+            "model/catalog" => "model.catalog.read-only",
+            "model/catalog-cache" => "model.catalog.cache.read-only",
+            "model/catalog-refresh-status" => "model.catalog.refresh.status.read-only",
+            "model/capability-check" => "model.capability-check.read-only",
+            "model/profile/list" | "model/profile/read" => "model.profile.read-only",
+            "project/open" => "project.open",
+            "project/list" => "project.list",
+            "project/navigation" => "project.navigation.persistent",
+            "project/trust-review" => "project.trust-review",
+            "project/trust-acknowledge" => "project.trust-acknowledge",
+            "project/root-list" | "project/root-add" | "project/root-remove" => {
+                "project.roots.scoped"
+            }
+            "project/relink" => "project.relink.explicit",
+            "session/archive" | "session/title" | "session/unarchive" => "session.metadata.manage",
+            "session/delete/preview" | "session/delete/schedule" | "session/deletion/status" => {
+                "session.deletion.two-phase"
+            }
+            "session/delete/undo" => "session.deletion.undo",
+            "session/compaction/checkpoint/create"
+            | "session/compaction/checkpoint/read"
+            | "session/compaction/checkpoint/revise" => "session.compaction.checkpoint-review",
+            "session/export/preview" | "session/export" => "session.portable.export",
+            "session/import/preview" | "session/import" => "session.portable.import",
+            "session/list" => "session.list",
+            "session/search" => "session.search.branch",
+            "session/background-notifications" => "background-notification.outbox.read-only",
+            "session/background-recovery" => "background-job.recovery.inspect",
+            "operation/reconcile" => "operation.reconciliation",
+            "operation/probe" => "operation.reconciliation.probe",
+            "operation/status" => "operation.reconciliation.status",
+            "session/recovery/status" => "session.recovery.status",
+            "runtime/projection-recovery/status" => "runtime.projection-recovery.status",
+            "session/start" => match request.params.get("mode").and_then(Value::as_str) {
+                Some("work") => "session.work.preview",
+                _ => "session.chat",
+            },
+            "session/resume" => "session.resume",
+            "session/fork" => "session.fork",
+            "session/read" => "session.history.paginated",
+            "session/provider-list" | "session/provider-read" => {
+                "session.provider.lifecycle.list-read"
+            }
+            "retention/policy/read" | "retention/policy/remove" | "retention/policy/set" => {
+                "retention.policy.manage"
+            }
+            "retention/maintenance/run" => "retention.maintenance.host-triggered",
+            "turn/start" => "timeline.streaming",
+            "turn/cancel" => "turn.cancel.interrupt",
+            "turn/steer" => "turn.steer.same-turn",
+            "turn/context/inspect" => "turn.context.inspect",
+            "workspace/list" => "workspace.list",
+            "workspace/read" => "workspace.read-text",
+            "workspace/instructions" => "workspace.instructions.discovery",
+            "workspace/pinned-context/list" => "workspace.pinned-context.store",
+            "workspace/pinned-context/save" | "workspace/pinned-context/remove" => {
+                "workspace.pinned-context.manage"
+            }
+            "workspace/image/import-user" => "workspace.image.import-user",
+            "workspace/image/read" => "workspace.image.preview",
+            "workspace/save-user-text" => "workspace.save-user-text",
+            "workspace/metadata" => "workspace.metadata",
+            "workspace/watch" | "workspace/watch/poll" => "workspace.watch.poll",
+            "workspace/git-status" => "workspace.git-status",
+            "workspace/git/overview"
+            | "workspace/git/log"
+            | "workspace/git/commit"
+            | "workspace/git/diff" => "workspace.git-query.read-only",
+            "workspace/git/context/read" => "workspace.git-context.read-only",
+            "workspace/search" => "workspace.search.bounded",
+            "workspace/search/cancel" => "workspace.search.cancel",
+            "workspace/index" => "workspace.index.tree-sitter",
+            "workspace/index/cancel" => "workspace.index.cancel",
+            "workspace/repository-map" => "workspace.repository-map.budgeted",
+            "workspace/language-servers"
+            | "workspace/language-server/start"
+            | "workspace/language-server/stop" => "workspace.language-servers",
+            "workspace/definition" => "workspace.definition",
+            "workspace/references" => "workspace.references",
+            "workspace/diagnostics" => "workspace.diagnostics.language-server",
+            "workspace/observed-diagnostics" => "workspace.diagnostics.observed",
+            "workspace/diagnostics/raw" => "workspace.diagnostics.raw-reference",
+            "artifact/read-command-output" => "artifact.command-output.bounded",
+            "workspace/edit/preview" | "workspace/edit/artifact/read" => {
+                "workspace.edit.preview.read-only"
+            }
+            "terminal/excerpt/read" => "terminal.excerpt.read",
+            "terminal/stop-user" => "terminal.lifecycle.named",
+            "terminal/open-user"
+            | "terminal/read"
+            | "terminal/attach"
+            | "terminal/list"
+            | "terminal/input-user"
+            | "terminal/resize"
+            | "terminal/signal-user"
+            | "terminal/close-user"
+            | "terminal/restart-user"
+            | "terminal/remove-user" => "terminal.lifecycle.named",
+            "initialize" | "initialized" | "shutdown" => return Vec::new(),
+            _ => return Vec::new(),
+        };
+        let mut required = vec![primary];
+        if matches!(
+            request.method.as_str(),
+            "terminal/open-user"
+                | "terminal/input-user"
+                | "terminal/resize"
+                | "terminal/signal-user"
+                | "terminal/stop-user"
+                | "terminal/restart-user"
+                | "terminal/excerpt/read"
+        ) {
+            required.push(TerminalManager::capability());
+        }
+        if request.method == "terminal/stop-user" {
+            required.push("terminal.stop.out-of-band");
+        }
+        if matches!(
+            request.method.as_str(),
+            "turn/start" | "turn/context/inspect"
+        ) {
+            if request
+                .params
+                .get("context")
+                .and_then(Value::as_array)
+                .is_some_and(|context| !context.is_empty())
+            {
+                required.push("turn.context.structured");
+            }
+            if request
+                .params
+                .get("pinned_context_ids")
+                .and_then(Value::as_array)
+                .is_some_and(|ids| !ids.is_empty())
+                || request
+                    .params
+                    .get("pinned_context_set_identity")
+                    .is_some_and(|identity| !identity.is_null())
+            {
+                required.push("turn.context.pinned-selected");
+            }
+        }
+        required
     }
 
     fn runtime_health(&mut self, request: Request) -> Vec<Value> {
@@ -4710,14 +5292,98 @@ impl Runtime {
     }
 
     fn initialize(&mut self, request: Request) -> Vec<Value> {
+        if self.initialized {
+            return self.error_for(&request, -32007, "initialize has already completed");
+        }
         let params: InitializeParams = match serde_json::from_value(request.params.clone()) {
             Ok(params) => params,
-            Err(error) => {
-                return self.error_for(&request, -32602, format!("invalid params: {error}"))
-            }
+            Err(_) => return self.error_for(&request, -32602, "initialize params are invalid"),
         };
-        if params.protocol_version != PROTOCOL_VERSION {
-            return self.error_for(&request, -32003, "unsupported AAP protocol version");
+        if !valid_identity_name(&params.client.name)
+            || !valid_identity_version(&params.client.version)
+        {
+            return self.error_for(&request, -32602, "client identity is invalid");
+        }
+        if !params.capabilities.experimental.is_empty() {
+            return self.error_for(
+                &request,
+                -32602,
+                "experimental capabilities are not supported by AAP 0.1",
+            );
+        }
+        if !matches!(
+            params.platform.os.as_str(),
+            "macos" | "windows" | "linux" | "unknown"
+        ) || !matches!(
+            params.platform.architecture.as_str(),
+            "arm64" | "x86_64" | "unknown"
+        ) {
+            return self.error_for(&request, -32602, "client platform is invalid");
+        }
+        if params.limits.max_frame_bytes != MAX_AAP_FRAME_BYTES {
+            return self.error_for(
+                &request,
+                -32602,
+                "AAP 0.1 frame limit must be exactly 4 MiB",
+            );
+        }
+        if params.transport_security.transport != "stdio"
+            || !params.transport_security.local
+            || params.transport_security.authenticated
+            || params.transport_security.encrypted
+            || params.transport_security.peer_verified
+        {
+            return self.error_for(
+                &request,
+                -32602,
+                "client transport security declaration does not match stdio",
+            );
+        }
+        let Some(client_minimum) = parse_protocol_version(&params.protocol.minimum) else {
+            return self.error_for(&request, -32602, "protocol minimum version is invalid");
+        };
+        let Some(client_maximum) = parse_protocol_version(&params.protocol.maximum) else {
+            return self.error_for(&request, -32602, "protocol maximum version is invalid");
+        };
+        let Some(client_preferred) = parse_protocol_version(&params.protocol.preferred) else {
+            return self.error_for(&request, -32602, "protocol preferred version is invalid");
+        };
+        if client_minimum > client_maximum
+            || client_preferred < client_minimum
+            || client_preferred > client_maximum
+        {
+            return self.error_for(&request, -32602, "client protocol range is invalid");
+        }
+        let runtime_minimum = parse_protocol_version(RUNTIME_PROTOCOL_MINIMUM)
+            .expect("runtime protocol minimum is compile-time valid");
+        let runtime_maximum = parse_protocol_version(RUNTIME_PROTOCOL_MAXIMUM)
+            .expect("runtime protocol maximum is compile-time valid");
+        if client_maximum < runtime_minimum || client_minimum > runtime_maximum {
+            let upgrade_direction = if client_maximum < runtime_minimum {
+                "client"
+            } else {
+                "runtime"
+            };
+            let response = Response::error_with_data(
+                request.id.clone().expect("initialize requests require IDs"),
+                -32003,
+                "AAP protocol ranges do not overlap",
+                Some(json!({
+                    "schema_version": "initialize-error/0.1",
+                    "reason": "protocol-range-not-overlapping",
+                    "client": {
+                        "minimum": params.protocol.minimum,
+                        "maximum": params.protocol.maximum
+                    },
+                    "runtime": {
+                        "minimum": RUNTIME_PROTOCOL_MINIMUM,
+                        "maximum": RUNTIME_PROTOCOL_MAXIMUM
+                    },
+                    "upgrade_direction": upgrade_direction
+                })),
+            );
+            return vec![serde_json::to_value(response)
+                .expect("protocol range error response serialization")];
         }
         if let Backend::Recovery(diagnostic) = &self.backend {
             if diagnostic.schema_version != codex_capability_matrix::RECOVERY_VERSION {
@@ -4728,10 +5394,9 @@ impl Runtime {
                 );
             }
         }
-        self.initialized = true;
         let local_workbench_available =
             matches!(&self.backend, Backend::Preview | Backend::Codex(_));
-        let (backend, mut capabilities) = match &self.backend {
+        let (backend, mut capabilities): (BackendDescriptor, Vec<String>) = match &self.backend {
             Backend::Preview => (
                 BackendDescriptor {
                     adapter: "preview".into(),
@@ -4880,15 +5545,70 @@ impl Runtime {
                 capabilities.push("model.profile.read-only".into());
             }
         }
+        let declared_stable = params
+            .capabilities
+            .stable
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        capabilities.retain(|capability| declared_stable.contains(capability.as_str()));
+        let negotiated_capabilities = capabilities.iter().cloned().collect::<BTreeSet<_>>();
+        let (backend_marker, requires_read_only_permission) = match &self.backend {
+            Backend::Preview => ("runtime.preview", true),
+            Backend::Codex(_) => ("runtime.codex-app-server", true),
+            Backend::Recovery(_) => ("runtime.recovery.read-only", true),
+            Backend::Unavailable(_) => ("runtime.unavailable", false),
+        };
+        if !negotiated_capabilities.contains(backend_marker)
+            || (requires_read_only_permission
+                && !negotiated_capabilities.contains("permission.read-only"))
+        {
+            return self.error_for(
+                &request,
+                -32006,
+                "required handshake capabilities were not negotiated",
+            );
+        }
+        let negotiated_max_frame_bytes = MAX_AAP_FRAME_BYTES;
+        let selected_protocol =
+            if client_preferred >= runtime_minimum && client_preferred <= runtime_maximum {
+                params.protocol.preferred
+            } else {
+                PROTOCOL_VERSION.to_owned()
+            };
         let result = InitializeResult {
-            protocol_version: PROTOCOL_VERSION.to_owned(),
+            protocol: NegotiatedProtocol {
+                minimum: RUNTIME_PROTOCOL_MINIMUM.into(),
+                maximum: RUNTIME_PROTOCOL_MAXIMUM.into(),
+                selected: selected_protocol,
+                upgrade_direction: "none".into(),
+            },
             runtime: Identity {
                 name: "aegisy-agentd".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
             },
+            platform: runtime_platform(),
             backend,
-            capabilities,
+            capabilities: NegotiatedCapabilities {
+                stable: capabilities,
+                experimental: Vec::new(),
+            },
+            limits: ProtocolLimits {
+                max_frame_bytes: negotiated_max_frame_bytes,
+            },
+            transport_security: TransportSecurity {
+                transport: "stdio".into(),
+                local: true,
+                authenticated: false,
+                encrypted: false,
+                peer_verified: false,
+            },
         };
+        self.initialized = true;
+        self.negotiated_capabilities = negotiated_capabilities;
+        self.negotiated_max_frame_bytes = negotiated_max_frame_bytes;
+        self.control
+            .set_negotiated_contract(&self.negotiated_capabilities, negotiated_max_frame_bytes);
         self.success_for(
             &request,
             serde_json::to_value(result).expect("result serialization"),
@@ -15329,12 +16049,13 @@ impl Runtime {
     }
 
     fn error_for(&self, request: &Request, code: i64, message: impl Into<String>) -> Vec<Value> {
-        vec![serde_json::to_value(Response::error(
-            request.id.clone().unwrap_or(Value::Null),
-            code,
-            message,
-        ))
-        .expect("response serialization")]
+        match &request.id {
+            Some(id) => vec![
+                serde_json::to_value(Response::error(id.clone(), code, message))
+                    .expect("response serialization"),
+            ],
+            None => Vec::new(),
+        }
     }
 }
 
@@ -15706,12 +16427,9 @@ mod pinned_context_assembly_tests {
         let mut runtime = Runtime::with_store(&data_root).unwrap();
         runtime.handle_line(&request(
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": {"name": "source-invalidation", "version": "1"}
-            }),
+            test_initialize_params("source-invalidation"),
         ));
-        runtime.handle_line(&request("initialized", json!({})));
+        runtime.handle_line(&test_notification("initialized", json!({})));
         let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
         let project_id = opened[0]["result"]["project"]["id"]
             .as_str()
@@ -15860,12 +16578,9 @@ mod pinned_context_assembly_tests {
         let mut reopened = Runtime::with_store(&data_root).unwrap();
         reopened.handle_line(&request(
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": {"name": "source-invalidation-reopen", "version": "1"}
-            }),
+            test_initialize_params("source-invalidation-reopen"),
         ));
-        reopened.handle_line(&request("initialized", json!({})));
+        reopened.handle_line(&test_notification("initialized", json!({})));
         let reopened_list = reopened.handle_line(&request(
             "workspace/pinned-context/list",
             json!({"project_id": project_id}),
@@ -15892,12 +16607,9 @@ mod pinned_context_assembly_tests {
         let mut runtime = Runtime::with_store(&data_root).unwrap();
         runtime.handle_line(&request(
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": {"name": "child-handoff", "version": "1"}
-            }),
+            test_initialize_params("child-handoff"),
         ));
-        runtime.handle_line(&request("initialized", json!({})));
+        runtime.handle_line(&test_notification("initialized", json!({})));
         let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
         let project_id = opened[0]["result"]["project"]["id"]
             .as_str()
@@ -16049,14 +16761,8 @@ mod pinned_context_assembly_tests {
         fs::create_dir_all(&data_root).unwrap();
         fs::create_dir_all(&project_root).unwrap();
         let mut runtime = Runtime::with_store(&data_root).unwrap();
-        runtime.handle_line(&request(
-            "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": {"name": "image-pin", "version": "1"}
-            }),
-        ));
-        runtime.handle_line(&request("initialized", json!({})));
+        runtime.handle_line(&request("initialize", test_initialize_params("image-pin")));
+        runtime.handle_line(&test_notification("initialized", json!({})));
         let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
         let project_id = opened[0]["result"]["project"]["id"]
             .as_str()
@@ -16226,12 +16932,9 @@ mod pinned_context_assembly_tests {
         let mut runtime = Runtime::with_store(&data_root).unwrap();
         runtime.handle_line(&request(
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": {"name": "artifact-pin", "version": "1"}
-            }),
+            test_initialize_params("artifact-pin"),
         ));
-        runtime.handle_line(&request("initialized", json!({})));
+        runtime.handle_line(&test_notification("initialized", json!({})));
         let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
         let project_id = opened[0]["result"]["project"]["id"]
             .as_str()
@@ -16317,12 +17020,9 @@ mod pinned_context_assembly_tests {
         let mut runtime = Runtime::with_store(&data_root).unwrap();
         runtime.handle_line(&request(
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": {"name": "diagnostic-pin", "version": "1"}
-            }),
+            test_initialize_params("diagnostic-pin"),
         ));
-        runtime.handle_line(&request("initialized", json!({})));
+        runtime.handle_line(&test_notification("initialized", json!({})));
         let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
         let project_id = opened[0]["result"]["project"]["id"]
             .as_str()
@@ -16479,12 +17179,9 @@ mod pinned_context_assembly_tests {
         let mut runtime = Runtime::with_store(&data_root).unwrap();
         runtime.handle_line(&request(
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": {"name": "terminal-pin", "version": "1"}
-            }),
+            test_initialize_params("terminal-pin"),
         ));
-        runtime.handle_line(&request("initialized", json!({})));
+        runtime.handle_line(&test_notification("initialized", json!({})));
         let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
         let project_id = opened[0]["result"]["project"]["id"]
             .as_str()
@@ -16703,14 +17400,8 @@ mod pinned_context_assembly_tests {
         fs::write(project_root.join("large.txt"), &large_content).unwrap();
 
         let mut runtime = Runtime::with_store(&data_root).unwrap();
-        runtime.handle_line(&request(
-            "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": {"name": "git-pin", "version": "1"}
-            }),
-        ));
-        runtime.handle_line(&request("initialized", json!({})));
+        runtime.handle_line(&request("initialize", test_initialize_params("git-pin")));
+        runtime.handle_line(&test_notification("initialized", json!({})));
         let opened = runtime.handle_line(&request("project/open", json!({"root": project_root})));
         let project_id = opened[0]["result"]["project"]["id"]
             .as_str()
@@ -16978,17 +17669,18 @@ mod turn_cancel_tests {
                 "jsonrpc": "2.0",
                 "id": "initialize-cancel",
                 "method": "initialize",
-                "params": {
-                    "protocol_version": "0.1",
-                    "client": { "name": "test", "version": "1" }
-                }
+                "params": test_initialize_params("test")
             })
             .to_string(),
         );
         assert!(initialized[0].get("result").is_some());
         assert!(runtime
-            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized"}"#)
+            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
             .is_empty());
+        runtime.control.lock().negotiated_capabilities.extend([
+            "turn.cancel.interrupt".into(),
+            "turn.steer.same-turn".into(),
+        ]);
         runtime
     }
 
@@ -17589,19 +18281,17 @@ mod durable_runtime_tests {
         .to_string()
     }
 
-    fn ready(runtime: &mut Runtime) {
+    fn ready(runtime: &mut Runtime) -> Value {
         let initialize = runtime.handle_line(&request(
             "initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": { "name": "durable-test", "version": "1" }
-            }),
+            test_initialize_params("durable-test"),
         ));
         assert!(initialize[0].get("result").is_some());
         assert!(runtime
-            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized"}"#)
+            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
             .is_empty());
+        initialize[0].clone()
     }
 
     #[test]
@@ -17977,17 +18667,16 @@ mod durable_runtime_tests {
         let initialized = restarted.handle_line(&request(
             "initialize",
             "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": {"name": "quarantine-test", "version": "1"}
-            }),
+            test_initialize_params("quarantine-test"),
         ));
-        let capabilities = initialized[0]["result"]["capabilities"].as_array().unwrap();
+        let capabilities = initialized[0]["result"]["capabilities"]["stable"]
+            .as_array()
+            .unwrap();
         assert!(capabilities
             .iter()
             .any(|value| value == "runtime.projection-recovery.status"));
         assert!(restarted
-            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized"}"#)
+            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
             .is_empty());
 
         let runtime_status = restarted.handle_line(&request(
@@ -18253,16 +18942,8 @@ mod durable_runtime_tests {
         fs::create_dir_all(&data_root).unwrap();
 
         let mut runtime = Runtime::with_store(&data_root).unwrap();
-        ready(&mut runtime);
-        let initialized = runtime.handle_line(&request(
-            "initialize-capabilities-again",
-            "initialize",
-            json!({
-                "protocol_version": "0.1",
-                "client": {"name": "deletion-test", "version": "1"}
-            }),
-        ));
-        assert!(initialized[0]["result"]["capabilities"]
+        let initialized = ready(&mut runtime);
+        assert!(initialized["result"]["capabilities"]["stable"]
             .as_array()
             .unwrap()
             .iter()
