@@ -1495,10 +1495,14 @@ QString AgentRuntimeClient::timelineSnapshotIdentity(
     quint64 totalItems, quint64 totalCanonicalBytes,
     const QStringList &orderedItemIdentities)
 {
+    const double floorSequence = floor.value(QStringLiteral("sequence")).toDouble();
+    const double watermarkSequence = watermark.value(QStringLiteral("sequence")).toDouble();
     if (!isBoundedTimelineIdentity(sessionId)
         || !isValidTimelineAnchor(floor) || !isValidTimelineAnchor(watermark)
-        || watermark.value(QStringLiteral("sequence")).toDouble()
-            < floor.value(QStringLiteral("sequence")).toDouble()
+        || watermarkSequence < floorSequence
+        || (watermarkSequence == floorSequence
+            && floor.value(QStringLiteral("event_id"))
+                != watermark.value(QStringLiteral("event_id")))
         || totalItems > 10000 || totalCanonicalBytes > 64ULL * 1024ULL * 1024ULL
         || totalItems != static_cast<quint64>(orderedItemIdentities.size())
         || (totalItems == 0) != (totalCanonicalBytes == 0)) {
