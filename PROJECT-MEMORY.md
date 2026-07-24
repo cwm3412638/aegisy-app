@@ -192,6 +192,21 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   checkpoint, and retained tail while its rebuildable Session projection is
   temporarily absent; strict ownership is enforced after recovery before the Store
   becomes writable.
+  A genuine `timeline/sync` request whose after anchor is before the validated floor
+  now returns JSON-RPC `-32148` with closed `timeline-retention-gap/0.1` data. It
+  exposes only the requested anchors and durable floor/head, requires
+  `timeline.snapshot.current` through `timeline/snapshot`, reports that snapshot as
+  unavailable in the current stage, declares event history incomplete, and forbids
+  replay from the floor. The response contains no Item/checkpoint content or internal
+  checkpoint identity. A retained after or fixed watermark with a substituted Event
+  ID remains ordinary `-32147` drift, including when another requested anchor is
+  already before the floor.
+  `session/read` cannot serve as the public recovery snapshot: it pages projected
+  Items without a fixed Public Timeline head and omits live `started`/`delta` state,
+  while the v16 Sequencer checkpoint intentionally omits Item content/data. The next
+  persistence stage must add a bounded durable visible-state floor snapshot and
+  atomically advance it with checkpoint/floor/prune before Runtime can materialize a
+  fixed-head paged snapshot and Qt can replace one Session atomically.
   Automatic pruning remains unreachable until public snapshot recovery exists.
   Snapshot, structured retention-gap recovery, live
   subscription, heartbeat, complete reconnect orchestration, explicit
@@ -2680,8 +2695,8 @@ Implemented visual baseline:
   stale prepared tickets, wall-clock rollback, terminal Item boundary enforcement,
   aggregate pending limits, 10,001st-Session fail-closed behavior, initial/history
   sync, pending-deletion read-only sync, and real disconnect signal ordering. The
-  complete Rust workspace passes 22 AAP type tests, 675 sidecar tests plus one
-  ignored live fixture, 6 daemon-main, 10 threshold, 13 handshake Runtime, 15
+  complete Rust workspace passes 23 AAP type tests, 675 sidecar tests plus one
+  ignored live fixture, 6 daemon-main, 10 threshold, 13 handshake Runtime, 16
   Schema, 66 protocol, and 23 stdio/Codex tests, with strict Clippy and formatting.
   The complete desktop build, all 16 CTests, strict OpenSpec validation, and
   `git diff --check` also pass. Preview's six-event transaction and adapter/
@@ -2693,9 +2708,10 @@ Implemented visual baseline:
   reject later Public Journal repair, and production builds expose no Trace-only
   terminal Store helper. The durable retention floor and content-free Sequencer
   checkpoint restore only internal lifecycle authority; they are not a public
-  current-Session snapshot. Automatic pruning remains disabled. Snapshot,
-  structured retention-gap recovery,
-  subscription, heartbeat, complete reconnect orchestration, explicit
+  current-Session snapshot. The strict content-free `-32148` retention-gap response
+  is implemented, while snapshot-based retention-gap recovery remains unavailable.
+  Automatic pruning remains disabled. Snapshot, subscription, heartbeat, complete
+  reconnect orchestration, explicit
   acknowledgement, and Windows recovery evidence remain absent.
 
 - The AAP initialization-negotiation stage completes OpenSpec `3.3`. Rust and Qt
@@ -2826,10 +2842,12 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Continue OpenSpec `3.5` with a bounded current-Session snapshot and structured
-   retention-gap response, then add Qt atomic snapshot replacement, subscription,
-   heartbeat, complete reconnect orchestration, explicit acknowledgement, and
-   Windows recovery evidence.
+1. Continue OpenSpec `3.5` with the schema v17 durable visible-state floor snapshot,
+   fixed-head bounded `timeline/snapshot` paging, and Qt atomic single-Session
+   replacement. Then add subscription, heartbeat, complete reconnect orchestration,
+   explicit acknowledgement, and Windows recovery evidence. The structured
+   retention-gap response is implemented; keep automatic pruning disabled until the
+   complete snapshot recovery path is verified.
 2. Validate the hardened TLS installer on a clean Windows x64 VM.
 3. Reproduce and correlate any remaining streaming disconnect with redacted logs.
 4. Continue consolidating widget-local QSS and replace remaining Qt stock icons;

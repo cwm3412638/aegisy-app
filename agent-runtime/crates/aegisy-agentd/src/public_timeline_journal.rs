@@ -721,16 +721,16 @@ fn sync_page_with_ownership(
     if watermark.sequence > current_watermark.sequence || after_sequence > watermark.sequence {
         return Err(JournalError::new("timeline-sync-watermark-invalid"));
     }
+    if watermark.sequence >= cursor.pruned_through_sequence && watermark.sequence > 0 {
+        let stored_event_id = anchor_event_id(connection, session_id, watermark.sequence, &cursor)?;
+        if stored_event_id.as_deref() != watermark.event_id.as_deref() {
+            return Err(JournalError::new("timeline-sync-watermark-drift"));
+        }
+    }
     if after_sequence < cursor.pruned_through_sequence
         || watermark.sequence < cursor.pruned_through_sequence
     {
         return Err(JournalError::new("timeline-sync-retention-gap"));
-    }
-    if watermark.sequence > 0 {
-        let stored_event_id = anchor_event_id(connection, session_id, watermark.sequence, &cursor)?;
-        if stored_event_id.as_deref() != watermark.event_id.as_deref() {
-            return Err(JournalError::new("timeline-sync-retention-gap"));
-        }
     }
 
     let mut statement = connection
@@ -856,7 +856,13 @@ pub fn sync_page_from_anchor(
     let cursor = read_cursor(connection, session_id)?;
     validate_cursor_anchor(connection, session_id, &cursor)?;
     if after.sequence < cursor.pruned_through_sequence {
-        return Err(JournalError::new("timeline-sync-retention-gap"));
+        return sync_page(
+            connection,
+            session_id,
+            after.sequence,
+            requested_watermark,
+            limit,
+        );
     }
     if after.sequence > 0 {
         let stored_event_id = anchor_event_id(connection, session_id, after.sequence, &cursor)?;
@@ -873,13 +879,13 @@ pub fn sync_page_from_anchor(
     )
 }
 
-#[cfg(test)]
 pub(crate) fn read_retention_state(
     connection: &Connection,
     session_id: &str,
 ) -> Result<TimelineRetentionState, JournalError> {
     let cursor = read_cursor(connection, session_id)?;
     validate_cursor_anchor(connection, session_id, &cursor)?;
+    validate_checkpoint(connection, session_id, &cursor)?;
     Ok(TimelineRetentionState {
         session_id: session_id.to_owned(),
         head: cursor.head(),
@@ -1653,7 +1659,7 @@ mod tests {
             sync_page(&connection, "session", 2, Some(&forged), 2)
                 .unwrap_err()
                 .code,
-            "timeline-sync-retention-gap"
+            "timeline-sync-watermark-drift"
         );
     }
 
@@ -1859,6 +1865,22 @@ mod tests {
                 .unwrap_err()
                 .code,
             "timeline-sync-retention-gap"
+        );
+        let forged_retained_watermark = TimelineWatermark {
+            sequence: 5,
+            event_id: Some(format!("event:sha256:{}", "0".repeat(64))),
+        };
+        assert_eq!(
+            sync_page(
+                &connection,
+                "session",
+                0,
+                Some(&forged_retained_watermark),
+                10,
+            )
+            .unwrap_err()
+            .code,
+            "timeline-sync-watermark-drift"
         );
         let page = sync_page_from_anchor(&connection, "session", &boundary, None, 10).unwrap();
         assert_eq!(

@@ -147,6 +147,22 @@ same capability instead of attempting an unnegotiated fallback.
 {"jsonrpc":"2.0","id":"timeline-sync-empty","result":{"schema_version":"timeline-sync-page/0.1","session_id":"session-empty","after":{"sequence":0,"event_id":null},"watermark":{"sequence":0,"event_id":null},"events":[],"next_after":null,"complete":true}}
 ```
 
+If the requested anchor is older than the durable retention floor, Runtime returns
+the distinct structured error below. This response does not contain a Session
+snapshot, does not expose the internal Sequencer checkpoint, and does not authorize
+the client to resume from `retained_floor` while silently discarding older visible
+state. Until `timeline.snapshot.current` is negotiated, the affected Session remains
+frozen while unrelated Sessions can continue.
+
+```jsonl
+{"jsonrpc":"2.0","id":"timeline-gap-1","error":{"code":-32148,"message":"requested Timeline history is no longer retained","data":{"schema_version":"timeline-retention-gap/0.1","reason":"requested-anchor-not-retained","session_id":"session-1","requested_after":{"sequence":0,"event_id":null},"requested_watermark":null,"retained_floor":{"sequence":2,"event_id":"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"head":{"sequence":3,"event_id":"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"snapshot_required":true,"snapshot_available":false,"snapshot_capability":"timeline.snapshot.current","snapshot_method":"timeline/snapshot","event_history_complete":false,"replay_from_floor_allowed":false}}}
+```
+
+Only a genuine pre-floor request uses `-32148`. A malformed, substituted, or
+same-sequence wrong Event ID in retained history remains anchor/watermark drift and
+uses the ordinary sync failure path. This prevents a forged anchor from being
+misrepresented as normal retention recovery.
+
 Every anchor is the exact pair `{sequence,event_id}`. Sequence zero is represented
 only as `{0,null}`. Every positive sequence requires the exact 77-byte lowercase
 `event:sha256:` identity of that event; a null, uppercase, malformed, or substituted

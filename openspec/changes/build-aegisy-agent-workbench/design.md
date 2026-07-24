@@ -326,6 +326,21 @@ temporarily missing, but it enforces exact Session ownership immediately after
 projection recovery and before the Store becomes writable.
 Automatic production pruning remains disabled until a versioned current-Session
 snapshot, structured retention-gap response, and client recovery flow exist.
+The structured gap response is `timeline-retention-gap/0.1` on JSON-RPC `-32148`.
+It publishes only requested anchors, the validated floor/head, and fixed recovery
+metadata. It requires `timeline.snapshot.current` through `timeline/snapshot`, marks
+that route unavailable until the snapshot stage lands, declares retained event
+history incomplete, and forbids replay directly from the floor. Retained anchors
+with substituted Event IDs remain drift failures. The v16 Sequencer checkpoint is
+never serialized into this response.
+
+The public current-Session snapshot requires a separate durable visible-state
+projection rather than `session/read`: projected Items omit live `started`/`delta`
+updates and the v16 checkpoint intentionally omits Item content. The next schema
+stage therefore adds a bounded floor snapshot that atomically advances with the
+checkpoint/floor/prune transaction, then reduces its state plus the retained tail to
+a fixed-head paged snapshot. Qt validates every page privately and replaces only the
+affected Session after the complete snapshot identity is proven.
 
 Credentials remain in OS secure storage. The database contains credential IDs or
 short-lived token references, never API keys or long-lived Aegisy JWT values.

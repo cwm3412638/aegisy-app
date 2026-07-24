@@ -27,8 +27,8 @@ use crate::operation_reconciliation::{
     reconcile as reconcile_operation, EventState, ReconciliationInput, ReconciliationResult,
 };
 use crate::public_timeline_journal::{
-    self, JournalError as PublicTimelineJournalError, TimelinePruneResult, TimelineSyncPage,
-    TimelineWatermark,
+    self, JournalError as PublicTimelineJournalError, TimelinePruneResult, TimelineRetentionState,
+    TimelineSyncPage, TimelineWatermark,
 };
 use crate::session_compaction::{activate_review, CompactionCheckpointReview};
 use crate::session_compaction_store::{
@@ -11080,6 +11080,15 @@ impl WorkbenchStore {
             limit,
         )
         .map_err(public_timeline_error)
+    }
+
+    pub(crate) fn public_timeline_retention_state(
+        &self,
+        session_id: &str,
+    ) -> Result<TimelineRetentionState, WorkbenchStoreError> {
+        self.ensure_session_readable(session_id)?;
+        public_timeline_journal::read_retention_state(&self.connection, session_id)
+            .map_err(public_timeline_error)
     }
 
     pub(crate) fn restore_public_timeline_sequencer(
@@ -23353,6 +23362,11 @@ mod tests {
         drop(reopened);
 
         let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        let retention = reopened
+            .public_timeline_retention_state("timeline-session")
+            .unwrap();
+        assert_eq!(retention.floor, checkpoint.floor);
+        assert_eq!(retention.head, checkpoint.head);
         let mut restored = reopened.restore_public_timeline_sequencer().unwrap();
         let terminal = restored
             .sequence(15, "timeline-session", "turn-two", "turn.completed", None)

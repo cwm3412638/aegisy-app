@@ -210,6 +210,22 @@ client SHALL drain queued live events through the ordinary validator. A malforme
 page, anchor drift, request failure, missing capability, or queue/batch overflow
 SHALL preserve the confirmed projection and leave that Session frozen.
 
+When the requested `after` anchor is strictly older than the validated durable
+retention floor, Runtime SHALL return JSON-RPC error `-32148` with exact
+`timeline-retention-gap/0.1` data. The data SHALL bind the Session, requested after
+and optional watermark, retained floor, current head, required snapshot capability
+and method, snapshot availability, incomplete event-history state, and the explicit
+prohibition on replaying from the floor. It SHALL contain no Item content, checkpoint
+content, checkpoint identity, path, provider data, or credential. A retained
+sequence with a substituted Event ID SHALL remain anchor or watermark drift and
+SHALL NOT be reported as a retention gap.
+
+Until `timeline.snapshot.current` is negotiated and the complete current-Session
+snapshot is atomically installed, the affected Session SHALL remain frozen. The
+client SHALL NOT discard its confirmed projection, clear bounded queued live events,
+or resume at the floor merely because the gap response was structurally valid.
+Other Sessions SHALL continue independently.
+
 The fixed-watermark slice does not satisfy the complete reconnect requirement by
 itself. The schema v16 floor/checkpoint is internal retention and startup authority,
 not a current-Session snapshot or public recovery response. Automatic production
@@ -257,6 +273,14 @@ considered complete.
 #### Scenario: Replay anchor or page identity is forged
 - **WHEN** zero is paired with an Event ID, a positive sequence has a null or malformed Event ID, equal sequences carry different IDs, a page changes Session/after/watermark, events gap or cross Session, or `next_after` does not identify the final event
 - **THEN** the peer SHALL reject the complete request or page before cursor advancement or Timeline projection
+
+#### Scenario: Requested replay point is no longer retained
+- **WHEN** a valid `timeline/sync` request names an after anchor strictly before the durable retention floor
+- **THEN** Runtime SHALL return `-32148` with exact content-free floor/head and snapshot-recovery metadata, and the client SHALL keep only that Session frozen without replaying from the floor
+
+#### Scenario: Retained replay identity is forged
+- **WHEN** an after or fixed-watermark sequence is still retained but its Event ID is substituted
+- **THEN** Runtime SHALL return the ordinary anchor/watermark drift failure without `timeline-retention-gap/0.1` data
 
 #### Scenario: Internal retention advances atomically
 - **WHEN** maintenance checkpoints a validated Session prefix and prunes through its exact sequence/Event-ID/timestamp anchor

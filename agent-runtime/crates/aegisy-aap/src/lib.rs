@@ -1146,6 +1146,169 @@ pub mod stable {
             }
         }
 
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct TimelineRetentionGapData {
+            pub schema_version: String,
+            pub reason: String,
+            pub session_id: String,
+            pub requested_after: TimelineAnchor,
+            pub requested_watermark: Option<TimelineAnchor>,
+            pub retained_floor: TimelineAnchor,
+            pub head: TimelineAnchor,
+            pub snapshot_required: bool,
+            pub snapshot_available: bool,
+            pub snapshot_capability: String,
+            pub snapshot_method: String,
+            pub event_history_complete: bool,
+            pub replay_from_floor_allowed: bool,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TimelineRetentionGapDataWire {
+            schema_version: String,
+            reason: String,
+            session_id: String,
+            requested_after: TimelineAnchor,
+            requested_watermark: Value,
+            retained_floor: TimelineAnchor,
+            head: TimelineAnchor,
+            snapshot_required: bool,
+            snapshot_available: bool,
+            snapshot_capability: String,
+            snapshot_method: String,
+            event_history_complete: bool,
+            replay_from_floor_allowed: bool,
+        }
+
+        impl TimelineRetentionGapData {
+            pub fn validate(&self) -> Result<(), &'static str> {
+                if self.schema_version != "timeline-retention-gap/0.1" {
+                    return Err("timeline retention gap schema version is invalid");
+                }
+                if self.reason != "requested-anchor-not-retained" {
+                    return Err("timeline retention gap reason is invalid");
+                }
+                if !valid_ascii_graphical(&self.session_id, MAX_TIMELINE_IDENTIFIER_BYTES) {
+                    return Err("timeline retention gap session identity is invalid");
+                }
+                self.requested_after.validate()?;
+                if let Some(watermark) = &self.requested_watermark {
+                    validate_timeline_window(&self.requested_after, watermark)?;
+                }
+                validate_timeline_window(&self.retained_floor, &self.head)?;
+                if self.requested_after.sequence >= self.retained_floor.sequence {
+                    return Err("timeline retention gap request is not before the retained floor");
+                }
+                if !self.snapshot_required {
+                    return Err("timeline retention gap must require snapshot recovery");
+                }
+                if self.snapshot_available {
+                    return Err("timeline retention gap snapshot is not available in this version");
+                }
+                if self.snapshot_capability != "timeline.snapshot.current"
+                    || self.snapshot_method != "timeline/snapshot"
+                {
+                    return Err("timeline retention gap snapshot recovery route is invalid");
+                }
+                if self.event_history_complete || self.replay_from_floor_allowed {
+                    return Err("timeline retention gap cannot claim complete replay history");
+                }
+                Ok(())
+            }
+
+            pub fn validate_for_request(
+                &self,
+                request: &TimelineSyncParams,
+            ) -> Result<(), &'static str> {
+                self.validate()?;
+                request.validate()?;
+                if self.session_id != request.session_id
+                    || self.requested_after != request.after
+                    || self.requested_watermark != request.watermark
+                {
+                    return Err("timeline retention gap does not match its request");
+                }
+                Ok(())
+            }
+        }
+
+        impl TryFrom<TimelineRetentionGapDataWire> for TimelineRetentionGapData {
+            type Error = &'static str;
+
+            fn try_from(value: TimelineRetentionGapDataWire) -> Result<Self, Self::Error> {
+                let data = Self {
+                    schema_version: value.schema_version,
+                    reason: value.reason,
+                    session_id: value.session_id,
+                    requested_after: value.requested_after,
+                    requested_watermark: parse_nullable_timeline_anchor(value.requested_watermark)?,
+                    retained_floor: value.retained_floor,
+                    head: value.head,
+                    snapshot_required: value.snapshot_required,
+                    snapshot_available: value.snapshot_available,
+                    snapshot_capability: value.snapshot_capability,
+                    snapshot_method: value.snapshot_method,
+                    event_history_complete: value.event_history_complete,
+                    replay_from_floor_allowed: value.replay_from_floor_allowed,
+                };
+                data.validate()?;
+                Ok(data)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for TimelineRetentionGapData {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                TimelineRetentionGapDataWire::deserialize(deserializer)?
+                    .try_into()
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl Serialize for TimelineRetentionGapData {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                self.validate().map_err(serde::ser::Error::custom)?;
+                #[derive(Serialize)]
+                struct DataRef<'a> {
+                    schema_version: &'a str,
+                    reason: &'a str,
+                    session_id: &'a str,
+                    requested_after: &'a TimelineAnchor,
+                    requested_watermark: Option<&'a TimelineAnchor>,
+                    retained_floor: &'a TimelineAnchor,
+                    head: &'a TimelineAnchor,
+                    snapshot_required: bool,
+                    snapshot_available: bool,
+                    snapshot_capability: &'a str,
+                    snapshot_method: &'a str,
+                    event_history_complete: bool,
+                    replay_from_floor_allowed: bool,
+                }
+                DataRef {
+                    schema_version: &self.schema_version,
+                    reason: &self.reason,
+                    session_id: &self.session_id,
+                    requested_after: &self.requested_after,
+                    requested_watermark: self.requested_watermark.as_ref(),
+                    retained_floor: &self.retained_floor,
+                    head: &self.head,
+                    snapshot_required: self.snapshot_required,
+                    snapshot_available: self.snapshot_available,
+                    snapshot_capability: &self.snapshot_capability,
+                    snapshot_method: &self.snapshot_method,
+                    event_history_complete: self.event_history_complete,
+                    replay_from_floor_allowed: self.replay_from_floor_allowed,
+                }
+                .serialize(serializer)
+            }
+        }
+
         fn deserialize_timeline_sync_events<'de, D>(
             deserializer: D,
         ) -> Result<Vec<EventEnvelope>, D::Error>
@@ -1364,7 +1527,7 @@ pub mod stable {
 mod tests {
     use super::stable::v0_1::{
         timeline_event_id, EventEnvelope, InitializeParams, ItemUpdate, TimelineAnchor,
-        TimelineItem, TimelineSyncPage, TimelineSyncParams, TurnState,
+        TimelineItem, TimelineRetentionGapData, TimelineSyncPage, TimelineSyncParams, TurnState,
     };
     use super::{
         MAX_INITIALIZE_CAPABILITIES, MAX_INITIALIZE_CAPABILITY_BYTES, MAX_SAFE_JSON_INTEGER,
@@ -1937,6 +2100,84 @@ mod tests {
             limit: 201,
         };
         assert!(serde_json::to_value(invalid).is_err());
+    }
+
+    #[test]
+    fn timeline_retention_gap_data_is_closed_bounded_and_requires_snapshot_recovery() {
+        let value = json!({
+            "schema_version": "timeline-retention-gap/0.1",
+            "reason": "requested-anchor-not-retained",
+            "session_id": "session-1",
+            "requested_after": {"sequence": 0, "event_id": null},
+            "requested_watermark": null,
+            "retained_floor": {
+                "sequence": 2,
+                "event_id": format!("event:sha256:{}", "a".repeat(64))
+            },
+            "head": {
+                "sequence": 3,
+                "event_id": format!("event:sha256:{}", "b".repeat(64))
+            },
+            "snapshot_required": true,
+            "snapshot_available": false,
+            "snapshot_capability": "timeline.snapshot.current",
+            "snapshot_method": "timeline/snapshot",
+            "event_history_complete": false,
+            "replay_from_floor_allowed": false
+        });
+        let data: TimelineRetentionGapData = serde_json::from_value(value.clone()).unwrap();
+        let request: TimelineSyncParams = serde_json::from_value(json!({
+            "session_id": "session-1",
+            "after": {"sequence": 0, "event_id": null},
+            "watermark": null,
+            "limit": 200
+        }))
+        .unwrap();
+        data.validate_for_request(&request).unwrap();
+        assert_eq!(serde_json::to_value(&data).unwrap(), value);
+
+        for (key, invalid) in [
+            ("snapshot_required", json!(false)),
+            ("snapshot_available", json!(true)),
+            ("event_history_complete", json!(true)),
+            ("replay_from_floor_allowed", json!(true)),
+            ("snapshot_method", json!("session/read")),
+        ] {
+            let mut candidate = value.clone();
+            candidate[key] = invalid;
+            assert!(serde_json::from_value::<TimelineRetentionGapData>(candidate).is_err());
+        }
+
+        for (key, mismatch) in [
+            ("session_id", json!("session-2")),
+            (
+                "requested_after",
+                json!({
+                    "sequence": 1,
+                    "event_id": format!("event:sha256:{}", "c".repeat(64))
+                }),
+            ),
+            (
+                "requested_watermark",
+                json!({
+                    "sequence": 3,
+                    "event_id": format!("event:sha256:{}", "b".repeat(64))
+                }),
+            ),
+        ] {
+            let mut candidate = value.clone();
+            candidate[key] = mismatch;
+            let candidate: TimelineRetentionGapData = serde_json::from_value(candidate).unwrap();
+            assert!(candidate.validate_for_request(&request).is_err());
+        }
+
+        let mut not_a_gap = value.clone();
+        not_a_gap["requested_after"] = not_a_gap["retained_floor"].clone();
+        assert!(serde_json::from_value::<TimelineRetentionGapData>(not_a_gap).is_err());
+
+        let mut extra = value;
+        extra["checkpoint_identity"] = json!("must-not-be-public");
+        assert!(serde_json::from_value::<TimelineRetentionGapData>(extra).is_err());
     }
 
     #[test]

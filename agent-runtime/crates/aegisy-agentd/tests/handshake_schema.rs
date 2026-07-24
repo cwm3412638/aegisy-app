@@ -1,6 +1,6 @@
 use aegisy_aap::stable::v0_1::{
     timeline_event_id, EventEnvelope, InitializeParams, InitializeResult, ItemUpdate, TimelineItem,
-    TimelineSyncPage, TimelineSyncParams, TurnState,
+    TimelineRetentionGapData, TimelineSyncPage, TimelineSyncParams, TurnState,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -263,6 +263,8 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
         "timelineSyncPage",
         "timelineSyncRequest",
         "timelineSyncSuccessResponse",
+        "timelineRetentionGapData",
+        "timelineSyncRetentionGapErrorResponse",
     ] {
         assert!(
             definitions.contains_key(required),
@@ -294,6 +296,8 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
         "timelineSyncPage",
         "timelineSyncRequest",
         "timelineSyncSuccessResponse",
+        "timelineRetentionGapData",
+        "timelineSyncRetentionGapErrorResponse",
     ] {
         assert_eq!(
             definitions[strict_object]["additionalProperties"], false,
@@ -1032,6 +1036,87 @@ fn timeline_sync_guide_example_is_an_empty_complete_fixed_watermark_page() {
     assert_eq!(page.watermark.sequence, 0);
     assert!(page.events.is_empty());
     assert!(page.complete);
+}
+
+#[test]
+fn timeline_retention_gap_fixture_is_strict_content_free_and_requires_snapshot() {
+    let messages = fixture_messages("aap-timeline-retention-gap.jsonl");
+    assert_eq!(messages.len(), 2);
+    assert!(schema_definition_valid("timelineSyncRequest", &messages[0]));
+    assert!(schema_definition_valid(
+        "timelineSyncRetentionGapErrorResponse",
+        &messages[1]
+    ));
+    assert!(strict_envelope_valid(&messages[1]));
+    assert_content_free(&messages[1]);
+
+    let data: TimelineRetentionGapData =
+        serde_json::from_value(messages[1]["error"]["data"].clone()).unwrap();
+    let request: TimelineSyncParams =
+        serde_json::from_value(messages[0]["params"].clone()).unwrap();
+    data.validate_for_request(&request).unwrap();
+    assert_eq!(
+        serde_json::to_value(&data).unwrap(),
+        messages[1]["error"]["data"]
+    );
+    assert!(data.snapshot_required);
+    assert!(!data.snapshot_available);
+    assert!(!data.event_history_complete);
+    assert!(!data.replay_from_floor_allowed);
+
+    for (key, invalid) in [
+        ("snapshot_required", json!(false)),
+        ("snapshot_available", json!(true)),
+        ("event_history_complete", json!(true)),
+        ("replay_from_floor_allowed", json!(true)),
+        ("snapshot_capability", json!("session.history")),
+    ] {
+        let mut candidate = messages[1].clone();
+        candidate["error"]["data"][key] = invalid;
+        assert!(!schema_definition_valid(
+            "timelineSyncRetentionGapErrorResponse",
+            &candidate
+        ));
+        assert!(serde_json::from_value::<TimelineRetentionGapData>(
+            candidate["error"]["data"].clone()
+        )
+        .is_err());
+    }
+
+    for (key, mismatch) in [
+        ("session_id", json!("session-2")),
+        (
+            "requested_after",
+            json!({
+                "sequence": 1,
+                "event_id": format!("event:sha256:{}", "c".repeat(64))
+            }),
+        ),
+        (
+            "requested_watermark",
+            json!({
+                "sequence": 3,
+                "event_id": format!("event:sha256:{}", "b".repeat(64))
+            }),
+        ),
+    ] {
+        let mut candidate = messages[1].clone();
+        candidate["error"]["data"][key] = mismatch;
+        assert!(schema_definition_valid(
+            "timelineSyncRetentionGapErrorResponse",
+            &candidate
+        ));
+        let candidate: TimelineRetentionGapData =
+            serde_json::from_value(candidate["error"]["data"].clone()).unwrap();
+        assert!(candidate.validate_for_request(&request).is_err());
+    }
+
+    let mut extra = messages[1].clone();
+    extra["error"]["data"]["checkpoint_identity"] = json!("internal");
+    assert!(!schema_definition_valid(
+        "timelineSyncRetentionGapErrorResponse",
+        &extra
+    ));
 }
 
 #[test]

@@ -885,6 +885,69 @@
         "result": { "$ref": "#/$defs/timelineSyncPage" }
       }
     },
+    "timelineRetentionGapData": {
+      "type": "object",
+      "$comment": "A true retention gap requires snapshot replacement. The client must not resume from retained_floor or treat the internal Sequencer checkpoint as a public Session snapshot.",
+      "required": [
+        "schema_version",
+        "reason",
+        "session_id",
+        "requested_after",
+        "requested_watermark",
+        "retained_floor",
+        "head",
+        "snapshot_required",
+        "snapshot_available",
+        "snapshot_capability",
+        "snapshot_method",
+        "event_history_complete",
+        "replay_from_floor_allowed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "timeline-retention-gap/0.1" },
+        "reason": { "const": "requested-anchor-not-retained" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "requested_after": { "$ref": "#/$defs/timelineAnchor" },
+        "requested_watermark": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineAnchor" },
+            { "type": "null" }
+          ]
+        },
+        "retained_floor": { "$ref": "#/$defs/timelineAnchor" },
+        "head": { "$ref": "#/$defs/timelineAnchor" },
+        "snapshot_required": { "const": true },
+        "snapshot_available": { "const": false },
+        "snapshot_capability": { "const": "timeline.snapshot.current" },
+        "snapshot_method": { "const": "timeline/snapshot" },
+        "event_history_complete": { "const": false },
+        "replay_from_floor_allowed": { "const": false }
+      }
+    },
+    "timelineSyncRetentionGapErrorResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message", "data"],
+          "additionalProperties": false,
+          "properties": {
+            "code": { "const": -32148 },
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "data": { "$ref": "#/$defs/timelineRetentionGapData" }
+          }
+        }
+      }
+    },
     "initializeParams": {
       "type": "object",
       "required": [

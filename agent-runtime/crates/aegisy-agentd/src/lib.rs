@@ -81,8 +81,8 @@ pub mod workspace_edit_restore;
 use aegisy_aap::stable::v0_1::{
     BackendDescriptor, EventEnvelope, Identity, InitializeParams, InitializeResult,
     NegotiatedCapabilities, NegotiatedProtocol, Platform, Project, ProtocolLimits, Session,
-    SessionMode, TimelineAnchor, TimelineItem, TimelineSyncPage as AapTimelineSyncPage,
-    TimelineSyncParams, TransportSecurity,
+    SessionMode, TimelineAnchor, TimelineItem, TimelineRetentionGapData,
+    TimelineSyncPage as AapTimelineSyncPage, TimelineSyncParams, TransportSecurity,
 };
 use aegisy_aap::{
     Notification, Request, Response, JSONRPC_VERSION, MAX_AAP_FRAME_BYTES, PROTOCOL_VERSION,
@@ -16373,11 +16373,71 @@ impl Runtime {
         ) {
             Ok(page) => page,
             Err(error) => {
+                if error.code == "timeline-sync-retention-gap" {
+                    let state = match store.public_timeline_retention_state(&params.session_id) {
+                        Ok(state) => state,
+                        Err(_) => {
+                            return self.error_for(
+                                &request,
+                                -32147,
+                                "durable Timeline retention state is unavailable",
+                            )
+                        }
+                    };
+                    let data = TimelineRetentionGapData {
+                        schema_version: "timeline-retention-gap/0.1".into(),
+                        reason: "requested-anchor-not-retained".into(),
+                        session_id: params.session_id.clone(),
+                        requested_after: params.after.clone(),
+                        requested_watermark: params.watermark.clone(),
+                        retained_floor: TimelineAnchor {
+                            sequence: state.floor.sequence,
+                            event_id: state.floor.event_id,
+                        },
+                        head: TimelineAnchor {
+                            sequence: state.head.sequence,
+                            event_id: state.head.event_id,
+                        },
+                        snapshot_required: true,
+                        snapshot_available: false,
+                        snapshot_capability: "timeline.snapshot.current".into(),
+                        snapshot_method: "timeline/snapshot".into(),
+                        event_history_complete: false,
+                        replay_from_floor_allowed: false,
+                    };
+                    if data.validate_for_request(&params).is_err() {
+                        return self.error_for(
+                            &request,
+                            -32147,
+                            "durable Timeline retention response failed request binding",
+                        );
+                    }
+                    let data = match serde_json::to_value(data) {
+                        Ok(data) => data,
+                        Err(_) => {
+                            return self.error_for(
+                                &request,
+                                -32147,
+                                "durable Timeline retention response failed validation",
+                            )
+                        }
+                    };
+                    return match &request.id {
+                        Some(id) => vec![serde_json::to_value(Response::error_with_data(
+                            id.clone(),
+                            -32148,
+                            "requested Timeline history is no longer retained",
+                            Some(data),
+                        ))
+                        .expect("timeline retention error response serialization")],
+                        None => Vec::new(),
+                    };
+                }
                 return self.error_for(
                     &request,
                     -32147,
                     format!("durable Timeline sync failed: {}", error.code),
-                )
+                );
             }
         };
         let page = AapTimelineSyncPage {
@@ -16743,6 +16803,7 @@ mod timeline_event_runtime_tests {
             )
             .unwrap();
         assert_eq!(second["params"]["sequence"], 2);
+        let second_event_id = second["params"]["event_id"].as_str().unwrap().to_owned();
         drop(runtime);
 
         let mut reopened = Runtime::with_store(&data_root).unwrap();
@@ -16755,6 +16816,7 @@ mod timeline_event_runtime_tests {
             )
             .unwrap();
         assert_eq!(third["params"]["sequence"], 3);
+        let third_event_id = third["params"]["event_id"].as_str().unwrap().to_owned();
         let sync_request: Request = serde_json::from_value(json!({
             "jsonrpc": "2.0",
             "id": "timeline-sync",
@@ -16789,6 +16851,112 @@ mod timeline_event_runtime_tests {
         .unwrap();
         let error = reopened.timeline_sync(forged);
         assert_eq!(error[0]["error"]["code"], -32147);
+
+        reopened
+            .workbench_store
+            .as_mut()
+            .unwrap()
+            .checkpoint_and_prune_public_timeline(
+                "runtime-timeline-session",
+                &public_timeline_journal::TimelineWatermark {
+                    sequence: 2,
+                    event_id: Some(second_event_id.clone()),
+                },
+                now_ms(),
+            )
+            .unwrap();
+        let gap: Request = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": "timeline-sync-gap",
+            "method": "timeline/sync",
+            "params": {
+                "session_id": "runtime-timeline-session",
+                "after": { "sequence": 0, "event_id": null },
+                "watermark": null,
+                "limit": 200
+            }
+        }))
+        .unwrap();
+        let gap = reopened.timeline_sync(gap);
+        assert_eq!(
+            gap[0],
+            json!({
+                "jsonrpc": "2.0",
+                "id": "timeline-sync-gap",
+                "error": {
+                    "code": -32148,
+                    "message": "requested Timeline history is no longer retained",
+                    "data": {
+                        "schema_version": "timeline-retention-gap/0.1",
+                        "reason": "requested-anchor-not-retained",
+                        "session_id": "runtime-timeline-session",
+                        "requested_after": { "sequence": 0, "event_id": null },
+                        "requested_watermark": null,
+                        "retained_floor": { "sequence": 2, "event_id": second_event_id },
+                        "head": { "sequence": 3, "event_id": third_event_id },
+                        "snapshot_required": true,
+                        "snapshot_available": false,
+                        "snapshot_capability": "timeline.snapshot.current",
+                        "snapshot_method": "timeline/snapshot",
+                        "event_history_complete": false,
+                        "replay_from_floor_allowed": false
+                    }
+                }
+            })
+        );
+
+        let forged_retained: Request = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": "timeline-sync-forged-retained",
+            "method": "timeline/sync",
+            "params": {
+                "session_id": "runtime-timeline-session",
+                "after": {
+                    "sequence": 2,
+                    "event_id": "event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "watermark": null,
+                "limit": 200
+            }
+        }))
+        .unwrap();
+        let forged_retained = reopened.timeline_sync(forged_retained);
+        assert_eq!(forged_retained[0]["error"]["code"], -32147);
+        assert!(forged_retained[0]["error"]["data"].is_null());
+
+        let forged_retained_watermark: Request = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": "timeline-sync-forged-watermark",
+            "method": "timeline/sync",
+            "params": {
+                "session_id": "runtime-timeline-session",
+                "after": { "sequence": 0, "event_id": null },
+                "watermark": {
+                    "sequence": 3,
+                    "event_id": "event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "limit": 200
+            }
+        }))
+        .unwrap();
+        let forged_retained_watermark = reopened.timeline_sync(forged_retained_watermark);
+        assert_eq!(forged_retained_watermark[0]["error"]["code"], -32147);
+        assert!(forged_retained_watermark[0]["error"]["data"].is_null());
+
+        let missing: Request = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": "timeline-sync-missing",
+            "method": "timeline/sync",
+            "params": {
+                "session_id": "missing-session",
+                "after": { "sequence": 0, "event_id": null },
+                "watermark": null,
+                "limit": 200
+            }
+        }))
+        .unwrap();
+        let missing = reopened.timeline_sync(missing);
+        assert_eq!(missing[0]["error"]["code"], -32147);
         drop(reopened);
         fs::remove_dir_all(data_root).unwrap();
     }

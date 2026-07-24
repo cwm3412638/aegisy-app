@@ -195,6 +195,14 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
   response-size bounds, final-anchor semantics, and complete-page validation.
   Forged after Event IDs fail with `-32147`; missing capability or durable storage
   fails closed instead of falling back to projected history.
+- A true pre-floor request now maps to the closed `timeline-retention-gap/0.1`
+  JSON-RPC `-32148` response. Typed Rust and Draft 2020-12 Schema require exact
+  requested after/watermark, durable floor/head, snapshot-required metadata,
+  `snapshot_available:false`, incomplete event history, and
+  `replay_from_floor_allowed:false`; the response contains no checkpoint or Item
+  content. A retained after or watermark with a substituted Event ID remains
+  `-32147`. Runtime coverage exercises gap, retained forgery, and missing Session;
+  public snapshot recovery and Qt consumption remain the next stage.
 - Qt now keeps recovery state per Session. A detected gap freezes only that Session,
   requests from its last confirmed sequence/Event-ID anchor, stages all validated
   pages and presentation effects privately, and queues bounded live events. No
