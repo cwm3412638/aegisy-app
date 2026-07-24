@@ -1754,7 +1754,9 @@ fn validate_record_paths(paths: &[String]) -> Result<(), GitWorkflowError> {
     let mut previous: Option<&str> = None;
     for path in paths {
         validate_relative_path(path, "Git workflow path")?;
-        if is_sensitive_path(Path::new(path)) || previous.is_some_and(|value| value >= path) {
+        if is_sensitive_path(Path::new(path))
+            || previous.is_some_and(|value| value >= path.as_str())
+        {
             return Err(error("Git workflow visible path set is invalid"));
         }
         previous = Some(path);

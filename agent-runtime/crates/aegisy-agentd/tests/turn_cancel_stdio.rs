@@ -68,6 +68,49 @@ where
     }
 }
 
+fn assert_atomic_failed_terminal(
+    store: &WorkbenchStore,
+    session_id: &str,
+    turn_id: &str,
+    expected_class: &str,
+) {
+    let error_items = store
+        .read_session_items(session_id, 0, 200)
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.turn_id.as_deref() == Some(turn_id) && item.item_kind == "error")
+        .collect::<Vec<_>>();
+    assert_eq!(error_items.len(), 1);
+    let error_item = &error_items[0];
+    assert_eq!(error_item.payload["data"]["class"], expected_class);
+    assert_eq!(error_item.payload["data"]["terminal_persisted"], true);
+
+    let page = store
+        .sync_public_timeline(session_id, 0, None, 200)
+        .unwrap();
+    let terminal_events = page
+        .events
+        .iter()
+        .filter(|event| event.turn_id == turn_id && event.event == "turn.failed")
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_events.len(), 1);
+    let terminal = terminal_events[0];
+    let public_item = terminal
+        .item
+        .as_ref()
+        .expect("failed terminal must carry its durable Error Item");
+    assert_eq!(public_item.id, error_item.item_id);
+    assert_eq!(public_item.kind, error_item.item_kind);
+    assert_eq!(public_item.role, error_item.role);
+    assert_eq!(public_item.state, error_item.state);
+    assert_eq!(
+        public_item.content,
+        error_item.payload["content"].as_str().unwrap()
+    );
+    assert_eq!(public_item.data.as_ref(), error_item.payload.get("data"));
+    assert_eq!(terminal.timestamp_ms, error_item.created_at_ms);
+}
+
 fn start_codex_runtime(
     codex: &PathBuf,
     data_root: &PathBuf,
@@ -1595,6 +1638,7 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
         .unwrap()
         .expect("transport failure must persist a terminal trace");
     assert_eq!(failed_trace.state, "failed");
+    assert_atomic_failed_terminal(&store, &session_id, "turn-reconnect-1", "transport");
     assert_eq!(failed_trace.trace.binding.session_id, session_id);
     assert_eq!(failed_trace.trace.binding.turn_id, "turn-reconnect-1");
     assert_eq!(failed_trace.trace.binding.project_id, None);
@@ -3252,6 +3296,7 @@ fn stdio_completed_turn_with_incomplete_command_fails_durably_and_restarts_start
         .unwrap()
         .expect("incomplete command must produce an authoritative failed Trace");
     assert_eq!(first_read.state, "failed");
+    assert_atomic_failed_terminal(&store, &session_id, "turn-fixture", "protocol");
     assert_eq!(first_read.trace.schema_version, "turn-trace/0.6");
     let tool_events = first_read
         .trace
@@ -3447,6 +3492,7 @@ fn stdio_command_persistence_failure_retains_started_without_terminal_tool_or_bl
         .unwrap()
         .expect("persistence failure must retain an authoritative failed Trace");
     assert_eq!(trace.state, "failed");
+    assert_atomic_failed_terminal(&store, &session_id, "turn-fixture", "storage");
     assert_eq!(trace.trace.schema_version, "turn-trace/0.6");
     let tool_events = trace
         .trace
@@ -3643,6 +3689,7 @@ fn stdio_trace_budget_exhaustion_fails_durably_before_command_terminal_persisten
         .read_turn_trace(&session_id, "turn-budget")
         .unwrap()
         .expect("Trace budget exhaustion must retain an authoritative failed Trace");
+    assert_atomic_failed_terminal(&store, &session_id, "turn-budget", "storage");
     let durable_turn = store.load_turn("turn-budget").unwrap();
     assert_eq!(durable_turn.session_id, session_id);
     assert_eq!(durable_turn.state, "failed");

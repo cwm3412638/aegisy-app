@@ -143,13 +143,13 @@ use turn_trace_producer::{
 use usage_authority::from_provider_token_usage;
 use workbench_store::{
     durable_blob_reference_id, BackgroundNotificationCursor, DurableBlobKind, DurableBlobWrite,
-    PortableSessionImportCommand, PortableSessionPackage, RetentionPolicy, SessionDeletionScope,
-    SessionProjectionConsistency, SessionSearchRequest, StoredItem, StoredItemAppend,
-    StoredProjectCreate, StoredProjectNavigationEntry, StoredProjectTrustAcknowledge,
-    StoredProjectTrustAcknowledgement, StoredSessionCreate, StoredSessionLineage,
-    StoredSessionMode, StoredSessionRuntimeBindingCreate, StoredSessionWorkspaceBinding,
-    StoredSessionWorkspaceBindingCreate, StoredTurnCreate, WorkbenchRecoveryDiagnostic,
-    WorkbenchStore, WorkbenchStoreOpen,
+    PortableSessionImportCommand, PortableSessionPackage, PreviewTurnCommit, RetentionPolicy,
+    SessionDeletionScope, SessionProjectionConsistency, SessionSearchRequest, StoredItem,
+    StoredItemAppend, StoredProjectCreate, StoredProjectNavigationEntry,
+    StoredProjectTrustAcknowledge, StoredProjectTrustAcknowledgement, StoredSessionCreate,
+    StoredSessionLineage, StoredSessionMode, StoredSessionRuntimeBindingCreate,
+    StoredSessionWorkspaceBinding, StoredSessionWorkspaceBindingCreate, StoredTurnCreate,
+    WorkbenchRecoveryDiagnostic, WorkbenchStore, WorkbenchStoreOpen,
 };
 use workspace::{
     collect_search_candidates, list_directory, path_metadata, read_text_file, search_workspace,
@@ -10054,28 +10054,6 @@ impl Runtime {
             .map_err(|cause| cause.message)
     }
 
-    fn persist_turn(
-        &mut self,
-        session_id: &str,
-        turn_id: &str,
-        input: &str,
-        idempotency_key: &str,
-    ) -> Result<(), String> {
-        let Some(store) = self.workbench_store.as_mut() else {
-            return Ok(());
-        };
-        store
-            .create_turn(StoredTurnCreate {
-                turn_id: turn_id.into(),
-                session_id: session_id.into(),
-                idempotency_key: Some(idempotency_key.into()),
-                input_hash: ContentHash::for_bytes(input.as_bytes()),
-                created_at_ms: now_ms(),
-            })
-            .map(|_| ())
-            .map_err(|cause| cause.message)
-    }
-
     fn persist_turn_with_timeline(
         &mut self,
         session_id: &str,
@@ -10108,30 +10086,6 @@ impl Runtime {
             .commit(&mut self.event_sequencer)
             .map_err(|error| format!("cannot commit turn start: {}", error.code()))?;
         Ok(message)
-    }
-
-    fn persist_item(
-        &mut self,
-        session_id: &str,
-        turn_id: Option<&str>,
-        item: &TimelineItem,
-    ) -> Result<(), String> {
-        let Some(store) = self.workbench_store.as_mut() else {
-            return Ok(());
-        };
-        store
-            .append_item(StoredItemAppend {
-                session_id: session_id.into(),
-                turn_id: turn_id.map(str::to_owned),
-                item_id: item.id.clone(),
-                item_kind: item.kind.clone(),
-                role: item.role.clone(),
-                state: item.state.clone(),
-                payload: json!({ "content": item.content, "data": item.data }),
-                created_at_ms: now_ms(),
-            })
-            .map(|_| ())
-            .map_err(|cause| cause.message)
     }
 
     fn persist_item_with_timeline(
@@ -10311,38 +10265,6 @@ impl Runtime {
             .collect::<Vec<_>>();
         store
             .put_durable_blobs(requests)
-            .map(|_| ())
-            .map_err(|cause| cause.message)
-    }
-
-    fn persist_turn_state(
-        &mut self,
-        session_id: &str,
-        turn_id: &str,
-        state: &str,
-    ) -> Result<(), String> {
-        let Some(store) = self.workbench_store.as_mut() else {
-            return Ok(());
-        };
-        store
-            .finish_turn(session_id, turn_id, state, now_ms())
-            .map(|_| ())
-            .map_err(|cause| cause.message)
-    }
-
-    fn persist_turn_state_with_trace(
-        &mut self,
-        session_id: &str,
-        turn_id: &str,
-        state: &str,
-        terminal_at_ms: u64,
-        trace: &TurnTrace,
-    ) -> Result<(), String> {
-        let Some(store) = self.workbench_store.as_mut() else {
-            return Ok(());
-        };
-        store
-            .finish_turn_with_trace(session_id, turn_id, state, terminal_at_ms, trace)
             .map(|_| ())
             .map_err(|cause| cause.message)
     }
@@ -12722,40 +12644,32 @@ impl Runtime {
         }
         if persistence_error.is_some() && !terminal_persisted {
             if let Some(pending) = pending_terminal.as_ref() {
-                if self
-                    .persist_turn_state_with_trace(
-                        &params.session_id,
-                        &pending.turn_id,
-                        pending.state,
-                        pending.terminal_at_ms,
-                        &pending.trace,
-                    )
-                    .is_ok()
-                {
-                    terminal_persisted = true;
-                    persistence_error = None;
-                    let pending = pending_terminal
-                        .take()
-                        .expect("retried terminal trace is available");
-                    let event_name = match pending.state {
-                        "completed" => "turn.completed",
-                        "failed" => "turn.failed",
-                        "interrupted" => "turn.interrupted",
-                        _ => unreachable!("only terminal turn traces are produced"),
-                    };
-                    if !self.emit_timeline_or_disable(
-                        &params.session_id,
-                        Some(&pending.turn_id),
-                        event_name,
-                        pending.item,
-                        emit,
-                    ) {
+                match self.persist_turn_state_with_trace_and_timeline(
+                    &params.session_id,
+                    &pending.turn_id,
+                    pending.state,
+                    pending.terminal_at_ms,
+                    &pending.trace,
+                    pending.item.clone(),
+                ) {
+                    Ok(timeline_message) => {
+                        terminal_persisted = true;
+                        persistence_error = None;
+                        pending_terminal
+                            .take()
+                            .expect("retried terminal trace is available");
+                        emit(timeline_message);
+                    }
+                    Err(error) => {
+                        self.backend = Backend::Unavailable(format!(
+                            "Atomic terminal persistence is unavailable: {error}"
+                        ));
+                        self.shutdown = true;
                         return;
                     }
                 }
             }
         }
-        let mut storage_failure_terminal_persisted = false;
         if persistence_error.is_some()
             && started
             && !terminal_persisted
@@ -12800,12 +12714,24 @@ impl Runtime {
                                 )
                             })
                             .and_then(|trace| {
-                                self.persist_turn_state_with_trace(
+                                let mut data = runtime_error_data("storage persistence failed");
+                                data["operation"] = Value::String("workbench.persistence".into());
+                                data["terminal_persisted"] = Value::Bool(true);
+                                let item = TimelineItem {
+                                    id: self.allocate_id("error"),
+                                    kind: "error".into(),
+                                    role: "system".into(),
+                                    state: "completed".into(),
+                                    content: "Workbench persistence failed".into(),
+                                    data: Some(data),
+                                };
+                                self.persist_turn_state_with_trace_and_timeline(
                                     &params.session_id,
                                     turn_id,
                                     "failed",
                                     terminal_at_ms,
                                     &trace,
+                                    Some(item),
                                 )
                             })
                     })
@@ -12813,43 +12739,27 @@ impl Runtime {
                 _ => Err("turn trace accumulator is unavailable after persistence failure".into()),
             };
             match terminal_result {
-                Ok(()) => {
-                    storage_failure_terminal_persisted = true;
+                Ok(timeline_message) => {
+                    terminal_persisted = true;
+                    emit(timeline_message);
                 }
                 Err(terminal_error) => {
-                    let original = persistence_error.take().unwrap_or_default();
-                    persistence_error = Some(format!("{original}; {terminal_error}"));
+                    self.backend = Backend::Unavailable(format!(
+                        "Atomic storage-failure terminal persistence is unavailable: {terminal_error}"
+                    ));
+                    self.shutdown = true;
+                    return;
                 }
             }
         }
         if let Some(error) = persistence_error {
-            if started {
-                let turn_id = started_turn_id.as_deref();
-                let (event_name, content) = if storage_failure_terminal_persisted {
-                    ("turn.failed", "Workbench persistence failed")
-                } else {
-                    ("turn.failed", "Workbench terminal persistence failed")
-                };
-                let mut data = runtime_error_data("storage persistence failed");
-                data["operation"] = Value::String("workbench.persistence".into());
-                data["terminal_persisted"] = Value::Bool(storage_failure_terminal_persisted);
-                let item = TimelineItem {
-                    id: self.allocate_id("error"),
-                    kind: "error".into(),
-                    role: "system".into(),
-                    state: "completed".into(),
-                    content: content.into(),
-                    data: Some(data),
-                };
-                self.emit_timeline_or_disable(
-                    &params.session_id,
-                    turn_id,
-                    event_name,
-                    Some(item),
-                    emit,
-                );
-            } else {
+            if !started {
                 self.emit_all(self.error_for(&request, -32113, error), emit);
+            } else if !terminal_persisted {
+                self.backend = Backend::Unavailable(
+                    "Atomic terminal persistence is unavailable after a storage failure".into(),
+                );
+                self.shutdown = true;
             }
             return;
         }
@@ -12872,6 +12782,16 @@ impl Runtime {
                 let (class, retryable) = runtime_error_classification(&error);
                 let Some(turn_id) = started_turn_id.as_deref() else {
                     return;
+                };
+                let mut error_data = runtime_error_data(&error);
+                error_data["terminal_persisted"] = Value::Bool(true);
+                let item = TimelineItem {
+                    id: self.allocate_id("error"),
+                    kind: "error".into(),
+                    role: "system".into(),
+                    state: "completed".into(),
+                    content: runtime_error_content(&error),
+                    data: Some(error_data),
                 };
                 let terminal_result = turn_trace_accumulator
                     .lock()
@@ -12905,51 +12825,24 @@ impl Runtime {
                             })
                     })
                     .and_then(|trace| {
-                        self.persist_turn_state_with_trace(
+                        self.persist_turn_state_with_trace_and_timeline(
                             &params.session_id,
                             turn_id,
                             "failed",
                             terminal_at_ms,
                             &trace,
+                            Some(item),
                         )
                     });
-                if let Err(terminal_error) = terminal_result {
-                    let mut data = runtime_error_data(&terminal_error);
-                    data["operation"] = Value::String("workbench.persistence".into());
-                    let item = TimelineItem {
-                        id: self.allocate_id("error"),
-                        kind: "error".into(),
-                        role: "system".into(),
-                        state: "completed".into(),
-                        content: terminal_error,
-                        data: Some(data),
-                    };
-                    self.emit_timeline_or_disable(
-                        &params.session_id,
-                        Some(turn_id),
-                        "turn.failed",
-                        Some(item),
-                        emit,
-                    );
-                    return;
+                match terminal_result {
+                    Ok(timeline_message) => emit(timeline_message),
+                    Err(terminal_error) => {
+                        self.backend = Backend::Unavailable(format!(
+                            "Atomic adapter-failure terminal persistence is unavailable: {terminal_error}"
+                        ));
+                        self.shutdown = true;
+                    }
                 }
-                let mut error_data = runtime_error_data(&error);
-                error_data["terminal_persisted"] = Value::Bool(true);
-                let item = TimelineItem {
-                    id: self.allocate_id("error"),
-                    kind: "error".into(),
-                    role: "system".into(),
-                    state: "completed".into(),
-                    content: runtime_error_content(&error),
-                    data: Some(error_data),
-                };
-                self.emit_timeline_or_disable(
-                    &params.session_id,
-                    Some(turn_id),
-                    "turn.failed",
-                    Some(item),
-                    emit,
-                );
             } else {
                 self.emit_all(
                     self.error_for(&request, -32112, runtime_error_content(&error)),
@@ -12972,13 +12865,73 @@ impl Runtime {
             user_item,
         } = turn;
         let turn_id = self.allocate_id("turn");
-        let agent_item = TimelineItem {
+        let raw_agent_item = TimelineItem {
             id: self.allocate_id("item"),
             kind: "message".into(),
             role: "agent".into(),
             state: "completed".into(),
             content: format!("AAP runtime preview received:\n{}", backend_input.trim()),
             data: None,
+        };
+        let observed_at_ms = now_ms();
+        let mut user_item_request = StoredItemAppend {
+            session_id: params.session_id.clone(),
+            turn_id: Some(turn_id.clone()),
+            item_id: user_item.id.clone(),
+            item_kind: user_item.kind.clone(),
+            role: user_item.role.clone(),
+            state: user_item.state.clone(),
+            payload: json!({ "content": user_item.content, "data": user_item.data }),
+            created_at_ms: observed_at_ms,
+        };
+        let mut agent_item_request = StoredItemAppend {
+            session_id: params.session_id.clone(),
+            turn_id: Some(turn_id.clone()),
+            item_id: raw_agent_item.id.clone(),
+            item_kind: raw_agent_item.kind.clone(),
+            role: raw_agent_item.role.clone(),
+            state: raw_agent_item.state.clone(),
+            payload: json!({ "content": raw_agent_item.content, "data": raw_agent_item.data }),
+            created_at_ms: observed_at_ms,
+        };
+        let (persisted_user_item, agent_item) = match self.workbench_store.as_ref() {
+            Some(store) => {
+                let user = store
+                    .preview_item_append(&user_item_request)
+                    .and_then(|stored| {
+                        timeline_item_from_stored(&stored).map_err(|message| {
+                            workbench_store::WorkbenchStoreError {
+                                code: "workbench-store-error".into(),
+                                message,
+                            }
+                        })
+                    });
+                let agent = store
+                    .preview_item_append(&agent_item_request)
+                    .and_then(|stored| {
+                        timeline_item_from_stored(&stored).map_err(|message| {
+                            workbench_store::WorkbenchStoreError {
+                                code: "workbench-store-error".into(),
+                                message,
+                            }
+                        })
+                    });
+                match (user, agent) {
+                    (Ok(user), Ok(agent)) => (user, agent),
+                    (Err(error), _) | (_, Err(error)) => {
+                        self.emit_all(
+                            self.error_for(
+                                &request,
+                                -32113,
+                                format!("cannot prepare preview item: {}", error.message),
+                            ),
+                            emit,
+                        );
+                        return;
+                    }
+                }
+            }
+            None => (user_item, raw_agent_item),
         };
         let mut started_agent = agent_item.clone();
         started_agent.state = "started".into();
@@ -12987,91 +12940,88 @@ impl Runtime {
         delta.state = "delta".into();
         let preview_events = vec![
             ("turn.started", None),
-            ("item.completed", Some(user_item.clone())),
+            ("item.completed", Some(persisted_user_item.clone())),
             ("item.started", Some(started_agent)),
             ("item.delta", Some(delta)),
             ("item.completed", Some(agent_item.clone())),
             ("turn.completed", None),
         ];
-        let mut preflight = self.event_sequencer.clone();
+        let mut staged_sequencer = self.event_sequencer.clone();
+        let mut public_events = Vec::with_capacity(preview_events.len());
         for (event, item) in &preview_events {
-            if let Err(error) =
-                preflight.sequence(now_ms(), &params.session_id, &turn_id, event, item.clone())
-            {
-                self.emit_all(
-                    self.error_for(
-                        &request,
-                        -32007,
-                        format!("cannot sequence preview turn: {}", error.code()),
-                    ),
-                    emit,
-                );
-                return;
-            }
-        }
-        if let Err(error) = self.persist_turn(
-            &params.session_id,
-            &turn_id,
-            &persistence_input,
-            &params.idempotency_key,
-        ) {
-            self.emit_all(
-                self.error_for(&request, -32113, format!("cannot persist turn: {error}")),
-                emit,
-            );
-            return;
-        }
-        if let Err(error) = self.persist_item(&params.session_id, Some(&turn_id), &user_item) {
-            let _ = self.persist_turn_state(&params.session_id, &turn_id, "failed");
-            self.emit_all(
-                self.error_for(
-                    &request,
-                    -32113,
-                    format!("cannot persist user item: {error}"),
-                ),
-                emit,
-            );
-            return;
-        }
-        if let Err(error) = self.persist_item(&params.session_id, Some(&turn_id), &agent_item) {
-            let _ = self.persist_turn_state(&params.session_id, &turn_id, "failed");
-            self.emit_all(
-                self.error_for(
-                    &request,
-                    -32113,
-                    format!("cannot persist agent item: {error}"),
-                ),
-                emit,
-            );
-            return;
-        }
-        if let Err(error) = self.persist_turn_state(&params.session_id, &turn_id, "completed") {
-            self.emit_all(
-                self.error_for(
-                    &request,
-                    -32113,
-                    format!("cannot persist turn completion: {error}"),
-                ),
-                emit,
-            );
-            return;
-        }
-        if let Some(state) = self.sessions.get_mut(&params.session_id) {
-            state.items.push(user_item.clone());
-            state.items.push(agent_item.clone());
-        }
-        let mut timeline = Vec::with_capacity(preview_events.len());
-        for (event, item) in preview_events {
-            match self.event(&params.session_id, Some(&turn_id), event, item) {
-                Ok(message) => timeline.push(message),
+            match staged_sequencer.sequence(
+                now_ms(),
+                &params.session_id,
+                &turn_id,
+                event,
+                item.clone(),
+            ) {
+                Ok(envelope) => public_events.push(envelope),
                 Err(error) => {
-                    self.backend = Backend::Unavailable(format!(
-                        "Preview timeline sequencing is unavailable: {}",
-                        error.code()
-                    ));
+                    self.emit_all(
+                        self.error_for(
+                            &request,
+                            -32007,
+                            format!("cannot sequence preview turn: {}", error.code()),
+                        ),
+                        emit,
+                    );
                     return;
                 }
             }
+        }
+        let public_events: [EventEnvelope; 6] = public_events
+            .try_into()
+            .expect("preview event list has a fixed length");
+        let timeline = match public_events
+            .iter()
+            .map(timeline_notification)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(timeline) => timeline,
+            Err(error) => {
+                self.emit_all(self.error_for(&request, -32007, error), emit);
+                return;
+            }
+        };
+        user_item_request.created_at_ms = public_events[1].timestamp_ms;
+        agent_item_request.created_at_ms = public_events[4].timestamp_ms;
+        if let Some(store) = self.workbench_store.as_mut() {
+            let committed = store.commit_preview_turn(PreviewTurnCommit {
+                turn: StoredTurnCreate {
+                    turn_id: turn_id.clone(),
+                    session_id: params.session_id.clone(),
+                    idempotency_key: Some(params.idempotency_key.clone()),
+                    input_hash: ContentHash::for_bytes(persistence_input.as_bytes()),
+                    created_at_ms: public_events[0].timestamp_ms,
+                },
+                user_item: user_item_request,
+                agent_item: agent_item_request,
+                public_events,
+            });
+            match committed {
+                Ok(committed) => {
+                    debug_assert_eq!(committed.turn.state, "completed");
+                    debug_assert_eq!(committed.user_item.item_id, persisted_user_item.id);
+                    debug_assert_eq!(committed.agent_item.item_id, agent_item.id);
+                }
+                Err(error) => {
+                    self.emit_all(
+                        self.error_for(
+                            &request,
+                            -32113,
+                            format!("cannot persist preview turn: {}", error.message),
+                        ),
+                        emit,
+                    );
+                    return;
+                }
+            }
+        }
+        self.event_sequencer = staged_sequencer;
+        if let Some(state) = self.sessions.get_mut(&params.session_id) {
+            state.items.push(persisted_user_item);
+            state.items.push(agent_item);
         }
         emit(
             serde_json::to_value(Response::success(
@@ -16499,6 +16449,7 @@ impl Runtime {
         Ok(message)
     }
 
+    #[cfg(test)]
     fn emit_timeline_or_disable<F>(
         &mut self,
         session_id: &str,
@@ -19119,9 +19070,38 @@ mod durable_runtime_tests {
             }),
         ));
         assert_eq!(events[0]["result"]["turn"]["id"], "turn-4");
-        assert!(events
-            .iter()
-            .any(|message| { message["params"]["event"] == "turn.completed" }));
+        assert_eq!(events.len(), 7);
+        assert_eq!(
+            events[1..]
+                .iter()
+                .map(|message| message["params"]["event"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "turn.started",
+                "item.completed",
+                "item.started",
+                "item.delta",
+                "item.completed",
+                "turn.completed"
+            ]
+        );
+        let timeline_page = runtime.handle_line(&request(
+            "timeline-sync",
+            "timeline/sync",
+            json!({
+                "session_id": "session-2",
+                "after": { "sequence": 0, "event_id": null },
+                "watermark": null,
+                "limit": 200
+            }),
+        ));
+        assert_eq!(
+            timeline_page[0]["result"]["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
 
         let mut restarted = Runtime::with_store(&data_root).unwrap();
         ready(&mut restarted);

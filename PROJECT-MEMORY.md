@@ -173,10 +173,17 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   publishes the complete batch atomically, drains bounded queued live events, retries
   after disconnect, and syncs new/resumed/history Sessions before enabling a Turn.
   Aggregate pending state is capped at 10,000 events/64 MiB and tracking fails closed
-  at 10,000 Sessions. Preview still journals its synthetic six-event Timeline after
-  projection, and adapter/persistence compensation can finish a Trace before a later
-  public terminal/Error transaction. Snapshot, structured retention-gap recovery,
-  live subscription, heartbeat, complete reconnect orchestration, explicit
+  at 10,000 Sessions. Preview now stages its synthetic six-event lifecycle through a
+  cloned Sequencer and commits the Turn, sanitized user/agent Items, internal events,
+  terminal state, and all six Public Journal events in one SQLite transaction; only
+  then do the live Sequencer and in-memory Items advance. Adapter, transport,
+  protocol, and persistence compensation now commit the exact durable Error Item,
+  Turn Trace, terminal state, internal trace/terminal events, and public terminal
+  event in one transaction before notification. An existing Trace cannot receive a
+  later Public Journal repair, and the Trace-only Store helper is compiled only for
+  tests so production callers cannot bypass the atomic producer API. Snapshot,
+  structured retention-gap recovery, live
+  subscription, heartbeat, complete reconnect orchestration, explicit
   acknowledgement, and Windows recovery evidence remain open. Keep `3.5` unchecked.
 - Model catalog foundation (2026-07-21): the sidecar now validates an internal
   `model-catalog/0.1` metadata contract and exposes the read-only AAP capability
@@ -2659,13 +2666,19 @@ Implemented visual baseline:
   stale prepared tickets, wall-clock rollback, terminal Item boundary enforcement,
   aggregate pending limits, 10,001st-Session fail-closed behavior, initial/history
   sync, pending-deletion read-only sync, and real disconnect signal ordering. The
-  complete Rust workspace passes 22 AAP type tests, 661 sidecar tests plus one
+  complete Rust workspace passes 22 AAP type tests, 663 sidecar tests plus one
   ignored live fixture, 6 daemon-main, 10 threshold, 13 handshake Runtime, 15
   Schema, 66 protocol, and 23 stdio/Codex tests, with strict Clippy and formatting.
   The complete desktop build, all 16 CTests, strict OpenSpec validation, and
-  `git diff --check` also pass. Preview and adapter/persistence compensation remain
-  outside the atomic producer boundary; snapshot, structured retention-gap
-  recovery, subscription, heartbeat, complete reconnect orchestration, explicit
+  `git diff --check` also pass. Preview's six-event transaction and adapter/
+  persistence compensation now share the atomic producer boundary. Failure
+  injection proves fourth-Journal-insert, internal Item event, terminal update, and
+  compensation Journal failures roll back projection, Trace, internal events,
+  cursor, and Journal together. Stdio failure fixtures prove the unique durable
+  Error Item exactly matches the replayed failed terminal event. Existing Traces
+  reject later Public Journal repair, and production builds expose no Trace-only
+  terminal Store helper. Snapshot, structured retention-gap recovery,
+  subscription, heartbeat, complete reconnect orchestration, explicit
   acknowledgement, and Windows recovery evidence remain absent.
 
 - The AAP initialization-negotiation stage completes OpenSpec `3.3`. Rust and Qt
@@ -2796,11 +2809,10 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Continue OpenSpec `3.5` by making Preview's six-event projection/Journal commit
-   atomic and bringing adapter/persistence compensation terminal/Error paths into
-   the same producer transaction. Then add snapshot plus structured retention-gap
-   recovery, followed by subscription, heartbeat, complete reconnect orchestration,
-   explicit acknowledgement, and Windows recovery evidence.
+1. Continue OpenSpec `3.5` with a schema v16 durable Timeline retention floor and
+   validated checkpoint, then add snapshot plus structured retention-gap recovery,
+   followed by subscription, heartbeat, complete reconnect orchestration, explicit
+   acknowledgement, and Windows recovery evidence.
 2. Validate the hardened TLS installer on a clean Windows x64 VM.
 3. Reproduce and correlate any remaining streaming disconnect with redacted logs.
 4. Continue consolidating widget-local QSS and replace remaining Qt stock icons;

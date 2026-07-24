@@ -190,17 +190,26 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
   wall-clock rollback, terminal-Item boundary enforcement, aggregate Qt pending
   limits, the 10,001st Session fail-closed gate, initial Session sync, and real
   disconnect signal ordering. Complete commands on 2026-07-25 pass 22 AAP type
-  tests, 661 sidecar tests plus one ignored live fixture, 6 daemon-main, 10
+  tests, 663 sidecar tests plus one ignored live fixture, 6 daemon-main, 10
   context-threshold, 13 handshake Runtime, 15 Schema, 66 protocol, and 23
   stdio/Codex tests; strict Clippy and formatting; the complete desktop build and
   all 16 CTests; strict OpenSpec validation; and `git diff --check`.
-- Preview Turns still write their durable projection first and append the synthetic
-  six-event public Timeline afterward; that path is outside the atomic producer
-  boundary above. Adapter and persistence compensation paths can also durably finish
-  a Turn Trace before appending the public terminal/Error event in a later
-  transaction. Some streaming/control-only events correctly have no durable Item
-  projection and append only to the Journal. Snapshot, structured retention-gap
-  recovery, live subscription, heartbeat, complete reconnect orchestration, explicit
+- Preview Turns now prepare all six synthetic events through a cloned Sequencer and
+  commit the Turn, sanitized user/agent Items, internal projection events, terminal
+  state, and all six Public Journal rows in one SQLite transaction. The live
+  Sequencer and in-memory Items advance only after commit. Failure injection at the
+  fourth Journal insert, internal Item event, terminal update, and sequence
+  validation boundaries proves complete rollback and successful exact retry.
+- Adapter, transport, protocol, and persistence compensation now atomically commit
+  the exact Error Item, Turn Trace, terminal projection, internal trace/terminal
+  events, and public failed terminal before notification. Store failure injection
+  proves no partial Item, Trace, terminal, internal event, cursor, or Journal growth;
+  stdio fixtures prove the unique durable Error Item equals the replayed terminal
+  Item and timestamp. An existing Trace cannot receive a later Public Journal repair,
+  and the Trace-only Store helper is unavailable in production builds.
+  Some streaming/control-only events correctly have no durable Item projection and
+  append only to the Journal. Snapshot, structured retention-gap recovery, live
+  subscription, heartbeat, complete reconnect orchestration, explicit
   acknowledgement, and cross-platform recovery evidence remain absent. Keep `3.5`
   unchecked.
 

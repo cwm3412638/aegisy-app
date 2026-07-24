@@ -192,6 +192,14 @@ this requirement is considered complete.
 - **WHEN** Runtime prepares and serializes an event but its Journal or combined projection transaction fails
 - **THEN** Runtime SHALL emit no event, SHALL advance no Session or Item lifecycle cursor, and SHALL leave no partial durable projection or Journal row
 
+#### Scenario: Preview lifecycle commits atomically
+- **WHEN** Runtime completes a synthetic Preview Turn whose lifecycle contains Turn start, user Item completion, Agent Item start/delta/completion, and Turn completion
+- **THEN** Runtime SHALL commit the Turn projection, both sanitized Item projections, all internal projection events, terminal state, and all six Public Journal events in one transaction before advancing the live Sequencer or in-memory Timeline
+
+#### Scenario: Failed-turn compensation commits atomically
+- **WHEN** adapter, transport, protocol, or persistence failure requires a durable failed Turn after the Turn has started
+- **THEN** Runtime SHALL commit the exact Error Item, Turn Trace, failed terminal projection, internal trace and terminal events, and public failed terminal event in one transaction before notification, and SHALL reject a later attempt to repair an existing Trace with a new public terminal
+
 #### Scenario: Sanitization changes a durable Item
 - **WHEN** durable Item admission redacts or otherwise sanitizes the requested payload
 - **THEN** the public event and replay Journal SHALL contain exactly that sanitized persisted Item, and a raw or independently reconstructed Item SHALL be rejected before transaction commit

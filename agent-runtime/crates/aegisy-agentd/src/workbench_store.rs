@@ -1251,6 +1251,21 @@ pub struct StoredTurnCreate {
     pub created_at_ms: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PreviewTurnCommit {
+    pub turn: StoredTurnCreate,
+    pub user_item: StoredItemAppend,
+    pub agent_item: StoredItemAppend,
+    pub public_events: [EventEnvelope; 6],
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoredPreviewTurn {
+    pub turn: StoredTurn,
+    pub user_item: StoredItem,
+    pub agent_item: StoredItem,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredItem {
     pub session_id: String,
@@ -6853,6 +6868,156 @@ impl WorkbenchStore {
         Ok(stored)
     }
 
+    pub(crate) fn commit_preview_turn(
+        &mut self,
+        request: PreviewTurnCommit,
+    ) -> Result<StoredPreviewTurn, WorkbenchStoreError> {
+        validate_identifier(&request.turn.turn_id, "turn ID")?;
+        validate_identifier(&request.turn.session_id, "turn session ID")?;
+        self.ensure_session_writable(&request.turn.session_id)?;
+        if let Some(idempotency_key) = &request.turn.idempotency_key {
+            validate_identifier(idempotency_key, "turn idempotency key")?;
+        }
+        validate_content_hash(&request.turn.input_hash, "turn input hash")?;
+        let prepared_user_item = prepare_item_append(&request.user_item)?;
+        let prepared_agent_item = prepare_item_append(&request.agent_item)?;
+        validate_preview_public_events(
+            &request.turn,
+            &request.user_item,
+            &prepared_user_item,
+            &request.agent_item,
+            &prepared_agent_item,
+            &request.public_events,
+        )?;
+
+        let created_at = to_i64(request.turn.created_at_ms, "turn creation time")?;
+        let completed_at_ms = request.public_events[5].timestamp_ms;
+        let completed_at = to_i64(completed_at_ms, "turn update time")?;
+        let transaction = self.begin_database_write("cannot start preview turn transaction")?;
+        let session_binding: Option<(String, Option<String>)> = transaction
+            .query_row(
+                "SELECT status, project_id FROM sessions WHERE session_id = ?1",
+                [&request.turn.session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| error("cannot validate preview turn session"))?;
+        let Some((session_state, project_id)) = session_binding else {
+            return Err(error("preview turn session does not exist"));
+        };
+        if session_state == "archived" {
+            return Err(error("cannot create a preview turn in an archived session"));
+        }
+        if let Some(idempotency_key) = &request.turn.idempotency_key {
+            let existing: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM turns
+                        WHERE session_id = ?1 AND idempotency_key = ?2
+                     )",
+                    params![request.turn.session_id, idempotency_key],
+                    |row| row.get(0),
+                )
+                .map_err(|_| error("cannot inspect preview turn idempotency record"))?;
+            if existing {
+                return Err(error("preview turn idempotency key already exists"));
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO turns (
+                    turn_id, session_id, idempotency_key, input_sha256, input_bytes,
+                    state, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'started', ?6, ?6)",
+                params![
+                    request.turn.turn_id,
+                    request.turn.session_id,
+                    request.turn.idempotency_key,
+                    request.turn.input_hash.sha256,
+                    to_i64(request.turn.input_hash.bytes, "turn input byte count")?,
+                    created_at,
+                ],
+            )
+            .map_err(|_| error("preview turn already exists or is invalid"))?;
+        let created_event_id = derived_event_id("turn-created", request.turn.turn_id.as_bytes());
+        append_event_tx(
+            &transaction,
+            EventInput {
+                session_id: &request.turn.session_id,
+                event_id: &created_event_id,
+                timestamp_ms: request.turn.created_at_ms,
+                correlation_id: &request.turn.turn_id,
+                event_kind: "turn.created",
+                project_id: project_id.as_deref(),
+                operation_id: &request.turn.turn_id,
+                generation: 0,
+                payload: json!({
+                    "schema_version": "turn.created/0.1",
+                    "turn": {
+                        "turn_id": &request.turn.turn_id,
+                        "session_id": &request.turn.session_id,
+                        "idempotency_key": &request.turn.idempotency_key,
+                        "input_hash": &request.turn.input_hash,
+                        "state": "started",
+                        "created_at_ms": request.turn.created_at_ms,
+                        "updated_at_ms": request.turn.created_at_ms
+                    }
+                }),
+            },
+        )?;
+        let user_item = append_item_tx(&transaction, &request.user_item, &prepared_user_item)?;
+        let agent_item = append_item_tx(&transaction, &request.agent_item, &prepared_agent_item)?;
+        let changed = transaction
+            .execute(
+                "UPDATE turns SET state = 'completed', updated_at_ms = ?1
+                 WHERE turn_id = ?2 AND session_id = ?3
+                   AND updated_at_ms <= ?1 AND state IN ('started','running')",
+                params![completed_at, request.turn.turn_id, request.turn.session_id],
+            )
+            .map_err(|_| error("cannot finish preview turn"))?;
+        if changed != 1 {
+            return Err(error(
+                "preview turn is missing, terminal, or timestamp is stale",
+            ));
+        }
+        let terminal_event_id = derived_event_id(
+            "turn-terminal",
+            format!("{}\0completed\0{completed_at_ms}", request.turn.turn_id).as_bytes(),
+        );
+        append_event_tx(
+            &transaction,
+            EventInput {
+                session_id: &request.turn.session_id,
+                event_id: &terminal_event_id,
+                timestamp_ms: completed_at_ms,
+                correlation_id: &request.turn.turn_id,
+                event_kind: "turn.completed",
+                project_id: project_id.as_deref(),
+                operation_id: &request.turn.turn_id,
+                generation: 0,
+                payload: json!({
+                    "schema_version": "turn.terminal/0.1",
+                    "turn_id": &request.turn.turn_id,
+                    "state": "completed",
+                    "updated_at_ms": completed_at_ms
+                }),
+            },
+        )?;
+        for event in &request.public_events {
+            public_timeline_journal::append_event_tx(&transaction, event)
+                .map_err(public_timeline_error)?;
+        }
+        let turn = load_turn_from_connection(&transaction, &request.turn.turn_id)?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit preview turn transaction"))?;
+        Ok(StoredPreviewTurn {
+            turn,
+            user_item,
+            agent_item,
+        })
+    }
+
     pub fn load_turn(&self, turn_id: &str) -> Result<StoredTurn, WorkbenchStoreError> {
         validate_identifier(turn_id, "turn ID")?;
         load_turn_from_connection(&self.connection, turn_id)
@@ -7041,7 +7206,8 @@ impl WorkbenchStore {
         )
     }
 
-    pub fn finish_turn_with_trace(
+    #[cfg(test)]
+    fn finish_turn_with_trace(
         &mut self,
         session_id: &str,
         turn_id: &str,
@@ -7199,15 +7365,13 @@ impl WorkbenchStore {
                 {
                     validate_trace_terminal_pair(&transaction, &existing)?;
                     let stored = load_turn_from_connection(&transaction, turn_id)?;
-                    if let Some(public_event) = public_event {
-                        public_timeline_journal::append_event_tx(&transaction, public_event)
-                            .map_err(public_timeline_error)?;
-                        transaction.commit().map_err(|_| {
-                            error("cannot commit idempotent turn terminal timeline transaction")
-                        })?;
-                    } else {
-                        drop(transaction);
+                    if public_event.is_some() {
+                        return Err(coded_error(
+                            "turn-trace-public-projection-missing",
+                            "an existing turn trace cannot be repaired by appending a public terminal event",
+                        ));
                     }
+                    drop(transaction);
                     return Ok(stored);
                 }
                 return Err(coded_error(
@@ -17174,6 +17338,128 @@ fn validate_public_item_event(
     Ok(())
 }
 
+fn validate_preview_public_events(
+    turn: &StoredTurnCreate,
+    user_item: &StoredItemAppend,
+    prepared_user_item: &PreparedItemAppend,
+    agent_item: &StoredItemAppend,
+    prepared_agent_item: &PreparedItemAppend,
+    events: &[EventEnvelope; 6],
+) -> Result<(), WorkbenchStoreError> {
+    if user_item.session_id != turn.session_id
+        || user_item.turn_id.as_deref() != Some(turn.turn_id.as_str())
+        || agent_item.session_id != turn.session_id
+        || agent_item.turn_id.as_deref() != Some(turn.turn_id.as_str())
+        || user_item.item_id == agent_item.item_id
+        || user_item.item_kind != "message"
+        || user_item.role != "user"
+        || user_item.state != "completed"
+        || agent_item.item_kind != "message"
+        || agent_item.role != "agent"
+        || agent_item.state != "completed"
+    {
+        return Err(error("preview item projection binding is invalid"));
+    }
+    let expected_events = [
+        "turn.started",
+        "item.completed",
+        "item.started",
+        "item.delta",
+        "item.completed",
+        "turn.completed",
+    ];
+    for (index, event) in events.iter().enumerate() {
+        event
+            .validate()
+            .map_err(|_| error("preview public timeline event is invalid"))?;
+        if event.session_id != turn.session_id
+            || event.turn_id != turn.turn_id
+            || event.event != expected_events[index]
+            || (index < 5 && event.turn_state != TurnState::Running)
+            || (index == 5 && event.turn_state != TurnState::Completed)
+        {
+            return Err(error("preview public timeline event binding is invalid"));
+        }
+        if index > 0 {
+            let expected_sequence = events[index - 1]
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| error("preview public timeline event order is invalid"))?;
+            if event.sequence != expected_sequence
+                || event.timestamp_ms < events[index - 1].timestamp_ms
+            {
+                return Err(error("preview public timeline event order is invalid"));
+            }
+        }
+    }
+    validate_public_turn_event(
+        &events[0],
+        &turn.session_id,
+        &turn.turn_id,
+        "turn.started",
+        turn.created_at_ms,
+    )?;
+    if events[0].item.is_some() || events[5].item.is_some() {
+        return Err(error("preview turn event unexpectedly contains an item"));
+    }
+    validate_public_item_event(
+        &events[1],
+        user_item,
+        prepared_user_item,
+        TurnState::Running,
+    )?;
+    validate_public_item_event(
+        &events[4],
+        agent_item,
+        prepared_agent_item,
+        TurnState::Running,
+    )?;
+    validate_public_turn_event(
+        &events[5],
+        &turn.session_id,
+        &turn.turn_id,
+        "turn.completed",
+        events[5].timestamp_ms,
+    )?;
+
+    let mut expected_started = projected_timeline_item(agent_item, prepared_agent_item)?;
+    expected_started.state = "started".into();
+    expected_started.content.clear();
+    let mut expected_delta = projected_timeline_item(agent_item, prepared_agent_item)?;
+    expected_delta.state = "delta".into();
+    if events[2].item.as_ref() != Some(&expected_started)
+        || events[3].item.as_ref() != Some(&expected_delta)
+    {
+        return Err(error(
+            "preview streaming events do not match the durable agent item",
+        ));
+    }
+    Ok(())
+}
+
+fn projected_timeline_item(
+    request: &StoredItemAppend,
+    prepared: &PreparedItemAppend,
+) -> Result<TimelineItem, WorkbenchStoreError> {
+    let content = prepared
+        .persisted_payload
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| error("sanitized item content is invalid"))?;
+    Ok(TimelineItem {
+        id: request.item_id.clone(),
+        kind: request.item_kind.clone(),
+        role: request.role.clone(),
+        state: request.state.clone(),
+        content: content.to_owned(),
+        data: prepared
+            .persisted_payload
+            .get("data")
+            .filter(|value| !value.is_null())
+            .cloned(),
+    })
+}
+
 fn append_item_tx(
     transaction: &Transaction<'_>,
     request: &StoredItemAppend,
@@ -22791,6 +23077,261 @@ mod tests {
         assert_eq!(public_terminal_event_name("running"), None);
     }
 
+    fn preview_turn_commit_fixture() -> PreviewTurnCommit {
+        let session_id = "preview-atomic-session";
+        let turn_id = "preview-atomic-turn";
+        let mut user_item = StoredItemAppend {
+            session_id: session_id.into(),
+            turn_id: Some(turn_id.into()),
+            item_id: "preview-user-item".into(),
+            item_kind: "message".into(),
+            role: "user".into(),
+            state: "completed".into(),
+            payload: json!({
+                "content": "preview input sk-abcdefghijklmnopqrstuvwxyz0123456789",
+                "data": null
+            }),
+            created_at_ms: 10,
+        };
+        let mut agent_item = StoredItemAppend {
+            session_id: session_id.into(),
+            turn_id: Some(turn_id.into()),
+            item_id: "preview-agent-item".into(),
+            item_kind: "message".into(),
+            role: "agent".into(),
+            state: "completed".into(),
+            payload: json!({
+                "content": "preview output sk-abcdefghijklmnopqrstuvwxyz0123456789",
+                "data": null
+            }),
+            created_at_ms: 10,
+        };
+        let prepared_user = prepare_item_append(&user_item).unwrap();
+        let prepared_agent = prepare_item_append(&agent_item).unwrap();
+        let user_timeline = projected_timeline_item(&user_item, &prepared_user).unwrap();
+        let agent_timeline = projected_timeline_item(&agent_item, &prepared_agent).unwrap();
+        let mut started_agent = agent_timeline.clone();
+        started_agent.state = "started".into();
+        started_agent.content.clear();
+        let mut delta_agent = agent_timeline.clone();
+        delta_agent.state = "delta".into();
+        let specifications = [
+            ("turn.started", None),
+            ("item.completed", Some(user_timeline)),
+            ("item.started", Some(started_agent)),
+            ("item.delta", Some(delta_agent)),
+            ("item.completed", Some(agent_timeline)),
+            ("turn.completed", None),
+        ];
+        let mut sequencer = crate::event_sequencer::EventSequencer::default();
+        let public_events: [EventEnvelope; 6] = specifications
+            .into_iter()
+            .enumerate()
+            .map(|(offset, (event, item))| {
+                sequencer
+                    .sequence(10 + offset as u64, session_id, turn_id, event, item)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        user_item.created_at_ms = public_events[1].timestamp_ms;
+        agent_item.created_at_ms = public_events[4].timestamp_ms;
+        PreviewTurnCommit {
+            turn: StoredTurnCreate {
+                turn_id: turn_id.into(),
+                session_id: session_id.into(),
+                idempotency_key: Some("preview-atomic-key".into()),
+                input_hash: ContentHash::for_bytes(b"preview input"),
+                created_at_ms: public_events[0].timestamp_ms,
+            },
+            user_item,
+            agent_item,
+            public_events,
+        }
+    }
+
+    fn assert_preview_turn_absent(store: &WorkbenchStore) {
+        assert!(store.load_turn("preview-atomic-turn").is_err());
+        assert!(store
+            .read_session_items("preview-atomic-session", 0, 10)
+            .unwrap()
+            .is_empty());
+        let internal_events: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE operation_id = 'preview-atomic-turn'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(internal_events, 0);
+        let internal_cursor: i64 = store
+            .connection
+            .query_row(
+                "SELECT next_sequence FROM session_sequences
+                 WHERE session_id = 'preview-atomic-session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(internal_cursor, 2);
+        let public_events: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM public_timeline_events
+                 WHERE session_id = 'preview-atomic-session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(public_events, 0);
+        let cursor: (i64, i64, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT next_sequence, last_timestamp_ms, latest_event_id
+                 FROM public_timeline_cursors
+                 WHERE session_id = 'preview-atomic-session'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(cursor, (1, 0, None));
+    }
+
+    #[test]
+    fn preview_projection_and_six_public_events_commit_in_one_transaction() {
+        let root = Root::new("preview-public-timeline-atomicity");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "preview-atomic-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Preview atomicity".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        let request = preview_turn_commit_fixture();
+
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_preview_public_timeline_insert
+                 BEFORE INSERT ON public_timeline_events
+                 WHEN NEW.sequence = 4
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected preview journal failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(store.commit_preview_turn(request.clone()).is_err());
+        assert_preview_turn_absent(&store);
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_preview_public_timeline_insert;")
+            .unwrap();
+
+        let mut invalid_sequence = request.clone();
+        invalid_sequence.public_events[3].sequence += 1;
+        assert!(store.commit_preview_turn(invalid_sequence).is_err());
+        assert_preview_turn_absent(&store);
+
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_preview_internal_event
+                 BEFORE INSERT ON events
+                 WHEN NEW.event_kind = 'item.appended'
+                   AND NEW.correlation_id = 'preview-agent-item'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected preview internal event failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(store.commit_preview_turn(request.clone()).is_err());
+        assert_preview_turn_absent(&store);
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_preview_internal_event;")
+            .unwrap();
+
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_preview_terminal_update
+                 BEFORE UPDATE OF state ON turns
+                 WHEN NEW.state = 'completed'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected preview terminal failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(store.commit_preview_turn(request.clone()).is_err());
+        assert_preview_turn_absent(&store);
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_preview_terminal_update;")
+            .unwrap();
+
+        let committed = store.commit_preview_turn(request).unwrap();
+        assert_eq!(committed.turn.state, "completed");
+        assert_eq!(committed.user_item.sequence, 1);
+        assert_eq!(committed.agent_item.sequence, 2);
+        assert!(!committed.user_item.payload["content"]
+            .as_str()
+            .unwrap()
+            .contains("sk-"));
+        assert!(!committed.agent_item.payload["content"]
+            .as_str()
+            .unwrap()
+            .contains("sk-"));
+        let public_page = store
+            .sync_public_timeline("preview-atomic-session", 0, None, 10)
+            .unwrap();
+        assert_eq!(public_page.events.len(), 6);
+        assert_eq!(public_page.events[0].event, "turn.started");
+        assert_eq!(public_page.events[5].event, "turn.completed");
+        let internal_kinds = store
+            .read_session_events("preview-atomic-session", 0, 20)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.operation_id == "preview-atomic-turn")
+            .map(|event| event.event_kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            internal_kinds,
+            vec![
+                "turn.created",
+                "item.appended",
+                "item.appended",
+                "turn.completed"
+            ]
+        );
+        let cursor: (i64, i64, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT next_sequence, last_timestamp_ms, latest_event_id
+                 FROM public_timeline_cursors
+                 WHERE session_id = 'preview-atomic-session'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(cursor.0, 7);
+        assert_eq!(cursor.1, 15);
+        assert_eq!(
+            cursor.2.as_deref(),
+            public_page
+                .events
+                .last()
+                .map(|event| event.event_id.as_str())
+        );
+    }
+
     #[test]
     fn public_timeline_projection_and_sanitized_item_commit_atomically() {
         let root = Root::new("public-timeline-projection-atomicity");
@@ -24774,6 +25315,316 @@ mod tests {
             Some(stored)
         );
         assert!(!reopened.session_requires_recovery("trace-session"));
+    }
+
+    #[test]
+    fn terminal_error_trace_projection_and_public_event_commit_atomically() {
+        let root = Root::new("turn-trace-public-timeline-atomic");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+        let trace = failed_turn_trace("trace-session", "trace-turn", "trace-terminal", 4);
+        let mut sequencer = crate::event_sequencer::EventSequencer::default();
+        let started = sequencer
+            .prepare(3, "trace-session", "trace-turn", "turn.started", None)
+            .unwrap();
+        let started_envelope = started.envelope().clone();
+        store
+            .append_public_timeline_event(&started_envelope)
+            .unwrap();
+        let started_event_id = started.envelope().event_id.clone();
+        started.commit(&mut sequencer).unwrap();
+
+        let error_item = StoredItemAppend {
+            session_id: "trace-session".into(),
+            turn_id: Some("trace-turn".into()),
+            item_id: "trace-error-item".into(),
+            item_kind: "error".into(),
+            role: "system".into(),
+            state: "completed".into(),
+            payload: json!({
+                "content": "bounded storage failure",
+                "data": {
+                    "schema_version": "runtime-error/0.1",
+                    "class": "storage",
+                    "retryable": false,
+                    "terminal_persisted": true
+                }
+            }),
+            created_at_ms: 4,
+        };
+        let preview = store.preview_item_append(&error_item).unwrap();
+        let timeline_item = TimelineItem {
+            id: preview.item_id,
+            kind: preview.item_kind,
+            role: preview.role,
+            state: preview.state,
+            content: preview.payload["content"].as_str().unwrap().to_owned(),
+            data: preview.payload.get("data").cloned(),
+        };
+        let failed = sequencer
+            .prepare(
+                4,
+                "trace-session",
+                "trace-turn",
+                "turn.failed",
+                Some(timeline_item.clone()),
+            )
+            .unwrap();
+        let failed_envelope = failed.envelope().clone();
+
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_trace_public_terminal_insert
+                 BEFORE INSERT ON public_timeline_events
+                 WHEN NEW.sequence = 2
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected trace public terminal failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(store
+            .finish_turn_with_trace_and_public_event(
+                "trace-session",
+                "trace-turn",
+                "failed",
+                4,
+                &trace,
+                (Some(error_item.clone()), &failed_envelope),
+            )
+            .is_err());
+        assert_eq!(store.load_turn("trace-turn").unwrap().state, "started");
+        assert!(store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .read_session_items("trace-session", 0, 10)
+            .unwrap()
+            .is_empty());
+        let terminal_internal_events: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM events
+                 WHERE session_id = 'trace-session'
+                   AND event_kind IN ('turn.trace.recorded', 'turn.failed')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(terminal_internal_events, 0);
+        let cursor: (i64, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT next_sequence, latest_event_id
+                 FROM public_timeline_cursors WHERE session_id = 'trace-session'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cursor.0, 2);
+        assert_eq!(cursor.1.as_deref(), Some(started_event_id.as_str()));
+
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_trace_public_terminal_insert;")
+            .unwrap();
+
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_trace_item_event_insert
+                 BEFORE INSERT ON events
+                 WHEN NEW.event_kind = 'item.appended'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected trace item event failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(store
+            .finish_turn_with_trace_and_public_event(
+                "trace-session",
+                "trace-turn",
+                "failed",
+                4,
+                &trace,
+                (Some(error_item.clone()), &failed_envelope),
+            )
+            .is_err());
+        assert_eq!(store.load_turn("trace-turn").unwrap().state, "started");
+        assert!(store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .read_session_items("trace-session", 0, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .sync_public_timeline("trace-session", 0, None, 10)
+                .unwrap()
+                .events
+                .len(),
+            1
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_trace_item_event_insert;")
+            .unwrap();
+
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_trace_turn_update
+                 BEFORE UPDATE ON turns
+                 WHEN OLD.turn_id = 'trace-turn'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected trace turn update failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(store
+            .finish_turn_with_trace_and_public_event(
+                "trace-session",
+                "trace-turn",
+                "failed",
+                4,
+                &trace,
+                (Some(error_item.clone()), &failed_envelope),
+            )
+            .is_err());
+        assert_eq!(store.load_turn("trace-turn").unwrap().state, "started");
+        assert!(store
+            .read_turn_trace("trace-session", "trace-turn")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .read_session_items("trace-session", 0, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .sync_public_timeline("trace-session", 0, None, 10)
+                .unwrap()
+                .events
+                .len(),
+            1
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_trace_turn_update;")
+            .unwrap();
+
+        let finished = store
+            .finish_turn_with_trace_and_public_event(
+                "trace-session",
+                "trace-turn",
+                "failed",
+                4,
+                &trace,
+                (Some(error_item.clone()), &failed_envelope),
+            )
+            .unwrap();
+        failed.commit(&mut sequencer).unwrap();
+        assert_eq!(finished.state, "failed");
+        assert_eq!(
+            store
+                .read_turn_trace("trace-session", "trace-turn")
+                .unwrap()
+                .unwrap()
+                .trace,
+            trace
+        );
+        assert_eq!(
+            store
+                .read_session_items("trace-session", 0, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        let page = store
+            .sync_public_timeline("trace-session", 0, None, 10)
+            .unwrap();
+        assert_eq!(page.events.len(), 2);
+        assert_eq!(page.events[1].event, "turn.failed");
+        assert_eq!(page.events[1].item.as_ref(), Some(&timeline_item));
+
+        let item_count = store
+            .read_session_items("trace-session", 0, 10)
+            .unwrap()
+            .len();
+        let public_count = page.events.len();
+        assert_eq!(
+            store
+                .finish_turn_with_trace_and_public_event(
+                    "trace-session",
+                    "trace-turn",
+                    "failed",
+                    4,
+                    &trace,
+                    (Some(error_item.clone()), &failed_envelope),
+                )
+                .unwrap_err()
+                .code,
+            "turn-trace-public-projection-missing"
+        );
+        assert_eq!(
+            store
+                .read_session_items("trace-session", 0, 10)
+                .unwrap()
+                .len(),
+            item_count
+        );
+        assert_eq!(
+            store
+                .sync_public_timeline("trace-session", 0, None, 10)
+                .unwrap()
+                .events
+                .len(),
+            public_count
+        );
+
+        let missing_root = Root::new("turn-trace-public-timeline-missing-repair");
+        let mut missing_store = WorkbenchStore::open(&missing_root.path).unwrap();
+        create_turn_trace_fixture(
+            &mut missing_store,
+            &missing_root,
+            "trace-session",
+            "trace-turn",
+        );
+        missing_store
+            .append_public_timeline_event(&started_envelope)
+            .unwrap();
+        missing_store
+            .finish_turn_with_trace("trace-session", "trace-turn", "failed", 4, &trace)
+            .unwrap();
+        assert_eq!(
+            missing_store
+                .finish_turn_with_trace_and_public_event(
+                    "trace-session",
+                    "trace-turn",
+                    "failed",
+                    4,
+                    &trace,
+                    (Some(error_item), &failed_envelope),
+                )
+                .unwrap_err()
+                .code,
+            "turn-trace-public-projection-missing"
+        );
+        assert!(missing_store
+            .read_session_items("trace-session", 0, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            missing_store
+                .sync_public_timeline("trace-session", 0, None, 10)
+                .unwrap()
+                .events
+                .len(),
+            1
+        );
     }
 
     #[test]
