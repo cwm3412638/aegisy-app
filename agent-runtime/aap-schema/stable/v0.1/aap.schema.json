@@ -125,6 +125,19 @@
           "params": { "$ref": "#/$defs/timelineSyncParams" }
         }
       }
+    },
+    {
+      "if": {
+        "required": ["method"],
+        "properties": { "method": { "const": "timeline/snapshot" } }
+      },
+      "then": {
+        "required": ["id", "params"],
+        "properties": {
+          "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+          "params": { "$ref": "#/$defs/timelineSnapshotParams" }
+        }
+      }
     }
   ],
   "$defs": {
@@ -345,6 +358,24 @@
       "pattern": "^event:sha256:[0-9a-f]{64}$",
       "minLength": 77,
       "maxLength": 77
+    },
+    "timelineSnapshotId": {
+      "type": "string",
+      "pattern": "^timeline-session-snapshot:sha256:[0-9a-f]{64}$",
+      "minLength": 97,
+      "maxLength": 97
+    },
+    "timelineSnapshotItemId": {
+      "type": "string",
+      "pattern": "^timeline-session-snapshot-item:sha256:[0-9a-f]{64}$",
+      "minLength": 102,
+      "maxLength": 102
+    },
+    "timelineSnapshotPageId": {
+      "type": "string",
+      "pattern": "^timeline-session-snapshot-page:sha256:[0-9a-f]{64}$",
+      "minLength": 102,
+      "maxLength": 102
     },
     "timelineAnchor": {
       "type": "object",
@@ -883,6 +914,215 @@
         "jsonrpc": { "const": "2.0" },
         "id": { "$ref": "#/$defs/jsonRpcRequestId" },
         "result": { "$ref": "#/$defs/timelineSyncPage" }
+      }
+    },
+    "timelineSnapshotParams": {
+      "type": "object",
+      "$comment": "The first request sets snapshot_identity, watermark, and after to null. Every continuation repeats the server-selected complete identity, fixed watermark, Session, and exact final-Item cursor from the previous page.",
+      "required": ["session_id", "snapshot_identity", "watermark", "after", "limit"],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "snapshot_identity": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineSnapshotId" },
+            { "type": "null" }
+          ]
+        },
+        "watermark": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineAnchor" },
+            { "type": "null" }
+          ]
+        },
+        "after": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineSnapshotCursor" },
+            { "type": "null" }
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "snapshot_identity": { "type": "null" },
+            "watermark": { "type": "null" },
+            "after": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "snapshot_identity": { "$ref": "#/$defs/timelineSnapshotId" },
+            "watermark": { "$ref": "#/$defs/timelineAnchor" },
+            "after": { "$ref": "#/$defs/timelineSnapshotCursor" }
+          }
+        }
+      ]
+    },
+    "timelineSnapshotCursor": {
+      "type": "object",
+      "required": ["ordinal", "item_id", "item_identity"],
+      "additionalProperties": false,
+      "properties": {
+        "ordinal": { "$ref": "#/$defs/safePositiveInteger" },
+        "item_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "item_identity": { "$ref": "#/$defs/timelineSnapshotItemId" }
+      }
+    },
+    "timelineSnapshotItem": {
+      "type": "object",
+      "$comment": "Typed peers verify the domain-separated item_identity over every field except item_identity plus the fixed Item schema and enclosing Session.",
+      "required": [
+        "ordinal",
+        "item_identity",
+        "turn_id",
+        "correlation_id",
+        "turn_state",
+        "first_event",
+        "latest_event",
+        "item",
+        "item_update"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ordinal": { "$ref": "#/$defs/safePositiveInteger" },
+        "item_identity": { "$ref": "#/$defs/timelineSnapshotItemId" },
+        "turn_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "correlation_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "turn_state": {
+          "enum": ["running", "completed", "failed", "interrupted"]
+        },
+        "first_event": { "$ref": "#/$defs/timelineAnchor" },
+        "latest_event": { "$ref": "#/$defs/timelineAnchor" },
+        "item": { "$ref": "#/$defs/timelineItem" },
+        "item_update": { "$ref": "#/$defs/timelineItemUpdate" }
+      }
+    },
+    "timelineSnapshotActiveTurn": {
+      "type": "object",
+      "required": [
+        "turn_id",
+        "correlation_id",
+        "state",
+        "started_event",
+        "latest_event",
+        "open_item_ids"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "turn_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "correlation_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "state": { "const": "running" },
+        "started_event": { "$ref": "#/$defs/timelineAnchor" },
+        "latest_event": { "$ref": "#/$defs/timelineAnchor" },
+        "open_item_ids": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": { "$ref": "#/$defs/boundedGraphicalId" }
+        }
+      }
+    },
+    "timelineSessionSnapshotPage": {
+      "type": "object",
+      "$comment": "Typed peers verify fixed floor/watermark/totals/active Turn across pages, contiguous ordinals, every Item/page identity, exact cursor chaining, the final complete identity, and an encoded result below the reserved 4 MiB AAP frame budget.",
+      "required": [
+        "schema_version",
+        "session_id",
+        "snapshot_identity",
+        "floor",
+        "watermark",
+        "active_turn",
+        "total_items",
+        "total_canonical_bytes",
+        "after",
+        "items",
+        "next_after",
+        "complete",
+        "page_identity"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "timeline-session-snapshot-page/0.1" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "snapshot_identity": { "$ref": "#/$defs/timelineSnapshotId" },
+        "floor": { "$ref": "#/$defs/timelineAnchor" },
+        "watermark": { "$ref": "#/$defs/timelineAnchor" },
+        "active_turn": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineSnapshotActiveTurn" },
+            { "type": "null" }
+          ]
+        },
+        "total_items": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "total_canonical_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        },
+        "after": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineSnapshotCursor" },
+            { "type": "null" }
+          ]
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 200,
+          "items": { "$ref": "#/$defs/timelineSnapshotItem" }
+        },
+        "next_after": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineSnapshotCursor" },
+            { "type": "null" }
+          ]
+        },
+        "complete": { "type": "boolean" },
+        "page_identity": { "$ref": "#/$defs/timelineSnapshotPageId" }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "complete": { "const": true },
+            "next_after": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "complete": { "const": false },
+            "items": { "minItems": 1 },
+            "next_after": { "$ref": "#/$defs/timelineSnapshotCursor" }
+          }
+        }
+      ]
+    },
+    "timelineSnapshotRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "method": { "const": "timeline/snapshot" },
+        "params": { "$ref": "#/$defs/timelineSnapshotParams" }
+      }
+    },
+    "timelineSnapshotSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "result": { "$ref": "#/$defs/timelineSessionSnapshotPage" }
       }
     },
     "timelineRetentionGapData": {

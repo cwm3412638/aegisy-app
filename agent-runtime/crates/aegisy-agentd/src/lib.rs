@@ -49,6 +49,7 @@ pub mod pinned_context;
 pub mod pinned_context_store;
 mod provider_error;
 pub mod public_timeline_journal;
+pub(crate) mod public_timeline_projection;
 mod repository_index;
 pub mod session_compaction;
 pub mod session_compaction_store;

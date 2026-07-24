@@ -211,6 +211,33 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Snapshot, structured retention-gap recovery, live
   subscription, heartbeat, complete reconnect orchestration, explicit
   acknowledgement, and Windows recovery evidence remain open. Keep `3.5` unchecked.
+- The Timeline snapshot wire-contract stage is now implemented and schema-tested,
+  without advertising the capability. AAP types and the stable Schema define the
+  exact null-only `timeline/snapshot` request, fixed floor/watermark, strict
+  continuation cursor, complete Item `first_event`/`latest_event` anchors, active
+  Turn `started_event`/`latest_event`/ordered `open_item_ids`, and domain-separated
+  Item/full-snapshot/page identities. Rust enforces the 10,000-Item/64 MiB complete
+  materialization bound, 200-Item page bound, and 4 MiB frame budget; fixtures cover
+  multi-page cursor chaining and identity drift. This is only the protocol boundary:
+  schema-v17 durable visible-state materialization, Runtime fixed-head paging, Qt
+  atomic replacement, and `snapshot_available` advertisement remain absent.
+- Schema v17 visible-state persistence is now implemented behind the same
+  checkpoint/floor/prune SQLite transaction. Each Session starts with a strict
+  empty visible snapshot; pruning reconstructs the public projection from the
+  prior durable visible floor and only replays events through the requested
+  `through` anchor, while the lifecycle Sequencer checkpoint continues through
+  the current head. Canonical snapshot JSON is bound to its raw-byte SHA-256,
+  floor anchor, complete Item count, and domain-separated snapshot identity.
+  Redundant header/active-Turn/Item rows carry byte/hash/anchor/revision checks
+  and are validated on read and startup; CAS on the previous snapshot identity
+  prevents stale replacement. Snapshot, checkpoint, floor movement, and exact
+  prefix deletion remain one rollback boundary. Focused tests cover durable
+  materialization, visible Item recovery, active/open state, tamper rejection,
+  and Session ownership. WorkbenchStore now has an internal validated snapshot
+  read API. Runtime fixed-head paging, Qt atomic Session replacement,
+  subscription/heartbeat/reconnect/acknowledgement, and `snapshot_available`
+  advertisement are still absent, so automatic pruning remains disabled and
+  OpenSpec `3.5` stays open.
 - Model catalog foundation (2026-07-21): the sidecar now validates an internal
   `model-catalog/0.1` metadata contract and exposes the read-only AAP capability
   `model.catalog.read-only` with `model/catalog`. The current projection is
@@ -2687,6 +2714,15 @@ Implemented visual baseline:
 
 ## Verification Snapshot (2026-07-25)
 
+- The schema-v17 visible-state floor persistence stage now passes the focused
+  Public Timeline Journal suite and the full `aegisy-agentd --lib` suite (`689`
+  passed, one ignored live fixture), strict Clippy, formatting, and
+  `git diff --check`. It materializes canonical visible Items and active/open
+  Turn state at the requested floor, validates redundant rows and snapshot
+  identity on restart/read, and atomically rolls back with checkpoint/floor/
+  prefix deletion. Runtime snapshot paging and Qt replacement are not yet
+  connected; this does not advertise `snapshot_available` or enable pruning.
+
 - The Public Timeline retention/checkpoint slice advances OpenSpec `3.5` without
   completing it. Schema v16 Journal/cursor CAS, bounded replay restoration,
   negotiated AAP `timeline/sync`, exact sanitized normal Codex transactions, and Qt
@@ -2844,7 +2880,8 @@ Implemented visual baseline:
 
 1. Continue OpenSpec `3.5` with the schema v17 durable visible-state floor snapshot,
    fixed-head bounded `timeline/snapshot` paging, and Qt atomic single-Session
-   replacement. Then add subscription, heartbeat, complete reconnect orchestration,
+   replacement; the strict wire contract is now complete but still unadvertised.
+   Then add subscription, heartbeat, complete reconnect orchestration,
    explicit acknowledgement, and Windows recovery evidence. The structured
    retention-gap response is implemented; keep automatic pruning disabled until the
    complete snapshot recovery path is verified.

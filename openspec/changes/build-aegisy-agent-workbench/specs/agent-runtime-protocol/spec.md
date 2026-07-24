@@ -226,6 +226,93 @@ client SHALL NOT discard its confirmed projection, clear bounded queued live eve
 or resume at the floor merely because the gap response was structurally valid.
 Other Sessions SHALL continue independently.
 
+The future current-Session snapshot capability SHALL be exactly
+`timeline.snapshot.current` and SHALL expose only `timeline/snapshot`. Runtime SHALL
+advertise it only when the durable floor-visible-state projection, retained Public
+Timeline tail, and snapshot materialization path are healthy. Until that complete
+path exists, the capability and method SHALL remain unavailable and a retention-gap
+response SHALL continue to report `snapshot_available:false`.
+
+The `timeline/snapshot` request SHALL contain exactly `session_id`, nullable
+`snapshot_identity`, nullable `watermark`, nullable `after`, and `limit`. `limit`
+SHALL be 1 through 200. The first request SHALL set the three nullable fields to
+null. Runtime SHALL atomically capture the current Public Timeline head as one fixed
+sequence/Event-ID watermark and SHALL materialize the Session's visible state only
+through that watermark. Every continuation SHALL repeat the exact returned
+`snapshot_identity` and watermark and SHALL use only the exact Runtime-issued
+`after` cursor. A continuation mismatch, expired materialization, or unavailable
+fixed head SHALL fail without silently selecting a new snapshot.
+
+Every response SHALL use `timeline-session-snapshot-page/0.1` and SHALL contain
+exactly `schema_version`, `session_id`, `snapshot_identity`, `floor`, `watermark`,
+`active_turn`, `total_items`, `total_canonical_bytes`, `after`, `items`,
+`next_after`, `complete`, and `page_identity`. `floor` and `watermark` SHALL be exact
+sequence/Event-ID anchors. `active_turn` SHALL be null or an exact closed object
+containing exactly `turn_id`, matching `correlation_id`, `state:"running"`,
+`started_event`, `latest_event`, and ordered unique `open_item_ids`. Both Event
+anchors SHALL come from the validated Public Timeline, and the open Item list SHALL
+exactly match the current visible `started`/`delta` Items for that Turn. Runtime SHALL
+NOT claim an active Turn from provider/process state outside the validated Public
+Timeline.
+
+Each ordered snapshot Item SHALL contain exactly `ordinal`, `item_identity`,
+`turn_id`, `correlation_id`, `turn_state`, `first_event`, `latest_event`, `item`, and
+`item_update`. Ordinals SHALL be contiguous positive JSON-safe integers starting at
+one. The two Event anchors SHALL bind the Item's first visible appearance and latest
+accepted revision at the fixed watermark. `item` SHALL be the complete current
+sanitized visible Item, including a current `started` or `delta` state when the fixed
+head falls inside a running Turn. `item_update` SHALL contain the exact current
+positive revision and `snapshot-replacement` content mode. The Turn/correlation
+binding, anchors, kind, role, Item ID, and revision SHALL NOT drift between the floor
+state, retained-tail reduction, pages, or later live validation.
+
+An Item identity SHALL have the form
+`timeline-session-snapshot-item:sha256:<64-lowercase-hex>` and SHALL hash
+domain-separated canonical JSON containing the schema, Session, ordinal,
+Turn/correlation binding, Turn state, first/latest Event anchors, complete Item, and
+item update, excluding only the identity field itself. The complete snapshot identity SHALL have the form
+`timeline-session-snapshot:sha256:<64-lowercase-hex>` and SHALL hash domain-separated
+canonical JSON containing the schema, Session, exact floor, fixed watermark,
+nullable active Turn, total Item count, total canonical Item bytes, and the complete
+ordered Item-identity list. The page identity SHALL have the form
+`timeline-session-snapshot-page:sha256:<64-lowercase-hex>` and SHALL bind that
+snapshot identity, exact request cursor, ordered Item identities returned by the
+page, next cursor, and completion state. No identity SHALL include transport request
+IDs or mutable provider/process metadata.
+
+The nullable item cursor SHALL otherwise contain exactly the final returned
+`ordinal`, `item_id`, and `item_identity`. An incomplete page SHALL contain at least
+one Item, return that exact final cursor as `next_after`, and set `complete:false`.
+A complete page SHALL return `next_after:null` and set `complete:true`. Every page
+SHALL remain below the 4 MiB AAP frame limit and MAY stop before the requested Item
+count to preserve that bound. One complete materialization SHALL contain at most
+10,000 Items and at most 64 MiB of canonical Item material. Runtime SHALL reject an
+over-bound Session before returning a usable first page and SHALL NOT truncate,
+prune, or label a partial set complete.
+
+The durable source for that materialization SHALL be a sanitized visible-state
+snapshot at the exact retention-floor anchor plus the contiguous retained Public
+Timeline tail strictly after the floor and no later than the fixed watermark.
+`session/read` SHALL NOT substitute for this source. Advancing the retention floor
+SHALL validate and commit the replacement visible-state floor snapshot, matching
+content-free Sequencer checkpoint, exact floor, and exact prefix deletion in one
+SQLite transaction. Any visible-state, checkpoint, floor, or deletion failure SHALL
+preserve the complete previous floor authority and Journal. Both the durable floor
+state and materialized current snapshot SHALL obey the 10,000-Item/64-MiB bounds;
+an over-bound state SHALL make pruning and snapshot recovery unavailable rather than
+discarding visible history.
+
+Qt SHALL preserve the affected Session's last confirmed projection while it stages
+every snapshot page privately. It SHALL verify the repeated Session, floor,
+watermark, active Turn, totals, snapshot identity, page identity, contiguous
+ordinals, every Item identity, cursor chain, and complete ordered identity before
+changing visible state. Only the final complete page SHALL atomically replace that
+one Session's Timeline, active-Turn/Item lifecycle state, and confirmed cursor at the
+fixed watermark. Qt SHALL then drain only queued live events after that watermark
+through the ordinary event validator. A malformed, missing, expired, over-bound, or
+identity-drifted page SHALL leave the previous projection visible and the Session
+frozen; it SHALL NOT partially append snapshot Items or affect another Session.
+
 The fixed-watermark slice does not satisfy the complete reconnect requirement by
 itself. The schema v16 floor/checkpoint is internal retention and startup authority,
 not a current-Session snapshot or public recovery response. Automatic production
@@ -308,12 +395,33 @@ considered complete.
 
 #### Scenario: Requested replay point is no longer retained
 - **WHEN** the event sequence predates retained replay data
-- **THEN** the runtime SHALL return a current Session snapshot plus the first available sequence, SHALL identify any non-replayable diagnostic gap, and SHALL let the client atomically replace only that Session before continuing live delivery
+- **THEN** the runtime SHALL return structured `-32148`; only a separately negotiated identity-complete `timeline/snapshot` result MAY let the client atomically replace that Session at a fixed watermark before continuing live delivery
 
-The schema v16 retention foundation does not yet satisfy this scenario. Until the
-versioned snapshot and structured retention-gap response land, the Runtime fails
+The schema v16 retention foundation and implemented structured gap response do not
+yet satisfy snapshot recovery. Until the versioned floor-visible-state projection,
+snapshot method, complete identities, paging, and Qt replacement land, Runtime fails
 closed without returning a partial tail or fabricating a snapshot, and the affected
 Session remains frozen.
+
+#### Scenario: Snapshot pages stay fixed while a Turn continues
+- **WHEN** Runtime captures a snapshot watermark during a running Turn and later Item deltas or a terminal event append while Qt pages
+- **THEN** every page SHALL retain the original watermark and active running-Turn state, the later events SHALL remain outside the snapshot, and Qt SHALL validate them only after atomic replacement
+
+#### Scenario: Snapshot materializes floor state plus retained tail
+- **WHEN** the durable floor snapshot contains visible Items and retained events update or complete them before the selected watermark
+- **THEN** Runtime SHALL reduce the exact contiguous tail over the floor state and SHALL identify the resulting complete ordered Item state without exposing the internal Sequencer checkpoint
+
+#### Scenario: Snapshot identity or cursor is substituted
+- **WHEN** a continuation changes the Session, floor, watermark, snapshot identity, active Turn, totals, Item/page identity, ordinal, or cursor chain
+- **THEN** Runtime or Qt SHALL reject the snapshot before visible replacement and SHALL keep only the affected Session frozen
+
+#### Scenario: Snapshot exceeds its complete-state bound
+- **WHEN** materialization would contain more than 10,000 Items or more than 64 MiB of canonical Item material
+- **THEN** Runtime SHALL fail before returning a usable first page, SHALL NOT truncate or prune the state, and Qt SHALL preserve its prior confirmed projection
+
+#### Scenario: Final snapshot page replaces one Session atomically
+- **WHEN** Qt validates all pages, exact totals, ordered Item identities, active running Turn, and the complete snapshot identity at the fixed watermark
+- **THEN** Qt SHALL replace only that Session's visible Timeline and lifecycle cursor once, then SHALL drain queued post-watermark events through normal validation
 
 ### Requirement: Mutating protocol requests are idempotent
 The protocol SHALL require or accept client-generated idempotency keys for turn

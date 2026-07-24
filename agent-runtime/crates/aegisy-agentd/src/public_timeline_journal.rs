@@ -1,4 +1,7 @@
 use crate::event_sequencer::{EventSequencer, EventSequencerCheckpoint};
+use crate::public_timeline_projection::{
+    ProjectionAnchor, PublicTimelineProjection, VisibleStateFloorSnapshot,
+};
 use aegisy_aap::stable::v0_1::EventEnvelope;
 use aegisy_aap::MAX_AAP_FRAME_BYTES;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -7,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 pub const JOURNAL_SCHEMA_VERSION: &str = "public-timeline-journal/0.1";
 pub const CHECKPOINT_SCHEMA_VERSION: &str = "public-timeline-checkpoint/0.1";
+pub const VISIBLE_SNAPSHOT_SCHEMA_VERSION: &str = "public-timeline-visible-snapshot/0.1";
 pub const SYNC_SCHEMA_VERSION: &str = "timeline-sync-page/0.1";
 pub const MAX_SYNC_PAGE: usize = 200;
 pub const MAX_SESSION_EVENTS: u64 = 100_000;
@@ -14,6 +18,8 @@ pub const MAX_JOURNAL_SESSIONS: u64 = 10_000;
 pub const MAX_TOTAL_EVENTS: u64 = 100_000;
 pub const MAX_CHECKPOINT_BYTES: u64 = crate::event_sequencer::MAX_CHECKPOINT_BYTES as u64;
 pub const MAX_TOTAL_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_VISIBLE_SNAPSHOT_ITEMS: u64 = 10_000;
+pub const MAX_VISIBLE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_SYNC_EVENTS_BYTES: u64 = MAX_AAP_FRAME_BYTES - 512 * 1024;
 
 pub const SCHEMA_SQL: &str = "
@@ -76,6 +82,56 @@ pub const SCHEMA_SQL: &str = "
         ),
         FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE RESTRICT
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS public_timeline_visible_snapshots (
+        session_id TEXT PRIMARY KEY,
+        schema_version TEXT NOT NULL CHECK(schema_version = 'public-timeline-visible-snapshot/0.1'),
+        through_sequence INTEGER NOT NULL CHECK(through_sequence >= 0 AND through_sequence <= 9007199254740991),
+        through_event_id TEXT,
+        through_timestamp_ms INTEGER NOT NULL CHECK(through_timestamp_ms >= 0 AND through_timestamp_ms <= 9007199254740991),
+        snapshot_identity TEXT,
+        snapshot_bytes INTEGER NOT NULL CHECK(snapshot_bytes >= 0 AND snapshot_bytes <= 67108864),
+        item_count INTEGER NOT NULL CHECK(item_count >= 0 AND item_count <= 10000),
+        active_turn_json TEXT,
+        active_turn_sha256 TEXT,
+        active_turn_bytes INTEGER NOT NULL CHECK(active_turn_bytes >= 0 AND active_turn_bytes <= 67108864),
+        snapshot_json TEXT,
+        snapshot_sha256 TEXT,
+        created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0 AND created_at_ms <= 9007199254740991),
+        CHECK(
+            (through_sequence = 0 AND through_event_id IS NULL AND through_timestamp_ms = 0
+                AND snapshot_identity IS NULL AND snapshot_bytes = 0 AND item_count = 0
+                AND active_turn_json IS NULL AND active_turn_sha256 IS NULL
+                AND active_turn_bytes = 0 AND snapshot_json IS NULL
+                AND snapshot_sha256 IS NULL AND created_at_ms = 0)
+            OR
+            (through_sequence > 0 AND through_event_id IS NOT NULL AND through_timestamp_ms > 0
+                AND snapshot_identity IS NOT NULL AND snapshot_json IS NOT NULL
+                AND snapshot_sha256 IS NOT NULL AND created_at_ms > 0)
+        ),
+        CHECK(snapshot_bytes >= active_turn_bytes),
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE RESTRICT
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS public_timeline_visible_snapshot_items (
+        session_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 1 AND ordinal <= 10000),
+        turn_id TEXT NOT NULL,
+        turn_state TEXT NOT NULL CHECK(turn_state IN ('running','completed','failed','interrupted')),
+        item_id TEXT NOT NULL,
+        first_sequence INTEGER NOT NULL CHECK(first_sequence >= 1 AND first_sequence <= 9007199254740991),
+        first_event_id TEXT NOT NULL,
+        first_timestamp_ms INTEGER NOT NULL CHECK(first_timestamp_ms >= 1 AND first_timestamp_ms <= 9007199254740991),
+        latest_sequence INTEGER NOT NULL CHECK(latest_sequence >= first_sequence AND latest_sequence <= 9007199254740991),
+        latest_event_id TEXT NOT NULL,
+        latest_timestamp_ms INTEGER NOT NULL CHECK(latest_timestamp_ms >= 1 AND latest_timestamp_ms <= 9007199254740991),
+        revision INTEGER NOT NULL CHECK(revision >= 1 AND revision <= 9007199254740991),
+        item_json TEXT NOT NULL,
+        item_sha256 TEXT NOT NULL,
+        item_bytes INTEGER NOT NULL CHECK(item_bytes > 0 AND item_bytes <= 3670016),
+        PRIMARY KEY(session_id, ordinal),
+        UNIQUE(session_id, item_id),
+        FOREIGN KEY(session_id) REFERENCES public_timeline_visible_snapshots(session_id) ON DELETE CASCADE,
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE RESTRICT
+    ) STRICT;
     CREATE TRIGGER IF NOT EXISTS public_timeline_session_cursor_insert
     AFTER INSERT ON sessions
     BEGIN
@@ -91,6 +147,15 @@ pub const SCHEMA_SQL: &str = "
         ) VALUES (
             NEW.session_id, 'public-timeline-checkpoint/0.1', 0, NULL,
             0, NULL, NULL, 0, 0, 0, 0
+        );
+        INSERT OR IGNORE INTO public_timeline_visible_snapshots (
+            session_id, schema_version, through_sequence, through_event_id,
+            through_timestamp_ms, snapshot_identity, snapshot_bytes, item_count,
+            active_turn_json, active_turn_sha256, active_turn_bytes,
+            snapshot_json, snapshot_sha256, created_at_ms
+        ) VALUES (
+            NEW.session_id, 'public-timeline-visible-snapshot/0.1', 0, NULL,
+            0, NULL, 0, 0, NULL, NULL, 0, NULL, NULL, 0
         );
     END;
 ";
@@ -202,7 +267,39 @@ pub fn apply_schema(connection: &Connection) -> Result<(), JournalError> {
             [],
         )
         .map_err(|_| JournalError::new("timeline-journal-checkpoint-backfill-failed"))?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO public_timeline_visible_snapshots (
+                session_id, schema_version, through_sequence, through_event_id,
+                through_timestamp_ms, snapshot_identity, snapshot_bytes, item_count,
+                active_turn_json, active_turn_sha256, active_turn_bytes,
+                snapshot_json, snapshot_sha256, created_at_ms
+             ) SELECT session_id, 'public-timeline-visible-snapshot/0.1', 0, NULL,
+                      0, NULL, 0, 0, NULL, NULL, 0, NULL, NULL, 0 FROM sessions",
+            [],
+        )
+        .map_err(|_| JournalError::new("timeline-journal-visible-snapshot-backfill-failed"))?;
     Ok(())
+}
+
+pub(crate) fn migrate_v16_to_v17(transaction: &Transaction<'_>) -> Result<(), JournalError> {
+    let pruned_sessions: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM public_timeline_cursors
+             WHERE pruned_through_sequence > 0",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| JournalError::new("timeline-journal-v17-floor-read-failed"))?;
+    if pruned_sessions != 0 {
+        return Err(JournalError::new(
+            "timeline-journal-v17-visible-snapshot-authority-missing",
+        ));
+    }
+    transaction
+        .execute_batch("DROP TRIGGER IF EXISTS public_timeline_session_cursor_insert;")
+        .map_err(|_| JournalError::new("timeline-journal-v17-trigger-migration-failed"))?;
+    apply_schema(transaction)
 }
 
 pub(crate) fn migrate_v15_to_v16(transaction: &Transaction<'_>) -> Result<(), JournalError> {
@@ -267,6 +364,18 @@ pub(crate) fn migrate_v15_to_v16(transaction: &Transaction<'_>) -> Result<(), Jo
             [],
         )
         .map_err(|_| JournalError::new("timeline-journal-v16-checkpoint-migration-failed"))?;
+    transaction
+        .execute(
+            "INSERT INTO public_timeline_visible_snapshots (
+                session_id, schema_version, through_sequence, through_event_id,
+                through_timestamp_ms, snapshot_identity, snapshot_bytes, item_count,
+                active_turn_json, active_turn_sha256, active_turn_bytes,
+                snapshot_json, snapshot_sha256, created_at_ms
+             ) SELECT session_id, 'public-timeline-visible-snapshot/0.1', 0, NULL,
+                      0, NULL, 0, 0, NULL, NULL, 0, NULL, NULL, 0 FROM sessions",
+            [],
+        )
+        .map_err(|_| JournalError::new("timeline-journal-v17-snapshot-migration-failed"))?;
     transaction
         .execute_batch("DROP TABLE public_timeline_events_v15;")
         .map_err(|_| JournalError::new("timeline-journal-v16-event-cleanup-failed"))?;
@@ -893,6 +1002,448 @@ pub(crate) fn read_retention_state(
     })
 }
 
+fn timeline_anchor_matches_projection(
+    anchor: &ProjectionAnchor,
+    sequence: i64,
+    event_id: Option<&str>,
+    timestamp_ms: i64,
+) -> bool {
+    i64::try_from(anchor.sequence).ok() == Some(sequence)
+        && anchor.event_id.as_deref() == event_id
+        && i64::try_from(anchor.timestamp_ms).ok() == Some(timestamp_ms)
+}
+
+fn turn_state_json(state: &aegisy_aap::stable::v0_1::TurnState) -> &'static str {
+    match state {
+        aegisy_aap::stable::v0_1::TurnState::Running => "running",
+        aegisy_aap::stable::v0_1::TurnState::Completed => "completed",
+        aegisy_aap::stable::v0_1::TurnState::Failed => "failed",
+        aegisy_aap::stable::v0_1::TurnState::Interrupted => "interrupted",
+    }
+}
+
+pub(crate) fn read_visible_snapshot(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<VisibleStateFloorSnapshot>, JournalError> {
+    let row = connection
+        .query_row(
+            "SELECT through_sequence, through_event_id, through_timestamp_ms,
+                    snapshot_identity, snapshot_bytes, item_count,
+                    active_turn_json, active_turn_sha256, active_turn_bytes,
+                    snapshot_json, snapshot_sha256
+             FROM public_timeline_visible_snapshots WHERE session_id = ?1",
+            [session_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-read-failed"))?;
+    let Some((
+        through_sequence,
+        through_event_id,
+        through_timestamp_ms,
+        identity,
+        bytes,
+        count,
+        active_json,
+        active_sha256,
+        active_bytes,
+        json,
+        sha256,
+    )) = row
+    else {
+        return Err(JournalError::new("timeline-visible-snapshot-missing"));
+    };
+    if through_sequence == 0 {
+        if through_event_id.is_some()
+            || through_timestamp_ms != 0
+            || identity.is_some()
+            || bytes != 0
+            || count != 0
+            || active_json.is_some()
+            || active_sha256.is_some()
+            || active_bytes != 0
+            || json.is_some()
+            || sha256.is_some()
+        {
+            return Err(JournalError::new("timeline-visible-snapshot-empty-invalid"));
+        }
+        return Ok(None);
+    }
+    let json = json.ok_or_else(|| JournalError::new("timeline-visible-snapshot-json-missing"))?;
+    let sha256 =
+        sha256.ok_or_else(|| JournalError::new("timeline-visible-snapshot-hash-missing"))?;
+    let identity =
+        identity.ok_or_else(|| JournalError::new("timeline-visible-snapshot-identity-missing"))?;
+    let json_bytes = u64::try_from(json.len())
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-byte-invalid"))?;
+    if json_bytes == 0
+        || json_bytes > MAX_VISIBLE_SNAPSHOT_BYTES
+        || i64::try_from(json_bytes).ok() != Some(bytes)
+        || format!("{:x}", Sha256::digest(json.as_bytes())) != sha256
+    {
+        return Err(JournalError::new(
+            "timeline-visible-snapshot-integrity-failed",
+        ));
+    }
+    let snapshot = VisibleStateFloorSnapshot::from_canonical_json(session_id, &json)
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-json-invalid"))?;
+    if snapshot.identity() != identity
+        || i64::try_from(snapshot.items.len()).ok() != Some(count)
+        || !timeline_anchor_matches_projection(
+            &snapshot.anchor,
+            through_sequence,
+            through_event_id.as_deref(),
+            through_timestamp_ms,
+        )
+    {
+        return Err(JournalError::new(
+            "timeline-visible-snapshot-anchor-invalid",
+        ));
+    }
+    let expected_active = active_turn_snapshot_row(&snapshot)?;
+    match (expected_active, active_json, active_sha256, active_bytes) {
+        (None, None, None, 0) => {}
+        (Some(expected), Some(raw), Some(hash), bytes)
+            if u64::try_from(raw.len()).ok() == Some(u64::try_from(bytes).unwrap_or(0))
+                && format!("{:x}", Sha256::digest(raw.as_bytes())) == hash
+                && serde_json::from_str::<ActiveTurnSnapshotRow>(&raw)
+                    .ok()
+                    .as_ref()
+                    == Some(&expected) => {}
+        _ => {
+            return Err(JournalError::new(
+                "timeline-visible-snapshot-active-turn-invalid",
+            ))
+        }
+    }
+
+    let mut statement = connection
+        .prepare(
+            "SELECT ordinal, turn_id, turn_state, item_id,
+                    first_sequence, first_event_id, first_timestamp_ms,
+                    latest_sequence, latest_event_id, latest_timestamp_ms,
+                    revision, item_json, item_sha256, item_bytes
+             FROM public_timeline_visible_snapshot_items
+             WHERE session_id = ?1 ORDER BY ordinal",
+        )
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-items-read-failed"))?;
+    let rows = statement
+        .query_map([session_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, String>(12)?,
+                row.get::<_, i64>(13)?,
+            ))
+        })
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-items-read-failed"))?;
+    for row in rows {
+        let (
+            ordinal,
+            turn_id,
+            turn_state,
+            item_id,
+            first_sequence,
+            first_event_id,
+            first_timestamp_ms,
+            latest_sequence,
+            latest_event_id,
+            latest_timestamp_ms,
+            revision,
+            item_json,
+            item_sha256,
+            item_bytes,
+        ) = row.map_err(|_| JournalError::new("timeline-visible-snapshot-item-row-invalid"))?;
+        let ordinal = usize::try_from(ordinal)
+            .map_err(|_| JournalError::new("timeline-visible-snapshot-item-row-invalid"))?;
+        let visible =
+            snapshot
+                .items
+                .get(ordinal.checked_sub(1).ok_or_else(|| {
+                    JournalError::new("timeline-visible-snapshot-item-row-invalid")
+                })?)
+                .ok_or_else(|| JournalError::new("timeline-visible-snapshot-item-row-invalid"))?;
+        let canonical_item = serde_json::to_string(&visible.item)
+            .map_err(|_| JournalError::new("timeline-visible-snapshot-item-json-invalid"))?;
+        let expected_turn_state = snapshot
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == visible.turn_id)
+            .ok_or_else(|| JournalError::new("timeline-visible-snapshot-turn-missing"))?;
+        if ordinal == 0
+            || visible.turn_id != turn_id
+            || visible.item.id != item_id
+            || turn_state != turn_state_json(&expected_turn_state.state)
+            || i64::try_from(visible.revision).ok() != Some(revision)
+            || i64::try_from(visible.first_anchor.sequence).ok() != Some(first_sequence)
+            || visible.first_anchor.event_id.as_deref() != Some(first_event_id.as_str())
+            || i64::try_from(visible.first_anchor.timestamp_ms).ok() != Some(first_timestamp_ms)
+            || i64::try_from(visible.latest_anchor.sequence).ok() != Some(latest_sequence)
+            || visible.latest_anchor.event_id.as_deref() != Some(latest_event_id.as_str())
+            || i64::try_from(visible.latest_anchor.timestamp_ms).ok() != Some(latest_timestamp_ms)
+            || item_json != canonical_item
+            || format!("{:x}", Sha256::digest(item_json.as_bytes())) != item_sha256
+            || i64::try_from(item_json.len()).ok() != Some(item_bytes)
+        {
+            return Err(JournalError::new(
+                "timeline-visible-snapshot-item-integrity-failed",
+            ));
+        }
+    }
+    let row_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM public_timeline_visible_snapshot_items WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-items-count-failed"))?;
+    if row_count != count {
+        return Err(JournalError::new(
+            "timeline-visible-snapshot-item-count-mismatch",
+        ));
+    }
+    Ok(Some(snapshot))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ActiveTurnSnapshotRow {
+    turn_id: String,
+    correlation_id: String,
+    state: aegisy_aap::stable::v0_1::TurnState,
+    started_event: ProjectionAnchor,
+    latest_event: ProjectionAnchor,
+    open_item_ids: Vec<String>,
+}
+
+fn active_turn_snapshot_row(
+    snapshot: &VisibleStateFloorSnapshot,
+) -> Result<Option<ActiveTurnSnapshotRow>, JournalError> {
+    let Some(turn_id) = snapshot.running_turn_id.as_deref() else {
+        return Ok(None);
+    };
+    let turn = snapshot
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == turn_id)
+        .ok_or_else(|| JournalError::new("timeline-visible-snapshot-active-turn-invalid"))?;
+    let open_item_ids = snapshot
+        .open_items
+        .iter()
+        .filter(|item| item.turn_id == turn_id)
+        .map(|item| item.item_id.clone())
+        .collect();
+    Ok(Some(ActiveTurnSnapshotRow {
+        turn_id: turn.turn_id.clone(),
+        correlation_id: turn.turn_id.clone(),
+        state: turn.state,
+        started_event: turn.started_anchor.clone(),
+        latest_event: turn.latest_anchor.clone(),
+        open_item_ids,
+    }))
+}
+
+fn write_visible_snapshot_tx(
+    transaction: &Transaction<'_>,
+    session_id: &str,
+    snapshot: &VisibleStateFloorSnapshot,
+    expected_identity: Option<&str>,
+    created_at_ms: u64,
+) -> Result<(), JournalError> {
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || snapshot.session_id != session_id
+        || created_at_ms == 0
+        || created_at_ms > aegisy_aap::MAX_SAFE_JSON_INTEGER
+    {
+        return Err(JournalError::new("timeline-visible-snapshot-write-invalid"));
+    }
+    let snapshot_json = snapshot
+        .to_canonical_json()
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-write-invalid"))?;
+    let snapshot_bytes = u64::try_from(snapshot_json.len())
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-byte-limit"))?;
+    if snapshot_bytes == 0 || snapshot_bytes > MAX_VISIBLE_SNAPSHOT_BYTES {
+        return Err(JournalError::new("timeline-visible-snapshot-byte-limit"));
+    }
+    let snapshot_sha256 = format!("{:x}", Sha256::digest(snapshot_json.as_bytes()));
+    let item_count = u64::try_from(snapshot.items.len())
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-item-limit"))?;
+    if item_count > MAX_VISIBLE_SNAPSHOT_ITEMS {
+        return Err(JournalError::new("timeline-visible-snapshot-item-limit"));
+    }
+    let active = active_turn_snapshot_row(snapshot)?;
+    if active
+        .as_ref()
+        .is_some_and(|turn| turn.state != aegisy_aap::stable::v0_1::TurnState::Running)
+    {
+        return Err(JournalError::new(
+            "timeline-visible-snapshot-active-turn-invalid",
+        ));
+    }
+    let active_json = active
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-active-turn-invalid"))?;
+    let active_bytes = active_json
+        .as_ref()
+        .map(|json| u64::try_from(json.len()))
+        .transpose()
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-active-turn-invalid"))?
+        .unwrap_or(0);
+    let active_sha256 = active_json
+        .as_ref()
+        .map(|json| format!("{:x}", Sha256::digest(json.as_bytes())));
+    let total_snapshot_bytes: i64 = transaction
+        .query_row(
+            "SELECT COALESCE(SUM(snapshot_bytes), 0) FROM public_timeline_visible_snapshots",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-total-read-failed"))?;
+    let old_bytes: i64 = transaction
+        .query_row(
+            "SELECT snapshot_bytes FROM public_timeline_visible_snapshots WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-read-failed"))?
+        .ok_or_else(|| JournalError::new("timeline-visible-snapshot-missing"))?;
+    let total_snapshot_bytes = u64::try_from(total_snapshot_bytes)
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-total-invalid"))?;
+    let old_bytes = u64::try_from(old_bytes)
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-total-invalid"))?;
+    let next_total = total_snapshot_bytes
+        .checked_sub(old_bytes)
+        .and_then(|bytes| bytes.checked_add(snapshot_bytes))
+        .ok_or_else(|| JournalError::new("timeline-visible-snapshot-total-limit"))?;
+    if next_total > MAX_VISIBLE_SNAPSHOT_BYTES {
+        return Err(JournalError::new("timeline-visible-snapshot-total-limit"));
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE public_timeline_visible_snapshots
+             SET through_sequence = ?2, through_event_id = ?3,
+                 through_timestamp_ms = ?4, snapshot_identity = ?5,
+                 snapshot_bytes = ?6, item_count = ?7,
+                 active_turn_json = ?8, active_turn_sha256 = ?9,
+                 active_turn_bytes = ?10, snapshot_json = ?11,
+                 snapshot_sha256 = ?12, created_at_ms = ?13
+             WHERE session_id = ?1 AND snapshot_identity IS ?14",
+            params![
+                session_id,
+                i64::try_from(snapshot.anchor.sequence)
+                    .map_err(|_| JournalError::new("timeline-visible-snapshot-anchor-invalid"))?,
+                snapshot.anchor.event_id.clone(),
+                i64::try_from(snapshot.anchor.timestamp_ms)
+                    .map_err(|_| JournalError::new("timeline-visible-snapshot-anchor-invalid"))?,
+                snapshot.identity(),
+                i64::try_from(snapshot_bytes)
+                    .map_err(|_| JournalError::new("timeline-visible-snapshot-byte-limit"))?,
+                i64::try_from(item_count)
+                    .map_err(|_| JournalError::new("timeline-visible-snapshot-item-limit"))?,
+                active_json,
+                active_sha256,
+                i64::try_from(active_bytes).map_err(|_| JournalError::new(
+                    "timeline-visible-snapshot-active-turn-invalid"
+                ))?,
+                snapshot_json,
+                snapshot_sha256,
+                i64::try_from(created_at_ms)
+                    .map_err(|_| JournalError::new("timeline-visible-snapshot-write-invalid"))?,
+                expected_identity,
+            ],
+        )
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-write-failed"))?;
+    if changed != 1 {
+        return Err(JournalError::new(
+            "timeline-visible-snapshot-write-conflict",
+        ));
+    }
+    transaction
+        .execute(
+            "DELETE FROM public_timeline_visible_snapshot_items WHERE session_id = ?1",
+            [session_id],
+        )
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-items-delete-failed"))?;
+    for (index, visible) in snapshot.items.iter().enumerate() {
+        let turn = snapshot
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == visible.turn_id)
+            .ok_or_else(|| JournalError::new("timeline-visible-snapshot-turn-missing"))?;
+        let item_json = serde_json::to_string(&visible.item)
+            .map_err(|_| JournalError::new("timeline-visible-snapshot-item-invalid"))?;
+        let item_bytes = u64::try_from(item_json.len())
+            .map_err(|_| JournalError::new("timeline-visible-snapshot-item-limit"))?;
+        if item_bytes == 0 || item_bytes > MAX_SYNC_EVENTS_BYTES {
+            return Err(JournalError::new("timeline-visible-snapshot-item-limit"));
+        }
+        transaction
+            .execute(
+                "INSERT INTO public_timeline_visible_snapshot_items (
+                    session_id, ordinal, turn_id, turn_state, item_id,
+                    first_sequence, first_event_id, first_timestamp_ms,
+                    latest_sequence, latest_event_id, latest_timestamp_ms,
+                    revision, item_json, item_sha256, item_bytes
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    session_id,
+                    i64::try_from(index + 1)
+                        .map_err(|_| JournalError::new("timeline-visible-snapshot-item-limit"))?,
+                    visible.turn_id,
+                    turn_state_json(&turn.state),
+                    visible.item.id,
+                    i64::try_from(visible.first_anchor.sequence)
+                        .map_err(|_| JournalError::new("timeline-visible-snapshot-item-invalid"))?,
+                    visible.first_anchor.event_id.clone(),
+                    i64::try_from(visible.first_anchor.timestamp_ms)
+                        .map_err(|_| JournalError::new("timeline-visible-snapshot-item-invalid"))?,
+                    i64::try_from(visible.latest_anchor.sequence)
+                        .map_err(|_| JournalError::new("timeline-visible-snapshot-item-invalid"))?,
+                    visible.latest_anchor.event_id.clone(),
+                    i64::try_from(visible.latest_anchor.timestamp_ms)
+                        .map_err(|_| JournalError::new("timeline-visible-snapshot-item-invalid"))?,
+                    i64::try_from(visible.revision)
+                        .map_err(|_| JournalError::new("timeline-visible-snapshot-item-invalid"))?,
+                    item_json,
+                    format!("{:x}", Sha256::digest(item_json.as_bytes())),
+                    i64::try_from(item_bytes)
+                        .map_err(|_| JournalError::new("timeline-visible-snapshot-item-limit"))?,
+                ],
+            )
+            .map_err(|_| JournalError::new("timeline-visible-snapshot-item-write-failed"))?;
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub(crate) fn checkpoint_and_prune_tx(
     transaction: &Transaction<'_>,
@@ -921,6 +1472,24 @@ pub(crate) fn checkpoint_and_prune_tx(
         return Err(JournalError::new("timeline-journal-prune-anchor-drift"));
     }
 
+    let previous_snapshot = read_visible_snapshot(transaction, session_id)?;
+    if previous_snapshot.as_ref().is_some_and(|snapshot| {
+        !timeline_anchor_matches_projection(
+            &snapshot.anchor,
+            i64::try_from(previous_floor.sequence).unwrap_or(-1),
+            previous_floor.event_id.as_deref(),
+            i64::try_from(previous_floor.timestamp_ms).unwrap_or(-1),
+        )
+    }) {
+        return Err(JournalError::new(
+            "timeline-visible-snapshot-anchor-mismatch",
+        ));
+    }
+    let mut projection = match previous_snapshot {
+        Some(snapshot) => PublicTimelineProjection::from_floor(snapshot),
+        None => PublicTimelineProjection::empty(session_id),
+    }
+    .map_err(|_| JournalError::new("timeline-visible-snapshot-invalid"))?;
     let mut candidate = match previous_checkpoint.as_ref() {
         Some(checkpoint) => EventSequencer::begin_session_restore_from_checkpoint(
             session_id,
@@ -952,6 +1521,11 @@ pub(crate) fn checkpoint_and_prune_tx(
             return Err(JournalError::new("timeline-journal-verify-incomplete"));
         }
         for event in &page.events {
+            if event.sequence <= through.sequence {
+                projection
+                    .apply(event)
+                    .map_err(|_| JournalError::new("timeline-visible-snapshot-replay-failed"))?;
+            }
             candidate = candidate
                 .replay_event(event)
                 .map_err(|_| JournalError::new("timeline-journal-lifecycle-invalid"))?;
@@ -969,6 +1543,26 @@ pub(crate) fn checkpoint_and_prune_tx(
             .map(|event| event.sequence)
             .ok_or_else(|| JournalError::new("timeline-journal-verify-incomplete"))?;
     }
+    let next_snapshot = projection
+        .floor_snapshot()
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-invalid"))?;
+    if next_snapshot.anchor.sequence != through.sequence
+        || next_snapshot.anchor.event_id.as_deref() != through.event_id.as_deref()
+    {
+        return Err(JournalError::new(
+            "timeline-visible-snapshot-anchor-mismatch",
+        ));
+    }
+    let previous_snapshot_identity = read_visible_snapshot(transaction, session_id)?
+        .map(|snapshot| snapshot.snapshot_identity)
+        .filter(|identity| !identity.is_empty());
+    write_visible_snapshot_tx(
+        transaction,
+        session_id,
+        &next_snapshot,
+        previous_snapshot_identity.as_deref(),
+        created_at_ms,
+    )?;
     candidate
         .complete()
         .map_err(|_| JournalError::new("timeline-journal-lifecycle-invalid"))?;
@@ -1131,6 +1725,30 @@ pub(crate) fn reset_session_tx(
             [session_id],
         )
         .map_err(|_| JournalError::new("timeline-journal-reset-events-failed"))?;
+    transaction
+        .execute(
+            "DELETE FROM public_timeline_visible_snapshot_items WHERE session_id = ?1",
+            [session_id],
+        )
+        .map_err(|_| JournalError::new("timeline-journal-reset-visible-items-failed"))?;
+    let visible_snapshot_reset = transaction
+        .execute(
+            "UPDATE public_timeline_visible_snapshots
+             SET through_sequence = 0, through_event_id = NULL,
+                 through_timestamp_ms = 0, snapshot_identity = NULL,
+                 snapshot_bytes = 0, item_count = 0,
+                 active_turn_json = NULL, active_turn_sha256 = NULL,
+                 active_turn_bytes = 0, snapshot_json = NULL,
+                 snapshot_sha256 = NULL, created_at_ms = 0
+             WHERE session_id = ?1",
+            [session_id],
+        )
+        .map_err(|_| JournalError::new("timeline-journal-reset-visible-snapshot-failed"))?;
+    if visible_snapshot_reset != 1 {
+        return Err(JournalError::new(
+            "timeline-journal-visible-snapshot-missing",
+        ));
+    }
     let checkpoint_reset = transaction
         .execute(
             "UPDATE public_timeline_checkpoints
@@ -1208,41 +1826,69 @@ fn restore_all_with_ownership(
             SELECT 1 FROM sessions s
             LEFT JOIN public_timeline_cursors c ON c.session_id = s.session_id
             LEFT JOIN public_timeline_checkpoints p ON p.session_id = s.session_id
-            WHERE c.session_id IS NULL OR p.session_id IS NULL
+            LEFT JOIN public_timeline_visible_snapshots v ON v.session_id = s.session_id
+            WHERE c.session_id IS NULL OR p.session_id IS NULL OR v.session_id IS NULL
             UNION ALL
             SELECT 1 FROM public_timeline_cursors c
             LEFT JOIN sessions s ON s.session_id = c.session_id
             LEFT JOIN public_timeline_checkpoints p ON p.session_id = c.session_id
-            WHERE s.session_id IS NULL OR p.session_id IS NULL
+            LEFT JOIN public_timeline_visible_snapshots v ON v.session_id = c.session_id
+            WHERE s.session_id IS NULL OR p.session_id IS NULL OR v.session_id IS NULL
             UNION ALL
             SELECT 1 FROM public_timeline_checkpoints p
             LEFT JOIN sessions s ON s.session_id = p.session_id
             LEFT JOIN public_timeline_cursors c ON c.session_id = p.session_id
-            WHERE s.session_id IS NULL OR c.session_id IS NULL
+            LEFT JOIN public_timeline_visible_snapshots v ON v.session_id = p.session_id
+            WHERE s.session_id IS NULL OR c.session_id IS NULL OR v.session_id IS NULL
+            UNION ALL
+            SELECT 1 FROM public_timeline_visible_snapshots v
+            LEFT JOIN sessions s ON s.session_id = v.session_id
+            LEFT JOIN public_timeline_cursors c ON c.session_id = v.session_id
+            LEFT JOIN public_timeline_checkpoints p ON p.session_id = v.session_id
+            WHERE s.session_id IS NULL OR c.session_id IS NULL OR p.session_id IS NULL
             UNION ALL
             SELECT 1 FROM public_timeline_events e
             LEFT JOIN sessions s ON s.session_id = e.session_id
             LEFT JOIN public_timeline_cursors c ON c.session_id = e.session_id
-            WHERE s.session_id IS NULL OR c.session_id IS NULL
+            LEFT JOIN public_timeline_visible_snapshots v ON v.session_id = e.session_id
+            WHERE s.session_id IS NULL OR c.session_id IS NULL OR v.session_id IS NULL
+            UNION ALL
+            SELECT 1 FROM public_timeline_visible_snapshot_items i
+            LEFT JOIN sessions s ON s.session_id = i.session_id
+            LEFT JOIN public_timeline_visible_snapshots v ON v.session_id = i.session_id
+            WHERE s.session_id IS NULL OR v.session_id IS NULL
          )"
     } else {
         "SELECT EXISTS(
             SELECT 1 FROM sessions s
             LEFT JOIN public_timeline_cursors c ON c.session_id = s.session_id
             LEFT JOIN public_timeline_checkpoints p ON p.session_id = s.session_id
-            WHERE c.session_id IS NULL OR p.session_id IS NULL
+            LEFT JOIN public_timeline_visible_snapshots v ON v.session_id = s.session_id
+            WHERE c.session_id IS NULL OR p.session_id IS NULL OR v.session_id IS NULL
             UNION ALL
             SELECT 1 FROM public_timeline_cursors c
             LEFT JOIN public_timeline_checkpoints p ON p.session_id = c.session_id
-            WHERE p.session_id IS NULL
+            LEFT JOIN public_timeline_visible_snapshots v ON v.session_id = c.session_id
+            WHERE p.session_id IS NULL OR v.session_id IS NULL
             UNION ALL
             SELECT 1 FROM public_timeline_checkpoints p
             LEFT JOIN public_timeline_cursors c ON c.session_id = p.session_id
-            WHERE c.session_id IS NULL
+            LEFT JOIN public_timeline_visible_snapshots v ON v.session_id = p.session_id
+            WHERE c.session_id IS NULL OR v.session_id IS NULL
+            UNION ALL
+            SELECT 1 FROM public_timeline_visible_snapshots v
+            LEFT JOIN public_timeline_cursors c ON c.session_id = v.session_id
+            LEFT JOIN public_timeline_checkpoints p ON p.session_id = v.session_id
+            WHERE c.session_id IS NULL OR p.session_id IS NULL
             UNION ALL
             SELECT 1 FROM public_timeline_events e
             LEFT JOIN public_timeline_cursors c ON c.session_id = e.session_id
-            WHERE c.session_id IS NULL
+            LEFT JOIN public_timeline_visible_snapshots v ON v.session_id = e.session_id
+            WHERE c.session_id IS NULL OR v.session_id IS NULL
+            UNION ALL
+            SELECT 1 FROM public_timeline_visible_snapshot_items i
+            LEFT JOIN public_timeline_visible_snapshots v ON v.session_id = i.session_id
+            WHERE v.session_id IS NULL
          )"
     };
     let ownership_drift: bool = connection
@@ -1290,6 +1936,7 @@ fn restore_all_with_ownership(
             .map_err(|_| JournalError::new("timeline-journal-verify-row-invalid"))?;
         let cursor = read_cursor(connection, &session_id)?;
         validate_cursor_anchor(connection, &session_id, &cursor)?;
+        let _visible_snapshot = read_visible_snapshot(connection, &session_id)?;
         let checkpoint = validate_checkpoint(connection, &session_id, &cursor)?;
         let watermark = TimelineWatermark {
             sequence: cursor.next_sequence - 1,
@@ -1598,6 +2245,8 @@ mod tests {
             "public_timeline_events",
             "public_timeline_cursors",
             "public_timeline_checkpoints",
+            "public_timeline_visible_snapshots",
+            "public_timeline_visible_snapshot_items",
         ] {
             let on_delete: String = connection
                 .query_row(&format!("PRAGMA foreign_key_list({table})"), [], |row| {
@@ -1848,6 +2497,13 @@ mod tests {
         assert_eq!(result.head.sequence, 5);
         assert_eq!(result.deleted_events, 3);
         assert!(result.checkpoint_identity.is_some());
+        let snapshot = read_visible_snapshot(&connection, "session")
+            .unwrap()
+            .expect("visible floor snapshot");
+        assert_eq!(snapshot.anchor.sequence, 3);
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].item.id, "item-one");
+        assert!(snapshot.running_turn_id.is_none());
         assert_eq!(
             connection
                 .query_row("SELECT COUNT(*) FROM public_timeline_events", [], |row| row
@@ -1920,6 +2576,38 @@ mod tests {
             6
         );
         verify_all(&connection).unwrap();
+    }
+
+    #[test]
+    fn visible_snapshot_tampering_is_rejected_and_empty_state_is_strict() {
+        let mut connection = test_connection();
+        let events = [
+            envelope(1, 10, "turn", TurnState::Running, "turn.started", None),
+            completed_item_event(2, 11, "turn", "item", 0),
+            envelope(3, 12, "turn", TurnState::Completed, "turn.completed", None),
+        ];
+        for candidate in &events {
+            append(&mut connection, candidate).unwrap();
+        }
+        let boundary = TimelineWatermark {
+            sequence: 3,
+            event_id: Some(events[2].event_id.clone()),
+        };
+        prune(&mut connection, &boundary, 20).unwrap();
+        connection
+            .execute(
+                "UPDATE public_timeline_visible_snapshots
+                 SET snapshot_json = '{}', snapshot_sha256 = lower(hex(zeroblob(32)))
+                 WHERE session_id = 'session'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            read_visible_snapshot(&connection, "session")
+                .unwrap_err()
+                .code,
+            "timeline-visible-snapshot-integrity-failed"
+        );
     }
 
     #[test]

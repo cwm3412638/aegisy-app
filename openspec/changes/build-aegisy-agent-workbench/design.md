@@ -336,11 +336,50 @@ never serialized into this response.
 
 The public current-Session snapshot requires a separate durable visible-state
 projection rather than `session/read`: projected Items omit live `started`/`delta`
-updates and the v16 checkpoint intentionally omits Item content. The next schema
-stage therefore adds a bounded floor snapshot that atomically advances with the
-checkpoint/floor/prune transaction, then reduces its state plus the retained tail to
-a fixed-head paged snapshot. Qt validates every page privately and replaces only the
-affected Session after the complete snapshot identity is proven.
+updates, do not bind one Public Timeline head, and the v16 checkpoint intentionally
+omits Item content. The next schema stage therefore adds one durable floor-visible-
+state snapshot at the exact retention-floor anchor. Advancing retention must commit
+that sanitized visible state, the content-free Sequencer checkpoint, floor movement,
+and exact prefix deletion in one SQLite transaction. Runtime materializes a public
+snapshot by replaying the retained tail strictly after that floor through one fixed
+Public Timeline head; events appended after that head do not enter the snapshot.
+
+The future stable capability is exactly `timeline.snapshot.current` and its only
+method is `timeline/snapshot`. The first request supplies a Session, null snapshot
+identity, null watermark, null item cursor, and a 1-200 Item limit. Runtime captures
+the current Journal head once and returns `timeline-session-snapshot-page/0.1`.
+Continuations repeat the exact snapshot identity and watermark plus the Runtime-
+issued last-Item cursor; neither the head nor the complete snapshot may move while
+paging. Each page stays below the 4 MiB AAP frame limit and may stop before the count
+limit. The complete materialized snapshot is limited to 10,000 Items and 64 MiB of
+canonical Item material; exceeding either bound fails closed without pruning or
+partial client replacement.
+
+Every snapshot Item has a contiguous positive snapshot ordinal and an identity over
+its Session, ordinal, Turn/correlation binding, Turn state, first/latest Public Event
+anchors, complete sanitized Item, and current `item_update` revision/content mode.
+The complete snapshot identity is
+domain-separated over the schema, Session, floor anchor, fixed watermark, nullable
+active running Turn, total Item count/bytes, and the ordered complete Item-identity
+list. A page identity additionally binds the snapshot identity, request cursor,
+returned ordered identities, next cursor, and completion state. A snapshot taken
+during a running Turn includes that exact active Turn plus every current
+`started`/`delta` Item revision. The active Turn binds its exact started/latest Public
+Event anchors and ordered open Item IDs, so live events strictly after the watermark
+can continue through normal validation; it never invents provider execution state.
+
+Qt keeps the affected Session frozen and its previous confirmed projection visible,
+queues bounded later live events, and validates every snapshot page into private
+staging. It verifies the fixed floor/watermark, snapshot/page/Item identities,
+contiguous ordinals, active-Turn consistency, totals, and final cursor before making
+anything visible. Only a complete identity-valid snapshot atomically replaces that
+one Session's Timeline and lifecycle cursor; Qt then drains queued events after the
+watermark through the ordinary event validator. Failure preserves the previous
+projection and frozen state while unrelated Sessions continue. The strict Rust types,
+stable Schema, identities, and cross-page fixture now implement this wire contract,
+but the Runtime method remains unadvertised until Store materialization and Qt atomic
+replacement land. Automatic pruning remains disabled, and OpenSpec task `3.5` stays
+unchecked.
 
 Credentials remain in OS secure storage. The database contains credential IDs or
 short-lived token references, never API keys or long-lived Aegisy JWT values.

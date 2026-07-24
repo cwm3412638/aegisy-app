@@ -1,6 +1,7 @@
 use aegisy_aap::stable::v0_1::{
     timeline_event_id, EventEnvelope, InitializeParams, InitializeResult, ItemUpdate, TimelineItem,
-    TimelineRetentionGapData, TimelineSyncPage, TimelineSyncParams, TurnState,
+    TimelineRetentionGapData, TimelineSessionSnapshotPage, TimelineSnapshotParams,
+    TimelineSyncPage, TimelineSyncParams, TurnState,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -1036,6 +1037,130 @@ fn timeline_sync_guide_example_is_an_empty_complete_fixed_watermark_page() {
     assert_eq!(page.watermark.sequence, 0);
     assert!(page.events.is_empty());
     assert!(page.complete);
+}
+
+#[test]
+fn timeline_snapshot_fixture_binds_fixed_head_identity_cursor_and_active_turn() {
+    let messages = fixture_messages("aap-timeline-snapshot.jsonl");
+    assert_eq!(messages.len(), 4);
+    messages.iter().for_each(assert_content_free);
+
+    let mut requests = Vec::new();
+    let mut pages = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        assert!(
+            strict_envelope_valid(message),
+            "invalid snapshot fixture: {message}"
+        );
+        if index % 2 == 0 {
+            assert!(schema_definition_valid("timelineSnapshotRequest", message));
+            assert_eq!(message["method"], "timeline/snapshot");
+            let request: TimelineSnapshotParams =
+                serde_json::from_value(message["params"].clone()).unwrap();
+            assert_eq!(serde_json::to_value(&request).unwrap(), message["params"]);
+            requests.push(request);
+        } else {
+            assert!(schema_definition_valid(
+                "timelineSnapshotSuccessResponse",
+                message
+            ));
+            let page: TimelineSessionSnapshotPage =
+                serde_json::from_value(message["result"].clone()).unwrap();
+            assert_eq!(serde_json::to_value(&page).unwrap(), message["result"]);
+            pages.push(page);
+        }
+    }
+
+    assert_eq!(requests.len(), 2);
+    assert_eq!(pages.len(), 2);
+    pages[0].validate_for_request(&requests[0]).unwrap();
+    pages[0]
+        .validate_continuation(&requests[1], &pages[1])
+        .unwrap();
+    assert_eq!(pages[0].snapshot_identity, pages[1].snapshot_identity);
+    assert_eq!(pages[0].floor, pages[1].floor);
+    assert_eq!(pages[0].watermark, pages[1].watermark);
+    assert_eq!(pages[0].active_turn, pages[1].active_turn);
+    assert_eq!(pages[0].next_after, requests[1].after);
+    assert!(!pages[0].complete);
+    assert!(pages[1].complete);
+    pages[1]
+        .validate_complete_identity(
+            &pages
+                .iter()
+                .flat_map(|page| page.items.iter().map(|item| item.item_identity.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    pages[1]
+        .validate_complete_items(
+            &pages
+                .iter()
+                .flat_map(|page| page.items.iter().cloned())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+
+    for (field, mismatch) in [
+        ("session_id", json!("session-2")),
+        (
+            "watermark",
+            json!({
+                "sequence": 3,
+                "event_id": format!("event:sha256:{}", "d".repeat(64))
+            }),
+        ),
+        (
+            "snapshot_identity",
+            json!(format!(
+                "timeline-session-snapshot:sha256:{}",
+                "e".repeat(64)
+            )),
+        ),
+        (
+            "after",
+            json!({
+                "ordinal": 2,
+                "item_id": messages[2]["params"]["after"]["item_id"],
+                "item_identity": messages[2]["params"]["after"]["item_identity"]
+            }),
+        ),
+    ] {
+        let mut candidate = messages[2].clone();
+        candidate["params"][field] = mismatch;
+        assert!(schema_definition_valid(
+            "timelineSnapshotRequest",
+            &candidate
+        ));
+        let request: TimelineSnapshotParams =
+            serde_json::from_value(candidate["params"].clone()).unwrap();
+        assert!(pages[0].validate_continuation(&request, &pages[1]).is_err());
+    }
+
+    let mut changed_turn = pages[1].clone();
+    changed_turn.active_turn.as_mut().unwrap().turn_id = "turn-2".into();
+    assert!(pages[0]
+        .validate_continuation(&requests[1], &changed_turn)
+        .is_err());
+
+    let mut extra_request = messages[0].clone();
+    extra_request["params"]["head"] = messages[1]["result"]["watermark"].clone();
+    assert!(!strict_envelope_valid(&extra_request));
+    assert!(!schema_definition_valid(
+        "timelineSnapshotRequest",
+        &extra_request
+    ));
+
+    let mut invalid_active_turn = messages[1].clone();
+    invalid_active_turn["result"]["active_turn"]["state"] = json!("completed");
+    assert!(!schema_definition_valid(
+        "timelineSnapshotSuccessResponse",
+        &invalid_active_turn
+    ));
+    assert!(serde_json::from_value::<TimelineSessionSnapshotPage>(
+        invalid_active_turn["result"].clone()
+    )
+    .is_err());
 }
 
 #[test]

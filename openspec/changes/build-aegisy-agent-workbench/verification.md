@@ -203,6 +203,28 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
   content. A retained after or watermark with a substituted Event ID remains
   `-32147`. Runtime coverage exercises gap, retained forgery, and missing Session;
   public snapshot recovery and Qt consumption remain the next stage.
+- The next snapshot stage has a closed verification target but no implementation
+  evidence yet. Persistence evidence must prove that a sanitized visible-state
+  snapshot at the exact floor advances atomically with the content-free Sequencer
+  checkpoint, floor, and prefix deletion, and that the retained tail reduces it
+  through one fixed Public Timeline head. Restart, transaction-failure, semantic-
+  tamper, missing-tail, over-10,000-Item, and over-64-MiB fixtures must preserve the
+  prior authority without truncation or automatic pruning.
+- Protocol evidence now covers the strict request/page Schema and Rust contract for
+  null-only first-page capture; exact continuation snapshot identity/watermark/cursor;
+  domain-separated complete snapshot, page, and Item identities; contiguous ordinals;
+  first/latest Item anchors; active-Turn started/latest anchors and ordered open Item
+  IDs; 1-200 Item pages below 4 MiB; and complete-state bounds of 10,000 Items/64 MiB.
+  Runtime dispatch still must prove empty and terminal Sessions plus a fixed head
+  inside an active running Turn with current `started`/`delta` revisions. Capability
+  advertisement must remain absent until every durable, dispatch, and Qt replacement
+  prerequisite is healthy.
+- Qt evidence must prove that all pages, totals, identities, active-Turn state, and
+  cursors remain in private per-Session staging; incomplete, malformed, substituted,
+  expired, and over-bound pages leave the prior projection visible; a complete page
+  atomically replaces only the affected Session once; and queued post-watermark live
+  events then pass through the ordinary validator while unrelated Sessions continue.
+  These are future required fixtures, not passing results. Keep `3.5` unchecked.
 - Qt now keeps recovery state per Session. A detected gap freezes only that Session,
   requests from its last confirmed sequence/Event-ID anchor, stages all validated
   pages and presentation effects privately, and queues bounded live events. No

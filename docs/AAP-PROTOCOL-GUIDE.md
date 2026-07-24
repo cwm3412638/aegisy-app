@@ -163,6 +163,64 @@ same-sequence wrong Event ID in retained history remains anchor/watermark drift 
 uses the ordinary sync failure path. This prevents a forged anchor from being
 misrepresented as normal retention recovery.
 
+The recovery target named by that error is deliberately separate from
+`session/read`. Its stable capability is exactly `timeline.snapshot.current`, its
+method is `timeline/snapshot`, and its page schema is
+`timeline-session-snapshot-page/0.1`. The strict wire contract, Schema, and fixture
+are implemented and tested, but Runtime does not advertise or dispatch this method
+until durable materialization and Qt atomic replacement are complete; the following
+is therefore not a currently callable example.
+
+The first request contains exactly a Session, null snapshot identity, null
+watermark, null Item cursor, and a 1-200 Item limit. Runtime captures the current
+Public Timeline head once. Every continuation repeats the returned snapshot identity
+and exact sequence/Event-ID watermark and uses the Runtime-issued final-Item cursor;
+it never asks Runtime to move the head while paging.
+
+```jsonl
+{"jsonrpc":"2.0","id":"timeline-snapshot-1","method":"timeline/snapshot","params":{"session_id":"session-1","snapshot_identity":null,"watermark":null,"after":null,"limit":200}}
+{"jsonrpc":"2.0","id":"timeline-snapshot-1","result":{"schema_version":"timeline-session-snapshot-page/0.1","session_id":"session-1","snapshot_identity":"timeline-session-snapshot:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","floor":{"sequence":2,"event_id":"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"watermark":{"sequence":3,"event_id":"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"active_turn":{"turn_id":"turn-1","correlation_id":"turn-1","state":"running","started_event":{"sequence":1,"event_id":"event:sha256:1111111111111111111111111111111111111111111111111111111111111111"},"latest_event":{"sequence":3,"event_id":"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"open_item_ids":["item-1"]},"total_items":1,"total_canonical_bytes":256,"after":null,"items":[{"ordinal":1,"item_identity":"timeline-session-snapshot-item:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","turn_id":"turn-1","correlation_id":"turn-1","turn_state":"running","first_event":{"sequence":2,"event_id":"event:sha256:2222222222222222222222222222222222222222222222222222222222222222"},"latest_event":{"sequence":3,"event_id":"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"item":{"id":"item-1","kind":"message","role":"agent","state":"delta","content":"Current partial response"},"item_update":{"revision":2,"content_mode":"snapshot-replacement"}}],"next_after":null,"complete":true,"page_identity":"timeline-session-snapshot-page:sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}
+```
+
+Runtime builds that state from a durable sanitized visible-state snapshot at the
+exact retention floor plus the contiguous retained Public Journal tail through the
+fixed watermark. The floor-visible-state snapshot must advance atomically with the
+content-free Sequencer checkpoint, floor, and exact prefix deletion. It includes
+visible Item content and current revisions; the internal checkpoint still does not.
+`session/read` cannot substitute because it has no fixed Public Timeline head and
+does not preserve live `started`/`delta` state.
+
+Every returned Item has a contiguous positive snapshot ordinal and binds its exact
+Turn/correlation state, first/latest Event anchors, complete sanitized current Item,
+and current revision. An Item identity hashes that complete material. The complete snapshot identity hashes
+the schema, Session, floor, fixed watermark, nullable active running Turn, total
+Item count/bytes, and the ordered list of all Item identities. The page identity
+additionally hashes the request cursor, returned ordered identities, next cursor,
+and completion state. A cursor contains exactly the last ordinal, Item ID, and Item
+identity. These domain-separated identities prevent a valid page from another
+Session, head, or position from being substituted.
+
+One materialized snapshot is capped at 10,000 Items and 64 MiB of canonical Item
+material. Each page is additionally capped at 200 Items and the 4 MiB AAP frame;
+Runtime may stop before the count limit to preserve the frame bound. It never marks
+a truncated or over-bound materialization complete, and an over-bound state blocks
+snapshot recovery and pruning rather than discarding visible history.
+
+A fixed head may be inside a running Turn. In that case `active_turn` identifies the
+exact Public Timeline running Turn and the snapshot includes every current
+`started`/`delta` Item revision. Later deltas or terminal events are outside the
+watermark. Qt keeps them in its existing bounded per-Session live queue while it
+validates every snapshot page privately.
+
+No incomplete page changes the UI. Qt verifies repeated Session/floor/watermark,
+active-Turn state, totals, ordinals, Item/page/snapshot identities, and the cursor
+chain. Only after the final page proves the complete ordered identity does Qt
+atomically replace that one Session's Timeline and lifecycle cursor, then drain live
+events after the watermark through the ordinary validator. Any failure preserves
+the last confirmed projection and freezes only that Session. Until this entire path
+is implemented, `snapshot_available` remains false, automatic pruning remains
+disabled, and OpenSpec task `3.5` remains unchecked.
+
 Every anchor is the exact pair `{sequence,event_id}`. Sequence zero is represented
 only as `{0,null}`. Every positive sequence requires the exact 77-byte lowercase
 `event:sha256:` identity of that event; a null, uppercase, malformed, or substituted

@@ -30,6 +30,7 @@ use crate::public_timeline_journal::{
     self, JournalError as PublicTimelineJournalError, TimelinePruneResult, TimelineRetentionState,
     TimelineSyncPage, TimelineWatermark,
 };
+use crate::public_timeline_projection::VisibleStateFloorSnapshot;
 use crate::session_compaction::{activate_review, CompactionCheckpointReview};
 use crate::session_compaction_store::{
     CompactionCheckpointDescriptor, STORE_SCHEMA_VERSION as COMPACTION_STORE_SCHEMA_VERSION,
@@ -70,7 +71,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = crate::turn_trace::MAX_DURABLE_EVENT_BYTES;
@@ -158,10 +159,12 @@ const REQUIRED_MODEL_PROFILE_INDEXES: [&str; 3] = [
     "model_profiles_state_updated_idx",
     "model_profiles_active_profile_id_idx",
 ];
-const REQUIRED_PUBLIC_TIMELINE_TABLES: [&str; 3] = [
+const REQUIRED_PUBLIC_TIMELINE_TABLES: [&str; 5] = [
     "public_timeline_events",
     "public_timeline_cursors",
     "public_timeline_checkpoints",
+    "public_timeline_visible_snapshots",
+    "public_timeline_visible_snapshot_items",
 ];
 const REQUIRED_PUBLIC_TIMELINE_INDEXES: [&str; 1] = ["public_timeline_events_turn_idx"];
 const REQUIRED_PUBLIC_TIMELINE_TRIGGERS: [&str; 1] = ["public_timeline_session_cursor_insert"];
@@ -11064,6 +11067,16 @@ impl WorkbenchStore {
         .map_err(public_timeline_error)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn read_public_timeline_visible_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<VisibleStateFloorSnapshot>, WorkbenchStoreError> {
+        self.ensure_session_readable(session_id)?;
+        public_timeline_journal::read_visible_snapshot(&self.connection, session_id)
+            .map_err(public_timeline_error)
+    }
+
     pub(crate) fn sync_public_timeline_from_anchor(
         &self,
         session_id: &str,
@@ -11172,6 +11185,21 @@ impl WorkbenchStore {
         }
         if version == SCHEMA_VERSION {
             return Ok(());
+        }
+        if version == 16 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start public timeline snapshot migration"))?;
+            public_timeline_journal::migrate_v16_to_v17(&transaction)
+                .map_err(public_timeline_error)?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit public timeline snapshot migration"));
         }
         if version == 15 {
             let transaction = self
@@ -16820,6 +16848,47 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             "pruned_through_sequence",
             "pruned_through_event_id",
             "pruned_through_timestamp_ms",
+        ],
+    )?;
+    verify_required_table_columns(
+        connection,
+        "public_timeline_visible_snapshots",
+        &[
+            "session_id",
+            "schema_version",
+            "through_sequence",
+            "through_event_id",
+            "through_timestamp_ms",
+            "snapshot_identity",
+            "snapshot_bytes",
+            "item_count",
+            "active_turn_json",
+            "active_turn_sha256",
+            "active_turn_bytes",
+            "snapshot_json",
+            "snapshot_sha256",
+            "created_at_ms",
+        ],
+    )?;
+    verify_required_table_columns(
+        connection,
+        "public_timeline_visible_snapshot_items",
+        &[
+            "session_id",
+            "ordinal",
+            "turn_id",
+            "turn_state",
+            "item_id",
+            "first_sequence",
+            "first_event_id",
+            "first_timestamp_ms",
+            "latest_sequence",
+            "latest_event_id",
+            "latest_timestamp_ms",
+            "revision",
+            "item_json",
+            "item_sha256",
+            "item_bytes",
         ],
     )?;
     verify_required_table_columns(
@@ -23170,6 +23239,8 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TRIGGER public_timeline_session_cursor_insert;
+                 DROP TABLE public_timeline_visible_snapshot_items;
+                 DROP TABLE public_timeline_visible_snapshots;
                  DROP TABLE public_timeline_checkpoints;
                  ALTER TABLE public_timeline_cursors RENAME TO public_timeline_cursors_v16;
                  CREATE TABLE public_timeline_cursors (
@@ -23269,10 +23340,182 @@ mod tests {
             )
             .unwrap();
         assert_eq!(checkpoint, (0, None, 0, None, 0));
+        let visible_snapshot: (i64, Option<String>, i64, i64) = reopened
+            .connection
+            .query_row(
+                "SELECT through_sequence, snapshot_identity, snapshot_bytes, item_count
+                 FROM public_timeline_visible_snapshots WHERE session_id = 'session-v15'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(visible_snapshot, (0, None, 0, 0));
         let manifests = migration_backup_manifests(&root.path).unwrap();
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0].source_schema_version, 15);
-        assert_eq!(manifests[0].target_schema_version, 16);
+        assert_eq!(manifests[0].target_schema_version, SCHEMA_VERSION as u64);
+    }
+
+    #[test]
+    fn upgrades_schema_v16_to_empty_visible_snapshot_after_backup() {
+        let root = Root::new("schema-v16-public-timeline-visible-snapshot");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "session-v16".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Preserved from v16".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        let event = crate::event_sequencer::EventSequencer::default()
+            .sequence(10, "session-v16", "turn-v16", "turn.started", None)
+            .unwrap();
+        store.append_public_timeline_event(&event).unwrap();
+        drop(store);
+
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER public_timeline_session_cursor_insert;
+                 DROP TABLE public_timeline_visible_snapshot_items;
+                 DROP TABLE public_timeline_visible_snapshots;
+                 CREATE TRIGGER public_timeline_session_cursor_insert
+                 AFTER INSERT ON sessions
+                 BEGIN
+                    INSERT OR IGNORE INTO public_timeline_cursors (
+                        session_id, next_sequence, last_timestamp_ms, latest_event_id,
+                        pruned_through_sequence, pruned_through_event_id,
+                        pruned_through_timestamp_ms
+                    ) VALUES (NEW.session_id, 1, 0, NULL, 0, NULL, 0);
+                    INSERT OR IGNORE INTO public_timeline_checkpoints (
+                        session_id, schema_version, through_sequence, through_event_id,
+                        through_timestamp_ms, checkpoint_json, checkpoint_identity,
+                        checkpoint_bytes, turn_count, item_count, created_at_ms
+                    ) VALUES (
+                        NEW.session_id, 'public-timeline-checkpoint/0.1', 0, NULL,
+                        0, NULL, NULL, 0, 0, 0, 0
+                    );
+                 END;
+                 PRAGMA user_version = 16;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        let version: i64 = reopened
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let visible_snapshot: (i64, Option<String>, i64, i64) = reopened
+            .connection
+            .query_row(
+                "SELECT through_sequence, snapshot_identity, snapshot_bytes, item_count
+                 FROM public_timeline_visible_snapshots WHERE session_id = 'session-v16'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(visible_snapshot, (0, None, 0, 0));
+        let retained = reopened
+            .sync_public_timeline("session-v16", 0, None, 10)
+            .unwrap();
+        assert_eq!(retained.events, vec![event]);
+        let manifests = migration_backup_manifests(&root.path).unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].source_schema_version, 16);
+        assert_eq!(manifests[0].target_schema_version, SCHEMA_VERSION as u64);
+    }
+
+    #[test]
+    fn schema_v16_with_pruned_history_refuses_to_fabricate_visible_snapshot() {
+        let root = Root::new("schema-v16-pruned-visible-snapshot-missing");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "session-v16-pruned".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Pruned v16".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        let event = crate::event_sequencer::EventSequencer::default()
+            .sequence(
+                10,
+                "session-v16-pruned",
+                "turn-v16-pruned",
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        store.append_public_timeline_event(&event).unwrap();
+        store
+            .checkpoint_and_prune_public_timeline(
+                "session-v16-pruned",
+                &TimelineWatermark {
+                    sequence: event.sequence,
+                    event_id: Some(event.event_id),
+                },
+                11,
+            )
+            .unwrap();
+        drop(store);
+
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER public_timeline_session_cursor_insert;
+                 DROP TABLE public_timeline_visible_snapshot_items;
+                 DROP TABLE public_timeline_visible_snapshots;
+                 CREATE TRIGGER public_timeline_session_cursor_insert
+                 AFTER INSERT ON sessions
+                 BEGIN
+                    INSERT OR IGNORE INTO public_timeline_cursors (
+                        session_id, next_sequence, last_timestamp_ms, latest_event_id,
+                        pruned_through_sequence, pruned_through_event_id,
+                        pruned_through_timestamp_ms
+                    ) VALUES (NEW.session_id, 1, 0, NULL, 0, NULL, 0);
+                    INSERT OR IGNORE INTO public_timeline_checkpoints (
+                        session_id, schema_version, through_sequence, through_event_id,
+                        through_timestamp_ms, checkpoint_json, checkpoint_identity,
+                        checkpoint_bytes, turn_count, item_count, created_at_ms
+                    ) VALUES (
+                        NEW.session_id, 'public-timeline-checkpoint/0.1', 0, NULL,
+                        0, NULL, NULL, 0, 0, 0, 0
+                    );
+                 END;
+                 PRAGMA user_version = 16;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = WorkbenchStore::open(&root.path).unwrap_err();
+        assert_eq!(error.code, "workbench-migration-failed");
+        let raw = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        let version: i64 = raw
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 16);
+        let snapshots_exist: bool = raw
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'public_timeline_visible_snapshots'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!snapshots_exist);
     }
 
     #[test]
