@@ -29,6 +29,18 @@ public:
     static QProcessEnvironment sanitizedSidecarEnvironment(
         const QProcessEnvironment &environment);
     static QString timelineEventIdentity(const QJsonObject &event);
+    static QString timelineSnapshotItemIdentity(const QString &sessionId,
+                                                const QJsonObject &itemPage);
+    static quint64 timelineSnapshotItemCanonicalBytes(const QString &sessionId,
+                                                      const QJsonObject &itemPage);
+    static QString timelineSnapshotIdentity(const QString &sessionId,
+                                            const QJsonObject &floor,
+                                            const QJsonObject &watermark,
+                                            const QJsonObject &activeTurn,
+                                            quint64 totalItems,
+                                            quint64 totalCanonicalBytes,
+                                            const QStringList &orderedItemIdentities);
+    static QString timelineSnapshotPageIdentity(const QJsonObject &page);
 
     void start();
     void stop();
@@ -100,6 +112,11 @@ public:
                          const QString &afterEventId = QString(),
                          const QJsonObject &watermark = QJsonObject(),
                          int limit = 100);
+    QString timelineSnapshot(const QString &sessionId,
+                             const QString &snapshotIdentity = QString(),
+                             const QJsonObject &watermark = QJsonObject(),
+                             const QJsonObject &after = QJsonObject(),
+                             int limit = 100);
     QString backgroundNotifications(const QString &sessionId,
                                     const QJsonObject &cursor = QJsonObject(),
                                     int limit = 100);
@@ -260,6 +277,7 @@ signals:
     void retentionMaintenanceCompleted(const QString &requestId, const QJsonObject &result);
     void sessionRead(const QString &requestId, const QJsonObject &snapshot);
     void timelineSynced(const QString &requestId, const QJsonObject &page);
+    void timelineSnapshotReceived(const QString &requestId, const QJsonObject &page);
     void backgroundNotificationsRead(const QString &requestId, const QJsonObject &result);
     void backgroundRecoveryRead(const QString &requestId, const QJsonObject &result);
     void projectionRecoveryStatusRead(const QJsonObject &status);

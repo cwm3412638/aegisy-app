@@ -144,6 +144,68 @@ QJsonObject timelineSyncPage(const QJsonObject &requestParams)
     };
 }
 
+QJsonObject timelineSnapshotPage(const QJsonObject &requestParams)
+{
+    const QJsonValue after = requestParams.value(QStringLiteral("after"));
+    const bool continuation = !after.isNull();
+    const QString snapshotIdentity =
+        QStringLiteral("timeline-session-snapshot:sha256:")
+        + QString(64, QLatin1Char('a'));
+    const QJsonObject watermark = timelineAnchor(
+        3, timelineEventId(QLatin1Char('b')));
+    const QJsonObject item{
+        {QStringLiteral("ordinal"), 1},
+        {QStringLiteral("item_identity"),
+         QStringLiteral("timeline-session-snapshot-item:sha256:")
+             + QString(64, QLatin1Char('c'))},
+        {QStringLiteral("turn_id"), QStringLiteral("turn-1")},
+        {QStringLiteral("correlation_id"), QStringLiteral("turn-1")},
+        {QStringLiteral("turn_state"), QStringLiteral("completed")},
+        {QStringLiteral("first_event"), timelineAnchor(
+            1, timelineEventId(QLatin1Char('1')))},
+        {QStringLiteral("latest_event"), timelineAnchor(
+            3, timelineEventId(QLatin1Char('b')))},
+        {QStringLiteral("item"), QJsonObject{
+            {QStringLiteral("id"), QStringLiteral("item-1")},
+            {QStringLiteral("kind"), QStringLiteral("message")},
+            {QStringLiteral("role"), QStringLiteral("agent")},
+            {QStringLiteral("state"), QStringLiteral("completed")},
+            {QStringLiteral("content"), QStringLiteral("snapshot")},
+        }},
+        {QStringLiteral("item_update"), QJsonObject{
+            {QStringLiteral("revision"), 1},
+            {QStringLiteral("content_mode"), QStringLiteral("snapshot-replacement")},
+        }},
+    };
+    const QJsonArray items = continuation ? QJsonArray{} : QJsonArray{item};
+    const QJsonValue nextAfter = continuation
+        ? QJsonValue(QJsonValue::Null)
+        : QJsonValue(QJsonObject{
+            {QStringLiteral("ordinal"), 1},
+            {QStringLiteral("item_id"), QStringLiteral("item-1")},
+            {QStringLiteral("item_identity"), item.value(QStringLiteral("item_identity"))},
+        });
+    return {
+        {QStringLiteral("schema_version"),
+         QStringLiteral("timeline-session-snapshot-page/0.1")},
+        {QStringLiteral("session_id"), requestParams.value(QStringLiteral("session_id"))},
+        {QStringLiteral("snapshot_identity"), snapshotIdentity},
+        {QStringLiteral("floor"), timelineAnchor(
+            0, QJsonValue(QJsonValue::Null))},
+        {QStringLiteral("watermark"), watermark},
+        {QStringLiteral("active_turn"), QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("total_items"), 1},
+        {QStringLiteral("total_canonical_bytes"), 1},
+        {QStringLiteral("after"), after},
+        {QStringLiteral("items"), items},
+        {QStringLiteral("next_after"), nextAfter},
+        {QStringLiteral("complete"), continuation},
+        {QStringLiteral("page_identity"),
+         QStringLiteral("timeline-session-snapshot-page:sha256:")
+             + QString(64, QLatin1Char('d'))},
+    };
+}
+
 QJsonObject validTimelineEnvelope()
 {
     const QString sessionId(128, QLatin1Char('s'));
@@ -288,6 +350,88 @@ bool verifyRustTimelineIdentityFixture()
         == AgentRuntimeClient::timelineEventIdentity(mathematicalEvent);
 }
 
+bool verifyRustTimelineSnapshotIdentityFixture()
+{
+    const QString itemIdentity =
+        QStringLiteral("timeline-session-snapshot-item:sha256:")
+        + QStringLiteral("c64cd9d8d5683b2b3365cad4e18647b5b96fb97ce3b05a16cf69dccbfec24b0b");
+    const QJsonObject itemPage{
+        {QStringLiteral("ordinal"), 1},
+        {QStringLiteral("item_identity"), itemIdentity},
+        {QStringLiteral("turn_id"), QStringLiteral("turn-1")},
+        {QStringLiteral("correlation_id"), QStringLiteral("turn-1")},
+        {QStringLiteral("turn_state"), QStringLiteral("running")},
+        {QStringLiteral("first_event"), timelineAnchor(
+            2, timelineEventId(QLatin1Char('2')))},
+        {QStringLiteral("latest_event"), timelineAnchor(
+            2, timelineEventId(QLatin1Char('2')))},
+        {QStringLiteral("item"), QJsonObject{
+            {QStringLiteral("id"), QStringLiteral("item-user-1")},
+            {QStringLiteral("kind"), QStringLiteral("message")},
+            {QStringLiteral("role"), QStringLiteral("user")},
+            {QStringLiteral("state"), QStringLiteral("completed")},
+            {QStringLiteral("content"), QStringLiteral("Inspect the project.")},
+        }},
+        {QStringLiteral("item_update"), QJsonObject{
+            {QStringLiteral("revision"), 1},
+            {QStringLiteral("content_mode"), QStringLiteral("snapshot-replacement")},
+        }},
+    };
+    const QString secondIdentity =
+        QStringLiteral("timeline-session-snapshot-item:sha256:")
+        + QStringLiteral("cb04df50b58cf6e5e94d2e1b6df5ce967ca3dbe8e971579f5dec57ef94dd5d90");
+    const QJsonObject floor = timelineAnchor(0, QJsonValue(QJsonValue::Null));
+    const QJsonObject watermark = timelineAnchor(
+        3, timelineEventId(QLatin1Char('b')));
+    const QJsonObject activeTurn{
+        {QStringLiteral("turn_id"), QStringLiteral("turn-1")},
+        {QStringLiteral("correlation_id"), QStringLiteral("turn-1")},
+        {QStringLiteral("state"), QStringLiteral("running")},
+        {QStringLiteral("started_event"), timelineAnchor(
+            1, timelineEventId(QLatin1Char('1')))},
+        {QStringLiteral("latest_event"), watermark},
+        {QStringLiteral("open_item_ids"), QJsonArray{}},
+    };
+    const QString snapshotIdentity = AgentRuntimeClient::timelineSnapshotIdentity(
+        QStringLiteral("session-1"), floor, watermark, activeTurn,
+        2, 1170, {itemIdentity, secondIdentity});
+    const QJsonObject page{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("timeline-session-snapshot-page/0.1")},
+        {QStringLiteral("session_id"), QStringLiteral("session-1")},
+        {QStringLiteral("snapshot_identity"), snapshotIdentity},
+        {QStringLiteral("floor"), floor},
+        {QStringLiteral("watermark"), watermark},
+        {QStringLiteral("active_turn"), activeTurn},
+        {QStringLiteral("total_items"), 2},
+        {QStringLiteral("total_canonical_bytes"), 1170},
+        {QStringLiteral("after"), QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("items"), QJsonArray{itemPage}},
+        {QStringLiteral("next_after"), QJsonObject{
+            {QStringLiteral("ordinal"), 1},
+            {QStringLiteral("item_id"), QStringLiteral("item-user-1")},
+            {QStringLiteral("item_identity"), itemIdentity},
+        }},
+        {QStringLiteral("complete"), false},
+        {QStringLiteral("page_identity"), QString()},
+    };
+    const QString pageIdentity = AgentRuntimeClient::timelineSnapshotPageIdentity(page);
+    return expect(AgentRuntimeClient::timelineSnapshotItemIdentity(
+                      QStringLiteral("session-1"), itemPage) == itemIdentity,
+                  "Qt Timeline snapshot Item identity diverged from Rust fixture")
+        && expect(AgentRuntimeClient::timelineSnapshotItemCanonicalBytes(
+                       QStringLiteral("session-1"), itemPage) > 0,
+                   "Qt Timeline snapshot Item canonical bytes were not bounded")
+        && expect(snapshotIdentity
+                      == QStringLiteral("timeline-session-snapshot:sha256:")
+                             + QStringLiteral("93c2795bd0ed77feabfe115eaa270f732f42b076fef6a91b4ed1f29263e2bdfb"),
+                   "Qt Timeline snapshot identity diverged from Rust fixture")
+        && expect(pageIdentity
+                      == QStringLiteral("timeline-session-snapshot-page:sha256:")
+                             + QStringLiteral("93c541f5fea427a36f71da915789dd766944be0d31a226799b8573f40d9fc5f9"),
+                   "Qt Timeline snapshot page identity diverged from Rust fixture");
+}
+
 int runFakeRuntime(const QString &testCase)
 {
     QFile log(qEnvironmentVariable("AEGISY_FAKE_RUNTIME_LOG"));
@@ -325,6 +469,11 @@ int runFakeRuntime(const QString &testCase)
         QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
                                       .value(QStringLiteral("stable")).toArray();
         capabilities.append(QStringLiteral("timeline.replay.fixed-watermark"));
+        setStableCapabilities(capabilities);
+    } else if (testCase.startsWith(QStringLiteral("timeline-snapshot-"))) {
+        QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
+                                      .value(QStringLiteral("stable")).toArray();
+        capabilities.append(QStringLiteral("timeline.snapshot.current"));
         setStableCapabilities(capabilities);
     } else if (testCase == QStringLiteral("notification-valid-event-envelope")
                || testCase == QStringLiteral("notification-valid-large-generic-event")
@@ -518,6 +667,7 @@ int runFakeRuntime(const QString &testCase)
     QJsonValue combinedFirstId;
     bool hasCombinedFirstId = false;
     int timelineSyncRequests = 0;
+    int timelineSnapshotRequests = 0;
     while (std::getline(std::cin, rawLine)) {
         const QByteArray line = QByteArray::fromStdString(rawLine);
         appendLogLine(&log, line);
@@ -662,6 +812,30 @@ int runFakeRuntime(const QString &testCase)
                 timelineResponse.insert(
                     QStringLiteral("result"),
                     timelineSyncPage(message.value(QStringLiteral("params")).toObject()));
+            }
+            std::cout
+                << QJsonDocument(timelineResponse).toJson(QJsonDocument::Compact).constData()
+                << std::endl;
+            continue;
+        }
+        if (message.value(QStringLiteral("method")).toString()
+                == QStringLiteral("timeline/snapshot")
+            && testCase.startsWith(QStringLiteral("timeline-snapshot-"))) {
+            ++timelineSnapshotRequests;
+            QJsonObject timelineResponse{
+                {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+            };
+            if (testCase == QStringLiteral("timeline-snapshot-error-cleanup")
+                && timelineSnapshotRequests == 1) {
+                timelineResponse.insert(QStringLiteral("error"), QJsonObject{
+                    {QStringLiteral("code"), -32160},
+                    {QStringLiteral("message"), QStringLiteral("timeline snapshot rejected")},
+                });
+            } else {
+                timelineResponse.insert(
+                    QStringLiteral("result"),
+                    timelineSnapshotPage(message.value(QStringLiteral("params")).toObject()));
             }
             std::cout
                 << QJsonDocument(timelineResponse).toJson(QJsonDocument::Compact).constData()
@@ -1197,6 +1371,145 @@ bool runTimelineSyncContractCase()
                   }, "fixed-watermark Timeline sync request changed its contract");
 }
 
+bool runTimelineSnapshotContractCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create Timeline snapshot directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("timeline-snapshot-contract"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    int invalidRequests = 0;
+    QHash<QString, QJsonObject> pages;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::timelineSnapshotReceived,
+                         [&pages](const QString &requestId, const QJsonObject &page) {
+            pages.insert(requestId, page);
+        });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                         [&invalidRequests](const QString &requestId,
+                                            const QString &method,
+                                            const QString &, int code) {
+            if (requestId.isEmpty() && method == QStringLiteral("timeline/snapshot")
+                && code == -32602) {
+                ++invalidRequests;
+            }
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "Timeline snapshot handshake timed out")) {
+            return false;
+        }
+        const QString snapshotIdentity =
+            QStringLiteral("timeline-session-snapshot:sha256:")
+            + QString(64, QLatin1Char('a'));
+        const QJsonObject watermark = timelineAnchor(
+            3, timelineEventId(QLatin1Char('b')));
+        const QJsonObject cursor{
+            {QStringLiteral("ordinal"), 1},
+            {QStringLiteral("item_id"), QStringLiteral("item-1")},
+            {QStringLiteral("item_identity"),
+             QStringLiteral("timeline-session-snapshot-item:sha256:")
+                 + QString(64, QLatin1Char('c'))},
+        };
+        if (!expect(client.timelineSnapshot(QString(), snapshotIdentity, watermark, cursor)
+                        .isEmpty()
+                    && client.timelineSnapshot(QStringLiteral("session-1"), snapshotIdentity,
+                                               {}, cursor).isEmpty()
+                    && client.timelineSnapshot(QStringLiteral("session-1"),
+                                               QStringLiteral("snapshot:bad"), watermark,
+                                               cursor).isEmpty()
+                    && client.timelineSnapshot(QStringLiteral("session-1"), snapshotIdentity,
+                                               timelineAnchor(0, QJsonValue(QJsonValue::Null)),
+                                               cursor).isEmpty()
+                    && client.timelineSnapshot(QStringLiteral("session-1"), snapshotIdentity,
+                                               watermark, QJsonObject{{QStringLiteral("ordinal"), 1}})
+                           .isEmpty()
+                    && invalidRequests == 5,
+                    "invalid Timeline snapshot requests were not rejected before transport")) {
+            return false;
+        }
+        const QString firstRequest = client.timelineSnapshot(
+            QStringLiteral("session-1"), {}, {}, {}, 200);
+        if (!expect(!firstRequest.isEmpty()
+                        && waitUntil([&]() { return pages.contains(firstRequest); }),
+                    "initial Timeline snapshot page was not signalled")) {
+            return false;
+        }
+        const QJsonObject firstPage = pages.value(firstRequest);
+        const QString secondRequest = client.timelineSnapshot(
+            QStringLiteral("session-1"),
+            firstPage.value(QStringLiteral("snapshot_identity")).toString(),
+            firstPage.value(QStringLiteral("watermark")).toObject(),
+            firstPage.value(QStringLiteral("next_after")).toObject(), 25);
+        if (!expect(!secondRequest.isEmpty() && secondRequest != firstRequest
+                        && waitUntil([&]() { return pages.contains(secondRequest); }),
+                    "Timeline snapshot continuation page was not signalled")) {
+            return false;
+        }
+        if (!expect(firstPage.value(QStringLiteral("schema_version"))
+                            == QStringLiteral("timeline-session-snapshot-page/0.1")
+                        && pages.value(secondRequest).value(QStringLiteral("after"))
+                            == firstPage.value(QStringLiteral("next_after")),
+                    "Timeline snapshot response signal did not preserve the page contract")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+
+    QList<QJsonObject> snapshotRequests;
+    QJsonObject initializeRequest;
+    for (const QJsonObject &message : readLogMessages(logPath)) {
+        const QString method = message.value(QStringLiteral("method")).toString();
+        if (method == QStringLiteral("initialize")) initializeRequest = message;
+        if (method == QStringLiteral("timeline/snapshot")) snapshotRequests.append(message);
+    }
+    const QJsonArray declared = initializeRequest.value(QStringLiteral("params")).toObject()
+                                    .value(QStringLiteral("capabilities")).toObject()
+                                    .value(QStringLiteral("stable")).toArray();
+    if (!expect(declared.contains(QStringLiteral("timeline.snapshot.current")),
+                "initialize did not declare the Timeline snapshot capability")
+        || !expect(snapshotRequests.size() == 2,
+                   "invalid Timeline snapshot requests reached the runtime")) {
+        return false;
+    }
+    const QJsonObject firstParams = snapshotRequests.at(0).value(QStringLiteral("params"))
+                                        .toObject();
+    const QJsonObject secondParams = snapshotRequests.at(1).value(QStringLiteral("params"))
+                                         .toObject();
+    return expect(firstParams == QJsonObject{
+                      {QStringLiteral("session_id"), QStringLiteral("session-1")},
+                      {QStringLiteral("snapshot_identity"), QJsonValue(QJsonValue::Null)},
+                      {QStringLiteral("watermark"), QJsonValue(QJsonValue::Null)},
+                      {QStringLiteral("after"), QJsonValue(QJsonValue::Null)},
+                      {QStringLiteral("limit"), 200},
+                  }, "initial Timeline snapshot request did not use null capture fields")
+        && expect(secondParams == QJsonObject{
+                      {QStringLiteral("session_id"), QStringLiteral("session-1")},
+                      {QStringLiteral("snapshot_identity"),
+                       QStringLiteral("timeline-session-snapshot:sha256:")
+                           + QString(64, QLatin1Char('a'))},
+                      {QStringLiteral("watermark"),
+                       timelineAnchor(3, timelineEventId(QLatin1Char('b')))},
+                      {QStringLiteral("after"), QJsonObject{
+                          {QStringLiteral("ordinal"), 1},
+                          {QStringLiteral("item_id"), QStringLiteral("item-1")},
+                          {QStringLiteral("item_identity"),
+                           QStringLiteral("timeline-session-snapshot-item:sha256:")
+                               + QString(64, QLatin1Char('c'))},
+                      }},
+                      {QStringLiteral("limit"), 25},
+                  }, "Timeline snapshot continuation changed its contract");
+}
+
 bool runTimelineSyncErrorCleanupCase()
 {
     QTemporaryDir directory;
@@ -1597,6 +1910,7 @@ int main(int argc, char *argv[])
                   "ordinary model setting was removed");
     ok = expect(verifyRustTimelineIdentityFixture(),
                 "Qt Timeline Event identity diverged from the Rust fixture") && ok;
+    ok = verifyRustTimelineSnapshotIdentityFixture() && ok;
     ok = runHandshakeCase(QStringLiteral("valid-preview"), true) && ok;
     ok = runHandshakeCase(QStringLiteral("valid-codex"), true) && ok;
     ok = runHandshakeCase(QStringLiteral("valid-recovery"), true, true, true) && ok;
@@ -1631,6 +1945,7 @@ int main(int argc, char *argv[])
     ok = runHandshakeCase(QStringLiteral("malformed-upgrade-error"), false) && ok;
     ok = runCapabilityGateCase() && ok;
     ok = runTimelineSyncContractCase() && ok;
+    ok = runTimelineSnapshotContractCase() && ok;
     ok = runTimelineSyncErrorCleanupCase() && ok;
     ok = runTimelineSyncDisconnectCleanupCase() && ok;
     ok = runValidTimelineNotificationCase() && ok;

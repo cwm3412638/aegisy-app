@@ -15,6 +15,7 @@
 #include <QTimer>
 
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace {
@@ -246,6 +247,7 @@ const QStringList &declaredCapabilities()
         QStringLiteral("terminal.stop.out-of-band"),
         QStringLiteral("timeline.command.structured.read-only"),
         QStringLiteral("timeline.replay.fixed-watermark"),
+        QStringLiteral("timeline.snapshot.current"),
         QStringLiteral("timeline.streaming"),
         QStringLiteral("turn.cancel.interrupt"),
         QStringLiteral("turn.context.inspect"),
@@ -385,6 +387,38 @@ bool isBoundedTimelineIdentity(const QJsonValue &value)
     });
 }
 
+bool isValidTimelineSnapshotIdentity(const QString &identity)
+{
+    static const QRegularExpression pattern(
+        QStringLiteral("^timeline-session-snapshot:sha256:[0-9a-f]{64}$"));
+    return identity.toUtf8().size() <= kMaximumTimelineIdentityBytes
+        && pattern.match(identity).hasMatch();
+}
+
+bool isValidTimelineSnapshotItemIdentity(const QString &identity)
+{
+    static const QRegularExpression pattern(
+        QStringLiteral("^timeline-session-snapshot-item:sha256:[0-9a-f]{64}$"));
+    return identity.toUtf8().size() <= kMaximumTimelineIdentityBytes
+        && pattern.match(identity).hasMatch();
+}
+
+bool isValidTimelineSnapshotCursor(const QJsonObject &cursor)
+{
+    if (!hasExactKeys(cursor, {
+            QStringLiteral("ordinal"), QStringLiteral("item_id"),
+            QStringLiteral("item_identity"),
+        })
+        || !isPositiveSafeJsonInteger(cursor.value(QStringLiteral("ordinal")))
+        || !isBoundedTimelineIdentity(cursor.value(QStringLiteral("item_id")))
+        || !isValidTimelineSnapshotItemIdentity(
+            cursor.value(QStringLiteral("item_identity")).toString())) {
+        return false;
+    }
+    return cursor.value(QStringLiteral("ordinal")).toDouble()
+        <= kMaximumSafeJsonInteger;
+}
+
 bool isValidTimelineName(const QJsonValue &value, qsizetype maximumBytes)
 {
     if (!value.isString()) return false;
@@ -519,6 +553,174 @@ QByteArray canonicalTimelineItemUpdate(const QJsonValue &value)
     encoded += compactJsonValue(update.value(QStringLiteral("content_mode")));
     encoded += '}';
     return encoded;
+}
+
+QByteArray canonicalTimelineSnapshotAnchor(const QJsonValue &value)
+{
+    if (!value.isObject() || !isValidTimelineAnchor(value.toObject())) return {};
+    const QJsonObject anchor = value.toObject();
+    QByteArray encoded = QByteArrayLiteral("{\"sequence\":");
+    encoded += compactJsonValue(anchor.value(QStringLiteral("sequence")));
+    encoded += QByteArrayLiteral(",\"event_id\":");
+    encoded += compactJsonValue(anchor.value(QStringLiteral("event_id")));
+    encoded += '}';
+    return encoded;
+}
+
+QByteArray canonicalTimelineSnapshotCursor(const QJsonValue &value)
+{
+    if (!value.isObject() || !isValidTimelineSnapshotCursor(value.toObject())) return {};
+    const QJsonObject cursor = value.toObject();
+    QByteArray encoded = QByteArrayLiteral("{\"ordinal\":");
+    encoded += compactJsonValue(cursor.value(QStringLiteral("ordinal")));
+    encoded += QByteArrayLiteral(",\"item_id\":");
+    encoded += compactJsonValue(cursor.value(QStringLiteral("item_id")));
+    encoded += QByteArrayLiteral(",\"item_identity\":");
+    encoded += compactJsonValue(cursor.value(QStringLiteral("item_identity")));
+    encoded += '}';
+    return encoded;
+}
+
+QByteArray canonicalTimelineSnapshotActiveTurn(const QJsonValue &value)
+{
+    if (value.isNull()) return QByteArrayLiteral("null");
+    if (!value.isObject()) return {};
+    const QJsonObject activeTurn = value.toObject();
+    if (!hasExactKeys(activeTurn, {
+            QStringLiteral("turn_id"), QStringLiteral("correlation_id"),
+            QStringLiteral("state"), QStringLiteral("started_event"),
+            QStringLiteral("latest_event"), QStringLiteral("open_item_ids"),
+        })
+        || !isBoundedTimelineIdentity(activeTurn.value(QStringLiteral("turn_id")))
+        || activeTurn.value(QStringLiteral("correlation_id"))
+            != activeTurn.value(QStringLiteral("turn_id"))
+        || activeTurn.value(QStringLiteral("state")).toString()
+            != QStringLiteral("running")) {
+        return {};
+    }
+    const QByteArray started = canonicalTimelineSnapshotAnchor(
+        activeTurn.value(QStringLiteral("started_event")));
+    const QByteArray latest = canonicalTimelineSnapshotAnchor(
+        activeTurn.value(QStringLiteral("latest_event")));
+    const QJsonValue openItems = activeTurn.value(QStringLiteral("open_item_ids"));
+    if (started.isEmpty() || latest.isEmpty()
+        || activeTurn.value(QStringLiteral("started_event")).toObject()
+                .value(QStringLiteral("sequence")).toDouble() == 0.0
+        || activeTurn.value(QStringLiteral("latest_event")).toObject()
+                .value(QStringLiteral("sequence")).toDouble()
+            < activeTurn.value(QStringLiteral("started_event")).toObject()
+                  .value(QStringLiteral("sequence")).toDouble()
+        || !openItems.isArray() || openItems.toArray().size() > 10000) {
+        return {};
+    }
+    QSet<QString> unique;
+    for (const QJsonValue &value : openItems.toArray()) {
+        if (!isBoundedTimelineIdentity(value) || unique.contains(value.toString())) {
+            return {};
+        }
+        unique.insert(value.toString());
+    }
+    QByteArray encoded = QByteArrayLiteral("{\"turn_id\":");
+    encoded += compactJsonValue(activeTurn.value(QStringLiteral("turn_id")));
+    encoded += QByteArrayLiteral(",\"correlation_id\":");
+    encoded += compactJsonValue(activeTurn.value(QStringLiteral("correlation_id")));
+    encoded += QByteArrayLiteral(",\"state\":");
+    encoded += compactJsonValue(activeTurn.value(QStringLiteral("state")));
+    encoded += QByteArrayLiteral(",\"started_event\":");
+    encoded += started;
+    encoded += QByteArrayLiteral(",\"latest_event\":");
+    encoded += latest;
+    encoded += QByteArrayLiteral(",\"open_item_ids\":");
+    encoded += compactJsonValue(openItems);
+    encoded += '}';
+    return encoded;
+}
+
+QByteArray canonicalTimelineSnapshotItemMaterial(const QString &sessionId,
+                                                 const QJsonObject &itemPage)
+{
+    if (!isBoundedTimelineIdentity(sessionId)
+        || !hasExactKeys(itemPage, {
+            QStringLiteral("ordinal"), QStringLiteral("item_identity"),
+            QStringLiteral("turn_id"), QStringLiteral("correlation_id"),
+            QStringLiteral("turn_state"), QStringLiteral("first_event"),
+            QStringLiteral("latest_event"), QStringLiteral("item"),
+            QStringLiteral("item_update"),
+        })
+        || !isPositiveSafeJsonInteger(itemPage.value(QStringLiteral("ordinal")))
+        || !isValidTimelineSnapshotItemIdentity(
+            itemPage.value(QStringLiteral("item_identity")).toString())
+        || !isBoundedTimelineIdentity(itemPage.value(QStringLiteral("turn_id")))
+        || itemPage.value(QStringLiteral("correlation_id"))
+            != itemPage.value(QStringLiteral("turn_id"))) {
+        return {};
+    }
+    const QString turnState = itemPage.value(QStringLiteral("turn_state")).toString();
+    if (turnState != QStringLiteral("running")
+        && turnState != QStringLiteral("completed")
+        && turnState != QStringLiteral("failed")
+        && turnState != QStringLiteral("interrupted")) {
+        return {};
+    }
+    const QByteArray first = canonicalTimelineSnapshotAnchor(
+        itemPage.value(QStringLiteral("first_event")));
+    const QByteArray latest = canonicalTimelineSnapshotAnchor(
+        itemPage.value(QStringLiteral("latest_event")));
+    const QByteArray item = canonicalTimelineItem(itemPage.value(QStringLiteral("item")));
+    const QByteArray update = canonicalTimelineItemUpdate(
+        itemPage.value(QStringLiteral("item_update")));
+    if (first.isEmpty() || latest.isEmpty() || item.isEmpty() || update.isEmpty()
+        || itemPage.value(QStringLiteral("first_event")).toObject()
+                .value(QStringLiteral("sequence")).toDouble() == 0.0
+        || itemPage.value(QStringLiteral("latest_event")).toObject()
+                .value(QStringLiteral("sequence")).toDouble()
+            < itemPage.value(QStringLiteral("first_event")).toObject()
+                  .value(QStringLiteral("sequence")).toDouble()
+        || !isPositiveSafeJsonInteger(itemPage.value(QStringLiteral("item_update"))
+                                          .toObject()
+                                          .value(QStringLiteral("revision")))
+        || itemPage.value(QStringLiteral("item_update")).toObject()
+                .value(QStringLiteral("content_mode")).toString()
+            != QStringLiteral("snapshot-replacement")) {
+        return {};
+    }
+
+    QByteArray encoded = QByteArrayLiteral(
+        "{\"schema_version\":\"timeline-session-snapshot-item/0.1\",\"session_id\":");
+    encoded += compactJsonValue(QJsonValue(sessionId));
+    encoded += QByteArrayLiteral(",\"ordinal\":");
+    encoded += compactJsonValue(itemPage.value(QStringLiteral("ordinal")));
+    encoded += QByteArrayLiteral(",\"turn_id\":");
+    encoded += compactJsonValue(itemPage.value(QStringLiteral("turn_id")));
+    encoded += QByteArrayLiteral(",\"correlation_id\":");
+    encoded += compactJsonValue(itemPage.value(QStringLiteral("correlation_id")));
+    encoded += QByteArrayLiteral(",\"turn_state\":");
+    encoded += compactJsonValue(itemPage.value(QStringLiteral("turn_state")));
+    encoded += QByteArrayLiteral(",\"first_event\":");
+    encoded += first;
+    encoded += QByteArrayLiteral(",\"latest_event\":");
+    encoded += latest;
+    encoded += QByteArrayLiteral(",\"item\":");
+    encoded += item;
+    encoded += QByteArrayLiteral(",\"item_update\":");
+    encoded += update;
+    encoded += '}';
+    return encoded;
+}
+
+QString domainSeparatedSnapshotIdentity(const char *domain, const char *prefix,
+                                        const QByteArray &material)
+{
+    QByteArray input(domain, static_cast<int>(std::strlen(domain)) + 1);
+    const quint64 size = static_cast<quint64>(material.size());
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        input.append(static_cast<char>((size >> shift) & 0xff));
+    }
+    input += material;
+    return QStringLiteral("%1%2").arg(
+        QString::fromLatin1(prefix),
+        QString::fromLatin1(QCryptographicHash::hash(
+            input, QCryptographicHash::Sha256).toHex()));
 }
 
 bool isValidTimelineEventEnvelope(const QJsonObject &event)
@@ -1037,6 +1239,7 @@ QStringList requiredCapabilitiesForMethod(const QString &method,
         {QStringLiteral("retention/maintenance/run"), QStringLiteral("retention.maintenance.host-triggered")},
         {QStringLiteral("session/read"), QStringLiteral("session.history.paginated")},
         {QStringLiteral("timeline/sync"), QStringLiteral("timeline.replay.fixed-watermark")},
+        {QStringLiteral("timeline/snapshot"), QStringLiteral("timeline.snapshot.current")},
         {QStringLiteral("session/background-notifications"), QStringLiteral("background-notification.outbox.read-only")},
         {QStringLiteral("session/background-recovery"), QStringLiteral("background-job.recovery.inspect")},
         {QStringLiteral("runtime/projection-recovery/status"), QStringLiteral("runtime.projection-recovery.status")},
@@ -1267,6 +1470,141 @@ QString AgentRuntimeClient::timelineEventIdentity(const QJsonObject &event)
     input += material;
     return QStringLiteral("event:sha256:%1").arg(QString::fromLatin1(
         QCryptographicHash::hash(input, QCryptographicHash::Sha256).toHex()));
+}
+
+QString AgentRuntimeClient::timelineSnapshotItemIdentity(const QString &sessionId,
+                                                          const QJsonObject &itemPage)
+{
+    const QByteArray material = canonicalTimelineSnapshotItemMaterial(sessionId, itemPage);
+    if (material.isEmpty()) return {};
+    return domainSeparatedSnapshotIdentity(
+        "aegisy-timeline-session-snapshot-item/0.1\0",
+        "timeline-session-snapshot-item:sha256:", material);
+}
+
+quint64 AgentRuntimeClient::timelineSnapshotItemCanonicalBytes(
+    const QString &sessionId, const QJsonObject &itemPage)
+{
+    const QByteArray material = canonicalTimelineSnapshotItemMaterial(sessionId, itemPage);
+    return material.isEmpty() ? 0 : static_cast<quint64>(material.size());
+}
+
+QString AgentRuntimeClient::timelineSnapshotIdentity(
+    const QString &sessionId, const QJsonObject &floor,
+    const QJsonObject &watermark, const QJsonObject &activeTurn,
+    quint64 totalItems, quint64 totalCanonicalBytes,
+    const QStringList &orderedItemIdentities)
+{
+    if (!isBoundedTimelineIdentity(sessionId)
+        || !isValidTimelineAnchor(floor) || !isValidTimelineAnchor(watermark)
+        || watermark.value(QStringLiteral("sequence")).toDouble()
+            < floor.value(QStringLiteral("sequence")).toDouble()
+        || totalItems > 10000 || totalCanonicalBytes > 64ULL * 1024ULL * 1024ULL
+        || totalItems != static_cast<quint64>(orderedItemIdentities.size())
+        || (totalItems == 0) != (totalCanonicalBytes == 0)) {
+        return {};
+    }
+    const QByteArray active = activeTurn.isEmpty()
+        ? QByteArrayLiteral("null")
+        : canonicalTimelineSnapshotActiveTurn(activeTurn);
+    if (active.isEmpty()) return {};
+    if (!activeTurn.isEmpty()) {
+        const QJsonObject latest = activeTurn.value(QStringLiteral("latest_event")).toObject();
+        if (!isValidTimelineAnchor(latest)
+            || latest.value(QStringLiteral("sequence")).toDouble()
+                > watermark.value(QStringLiteral("sequence")).toDouble()) {
+            return {};
+        }
+    }
+    QByteArray identities(1, '[');
+    for (qsizetype index = 0; index < orderedItemIdentities.size(); ++index) {
+        if (index > 0) identities += ',';
+        const QString &identity = orderedItemIdentities.at(index);
+        if (!isValidTimelineSnapshotItemIdentity(identity)) return {};
+        identities += compactJsonValue(QJsonValue(identity));
+    }
+    identities += ']';
+
+    QByteArray material = QByteArrayLiteral(
+        "{\"schema_version\":\"timeline-session-snapshot-page/0.1\",\"session_id\":");
+    material += compactJsonValue(QJsonValue(sessionId));
+    material += QByteArrayLiteral(",\"floor\":");
+    material += canonicalTimelineSnapshotAnchor(floor);
+    material += QByteArrayLiteral(",\"watermark\":");
+    material += canonicalTimelineSnapshotAnchor(watermark);
+    material += QByteArrayLiteral(",\"active_turn\":");
+    material += active;
+    material += QByteArrayLiteral(",\"total_items\":");
+    material += QByteArray::number(totalItems);
+    material += QByteArrayLiteral(",\"total_canonical_bytes\":");
+    material += QByteArray::number(totalCanonicalBytes);
+    material += QByteArrayLiteral(",\"ordered_item_identities\":");
+    material += identities;
+    material += '}';
+    return domainSeparatedSnapshotIdentity(
+        "aegisy-timeline-session-snapshot/0.1\0",
+        "timeline-session-snapshot:sha256:", material);
+}
+
+QString AgentRuntimeClient::timelineSnapshotPageIdentity(const QJsonObject &page)
+{
+    if (!hasExactKeys(page, {
+            QStringLiteral("schema_version"), QStringLiteral("session_id"),
+            QStringLiteral("snapshot_identity"), QStringLiteral("floor"),
+            QStringLiteral("watermark"), QStringLiteral("active_turn"),
+            QStringLiteral("total_items"), QStringLiteral("total_canonical_bytes"),
+            QStringLiteral("after"), QStringLiteral("items"),
+            QStringLiteral("next_after"), QStringLiteral("complete"),
+            QStringLiteral("page_identity"),
+        })
+        || page.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("timeline-session-snapshot-page/0.1")
+        || !isValidTimelineSnapshotIdentity(
+            page.value(QStringLiteral("snapshot_identity")).toString())
+        || !page.value(QStringLiteral("session_id")).isString()
+        || !isValidTimelineAnchor(page.value(QStringLiteral("floor")).toObject())
+        || !isValidTimelineAnchor(page.value(QStringLiteral("watermark")).toObject())
+        || !page.value(QStringLiteral("items")).isArray()
+        || !page.value(QStringLiteral("complete")).isBool()) {
+        return {};
+    }
+    const QByteArray after = page.value(QStringLiteral("after")).isNull()
+        ? QByteArrayLiteral("null")
+        : canonicalTimelineSnapshotCursor(page.value(QStringLiteral("after")));
+    const QByteArray nextAfter = page.value(QStringLiteral("next_after")).isNull()
+        ? QByteArrayLiteral("null")
+        : canonicalTimelineSnapshotCursor(page.value(QStringLiteral("next_after")));
+    if (after.isEmpty() || nextAfter.isEmpty()) return {};
+    const QJsonArray items = page.value(QStringLiteral("items")).toArray();
+    QByteArray identities(1, '[');
+    QSet<QString> seen;
+    for (qsizetype index = 0; index < items.size(); ++index) {
+        if (index > 0) identities += ',';
+        if (!items.at(index).isObject()) return {};
+        const QJsonObject item = items.at(index).toObject();
+        const QString identity = item.value(QStringLiteral("item_identity")).toString();
+        if (!isValidTimelineSnapshotItemIdentity(identity) || seen.contains(identity)) {
+            return {};
+        }
+        seen.insert(identity);
+        identities += compactJsonValue(QJsonValue(identity));
+    }
+    identities += ']';
+    QByteArray material = QByteArrayLiteral(
+        "{\"schema_version\":\"timeline-session-snapshot-page/0.1\",\"snapshot_identity\":");
+    material += compactJsonValue(page.value(QStringLiteral("snapshot_identity")));
+    material += QByteArrayLiteral(",\"after\":");
+    material += after;
+    material += QByteArrayLiteral(",\"ordered_item_identities\":");
+    material += identities;
+    material += QByteArrayLiteral(",\"next_after\":");
+    material += nextAfter;
+    material += QByteArrayLiteral(",\"complete\":");
+    material += compactJsonValue(page.value(QStringLiteral("complete")));
+    material += '}';
+    return domainSeparatedSnapshotIdentity(
+        "aegisy-timeline-session-snapshot-page/0.1\0",
+        "timeline-session-snapshot-page:sha256:", material);
 }
 
 bool AgentRuntimeClient::isReady() const
@@ -1838,6 +2176,44 @@ QString AgentRuntimeClient::syncTimeline(const QString &sessionId,
         {QStringLiteral("watermark"), watermark.isEmpty()
              ? QJsonValue(QJsonValue::Null) : QJsonValue(watermark)},
         {QStringLiteral("limit"), qBound(1, limit, 200)},
+    });
+}
+
+QString AgentRuntimeClient::timelineSnapshot(const QString &sessionId,
+                                             const QString &snapshotIdentity,
+                                             const QJsonObject &watermark,
+                                             const QJsonObject &after,
+                                             int limit)
+{
+    const QString method = QStringLiteral("timeline/snapshot");
+    const bool hasIdentity = !snapshotIdentity.isEmpty();
+    const bool hasWatermark = !watermark.isEmpty();
+    const bool hasAfter = !after.isEmpty();
+    bool validContinuation = false;
+    if (hasIdentity && hasWatermark && hasAfter
+        && isValidTimelineSnapshotIdentity(snapshotIdentity)
+        && isValidTimelineAnchor(watermark)
+        && watermark.value(QStringLiteral("sequence")).toDouble() > 0.0
+        && isValidTimelineSnapshotCursor(after)) {
+        validContinuation = true;
+    }
+    const bool validInitial = !hasIdentity && !hasWatermark && !hasAfter;
+    if (sessionId.isEmpty() || !isBoundedTimelineIdentity(sessionId)
+        || (!validInitial && !validContinuation)
+        || limit < 1 || limit > 200) {
+        emit requestFailed({}, method, QStringLiteral("Timeline 快照请求无效"), -32602);
+        return {};
+    }
+
+    return sendRequest(method, {
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("snapshot_identity"), hasIdentity
+             ? QJsonValue(snapshotIdentity) : QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("watermark"), hasWatermark
+             ? QJsonValue(watermark) : QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("after"), hasAfter
+             ? QJsonValue(after) : QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("limit"), limit},
     });
 }
 
@@ -2734,6 +3110,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit sessionRead(id, result);
     } else if (pendingMethod == QStringLiteral("timeline/sync")) {
         emit timelineSynced(id, result);
+    } else if (pendingMethod == QStringLiteral("timeline/snapshot")) {
+        emit timelineSnapshotReceived(id, result);
     } else if (pendingMethod == QStringLiteral("session/background-notifications")) {
         emit backgroundNotificationsRead(id, result);
     } else if (pendingMethod == QStringLiteral("session/background-recovery")) {
