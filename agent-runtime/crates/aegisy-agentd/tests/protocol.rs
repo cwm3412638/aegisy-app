@@ -3309,18 +3309,37 @@ fn emits_ordered_turn_lifecycle() {
             "idempotency_key": "turn-client-1"
         }),
     ));
-    assert_eq!(messages.len(), 6);
+    assert_eq!(messages.len(), 7);
     assert_eq!(messages[1]["params"]["event"], "turn.started");
     assert_eq!(messages[2]["params"]["item"]["role"], "user");
-    assert_eq!(messages[3]["params"]["event"], "item.delta");
-    assert_eq!(messages[4]["params"]["item"]["state"], "completed");
-    assert_eq!(messages[5]["params"]["event"], "turn.completed");
-    for pair in messages[1..].windows(2) {
-        assert!(
-            pair[0]["params"]["sequence"].as_u64().unwrap()
-                < pair[1]["params"]["sequence"].as_u64().unwrap()
-        );
+    assert_eq!(messages[3]["params"]["event"], "item.started");
+    assert_eq!(messages[4]["params"]["event"], "item.delta");
+    assert_eq!(messages[5]["params"]["item"]["state"], "completed");
+    assert_eq!(messages[6]["params"]["event"], "turn.completed");
+    let mut event_ids = std::collections::HashSet::new();
+    for (index, message) in messages[1..].iter().enumerate() {
+        let params = message["params"].as_object().unwrap();
+        assert_eq!(params.len(), 11);
+        assert_eq!(params["schema_version"], "timeline-event/0.1");
+        assert_eq!(params["sequence"], u64::try_from(index + 1).unwrap());
+        assert_eq!(params["session_id"], session_id);
+        assert_eq!(params["correlation_id"], params["turn_id"]);
+        let event_id = params["event_id"].as_str().unwrap();
+        assert!(event_id.starts_with("event:sha256:"));
+        assert!(event_ids.insert(event_id.to_owned()));
+        if index > 0 {
+            assert!(
+                messages[index]["params"]["timestamp_ms"].as_u64().unwrap()
+                    <= params["timestamp_ms"].as_u64().unwrap()
+            );
+        }
     }
+    assert_eq!(messages[1]["params"]["turn_state"], "running");
+    assert_eq!(messages[6]["params"]["turn_state"], "completed");
+    assert_eq!(messages[2]["params"]["item_update"]["revision"], 1);
+    assert_eq!(messages[3]["params"]["item_update"]["revision"], 1);
+    assert_eq!(messages[4]["params"]["item_update"]["revision"], 2);
+    assert_eq!(messages[5]["params"]["item_update"]["revision"], 3);
 
     let second_session =
         runtime.handle_line(&request("4", "session/start", json!({ "mode": "chat" })));
@@ -3337,7 +3356,7 @@ fn emits_ordered_turn_lifecycle() {
         }),
     ));
     assert_eq!(second_messages[1]["params"]["sequence"], 1);
-    assert_eq!(second_messages[5]["params"]["sequence"], 5);
+    assert_eq!(second_messages[6]["params"]["sequence"], 6);
 
     let resumed_messages = runtime.handle_line(&request(
         "6",
@@ -3348,8 +3367,8 @@ fn emits_ordered_turn_lifecycle() {
             "idempotency_key": "turn-client-3"
         }),
     ));
-    assert_eq!(resumed_messages[1]["params"]["sequence"], 6);
-    assert_eq!(resumed_messages[5]["params"]["sequence"], 10);
+    assert_eq!(resumed_messages[1]["params"]["sequence"], 7);
+    assert_eq!(resumed_messages[6]["params"]["sequence"], 12);
 }
 
 #[test]

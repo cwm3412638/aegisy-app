@@ -1,4 +1,7 @@
-use aegisy_aap::stable::v0_1::{InitializeParams, InitializeResult};
+use aegisy_aap::stable::v0_1::{
+    timeline_event_id, EventEnvelope, InitializeParams, InitializeResult, ItemUpdate, TimelineItem,
+    TurnState,
+};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::fs;
@@ -18,11 +21,30 @@ fn fixture_path(name: &str) -> String {
     )
 }
 
+fn guide_path() -> String {
+    format!(
+        "{}/../../../docs/AAP-PROTOCOL-GUIDE.md",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 fn fixture_messages(name: &str) -> Vec<Value> {
     fs::read_to_string(fixture_path(name))
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn guide_timeline_messages() -> Vec<Value> {
+    fs::read_to_string(guide_path())
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|message| {
+            message["method"] == "event"
+                && message["params"]["schema_version"] == "timeline-event/0.1"
+        })
         .collect()
 }
 
@@ -150,6 +172,44 @@ fn assert_content_free(value: &Value) {
     }
 }
 
+fn expected_timeline_event_id(event: &EventEnvelope) -> String {
+    timeline_event_id(
+        &event.schema_version,
+        event.sequence,
+        event.timestamp_ms,
+        &event.correlation_id,
+        &event.session_id,
+        &event.turn_id,
+        event.turn_state,
+        &event.event,
+        &event.item,
+        &event.item_update,
+    )
+    .unwrap()
+}
+
+fn reseal_timeline_event(message: &mut Value) {
+    let params = &message["params"];
+    let item = (!params["item"].is_null())
+        .then(|| serde_json::from_value::<TimelineItem>(params["item"].clone()).unwrap());
+    let item_update = (!params["item_update"].is_null())
+        .then(|| serde_json::from_value::<ItemUpdate>(params["item_update"].clone()).unwrap());
+    let event_id = timeline_event_id(
+        params["schema_version"].as_str().unwrap(),
+        params["sequence"].as_u64().unwrap(),
+        params["timestamp_ms"].as_u64().unwrap(),
+        params["correlation_id"].as_str().unwrap(),
+        params["session_id"].as_str().unwrap(),
+        params["turn_id"].as_str().unwrap(),
+        serde_json::from_value::<TurnState>(params["turn_state"].clone()).unwrap(),
+        params["event"].as_str().unwrap(),
+        &item,
+        &item_update,
+    )
+    .unwrap();
+    message["params"]["event_id"] = json!(event_id);
+}
+
 #[test]
 fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
     let schema: Value = serde_json::from_str(&fs::read_to_string(schema_path()).unwrap()).unwrap();
@@ -166,6 +226,12 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
         "initializedNotification",
         "initializeIncompatibleData",
         "initializeIncompatibleErrorResponse",
+        "safePositiveInteger",
+        "boundedGraphicalId",
+        "timelineEventName",
+        "timelineItem",
+        "timelineItemUpdate",
+        "timelineEvent",
     ] {
         assert!(
             definitions.contains_key(required),
@@ -189,6 +255,9 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
         "initializedNotification",
         "initializeIncompatibleData",
         "initializeIncompatibleErrorResponse",
+        "timelineItem",
+        "timelineItemUpdate",
+        "timelineEvent",
     ] {
         assert_eq!(
             definitions[strict_object]["additionalProperties"], false,
@@ -439,7 +508,7 @@ fn strict_handshake_contract_rejects_legacy_empty_experimental_and_envelope_drif
 
     let mut ordinary_notification = json!({
         "jsonrpc": "2.0",
-        "method": "event",
+        "method": "runtime/heartbeat",
         "params": {}
     });
     assert!(strict_envelope_valid(&ordinary_notification));
@@ -497,4 +566,365 @@ fn strict_handshake_contract_rejects_legacy_empty_experimental_and_envelope_drif
             "upgrade_direction",
         ]
     ));
+}
+
+#[test]
+fn timeline_event_fixture_matches_schema_types_and_ordering_contract() {
+    let messages = fixture_messages("aap-timeline-events.jsonl");
+    assert_eq!(messages.len(), 7);
+    let mut event_ids = HashSet::new();
+    let mut last_sequence = 0;
+    let mut last_timestamp = 0;
+    let mut item_revisions = std::collections::HashMap::new();
+
+    for message in &messages {
+        assert!(strict_envelope_valid(message), "invalid fixture: {message}");
+        assert_content_free(message);
+        assert_eq!(message["method"], "event");
+        let params = message["params"].as_object().unwrap();
+        assert!(has_exact_keys(
+            params,
+            &[
+                "schema_version",
+                "event_id",
+                "sequence",
+                "timestamp_ms",
+                "correlation_id",
+                "session_id",
+                "turn_id",
+                "turn_state",
+                "event",
+                "item",
+                "item_update",
+            ]
+        ));
+        let event: EventEnvelope = serde_json::from_value(message["params"].clone()).unwrap();
+        assert_eq!(serde_json::to_value(&event).unwrap(), message["params"]);
+        assert_eq!(event.correlation_id, event.turn_id);
+        assert_eq!(event.event_id, expected_timeline_event_id(&event));
+        assert!(event_ids.insert(event.event_id.clone()));
+        assert_eq!(event.sequence, last_sequence + 1);
+        assert!(event.timestamp_ms > last_timestamp);
+        last_sequence = event.sequence;
+        last_timestamp = event.timestamp_ms;
+
+        match (&event.item, &event.item_update) {
+            (Some(item), Some(update)) => {
+                let next = item_revisions.entry(item.id.clone()).or_insert(0_u64);
+                assert_eq!(update.revision, *next + 1);
+                *next = update.revision;
+                assert_eq!(update.content_mode, "snapshot-replacement");
+            }
+            (None, None) => {}
+            _ => panic!("item and item_update presence drifted"),
+        }
+    }
+
+    assert_eq!(messages[0]["params"]["event"], "turn.started");
+    assert_eq!(messages[5]["params"]["event"], "future.adapter-state");
+    assert!(messages[5]["params"]["item"].is_null());
+    assert_eq!(messages[6]["params"]["event"], "turn.completed");
+    assert_eq!(messages[6]["params"]["turn_state"], "completed");
+}
+
+#[test]
+fn timeline_event_schema_documents_typed_aggregate_data_bounds() {
+    let schema: Value = serde_json::from_str(&fs::read_to_string(schema_path()).unwrap()).unwrap();
+    let comment = schema["$defs"]["jsonSafeValue"]["$comment"]
+        .as_str()
+        .unwrap();
+    assert!(comment.contains("maximum depth of 16"));
+    assert!(comment.contains("4096 total values"));
+    assert!(comment.contains("Rust and Qt typed validators"));
+}
+
+#[test]
+fn timeline_event_guide_examples_have_reproducible_ids_and_complete_cancellation() {
+    let messages = guide_timeline_messages();
+    assert_eq!(messages.len(), 8);
+
+    let events = messages
+        .iter()
+        .map(|message| {
+            assert!(
+                strict_envelope_valid(message),
+                "invalid guide event: {message}"
+            );
+            let event: EventEnvelope = serde_json::from_value(message["params"].clone()).unwrap();
+            assert_eq!(event.event_id, expected_timeline_event_id(&event));
+            event
+        })
+        .collect::<Vec<_>>();
+
+    let cancellation = events
+        .iter()
+        .filter(|event| event.session_id == "session-2")
+        .collect::<Vec<_>>();
+    assert_eq!(cancellation.len(), 3);
+    assert_eq!(
+        cancellation
+            .iter()
+            .map(|event| (event.sequence, event.event.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, "turn.started"),
+            (2, "turn.cancellation-acknowledged"),
+            (3, "turn.interrupted"),
+        ]
+    );
+    assert_eq!(
+        cancellation
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "event:sha256:72ea0537d20013e275ce8545ee08e65a783deeef0fec69ad011ff823679217e9",
+            "event:sha256:fd7d6120bc7ba2ffff60562cd172a6a4d872781ad638953f89be27e7a5837e4f",
+            "event:sha256:8b416a06c09ed140775e75d12d36a333a68e863e4565ffea33a25c681695eae2",
+        ]
+    );
+    assert!(cancellation[0].turn_state == TurnState::Running);
+    assert!(cancellation[1].turn_state == TurnState::Running);
+    assert!(cancellation[2].turn_state == TurnState::Interrupted);
+}
+
+#[test]
+fn timeline_event_schema_accepts_every_known_event_shape() {
+    let started = fixture_messages("aap-timeline-events.jsonl")[0].clone();
+    let cases = [
+        ("turn.started", "running", None),
+        ("turn.completed", "completed", None),
+        (
+            "turn.failed",
+            "failed",
+            Some(("error", "system", "completed")),
+        ),
+        ("turn.interrupted", "interrupted", None),
+        (
+            "item.started",
+            "running",
+            Some(("message", "agent", "started")),
+        ),
+        ("item.delta", "running", Some(("message", "agent", "delta"))),
+        (
+            "item.completed",
+            "running",
+            Some(("message", "agent", "completed")),
+        ),
+        (
+            "diagnostics.observed",
+            "running",
+            Some(("diagnostic", "tool", "completed")),
+        ),
+        (
+            "usage.updated",
+            "running",
+            Some(("usage", "system", "updated")),
+        ),
+        (
+            "usage.truncated",
+            "running",
+            Some(("usage", "system", "truncated")),
+        ),
+        (
+            "turn.diff.updated",
+            "running",
+            Some(("diff", "tool", "updated")),
+        ),
+        (
+            "turn.diff.truncated",
+            "running",
+            Some(("diff", "tool", "truncated")),
+        ),
+        (
+            "turn.plan.updated",
+            "running",
+            Some(("plan", "agent", "updated")),
+        ),
+        (
+            "turn.plan.truncated",
+            "running",
+            Some(("plan", "agent", "truncated")),
+        ),
+        (
+            "turn.error-observed",
+            "running",
+            Some(("error", "system", "updated")),
+        ),
+        ("turn.error-observed.truncated", "running", None),
+        (
+            "turn.steering-requested",
+            "running",
+            Some(("message", "user", "completed")),
+        ),
+        ("turn.steering-acknowledged", "running", None),
+        (
+            "turn.steering-failed",
+            "running",
+            Some(("error", "system", "completed")),
+        ),
+        ("turn.cancellation-acknowledged", "running", None),
+        (
+            "turn.cancellation-failed",
+            "running",
+            Some(("error", "system", "completed")),
+        ),
+    ];
+
+    for (index, (event, turn_state, item_shape)) in cases.into_iter().enumerate() {
+        let mut message = started.clone();
+        message["params"]["event"] = json!(event);
+        message["params"]["turn_state"] = json!(turn_state);
+        message["params"]["sequence"] = json!(index + 1);
+        if let Some((kind, role, state)) = item_shape {
+            message["params"]["item"] = json!({
+                "id": format!("item-{index}"),
+                "kind": kind,
+                "role": role,
+                "state": state,
+                "content": "bounded snapshot"
+            });
+            message["params"]["item_update"] =
+                json!({"revision": 1, "content_mode": "snapshot-replacement"});
+        }
+        reseal_timeline_event(&mut message);
+        assert!(strict_envelope_valid(&message), "rejected {event}");
+        assert!(
+            serde_json::from_value::<EventEnvelope>(message["params"].clone()).is_ok(),
+            "Rust type rejected {event}"
+        );
+    }
+}
+
+#[test]
+fn timeline_event_schema_rejects_missing_bounds_pairing_and_unknown_item_drift() {
+    let messages = fixture_messages("aap-timeline-events.jsonl");
+    let started = messages[0].clone();
+    let completed_item = messages[1].clone();
+
+    for missing in [
+        "schema_version",
+        "event_id",
+        "sequence",
+        "timestamp_ms",
+        "correlation_id",
+        "session_id",
+        "turn_id",
+        "turn_state",
+        "event",
+        "item",
+        "item_update",
+    ] {
+        let mut invalid = started.clone();
+        invalid["params"].as_object_mut().unwrap().remove(missing);
+        assert!(
+            !strict_envelope_valid(&invalid),
+            "accepted missing {missing}"
+        );
+    }
+
+    let mut extra = started.clone();
+    extra["params"]["legacy"] = json!(true);
+    assert!(!strict_envelope_valid(&extra));
+
+    for invalid_number in [json!(0), json!(9_007_199_254_740_992_u64)] {
+        for field in ["sequence", "timestamp_ms"] {
+            let mut invalid = started.clone();
+            invalid["params"][field] = invalid_number.clone();
+            assert!(!strict_envelope_valid(&invalid));
+        }
+    }
+
+    let mut invalid_event_id = started.clone();
+    invalid_event_id["params"]["event_id"] = json!(format!("event:sha256:{}", "A".repeat(64)));
+    assert!(!strict_envelope_valid(&invalid_event_id));
+
+    let mut invalid_identifier = started.clone();
+    invalid_identifier["params"]["session_id"] = json!("session id");
+    assert!(!strict_envelope_valid(&invalid_identifier));
+
+    let mut missing_update = completed_item.clone();
+    missing_update["params"]["item_update"] = Value::Null;
+    assert!(!strict_envelope_valid(&missing_update));
+
+    let mut update_without_item = started.clone();
+    update_without_item["params"]["item_update"] =
+        json!({"revision": 1, "content_mode": "snapshot-replacement"});
+    assert!(!strict_envelope_valid(&update_without_item));
+
+    let mut invalid_revision = completed_item.clone();
+    invalid_revision["params"]["item_update"]["revision"] = json!(0);
+    assert!(!strict_envelope_valid(&invalid_revision));
+    invalid_revision["params"]["item_update"]["revision"] = json!(1);
+    invalid_revision["params"]["item_update"]["content_mode"] = json!("append");
+    assert!(!strict_envelope_valid(&invalid_revision));
+
+    let mut extra_update = completed_item.clone();
+    extra_update["params"]["item_update"]["append"] = json!(true);
+    assert!(!strict_envelope_valid(&extra_update));
+
+    let mut extra_item = completed_item.clone();
+    extra_item["params"]["item"]["legacy"] = json!(true);
+    assert!(!strict_envelope_valid(&extra_item));
+
+    let mut null_item_data = completed_item.clone();
+    null_item_data["params"]["item"]["data"] = Value::Null;
+    assert!(!strict_envelope_valid(&null_item_data));
+
+    let mut wrong_item_state = completed_item.clone();
+    wrong_item_state["params"]["item"]["state"] = json!("delta");
+    assert!(!strict_envelope_valid(&wrong_item_state));
+
+    let mut unknown_with_item = completed_item.clone();
+    unknown_with_item["params"]["event"] = json!("future.adapter-state");
+    assert!(!strict_envelope_valid(&unknown_with_item));
+
+    let mut unknown_terminal = started.clone();
+    unknown_terminal["params"]["event"] = json!("future.adapter-state");
+    unknown_terminal["params"]["turn_state"] = json!("completed");
+    assert!(!strict_envelope_valid(&unknown_terminal));
+
+    let mut persistence_failed = started;
+    persistence_failed["params"]["event"] = json!("turn.persistence-failed");
+    assert!(!strict_envelope_valid(&persistence_failed));
+}
+
+#[test]
+fn timeline_event_schema_accepts_exact_safe_and_text_boundaries() {
+    let mut boundary = fixture_messages("aap-timeline-events.jsonl")[1].clone();
+    boundary["params"]["sequence"] = json!(9_007_199_254_740_991_u64);
+    boundary["params"]["timestamp_ms"] = json!(9_007_199_254_740_991_u64);
+    boundary["params"]["session_id"] = json!("s".repeat(128));
+    boundary["params"]["item"]["id"] = json!("i".repeat(128));
+    boundary["params"]["item"]["kind"] = json!("k".repeat(64));
+    boundary["params"]["item"]["content"] = json!("界".repeat(65_536));
+    boundary["params"]["item_update"]["revision"] = json!(9_007_199_254_740_991_u64);
+    reseal_timeline_event(&mut boundary);
+    assert!(strict_envelope_valid(&boundary));
+    let event: EventEnvelope = serde_json::from_value(boundary["params"].clone()).unwrap();
+    assert_eq!(serde_json::to_value(event).unwrap(), boundary["params"]);
+}
+
+#[test]
+fn timeline_event_schema_requires_structured_failed_terminal_item() {
+    let mut failed = fixture_messages("aap-timeline-events.jsonl")[1].clone();
+    failed["params"]["event"] = json!("turn.failed");
+    failed["params"]["turn_state"] = json!("failed");
+    failed["params"]["item"] = json!({
+        "id": "error-1",
+        "kind": "error",
+        "role": "system",
+        "state": "completed",
+        "content": "Turn failed"
+    });
+    assert!(strict_envelope_valid(&failed));
+
+    let mut missing_item = failed.clone();
+    missing_item["params"]["item"] = Value::Null;
+    missing_item["params"]["item_update"] = Value::Null;
+    assert!(!strict_envelope_valid(&missing_item));
+
+    let mut wrong_role = failed;
+    wrong_role["params"]["item"]["role"] = json!("agent");
+    assert!(!strict_envelope_valid(&wrong_role));
 }

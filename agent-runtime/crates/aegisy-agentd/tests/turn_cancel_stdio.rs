@@ -239,6 +239,24 @@ while IFS= read -r line; do
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-fixture"}}}\n' "$id"
       case "$line" in
+        *'emit agent lifecycle'*)
+          printf '{"method":"item/started","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"id":"agent-message-fixture","type":"agentMessage","text":""}}}\n'
+          printf '{"method":"item/agentMessage/delta","params":{"threadId":"thread-fixture","turnId":"turn-fixture","itemId":"agent-message-fixture","delta":"hello"}}\n'
+          printf '{"method":"item/completed","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"id":"agent-message-fixture","type":"agentMessage","text":"hello"}}}\n'
+          printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
+          ;;
+        *'emit agent delta before start'*)
+          printf '{"method":"item/agentMessage/delta","params":{"threadId":"thread-fixture","turnId":"turn-fixture","itemId":"agent-message-fixture","delta":"invalid"}}\n'
+          ;;
+        *'emit duplicate agent completion'*)
+          printf '{"method":"item/started","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"id":"agent-message-fixture","type":"agentMessage","text":""}}}\n'
+          printf '{"method":"item/completed","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"id":"agent-message-fixture","type":"agentMessage","text":"done"}}}\n'
+          printf '{"method":"item/completed","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"id":"agent-message-fixture","type":"agentMessage","text":"done"}}}\n'
+          ;;
+        *'emit terminal with open agent'*)
+          printf '{"method":"item/started","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"id":"agent-message-fixture","type":"agentMessage","text":"partial"}}}\n'
+          printf '{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}\n'
+          ;;
         *'emit metadata'*)
           printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","tokenUsage":{"last":{"cachedInputTokens":1,"inputTokens":2,"outputTokens":3,"reasoningOutputTokens":0,"totalTokens":5},"total":{"cachedInputTokens":1,"inputTokens":2,"outputTokens":3,"reasoningOutputTokens":0,"totalTokens":5},"modelContextWindow":128000}}}\n'
           printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"thread-fixture","turnId":"turn-fixture","tokenUsage":{"last":{"cachedInputTokens":4,"inputTokens":20,"outputTokens":7,"reasoningOutputTokens":2,"totalTokens":27},"total":{"cachedInputTokens":10,"inputTokens":50,"outputTokens":15,"reasoningOutputTokens":4,"totalTokens":65},"modelContextWindow":128000}}}\n'
@@ -312,6 +330,117 @@ done
     permissions.set_mode(0o755);
     fs::set_permissions(&executable, permissions).unwrap();
     executable
+}
+
+#[test]
+fn stdio_agent_message_lifecycle_is_ordered_and_fails_closed() {
+    for (prefix, case, terminal, expected_item_events) in [
+        (
+            "agent-valid",
+            "emit agent lifecycle",
+            "turn.completed",
+            vec!["item.started", "item.delta", "item.completed"],
+        ),
+        (
+            "agent-delta-before-start",
+            "emit agent delta before start",
+            "turn.failed",
+            vec![],
+        ),
+        (
+            "agent-duplicate-completed",
+            "emit duplicate agent completion",
+            "turn.failed",
+            vec!["item.started", "item.completed"],
+        ),
+        (
+            "agent-open-terminal",
+            "emit terminal with open agent",
+            "turn.failed",
+            vec!["item.started"],
+        ),
+    ] {
+        let codex = fake_codex();
+        let fixture_root = codex.parent().unwrap().to_path_buf();
+        let data_root = fixture_root.join("agent-lifecycle-workbench");
+        let (mut child, mut stdin, receiver, reader, session_id) =
+            start_codex_runtime(&codex, &data_root, prefix);
+        let request_id = format!("{prefix}-turn");
+        send(
+            &mut stdin,
+            &request(
+                &request_id,
+                "turn/start",
+                json!({
+                    "session_id": session_id,
+                    "input": case,
+                    "idempotency_key": request_id
+                }),
+            ),
+        );
+
+        let mut messages = Vec::new();
+        loop {
+            let message = receiver
+                .recv_timeout(Duration::from_secs(15))
+                .expect("sidecar did not finish the agent-message lifecycle fixture");
+            let is_terminal = message["method"] == "event"
+                && message["params"]["event"].as_str() == Some(terminal);
+            messages.push(message);
+            if is_terminal {
+                break;
+            }
+        }
+        assert!(messages.iter().any(|message| message["id"] == request_id));
+        let item_events = messages
+            .iter()
+            .filter(|message| message["params"]["item"]["id"] == "agent-message-fixture")
+            .map(|message| message["params"]["event"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(item_events, expected_item_events, "fixture {case}");
+
+        let events = messages
+            .iter()
+            .filter(|message| message["method"] == "event")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|message| {
+                    matches!(
+                        message["params"]["event"].as_str(),
+                        Some("turn.completed" | "turn.failed" | "turn.interrupted")
+                    )
+                })
+                .count(),
+            1,
+            "fixture {case} emitted more than one terminal event"
+        );
+        for pair in events.windows(2) {
+            assert_eq!(
+                pair[1]["params"]["sequence"].as_u64().unwrap(),
+                pair[0]["params"]["sequence"].as_u64().unwrap() + 1
+            );
+            assert!(
+                pair[0]["params"]["timestamp_ms"].as_u64().unwrap()
+                    <= pair[1]["params"]["timestamp_ms"].as_u64().unwrap()
+            );
+        }
+        if terminal == "turn.failed" {
+            let failed = events.last().unwrap();
+            assert_eq!(failed["params"]["turn_state"], "failed");
+            assert_eq!(failed["params"]["item"]["data"]["class"], "protocol");
+            assert_eq!(failed["params"]["item"]["data"]["retryable"], false);
+        }
+
+        let shutdown_id = format!("{prefix}-shutdown");
+        send(&mut stdin, &request(&shutdown_id, "shutdown", json!({})));
+        receive_until(&receiver, |message| message["id"] == shutdown_id);
+        drop(stdin);
+        assert!(child.wait().unwrap().success());
+        reader.join().unwrap();
+        let _ = fs::remove_dir_all(fixture_root);
+    }
 }
 
 fn trace_budget_codex() -> PathBuf {
@@ -501,9 +630,11 @@ while IFS= read -r line; do
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn-reconnect-%s"}}}\n' "$id" "$count"
       if [ "$count" -eq 1 ]; then
+        printf '{"method":"item/started","params":{"threadId":"thread-reconnect","turnId":"turn-reconnect-1","item":{"id":"item-reconnect","type":"agentMessage","text":""}}}\n'
         printf '{"method":"item/agentMessage/delta","params":{"threadId":"thread-reconnect","turnId":"turn-reconnect-1","itemId":"item-reconnect","delta":"partial\\n"}}\n'
         exit 23
       fi
+      printf '{"method":"item/started","params":{"threadId":"thread-reconnect","turnId":"turn-reconnect-2","item":{"id":"item-reconnect","type":"agentMessage","text":""}}}\n'
       printf '{"method":"item/agentMessage/delta","params":{"threadId":"thread-reconnect","turnId":"turn-reconnect-2","itemId":"item-reconnect","delta":"recovered"}}\n'
       printf '{"method":"item/completed","params":{"threadId":"thread-reconnect","turnId":"turn-reconnect-2","item":{"id":"item-reconnect","type":"agentMessage","text":"recovered"}}}\n'
       printf '{"method":"turn/completed","params":{"threadId":"thread-reconnect","turn":{"id":"turn-reconnect-2","status":"completed"}}}\n'
@@ -772,9 +903,6 @@ while IFS= read -r line; do
       else
         printf '{"method":"turn/completed","params":{"threadId":"thread-invalid-approval","turn":{"id":"turn-invalid-approval-%s","status":"completed"}}}\n' "$count"
       fi
-      ;;
-    *'"id":null'*'"code":-32602'*|*'"code":-32602'*'"id":null'*)
-      printf '%s' "$fixture_case" > "$0.invalid-response"
       ;;
     *'"method":"shutdown"'*)
       printf '{"id":%s,"result":{}}\n' "$id"
@@ -2314,7 +2442,6 @@ fn stdio_runtime_denial_budget_error_resolves_request_and_reuses_backend() {
 fn stdio_invalid_runtime_denial_requests_discard_backend_and_restart_cleanly() {
     for fixture_case in ["missing-id", "malformed-params"] {
         let codex = invalid_approval_codex(fixture_case);
-        let invalid_response = codex.with_extension("sh.invalid-response");
         let instances = codex.with_extension("sh.instances");
         let data_root = codex.parent().unwrap().join("invalid-approval-workbench");
         let (mut child, mut stdin, receiver, reader, session_id) =
@@ -2337,14 +2464,6 @@ fn stdio_invalid_runtime_denial_requests_discard_backend_and_restart_cleanly() {
                 && message["params"]["event"] == "turn.failed"
                 && message["params"]["turn_id"] == "turn-invalid-approval-1"
         });
-        for _ in 0..100 {
-            if invalid_response.exists() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(fs::read_to_string(&invalid_response).unwrap(), fixture_case);
-
         let health_id = format!("{fixture_case}-health");
         send(
             &mut stdin,

@@ -28,6 +28,7 @@ public:
     // The sidecar must not inherit credential-bearing desktop environment values.
     static QProcessEnvironment sanitizedSidecarEnvironment(
         const QProcessEnvironment &environment);
+    static QString timelineEventIdentity(const QJsonObject &event);
 
     void start();
     void stop();

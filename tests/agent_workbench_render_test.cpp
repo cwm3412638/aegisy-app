@@ -201,6 +201,37 @@ public:
         return widget.m_lastTimelineEventSequences.value(sessionId, 0);
     }
 
+    static quint64 timelineTimestampForSession(const AgentWorkbenchWidget &widget,
+                                               const QString &sessionId)
+    {
+        return widget.m_lastTimelineEventTimestamps.value(sessionId, 0);
+    }
+
+    static QString timelineTurnState(const AgentWorkbenchWidget &widget,
+                                     const QString &sessionId,
+                                     const QString &turnId)
+    {
+        const QString key = sessionId + QChar(0x1f) + turnId;
+        return widget.m_turnStates.value(key);
+    }
+
+    static QString timelineItemState(const AgentWorkbenchWidget &widget,
+                                     const QString &sessionId,
+                                     const QString &turnId,
+                                     const QString &itemId)
+    {
+        const QString key = sessionId + QChar(0x1f) + turnId
+            + QChar(0x1f) + itemId;
+        return widget.m_itemStates.value(key);
+    }
+
+    static quint64 unknownTimelineEventCount(const AgentWorkbenchWidget &widget)
+    {
+        quint64 total = widget.m_unknownTimelineEventOverflowCount;
+        for (quint64 count : widget.m_unknownTimelineEventCounts) total += count;
+        return total;
+    }
+
     static void resetTimelineValidation(AgentWorkbenchWidget &widget)
     {
         widget.m_turnRunning = false;
@@ -208,10 +239,14 @@ public:
         widget.m_activeTurnSessionId.clear();
         widget.m_activeTurnId.clear();
         widget.m_lastTimelineEventSequences.clear();
+        widget.m_lastTimelineEventTimestamps.clear();
         widget.m_turnStates.clear();
         widget.m_itemKinds.clear();
         widget.m_itemRoles.clear();
         widget.m_itemStates.clear();
+        widget.m_itemRevisions.clear();
+        widget.m_unknownTimelineEventCounts.clear();
+        widget.m_unknownTimelineEventOverflowCount = 0;
     }
 
     static bool hasTimelineItem(const AgentWorkbenchWidget &widget, const QString &id)
@@ -223,6 +258,20 @@ public:
     {
         const QLabel *label = widget.m_itemLabels.value(id, nullptr);
         return label ? label->text() : QString();
+    }
+
+    static int timelineItemPresentationCount(const AgentWorkbenchWidget &widget,
+                                             const QString &id)
+    {
+        QSet<const QLabel *> labels;
+        const QString suffix = QChar(0x1f) + id;
+        for (auto entry = widget.m_itemLabels.cbegin();
+             entry != widget.m_itemLabels.cend(); ++entry) {
+            if (entry.key() == id || entry.key().endsWith(suffix)) {
+                labels.insert(entry.value());
+            }
+        }
+        return labels.size();
     }
 
     static void prepareSessionRead(AgentWorkbenchWidget &widget, const QString &requestId,
@@ -474,19 +523,52 @@ QJsonObject mutateDegradation(QJsonObject snapshot, int index,
 QJsonObject timelineEnvelope(const QString &event, const QString &sessionId,
                              const QString &turnId,
                              const QJsonValue &item = QJsonValue(QJsonValue::Null),
-                             quint64 explicitSequence = 0)
+                             quint64 explicitSequence = 0,
+                             quint64 explicitTimestamp = 0,
+                             quint64 explicitRevision = 0)
 {
     static QHash<QString, quint64> nextSequences;
+    static QHash<QString, quint64> nextRevisions;
     const quint64 sequence = explicitSequence == 0
         ? ++nextSequences[sessionId] : explicitSequence;
-    return QJsonObject{
+    const quint64 timestamp = explicitTimestamp == 0
+        ? 1'000 + sequence : explicitTimestamp;
+    const QString turnState = event == QStringLiteral("turn.completed")
+        ? QStringLiteral("completed")
+        : event == QStringLiteral("turn.failed")
+            ? QStringLiteral("failed")
+            : event == QStringLiteral("turn.interrupted")
+                ? QStringLiteral("interrupted") : QStringLiteral("running");
+    const bool hasItem = item.isObject();
+    QJsonValue itemUpdate(QJsonValue::Null);
+    quint64 revision = 0;
+    if (hasItem) {
+        const QString itemId = item.toObject().value(QStringLiteral("id")).toString();
+        const QString revisionKey = sessionId + QChar(0x1f) + turnId
+            + QChar(0x1f) + itemId;
+        revision = explicitRevision == 0
+            ? ++nextRevisions[revisionKey] : explicitRevision;
+        itemUpdate = QJsonObject{
+            {QStringLiteral("revision"), static_cast<double>(revision)},
+            {QStringLiteral("content_mode"), QStringLiteral("snapshot-replacement")},
+        };
+    }
+    QJsonObject envelope{
+        {QStringLiteral("schema_version"), QStringLiteral("timeline-event/0.1")},
+        {QStringLiteral("event_id"), QString()},
         {QStringLiteral("sequence"), static_cast<double>(sequence)},
-        {QStringLiteral("timestamp_ms"), 1'000.0 + static_cast<double>(sequence)},
+        {QStringLiteral("timestamp_ms"), static_cast<double>(timestamp)},
+        {QStringLiteral("correlation_id"), turnId},
         {QStringLiteral("session_id"), sessionId},
         {QStringLiteral("turn_id"), turnId},
+        {QStringLiteral("turn_state"), turnState},
         {QStringLiteral("event"), event},
         {QStringLiteral("item"), item},
+        {QStringLiteral("item_update"), itemUpdate},
     };
+    envelope.insert(QStringLiteral("event_id"),
+                    AgentRuntimeClient::timelineEventIdentity(envelope));
+    return envelope;
 }
 
 QJsonObject timelineMessage(const QString &id, const QString &state,
@@ -740,57 +822,138 @@ bool verifyStrictTimelineValidation(QApplication &application,
     AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
     AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, sessionId);
     runtimeClient->timelineEvent(timelineEnvelope(
-        QStringLiteral("turn.started"), sessionId, turnId, QJsonValue(QJsonValue::Null), 1));
+        QStringLiteral("turn.started"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 1, 1'001));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.started"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("started"),
+                        QString()), 2, 1'002, 1));
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("item.delta"), sessionId, turnId,
         timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
-                        QStringLiteral("partial")), 2));
+                        QStringLiteral("partial")), 3, 1'003, 2));
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("turn.cancellation-acknowledged"), sessionId, turnId,
-        QJsonValue(QJsonValue::Null), 3));
+        QJsonValue(QJsonValue::Null), 4, 1'004));
     application.processEvents();
     if (!expect(AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
                     && AgentWorkbenchWidgetTestAccess::turnCancelling(workbench)
-                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 3
+                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 4
+                    && AgentWorkbenchWidgetTestAccess::timelineTimestampForSession(
+                           workbench, sessionId) == 1'004
                     && AgentWorkbenchWidgetTestAccess::timelineItemText(
                            workbench, QStringLiteral("live-item")) == QStringLiteral("partial"),
                 "valid bound live event was rejected")) {
         return false;
     }
 
-    // Duplicate, decreasing, and gapped envelopes must leave every live state untouched.
+    // Every invalid candidate targets the next cursor and must be atomic.
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("turn.completed"), sessionId, turnId,
-        QJsonValue(QJsonValue::Null), 3));
+        QJsonValue(QJsonValue::Null), 4, 1'005));
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("turn.completed"), sessionId, turnId,
-        QJsonValue(QJsonValue::Null), 2));
+        QJsonValue(QJsonValue::Null), 6, 1'006));
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("turn.completed"), sessionId, turnId,
-        QJsonValue(QJsonValue::Null), 5));
+        QJsonValue(QJsonValue::Null), 5, 1'005));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.interrupted"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 5, 1'005));
+    QJsonObject timestampRollback = timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("rollback")), 5, 1'003, 3);
+    runtimeClient->timelineEvent(timestampRollback);
+    QJsonObject correlationReplacement = timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("correlation")), 5, 1'005, 3);
+    correlationReplacement.insert(QStringLiteral("correlation_id"),
+                                  QStringLiteral("other-turn"));
+    runtimeClient->timelineEvent(correlationReplacement);
+    QJsonObject wrongTurnState = timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("wrong-state")), 5, 1'005, 3);
+    wrongTurnState.insert(QStringLiteral("turn_state"), QStringLiteral("completed"));
+    runtimeClient->timelineEvent(wrongTurnState);
+    QJsonObject missingUpdate = timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("missing-update")), 5, 1'005, 3);
+    missingUpdate.insert(QStringLiteral("item_update"), QJsonValue(QJsonValue::Null));
+    runtimeClient->timelineEvent(missingUpdate);
+    QJsonObject wrongSchema = timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("wrong-schema")), 5, 1'005, 3);
+    wrongSchema.insert(QStringLiteral("schema_version"),
+                       QStringLiteral("timeline-event/0.2"));
+    runtimeClient->timelineEvent(wrongSchema);
+    QJsonObject wrongEventId = timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("wrong-event-id")), 5, 1'005, 3);
+    wrongEventId.insert(QStringLiteral("event_id"), QStringLiteral("event:sha256:ABC"));
+    runtimeClient->timelineEvent(wrongEventId);
+    QJsonObject identityTamper = timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("before-tamper")), 5, 1'005, 3);
+    QJsonObject tamperedItem = identityTamper.value(QStringLiteral("item")).toObject();
+    tamperedItem.insert(QStringLiteral("content"), QStringLiteral("after-tamper"));
+    identityTamper.insert(QStringLiteral("item"), tamperedItem);
+    runtimeClient->timelineEvent(identityTamper);
+    QJsonObject extraEnvelopeField = timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("extra-field")), 5, 1'005, 3);
+    extraEnvelopeField.insert(QStringLiteral("extra"), true);
+    runtimeClient->timelineEvent(extraEnvelopeField);
+    QJsonObject wrongContentMode = timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("wrong-content-mode")), 5, 1'005, 3);
+    QJsonObject wrongUpdate = wrongContentMode.value(
+        QStringLiteral("item_update")).toObject();
+    wrongUpdate.insert(QStringLiteral("content_mode"), QStringLiteral("append"));
+    wrongContentMode.insert(QStringLiteral("item_update"), wrongUpdate);
+    runtimeClient->timelineEvent(wrongContentMode);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.persistence-failed"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 5, 1'005));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("revision-jump")), 5, 1'005, 4));
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("unknown.event"), sessionId, turnId,
         timelineMessage(QStringLiteral("unknown-event-item"),
-                        QStringLiteral("delta"), QStringLiteral("must-not-render")), 4));
+                        QStringLiteral("completed"), QStringLiteral("must-not-render")),
+        5, 1'005, 1));
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("turn.completed"), QStringLiteral("other-session"), turnId,
-        QJsonValue(QJsonValue::Null), 4));
+        QJsonValue(QJsonValue::Null), 5, 1'005));
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("turn.completed"), sessionId, QStringLiteral("other-turn"),
-        QJsonValue(QJsonValue::Null), 4));
+        QJsonValue(QJsonValue::Null), 5, 1'005));
     application.processEvents();
     if (!expect(!AgentWorkbenchWidgetTestAccess::hasTimelineItem(
                     workbench, QStringLiteral("unknown-event-item"))
                     && AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
                     && AgentWorkbenchWidgetTestAccess::turnCancelling(workbench)
-                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 3,
+                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 4
+                    && AgentWorkbenchWidgetTestAccess::timelineTimestampForSession(
+                           workbench, sessionId) == 1'004
+                    && AgentWorkbenchWidgetTestAccess::unknownTimelineEventCount(workbench) == 0,
                 "rejected envelope mutated the Timeline, cancellation, Turn, or sequence")) {
         return false;
     }
 
     const QList<QJsonObject> invalidItems{
         QJsonObject{{QStringLiteral("id"), QStringLiteral("bad-kind")},
-                    {QStringLiteral("kind"), QStringLiteral("unknown")},
+                    {QStringLiteral("kind"), QStringLiteral("Bad Kind")},
                     {QStringLiteral("role"), QStringLiteral("agent")},
                     {QStringLiteral("state"), QStringLiteral("delta")},
                     {QStringLiteral("content"), QStringLiteral("bad")}},
@@ -804,27 +967,49 @@ bool verifyStrictTimelineValidation(QApplication &application,
                     {QStringLiteral("role"), QStringLiteral("agent")},
                     {QStringLiteral("state"), QStringLiteral("unknown")},
                     {QStringLiteral("content"), QStringLiteral("bad")}},
-        timelineMessage(QString(257, QLatin1Char('i')), QStringLiteral("delta"),
+        timelineMessage(QString(129, QLatin1Char('i')), QStringLiteral("delta"),
+                        QStringLiteral("bad")),
+        timelineMessage(QStringLiteral("项目-item"), QStringLiteral("delta"),
                         QStringLiteral("bad")),
         timelineMessage(QStringLiteral("oversized-content"), QStringLiteral("delta"),
                         QString(65 * 1024, QLatin1Char('x'))),
     };
     for (const QJsonObject &item : invalidItems) {
         runtimeClient->timelineEvent(timelineEnvelope(
-            QStringLiteral("item.delta"), sessionId, turnId, item, 4));
+            QStringLiteral("item.delta"), sessionId, turnId, item, 5, 1'005, 3));
     }
-    QJsonObject oversizedData = timelineMessage(
-        QStringLiteral("oversized-data"), QStringLiteral("delta"), QStringLiteral("bad"));
-    oversizedData.insert(QStringLiteral("data"), QJsonObject{
-        {QStringLiteral("payload"), QString(257 * 1024, QLatin1Char('d'))},
+    QJsonObject unsafeIntegerData = timelineMessage(
+        QStringLiteral("unsafe-integer-data"), QStringLiteral("delta"),
+        QStringLiteral("bad"));
+    unsafeIntegerData.insert(QStringLiteral("data"), QJsonObject{
+        {QStringLiteral("unsafe"), 9'007'199'254'740'992.0},
     });
     runtimeClient->timelineEvent(timelineEnvelope(
-        QStringLiteral("item.delta"), sessionId, turnId, oversizedData, 4));
+        QStringLiteral("item.delta"), sessionId, turnId, unsafeIntegerData,
+        5, 1'005, 3));
+    QJsonObject floatData = timelineMessage(
+        QStringLiteral("float-data"), QStringLiteral("delta"), QStringLiteral("bad"));
+    floatData.insert(QStringLiteral("data"), QJsonObject{
+        {QStringLiteral("unsafe"), 1.5},
+    });
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId, floatData, 5, 1'005, 3));
+    QJsonObject invalidDataKey = timelineMessage(
+        QStringLiteral("invalid-data-key"), QStringLiteral("delta"),
+        QStringLiteral("bad"));
+    invalidDataKey.insert(QStringLiteral("data"), QJsonObject{
+        {QStringLiteral("项目"), true},
+    });
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId, invalidDataKey,
+        5, 1'005, 3));
     application.processEvents();
     for (const QString &id : {QStringLiteral("bad-kind"), QStringLiteral("bad-role"),
                               QStringLiteral("bad-state"),
                               QStringLiteral("oversized-content"),
-                              QStringLiteral("oversized-data")}) {
+                              QStringLiteral("unsafe-integer-data"),
+                              QStringLiteral("float-data"),
+                              QStringLiteral("invalid-data-key")}) {
         if (!expect(!AgentWorkbenchWidgetTestAccess::hasTimelineItem(workbench, id),
                     "malformed or oversized live item was rendered")) {
             return false;
@@ -832,50 +1017,335 @@ bool verifyStrictTimelineValidation(QApplication &application,
     }
 
     runtimeClient->timelineEvent(timelineEnvelope(
-        QStringLiteral("item.completed"), sessionId, turnId,
-        timelineMessage(QStringLiteral("live-item"), QStringLiteral("completed"),
-                        QStringLiteral("complete")), 4));
+        QStringLiteral("unknown.future-event"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 5, 1'004));
     application.processEvents();
-    if (!expect(AgentWorkbenchWidgetTestAccess::timelineItemText(
-                    workbench, QStringLiteral("live-item")) == QStringLiteral("complete")
-                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 4,
-                "valid Item completion was rejected after malformed envelopes")) {
+    if (!expect(AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
+                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 5
+                    && AgentWorkbenchWidgetTestAccess::timelineTimestampForSession(
+                           workbench, sessionId) == 1'004
+                    && AgentWorkbenchWidgetTestAccess::unknownTimelineEventCount(workbench) == 1
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("unknown-event-item")),
+                "well-formed unknown event did not advance only its bounded diagnostics")) {
         return false;
     }
 
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("item.delta"), sessionId, turnId,
         timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
-                        QStringLiteral("regressed")), 5));
-    QJsonObject driftItem{
-        {QStringLiteral("id"), QStringLiteral("live-item")},
-        {QStringLiteral("kind"), QStringLiteral("error")},
-        {QStringLiteral("role"), QStringLiteral("system")},
-        {QStringLiteral("state"), QStringLiteral("completed")},
-        {QStringLiteral("content"), QStringLiteral("identity drift")},
-    };
+                        QStringLiteral("after unknown")), 6, 1'005, 3));
     runtimeClient->timelineEvent(timelineEnvelope(
-        QStringLiteral("turn.failed"), sessionId, turnId, driftItem, 5));
+        QStringLiteral("item.completed"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("completed"),
+                        QStringLiteral("complete")), 7, 1'006, 4));
     application.processEvents();
     if (!expect(AgentWorkbenchWidgetTestAccess::timelineItemText(
                     workbench, QStringLiteral("live-item")) == QStringLiteral("complete")
                     && AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
-                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 4,
-                "terminal Item regressed, identity drift ended the Turn, or rejection consumed sequence")) {
+                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 7,
+                "legal event after unknown or Item completion was rejected")) {
         return false;
     }
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.delta"), sessionId, turnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("delta"),
+                        QStringLiteral("after-item-terminal")), 8, 1'007, 5));
+    QJsonObject terminalStateMismatch = timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 8, 1'007);
+    terminalStateMismatch.insert(QStringLiteral("turn_state"),
+                                 QStringLiteral("failed"));
+    runtimeClient->timelineEvent(terminalStateMismatch);
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("turn.completed"), sessionId, turnId,
-        QJsonValue(QJsonValue::Null), 5));
+        QJsonValue(QJsonValue::Null), 8, 1'007));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 9, 1'008));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), sessionId, turnId,
+        timelineMessage(QStringLiteral("post-terminal"), QStringLiteral("completed"),
+                        QStringLiteral("must-not-render")), 9, 1'008, 1));
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("turn.started"), sessionId, turnId,
-        QJsonValue(QJsonValue::Null), 6));
+        QJsonValue(QJsonValue::Null), 9, 1'008));
     application.processEvents();
     if (!expect(!AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
-                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 5,
-                "completed Turn reopened under the same identity")) {
+                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 8
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("post-terminal")),
+                "terminal Turn accepted a second terminal, later Item, or reopen")) {
         return false;
     }
+
+    runtimeClient->runtimeRestarted(QStringLiteral("adapter-restart-fixture"), QJsonObject{
+        {QStringLiteral("health"), QJsonObject{
+            {QStringLiteral("state"), QStringLiteral("running")},
+            {QStringLiteral("restart_required"), false},
+        }},
+    });
+    const QString postRestartTurnId = QStringLiteral("timeline-post-restart-turn");
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), sessionId, postRestartTurnId,
+        QJsonValue(QJsonValue::Null), 9, 1'009));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), sessionId, postRestartTurnId,
+        timelineMessage(QStringLiteral("post-restart-item"),
+                        QStringLiteral("completed"), QStringLiteral("continued")),
+        10, 1'010, 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionId, postRestartTurnId,
+        QJsonValue(QJsonValue::Null), 11, 1'011));
+    application.processEvents();
+    if (!expect(!AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
+                    && AgentWorkbenchWidgetTestAccess::lastTimelineSequence(workbench) == 11
+                    && AgentWorkbenchWidgetTestAccess::timelineItemText(
+                           workbench, QStringLiteral("post-restart-item"))
+                        == QStringLiteral("continued"),
+                "Codex backend restart reset the live sidecar Timeline cursor")) {
+        return false;
+    }
+
+    const QString failedSessionId = QStringLiteral("timeline-partial-failure-session");
+    const QString failedTurnId = QStringLiteral("timeline-partial-failure-turn");
+    const QString partialItemId = QStringLiteral("partial-before-failure");
+    const QString failureItemId = QStringLiteral("structured-failure");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, failedSessionId);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), failedSessionId, failedTurnId,
+        QJsonValue(QJsonValue::Null), 1, 3'001));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.started"), failedSessionId, failedTurnId,
+        timelineMessage(partialItemId, QStringLiteral("started"), QString()),
+        2, 3'002, 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.delta"), failedSessionId, failedTurnId,
+        timelineMessage(partialItemId, QStringLiteral("delta"),
+                        QStringLiteral("retained partial output")),
+        3, 3'003, 2));
+    const QJsonObject failureItem{
+        {QStringLiteral("id"), failureItemId},
+        {QStringLiteral("kind"), QStringLiteral("error")},
+        {QStringLiteral("role"), QStringLiteral("system")},
+        {QStringLiteral("state"), QStringLiteral("completed")},
+        {QStringLiteral("content"), QStringLiteral("structured failure")},
+    };
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.failed"), failedSessionId, failedTurnId,
+        failureItem, 4, 3'004, 1));
+    application.processEvents();
+    if (!expect(!AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, failedSessionId) == 4
+                    && AgentWorkbenchWidgetTestAccess::timelineTurnState(
+                           workbench, failedSessionId, failedTurnId)
+                        == QStringLiteral("failed")
+                    && AgentWorkbenchWidgetTestAccess::timelineItemState(
+                           workbench, failedSessionId, failedTurnId, partialItemId)
+                        == QStringLiteral("delta")
+                    && AgentWorkbenchWidgetTestAccess::timelineItemText(
+                           workbench, partialItemId)
+                        == QStringLiteral("retained partial output")
+                    && AgentWorkbenchWidgetTestAccess::timelineItemState(
+                           workbench, failedSessionId, failedTurnId, failureItemId)
+                        == QStringLiteral("completed")
+                    && AgentWorkbenchWidgetTestAccess::timelineItemText(
+                           workbench, failureItemId)
+                        == QStringLiteral("structured failure"),
+                "structured failure discarded partial output or did not close the Turn")) {
+        return false;
+    }
+
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), failedSessionId, failedTurnId,
+        timelineMessage(QStringLiteral("late-after-failure"),
+                        QStringLiteral("completed"),
+                        QStringLiteral("must-not-render")),
+        5, 3'005, 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), failedSessionId, failedTurnId,
+        QJsonValue(QJsonValue::Null), 5, 3'005));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), failedSessionId, failedTurnId,
+        QJsonValue(QJsonValue::Null), 5, 3'005));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                       workbench, failedSessionId) == 4
+                    && AgentWorkbenchWidgetTestAccess::timelineTurnState(
+                           workbench, failedSessionId, failedTurnId)
+                        == QStringLiteral("failed")
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("late-after-failure")),
+                "failed Turn accepted a later Item, terminal, or reopen event")) {
+        return false;
+    }
+
+    const QString updatingSessionId = QStringLiteral("timeline-updating-terminal-session");
+    const QString updatingCompletedTurnId = QStringLiteral("timeline-updating-completed-turn");
+    const QString updatingInterruptedTurnId = QStringLiteral("timeline-updating-interrupted-turn");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, updatingSessionId);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), updatingSessionId, updatingCompletedTurnId,
+        QJsonValue(QJsonValue::Null), 1, 4'001));
+    QJsonObject usageUpdate{
+        {QStringLiteral("id"), QStringLiteral("usage-open-snapshot")},
+        {QStringLiteral("kind"), QStringLiteral("usage")},
+        {QStringLiteral("role"), QStringLiteral("system")},
+        {QStringLiteral("state"), QStringLiteral("updated")},
+        {QStringLiteral("content"), QStringLiteral("latest usage snapshot")},
+    };
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("usage.updated"), updatingSessionId, updatingCompletedTurnId,
+        usageUpdate, 2, 4'002, 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), updatingSessionId, updatingCompletedTurnId,
+        QJsonValue(QJsonValue::Null), 3, 4'003));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), updatingSessionId, updatingInterruptedTurnId,
+        QJsonValue(QJsonValue::Null), 4, 4'004));
+    QJsonObject planUpdate{
+        {QStringLiteral("id"), QStringLiteral("plan-open-snapshot")},
+        {QStringLiteral("kind"), QStringLiteral("plan")},
+        {QStringLiteral("role"), QStringLiteral("agent")},
+        {QStringLiteral("state"), QStringLiteral("updated")},
+        {QStringLiteral("content"), QStringLiteral("latest plan snapshot")},
+    };
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.plan.updated"), updatingSessionId,
+        updatingInterruptedTurnId, planUpdate, 5, 4'005, 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.interrupted"), updatingSessionId,
+        updatingInterruptedTurnId, QJsonValue(QJsonValue::Null), 6, 4'006));
+    const QString atomicTruncatedTurnId = QStringLiteral("timeline-atomic-truncated-turn");
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), updatingSessionId, atomicTruncatedTurnId,
+        QJsonValue(QJsonValue::Null), 7, 4'007));
+    const QJsonObject atomicTruncatedItem{
+        {QStringLiteral("id"), QStringLiteral("atomic-truncated-snapshot")},
+        {QStringLiteral("kind"), QStringLiteral("usage")},
+        {QStringLiteral("role"), QStringLiteral("system")},
+        {QStringLiteral("state"), QStringLiteral("truncated")},
+        {QStringLiteral("content"), QStringLiteral("usage updates truncated")},
+    };
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("usage.truncated"), updatingSessionId,
+        atomicTruncatedTurnId, atomicTruncatedItem, 8, 4'008, 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), updatingSessionId, atomicTruncatedTurnId,
+        QJsonValue(QJsonValue::Null), 9, 4'009));
+    application.processEvents();
+    if (!expect(!AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, updatingSessionId) == 9
+                    && AgentWorkbenchWidgetTestAccess::timelineTurnState(
+                           workbench, updatingSessionId, updatingCompletedTurnId)
+                        == QStringLiteral("completed")
+                    && AgentWorkbenchWidgetTestAccess::timelineTurnState(
+                           workbench, updatingSessionId, updatingInterruptedTurnId)
+                        == QStringLiteral("interrupted")
+                    && AgentWorkbenchWidgetTestAccess::timelineItemState(
+                           workbench, updatingSessionId, updatingCompletedTurnId,
+                           QStringLiteral("usage-open-snapshot"))
+                        == QStringLiteral("updated")
+                    && AgentWorkbenchWidgetTestAccess::timelineItemState(
+                           workbench, updatingSessionId, updatingInterruptedTurnId,
+                           QStringLiteral("plan-open-snapshot"))
+                        == QStringLiteral("updated")
+                    && AgentWorkbenchWidgetTestAccess::timelineTurnState(
+                           workbench, updatingSessionId, atomicTruncatedTurnId)
+                        == QStringLiteral("completed")
+                    && AgentWorkbenchWidgetTestAccess::timelineItemState(
+                           workbench, updatingSessionId, atomicTruncatedTurnId,
+                           QStringLiteral("atomic-truncated-snapshot"))
+                        == QStringLiteral("truncated"),
+                "updated terminal or atomic truncated Item lifecycle diverged from Runtime")) {
+        return false;
+    }
+
+    const QString secondSessionId = QStringLiteral("timeline-validation-session-two");
+    const QString secondTurnId = QStringLiteral("timeline-validation-turn-two");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, secondSessionId);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), secondSessionId, secondTurnId,
+        QJsonValue(QJsonValue::Null), 1, 2'001));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), secondSessionId, secondTurnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("completed"),
+                        QStringLiteral("same ID in second Session")), 2, 2'002, 1));
+    QJsonObject usageItem{
+        {QStringLiteral("id"), QStringLiteral("usage-revisions")},
+        {QStringLiteral("kind"), QStringLiteral("usage")},
+        {QStringLiteral("role"), QStringLiteral("system")},
+        {QStringLiteral("state"), QStringLiteral("updated")},
+        {QStringLiteral("content"), QStringLiteral("usage one")},
+    };
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("usage.updated"), secondSessionId, secondTurnId,
+        usageItem, 3, 2'003, 1));
+    usageItem.insert(QStringLiteral("content"), QStringLiteral("usage two"));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("usage.updated"), secondSessionId, secondTurnId,
+        usageItem, 4, 2'004, 2));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("usage.updated"), secondSessionId, secondTurnId,
+        usageItem, 5, 2'005, 2));
+    usageItem.insert(QStringLiteral("state"), QStringLiteral("truncated"));
+    usageItem.insert(QStringLiteral("content"), QStringLiteral("usage truncated"));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("usage.truncated"), secondSessionId, secondTurnId,
+        usageItem, 5, 2'005, 3));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), secondSessionId, secondTurnId,
+        QJsonValue(QJsonValue::Null), 6, 2'006));
+
+    const QString thirdTurnId = QStringLiteral("timeline-validation-turn-three");
+    const QString boundaryItemId(128, QLatin1Char('i'));
+    const QString oversizedItemId(129, QLatin1Char('i'));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), secondSessionId, thirdTurnId,
+        QJsonValue(QJsonValue::Null), 7, 2'007));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), secondSessionId, thirdTurnId,
+        timelineMessage(QStringLiteral("live-item"), QStringLiteral("completed"),
+                        QStringLiteral("same ID in another Turn")), 8, 2'008, 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), secondSessionId, thirdTurnId,
+        timelineMessage(boundaryItemId, QStringLiteral("completed"),
+                        QStringLiteral("128-byte Item ID")), 9, 2'009, 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), secondSessionId, thirdTurnId,
+        timelineMessage(oversizedItemId, QStringLiteral("completed"),
+                        QStringLiteral("must-not-render")), 10, 2'010, 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), secondSessionId, thirdTurnId,
+        timelineMessage(QStringLiteral("项目-item"), QStringLiteral("completed"),
+                        QStringLiteral("must-not-render")), 10, 2'010, 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), secondSessionId, thirdTurnId,
+        QJsonValue(QJsonValue::Null), 10, 2'010));
+    application.processEvents();
+    if (!expect(!AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, secondSessionId) == 10
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, sessionId) == 11
+                    && AgentWorkbenchWidgetTestAccess::timelineItemText(
+                           workbench, QStringLiteral("live-item"))
+                        == QStringLiteral("same ID in another Turn")
+                    && AgentWorkbenchWidgetTestAccess::timelineItemPresentationCount(
+                           workbench, QStringLiteral("live-item")) == 3
+                    && AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                           workbench, boundaryItemId)
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                           workbench, oversizedItemId)
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                           workbench, QStringLiteral("项目-item")),
+                "Session/Turn Item isolation, revision stream, or ID bounds failed")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, sessionId);
 
     QJsonObject replayGood = timelineMessage(
         QStringLiteral("replay-good"), QStringLiteral("completed"),
@@ -885,7 +1355,7 @@ bool verifyStrictTimelineValidation(QApplication &application,
         QStringLiteral("replay-bad"), QStringLiteral("completed"),
         QStringLiteral("bad"));
     replayBad.insert(QStringLiteral("sequence"), 4);
-    replayBad.insert(QStringLiteral("kind"), QStringLiteral("unknown"));
+    replayBad.insert(QStringLiteral("kind"), QStringLiteral("Bad Kind"));
     AgentWorkbenchWidgetTestAccess::prepareSessionRead(
         workbench, QStringLiteral("malformed-replay"), sessionId, false);
     runtimeClient->sessionRead(
@@ -1080,46 +1550,100 @@ bool verifySessionScopedTimelineSequences(QApplication &application,
     if (!runtimeClient) return false;
     const QString firstSession = QStringLiteral("timeline-session-first");
     const QString secondSession = QStringLiteral("timeline-session-second");
+    const QString firstTurn = QStringLiteral("turn-first");
+    const QString secondTurn = QStringLiteral("turn-second");
+    const QString sharedItem = QStringLiteral("shared-item");
+    const QString genericKind = QStringLiteral("a") + QString(63, QLatin1Char('g'));
     AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
 
     AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, firstSession);
     runtimeClient->timelineEvent(timelineEnvelope(
-        QStringLiteral("turn.started"), firstSession, QStringLiteral("turn-first"),
-        QJsonValue(QJsonValue::Null), 1));
+        QStringLiteral("turn.started"), firstSession, firstTurn,
+        QJsonValue(QJsonValue::Null), 1, 1'001));
     runtimeClient->timelineEvent(timelineEnvelope(
-        QStringLiteral("turn.completed"), firstSession, QStringLiteral("turn-first"),
-        QJsonValue(QJsonValue::Null), 2));
+        QStringLiteral("turn.started"), secondSession, secondTurn,
+        QJsonValue(QJsonValue::Null), 1, 2'001));
 
-    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, secondSession);
+    QJsonObject backgroundItem = timelineMessage(
+        sharedItem, QStringLiteral("started"), QStringLiteral("background-start"),
+        QStringLiteral("tool"));
+    backgroundItem.insert(QStringLiteral("kind"), genericKind);
+    backgroundItem.insert(QStringLiteral("data"), QJsonObject{
+        {QStringLiteral("payload"), QString(3 * 1024 * 1024, QLatin1Char('d'))},
+        {QStringLiteral("integers"), QJsonArray{
+            1.0, 1e3, -0.0,
+            9'007'199'254'740'991.0,
+            -9'007'199'254'740'991.0,
+        }},
+    });
     runtimeClient->timelineEvent(timelineEnvelope(
-        QStringLiteral("turn.started"), secondSession, QStringLiteral("turn-second"),
-        QJsonValue(QJsonValue::Null), 1));
-    runtimeClient->timelineEvent(timelineEnvelope(
-        QStringLiteral("turn.completed"), secondSession, QStringLiteral("turn-second"),
-        QJsonValue(QJsonValue::Null), 2));
+        QStringLiteral("item.started"), secondSession, secondTurn,
+        backgroundItem, 2, 2'002, 1));
 
-    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, firstSession);
+    QJsonObject foregroundItem = timelineMessage(
+        sharedItem, QStringLiteral("completed"), QStringLiteral("foreground-only"));
+    foregroundItem.insert(QStringLiteral("kind"), QStringLiteral("future.message"));
     runtimeClient->timelineEvent(timelineEnvelope(
-        QStringLiteral("turn.started"), firstSession, QStringLiteral("turn-first-resumed"),
-        QJsonValue(QJsonValue::Null), 3));
+        QStringLiteral("item.completed"), firstSession, firstTurn,
+        foregroundItem, 2, 1'002, 1));
+
+    backgroundItem.insert(QStringLiteral("state"), QStringLiteral("delta"));
+    backgroundItem.insert(QStringLiteral("content"), QStringLiteral("background-delta"));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.delta"), secondSession, secondTurn,
+        backgroundItem, 3, 2'003, 2));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), firstSession, firstTurn,
+        QJsonValue(QJsonValue::Null), 3, 1'003));
+
+    backgroundItem.insert(QStringLiteral("state"), QStringLiteral("completed"));
+    backgroundItem.insert(QStringLiteral("content"), QStringLiteral("background-complete"));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), secondSession, secondTurn,
+        backgroundItem, 4, 2'004, 3));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), secondSession, secondTurn,
+        QJsonValue(QJsonValue::Null), 5, 2'005));
     application.processEvents();
-    const bool modeSwitchBlocked = !AgentWorkbenchWidgetTestAccess::activateMode(
-                                       workbench, QStringLiteral("work"))
-        && AgentWorkbenchWidgetTestAccess::currentMode(workbench) == QStringLiteral("chat");
     const bool scoped = AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
                             workbench, firstSession) == 3
         && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
-               workbench, secondSession) == 2
-        && AgentWorkbenchWidgetTestAccess::turnRunning(workbench) && modeSwitchBlocked;
+               workbench, secondSession) == 5
+        && AgentWorkbenchWidgetTestAccess::timelineItemState(
+               workbench, secondSession, secondTurn, sharedItem)
+               == QStringLiteral("completed")
+        && AgentWorkbenchWidgetTestAccess::timelineItemText(workbench, sharedItem)
+               == QStringLiteral("foreground-only")
+        && AgentWorkbenchWidgetTestAccess::timelineItemPresentationCount(
+               workbench, sharedItem) == 1
+        && !AgentWorkbenchWidgetTestAccess::turnRunning(workbench);
+
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, secondSession);
+    const QString resumedTurn = QStringLiteral("turn-second-resumed");
     runtimeClient->timelineEvent(timelineEnvelope(
-        QStringLiteral("turn.completed"), firstSession,
-        QStringLiteral("turn-first-resumed"), QJsonValue(QJsonValue::Null), 4));
+        QStringLiteral("turn.started"), secondSession, resumedTurn,
+        QJsonValue(QJsonValue::Null), 6, 2'006));
+    QJsonObject overlongKindItem = timelineMessage(
+        QStringLiteral("overlong-kind"), QStringLiteral("completed"),
+        QStringLiteral("must-not-render"));
+    overlongKindItem.insert(QStringLiteral("kind"),
+                            QStringLiteral("a") + QString(64, QLatin1Char('x')));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), secondSession, resumedTurn,
+        overlongKindItem, 7, 2'007, 1));
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), secondSession, resumedTurn,
+        QJsonValue(QJsonValue::Null), 7, 2'007));
     application.processEvents();
     return expect(scoped
                       && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
-                             workbench, firstSession) == 4
+                             workbench, firstSession) == 3
+                      && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                             workbench, secondSession) == 7
+                      && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                          workbench, QStringLiteral("overlong-kind"))
                       && !AgentWorkbenchWidgetTestAccess::turnRunning(workbench),
-                  "Timeline sequence cursor was not isolated per Session");
+                  "interleaved Session Timeline state, generic kind, or UI isolation failed");
 }
 
 bool runGit(const QString &executable, const QString &root, const QStringList &arguments,

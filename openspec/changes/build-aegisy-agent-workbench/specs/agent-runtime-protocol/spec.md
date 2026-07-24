@@ -53,21 +53,94 @@ accepted.
 The protocol SHALL expose typed lifecycle objects and immutable event identity for
 all user and Agent activity.
 
+Every live event SHALL use the strict `timeline-event/0.1` envelope. Its positive
+JSON-safe Session sequence SHALL be contiguous within the current Runtime stream;
+its Runtime-observed Unix-millisecond timestamp SHALL be non-decreasing within that
+Session; its correlation ID SHALL equal the bound Turn ID; and its content-hashed
+Event ID SHALL bind the immutable envelope fields other than the Event ID itself.
+An Item-bearing event SHALL also carry a positive contiguous revision and declare
+`snapshot-replacement` content semantics. Runtime restart persistence, subscription,
+snapshot, replay, and sequence-gap recovery remain the separate requirement below.
+Optional Item data SHALL be a recursively bounded canonical JSON tree with at most
+16 levels and 4,096 values, at most 128 properties per object and 4,096 entries per
+array, 1-128 byte ASCII graphical property names, and only exact mathematical
+integers in the signed JSON-safe range.
+
+The Event identity material SHALL be one compact UTF-8 JSON object without
+`event_id`, ordered as `schema_version`, `sequence`, `timestamp_ms`,
+`correlation_id`, `session_id`, `turn_id`, `turn_state`, `event`, `item`, and
+`item_update`. Item fields SHALL be ordered `id`, `kind`, `role`, `state`,
+`content`, then optional `data`; Item-update fields SHALL be ordered `revision`,
+then `content_mode`. Nullable Item and Item-update fields SHALL remain literal
+`null`; absent optional Item data SHALL remain omitted. Item-data object keys SHALL
+sort by ascending UTF-8 bytes at every level, arrays SHALL retain input order,
+strings SHALL use compact JSON escaping without Unicode normalization, and invalid
+Unicode scalar sequences SHALL be rejected. Every accepted mathematical integer
+SHALL serialize in shortest base-10 integer form without an exponent, decimal
+point, leading plus, or redundant leading zero, and every representation of zero
+SHALL serialize as `0`.
+
+Let `material` be those exact bytes. Event SHA-256 input SHALL be the ASCII domain
+`aegisy-timeline-event/0.1` followed by one NUL byte, the material byte length as
+one unsigned eight-byte big-endian integer, and `material`. `event_id` SHALL be
+`event:sha256:` plus the 64 lowercase hexadecimal digest characters. The transport
+wrapper and Event ID itself SHALL NOT enter the digest. Schema validates recursive
+types and per-container limits; typed Rust and Qt validation SHALL additionally
+enforce the 16-level and 4,096-value aggregate bounds. This boundary SHALL make the
+Event identity independently reproducible without numeric precision, key-order, or
+nullable-field drift.
+
 #### Scenario: User starts a turn
 - **WHEN** a valid turn-start request is accepted
 - **THEN** the runtime SHALL return a turn identity, emit a started event, stream ordered item events, and emit exactly one completed, interrupted, or failed terminal event
 
+#### Scenario: Events from two sessions interleave
+- **WHEN** live events for multiple Sessions are emitted by the same Runtime
+- **THEN** each Session SHALL retain its own contiguous sequence, non-decreasing Runtime observation time, exact Turn correlation, and immutable unique Event IDs without one Session consuming another Session's cursor
+
 #### Scenario: Item streams incremental state
 - **WHEN** a message, plan, reasoning summary, command output, patch, or tool result arrives incrementally
-- **THEN** every delta SHALL reference the same session, turn, and item identities and SHALL be reconstructable in sequence order
+- **THEN** the Item SHALL emit `started`, zero or more `delta` revisions, and one `completed` revision with unchanged Session, Turn, Item, kind, and role identity, and each update SHALL contain the complete replacement snapshot needed to reconstruct state without append heuristics
+
+#### Scenario: Atomic item completes without streaming
+- **WHEN** a user message or other atomic Item has no incremental phase
+- **THEN** it MAY emit one `completed` revision at revision one and SHALL NOT fabricate a started or delta event
+
+#### Scenario: Provider emits an invalid item order
+- **WHEN** an adapter observes a delta before start, a duplicate start or completion, an identity drift, an update after completion, or a Turn terminal while an Item is open
+- **THEN** the Runtime SHALL reject that provider sequence, retain already accepted partial Items, and close the Turn with one structured `failed` terminal event rather than forwarding the invalid event or terminating the Runtime
 
 #### Scenario: Turn fails after partial output
 - **WHEN** a runtime, provider, sandbox, tool, or transport error terminates the turn
 - **THEN** the terminal event SHALL retain partial items and a structured error class without marking incomplete mutations successful
 
+#### Scenario: Persistence fails while a turn terminates
+- **WHEN** terminal persistence cannot be confirmed
+- **THEN** the live Runtime SHALL use the single `failed` terminal state with bounded structured storage metadata and SHALL NOT invent `turn.persistence-failed` or any fourth terminal state
+
+#### Scenario: Runtime clock moves backwards
+- **WHEN** the wall clock is lower than the last emitted timestamp for a Session
+- **THEN** the next event SHALL retain the previous timestamp so observable Runtime time remains non-decreasing without rewriting provider-observed times stored separately in Item metadata
+
+#### Scenario: Older client receives an unknown event
+- **WHEN** an event name is unknown but the envelope is valid, bound to the active Turn, running, and contains no Item update
+- **THEN** the client SHALL advance the Session sequence and timestamp cursor, SHALL NOT project product state, and SHALL retain only a bounded content-free diagnostic; malformed or Item-bearing unknown events SHALL be rejected atomically
+
+#### Scenario: Event exceeds the JSON safe integer boundary
+- **WHEN** a sequence, timestamp, or Item revision is zero or exceeds `9007199254740991`
+- **THEN** the event SHALL be rejected before projection and SHALL NOT advance any Runtime or client cursor
+
+#### Scenario: Item data cannot be canonically represented by every peer
+- **WHEN** Item data contains a non-integral number, a mathematical integer outside `[-9007199254740991, 9007199254740991]`, invalid Unicode, or exceeds the recursive structure limits
+- **THEN** the event SHALL be rejected before sequence allocation and SHALL NOT enter a live or replay Timeline
+
 ### Requirement: Runtime events support reconnect and replay
 The runtime SHALL assign a monotonic session sequence and persist replayable
 events before acknowledging terminal mutations to the client.
+
+The public replay sequence SHALL be supplied by a dedicated AAP Event Journal.
+Internal Workbench projection events include metadata operations outside the public
+Timeline and SHALL NOT be exposed directly or used as an accidental replay cursor.
 
 #### Scenario: Client reconnects after losing transport
 - **WHEN** the client supplies its last acknowledged sequence

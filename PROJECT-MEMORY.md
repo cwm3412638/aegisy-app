@@ -132,7 +132,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 43 of 235 checkbox tasks are complete and 192 remain
+- OpenSpec task baseline: 44 of 235 checkbox tasks are complete and 191 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
 - OpenSpec task `3.3` is complete. The stable Schema, Rust Runtime/stdio daemon, Qt
@@ -141,7 +141,24 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   stable capability intersection, per-method capability enforcement, fixed 4 MiB
   bidirectional frame limit, strict envelope/ID/params rules, and fail-closed
   disconnect cleanup. This does not complete event replay, authenticated IPC, or
-  Agent mutation authority; tasks `3.4`, `3.5`, and `4.2` through `4.4` remain open.
+  Agent mutation authority; tasks `3.5` and `4.2` through `4.4` remain open.
+- OpenSpec task `3.4` is complete. Stable `timeline-event/0.1` envelopes now use
+  Session-local contiguous positive sequences, non-decreasing positive millisecond
+  timestamps, exact Turn correlation, explicit terminal states, and contiguous Item
+  revisions. Rust and Qt independently reproduce the domain-separated SHA-256 Event
+  ID from fixed-order canonical JSON; mathematical JSON integers normalize to the
+  shortest decimal integer, while fractional or out-of-safe-range numbers fail
+  closed. The Runtime owns Turn/Item lifecycle sequencing and closes stdio if a live
+  terminal event cannot be sequenced after durable terminal persistence. Qt validates
+  A/B/A interleaved Sessions independently, advances background Session state without
+  visible-Session UI contamination, accepts generic 64-byte Item kinds, and enforces
+  the exact 4 MiB frame boundary. Qt mirrors Runtime terminal semantics: structured
+  failure retains accepted `started`/`delta` partial Items, while completed and
+  interrupted terminals reject those open streams; repeatable `updated` snapshots may
+  remain at terminal, and a revision-one atomic `truncated` marker is valid. Public
+  Timeline journaling, snapshot/replay,
+  subscription, heartbeat, reconnect catch-up, and gap recovery remain under `3.5`;
+  Agent/Codex remains read-only.
 - Model catalog foundation (2026-07-21): the sidecar now validates an internal
   `model-catalog/0.1` metadata contract and exposes the read-only AAP capability
   `model.catalog.read-only` with `model/catalog`. The current projection is
@@ -2624,6 +2641,23 @@ Implemented visual baseline:
   protocol, and 22 stdio/Codex tests, strict Clippy, formatting, the focused three Qt
   tests, strict OpenSpec validation, and `git diff --check`.
 
+- The ordered Timeline stage completes OpenSpec `3.4`. Rust, Schema, Qt, fixtures,
+  the protocol guide, design, and delta spec share the strict
+  `timeline-event/0.1` sequence, timestamp, correlation, Turn terminal, Item
+  lifecycle, revision, canonical JSON, and Event ID contract. Qt accepts A/B/A
+  Session interleaving without rendering background events into the visible
+  Session, and Rust sequencing failure advances no cursor and closes transport when
+  a valid terminal cannot be emitted. Qt retains partial streaming Items on structured
+  failure, accepts terminal Turns with repeatable `updated` metadata snapshots and
+  revision-one atomic `truncated` markers, but still rejects completed/interrupted
+  terminals while a `started`/`delta` stream remains open. Mathematical integer forms and exact safe
+  boundaries hash identically across Rust and Qt; fractional/out-of-range values,
+  65-byte kinds, and frames above 4 MiB fail closed. Verification passes 17 AAP
+  type tests, 644 sidecar library tests plus one ignored live fixture, 6 daemon-main,
+  10 threshold, 13 handshake Runtime, 12 Schema, 63 protocol, 23 stdio/Codex, all
+  16 desktop CTests, strict Clippy, formatting, strict OpenSpec validation, and
+  `git diff --check`. Durable public Timeline replay/reconnect remains `3.5`.
+
 - The Codex degradation/provider hardening stage passes 630 `aegisy-agentd`
   library tests with one ignored live fixture, 63 protocol tests, and 21 stdio/Codex
   tests. Runtime event counters and Qt live cursors are Session-scoped, so a new
@@ -2631,10 +2665,10 @@ Implemented visual baseline:
   own cursor; Chat/Work mode switching is blocked while the single active Turn is
   running. Duplicate, decreasing, and gapped events remain inert. Rust formatting,
   `git diff --check`, the focused Qt degradation/Timeline run, and the ordinary Qt
-  render run pass. Public event persistence, reconnect replay, unknown-event cursor
-  diagnostics, Windows evidence, complete vendor capability negotiation, and
-  remaining runtime-only desktop surfaces are still absent, so OpenSpec `3.4`,
-  `3.5`, and `7.9` remain unchecked.
+  render run pass. Durable public event replay/reconnect, complete gap recovery,
+  Windows evidence, complete vendor capability negotiation, and remaining runtime-
+  only desktop surfaces are still absent, so OpenSpec `3.5` and `7.9` remain
+  unchecked.
 
 - The Rust workspace passes `cargo fmt --all -- --check`, `cargo test
   --workspace` (616 `aegisy-agentd` library tests passed, one ignored, 10
@@ -2721,46 +2755,49 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Validate the hardened TLS installer on a clean Windows x64 VM.
-2. Reproduce and correlate any remaining streaming disconnect with redacted logs.
-3. Continue consolidating widget-local QSS and replace remaining Qt stock icons;
+1. Implement OpenSpec `3.5` in reviewed slices: durable public Timeline journal,
+   fixed-watermark catch-up replay, gap freeze/recovery, then subscription,
+   heartbeat, reconnect, snapshot, retention-gap, and acknowledgement behavior.
+2. Validate the hardened TLS installer on a clean Windows x64 VM.
+3. Reproduce and correlate any remaining streaming disconnect with redacted logs.
+4. Continue consolidating widget-local QSS and replace remaining Qt stock icons;
    the Codex health/restart toolbar state is now covered by the render suite.
    The context-inspection render target remains subject to host resource pressure
    and must be rerun on a machine that can keep the Qt process alive.
-4. Run the Windows packaging workflow or a clean Windows VM to validate ConPTY,
+5. Run the Windows packaging workflow or a clean Windows VM to validate ConPTY,
    Unicode, resize, Ctrl+C, exit status, and Job Object process-tree cleanup, then
    close `14.2` without exposing Agent execution permissions.
-5. Finish `14.5` with a pinned live command fixture and child-process observation
+6. Finish `14.5` with a pinned live command fixture and child-process observation
    evidence, without exposing native Agent execution before sandbox,
    permission, approval, and recovery gates exist.
-6. Finish `14.7` by adding gated foreground/daemon producers only after permission,
+7. Finish `14.7` by adding gated foreground/daemon producers only after permission,
    sandbox, and approval controls, then prove their process-tree cancellation on
    macOS and Windows and validate user-terminal stop on a real Windows runner.
-7. Continue task `16.7` with the production permission/approval authority and durable
+8. Continue task `16.7` with the production permission/approval authority and durable
    consumption ledger, typed session events, and reviewed Qt conflict/recovery flow.
    Keep the internal executor unreachable from AAP/Qt until those gates are complete;
    add sandboxed hook output and secure signing as separate reviewed policies.
-8. Continue task `7.3` only after `6.10` supplies a durable compaction checkpoint
+9. Continue task `7.3` only after `6.10` supplies a durable compaction checkpoint
    and preservation review; provider delete/compact must remain unavailable until
    their scoped review, compensation, and recovery contracts are complete.
-9. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
+10. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
    permission policy and the production approval ledger. A trust acknowledgement must
    never become an implicit write, command, Hook, or network grant.
-10. Continue `21.9` by adding reviewed platform permission/delivery settings only
+11. Continue `21.9` by adding reviewed platform permission/delivery settings only
    after scheduler and approval gates are complete. Continue `21.8` with durable
    decision production/consumption and reviewed recovery transitions only after the
    permission, sandbox, budget, and release gates pass. Keep automatic lease
    acquisition/renewal, process adoption, retry, approval, recovery mutation, and
    dispatch unavailable until those gates pass.
-11. Continue `20.1` in dependency order with genuine-user Approval only after the
+12. Continue `20.1` in dependency order with genuine-user Approval only after the
     production approval authority and consumption ledger exist, then add complete
     Change/Test production and reviewed AAP/Qt, audit/export, and retention surfaces.
     Do not record prompts/provider bodies or treat Runtime denial, Provider
     `declined`, or `approvalPolicy=never` as user approval.
-12. Continue with the next unchecked database/event, durable project/session, typed
+13. Continue with the next unchecked database/event, durable project/session, typed
     timeline, permission/approval, structured patch/checkpoint, terminal, and Git
     milestones in dependency order.
-13. Replace the offline model-catalog projection with an authenticated,
+14. Replace the offline model-catalog projection with an authenticated,
    signature-validated cache; connect durable global/project profiles to the
    catalog matcher; then expose a real picker and immutable model-change event
    only after token, routing, and cross-platform evidence gates pass. The

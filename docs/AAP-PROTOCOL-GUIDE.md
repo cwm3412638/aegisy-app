@@ -77,15 +77,68 @@ project. The current Codex adapter uses `permission_profile: read-only`.
 {"jsonrpc":"2.0","id":"2","method":"session/start","params":{"mode":"chat","title":"AAP example"}}
 {"jsonrpc":"2.0","id":"2","result":{"session":{"id":"session-1","mode":"chat","title":"AAP example"},"runtime":{"adapter":"preview","version":"0.1.0","provider":"local","model":"deterministic-echo","permission_profile":"read-only"},"environment":{"environment_id":"environment:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","identity":"environment:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
 {"jsonrpc":"2.0","id":"3","method":"turn/start","params":{"session_id":"session-1","input":"Inspect the project","idempotency_key":"turn-key-1"}}
-{"jsonrpc":"2.0","method":"event","params":{"event":"turn.started","session_id":"session-1","turn_id":"turn-1"}}
-{"jsonrpc":"2.0","method":"event","params":{"event":"item.delta","session_id":"session-1","turn_id":"turn-1","item":{"id":"item-1","kind":"message","role":"agent","state":"delta","content":"Project summary"}}}
-{"jsonrpc":"2.0","method":"event","params":{"event":"turn.completed","session_id":"session-1","turn_id":"turn-1"}}
+{"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:f305276603e639d98638df9dfc805247f46cda7c3e68abac647f52335996fb24","sequence":1,"timestamp_ms":1730000000000,"correlation_id":"turn-1","session_id":"session-1","turn_id":"turn-1","turn_state":"running","event":"turn.started","item":null,"item_update":null}}
+{"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:fc245999261fadedb20f05abf2846b0ddd3fcd03b1dfcead7130fd05e55a3b9a","sequence":2,"timestamp_ms":1730000000001,"correlation_id":"turn-1","session_id":"session-1","turn_id":"turn-1","turn_state":"running","event":"item.started","item":{"id":"item-1","kind":"message","role":"agent","state":"started","content":""},"item_update":{"revision":1,"content_mode":"snapshot-replacement"}}}
+{"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:d70dbd6c228cc8308796f50d4add55627491625139999fcd627e2ea7d0e1e84a","sequence":3,"timestamp_ms":1730000000002,"correlation_id":"turn-1","session_id":"session-1","turn_id":"turn-1","turn_state":"running","event":"item.delta","item":{"id":"item-1","kind":"message","role":"agent","state":"delta","content":"Project summary"},"item_update":{"revision":2,"content_mode":"snapshot-replacement"}}}
+{"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:29638b7362125d3dcc1e179a651ac0879df8993520c435820f3109369d0f7731","sequence":4,"timestamp_ms":1730000000003,"correlation_id":"turn-1","session_id":"session-1","turn_id":"turn-1","turn_state":"running","event":"item.completed","item":{"id":"item-1","kind":"message","role":"agent","state":"completed","content":"Project summary"},"item_update":{"revision":3,"content_mode":"snapshot-replacement"}}}
+{"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:f79be436b3316726db313dd4feadf4bcb5d1daedfde2a8d3276c8487d92da86b","sequence":5,"timestamp_ms":1730000000004,"correlation_id":"turn-1","session_id":"session-1","turn_id":"turn-1","turn_state":"completed","event":"turn.completed","item":null,"item_update":null}}
 ```
 
-Every item event carries the same session and turn identity until the terminal
-turn event. A turn has exactly one terminal state: `completed`, `interrupted`,
-or `failed`. Reusing an idempotency key with different input is an error; retrying
-the same request returns the original turn identity.
+Every event uses `timeline-event/0.1`. `sequence` is contiguous per Session in
+the current Runtime live stream and every numeric cursor stays at or below
+`9007199254740991`. `timestamp_ms` is the Runtime observation time and never
+moves backwards within that Session; provider time remains separate Item
+metadata. `correlation_id` equals `turn_id`. `event_id` is a domain-separated
+SHA-256 identity over the immutable event fields other than the ID itself.
+
+The Event ID input is byte-exact. First encode one compact UTF-8 JSON object with
+fields in this order: `schema_version`, `sequence`, `timestamp_ms`,
+`correlation_id`, `session_id`, `turn_id`, `turn_state`, `event`, `item`, and
+`item_update`. An Item uses `id`, `kind`, `role`, `state`, `content`, then optional
+`data`; an Item update uses `revision`, then `content_mode`. Present `null` Item
+and Item-update fields remain literal `null`, while absent optional Item `data` is
+omitted. Item-data object keys are sorted by ascending UTF-8 bytes at every level;
+array order is semantic and retained. Strings use compact JSON escaping, emit
+non-control Unicode scalars as UTF-8 without normalization, and reject invalid
+Unicode scalar sequences. Mathematical integers are normalized to their shortest
+base-10 integer form with no exponent, decimal point, leading plus, or redundant
+leading zero; every representation of zero, including negative zero, becomes `0`.
+
+Let `material` be those exact UTF-8 bytes and `uint64be` an unsigned eight-byte
+big-endian length. The digest input is
+`"aegisy-timeline-event/0.1\0" || uint64be(len(material)) || material`, where
+`\0` is one NUL byte. `event_id` is `event:sha256:` followed by the digest's 64
+lowercase hexadecimal characters. No transport wrapper or `event_id` bytes enter
+the digest.
+
+An Item update carries a contiguous per-Item revision. `snapshot-replacement`
+means `item.content` is the complete current bounded snapshot, so clients replace
+rather than append. Streaming Items follow `started -> delta* -> completed`;
+an atomic Item may emit only `completed` at revision one. Session, Turn, Item,
+kind, and role identity cannot drift. A Turn has exactly one terminal state:
+`completed`, `interrupted`, or `failed`; `turn.persistence-failed` is not a valid
+fourth terminal. Reusing an idempotency key with different input is an error;
+retrying the same request returns the original turn identity.
+
+To keep Event IDs byte-identical across Rust and Qt, optional Item `data` is a
+canonical JSON tree with at most 16 levels and 4,096 total values. Objects contain
+at most 128 properties whose names are 1-128 byte ASCII graphical strings, arrays
+at most 4,096 entries, and every number must have an exact mathematical integer
+value in `[-9007199254740991, 9007199254740991]`. Non-integral or non-finite
+values, unsafe property names, and values outside that range are rejected before
+sequence allocation. The JSON Schema enforces value types and per-container
+bounds; Rust and Qt typed validators additionally enforce the aggregate depth and
+node limits.
+
+Structurally valid unknown events are safe only when they are itemless, running,
+and bound to the active Turn. An older client advances its cursor and records a
+bounded content-free diagnostic without projecting UI state. An unknown event
+cannot carry an Item or create authority.
+
+The live sequence in this section is not yet a durable reconnect cursor. OpenSpec
+`3.5` owns the dedicated public Event Journal, snapshots, subscriptions, replay,
+heartbeats, reconnect, and gap recovery. Internal Workbench projection events are
+not public Timeline replay data and must not be exposed as AAP sequence authority.
 
 ## Structured Errors And Cancellation
 
@@ -95,10 +148,11 @@ transport, timeout, persistence, and adapter classes never include credentials,
 prompts, response bodies, or raw provider rollout text in AAP timeline data.
 
 ```jsonl
-{"jsonrpc":"2.0","id":"4","method":"turn/cancel","params":{"session_id":"session-1","turn_id":"turn-1"}}
+{"jsonrpc":"2.0","id":"4","method":"turn/cancel","params":{"session_id":"session-2","turn_id":"turn-2"}}
 {"jsonrpc":"2.0","id":"4","result":{"state":"cancellation-requested"}}
-{"jsonrpc":"2.0","method":"event","params":{"event":"turn.cancellation-acknowledged","session_id":"session-1","turn_id":"turn-1"}}
-{"jsonrpc":"2.0","method":"event","params":{"event":"turn.interrupted","session_id":"session-1","turn_id":"turn-1"}}
+{"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:72ea0537d20013e275ce8545ee08e65a783deeef0fec69ad011ff823679217e9","sequence":1,"timestamp_ms":1730000000099,"correlation_id":"turn-2","session_id":"session-2","turn_id":"turn-2","turn_state":"running","event":"turn.started","item":null,"item_update":null}}
+{"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:fd7d6120bc7ba2ffff60562cd172a6a4d872781ad638953f89be27e7a5837e4f","sequence":2,"timestamp_ms":1730000000100,"correlation_id":"turn-2","session_id":"session-2","turn_id":"turn-2","turn_state":"running","event":"turn.cancellation-acknowledged","item":null,"item_update":null}}
+{"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:8b416a06c09ed140775e75d12d36a333a68e863e4565ffea33a25c681695eae2","sequence":3,"timestamp_ms":1730000000101,"correlation_id":"turn-2","session_id":"session-2","turn_id":"turn-2","turn_state":"interrupted","event":"turn.interrupted","item":null,"item_update":null}}
 {"jsonrpc":"2.0","id":"5","error":{"code":-32110,"message":"provider request failed: [REDACTED]","data":{"schema_version":"runtime-error/0.1","class":"provider","retryable":false,"provider_error":{"schema_version":"provider-error/0.1","source":"codex-app-server","kind":"unauthorized","class":"provider","http_status":401,"retryable":false,"response_body_included":false,"credentials_included":false}}}}
 ```
 

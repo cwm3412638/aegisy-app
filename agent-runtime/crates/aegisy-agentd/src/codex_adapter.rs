@@ -8,6 +8,7 @@ use crate::turn_trace::{
     ApprovalPolicySandbox, RuntimeApprovalPolicy, RuntimeDenialRequestKind, TurnTraceError,
 };
 use crate::{TurnCancellationHandle, TurnSteerRequest, TurnSteeringHandle};
+use aegisy_aap::{MAX_TIMELINE_CONTENT_CHARACTERS, MAX_TIMELINE_IDENTIFIER_BYTES};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -29,6 +30,8 @@ const STARTUP_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 const TURN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CODEX_MESSAGE_QUEUE_CAPACITY: usize = 16;
 const MAX_CODEX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_AGENT_MESSAGE_CHARACTERS: usize = MAX_TIMELINE_CONTENT_CHARACTERS;
+const MAX_PROVIDER_IDENTIFIER_BYTES: usize = MAX_TIMELINE_IDENTIFIER_BYTES;
 const CODEX_ADAPTER_IDENTITY: &str = "codex-app-server";
 const CODEX_TRACE_RUNTIME_VERSION: &str = "0.144.5";
 const PINNED_CODEX_VERSION: &str = "codex-cli 0.144.5";
@@ -279,6 +282,11 @@ pub enum CodexEvent {
     TurnStarted {
         turn_id: String,
     },
+    AgentStarted {
+        turn_id: String,
+        item_id: String,
+        text: String,
+    },
     AgentDelta {
         turn_id: String,
         item_id: String,
@@ -342,6 +350,13 @@ pub enum CodexEvent {
         message: String,
         provider_error: Option<ProviderError>,
     },
+}
+
+#[derive(Debug)]
+struct AgentMessageItem {
+    text: String,
+    character_count: usize,
+    completed: bool,
 }
 
 pub struct CodexAdapter {
@@ -766,13 +781,14 @@ impl CodexAdapter {
         let turn_id = response
             .pointer("/turn/id")
             .and_then(Value::as_str)
-            .ok_or_else(|| "Codex turn/start response is missing turn.id".to_owned())?
+            .filter(|turn_id| valid_provider_identifier(turn_id))
+            .ok_or_else(|| "Codex turn/start response has no valid turn.id".to_owned())?
             .to_owned();
         emit(CodexEvent::TurnStarted {
             turn_id: turn_id.clone(),
         });
 
-        let mut accumulated = HashMap::<String, String>::new();
+        let mut agent_messages = HashMap::<String, AgentMessageItem>::new();
         let mut commands = HashMap::<String, CommandItem>::new();
         let deadline = Instant::now() + TURN_TIMEOUT;
         let mut interrupt_sent = false;
@@ -887,22 +903,63 @@ impl CodexAdapter {
                     continue;
                 }
             }
+            if method == "item/started" {
+                let item = params
+                    .get("item")
+                    .ok_or_else(|| agent_message_protocol_error("started item is missing"))?;
+                if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
+                    let item_id = required_agent_message_item_id(item)?;
+                    if agent_messages.contains_key(item_id) {
+                        return Err(agent_message_protocol_error(
+                            "agent message item started more than once",
+                        )
+                        .into());
+                    }
+                    let text = bounded_agent_message_text(item.get("text"))?;
+                    agent_messages.insert(
+                        item_id.to_owned(),
+                        AgentMessageItem {
+                            character_count: text.chars().count(),
+                            text: text.clone(),
+                            completed: false,
+                        },
+                    );
+                    emit(CodexEvent::AgentStarted {
+                        turn_id: turn_id.clone(),
+                        item_id: item_id.to_owned(),
+                        text,
+                    });
+                    continue;
+                }
+            }
             if let Some(event) = translate_turn_notification(method, &params, &turn_id) {
                 emit(event);
                 continue;
             }
             match method {
                 "item/agentMessage/delta" => {
-                    let Some(item_id) = params.get("itemId").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let delta = params.get("delta").and_then(Value::as_str).unwrap_or("");
-                    let text = accumulated.entry(item_id.to_owned()).or_default();
-                    text.push_str(delta);
+                    let item_id = required_agent_message_item_id_value(params.get("itemId"))?;
+                    let delta = params
+                        .get("delta")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| agent_message_protocol_error("delta text is missing"))?;
+                    let message = agent_messages.get_mut(item_id).ok_or_else(|| {
+                        agent_message_protocol_error("delta has no started agent message item")
+                    })?;
+                    if message.completed {
+                        return Err(agent_message_protocol_error(
+                            "delta arrived after agent message completion",
+                        )
+                        .into());
+                    }
+                    let next_character_count =
+                        checked_agent_message_character_count(message.character_count, delta)?;
+                    message.text.push_str(delta);
+                    message.character_count = next_character_count;
                     emit(CodexEvent::AgentDelta {
                         turn_id: turn_id.clone(),
                         item_id: item_id.to_owned(),
-                        text: text.clone(),
+                        text: message.text.clone(),
                     });
                 }
                 "item/completed" => {
@@ -910,19 +967,42 @@ impl CodexAdapter {
                     if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
                         continue;
                     }
-                    let Some(item_id) = item.get("id").and_then(Value::as_str) else {
-                        continue;
+                    let item_id = required_agent_message_item_id(&item)?;
+                    let message = agent_messages.get_mut(item_id).ok_or_else(|| {
+                        agent_message_protocol_error(
+                            "completed item has no started agent message item",
+                        )
+                    })?;
+                    if message.completed {
+                        return Err(agent_message_protocol_error(
+                            "agent message item completed more than once",
+                        )
+                        .into());
+                    }
+                    let text = match item.get("text") {
+                        Some(value) => bounded_agent_message_text(Some(value))?,
+                        None => message.text.clone(),
                     };
-                    let text = item.get("text").and_then(Value::as_str).unwrap_or_else(|| {
-                        accumulated.get(item_id).map(String::as_str).unwrap_or("")
-                    });
+                    message.completed = true;
+                    message.character_count = text.chars().count();
+                    message.text = text.clone();
                     emit(CodexEvent::AgentCompleted {
                         turn_id: turn_id.clone(),
                         item_id: item_id.to_owned(),
-                        text: text.to_owned(),
+                        text,
                     });
                 }
                 "turn/completed" => {
+                    if agent_messages.values().any(|message| !message.completed)
+                        || commands
+                            .values()
+                            .any(|command| !command.status.is_terminal())
+                    {
+                        return Err(agent_message_protocol_error(
+                            "turn reached a terminal state with an open item",
+                        )
+                        .into());
+                    }
                     emit(turn_terminal_event(&params, &turn_id)?);
                     return Ok(());
                 }
@@ -1172,6 +1252,45 @@ impl CodexAdapter {
     }
 }
 
+fn required_agent_message_item_id(item: &Value) -> Result<&str, String> {
+    required_agent_message_item_id_value(item.get("id"))
+}
+
+fn required_agent_message_item_id_value(value: Option<&Value>) -> Result<&str, String> {
+    let item_id = value
+        .and_then(Value::as_str)
+        .ok_or_else(|| agent_message_protocol_error("item identity is missing"))?;
+    if !valid_provider_identifier(item_id) {
+        return Err(agent_message_protocol_error("item identity is invalid"));
+    }
+    Ok(item_id)
+}
+
+fn valid_provider_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PROVIDER_IDENTIFIER_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn bounded_agent_message_text(value: Option<&Value>) -> Result<String, String> {
+    let text = value.and_then(Value::as_str).unwrap_or("");
+    if text.chars().count() > MAX_AGENT_MESSAGE_CHARACTERS {
+        return Err(agent_message_protocol_error("agent message is too large"));
+    }
+    Ok(text.to_owned())
+}
+
+fn checked_agent_message_character_count(current: usize, delta: &str) -> Result<usize, String> {
+    current
+        .checked_add(delta.chars().count())
+        .filter(|count| *count <= MAX_AGENT_MESSAGE_CHARACTERS)
+        .ok_or_else(|| agent_message_protocol_error("agent message is too large"))
+}
+
+fn agent_message_protocol_error(reason: &str) -> String {
+    format!("Codex agent message lifecycle protocol error: {reason}")
+}
+
 fn runtime_denial_request_kind(message: &Value) -> Option<RuntimeDenialRequestKind> {
     match message.get("method").and_then(Value::as_str) {
         Some("item/commandExecution/requestApproval") => {
@@ -1285,6 +1404,9 @@ fn translate_command_notification(
             }
             let command = command_item(item, None, started_at_ms, None)
                 .ok_or_else(|| command_protocol_error("started item is invalid"))?;
+            if !valid_provider_identifier(&command.item_id) {
+                return Err(command_protocol_error("started item identity is invalid"));
+            }
             if commands.contains_key(&command.item_id) {
                 return Err(command_protocol_error(
                     "command item started more than once",
@@ -1302,6 +1424,11 @@ fn translate_command_notification(
                 .get("itemId")
                 .and_then(Value::as_str)
                 .ok_or_else(|| command_protocol_error("output delta item identity is missing"))?;
+            if !valid_provider_identifier(item_id) {
+                return Err(command_protocol_error(
+                    "output delta item identity is invalid",
+                ));
+            }
             let delta = params
                 .get("delta")
                 .and_then(Value::as_str)
@@ -1332,6 +1459,9 @@ fn translate_command_notification(
                 .get("id")
                 .and_then(Value::as_str)
                 .ok_or_else(|| command_protocol_error("completed item identity is missing"))?;
+            if !valid_provider_identifier(item_id) {
+                return Err(command_protocol_error("completed item identity is invalid"));
+            }
             let previous = commands
                 .get(item_id)
                 .ok_or_else(|| command_protocol_error("completed item has no started command"))?;
@@ -2026,6 +2156,20 @@ fn turn_terminal_event(params: &Value, turn_id: &str) -> Result<CodexEvent, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_message_limit_counts_unicode_characters_not_utf8_bytes() {
+        let boundary = json!("界".repeat(MAX_AGENT_MESSAGE_CHARACTERS));
+        assert!(bounded_agent_message_text(Some(&boundary)).is_ok());
+        assert_eq!(
+            checked_agent_message_character_count(MAX_AGENT_MESSAGE_CHARACTERS - 1, "界").unwrap(),
+            MAX_AGENT_MESSAGE_CHARACTERS
+        );
+
+        let over_limit = json!("界".repeat(MAX_AGENT_MESSAGE_CHARACTERS + 1));
+        assert!(bounded_agent_message_text(Some(&over_limit)).is_err());
+        assert!(checked_agent_message_character_count(MAX_AGENT_MESSAGE_CHARACTERS, "界").is_err());
+    }
 
     #[test]
     fn backend_info_uses_read_only_profile() {

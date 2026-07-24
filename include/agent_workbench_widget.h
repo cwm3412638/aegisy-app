@@ -140,14 +140,16 @@ private:
     void rebuildContextPanel();
     void clearContextItems();
     QJsonArray includedTurnContext() const;
-    void addTimelineItem(const QJsonObject &item, bool prepend = false);
+    void addTimelineItem(const QJsonObject &item, bool prepend = false,
+                         const QString &presentationKey = QString());
     bool validateTimelineItem(const QJsonObject &item,
                               const QString &expectedSessionId,
                               const QString &expectedTurnId,
                               QHash<QString, QString> *itemKinds,
                               QHash<QString, QString> *itemRoles) const;
     bool validateTimelineEvent(const QJsonObject &event,
-                               QJsonObject *validatedItem = nullptr) const;
+                               QJsonObject *validatedItem = nullptr,
+                               bool *recognizedEvent = nullptr) const;
     void addNotice(const QString &text, bool error = false);
     bool storeSessionRuntimeBinding(const QString &sessionId, const QJsonObject &runtime);
     bool storeSessionContextThreshold(const QString &sessionId,
@@ -384,7 +386,10 @@ private:
     QHash<QString, QString> m_itemKinds;
     QHash<QString, QString> m_itemRoles;
     QHash<QString, QString> m_itemStates;
+    QHash<QString, quint64> m_itemRevisions;
     QHash<QString, QString> m_turnStates;
+    QHash<QString, quint64> m_unknownTimelineEventCounts;
+    quint64 m_unknownTimelineEventOverflowCount = 0;
     QHash<QString, QString> m_commandArtifactRequests;
     QHash<QString, QTreeWidgetItem *> m_treeItems;
     QHash<QString, QString> m_workspaceListRequests;
@@ -519,6 +524,7 @@ private:
     QString m_activeTurnSessionId;
     QString m_activeTurnId;
     QHash<QString, quint64> m_lastTimelineEventSequences;
+    QHash<QString, quint64> m_lastTimelineEventTimestamps;
     QString m_turnCancelRequestId;
     QString m_contextInspectRequestId;
     QString m_pinnedContextListRequestId;

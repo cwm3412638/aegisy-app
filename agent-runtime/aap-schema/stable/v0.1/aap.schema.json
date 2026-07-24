@@ -99,6 +99,19 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "required": ["method"],
+        "properties": { "method": { "const": "event" } }
+      },
+      "then": {
+        "required": ["params"],
+        "not": { "required": ["id"] },
+        "properties": {
+          "params": { "$ref": "#/$defs/timelineEvent" }
+        }
+      }
     }
   ],
   "$defs": {
@@ -268,6 +281,473 @@
           "maxLength": 64
         }
       }
+    },
+    "safePositiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "jsonSafeValue": {
+      "$comment": "The schema enforces recursive value types and per-container bounds. Rust and Qt typed validators additionally enforce a maximum depth of 16 and 4096 total values per item.data tree because JSON Schema cannot express a shared aggregate recursive-node budget.",
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "string" },
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/jsonSafeValue" }
+        },
+        {
+          "type": "object",
+          "maxProperties": 128,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[!-~]+$"
+          },
+          "additionalProperties": { "$ref": "#/$defs/jsonSafeValue" }
+        }
+      ]
+    },
+    "boundedGraphicalId": {
+      "type": "string",
+      "pattern": "^[!-~]+$",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "timelineEventName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": { "const": "turn.persistence-failed" }
+    },
+    "timelineItem": {
+      "type": "object",
+      "required": ["id", "kind", "role", "state", "content"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "kind": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "role": { "enum": ["user", "agent", "system", "tool"] },
+        "state": {
+          "enum": [
+            "started",
+            "running",
+            "delta",
+            "updated",
+            "completed",
+            "failed",
+            "interrupted",
+            "truncated",
+            "unavailable"
+          ]
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "data": {
+          "type": "object",
+          "maxProperties": 128,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[!-~]+$"
+          },
+          "additionalProperties": { "$ref": "#/$defs/jsonSafeValue" }
+        }
+      }
+    },
+    "timelineItemUpdate": {
+      "type": "object",
+      "required": ["revision", "content_mode"],
+      "additionalProperties": false,
+      "properties": {
+        "revision": { "$ref": "#/$defs/safePositiveInteger" },
+        "content_mode": { "const": "snapshot-replacement" }
+      }
+    },
+    "timelineEvent": {
+      "type": "object",
+      "$comment": "correlation_id must equal turn_id; peers enforce this cross-field invariant in typed validation",
+      "required": [
+        "schema_version",
+        "event_id",
+        "sequence",
+        "timestamp_ms",
+        "correlation_id",
+        "session_id",
+        "turn_id",
+        "turn_state",
+        "event",
+        "item",
+        "item_update"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "timeline-event/0.1" },
+        "event_id": {
+          "type": "string",
+          "pattern": "^event:sha256:[0-9a-f]{64}$",
+          "minLength": 77,
+          "maxLength": 77
+        },
+        "sequence": { "$ref": "#/$defs/safePositiveInteger" },
+        "timestamp_ms": { "$ref": "#/$defs/safePositiveInteger" },
+        "correlation_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "turn_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "turn_state": {
+          "enum": ["running", "completed", "failed", "interrupted"]
+        },
+        "event": { "$ref": "#/$defs/timelineEventName" },
+        "item": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineItem" },
+            { "type": "null" }
+          ]
+        },
+        "item_update": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineItemUpdate" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "item": { "type": "null" } }
+          },
+          "then": {
+            "properties": { "item_update": { "type": "null" } }
+          },
+          "else": {
+            "properties": {
+              "item_update": { "$ref": "#/$defs/timelineItemUpdate" }
+            }
+          }
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "event": { "const": "turn.started" },
+                "turn_state": { "const": "running" },
+                "item": { "type": "null" }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "turn.completed" },
+                "turn_state": { "const": "completed" },
+                "item": { "type": "null" }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "turn.failed" },
+                "turn_state": { "const": "failed" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    {
+                      "properties": {
+                        "kind": { "const": "error" },
+                        "role": { "const": "system" },
+                        "state": { "const": "completed" }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "turn.interrupted" },
+                "turn_state": { "const": "interrupted" },
+                "item": { "type": "null" }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "item.started" },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    { "properties": { "state": { "const": "started" } } }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "item.delta" },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    { "properties": { "state": { "const": "delta" } } }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "item.completed" },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    { "properties": { "state": { "const": "completed" } } }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "diagnostics.observed" },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    {
+                      "properties": {
+                        "kind": { "const": "diagnostic" },
+                        "role": { "const": "tool" },
+                        "state": { "const": "completed" }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "usage.updated" },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    {
+                      "properties": {
+                        "kind": { "const": "usage" },
+                        "role": { "const": "system" },
+                        "state": { "const": "updated" }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "usage.truncated" },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    {
+                      "properties": {
+                        "kind": { "const": "usage" },
+                        "role": { "const": "system" },
+                        "state": { "const": "truncated" }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "turn.diff.updated" },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    {
+                      "properties": {
+                        "kind": { "const": "diff" },
+                        "role": { "const": "tool" },
+                        "state": { "const": "updated" }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "turn.diff.truncated" },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    {
+                      "properties": {
+                        "kind": { "const": "diff" },
+                        "role": { "const": "tool" },
+                        "state": { "const": "truncated" }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "turn.plan.updated" },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    {
+                      "properties": {
+                        "kind": { "const": "plan" },
+                        "role": { "const": "agent" },
+                        "state": { "const": "updated" }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "turn.plan.truncated" },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    {
+                      "properties": {
+                        "kind": { "const": "plan" },
+                        "role": { "const": "agent" },
+                        "state": { "const": "truncated" }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "turn.error-observed" },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    {
+                      "properties": {
+                        "kind": { "const": "error" },
+                        "role": { "const": "system" },
+                        "state": { "const": "updated" }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": {
+                  "enum": [
+                    "turn.error-observed.truncated",
+                    "turn.steering-acknowledged",
+                    "turn.cancellation-acknowledged"
+                  ]
+                },
+                "turn_state": { "const": "running" },
+                "item": { "type": "null" }
+              }
+            },
+            {
+              "properties": {
+                "event": { "const": "turn.steering-requested" },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    {
+                      "properties": {
+                        "kind": { "const": "message" },
+                        "role": { "const": "user" },
+                        "state": { "const": "completed" }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": { "enum": ["turn.steering-failed", "turn.cancellation-failed"] },
+                "turn_state": { "const": "running" },
+                "item": {
+                  "allOf": [
+                    { "$ref": "#/$defs/timelineItem" },
+                    {
+                      "properties": {
+                        "kind": { "const": "error" },
+                        "role": { "const": "system" },
+                        "state": { "const": "completed" }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "properties": {
+                "event": {
+                  "not": {
+                    "enum": [
+                      "turn.started",
+                      "turn.completed",
+                      "turn.failed",
+                      "turn.interrupted",
+                      "item.started",
+                      "item.delta",
+                      "item.completed",
+                      "diagnostics.observed",
+                      "usage.updated",
+                      "usage.truncated",
+                      "turn.diff.updated",
+                      "turn.diff.truncated",
+                      "turn.plan.updated",
+                      "turn.plan.truncated",
+                      "turn.error-observed",
+                      "turn.error-observed.truncated",
+                      "turn.steering-requested",
+                      "turn.steering-acknowledged",
+                      "turn.steering-failed",
+                      "turn.cancellation-acknowledged",
+                      "turn.cancellation-failed"
+                    ]
+                  }
+                },
+                "turn_state": { "const": "running" },
+                "item": { "type": "null" }
+              }
+            }
+          ]
+        }
+      ]
     },
     "initializeParams": {
       "type": "object",

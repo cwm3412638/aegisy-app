@@ -17,6 +17,8 @@
 
 namespace {
 
+constexpr qsizetype kTestMaximumFrameBytes = 4 * 1024 * 1024;
+
 bool expect(bool condition, const char *message)
 {
     if (!condition) std::fprintf(stderr, "%s\n", message);
@@ -110,6 +112,150 @@ QJsonObject validInitializeResult()
     };
 }
 
+QJsonObject validTimelineEnvelope()
+{
+    const QString sessionId(128, QLatin1Char('s'));
+    const QString turnId(128, QLatin1Char('t'));
+    QJsonObject event{
+        {QStringLiteral("schema_version"), QStringLiteral("timeline-event/0.1")},
+        {QStringLiteral("event_id"), QString()},
+        {QStringLiteral("sequence"), 1},
+        {QStringLiteral("timestamp_ms"), 1'000},
+        {QStringLiteral("correlation_id"), turnId},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("turn_id"), turnId},
+        {QStringLiteral("turn_state"), QStringLiteral("running")},
+        {QStringLiteral("event"), QStringLiteral("turn.started")},
+        {QStringLiteral("item"), QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("item_update"), QJsonValue(QJsonValue::Null)},
+    };
+    event.insert(QStringLiteral("event_id"),
+                 AgentRuntimeClient::timelineEventIdentity(event));
+    return event;
+}
+
+QJsonObject timelineDataEnvelope(const QJsonValue &data)
+{
+    QJsonObject event = validTimelineEnvelope();
+    event.insert(QStringLiteral("event"), QStringLiteral("item.completed"));
+    event.insert(QStringLiteral("item"), QJsonObject{
+        {QStringLiteral("id"), QStringLiteral("item-1")},
+        {QStringLiteral("kind"), QStringLiteral("message")},
+        {QStringLiteral("role"), QStringLiteral("agent")},
+        {QStringLiteral("state"), QStringLiteral("completed")},
+        {QStringLiteral("content"), QStringLiteral("bounded")},
+        {QStringLiteral("data"), data},
+    });
+    event.insert(QStringLiteral("item_update"), QJsonObject{
+        {QStringLiteral("revision"), 1},
+        {QStringLiteral("content_mode"), QStringLiteral("snapshot-replacement")},
+    });
+    event.insert(QStringLiteral("event_id"),
+                 AgentRuntimeClient::timelineEventIdentity(event));
+    return event;
+}
+
+QJsonObject validLargeGenericTimelineEnvelope()
+{
+    QJsonObject event = timelineDataEnvelope(QJsonObject{
+        {QStringLiteral("payload"), QString(300 * 1024, QLatin1Char('d'))},
+    });
+    QJsonObject item = event.value(QStringLiteral("item")).toObject();
+    item.insert(QStringLiteral("kind"),
+                QStringLiteral("a") + QString(63, QLatin1Char('g')));
+    event.insert(QStringLiteral("item"), item);
+    event.insert(QStringLiteral("event_id"),
+                 AgentRuntimeClient::timelineEventIdentity(event));
+    return event;
+}
+
+QJsonObject validMathematicalIntegerTimelineEnvelope()
+{
+    return timelineDataEnvelope(QJsonObject{
+        {QStringLiteral("maximum"), 9'007'199'254'740'991.0},
+        {QStringLiteral("minimum"), -9'007'199'254'740'991.0},
+        {QStringLiteral("negative_zero"), 0},
+        {QStringLiteral("one"), 1},
+        {QStringLiteral("thousand"), 1'000},
+    });
+}
+
+QByteArray rawMathematicalIntegerTimelineNotification()
+{
+    const QJsonObject event = validMathematicalIntegerTimelineEnvelope();
+    QByteArray frame = QJsonDocument(QJsonObject{
+        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+        {QStringLiteral("method"), QStringLiteral("event")},
+        {QStringLiteral("params"), event},
+    }).toJson(QJsonDocument::Compact);
+    if (!frame.contains("\"sequence\":1")
+            || !frame.contains("\"timestamp_ms\":1000")
+            || !frame.contains("\"negative_zero\":0")
+            || !frame.contains("\"one\":1")
+            || !frame.contains("\"thousand\":1000")) {
+        return {};
+    }
+    frame.replace("\"sequence\":1", "\"sequence\":1.0");
+    frame.replace("\"timestamp_ms\":1000", "\"timestamp_ms\":1e3");
+    frame.replace("\"negative_zero\":0", "\"negative_zero\":-0.0");
+    frame.replace("\"one\":1", "\"one\":1.0");
+    frame.replace("\"thousand\":1000", "\"thousand\":1e3");
+    return frame;
+}
+
+QByteArray exactBoundaryTimelineNotification()
+{
+    QJsonObject event = timelineDataEnvelope(QJsonObject{
+        {QStringLiteral("payload"), QString()},
+    });
+    const auto encode = [&event]() {
+        event.insert(QStringLiteral("event_id"),
+                     AgentRuntimeClient::timelineEventIdentity(event));
+        return QJsonDocument(QJsonObject{
+            {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+            {QStringLiteral("method"), QStringLiteral("event")},
+            {QStringLiteral("params"), event},
+        }).toJson(QJsonDocument::Compact);
+    };
+    const QByteArray emptyFrame = encode();
+    const qsizetype payloadBytes = kTestMaximumFrameBytes - emptyFrame.size();
+    if (payloadBytes <= 0) return {};
+    QJsonObject item = event.value(QStringLiteral("item")).toObject();
+    item.insert(QStringLiteral("data"), QJsonObject{
+        {QStringLiteral("payload"), QString(payloadBytes, QLatin1Char('d'))},
+    });
+    event.insert(QStringLiteral("item"), item);
+    const QByteArray frame = encode();
+    return frame.size() == kTestMaximumFrameBytes ? frame : QByteArray{};
+}
+
+bool verifyRustTimelineIdentityFixture()
+{
+    const QList<QByteArray> fixtureLines{
+        QByteArrayLiteral(R"({"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:a3ea83f9fd0b70adafafe203fc62f1a82a78b42a652e82615725a858d411236a","sequence":1,"timestamp_ms":1784851200001,"correlation_id":"turn-1","session_id":"session-1","turn_id":"turn-1","turn_state":"running","event":"turn.started","item":null,"item_update":null}})"),
+        QByteArrayLiteral(R"({"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:6cf6e2279d2c733558d9ad3b6c7f35431a850328a14f8686a4a53ba0c1f00798","sequence":2,"timestamp_ms":1784851200002,"correlation_id":"turn-1","session_id":"session-1","turn_id":"turn-1","turn_state":"running","event":"item.completed","item":{"id":"item-user-1","kind":"message","role":"user","state":"completed","content":"Inspect the project."},"item_update":{"revision":1,"content_mode":"snapshot-replacement"}}})"),
+        QByteArrayLiteral(R"({"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:a8e4ae9fca35aebb4b095f0276dfa1955736bd8e632cbfdb58bb49dd20c4cf63","sequence":3,"timestamp_ms":1784851200003,"correlation_id":"turn-1","session_id":"session-1","turn_id":"turn-1","turn_state":"running","event":"item.started","item":{"id":"item-command-1","kind":"command","role":"tool","state":"started","content":"Command started","data":{"risk":"read-only","canonical":{"array":[0,-1,9007199254740991,"quote\" slash\\ newline\n 界"],"ordered":{"z":2,"a":1}}}},"item_update":{"revision":1,"content_mode":"snapshot-replacement"}}})"),
+    };
+    for (const QByteArray &line : fixtureLines) {
+        const QJsonDocument document = QJsonDocument::fromJson(line);
+        if (!document.isObject()) return false;
+        const QJsonObject event = document.object().value(
+            QStringLiteral("params")).toObject();
+        if (event.value(QStringLiteral("event_id")).toString()
+            != AgentRuntimeClient::timelineEventIdentity(event)) {
+            return false;
+        }
+    }
+    const QByteArray mathematicalFrame = rawMathematicalIntegerTimelineNotification();
+    const QJsonDocument mathematicalDocument = QJsonDocument::fromJson(
+        mathematicalFrame);
+    if (mathematicalFrame.isEmpty() || !mathematicalDocument.isObject()) return false;
+    const QJsonObject mathematicalEvent = mathematicalDocument.object().value(
+        QStringLiteral("params")).toObject();
+    return mathematicalEvent.value(QStringLiteral("event_id")).toString()
+        == AgentRuntimeClient::timelineEventIdentity(mathematicalEvent);
+}
+
 int runFakeRuntime(const QString &testCase)
 {
     QFile log(qEnvironmentVariable("AEGISY_FAKE_RUNTIME_LOG"));
@@ -142,6 +288,24 @@ int runFakeRuntime(const QString &testCase)
         QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
                                       .value(QStringLiteral("stable")).toArray();
         capabilities.append(QStringLiteral("session.portable.import"));
+        setStableCapabilities(capabilities);
+    } else if (testCase == QStringLiteral("notification-valid-event-envelope")
+               || testCase == QStringLiteral("notification-valid-large-generic-event")
+               || testCase == QStringLiteral("notification-valid-mathematical-integers")
+               || testCase == QStringLiteral("notification-valid-boundary-event")
+               || testCase == QStringLiteral("notification-invalid-event-envelope")
+               || testCase == QStringLiteral("notification-invalid-event-item")
+               || testCase == QStringLiteral("notification-unsafe-event-data-integer")
+               || testCase == QStringLiteral("notification-float-event-data")
+               || testCase == QStringLiteral("notification-invalid-event-data-key")
+               || testCase == QStringLiteral("notification-unknown-event-item")
+               || testCase == QStringLiteral("notification-event-identity-tamper")
+               || testCase == QStringLiteral("notification-overlong-event-identity")
+               || testCase == QStringLiteral("notification-nonascii-event-identity")
+               || testCase == QStringLiteral("notification-removed-persistence-terminal")) {
+        QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
+                                      .value(QStringLiteral("stable")).toArray();
+        capabilities.append(QStringLiteral("timeline.streaming"));
         setStableCapabilities(capabilities);
     } else if (testCase == QStringLiteral("valid-codex")) {
         result.insert(QStringLiteral("backend"), QJsonObject{
@@ -325,6 +489,18 @@ int runFakeRuntime(const QString &testCase)
         if (message.value(QStringLiteral("method")).toString()
                 == QStringLiteral("initialized")
             && testCase.startsWith(QStringLiteral("notification-"))) {
+            if (testCase == QStringLiteral("notification-valid-mathematical-integers")
+                    || testCase == QStringLiteral("notification-valid-boundary-event")) {
+                QByteArray frame = testCase
+                        == QStringLiteral("notification-valid-mathematical-integers")
+                    ? rawMathematicalIntegerTimelineNotification()
+                    : exactBoundaryTimelineNotification();
+                if (frame.isEmpty()) return 93;
+                frame.append('\n');
+                std::cout.write(frame.constData(), std::streamsize(frame.size()));
+                std::cout.flush();
+                continue;
+            }
             QJsonObject notification{
                 {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
                 {QStringLiteral("method"), QStringLiteral("event")},
@@ -336,6 +512,81 @@ int runFakeRuntime(const QString &testCase)
                 notification.insert(QStringLiteral("params"), QJsonArray{});
             } else if (testCase == QStringLiteral("notification-missing-params")) {
                 notification.remove(QStringLiteral("params"));
+            } else if (testCase == QStringLiteral("notification-valid-event-envelope")) {
+                notification.insert(QStringLiteral("params"), validTimelineEnvelope());
+            } else if (testCase
+                       == QStringLiteral("notification-valid-large-generic-event")) {
+                notification.insert(QStringLiteral("params"),
+                                    validLargeGenericTimelineEnvelope());
+            } else if (testCase == QStringLiteral("notification-invalid-event-envelope")) {
+                QJsonObject event = validTimelineEnvelope();
+                event.remove(QStringLiteral("correlation_id"));
+                notification.insert(QStringLiteral("params"), event);
+            } else if (testCase == QStringLiteral("notification-invalid-event-item")) {
+                QJsonObject event = validTimelineEnvelope();
+                event.insert(QStringLiteral("event"), QStringLiteral("item.completed"));
+                event.insert(QStringLiteral("item"), QJsonObject{
+                    {QStringLiteral("id"), QStringLiteral("item-1")},
+                    {QStringLiteral("kind"), QStringLiteral("message")},
+                    {QStringLiteral("role"), QStringLiteral("agent")},
+                    {QStringLiteral("state"), QStringLiteral("completed")},
+                });
+                event.insert(QStringLiteral("item_update"), QJsonObject{
+                    {QStringLiteral("revision"), 1},
+                    {QStringLiteral("content_mode"),
+                     QStringLiteral("snapshot-replacement")},
+                });
+                notification.insert(QStringLiteral("params"), event);
+            } else if (testCase
+                       == QStringLiteral("notification-unsafe-event-data-integer")) {
+                notification.insert(QStringLiteral("params"), timelineDataEnvelope(
+                    QJsonObject{{QStringLiteral("unsafe"),
+                                 9'007'199'254'740'992.0}}));
+            } else if (testCase == QStringLiteral("notification-float-event-data")) {
+                notification.insert(QStringLiteral("params"), timelineDataEnvelope(
+                    QJsonObject{{QStringLiteral("unsafe"), 1.5}}));
+            } else if (testCase
+                       == QStringLiteral("notification-invalid-event-data-key")) {
+                notification.insert(QStringLiteral("params"), timelineDataEnvelope(
+                    QJsonObject{{QStringLiteral("项目"), true}}));
+            } else if (testCase == QStringLiteral("notification-unknown-event-item")) {
+                QJsonObject event = validTimelineEnvelope();
+                event.insert(QStringLiteral("event"), QStringLiteral("future.item"));
+                event.insert(QStringLiteral("item"), QJsonObject{
+                    {QStringLiteral("id"), QStringLiteral("item-1")},
+                    {QStringLiteral("kind"), QStringLiteral("message")},
+                    {QStringLiteral("role"), QStringLiteral("agent")},
+                    {QStringLiteral("state"), QStringLiteral("completed")},
+                    {QStringLiteral("content"), QStringLiteral("invalid")},
+                });
+                event.insert(QStringLiteral("item_update"), QJsonObject{
+                    {QStringLiteral("revision"), 1},
+                    {QStringLiteral("content_mode"),
+                     QStringLiteral("snapshot-replacement")},
+                });
+                notification.insert(QStringLiteral("params"), event);
+            } else if (testCase
+                       == QStringLiteral("notification-event-identity-tamper")) {
+                QJsonObject event = validTimelineEnvelope();
+                event.insert(QStringLiteral("timestamp_ms"), 1'001);
+                notification.insert(QStringLiteral("params"), event);
+            } else if (testCase
+                       == QStringLiteral("notification-overlong-event-identity")) {
+                QJsonObject event = validTimelineEnvelope();
+                event.insert(QStringLiteral("session_id"),
+                             QString(129, QLatin1Char('s')));
+                notification.insert(QStringLiteral("params"), event);
+            } else if (testCase
+                       == QStringLiteral("notification-nonascii-event-identity")) {
+                QJsonObject event = validTimelineEnvelope();
+                event.insert(QStringLiteral("session_id"), QStringLiteral("项目"));
+                notification.insert(QStringLiteral("params"), event);
+            } else if (testCase
+                       == QStringLiteral("notification-removed-persistence-terminal")) {
+                QJsonObject event = validTimelineEnvelope();
+                event.insert(QStringLiteral("event"),
+                             QStringLiteral("turn.persistence-failed"));
+                notification.insert(QStringLiteral("params"), event);
             }
             std::cout
                 << QJsonDocument(notification).toJson(QJsonDocument::Compact).constData()
@@ -760,6 +1011,183 @@ bool runCapabilityGateCase()
                   "session/search escaped without session.search.branch");
 }
 
+bool runValidTimelineNotificationCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create Timeline-envelope directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("notification-valid-event-envelope"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool eventReceived = false;
+    bool disconnected = false;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::timelineEvent,
+                         [&eventReceived](const QJsonObject &event) {
+            eventReceived = event == validTimelineEnvelope();
+        });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized && eventReceived; }),
+                    "valid Timeline envelope was not emitted")) {
+            return false;
+        }
+        if (!expect(client.isReady() && !disconnected,
+                    "valid Timeline envelope closed the negotiated transport")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+    return true;
+}
+
+bool runLargeGenericTimelineNotificationCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create large Timeline directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE",
+            QByteArray("notification-valid-large-generic-event"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool eventReceived = false;
+    bool disconnected = false;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::timelineEvent,
+                         [&eventReceived](const QJsonObject &event) {
+            eventReceived = event == validLargeGenericTimelineEnvelope();
+        });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized && eventReceived; }),
+                    "large generic Timeline envelope was not emitted")) {
+            return false;
+        }
+        if (!expect(client.isReady() && !disconnected,
+                    "legal large Timeline envelope closed the transport")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+    return true;
+}
+
+bool runMathematicalIntegerTimelineNotificationCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create integer Timeline directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE",
+            QByteArray("notification-valid-mathematical-integers"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool eventReceived = false;
+    bool disconnected = false;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::timelineEvent,
+                         [&eventReceived](const QJsonObject &event) {
+            eventReceived = event == validMathematicalIntegerTimelineEnvelope();
+        });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized && eventReceived; }),
+                    "mathematical integer Timeline envelope was not emitted")) {
+            return false;
+        }
+        if (!expect(client.isReady() && !disconnected,
+                    "mathematical integer normalization closed the transport")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+    return true;
+}
+
+bool runBoundaryTimelineNotificationCase()
+{
+    const QByteArray expectedFrame = exactBoundaryTimelineNotification();
+    if (!expect(expectedFrame.size() == kTestMaximumFrameBytes,
+                "could not construct an exact 4 MiB Timeline frame")) {
+        return false;
+    }
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create boundary Timeline directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE",
+            QByteArray("notification-valid-boundary-event"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool eventReceived = false;
+    bool disconnected = false;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::timelineEvent,
+                         [&eventReceived](const QJsonObject &event) {
+            const QJsonObject data = event.value(QStringLiteral("item")).toObject()
+                .value(QStringLiteral("data")).toObject();
+            eventReceived = data.value(QStringLiteral("payload")).toString()
+                                .toUtf8().size() > 3 * 1024 * 1024
+                && event.value(QStringLiteral("event_id")).toString()
+                    == AgentRuntimeClient::timelineEventIdentity(event);
+        });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized && eventReceived; }, 10000),
+                    "exact 4 MiB Timeline envelope was not emitted")) {
+            return false;
+        }
+        if (!expect(client.isReady() && !disconnected,
+                    "exact 4 MiB Timeline envelope closed the transport")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+    return true;
+}
+
 bool runOutboundFrameLimitCase()
 {
     QTemporaryDir directory;
@@ -864,6 +1292,8 @@ int main(int argc, char *argv[])
                   "authenticated proxy reached the sidecar environment")
         && expect(sanitized.value(QStringLiteral("MODEL_NAME")) == QStringLiteral("aegisy-coding"),
                   "ordinary model setting was removed");
+    ok = expect(verifyRustTimelineIdentityFixture(),
+                "Qt Timeline Event identity diverged from the Rust fixture") && ok;
     ok = runHandshakeCase(QStringLiteral("valid-preview"), true) && ok;
     ok = runHandshakeCase(QStringLiteral("valid-codex"), true) && ok;
     ok = runHandshakeCase(QStringLiteral("valid-recovery"), true, true, true) && ok;
@@ -897,6 +1327,10 @@ int main(int argc, char *argv[])
                           QStringLiteral("upgrade-runtime")) && ok;
     ok = runHandshakeCase(QStringLiteral("malformed-upgrade-error"), false) && ok;
     ok = runCapabilityGateCase() && ok;
+    ok = runValidTimelineNotificationCase() && ok;
+    ok = runLargeGenericTimelineNotificationCase() && ok;
+    ok = runMathematicalIntegerTimelineNotificationCase() && ok;
+    ok = runBoundaryTimelineNotificationCase() && ok;
     ok = runCombinedFramesCase() && ok;
     ok = runOutboundFrameLimitCase() && ok;
     ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-wrong-jsonrpc")) && ok;
@@ -913,6 +1347,26 @@ int main(int argc, char *argv[])
     ok = runOrdinaryEnvelopeCase(QStringLiteral("notification-missing-params")) && ok;
     ok = runOrdinaryEnvelopeCase(
              QStringLiteral("notification-event-without-capability")) && ok;
+    ok = runOrdinaryEnvelopeCase(
+             QStringLiteral("notification-invalid-event-envelope")) && ok;
+    ok = runOrdinaryEnvelopeCase(
+             QStringLiteral("notification-invalid-event-item")) && ok;
+    ok = runOrdinaryEnvelopeCase(
+             QStringLiteral("notification-unsafe-event-data-integer")) && ok;
+    ok = runOrdinaryEnvelopeCase(
+             QStringLiteral("notification-float-event-data")) && ok;
+    ok = runOrdinaryEnvelopeCase(
+             QStringLiteral("notification-invalid-event-data-key")) && ok;
+    ok = runOrdinaryEnvelopeCase(
+             QStringLiteral("notification-unknown-event-item")) && ok;
+    ok = runOrdinaryEnvelopeCase(
+             QStringLiteral("notification-event-identity-tamper")) && ok;
+    ok = runOrdinaryEnvelopeCase(
+             QStringLiteral("notification-overlong-event-identity")) && ok;
+    ok = runOrdinaryEnvelopeCase(
+             QStringLiteral("notification-nonascii-event-identity")) && ok;
+    ok = runOrdinaryEnvelopeCase(
+             QStringLiteral("notification-removed-persistence-terminal")) && ok;
     qunsetenv("AEGISY_AGENTD_PATH");
     qunsetenv("AEGISY_FAKE_RUNTIME_CASE");
     qunsetenv("AEGISY_FAKE_RUNTIME_LOG");

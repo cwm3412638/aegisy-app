@@ -18,6 +18,7 @@ mod context_budget;
 pub mod context_threshold;
 mod diagnostic_store;
 mod durable_blob;
+mod event_sequencer;
 pub mod git_branch_transaction;
 pub mod git_checkpoint;
 pub mod git_commit_transaction;
@@ -77,9 +78,9 @@ mod workspace_edit_preview;
 pub mod workspace_edit_restore;
 
 use aegisy_aap::stable::v0_1::{
-    BackendDescriptor, EventEnvelope, Identity, InitializeParams, InitializeResult,
-    NegotiatedCapabilities, NegotiatedProtocol, Platform, Project, ProtocolLimits, Session,
-    SessionMode, TimelineItem, TransportSecurity,
+    BackendDescriptor, Identity, InitializeParams, InitializeResult, NegotiatedCapabilities,
+    NegotiatedProtocol, Platform, Project, ProtocolLimits, Session, SessionMode, TimelineItem,
+    TransportSecurity,
 };
 use aegisy_aap::{
     Notification, Request, Response, JSONRPC_VERSION, MAX_AAP_FRAME_BYTES, PROTOCOL_VERSION,
@@ -393,7 +394,7 @@ pub struct Runtime {
     negotiated_capabilities: BTreeSet<String>,
     negotiated_max_frame_bytes: u64,
     shutdown: bool,
-    session_sequences: HashMap<String, u64>,
+    event_sequencer: event_sequencer::EventSequencer,
     next_id: u64,
     control: RuntimeControl,
     projects: HashMap<String, Project>,
@@ -1565,6 +1566,25 @@ struct PendingTurnTerminal {
     terminal_at_ms: u64,
     trace: TurnTrace,
     item: Option<TimelineItem>,
+}
+
+fn forward_timeline_event<F>(
+    result: Result<Value, event_sequencer::SequenceError>,
+    sequencing_error: &mut Option<event_sequencer::SequenceError>,
+    cancellation: &TurnCancellationHandle,
+    emit: &mut F,
+) where
+    F: FnMut(Value),
+{
+    match result {
+        Ok(message) => emit(message),
+        Err(error) => {
+            if sequencing_error.is_none() {
+                *sequencing_error = Some(error);
+            }
+            cancellation.request();
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -4230,7 +4250,7 @@ impl Runtime {
             negotiated_capabilities: BTreeSet::new(),
             negotiated_max_frame_bytes: MAX_AAP_FRAME_BYTES,
             shutdown: false,
-            session_sequences: HashMap::new(),
+            event_sequencer: event_sequencer::EventSequencer::default(),
             next_id: 0,
             control: RuntimeControl::default(),
             projects,
@@ -11361,6 +11381,7 @@ impl Runtime {
         let mut pending_terminal: Option<PendingTurnTerminal> = None;
         let mut terminal_persisted = false;
         let mut persistence_error: Option<String> = None;
+        let mut sequencing_error: Option<event_sequencer::SequenceError> = None;
         let mut metadata_update_counts = HashMap::<String, usize>::new();
         let mut metadata_truncation_notified = HashSet::<String>::new();
         let mut context_threshold_status = self
@@ -11379,8 +11400,24 @@ impl Runtime {
                 &cancellation,
                 &steering,
                 |event| {
-                    if persistence_error.is_some() {
+                    if persistence_error.is_some() || sequencing_error.is_some() {
+                        cancellation.request();
                         return;
+                    }
+                    macro_rules! emit_timeline {
+                        ($turn_id:expr, $event:expr, $item:expr) => {
+                            forward_timeline_event(
+                                self.event(
+                                    &params.session_id,
+                                    Some($turn_id),
+                                    $event,
+                                    $item,
+                                ),
+                                &mut sequencing_error,
+                                &cancellation,
+                                emit,
+                            )
+                        };
                     }
                     match event {
                         CodexEvent::TurnStarted { turn_id } => {
@@ -11447,29 +11484,38 @@ impl Runtime {
                                 ))
                                 .expect("response serialization"),
                             );
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&turn_id),
-                                "turn.started",
-                                None,
-                            ));
+                            emit_timeline!(&turn_id, "turn.started", None);
                             if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                 state.items.push(user_item.clone());
                             }
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&turn_id),
+                            emit_timeline!(
+                                &turn_id,
                                 "item.completed",
-                                Some(user_item.clone()),
-                            ));
+                                Some(user_item.clone())
+                            );
                         }
+                        CodexEvent::AgentStarted {
+                            turn_id,
+                            item_id,
+                            text,
+                        } => emit_timeline!(
+                            &turn_id,
+                            "item.started",
+                            Some(TimelineItem {
+                                id: item_id,
+                                kind: "message".into(),
+                                role: "agent".into(),
+                                state: "started".into(),
+                                content: text,
+                                data: None,
+                            })
+                        ),
                         CodexEvent::AgentDelta {
                             turn_id,
                             item_id,
                             text,
-                        } => emit(self.event(
-                            &params.session_id,
-                            Some(&turn_id),
+                        } => emit_timeline!(
+                            &turn_id,
                             "item.delta",
                             Some(TimelineItem {
                                 id: item_id,
@@ -11478,8 +11524,8 @@ impl Runtime {
                                 state: "delta".into(),
                                 content: text,
                                 data: None,
-                            }),
-                        )),
+                            })
+                        ),
                         CodexEvent::AgentCompleted {
                             turn_id,
                             item_id,
@@ -11504,12 +11550,7 @@ impl Runtime {
                             if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                 state.items.push(item.clone());
                             }
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&turn_id),
-                                "item.completed",
-                                Some(item),
-                            ));
+                            emit_timeline!(&turn_id, "item.completed", Some(item));
                         }
                         CodexEvent::CommandUpdated {
                             turn_id,
@@ -11577,12 +11618,7 @@ impl Runtime {
                                 match accumulator.record_tool_observation(observation) {
                                     Ok(ToolObservationAdmission::Recorded) => {}
                                     Ok(ToolObservationAdmission::TerminalPersistenceDenied) => {
-                                        emit(self.event(
-                                            &params.session_id,
-                                            Some(&turn_id),
-                                            "item.started",
-                                            Some(item),
-                                        ));
+                                        emit_timeline!(&turn_id, "item.started", Some(item));
                                         persistence_error = Some(
                                             "cannot persist another command terminal within the durable turn trace budget"
                                                 .to_owned(),
@@ -11709,12 +11745,7 @@ impl Runtime {
                                 "completed" => "item.completed",
                                 _ => "item.delta",
                             };
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&turn_id),
-                                event_name,
-                                Some(item),
-                            ));
+                            emit_timeline!(&turn_id, event_name, Some(item));
                             if let Some((project_id, toolchain, observation, _)) =
                                 command_diagnostics
                             {
@@ -11756,12 +11787,11 @@ impl Runtime {
                                 if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                     state.items.push(diagnostic_item.clone());
                                 }
-                                emit(self.event(
-                                    &params.session_id,
-                                    Some(&turn_id),
+                                emit_timeline!(
+                                    &turn_id,
                                     "diagnostics.observed",
-                                    Some(diagnostic_item),
-                                ));
+                                    Some(diagnostic_item)
+                                );
                             }
                         }
                         CodexEvent::TokenUsage { turn_id, mut usage } => {
@@ -11848,12 +11878,7 @@ impl Runtime {
                                 if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                     state.items.push(item.clone());
                                 }
-                                emit(self.event(
-                                    &params.session_id,
-                                    Some(&turn_id),
-                                    "usage.updated",
-                                    Some(item),
-                                ));
+                                emit_timeline!(&turn_id, "usage.updated", Some(item));
                             } else if metadata_truncation_notified.insert(key) {
                                 let item = TimelineItem {
                                     id: self.allocate_id("usage-truncated"),
@@ -11865,12 +11890,7 @@ impl Runtime {
                                         "max_updates": MAX_TURN_METADATA_UPDATES_PER_KIND
                                     })),
                                 };
-                                emit(self.event(
-                                    &params.session_id,
-                                    Some(&turn_id),
-                                    "usage.truncated",
-                                    Some(item),
-                                ));
+                                emit_timeline!(&turn_id, "usage.truncated", Some(item));
                             }
                         }
                         CodexEvent::TurnDiff { turn_id, diff } => {
@@ -11897,12 +11917,7 @@ impl Runtime {
                                 if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                     state.items.push(item.clone());
                                 }
-                                emit(self.event(
-                                    &params.session_id,
-                                    Some(&turn_id),
-                                    "turn.diff.updated",
-                                    Some(item),
-                                ));
+                                emit_timeline!(&turn_id, "turn.diff.updated", Some(item));
                             } else if metadata_truncation_notified.insert(key) {
                                 let item = TimelineItem {
                                     id: self.allocate_id("diff-truncated"),
@@ -11914,12 +11929,7 @@ impl Runtime {
                                         "max_updates": MAX_TURN_METADATA_UPDATES_PER_KIND
                                     })),
                                 };
-                                emit(self.event(
-                                    &params.session_id,
-                                    Some(&turn_id),
-                                    "turn.diff.truncated",
-                                    Some(item),
-                                ));
+                                emit_timeline!(&turn_id, "turn.diff.truncated", Some(item));
                             }
                         }
                         CodexEvent::TurnPlan {
@@ -11950,12 +11960,7 @@ impl Runtime {
                                 if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                     state.items.push(item.clone());
                                 }
-                                emit(self.event(
-                                    &params.session_id,
-                                    Some(&turn_id),
-                                    "turn.plan.updated",
-                                    Some(item),
-                                ));
+                                emit_timeline!(&turn_id, "turn.plan.updated", Some(item));
                             } else if metadata_truncation_notified.insert(key) {
                                 let item = TimelineItem {
                                     id: self.allocate_id("plan-truncated"),
@@ -11967,12 +11972,7 @@ impl Runtime {
                                         "max_updates": MAX_TURN_METADATA_UPDATES_PER_KIND
                                     })),
                                 };
-                                emit(self.event(
-                                    &params.session_id,
-                                    Some(&turn_id),
-                                    "turn.plan.truncated",
-                                    Some(item),
-                                ));
+                                emit_timeline!(&turn_id, "turn.plan.truncated", Some(item));
                             }
                         }
                         CodexEvent::TurnErrorObserved {
@@ -11999,23 +11999,28 @@ impl Runtime {
                                     content: "Codex reported a non-terminal turn error".into(),
                                     data: Some(data),
                                 };
-                                emit(self.event(
-                                    &params.session_id,
-                                    Some(&turn_id),
-                                    "turn.error-observed",
-                                    Some(item),
-                                ));
+                                emit_timeline!(&turn_id, "turn.error-observed", Some(item));
                             } else if metadata_truncation_notified.insert(key) {
-                                emit(self.event(
-                                    &params.session_id,
-                                    Some(&turn_id),
+                                emit_timeline!(
+                                    &turn_id,
                                     "turn.error-observed.truncated",
-                                    None,
-                                ));
+                                    None
+                                );
                             }
                         }
                         CodexEvent::TurnCompleted { turn_id } => {
                             let terminal_at_ms = now_ms();
+                            if let Err(error) = self.event_sequencer.preflight(
+                                terminal_at_ms,
+                                &params.session_id,
+                                &turn_id,
+                                "turn.completed",
+                                None,
+                            ) {
+                                sequencing_error = Some(error);
+                                cancellation.request();
+                                return;
+                            }
                             let Some(accumulator) = turn_trace_accumulator
                                 .lock()
                                 .expect("turn trace accumulator lock")
@@ -12074,12 +12079,7 @@ impl Runtime {
                             let pending = pending_terminal
                                 .take()
                                 .expect("persisted completed terminal trace is available");
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&pending.turn_id),
-                                "turn.completed",
-                                pending.item,
-                            ))
+                            emit_timeline!(&pending.turn_id, "turn.completed", pending.item)
                         }
                         CodexEvent::TurnSteeringRequested { turn_id, input } => {
                             let item = TimelineItem {
@@ -12101,19 +12101,11 @@ impl Runtime {
                             if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                 state.items.push(item.clone());
                             }
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&turn_id),
-                                "turn.steering-requested",
-                                Some(item),
-                            ));
+                            emit_timeline!(&turn_id, "turn.steering-requested", Some(item));
                         }
-                        CodexEvent::TurnSteeringAcknowledged { turn_id } => emit(self.event(
-                            &params.session_id,
-                            Some(&turn_id),
-                            "turn.steering-acknowledged",
-                            None,
-                        )),
+                        CodexEvent::TurnSteeringAcknowledged { turn_id } => {
+                            emit_timeline!(&turn_id, "turn.steering-acknowledged", None)
+                        }
                         CodexEvent::TurnSteeringFailed { turn_id, message } => {
                             let item = TimelineItem {
                                 id: self.allocate_id("error"),
@@ -12127,19 +12119,11 @@ impl Runtime {
                                     data
                                 }),
                             };
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&turn_id),
-                                "turn.steering-failed",
-                                Some(item),
-                            ));
+                            emit_timeline!(&turn_id, "turn.steering-failed", Some(item));
                         }
-                        CodexEvent::TurnCancellationAcknowledged { turn_id } => emit(self.event(
-                            &params.session_id,
-                            Some(&turn_id),
-                            "turn.cancellation-acknowledged",
-                            None,
-                        )),
+                        CodexEvent::TurnCancellationAcknowledged { turn_id } => {
+                            emit_timeline!(&turn_id, "turn.cancellation-acknowledged", None)
+                        }
                         CodexEvent::TurnCancellationFailed { turn_id, message } => {
                             let item = TimelineItem {
                                 id: self.allocate_id("error"),
@@ -12153,15 +12137,21 @@ impl Runtime {
                                     data
                                 }),
                             };
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&turn_id),
-                                "turn.cancellation-failed",
-                                Some(item),
-                            ));
+                            emit_timeline!(&turn_id, "turn.cancellation-failed", Some(item));
                         }
                         CodexEvent::TurnInterrupted { turn_id } => {
                             let terminal_at_ms = now_ms();
+                            if let Err(error) = self.event_sequencer.preflight(
+                                terminal_at_ms,
+                                &params.session_id,
+                                &turn_id,
+                                "turn.interrupted",
+                                None,
+                            ) {
+                                sequencing_error = Some(error);
+                                cancellation.request();
+                                return;
+                            }
                             let Some(accumulator) = turn_trace_accumulator
                                 .lock()
                                 .expect("turn trace accumulator lock")
@@ -12220,12 +12210,7 @@ impl Runtime {
                             let pending = pending_terminal
                                 .take()
                                 .expect("persisted interrupted terminal trace is available");
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&pending.turn_id),
-                                "turn.interrupted",
-                                pending.item,
-                            ));
+                            emit_timeline!(&pending.turn_id, "turn.interrupted", pending.item);
                         }
                         CodexEvent::TurnFailed {
                             turn_id,
@@ -12282,6 +12267,11 @@ impl Runtime {
                             *turn_trace_accumulator
                                 .lock()
                                 .expect("turn trace accumulator lock") = None;
+                            let mut error_data = runtime_error_data_with_provider(
+                                &message,
+                                provider_error.as_ref(),
+                            );
+                            error_data["terminal_persisted"] = Value::Bool(true);
                             let item = TimelineItem {
                                 id: self.allocate_id("error"),
                                 kind: "error".into(),
@@ -12291,10 +12281,7 @@ impl Runtime {
                                     &message,
                                     provider_error.as_ref(),
                                 ),
-                                data: Some(runtime_error_data_with_provider(
-                                    &message,
-                                    provider_error.as_ref(),
-                                )),
+                                data: Some(error_data),
                             };
                             pending_terminal = Some(PendingTurnTerminal {
                                 turn_id: turn_id.clone(),
@@ -12322,12 +12309,7 @@ impl Runtime {
                             let pending = pending_terminal
                                 .take()
                                 .expect("persisted failed terminal trace is available");
-                            emit(self.event(
-                                &params.session_id,
-                                Some(&pending.turn_id),
-                                "turn.failed",
-                                pending.item,
-                            ));
+                            emit_timeline!(&pending.turn_id, "turn.failed", pending.item);
                         }
                     }
                 },
@@ -12363,7 +12345,18 @@ impl Runtime {
         let backend_restart_required = result
             .as_ref()
             .is_err_and(codex_adapter::CodexTurnFailure::restart_required);
-        let result = result.map_err(codex_adapter::CodexTurnFailure::into_message);
+        let mut fatal_sequence_error = None;
+        let result = match sequencing_error.take() {
+            Some(error) if error.closes_turn() => Err(format!(
+                "Codex provider event lifecycle protocol error: {}",
+                error.code()
+            )),
+            Some(error) => {
+                fatal_sequence_error = Some(error);
+                result.map_err(codex_adapter::CodexTurnFailure::into_message)
+            }
+            None => result.map_err(codex_adapter::CodexTurnFailure::into_message),
+        };
         self.backend = if backend_restart_required {
             Backend::Unavailable(
                 "Codex App Server response channel is unavailable; restart is required".into(),
@@ -12374,6 +12367,14 @@ impl Runtime {
         self.control.finish_turn(&params.session_id);
         if let Some(state) = self.sessions.get_mut(&params.session_id) {
             state.context_threshold_status = context_threshold_status;
+        }
+        if let Some(error) = fatal_sequence_error {
+            self.backend = Backend::Unavailable(format!(
+                "Timeline event sequencing is unavailable: {}",
+                error.code()
+            ));
+            self.shutdown = true;
+            return;
         }
         if persistence_error.is_some() && !terminal_persisted {
             if let Some(pending) = pending_terminal.as_ref() {
@@ -12398,12 +12399,15 @@ impl Runtime {
                         "interrupted" => "turn.interrupted",
                         _ => unreachable!("only terminal turn traces are produced"),
                     };
-                    emit(self.event(
+                    if !self.emit_timeline_or_disable(
                         &params.session_id,
                         Some(&pending.turn_id),
                         event_name,
                         pending.item,
-                    ));
+                        emit,
+                    ) {
+                        return;
+                    }
                 }
             }
         }
@@ -12470,10 +12474,7 @@ impl Runtime {
                 let (event_name, content) = if storage_failure_terminal_persisted {
                     ("turn.failed", "Workbench persistence failed")
                 } else {
-                    (
-                        "turn.persistence-failed",
-                        "Workbench terminal persistence failed",
-                    )
+                    ("turn.failed", "Workbench terminal persistence failed")
                 };
                 let mut data = runtime_error_data("storage persistence failed");
                 data["operation"] = Value::String("workbench.persistence".into());
@@ -12486,7 +12487,13 @@ impl Runtime {
                     content: content.into(),
                     data: Some(data),
                 };
-                emit(self.event(&params.session_id, turn_id, event_name, Some(item)));
+                self.emit_timeline_or_disable(
+                    &params.session_id,
+                    turn_id,
+                    event_name,
+                    Some(item),
+                    emit,
+                );
             } else {
                 self.emit_all(self.error_for(&request, -32113, error), emit);
             }
@@ -12497,22 +12504,6 @@ impl Runtime {
                 let terminal_at_ms = now_ms();
                 let (class, retryable) = runtime_error_classification(&error);
                 let Some(turn_id) = started_turn_id.as_deref() else {
-                    let item = TimelineItem {
-                        id: self.allocate_id("error"),
-                        kind: "error".into(),
-                        role: "system".into(),
-                        state: "completed".into(),
-                        content: "Turn identity is unavailable after adapter failure".into(),
-                        data: Some(runtime_error_data(
-                            "turn identity is unavailable after adapter failure",
-                        )),
-                    };
-                    emit(self.event(
-                        &params.session_id,
-                        None,
-                        "turn.persistence-failed",
-                        Some(item),
-                    ));
                     return;
                 };
                 let terminal_result = turn_trace_accumulator
@@ -12566,23 +12557,32 @@ impl Runtime {
                         content: terminal_error,
                         data: Some(data),
                     };
-                    emit(self.event(
+                    self.emit_timeline_or_disable(
                         &params.session_id,
                         Some(turn_id),
-                        "turn.persistence-failed",
+                        "turn.failed",
                         Some(item),
-                    ));
+                        emit,
+                    );
                     return;
                 }
+                let mut error_data = runtime_error_data(&error);
+                error_data["terminal_persisted"] = Value::Bool(true);
                 let item = TimelineItem {
                     id: self.allocate_id("error"),
                     kind: "error".into(),
                     role: "system".into(),
                     state: "completed".into(),
                     content: runtime_error_content(&error),
-                    data: Some(runtime_error_data(&error)),
+                    data: Some(error_data),
                 };
-                emit(self.event(&params.session_id, Some(turn_id), "turn.failed", Some(item)));
+                self.emit_timeline_or_disable(
+                    &params.session_id,
+                    Some(turn_id),
+                    "turn.failed",
+                    Some(item),
+                    emit,
+                );
             } else {
                 self.emit_all(
                     self.error_for(&request, -32112, runtime_error_content(&error)),
@@ -12613,6 +12613,35 @@ impl Runtime {
             content: format!("AAP runtime preview received:\n{}", backend_input.trim()),
             data: None,
         };
+        let mut started_agent = agent_item.clone();
+        started_agent.state = "started".into();
+        started_agent.content.clear();
+        let mut delta = agent_item.clone();
+        delta.state = "delta".into();
+        let preview_events = vec![
+            ("turn.started", None),
+            ("item.completed", Some(user_item.clone())),
+            ("item.started", Some(started_agent)),
+            ("item.delta", Some(delta)),
+            ("item.completed", Some(agent_item.clone())),
+            ("turn.completed", None),
+        ];
+        let mut preflight = self.event_sequencer.clone();
+        for (event, item) in &preview_events {
+            if let Err(error) =
+                preflight.sequence(now_ms(), &params.session_id, &turn_id, event, item.clone())
+            {
+                self.emit_all(
+                    self.error_for(
+                        &request,
+                        -32007,
+                        format!("cannot sequence preview turn: {}", error.code()),
+                    ),
+                    emit,
+                );
+                return;
+            }
+        }
         if let Err(error) = self.persist_turn(
             &params.session_id,
             &turn_id,
@@ -12664,6 +12693,19 @@ impl Runtime {
             state.items.push(user_item.clone());
             state.items.push(agent_item.clone());
         }
+        let mut timeline = Vec::with_capacity(preview_events.len());
+        for (event, item) in preview_events {
+            match self.event(&params.session_id, Some(&turn_id), event, item) {
+                Ok(message) => timeline.push(message),
+                Err(error) => {
+                    self.backend = Backend::Unavailable(format!(
+                        "Preview timeline sequencing is unavailable: {}",
+                        error.code()
+                    ));
+                    return;
+                }
+            }
+        }
         emit(
             serde_json::to_value(Response::success(
                 request.id.unwrap_or(Value::Null),
@@ -12680,28 +12722,9 @@ impl Runtime {
             ))
             .expect("response serialization"),
         );
-        emit(self.event(&params.session_id, Some(&turn_id), "turn.started", None));
-        emit(self.event(
-            &params.session_id,
-            Some(&turn_id),
-            "item.completed",
-            Some(user_item),
-        ));
-        let mut delta = agent_item.clone();
-        delta.state = "delta".into();
-        emit(self.event(
-            &params.session_id,
-            Some(&turn_id),
-            "item.delta",
-            Some(delta),
-        ));
-        emit(self.event(
-            &params.session_id,
-            Some(&turn_id),
-            "item.completed",
-            Some(agent_item),
-        ));
-        emit(self.event(&params.session_id, Some(&turn_id), "turn.completed", None));
+        for message in timeline {
+            emit(message);
+        }
     }
 
     fn verify_session_projection_for_read(
@@ -16005,25 +16028,46 @@ impl Runtime {
         turn_id: Option<&str>,
         event: &str,
         item: Option<TimelineItem>,
-    ) -> Value {
-        let sequence = self
-            .session_sequences
-            .entry(session_id.to_owned())
-            .and_modify(|sequence| *sequence += 1)
-            .or_insert(1);
+    ) -> Result<Value, event_sequencer::SequenceError> {
+        let turn_id = turn_id.ok_or(event_sequencer::SequenceError::Rejected(
+            "missing-turn-identity",
+        ))?;
+        let envelope = self
+            .event_sequencer
+            .sequence(now_ms(), session_id, turn_id, event, item)?;
         serde_json::to_value(Notification {
             jsonrpc: JSONRPC_VERSION,
             method: "event",
-            params: EventEnvelope {
-                sequence: *sequence,
-                timestamp_ms: now_ms(),
-                session_id: session_id.to_owned(),
-                turn_id: turn_id.map(str::to_owned),
-                event: event.to_owned(),
-                item,
-            },
+            params: envelope,
         })
-        .expect("event serialization")
+        .map_err(|_| event_sequencer::SequenceError::Rejected("notification-serialization-failed"))
+    }
+
+    fn emit_timeline_or_disable<F>(
+        &mut self,
+        session_id: &str,
+        turn_id: Option<&str>,
+        event: &str,
+        item: Option<TimelineItem>,
+        emit: &mut F,
+    ) -> bool
+    where
+        F: FnMut(Value),
+    {
+        match self.event(session_id, turn_id, event, item) {
+            Ok(message) => {
+                emit(message);
+                true
+            }
+            Err(error) => {
+                self.backend = Backend::Unavailable(format!(
+                    "Timeline event sequencing is unavailable: {}",
+                    error.code()
+                ));
+                self.shutdown = true;
+                false
+            }
+        }
     }
 
     fn allocate_id(&mut self, prefix: &str) -> String {
@@ -16056,6 +16100,91 @@ impl Runtime {
             ],
             None => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod timeline_event_runtime_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_propagates_shape_violation_before_committing_structured_failure() {
+        let mut runtime = Runtime::unavailable("test backend");
+        let started = runtime
+            .event("session", Some("turn"), "turn.started", None)
+            .unwrap();
+        assert_eq!(started["params"]["sequence"], 1);
+
+        let violation = runtime
+            .event("session", Some("turn"), "turn.failed", None)
+            .unwrap_err();
+        assert!(violation.closes_turn());
+        assert_eq!(violation.code(), "invalid-event-shape");
+
+        let failed = runtime
+            .event(
+                "session",
+                Some("turn"),
+                "turn.failed",
+                Some(TimelineItem {
+                    id: "runtime-error".into(),
+                    kind: "error".into(),
+                    role: "system".into(),
+                    state: "completed".into(),
+                    content: "Runtime rejected an invalid event lifecycle".into(),
+                    data: Some(json!({
+                        "schema_version": "runtime-error/0.1",
+                        "class": "protocol",
+                        "retryable": false,
+                        "operation": "event.sequencing",
+                        "code": violation.code(),
+                        "terminal_persisted": true
+                    })),
+                }),
+            )
+            .unwrap();
+        assert_eq!(failed["params"]["sequence"], 2);
+        assert_eq!(failed["params"]["event"], "turn.failed");
+        assert_eq!(failed["params"]["turn_state"], "failed");
+    }
+
+    #[test]
+    fn terminal_emission_failure_closes_transport_without_advancing_sequence() {
+        let mut runtime = Runtime::unavailable("test backend");
+        runtime.backend = Backend::Preview;
+        runtime
+            .event("session", Some("turn"), "turn.started", None)
+            .unwrap();
+        let mut emitted = Vec::new();
+
+        assert!(!runtime.emit_timeline_or_disable(
+            "session",
+            Some("turn"),
+            "turn.failed",
+            None,
+            &mut |message| emitted.push(message),
+        ));
+        assert!(emitted.is_empty());
+        assert!(runtime.should_shutdown());
+        assert!(matches!(&runtime.backend, Backend::Unavailable(message)
+            if message == "Timeline event sequencing is unavailable: invalid-event-shape"));
+
+        let failed = runtime
+            .event(
+                "session",
+                Some("turn"),
+                "turn.failed",
+                Some(TimelineItem {
+                    id: "runtime-error".into(),
+                    kind: "error".into(),
+                    role: "system".into(),
+                    state: "completed".into(),
+                    content: "Runtime rejected an invalid event lifecycle".into(),
+                    data: None,
+                }),
+            )
+            .unwrap();
+        assert_eq!(failed["params"]["sequence"], 2);
     }
 }
 
@@ -18417,6 +18546,76 @@ mod durable_runtime_tests {
         assert_eq!(older_page[0]["result"]["items"][0]["sequence"], 1);
         assert_eq!(older_page[0]["result"]["history_page"]["has_older"], false);
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn durable_terminal_followed_by_live_sequence_failure_closes_transport() {
+        let root = std::env::temp_dir().join(format!(
+            "aegisy-runtime-terminal-close-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let data_root = root.join("data");
+        fs::create_dir_all(&data_root).unwrap();
+
+        let mut runtime = Runtime::with_store(&data_root).unwrap();
+        ready(&mut runtime);
+        let session = runtime.handle_line(&request(
+            "session-start",
+            "session/start",
+            json!({"mode": "chat", "title": "Terminal close fixture"}),
+        ));
+        let session_id = session[0]["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let turn = runtime.handle_line(&request(
+            "turn-start",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "persist before live failure",
+                "idempotency_key": "terminal-close-turn"
+            }),
+        ));
+        let turn_id = turn[0]["result"]["turn"]["id"].as_str().unwrap().to_owned();
+        assert!(turn
+            .iter()
+            .any(|message| message["params"]["event"] == "turn.completed"));
+        let durable_events = runtime
+            .workbench_store
+            .as_ref()
+            .unwrap()
+            .read_session_events(&session_id, 0, 100)
+            .unwrap();
+        assert!(durable_events.iter().any(|event| {
+            event.event_kind == "turn.completed" && event.operation_id == turn_id
+        }));
+
+        let mut emitted = Vec::new();
+        assert!(!runtime.emit_timeline_or_disable(
+            &session_id,
+            Some(&turn_id),
+            "turn.completed",
+            None,
+            &mut |message| emitted.push(message),
+        ));
+        assert!(emitted.is_empty());
+        assert!(runtime.should_shutdown());
+        assert!(matches!(&runtime.backend, Backend::Unavailable(message)
+            if message == "Timeline event sequencing is unavailable: turn-already-terminal"));
+
+        drop(runtime);
+        let reopened = WorkbenchStore::open(&data_root).unwrap();
+        assert!(reopened
+            .read_session_events(&session_id, 0, 100)
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event.event_kind == "turn.completed" && event.operation_id == turn_id
+            }));
+        drop(reopened);
         let _ = fs::remove_dir_all(root);
     }
 

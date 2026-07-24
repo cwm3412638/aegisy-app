@@ -20,6 +20,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDateTime>
+#include <QDebug>
 #include <QEvent>
 #include <QFile>
 #include <QFileDialog>
@@ -74,6 +75,8 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <utility>
 
@@ -113,8 +116,12 @@ constexpr int kMaxInlineContextBytes = 16 * 1024;
 constexpr qint64 kMaxPortableSessionBytes = 4LL * 1024 * 1024;
 constexpr int kMaxTimelinePageItems = 200;
 constexpr int kMaxTimelineIdentityBytes = 256;
-constexpr int kMaxTimelineContentBytes = 64 * 1024;
-constexpr int kMaxTimelineDataBytes = 256 * 1024;
+constexpr int kMaxTimelineContentCharacters = 64 * 1024;
+constexpr int kMaxTimelineDataDepth = 16;
+constexpr qsizetype kMaxTimelineDataNodes = 4096;
+constexpr qsizetype kMaxTimelineDataObjectProperties = 128;
+constexpr qsizetype kMaxTimelineDataArrayItems = 4096;
+constexpr qsizetype kMaxUnknownTimelineEventKinds = 64;
 
 struct RuntimeDegradationExpectation {
     QString state;
@@ -142,9 +149,31 @@ bool isBoundedDiagnosticText(const QJsonValue &value, qsizetype maxBytes)
     });
 }
 
-bool isBoundedTimelineContent(const QJsonValue &value, qsizetype maxBytes)
+bool isBoundedGraphicalId(const QJsonValue &value, qsizetype maxBytes)
 {
-    if (!value.isString() || value.toString().toUtf8().size() > maxBytes) return false;
+    if (!value.isString()) return false;
+    const QString text = value.toString();
+    if (text.isEmpty() || text.size() > maxBytes) return false;
+    return std::all_of(text.cbegin(), text.cend(), [](QChar character) {
+        const ushort code = character.unicode();
+        return code >= 0x21 && code <= 0x7e;
+    });
+}
+
+bool isValidTimelineName(const QJsonValue &value, qsizetype maxBytes)
+{
+    if (!value.isString()) return false;
+    const QString text = value.toString();
+    static const QRegularExpression pattern(
+        QStringLiteral("^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$"));
+    return !text.isEmpty() && text.toUtf8().size() <= maxBytes
+        && pattern.match(text).hasMatch();
+}
+
+bool isBoundedTimelineContent(const QJsonValue &value, qsizetype maxCharacters)
+{
+    if (!value.isString()
+            || value.toString().toUcs4().size() > maxCharacters) return false;
     const QString text = value.toString();
     return std::none_of(text.cbegin(), text.cend(), [](QChar character) {
         const ushort code = character.unicode();
@@ -165,6 +194,56 @@ bool isNonnegativeSafeJsonInteger(const QJsonValue &value)
 bool isPositiveSafeJsonInteger(const QJsonValue &value)
 {
     return isNonnegativeSafeJsonInteger(value) && value.toDouble() >= 1.0;
+}
+
+bool isSafeJsonInteger(const QJsonValue &value)
+{
+    if (!value.isDouble()) return false;
+    const double number = value.toDouble();
+    return std::isfinite(number)
+        && number >= -9'007'199'254'740'991.0
+        && number <= 9'007'199'254'740'991.0
+        && number == std::floor(number);
+}
+
+bool isValidTimelineDataKey(const QString &key)
+{
+    if (key.isEmpty() || key.toUtf8().size() > 128) return false;
+    return std::all_of(key.cbegin(), key.cend(), [](QChar character) {
+        const ushort code = character.unicode();
+        return code >= 0x21 && code <= 0x7e;
+    });
+}
+
+bool isValidTimelineDataValue(const QJsonValue &value, int depth,
+                              qsizetype *nodes)
+{
+    if (!nodes || ++(*nodes) > kMaxTimelineDataNodes
+            || depth > kMaxTimelineDataDepth) {
+        return false;
+    }
+    if (value.isNull() || value.isBool() || value.isString()) return true;
+    if (value.isDouble()) return isSafeJsonInteger(value);
+    if (value.isArray()) {
+        const QJsonArray values = value.toArray();
+        if (values.size() > kMaxTimelineDataArrayItems) return false;
+        return std::all_of(values.cbegin(), values.cend(),
+                           [depth, nodes](const QJsonValue &child) {
+            return isValidTimelineDataValue(child, depth + 1, nodes);
+        });
+    }
+    if (value.isObject()) {
+        const QJsonObject values = value.toObject();
+        if (values.size() > kMaxTimelineDataObjectProperties) return false;
+        for (auto valueIt = values.constBegin(); valueIt != values.constEnd(); ++valueIt) {
+            if (!isValidTimelineDataKey(valueIt.key())
+                    || !isValidTimelineDataValue(valueIt.value(), depth + 1, nodes)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
 }
 
 QHash<QString, RuntimeDegradationExpectation> runtimeDegradationExpectations(
@@ -882,6 +961,12 @@ QString timelineTurnKey(const QString &sessionId, const QString &turnId)
 {
     return sessionId + QChar(0x1f) + turnId;
 }
+
+QString timelineItemKey(const QString &sessionId, const QString &turnId,
+                        const QString &itemId)
+{
+    return sessionId + QChar(0x1f) + turnId + QChar(0x1f) + itemId;
+}
 }
 
 AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
@@ -917,7 +1002,11 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     connect(m_runtime, &AgentRuntimeClient::runtimeInitialized,
             this, [this](const QJsonObject &result) {
         m_lastTimelineEventSequences.clear();
+        m_lastTimelineEventTimestamps.clear();
         m_turnStates.clear();
+        m_itemRevisions.clear();
+        m_unknownTimelineEventCounts.clear();
+        m_unknownTimelineEventOverflowCount = 0;
         const QJsonObject backend = result.value(QStringLiteral("backend")).toObject();
         m_runtimeRecoveryMode = backend.value(QStringLiteral("status")).toString()
             == QStringLiteral("read-only-recovery");
@@ -1183,8 +1272,6 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::runtimeRestarted,
             this, [this](const QString &, const QJsonObject &result) {
-        m_lastTimelineEventSequences.clear();
-        m_turnStates.clear();
         m_runtimeRestartRequired = false;
         const QJsonObject health = result.value(QStringLiteral("health")).toObject();
         m_runtimeStatus->setText(QStringLiteral("● Codex 已恢复"));
@@ -1362,7 +1449,11 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_activeTurnSessionId.clear();
             m_activeTurnId.clear();
             m_lastTimelineEventSequences.clear();
+            m_lastTimelineEventTimestamps.clear();
             m_turnStates.clear();
+            m_itemRevisions.clear();
+            m_unknownTimelineEventCounts.clear();
+            m_unknownTimelineEventOverflowCount = 0;
             m_turnCancelRequestId.clear();
         }
         updateTurnAction();
@@ -2070,7 +2161,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
             const QJsonObject replayItem = value.toObject();
             const QString replayItemId = replayItem.value(QStringLiteral("id")).toString();
-            if ((appendingHistory && m_itemKinds.contains(replayItemId))
+            const QString replayItemKey = timelineItemKey(id, QString(), replayItemId);
+            if ((appendingHistory && m_itemKinds.contains(replayItemKey))
                     || pageItemIds.contains(replayItemId)
                     || !replayItem.contains(QStringLiteral("sequence"))
                     || !validateTimelineItem(replayItem, id, QString(),
@@ -2080,7 +2172,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
             pageItemIds.insert(replayItemId);
             validatedStates.insert(
-                replayItemId, replayItem.value(QStringLiteral("state")).toString());
+                replayItemKey, replayItem.value(QStringLiteral("state")).toString());
             const quint64 sequence = static_cast<quint64>(
                 replayItem.value(QStringLiteral("sequence")).toDouble());
             if ((lastSequence != 0 && sequence != lastSequence + 1)
@@ -2209,29 +2301,65 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     connect(m_runtime, &AgentRuntimeClient::timelineEvent,
             this, [this](const QJsonObject &event) {
         QJsonObject item;
-        if (!validateTimelineEvent(event, &item)) return;
+        bool recognizedEvent = false;
+        if (!validateTimelineEvent(event, &item, &recognizedEvent)) return;
         const QString sessionId = event.value(QStringLiteral("session_id")).toString();
         m_lastTimelineEventSequences.insert(
             sessionId, static_cast<quint64>(
                 event.value(QStringLiteral("sequence")).toDouble()));
+        m_lastTimelineEventTimestamps.insert(
+            sessionId, static_cast<quint64>(
+                event.value(QStringLiteral("timestamp_ms")).toDouble()));
         const QString eventName = event.value(QStringLiteral("event")).toString();
         const QString turnId = event.value(QStringLiteral("turn_id")).toString();
+        const QString visibleSessionId = m_mode == QStringLiteral("work")
+            ? m_workSessionId : m_chatSessionId;
+        const bool visibleEvent = !visibleSessionId.isEmpty()
+            && sessionId == visibleSessionId;
+        if (!recognizedEvent) {
+            const QString methodHash = QStringLiteral("sha256:%1").arg(
+                QString::fromLatin1(QCryptographicHash::hash(
+                    eventName.toUtf8(), QCryptographicHash::Sha256).toHex()));
+            quint64 count = 0;
+            if (m_unknownTimelineEventCounts.contains(methodHash)
+                    || m_unknownTimelineEventCounts.size()
+                        < kMaxUnknownTimelineEventKinds) {
+                count = m_unknownTimelineEventCounts.value(methodHash, 0);
+                if (count < std::numeric_limits<quint64>::max()) ++count;
+                m_unknownTimelineEventCounts.insert(methodHash, count);
+            } else {
+                if (m_unknownTimelineEventOverflowCount
+                        < std::numeric_limits<quint64>::max()) {
+                    ++m_unknownTimelineEventOverflowCount;
+                }
+                count = m_unknownTimelineEventOverflowCount;
+            }
+            qWarning().noquote()
+                << QStringLiteral("Ignored unknown AAP Timeline event hash=%1 count=%2")
+                       .arg(methodHash).arg(count);
+            return;
+        }
         if (!item.isEmpty()) {
             const QString itemId = item.value(QStringLiteral("id")).toString();
-            m_itemKinds.insert(itemId, item.value(QStringLiteral("kind")).toString());
-            m_itemRoles.insert(itemId, item.value(QStringLiteral("role")).toString());
-            m_itemStates.insert(itemId, item.value(QStringLiteral("state")).toString());
-            addTimelineItem(item);
+            const QString itemKey = timelineItemKey(sessionId, turnId, itemId);
+            m_itemKinds.insert(itemKey, item.value(QStringLiteral("kind")).toString());
+            m_itemRoles.insert(itemKey, item.value(QStringLiteral("role")).toString());
+            m_itemStates.insert(itemKey, item.value(QStringLiteral("state")).toString());
+            m_itemRevisions.insert(itemKey, static_cast<quint64>(
+                event.value(QStringLiteral("item_update")).toObject()
+                    .value(QStringLiteral("revision")).toDouble()));
+            if (visibleEvent) addTimelineItem(item, false, itemKey);
         }
         const QString turnKey = timelineTurnKey(sessionId, turnId);
         if (eventName == QStringLiteral("turn.started")) {
             m_turnStates.insert(turnKey, QStringLiteral("running"));
         } else if (eventName == QStringLiteral("turn.completed")
                    || eventName == QStringLiteral("turn.failed")
-                   || eventName == QStringLiteral("turn.persistence-failed")
                    || eventName == QStringLiteral("turn.interrupted")) {
-            m_turnStates.insert(turnKey, eventName);
+            m_turnStates.insert(turnKey,
+                event.value(QStringLiteral("turn_state")).toString());
         }
+        if (!visibleEvent) return;
         const auto showRuntimeFailure = [this](const QJsonObject &failureItem,
                                                 const QString &operation) {
             const QJsonObject data = failureItem.value(QStringLiteral("data")).toObject();
@@ -2300,12 +2428,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
         } else if ((eventName == QStringLiteral("turn.completed")
                     || eventName == QStringLiteral("turn.failed")
-                    || eventName == QStringLiteral("turn.persistence-failed")
                     || eventName == QStringLiteral("turn.interrupted"))
                    && sessionId == m_activeTurnSessionId
                    && turnId == m_activeTurnId) {
-            if (eventName == QStringLiteral("turn.failed")
-                    || eventName == QStringLiteral("turn.persistence-failed")) {
+            if (eventName == QStringLiteral("turn.failed")) {
                 showRuntimeFailure(item, QStringLiteral("任务"));
             }
             if (eventName == QStringLiteral("turn.interrupted")) {
@@ -10901,13 +11027,12 @@ bool AgentWorkbenchWidget::validateTimelineItem(
         return false;
     }
 
-    if (!isBoundedDiagnosticText(item.value(QStringLiteral("id")),
-                                 kMaxTimelineIdentityBytes)
-            || !isBoundedDiagnosticText(item.value(QStringLiteral("kind")), 32)
+    if (!isBoundedGraphicalId(item.value(QStringLiteral("id")), 128)
+            || !isValidTimelineName(item.value(QStringLiteral("kind")), 64)
             || !isBoundedDiagnosticText(item.value(QStringLiteral("role")), 32)
             || !isBoundedDiagnosticText(item.value(QStringLiteral("state")), 32)
             || !isBoundedTimelineContent(item.value(QStringLiteral("content")),
-                                        kMaxTimelineContentBytes)) {
+                                        kMaxTimelineContentCharacters)) {
         return false;
     }
     if (item.contains(QStringLiteral("sequence"))
@@ -10918,12 +11043,12 @@ bool AgentWorkbenchWidget::validateTimelineItem(
     QJsonObject data;
     if (item.contains(QStringLiteral("data"))) {
         const QJsonValue dataValue = item.value(QStringLiteral("data"));
-        if (!dataValue.isObject()) return false;
-        data = dataValue.toObject();
-        if (QJsonDocument(data).toJson(QJsonDocument::Compact).size()
-                > kMaxTimelineDataBytes) {
+        qsizetype nodes = 0;
+        if (!dataValue.isObject()
+                || !isValidTimelineDataValue(dataValue, 1, &nodes)) {
             return false;
         }
+        data = dataValue.toObject();
         const QJsonValue dataSession = data.value(QStringLiteral("session_id"));
         if (!dataSession.isUndefined()
                 && (!dataSession.isString() || expectedSessionId.isEmpty()
@@ -10939,85 +11064,138 @@ bool AgentWorkbenchWidget::validateTimelineItem(
     }
 
     const QString id = item.value(QStringLiteral("id")).toString();
+    const QString itemKey = timelineItemKey(expectedSessionId, expectedTurnId, id);
     const QString kind = item.value(QStringLiteral("kind")).toString();
     const QString role = item.value(QStringLiteral("role")).toString();
     const QString state = item.value(QStringLiteral("state")).toString();
-    const bool validCombination =
-        (kind == QStringLiteral("message")
-         && ((role == QStringLiteral("user") && state == QStringLiteral("completed"))
-             || ((role == QStringLiteral("agent") || role == QStringLiteral("assistant"))
-                 && (state == QStringLiteral("delta")
-                     || state == QStringLiteral("completed")))))
-        || (kind == QStringLiteral("command") && role == QStringLiteral("tool")
-            && (state == QStringLiteral("started") || state == QStringLiteral("delta")
-                || state == QStringLiteral("completed")))
-        || (kind == QStringLiteral("diagnostic") && role == QStringLiteral("tool")
-            && state == QStringLiteral("completed"))
-        || (kind == QStringLiteral("usage") && role == QStringLiteral("system")
-            && (state == QStringLiteral("updated") || state == QStringLiteral("truncated")))
-        || (kind == QStringLiteral("diff") && role == QStringLiteral("tool")
-            && (state == QStringLiteral("updated") || state == QStringLiteral("truncated")))
-        || (kind == QStringLiteral("plan") && role == QStringLiteral("agent")
-            && (state == QStringLiteral("updated") || state == QStringLiteral("truncated")))
-        || (kind == QStringLiteral("error") && role == QStringLiteral("system")
-            && (state == QStringLiteral("updated") || state == QStringLiteral("completed")));
-    if (!validCombination) return false;
+    static const QSet<QString> validRoles{
+        QStringLiteral("user"), QStringLiteral("agent"),
+        QStringLiteral("system"), QStringLiteral("tool"),
+    };
+    static const QSet<QString> validStates{
+        QStringLiteral("started"), QStringLiteral("running"),
+        QStringLiteral("delta"), QStringLiteral("updated"),
+        QStringLiteral("completed"), QStringLiteral("failed"),
+        QStringLiteral("interrupted"), QStringLiteral("truncated"),
+        QStringLiteral("unavailable"),
+    };
+    if (!validRoles.contains(role) || !validStates.contains(state)) return false;
 
-    const auto kindIt = itemKinds->constFind(id);
-    const auto roleIt = itemRoles->constFind(id);
+    const auto kindIt = itemKinds->constFind(itemKey);
+    const auto roleIt = itemRoles->constFind(itemKey);
     if ((kindIt != itemKinds->cend() && kindIt.value() != kind)
             || (roleIt != itemRoles->cend() && roleIt.value() != role)
             || (kindIt == itemKinds->cend()) != (roleIt == itemRoles->cend())) {
         return false;
     }
-    itemKinds->insert(id, kind);
-    itemRoles->insert(id, role);
+    itemKinds->insert(itemKey, kind);
+    itemRoles->insert(itemKey, role);
     return true;
 }
 
 bool AgentWorkbenchWidget::validateTimelineEvent(
-    const QJsonObject &event, QJsonObject *validatedItem) const
+    const QJsonObject &event, QJsonObject *validatedItem,
+    bool *recognizedEvent) const
 {
     const QSet<QString> eventKeys{
+        QStringLiteral("schema_version"), QStringLiteral("event_id"),
         QStringLiteral("sequence"), QStringLiteral("timestamp_ms"),
-        QStringLiteral("session_id"), QStringLiteral("turn_id"),
+        QStringLiteral("correlation_id"), QStringLiteral("session_id"),
+        QStringLiteral("turn_id"), QStringLiteral("turn_state"),
         QStringLiteral("event"), QStringLiteral("item"),
+        QStringLiteral("item_update"),
     };
+    static const QRegularExpression eventIdPattern(
+        QStringLiteral("^event:sha256:[0-9a-f]{64}$"));
+    static const QRegularExpression eventNamePattern(
+        QStringLiteral("^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$"));
     if (!hasExactJsonKeys(event, eventKeys)
+            || event.value(QStringLiteral("schema_version")).toString()
+                != QStringLiteral("timeline-event/0.1")
+            || !event.value(QStringLiteral("event_id")).isString()
+            || !eventIdPattern.match(
+                    event.value(QStringLiteral("event_id")).toString()).hasMatch()
             || !isPositiveSafeJsonInteger(event.value(QStringLiteral("sequence")))
             || !isPositiveSafeJsonInteger(event.value(QStringLiteral("timestamp_ms")))
-            || !isBoundedDiagnosticText(event.value(QStringLiteral("session_id")),
-                                        kMaxTimelineIdentityBytes)
-            || !isBoundedDiagnosticText(event.value(QStringLiteral("turn_id")),
-                                        kMaxTimelineIdentityBytes)
-            || !isBoundedDiagnosticText(event.value(QStringLiteral("event")), 64)) {
+            || !isBoundedGraphicalId(event.value(QStringLiteral("correlation_id")), 128)
+            || !isBoundedGraphicalId(event.value(QStringLiteral("session_id")), 128)
+            || !isBoundedGraphicalId(event.value(QStringLiteral("turn_id")), 128)
+            || !event.value(QStringLiteral("event")).isString()
+            || event.value(QStringLiteral("event")).toString().toUtf8().size() > 128
+            || !eventNamePattern.match(
+                    event.value(QStringLiteral("event")).toString()).hasMatch()
+            || event.value(QStringLiteral("event")).toString()
+                == QStringLiteral("turn.persistence-failed")
+            || event.value(QStringLiteral("event_id")).toString()
+                != AgentRuntimeClient::timelineEventIdentity(event)) {
         return false;
     }
     const QString sessionId = event.value(QStringLiteral("session_id")).toString();
     const QString turnId = event.value(QStringLiteral("turn_id")).toString();
     const QString eventName = event.value(QStringLiteral("event")).toString();
+    const QString turnState = event.value(QStringLiteral("turn_state")).toString();
+    if (event.value(QStringLiteral("correlation_id")).toString() != turnId
+            || (turnState != QStringLiteral("running")
+                && turnState != QStringLiteral("completed")
+                && turnState != QStringLiteral("failed")
+                && turnState != QStringLiteral("interrupted"))) {
+        return false;
+    }
     const quint64 sequence = static_cast<quint64>(
         event.value(QStringLiteral("sequence")).toDouble());
-    const QString visibleSessionId = m_mode == QStringLiteral("work")
-        ? m_workSessionId : m_chatSessionId;
-    if (visibleSessionId.isEmpty() || sessionId != visibleSessionId) return false;
+    const quint64 timestamp = static_cast<quint64>(
+        event.value(QStringLiteral("timestamp_ms")).toDouble());
     if (sequence != m_lastTimelineEventSequences.value(sessionId, 0) + 1) return false;
+    if (timestamp < m_lastTimelineEventTimestamps.value(sessionId, 0)) return false;
 
     const bool starting = eventName == QStringLiteral("turn.started");
     const QString turnKey = timelineTurnKey(sessionId, turnId);
     const QString durableTurnState = m_turnStates.value(turnKey);
     if (starting) {
-        if (m_turnRunning || !durableTurnState.isEmpty()) return false;
-    } else if (!m_turnRunning || sessionId != m_activeTurnSessionId
-               || turnId != m_activeTurnId
-               || durableTurnState != QStringLiteral("running")) {
+        if (!durableTurnState.isEmpty()) return false;
+        const QString sessionTurnPrefix = timelineTurnKey(sessionId, QString());
+        for (auto state = m_turnStates.cbegin(); state != m_turnStates.cend(); ++state) {
+            if (state.key().startsWith(sessionTurnPrefix)
+                    && state.value() == QStringLiteral("running")) {
+                return false;
+            }
+        }
+    } else if (durableTurnState != QStringLiteral("running")) {
         return false;
     }
 
     const QJsonValue itemValue = event.value(QStringLiteral("item"));
+    const QJsonValue updateValue = event.value(QStringLiteral("item_update"));
     const bool hasItem = itemValue.isObject();
-    if (!hasItem && !itemValue.isNull()) return false;
+    if ((!hasItem && !itemValue.isNull()) || itemValue.isNull() != updateValue.isNull()
+            || (hasItem && !updateValue.isObject())) {
+        return false;
+    }
     const QJsonObject item = hasItem ? itemValue.toObject() : QJsonObject{};
+    quint64 revision = 0;
+    if (hasItem) {
+        if (item.contains(QStringLiteral("sequence"))
+                || !isBoundedGraphicalId(item.value(QStringLiteral("id")), 128)
+                || item.value(QStringLiteral("role")).toString()
+                    == QStringLiteral("assistant")
+                || (item.contains(QStringLiteral("data"))
+                    && item.value(QStringLiteral("data")).toObject().size() > 128)) {
+            return false;
+        }
+        const QJsonObject update = updateValue.toObject();
+        const QSet<QString> updateKeys{
+            QStringLiteral("revision"), QStringLiteral("content_mode"),
+        };
+        if (!hasExactJsonKeys(update, updateKeys)
+                || !isPositiveSafeJsonInteger(
+                    update.value(QStringLiteral("revision")))
+                || update.value(QStringLiteral("content_mode")).toString()
+                    != QStringLiteral("snapshot-replacement")) {
+            return false;
+        }
+        revision = static_cast<quint64>(
+            update.value(QStringLiteral("revision")).toDouble());
+    }
     const auto matchesItem = [&item](const QString &kind, const QString &role,
                                      const QString &state) {
         return item.value(QStringLiteral("kind")).toString() == kind
@@ -11026,13 +11204,18 @@ bool AgentWorkbenchWidget::validateTimelineEvent(
     };
 
     bool validEvent = false;
+    QString expectedTurnState = QStringLiteral("running");
     if (eventName == QStringLiteral("turn.started")
-            || eventName == QStringLiteral("turn.completed")
-            || eventName == QStringLiteral("turn.interrupted")
             || eventName == QStringLiteral("turn.steering-acknowledged")
             || eventName == QStringLiteral("turn.cancellation-acknowledged")
             || eventName == QStringLiteral("turn.error-observed.truncated")) {
         validEvent = !hasItem;
+    } else if (eventName == QStringLiteral("turn.completed")) {
+        validEvent = !hasItem;
+        expectedTurnState = QStringLiteral("completed");
+    } else if (eventName == QStringLiteral("turn.interrupted")) {
+        validEvent = !hasItem;
+        expectedTurnState = QStringLiteral("interrupted");
     } else if (eventName == QStringLiteral("item.started")) {
         validEvent = hasItem && item.value(QStringLiteral("state")).toString()
             == QStringLiteral("started");
@@ -11078,25 +11261,53 @@ bool AgentWorkbenchWidget::validateTimelineEvent(
         validEvent = hasItem && matchesItem(QStringLiteral("message"),
                                            QStringLiteral("user"),
                                            QStringLiteral("completed"));
-    } else if (eventName == QStringLiteral("turn.failed")
-               || eventName == QStringLiteral("turn.persistence-failed")
-               || eventName == QStringLiteral("turn.steering-failed")
+    } else if (eventName == QStringLiteral("turn.failed")) {
+        validEvent = hasItem && matchesItem(QStringLiteral("error"),
+                                           QStringLiteral("system"),
+                                           QStringLiteral("completed"));
+        expectedTurnState = QStringLiteral("failed");
+    } else if (eventName == QStringLiteral("turn.steering-failed")
                || eventName == QStringLiteral("turn.cancellation-failed")) {
         validEvent = hasItem && matchesItem(QStringLiteral("error"),
                                            QStringLiteral("system"),
                                            QStringLiteral("completed"));
+    } else {
+        if (turnState != QStringLiteral("running") || hasItem) return false;
+        if (validatedItem) *validatedItem = QJsonObject{};
+        if (recognizedEvent) *recognizedEvent = false;
+        return true;
     }
-    if (!validEvent) return false;
+    if (!validEvent || turnState != expectedTurnState) return false;
+    if (expectedTurnState == QStringLiteral("completed")
+            || expectedTurnState == QStringLiteral("interrupted")) {
+        const QString itemPrefix = timelineItemKey(sessionId, turnId, QString());
+        const QString completingItemKey = hasItem
+            ? timelineItemKey(sessionId, turnId,
+                              item.value(QStringLiteral("id")).toString())
+            : QString();
+        for (auto state = m_itemStates.cbegin(); state != m_itemStates.cend(); ++state) {
+            if (state.key().startsWith(itemPrefix)
+                    && state.key() != completingItemKey
+                    && (state.value() == QStringLiteral("started")
+                        || state.value() == QStringLiteral("delta"))) {
+                return false;
+            }
+        }
+    }
     if (hasItem) {
         QHash<QString, QString> kinds = m_itemKinds;
         QHash<QString, QString> roles = m_itemRoles;
         if (!validateTimelineItem(item, sessionId, turnId, &kinds, &roles)) return false;
         const QString id = item.value(QStringLiteral("id")).toString();
-        const QString kind = item.value(QStringLiteral("kind")).toString();
+        const QString itemKey = timelineItemKey(sessionId, turnId, id);
         const QString state = item.value(QStringLiteral("state")).toString();
-        const QString previousState = m_itemStates.value(id);
+        const QString previousState = m_itemStates.value(itemKey);
+        const quint64 previousRevision = m_itemRevisions.value(itemKey, 0);
+        if (revision != previousRevision + 1) return false;
         const bool validTransition = previousState.isEmpty()
-            ? (kind != QStringLiteral("command") || state == QStringLiteral("started"))
+            ? (state == QStringLiteral("started") || state == QStringLiteral("completed")
+               || state == QStringLiteral("updated")
+               || state == QStringLiteral("truncated"))
             : previousState == QStringLiteral("started")
                 ? (state == QStringLiteral("delta") || state == QStringLiteral("completed"))
             : previousState == QStringLiteral("delta")
@@ -11108,12 +11319,15 @@ bool AgentWorkbenchWidget::validateTimelineEvent(
         if (!validTransition) return false;
     }
     if (validatedItem) *validatedItem = item;
+    if (recognizedEvent) *recognizedEvent = true;
     return true;
 }
 
-void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend)
+void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend,
+                                           const QString &presentationKey)
 {
     const QString id = item.value(QStringLiteral("id")).toString();
+    const QString key = presentationKey.isEmpty() ? id : presentationKey;
     const QString role = item.value(QStringLiteral("role")).toString();
     const QString kind = item.value(QStringLiteral("kind")).toString();
     const QJsonObject data = item.value(QStringLiteral("data")).toObject();
@@ -11126,9 +11340,9 @@ void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend
     const UsageAuthorityPresentation usagePresentation = kind == QStringLiteral("usage")
         ? usageAuthorityPresentation(data)
         : UsageAuthorityPresentation{};
-    if (QLabel *existing = m_itemLabels.value(id, nullptr)) {
+    if (QLabel *existing = m_itemLabels.value(key, nullptr)) {
         existing->setText(content);
-        if (QPushButton *button = m_itemArtifactButtons.value(id, nullptr)) {
+        if (QPushButton *button = m_itemArtifactButtons.value(key, nullptr)) {
             button->setProperty("artifactReference", artifactReference);
             button->setProperty("artifactSession", artifactSession);
             button->setVisible(!artifactReference.isEmpty() && !artifactSession.isEmpty());
@@ -11214,19 +11428,24 @@ void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend
             "QPushButton { background:#ffffff; color:#344054; border:1px solid #d0d5dd;"
             "border-radius:5px; padding:2px 8px; font-size:9px; text-align:left; }"
             "QPushButton:hover { background:#f2f4f7; }"));
-        connect(artifactButton, &QPushButton::clicked, this, [this, artifactButton, id]() {
+        connect(artifactButton, &QPushButton::clicked, this,
+                [this, artifactButton, key]() {
             const QString reference = artifactButton->property("artifactReference").toString();
             const QString sessionId = artifactButton->property("artifactSession").toString();
             if (reference.isEmpty() || sessionId.isEmpty()) return;
             const QString requestId = m_runtime->readCommandArtifact(sessionId, reference);
             if (!requestId.isEmpty()) {
                 artifactButton->setEnabled(false);
-                m_commandArtifactRequests.insert(requestId, id);
+                m_commandArtifactRequests.insert(requestId, key);
             }
         });
         layout->addWidget(artifactButton);
-        m_itemArtifactButtons.insert(id, artifactButton);
+        m_itemArtifactButtons.insert(key, artifactButton);
     }
+    m_itemLabels.insert(key, message);
+    // The raw ID remains a current-item alias for existing artifact/UI lookups.
+    // Lifecycle updates always use the scoped key above, so another Turn cannot
+    // overwrite a prior Turn's visible Item when an adapter reuses an Item ID.
     m_itemLabels.insert(id, message);
     const int insertAt = prepend ? 1 : qMax(0, m_timelineLayout->count() - 1);
     m_timelineLayout->insertWidget(insertAt, bubble, 0,

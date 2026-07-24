@@ -81,6 +81,49 @@ AAP 0.1 initialization and capability-negotiation evidence (`3.3`):
   `agent_runtime_protocol`, `agent_workbench_render`, and
   `agent_runtime_environment`; strict OpenSpec validation; and `git diff --check`.
 
+AAP 0.1 ordered Timeline event evidence (`3.4`):
+
+- Stable `timeline-event/0.1` envelopes now bind a Session-local positive contiguous
+  sequence, non-decreasing positive millisecond timestamp, exact Session/Turn
+  correlation, explicit running/completed/failed/interrupted Turn state, optional
+  Item snapshot, and positive contiguous Item revision using
+  `snapshot-replacement`. Rust, JSON Schema, Qt, fixtures, the internal guide,
+  design, and protocol delta spec share the same field and lifecycle contract.
+- Event IDs are independently reproducible in Rust and Qt as SHA-256 over the fixed
+  domain, unsigned 64-bit big-endian canonical JSON byte length, and compact UTF-8
+  canonical JSON. Envelope/Item fields use fixed order; data-object keys sort by
+  UTF-8 bytes; arrays retain order; nullable fields remain present. Mathematical
+  JSON integers such as `1.0`, `1e3`, and `-0.0` normalize to the shortest decimal
+  integer before hashing, while fractional and out-of-safe-range values fail closed.
+- The Runtime sequencer owns Turn and Item lifecycle transitions. Known event
+  shapes, generic 64-byte Item kinds, stable kind/role identity, revision order,
+  open-Item terminal rejection, duplicate/late terminal rejection, timestamp
+  rollback, and sequence exhaustion are validated before cursor mutation. Failed
+  sequencing advances no sequence or Item revision. If a terminal live event cannot
+  be sequenced after durable terminal persistence, the Runtime disables the backend
+  and closes stdio without emitting an invalid event; durable history remains intact.
+- Qt validates and advances cursors, Turn state, and Item state independently for
+  every Session, including A/B/A interleaving. Background Session events never
+  render into or alter the visible Session UI. Unknown itemless running events
+  advance only their Session cursor and produce bounded content-free diagnostics.
+  Structured `turn.failed` retains accepted `started`/`delta` partial Items and adds
+  its validated error Item before closing the Turn. Completed and interrupted Turns
+  continue to reject those open streams, but may retain repeatable `updated`
+  metadata snapshots; revision-one atomic `truncated` markers are also accepted.
+  Regression coverage proves the terminal cursor advances exactly once and that no
+  later Item, terminal, or reopen event mutates a failed Turn.
+  Tests cover generic Item lifecycles, kind/role drift, 3 MiB structured data,
+  exact 4 MiB notification framing, `4 MiB + 1` rejection, mathematical integer
+  normalization, and Rust/Qt Event ID agreement.
+- Verified commands on 2026-07-24: Rust formatting; full workspace tests (17 AAP
+  type tests, 644 sidecar library tests passed plus one ignored live fixture, 6
+  daemon-main, 10 context-threshold, 13 handshake Runtime, 12 handshake Schema,
+  63 protocol, and 23 stdio/Codex tests); strict workspace Clippy; all 16 desktop
+  CTests; strict OpenSpec validation; and `git diff --check`.
+- This stage does not claim durable public Timeline journaling, snapshot/replay,
+  subscription, heartbeat, reconnect catch-up, or gap recovery. Those remain under
+  `3.5`; the current Agent/Codex permission boundary remains read-only.
+
 Model catalog foundation evidence:
 
 - An internal `model-catalog/0.1` contract now validates bounded model identity,
@@ -639,9 +682,9 @@ Current editor evidence:
   switching is disabled while the single active Turn is running. The full Rust
   stage passes 630 library tests (one ignored), 63 protocol tests, and 21 stdio
   tests; both the focused degradation/Timeline run and ordinary Qt render run pass.
-  Public event persistence/reconnect replay, unknown-event cursor diagnostics, full
+  Durable public event persistence/reconnect replay, complete gap recovery, full
   vendor capability negotiation, and remaining desktop/dependent feature gates are
-  not complete, so `3.4`, `3.5`, and `7.9` remain unchecked.
+  not complete, so `3.5` and `7.9` remain unchecked.
 - Large command-output tests cover a Unicode-safe 64 KiB head/192 KiB tail,
   1 MiB artifact head/tail, exact omission metadata, 100,000 deltas, and
   content-addressed session isolation/eviction. Output is redacted before capture;

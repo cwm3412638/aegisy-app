@@ -184,9 +184,32 @@ Protocol properties:
   chunking, and content references remain owned by task `3.8`.
 - Disconnect, runtime exit, or protocol rejection clears readiness, capability,
   and limit state; reconnect always starts a new handshake.
-- Monotonic event sequence per session, event IDs, timestamps, correlation IDs,
-  and explicit terminal states.
+- `timeline-event/0.1` uses a contiguous positive safe-integer sequence per
+  Session within the current Runtime live stream, a content-hashed immutable
+  Event ID, the Runtime observation time clamped non-decreasing per Session, and
+  a correlation ID equal to the bound Turn ID. Item updates carry a contiguous
+  per-Item revision and explicitly use `snapshot-replacement` content semantics.
+  Optional Item data uses a recursively bounded canonical JSON subset and only
+  exact mathematical integers in the signed JSON-safe range. Event identity hashes
+  a fixed-order compact UTF-8 envelope without `event_id`: Item data keys sort by
+  UTF-8 bytes, arrays retain order, nullable fields remain present, integers use
+  shortest base-10 form, and Item/Item-update fields have fixed order. SHA-256
+  consumes the NUL-terminated `aegisy-timeline-event/0.1` domain, an eight-byte
+  big-endian material length, and the material bytes. This lets Rust and Qt
+  independently reproduce the same immutable Event identity without numeric
+  precision or key-order drift.
+  The only Turn terminal states are `completed`, `failed`, and `interrupted`.
+- A single Runtime sequencer validates Turn and Item state before allocating a
+  public sequence. Preview, Codex, and future adapters cannot bypass
+  `started -> delta* -> completed`, emit after a terminal Turn, invent a fourth
+  persistence terminal, or change Session/Turn/Item/kind/role identity midstream.
+  Structurally valid unknown itemless running events advance the client cursor
+  without changing product state; their names are retained only as bounded
+  content-free diagnostics.
 - Snapshot plus replay from sequence number for reconnect and crash recovery.
+  This is a separate `3.5` public Event Journal contract: the current live
+  sequence is not durable across Runtime restart, and the internal Workbench
+  projection-event sequence must not be exposed as AAP replay authority.
 - Bounded outbound queues, overload errors, cancellation, heartbeat, and
   backpressure.
 - Idempotency keys for turn start, approval responses, writes, and background job
