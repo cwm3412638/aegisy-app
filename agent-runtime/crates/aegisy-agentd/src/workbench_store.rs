@@ -11077,6 +11077,16 @@ impl WorkbenchStore {
             .map_err(public_timeline_error)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn materialize_public_timeline_visible_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<VisibleStateFloorSnapshot, WorkbenchStoreError> {
+        self.ensure_session_readable(session_id)?;
+        public_timeline_journal::materialize_visible_snapshot(&self.connection, session_id)
+            .map_err(public_timeline_error)
+    }
+
     pub(crate) fn sync_public_timeline_from_anchor(
         &self,
         session_id: &str,

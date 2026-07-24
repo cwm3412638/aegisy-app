@@ -238,6 +238,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   subscription/heartbeat/reconnect/acknowledgement, and `snapshot_available`
   advertisement are still absent, so automatic pruning remains disabled and
   OpenSpec `3.5` stays open.
+- Runtime now has an internal, capability-gated `timeline/snapshot` handler.
+  It materializes one fixed head from the durable visible floor plus retained
+  tail, converts validated Items/active Turn metadata into the AAP snapshot
+  contract, computes complete snapshot/Item/page identities, and enforces
+  continuation cursor, watermark, page-size, and response validation. The
+  capability is deliberately not advertised yet; no subscription, heartbeat,
+  reconnect orchestration, acknowledgement, Qt atomic replacement, or Windows
+  recovery evidence has been added.
 - Model catalog foundation (2026-07-21): the sidecar now validates an internal
   `model-catalog/0.1` metadata contract and exposes the read-only AAP capability
   `model.catalog.read-only` with `model/catalog`. The current projection is
@@ -2715,7 +2723,7 @@ Implemented visual baseline:
 ## Verification Snapshot (2026-07-25)
 
 - The schema-v17 visible-state floor persistence stage now passes the focused
-  Public Timeline Journal suite and the full `aegisy-agentd --lib` suite (`689`
+  Public Timeline Journal suite and the full `aegisy-agentd --lib` suite (`690`
   passed, one ignored live fixture), strict Clippy, formatting, and
   `git diff --check`. It materializes canonical visible Items and active/open
   Turn state at the requested floor, validates redundant rows and snapshot

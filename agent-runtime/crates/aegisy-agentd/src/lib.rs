@@ -80,10 +80,14 @@ mod workspace_edit_preview;
 pub mod workspace_edit_restore;
 
 use aegisy_aap::stable::v0_1::{
-    BackendDescriptor, EventEnvelope, Identity, InitializeParams, InitializeResult,
+    timeline_snapshot_identity, timeline_snapshot_item_canonical_bytes,
+    timeline_snapshot_item_identity, timeline_snapshot_page_identity, BackendDescriptor,
+    EventEnvelope, Identity, InitializeParams, InitializeResult, ItemUpdate,
     NegotiatedCapabilities, NegotiatedProtocol, Platform, Project, ProtocolLimits, Session,
     SessionMode, TimelineAnchor, TimelineItem, TimelineRetentionGapData,
-    TimelineSyncPage as AapTimelineSyncPage, TimelineSyncParams, TransportSecurity,
+    TimelineSessionSnapshotPage, TimelineSnapshotActiveTurn, TimelineSnapshotCursor,
+    TimelineSnapshotItem, TimelineSnapshotParams, TimelineSyncPage as AapTimelineSyncPage,
+    TimelineSyncParams, TransportSecurity,
 };
 use aegisy_aap::{
     Notification, Request, Response, JSONRPC_VERSION, MAX_AAP_FRAME_BYTES, PROTOCOL_VERSION,
@@ -4706,6 +4710,7 @@ impl Runtime {
             "session/fork" => self.session_fork(request),
             "session/read" => self.session_read(request),
             "timeline/sync" => self.timeline_sync(request),
+            "timeline/snapshot" => self.timeline_snapshot(request),
             "session/title" => self.session_title(request),
             "session/unarchive" => self.session_unarchive(request),
             "session/provider-list" => self.provider_thread_list(request),
@@ -4824,6 +4829,7 @@ impl Runtime {
             "session/fork" => "session.fork",
             "session/read" => "session.history.paginated",
             "timeline/sync" => "timeline.replay.fixed-watermark",
+            "timeline/snapshot" => "timeline.snapshot.current",
             "session/provider-list" | "session/provider-read" => {
                 "session.provider.lifecycle.list-read"
             }
@@ -16478,6 +16484,205 @@ impl Runtime {
         }
     }
 
+    fn timeline_snapshot(&self, request: Request) -> Vec<Value> {
+        let params: TimelineSnapshotParams = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        if let Err(error) = params.validate() {
+            return self.error_for(&request, -32602, error);
+        }
+        let Some(store) = self.workbench_store.as_ref() else {
+            return self.error_for(&request, -32120, "durable Timeline snapshot is unavailable");
+        };
+        let snapshot = match store.materialize_public_timeline_visible_snapshot(&params.session_id)
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32147,
+                    format!("durable Timeline snapshot failed: {}", error.message),
+                )
+            }
+        };
+        let retention = match store.public_timeline_retention_state(&params.session_id) {
+            Ok(state) => state,
+            Err(error) => {
+                return self.error_for(
+                    &request,
+                    -32147,
+                    format!("durable Timeline retention state failed: {}", error.message),
+                )
+            }
+        };
+        let floor = TimelineAnchor {
+            sequence: retention.floor.sequence,
+            event_id: retention.floor.event_id,
+        };
+        let watermark = TimelineAnchor {
+            sequence: retention.head.sequence,
+            event_id: retention.head.event_id,
+        };
+        let mut items = Vec::with_capacity(snapshot.items.len());
+        for (index, visible) in snapshot.items.iter().enumerate() {
+            let turn = match snapshot
+                .turns
+                .iter()
+                .find(|turn| turn.turn_id == visible.turn_id)
+            {
+                Some(turn) => turn,
+                None => {
+                    return self.error_for(
+                        &request,
+                        -32147,
+                        "Timeline snapshot Turn binding failed",
+                    )
+                }
+            };
+            let mut item = TimelineSnapshotItem {
+                ordinal: u64::try_from(index + 1).unwrap_or(u64::MAX),
+                item_identity: String::new(),
+                turn_id: visible.turn_id.clone(),
+                correlation_id: visible.turn_id.clone(),
+                turn_state: turn.state,
+                first_event: TimelineAnchor {
+                    sequence: visible.first_anchor.sequence,
+                    event_id: visible.first_anchor.event_id.clone(),
+                },
+                latest_event: TimelineAnchor {
+                    sequence: visible.latest_anchor.sequence,
+                    event_id: visible.latest_anchor.event_id.clone(),
+                },
+                item: visible.item.clone(),
+                item_update: ItemUpdate {
+                    revision: visible.revision,
+                    content_mode: "snapshot-replacement".into(),
+                },
+            };
+            item.item_identity = match timeline_snapshot_item_identity(&params.session_id, &item) {
+                Ok(identity) => identity,
+                Err(error) => return self.error_for(&request, -32147, error),
+            };
+            items.push(item);
+        }
+        let total_canonical_bytes = match items.iter().try_fold(0_u64, |total, item| {
+            timeline_snapshot_item_canonical_bytes(&params.session_id, item).and_then(|bytes| {
+                total
+                    .checked_add(bytes)
+                    .ok_or("Timeline snapshot byte total overflowed")
+            })
+        }) {
+            Ok(total) => total,
+            Err(error) => return self.error_for(&request, -32147, error),
+        };
+        let active_turn = snapshot.running_turn_id.as_ref().and_then(|turn_id| {
+            snapshot
+                .turns
+                .iter()
+                .find(|turn| &turn.turn_id == turn_id)
+                .map(|turn| TimelineSnapshotActiveTurn {
+                    turn_id: turn.turn_id.clone(),
+                    correlation_id: turn.turn_id.clone(),
+                    state: turn.state,
+                    started_event: TimelineAnchor {
+                        sequence: turn.started_anchor.sequence,
+                        event_id: turn.started_anchor.event_id.clone(),
+                    },
+                    latest_event: TimelineAnchor {
+                        sequence: turn.latest_anchor.sequence,
+                        event_id: turn.latest_anchor.event_id.clone(),
+                    },
+                    open_item_ids: snapshot
+                        .open_items
+                        .iter()
+                        .filter(|open| &open.turn_id == turn_id)
+                        .map(|open| open.item_id.clone())
+                        .collect(),
+                })
+        });
+        let ordered_item_identities = items
+            .iter()
+            .map(|item| item.item_identity.clone())
+            .collect::<Vec<_>>();
+        let snapshot_identity = match timeline_snapshot_identity(
+            &params.session_id,
+            &floor,
+            &watermark,
+            active_turn.as_ref(),
+            items.len() as u64,
+            total_canonical_bytes,
+            &ordered_item_identities,
+        ) {
+            Ok(identity) => identity,
+            Err(error) => return self.error_for(&request, -32147, error),
+        };
+        if params
+            .snapshot_identity
+            .as_deref()
+            .is_some_and(|identity| identity != snapshot_identity)
+            || params
+                .watermark
+                .as_ref()
+                .is_some_and(|requested| requested != &watermark)
+        {
+            return self.error_for(&request, -32147, "Timeline snapshot continuation drifted");
+        }
+        let start = match params.after.as_ref() {
+            None => 0,
+            Some(cursor) => {
+                let index = usize::try_from(cursor.ordinal).unwrap_or(usize::MAX);
+                if index >= items.len()
+                    || items[index].item.id != cursor.item_id
+                    || items[index].item_identity != cursor.item_identity
+                {
+                    return self.error_for(&request, -32147, "Timeline snapshot cursor drifted");
+                }
+                index + 1
+            }
+        };
+        let limit = usize::try_from(params.limit).unwrap_or(0);
+        let end = start.saturating_add(limit).min(items.len());
+        let page_items = items[start..end].to_vec();
+        let complete = end == items.len();
+        let next_after = (!complete).then(|| {
+            let item = &items[end - 1];
+            TimelineSnapshotCursor {
+                ordinal: item.ordinal,
+                item_id: item.item.id.clone(),
+                item_identity: item.item_identity.clone(),
+            }
+        });
+        let mut page = TimelineSessionSnapshotPage {
+            schema_version: "timeline-session-snapshot-page/0.1".into(),
+            session_id: params.session_id.clone(),
+            snapshot_identity,
+            floor,
+            watermark,
+            active_turn,
+            total_items: items.len() as u64,
+            total_canonical_bytes,
+            after: params.after.clone(),
+            items: page_items,
+            next_after,
+            complete,
+            page_identity: String::new(),
+        };
+        page.page_identity = match timeline_snapshot_page_identity(&page) {
+            Ok(identity) => identity,
+            Err(error) => return self.error_for(&request, -32147, error),
+        };
+        if let Err(error) = page.validate_for_request(&params) {
+            return self.error_for(&request, -32147, error);
+        }
+        match serde_json::to_value(page) {
+            Ok(result) => self.success_for(&request, result),
+            Err(_) => self.error_for(&request, -32147, "Timeline snapshot serialization failed"),
+        }
+    }
+
     fn event(
         &mut self,
         session_id: &str,
@@ -16574,6 +16779,90 @@ impl Runtime {
 #[cfg(test)]
 mod timeline_event_runtime_tests {
     use super::*;
+
+    #[test]
+    fn timeline_snapshot_materializes_fixed_head_pages_without_advertising_capability() {
+        let root = std::env::temp_dir().join(format!(
+            "aegisy-timeline-snapshot-runtime-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut runtime = Runtime::unavailable("test backend");
+        runtime.workbench_store = Some(WorkbenchStore::open(&root).unwrap());
+        runtime
+            .workbench_store
+            .as_mut()
+            .unwrap()
+            .create_session(StoredSessionCreate {
+                session_id: "snapshot-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Snapshot".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        runtime
+            .event(
+                "snapshot-session",
+                Some("snapshot-turn"),
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        runtime
+            .event(
+                "snapshot-session",
+                Some("snapshot-turn"),
+                "item.completed",
+                Some(TimelineItem {
+                    id: "snapshot-item".into(),
+                    kind: "message".into(),
+                    role: "agent".into(),
+                    state: "completed".into(),
+                    content: "safe".into(),
+                    data: None,
+                }),
+            )
+            .unwrap();
+        runtime
+            .event(
+                "snapshot-session",
+                Some("snapshot-turn"),
+                "turn.completed",
+                None,
+            )
+            .unwrap();
+
+        let request = Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("snapshot-page-1")),
+            method: "timeline/snapshot".into(),
+            params: json!({
+                "session_id": "snapshot-session",
+                "snapshot_identity": null,
+                "watermark": null,
+                "after": null,
+                "limit": 1
+            }),
+        };
+        let first = runtime.timeline_snapshot(request);
+        let page = &first[0]["result"];
+        assert_eq!(page["complete"], true);
+        assert_eq!(page["total_items"], 1);
+        assert_eq!(page["items"][0]["item"]["id"], "snapshot-item");
+        assert!(page["snapshot_identity"]
+            .as_str()
+            .unwrap()
+            .starts_with("timeline-session-snapshot:sha256:"));
+        assert!(!runtime
+            .negotiated_capabilities
+            .contains("timeline.snapshot.current"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn persisted_turn_start_uses_the_sequencer_timestamp_after_clock_rollback() {

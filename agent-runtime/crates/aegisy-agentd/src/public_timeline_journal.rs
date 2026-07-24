@@ -1230,6 +1230,73 @@ pub(crate) fn read_visible_snapshot(
     Ok(Some(snapshot))
 }
 
+pub(crate) fn materialize_visible_snapshot(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<VisibleStateFloorSnapshot, JournalError> {
+    let cursor = read_cursor(connection, session_id)?;
+    validate_cursor_anchor(connection, session_id, &cursor)?;
+    let floor = cursor.floor();
+    let head = cursor.head();
+    let floor_snapshot = read_visible_snapshot(connection, session_id)?;
+    if floor_snapshot.as_ref().is_some_and(|snapshot| {
+        !timeline_anchor_matches_projection(
+            &snapshot.anchor,
+            i64::try_from(floor.sequence).unwrap_or(-1),
+            floor.event_id.as_deref(),
+            i64::try_from(floor.timestamp_ms).unwrap_or(-1),
+        )
+    }) {
+        return Err(JournalError::new(
+            "timeline-visible-snapshot-anchor-mismatch",
+        ));
+    }
+    let mut projection = match floor_snapshot {
+        Some(snapshot) => PublicTimelineProjection::from_floor(snapshot),
+        None => PublicTimelineProjection::empty(session_id),
+    }
+    .map_err(|_| JournalError::new("timeline-visible-snapshot-invalid"))?;
+    let mut after = floor.sequence;
+    let watermark = TimelineWatermark {
+        sequence: head.sequence,
+        event_id: head.event_id.clone(),
+    };
+    while after < watermark.sequence {
+        let page = sync_page(
+            connection,
+            session_id,
+            after,
+            Some(&watermark),
+            MAX_SYNC_PAGE,
+        )?;
+        if page.events.is_empty() {
+            return Err(JournalError::new(
+                "timeline-visible-snapshot-replay-incomplete",
+            ));
+        }
+        for event in &page.events {
+            projection
+                .apply(event)
+                .map_err(|_| JournalError::new("timeline-visible-snapshot-replay-failed"))?;
+        }
+        after = page
+            .events
+            .last()
+            .map(|event| event.sequence)
+            .ok_or_else(|| JournalError::new("timeline-visible-snapshot-replay-incomplete"))?;
+    }
+    let snapshot = projection
+        .floor_snapshot()
+        .map_err(|_| JournalError::new("timeline-visible-snapshot-invalid"))?;
+    if snapshot.anchor.sequence != head.sequence
+        || snapshot.anchor.event_id.as_deref() != head.event_id.as_deref()
+        || snapshot.anchor.timestamp_ms != head.timestamp_ms
+    {
+        return Err(JournalError::new("timeline-visible-snapshot-head-mismatch"));
+    }
+    Ok(snapshot)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct ActiveTurnSnapshotRow {
