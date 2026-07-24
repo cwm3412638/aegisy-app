@@ -26,6 +26,9 @@ use crate::model_profile::{
 use crate::operation_reconciliation::{
     reconcile as reconcile_operation, EventState, ReconciliationInput, ReconciliationResult,
 };
+use crate::public_timeline_journal::{
+    self, JournalError as PublicTimelineJournalError, TimelineSyncPage, TimelineWatermark,
+};
 use crate::session_compaction::{activate_review, CompactionCheckpointReview};
 use crate::session_compaction_store::{
     CompactionCheckpointDescriptor, STORE_SCHEMA_VERSION as COMPACTION_STORE_SCHEMA_VERSION,
@@ -53,6 +56,7 @@ use crate::usage_authority::{
 pub use crate::workbench_migration::WorkbenchRecoveryDiagnostic;
 use crate::workbench_migration::{create_pre_upgrade_backup, inspect_recovery};
 use crate::workspace_edit::ContentHash;
+use aegisy_aap::stable::v0_1::EventEnvelope;
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
@@ -65,7 +69,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = crate::turn_trace::MAX_DURABLE_EVENT_BYTES;
@@ -153,6 +157,10 @@ const REQUIRED_MODEL_PROFILE_INDEXES: [&str; 3] = [
     "model_profiles_state_updated_idx",
     "model_profiles_active_profile_id_idx",
 ];
+const REQUIRED_PUBLIC_TIMELINE_TABLES: [&str; 2] =
+    ["public_timeline_events", "public_timeline_cursors"];
+const REQUIRED_PUBLIC_TIMELINE_INDEXES: [&str; 1] = ["public_timeline_events_turn_idx"];
+const REQUIRED_PUBLIC_TIMELINE_TRIGGERS: [&str; 1] = ["public_timeline_session_cursor_insert"];
 const REQUIRED_SESSION_SEARCH_INDEXES: [&str; 4] = [
     "sessions_status_updated_idx",
     "session_runtime_binding_model_idx",
@@ -1574,6 +1582,12 @@ impl WorkbenchStore {
                     coded_error(cause.code, "cannot complete startup recovery scan")
                 })?,
         );
+        public_timeline_journal::verify_all(&store.connection).map_err(|cause| {
+            coded_error(
+                cause.code,
+                "cannot verify the public timeline journal at startup",
+            )
+        })?;
         Ok(store)
     }
 
@@ -6120,6 +6134,23 @@ impl WorkbenchStore {
                 .map_err(|_| error("cannot purge deleted session event cursor"))?;
             transaction
                 .execute(
+                    "DELETE FROM public_timeline_events WHERE session_id = ?1",
+                    [&member.session_id],
+                )
+                .map_err(|_| error("cannot purge deleted public timeline events"))?;
+            let cursor_reset = transaction
+                .execute(
+                    "UPDATE public_timeline_cursors
+                     SET next_sequence = 1, last_timestamp_ms = 0, latest_event_id = NULL
+                     WHERE session_id = ?1",
+                    [&member.session_id],
+                )
+                .map_err(|_| error("cannot reset deleted public timeline cursor"))?;
+            if cursor_reset != 1 {
+                return Err(error("deleted public timeline cursor is missing"));
+            }
+            transaction
+                .execute(
                     "UPDATE sessions SET title = 'Deleted session', status = 'archived',
                         environment_identity = NULL,
                         updated_at_ms = CASE WHEN updated_at_ms < ?1 THEN ?1 ELSE updated_at_ms END
@@ -10644,6 +10675,41 @@ impl WorkbenchStore {
         Ok(events)
     }
 
+    pub fn append_public_timeline_event(
+        &mut self,
+        event: &EventEnvelope,
+    ) -> Result<(), WorkbenchStoreError> {
+        self.ensure_session_writable(&event.session_id)?;
+        let persisted = serde_json::to_value(event)
+            .map_err(|_| error("cannot serialize public timeline event"))?;
+        validate_persisted_payload(&persisted, "public timeline event")?;
+        let transaction =
+            self.begin_database_write("cannot start public timeline journal transaction")?;
+        public_timeline_journal::append_event_tx(&transaction, event)
+            .map_err(public_timeline_error)?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit public timeline journal transaction"))
+    }
+
+    pub fn sync_public_timeline(
+        &self,
+        session_id: &str,
+        after_sequence: u64,
+        watermark: Option<TimelineWatermark>,
+        limit: usize,
+    ) -> Result<TimelineSyncPage, WorkbenchStoreError> {
+        self.ensure_session_readable(session_id)?;
+        public_timeline_journal::sync_page(
+            &self.connection,
+            session_id,
+            after_sequence,
+            watermark.as_ref(),
+            limit,
+        )
+        .map_err(public_timeline_error)
+    }
+
     fn configure(&mut self) -> Result<(), WorkbenchStoreError> {
         self.connection
             .busy_timeout(Duration::from_secs(2))
@@ -10720,6 +10786,20 @@ impl WorkbenchStore {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
+        if version == 14 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start public timeline journal migration"))?;
+            public_timeline_journal::apply_schema(&transaction).map_err(public_timeline_error)?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit public timeline journal migration"));
+        }
         if version == 13 {
             let transaction = self
                 .connection
@@ -10728,6 +10808,7 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(MODEL_PROFILE_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply model profile schema migration"))?;
+            public_timeline_journal::apply_schema(&transaction).map_err(public_timeline_error)?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -16292,7 +16373,8 @@ fn apply_session_search_indexes(connection: &Connection) -> Result<(), Workbench
         .map_err(|_| error("cannot apply background notification schema migration"))?;
     connection
         .execute_batch(MODEL_PROFILE_SCHEMA_SQL)
-        .map_err(|_| error("cannot apply model profile schema migration"))
+        .map_err(|_| error("cannot apply model profile schema migration"))?;
+    public_timeline_journal::apply_schema(connection).map_err(public_timeline_error)
 }
 
 fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreError> {
@@ -16310,6 +16392,7 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         .chain(REQUIRED_BACKGROUND_LEASE_TABLES)
         .chain(REQUIRED_BACKGROUND_NOTIFICATION_TABLES)
         .chain(REQUIRED_MODEL_PROFILE_TABLES)
+        .chain(REQUIRED_PUBLIC_TIMELINE_TABLES)
     {
         let exists: Option<String> = connection
             .query_row(
@@ -16400,6 +16483,34 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             return Err(error(
                 "workbench database model profile indexes are incomplete",
             ));
+        }
+    }
+    for index in REQUIRED_PUBLIC_TIMELINE_INDEXES {
+        let exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot verify public timeline journal indexes"))?;
+        if exists.as_deref() != Some(index) {
+            return Err(error("public timeline journal indexes are incomplete"));
+        }
+    }
+    for trigger in REQUIRED_PUBLIC_TIMELINE_TRIGGERS {
+        let exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'trigger' AND name = ?1",
+                [trigger],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot verify public timeline journal triggers"))?;
+        if exists.as_deref() != Some(trigger) {
+            return Err(error("public timeline journal triggers are incomplete"));
         }
     }
     Ok(())
@@ -18085,6 +18196,10 @@ fn coded_error(code: impl Into<String>, message: impl Into<String>) -> Workbench
         code: code.into(),
         message: message.into(),
     }
+}
+
+fn public_timeline_error(cause: PublicTimelineJournalError) -> WorkbenchStoreError {
+    coded_error(cause.code, "public timeline journal operation failed")
 }
 
 #[cfg(test)]
@@ -22208,6 +22323,152 @@ mod tests {
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0].source_schema_version, 13);
         assert_eq!(manifests[0].target_schema_version, SCHEMA_VERSION as u64);
+    }
+
+    #[test]
+    fn upgrades_schema_v14_to_public_timeline_after_backup() {
+        let root = Root::new("schema-v14-public-timeline");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "session-v14".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Preserved from v14".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        drop(store);
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER public_timeline_session_cursor_insert;
+                 DROP TABLE public_timeline_cursors;
+                 DROP TABLE public_timeline_events;
+                 PRAGMA user_version = 14;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        let version: i64 = reopened
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(
+            reopened.load_session("session-v14").unwrap().title,
+            "Preserved from v14"
+        );
+        let cursor: (i64, i64, Option<String>) = reopened
+            .connection
+            .query_row(
+                "SELECT next_sequence, last_timestamp_ms, latest_event_id
+                 FROM public_timeline_cursors WHERE session_id = 'session-v14'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(cursor, (1, 0, None));
+        for table in REQUIRED_PUBLIC_TIMELINE_TABLES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                     )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing public timeline table {table}");
+        }
+        let manifests = migration_backup_manifests(&root.path).unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].source_schema_version, 14);
+        assert_eq!(manifests[0].target_schema_version, SCHEMA_VERSION as u64);
+    }
+
+    #[test]
+    fn public_timeline_journal_is_restart_safe_and_uses_fixed_watermarks() {
+        let root = Root::new("public-timeline-journal");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "timeline-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Timeline".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        let mut sequencer = crate::event_sequencer::EventSequencer::default();
+        let first = sequencer
+            .sequence(10, "timeline-session", "turn-one", "turn.started", None)
+            .unwrap();
+        let second = sequencer
+            .sequence(
+                11,
+                "timeline-session",
+                "turn-one",
+                "item.completed",
+                Some(aegisy_aap::stable::v0_1::TimelineItem {
+                    id: "timeline-item".into(),
+                    kind: "message".into(),
+                    role: "agent".into(),
+                    state: "completed".into(),
+                    content: "safe timeline content".into(),
+                    data: None,
+                }),
+            )
+            .unwrap();
+        let third = sequencer
+            .sequence(12, "timeline-session", "turn-one", "turn.completed", None)
+            .unwrap();
+        store.append_public_timeline_event(&first).unwrap();
+        store.append_public_timeline_event(&second).unwrap();
+        store.append_public_timeline_event(&third).unwrap();
+        let page = store
+            .sync_public_timeline("timeline-session", 0, None, 2)
+            .unwrap();
+        assert_eq!(page.watermark.sequence, 3);
+        assert_eq!(
+            page.watermark.event_id.as_deref(),
+            Some(third.event_id.as_str())
+        );
+        assert_eq!(page.next_after_sequence, Some(2));
+        drop(store);
+
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        let continued = sequencer
+            .sequence(13, "timeline-session", "turn-two", "turn.started", None)
+            .unwrap();
+        reopened.append_public_timeline_event(&continued).unwrap();
+        let stable = reopened
+            .sync_public_timeline("timeline-session", 2, Some(page.watermark.clone()), 2)
+            .unwrap();
+        assert_eq!(stable.events, vec![third.clone()]);
+        assert!(stable.complete);
+        let fresh = reopened
+            .sync_public_timeline("timeline-session", 3, None, 2)
+            .unwrap();
+        assert_eq!(fresh.watermark.sequence, 4);
+        assert_eq!(
+            fresh.watermark.event_id.as_deref(),
+            Some(continued.event_id.as_str())
+        );
+        assert_eq!(fresh.events, vec![continued.clone()]);
+
+        let all = reopened
+            .sync_public_timeline("timeline-session", 0, None, 10)
+            .unwrap();
+        assert_eq!(all.events, vec![first, second, third, continued]);
     }
 
     #[test]
@@ -27278,6 +27539,10 @@ mod tests {
         let artifact = store
             .put_durable_blob(session_artifact_request("purge-parent", 50))
             .unwrap();
+        let public_event = crate::event_sequencer::EventSequencer::default()
+            .sequence(51, "purge-parent", "public-turn", "turn.started", None)
+            .unwrap();
+        store.append_public_timeline_event(&public_event).unwrap();
         let preview = store
             .preview_session_deletion("purge-parent", SessionDeletionScope::SessionOnly)
             .unwrap();
@@ -27317,6 +27582,25 @@ mod tests {
             .read_session_events("purge-parent", 0, 10)
             .unwrap()
             .is_empty());
+        let public_event_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM public_timeline_events WHERE session_id = ?1",
+                ["purge-parent"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(public_event_count, 0);
+        let public_cursor: (i64, i64, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT next_sequence, last_timestamp_ms, latest_event_id
+                 FROM public_timeline_cursors WHERE session_id = ?1",
+                ["purge-parent"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(public_cursor, (1, 0, None));
         let released =
             load_durable_blob_reference(&store.connection, &artifact.reference_id).unwrap();
         assert_eq!(released.state, "released");

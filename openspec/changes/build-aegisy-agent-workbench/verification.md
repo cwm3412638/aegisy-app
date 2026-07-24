@@ -124,6 +124,48 @@ AAP 0.1 ordered Timeline event evidence (`3.4`):
   subscription, heartbeat, reconnect catch-up, or gap recovery. Those remain under
   `3.5`; the current Agent/Codex permission boundary remains read-only.
 
+Public Timeline Journal Store foundation (`3.5`, partial):
+
+- Workbench schema v15 adds a dedicated `public_timeline_events` journal and one
+  `public_timeline_cursors` source/cursor row per Session. Session insertion registers
+  the empty cursor idempotently; event insertion and cursor advancement use the same
+  SQLite transaction with compare-and-swap state. A normal WAL-consistent migration
+  backup precedes v14-to-v15, and migration backfills an empty registered cursor for
+  every existing Session without fabricating historical public events.
+- Stored envelopes retain exact JSON bytes, SHA-256, Event ID, timestamp, Turn, and
+  Session-local sequence. Startup verifies the registered cursor/event count and
+  anchor, redundant columns, envelope hash/bytes, Event ID, contiguous order, and
+  the complete cross-page Turn/Item lifecycle by replaying through a local
+  `EventSequencer`. Verification is bounded to 10,000 Sessions and 100,000 total
+  public events; malformed, missing, hash-consistent semantically invalid, or
+  over-limit authority fails closed.
+- Fixed-watermark pages bind both sequence and Event ID, cap one page at 200 events,
+  reserve 512 KiB beneath the 4 MiB AAP frame for the page/JSON-RPC envelope, and
+  stop before the accumulated event-byte budget without skipping a sequence. A
+  single event that cannot fit the replay budget is rejected before either event or
+  cursor mutation. Tests wrap a large page in a worst-case 128-byte JSON-RPC request
+  ID and keep the serialized response within the exact frame limit.
+- Session purge removes all public Timeline envelopes and resets its retained
+  tombstone cursor to the registered empty state in the same deletion transaction,
+  so deleted conversation content cannot remain replay-readable. Projection rebuild
+  may reinsert a Session without resetting an existing public cursor.
+- Focused failure fixtures cover cursor-update rollback, new-Session registration,
+  v14 migration backup/backfill, restart paging, new events between fixed-watermark
+  pages, forged watermark Event IDs, payload and redundant-column tampering, removed
+  streams, invalid terminal-after-Item history, response-byte pagination, oversized
+  event rejection, and deletion purge. The complete Rust gate passes 17 AAP type
+  tests, 652 sidecar library tests plus one ignored live fixture, 6 daemon-main,
+  10 context-threshold, 13 handshake Runtime, 12 handshake Schema, 63 protocol, and
+  23 stdio/Codex tests, plus strict Clippy, formatting, the complete desktop build,
+  all 16 CTests, strict OpenSpec validation, and `git diff --check`.
+- This is Store infrastructure only. Runtime still sequences before persistence,
+  projection writes and Journal append are not yet one transaction, raw live user
+  Items are not yet replaced by the exact sanitized persisted projection, no AAP
+  `timeline/sync` capability is advertised, and Qt does not freeze/catch up a gapped
+  Session. Snapshot, retention-gap response, subscription, heartbeat, reconnect,
+  acknowledgement, and cross-platform UI evidence also remain absent. Keep `3.5`
+  unchecked.
+
 Model catalog foundation evidence:
 
 - An internal `model-catalog/0.1` contract now validates bounded model identity,

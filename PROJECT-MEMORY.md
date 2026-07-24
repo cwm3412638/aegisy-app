@@ -159,6 +159,20 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Timeline journaling, snapshot/replay,
   subscription, heartbeat, reconnect catch-up, and gap recovery remain under `3.5`;
   Agent/Codex remains read-only.
+- OpenSpec task `3.5` now has a durable Public Timeline Journal Store foundation.
+  Workbench schema v15 registers one empty cursor per Session and stores exact
+  validated `timeline-event/0.1` envelopes with their content hash. Event append and
+  cursor advancement are one compare-and-swap SQLite transaction. Fixed-watermark
+  pages bind sequence plus Event ID, cap count and aggregate bytes below the 4 MiB
+  AAP frame, and startup replays every bounded Session through `EventSequencer` to
+  detect hash-consistent lifecycle drift. The v14-to-v15 migration uses the normal
+  WAL-consistent backup and backfills empty cursors without inventing history.
+  Session purge removes public envelopes and resets the retained tombstone cursor in
+  the same transaction. This is not Runtime/AAP/Qt integration: projection plus
+  Journal are not yet atomic, live user Items do not yet use the exact sanitized
+  stored projection, `timeline/sync` is not advertised, and Qt gap freeze/catch-up,
+  snapshot, subscription, heartbeat, reconnect, retention-gap, and acknowledgement
+  remain open. Keep `3.5` unchecked.
 - Model catalog foundation (2026-07-21): the sidecar now validates an internal
   `model-catalog/0.1` metadata contract and exposes the read-only AAP capability
   `model.catalog.read-only` with `model/catalog`. The current projection is
@@ -1079,7 +1093,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   `WorkbenchStore::finish_turn_with_trace` still writes the unchanged outer
   `turn.trace.recorded/0.1` event immediately before the terminal event in one SQLite
   transaction. Turn Trace itself required no migration, backfill, or legacy event
-  rewrite; the Store is now schema v14 for the separate model-profile projection.
+  rewrite; schema v14 remains the model-profile projection introduction, while the
+  Store is now schema v15 for the separate Public Timeline Journal foundation.
   The Trace remains content-free: no prompt, provider body, path, command, diff,
   output, or credential content is recorded. Complete genuine-user
   Approval/Change/Test production, non-command Tool families,
@@ -1198,14 +1213,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user-gesture ID for explicit approvals; it refuses read-only or managed-denied
   Git actions before SQLite mutation. This remains an internal foundation, not an
   AAP/Qt approval bridge or native execution grant.
-- `WorkbenchStore` schema version 14 now persists canonical projects and roots plus
+- `WorkbenchStore` schema version 15 now persists canonical projects and roots plus
   Chat/Work sessions with project binding, environment identity, new/resume/fork
   lineage, and active/archived/failed/interrupted status. Work sessions require a
   project, lineage parents must match project and mode, archive/unarchive is
   timestamp-guarded, and reopen plus v1-to-v2 migration fixtures pass. Turns now
   have bounded idempotency/input hashes and terminal states; items have session
   sequences, turn binding, bounded redacted JSON payloads, and content hashes with
-  tamper/gap replay checks. Transactional v1-through-v13 source migrations into v14
+  tamper/gap replay checks. Transactional v1-through-v14 source migrations into v15
   pass; the v3
   path preserves existing events while allowing projectless Chat event streams, and
   v4 adds only the durable Blob schema. The v11 background-job and scheduler-lease
@@ -1220,8 +1235,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Work Session observation occurs before provider thread creation, and a later Store
   failure best-effort archives the newly created Codex thread. Event failure rolls
   back all local rows. Schema v14 adds the bounded authority-free model-profile
-  projection and full-chain verification described above. The normal WAL-consistent
-  migration backup covers v12-to-v13 and v13-to-v14. Final two-phase Session purge
+  projection and full-chain verification described above. Schema v15 adds the
+  registered Public Timeline Journal/cursor foundation described under task `3.5`.
+  The normal WAL-consistent migration backup covers v12-to-v13, v13-to-v14, and
+  v14-to-v15. Final two-phase Session purge
   removes the binding in the same transaction as Turns, Items, and events. No
   repository absolute path, permission,
   dedicated-worktree claim, or mutation authority enters the binding. Extensions,
@@ -2628,6 +2645,21 @@ Implemented visual baseline:
 
 ## Verification Snapshot (2026-07-24)
 
+- The Public Timeline Journal Store foundation advances OpenSpec `3.5` without
+  completing it. Schema v15 supplies registered per-Session cursors, transactional
+  append/cursor CAS, sequence-plus-Event-ID fixed watermarks, bounded byte paging,
+  v14 backup migration, startup hash/redundant-column/lifecycle replay validation,
+  and deletion-purge cleanup. Failure tests cover rollback, restart, forged anchors,
+  removed or semantically invalid streams, large pages, and oversized events. The
+  complete Rust workspace passes 17 AAP type tests, 652 sidecar tests plus one
+  ignored live fixture, 6 daemon-main, 10 threshold, 13 handshake Runtime, 12
+  Schema, 63 protocol, and 23 stdio/Codex tests, with strict Clippy, formatting,
+  the complete desktop build, all 16 CTests, strict OpenSpec validation, and
+  `git diff --check`.
+  Runtime projection/Journal atomicity, sanitized live/replay identity, AAP sync, Qt
+  gap recovery, snapshot, subscription, heartbeat, reconnect, retention-gap, and
+  acknowledgement remain absent.
+
 - The AAP initialization-negotiation stage completes OpenSpec `3.3`. Rust and Qt
   implement the exact two-stage `initialize`/`initialized` state machine, numeric
   version ranges and upgrade direction, bounded identities, deterministic stable
@@ -2755,9 +2787,10 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Implement OpenSpec `3.5` in reviewed slices: durable public Timeline journal,
-   fixed-watermark catch-up replay, gap freeze/recovery, then subscription,
-   heartbeat, reconnect, snapshot, retention-gap, and acknowledgement behavior.
+1. Continue OpenSpec `3.5` with sequencer prepare/commit and one transaction for the
+   exact sanitized projection plus Journal append, then add AAP fixed-watermark sync
+   and Qt per-Session gap freeze/catch-up. Follow with subscription, heartbeat,
+   reconnect, snapshot, retention-gap, and acknowledgement behavior.
 2. Validate the hardened TLS installer on a clean Windows x64 VM.
 3. Reproduce and correlate any remaining streaming disconnect with redacted logs.
 4. Continue consolidating widget-local QSS and replace remaining Qt stock icons;
