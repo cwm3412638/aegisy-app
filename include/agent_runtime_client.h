@@ -96,6 +96,10 @@ public:
     QString cancelTurn(const QString &sessionId, const QString &turnId);
     QString readSession(const QString &sessionId, const QString &cursor = QString(),
                         int limit = 100);
+    QString syncTimeline(const QString &sessionId, quint64 afterSequence,
+                         const QString &afterEventId = QString(),
+                         const QJsonObject &watermark = QJsonObject(),
+                         int limit = 100);
     QString backgroundNotifications(const QString &sessionId,
                                     const QJsonObject &cursor = QJsonObject(),
                                     int limit = 100);
@@ -255,6 +259,7 @@ signals:
                                 const QJsonObject &result);
     void retentionMaintenanceCompleted(const QString &requestId, const QJsonObject &result);
     void sessionRead(const QString &requestId, const QJsonObject &snapshot);
+    void timelineSynced(const QString &requestId, const QJsonObject &page);
     void backgroundNotificationsRead(const QString &requestId, const QJsonObject &result);
     void backgroundRecoveryRead(const QString &requestId, const QJsonObject &result);
     void projectionRecoveryStatusRead(const QJsonObject &status);

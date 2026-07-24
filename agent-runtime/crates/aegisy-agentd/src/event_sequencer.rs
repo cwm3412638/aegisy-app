@@ -1,7 +1,7 @@
 use aegisy_aap::stable::v0_1::{
     timeline_event_id, EventEnvelope, ItemUpdate, TimelineItem, TurnState,
 };
-use aegisy_aap::MAX_SAFE_JSON_INTEGER;
+use aegisy_aap::{MAX_SAFE_JSON_INTEGER, MAX_TIMELINE_IDENTIFIER_BYTES};
 use std::collections::HashMap;
 
 const EVENT_SCHEMA_VERSION: &str = "timeline-event/0.1";
@@ -12,10 +12,32 @@ pub(crate) struct EventSequencer {
     sessions: HashMap<String, SessionSequence>,
 }
 
+pub(crate) struct PreparedEvent {
+    session_id: String,
+    expected_sequence: u64,
+    expected_event_id: Option<String>,
+    candidate: SessionSequence,
+    envelope: EventEnvelope,
+}
+
+pub(crate) struct SessionRestoreCandidate {
+    session_id: String,
+    expected_sequence: u64,
+    expected_event_id: Option<String>,
+    session: SessionSequence,
+    last_event_id: Option<String>,
+}
+
+pub(crate) struct RestoredSession {
+    session_id: String,
+    session: SessionSequence,
+}
+
 #[derive(Debug, Clone, Default)]
 struct SessionSequence {
     sequence: u64,
     timestamp_ms: u64,
+    last_event_id: Option<String>,
     turns: HashMap<String, TurnSequence>,
 }
 
@@ -67,6 +89,73 @@ impl SequenceError {
     }
 }
 
+impl PreparedEvent {
+    pub(crate) fn envelope(&self) -> &EventEnvelope {
+        &self.envelope
+    }
+
+    pub(crate) fn commit(
+        self,
+        sequencer: &mut EventSequencer,
+    ) -> Result<EventEnvelope, SequenceError> {
+        let Self {
+            session_id,
+            expected_sequence,
+            expected_event_id,
+            candidate,
+            envelope,
+        } = self;
+        let current = sequencer.sessions.get(&session_id);
+        let current_sequence = current.map_or(0, |session| session.sequence);
+        let current_event_id = current.and_then(|session| session.last_event_id.as_ref());
+        if current_sequence != expected_sequence || current_event_id != expected_event_id.as_ref() {
+            return Err(SequenceError::Rejected("prepared-event-stale"));
+        }
+        sequencer.sessions.insert(session_id, candidate);
+        Ok(envelope)
+    }
+}
+
+impl SessionRestoreCandidate {
+    pub(crate) fn replay_event(mut self, event: &EventEnvelope) -> Result<Self, SequenceError> {
+        event
+            .validate()
+            .map_err(|_| SequenceError::Rejected("restored-event-invalid"))?;
+        if event.session_id != self.session_id {
+            return Err(SequenceError::Rejected("restored-session-mismatch"));
+        }
+        if self.session.sequence >= self.expected_sequence {
+            return Err(SequenceError::Rejected("restored-event-after-watermark"));
+        }
+        let reproduced = EventSequencer::prepare_session_event(
+            &mut self.session,
+            event.timestamp_ms,
+            &event.session_id,
+            &event.turn_id,
+            &event.event,
+            event.item.clone(),
+        )?;
+        if reproduced != *event {
+            return Err(SequenceError::Rejected("restored-event-mismatch"));
+        }
+        self.last_event_id = Some(event.event_id.clone());
+        Ok(self)
+    }
+
+    pub(crate) fn complete(self) -> Result<RestoredSession, SequenceError> {
+        if self.session.sequence != self.expected_sequence {
+            return Err(SequenceError::Rejected("restored-session-incomplete"));
+        }
+        if self.last_event_id != self.expected_event_id {
+            return Err(SequenceError::Rejected("restored-watermark-mismatch"));
+        }
+        Ok(RestoredSession {
+            session_id: self.session_id,
+            session: self.session,
+        })
+    }
+}
+
 impl EventSequencer {
     pub(crate) fn preflight(
         &self,
@@ -77,18 +166,59 @@ impl EventSequencer {
         item: Option<TimelineItem>,
     ) -> Result<(), SequenceError> {
         let mut candidate = self.sessions.get(session_id).cloned().unwrap_or_default();
-        let (turn_state, item, item_update) = Self::apply(&mut candidate, turn_id, event, item)?;
-        Self::finish(
-            &candidate,
+        Self::prepare_session_event(
+            &mut candidate,
             observed_at_ms,
             session_id,
             turn_id,
-            turn_state,
             event,
             item,
-            item_update,
         )
         .map(drop)
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        observed_at_ms: u64,
+        session_id: &str,
+        turn_id: &str,
+        event: &str,
+        item: Option<TimelineItem>,
+    ) -> Result<PreparedEvent, SequenceError> {
+        let current = self.sessions.get(session_id);
+        let expected_sequence = current.map_or(0, |session| session.sequence);
+        let expected_event_id = current.and_then(|session| session.last_event_id.clone());
+        let mut candidate = current.cloned().unwrap_or_default();
+        let envelope = Self::prepare_session_event(
+            &mut candidate,
+            observed_at_ms,
+            session_id,
+            turn_id,
+            event,
+            item,
+        )?;
+        Ok(PreparedEvent {
+            session_id: session_id.to_owned(),
+            expected_sequence,
+            expected_event_id,
+            candidate,
+            envelope,
+        })
+    }
+
+    pub(crate) fn normalized_timestamp(
+        &self,
+        observed_at_ms: u64,
+        session_id: &str,
+    ) -> Result<u64, SequenceError> {
+        if observed_at_ms == 0 || observed_at_ms > MAX_SAFE_JSON_INTEGER {
+            return Err(SequenceError::Bounds("event-timestamp-out-of-range"));
+        }
+        Ok(observed_at_ms.max(
+            self.sessions
+                .get(session_id)
+                .map_or(0, |session| session.timestamp_ms),
+        ))
     }
 
     pub(crate) fn sequence(
@@ -99,10 +229,54 @@ impl EventSequencer {
         event: &str,
         item: Option<TimelineItem>,
     ) -> Result<EventEnvelope, SequenceError> {
-        let mut candidate = self.sessions.get(session_id).cloned().unwrap_or_default();
-        let (turn_state, item, item_update) = Self::apply(&mut candidate, turn_id, event, item)?;
+        let prepared = self.prepare(observed_at_ms, session_id, turn_id, event, item)?;
+        prepared.commit(self)
+    }
+
+    pub(crate) fn begin_session_restore(
+        session_id: &str,
+        expected_sequence: u64,
+        expected_event_id: Option<&str>,
+    ) -> Result<SessionRestoreCandidate, SequenceError> {
+        if !valid_binding_identity(session_id) {
+            return Err(SequenceError::Rejected("restored-session-identity-invalid"));
+        }
+        if expected_sequence > MAX_SAFE_JSON_INTEGER {
+            return Err(SequenceError::Bounds("restored-sequence-out-of-range"));
+        }
+        if (expected_sequence == 0) != expected_event_id.is_none()
+            || expected_event_id.is_some_and(|event_id| !valid_event_id(event_id))
+        {
+            return Err(SequenceError::Rejected("restored-watermark-invalid"));
+        }
+        Ok(SessionRestoreCandidate {
+            session_id: session_id.to_owned(),
+            expected_sequence,
+            expected_event_id: expected_event_id.map(str::to_owned),
+            session: SessionSequence::default(),
+            last_event_id: None,
+        })
+    }
+
+    pub(crate) fn install_restored_session(&mut self, restored: RestoredSession) {
+        if restored.session.sequence == 0 {
+            self.sessions.remove(&restored.session_id);
+        } else {
+            self.sessions.insert(restored.session_id, restored.session);
+        }
+    }
+
+    fn prepare_session_event(
+        candidate: &mut SessionSequence,
+        observed_at_ms: u64,
+        session_id: &str,
+        turn_id: &str,
+        event: &str,
+        item: Option<TimelineItem>,
+    ) -> Result<EventEnvelope, SequenceError> {
+        let (turn_state, item, item_update) = Self::apply(candidate, turn_id, event, item)?;
         let envelope = Self::finish(
-            &candidate,
+            candidate,
             observed_at_ms,
             session_id,
             turn_id,
@@ -113,7 +287,7 @@ impl EventSequencer {
         )?;
         candidate.sequence = envelope.sequence;
         candidate.timestamp_ms = envelope.timestamp_ms;
-        self.sessions.insert(session_id.to_owned(), candidate);
+        candidate.last_event_id = Some(envelope.event_id.clone());
         Ok(envelope)
     }
 
@@ -239,6 +413,20 @@ impl EventSequencer {
             .map_err(|_| SequenceError::Rejected("event-envelope-serialization-failed"))?;
         Ok(envelope)
     }
+}
+
+fn valid_binding_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_TIMELINE_IDENTIFIER_BYTES
+        && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+}
+
+fn valid_event_id(value: &str) -> bool {
+    value.len() == 77
+        && value.starts_with("event:sha256:")
+        && value[13..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_requested_shape(
@@ -492,6 +680,236 @@ mod tests {
                 "terminal_persisted": true
             })),
         }
+    }
+
+    fn completed_turn_events(session_id: &str, turn_id: &str) -> Vec<EventEnvelope> {
+        let mut sequencer = EventSequencer::default();
+        vec![
+            sequencer
+                .sequence(10, session_id, turn_id, "turn.started", None)
+                .unwrap(),
+            sequencer
+                .sequence(
+                    11,
+                    session_id,
+                    turn_id,
+                    "item.completed",
+                    Some(item("user", "completed", "request")),
+                )
+                .unwrap(),
+            sequencer
+                .sequence(
+                    12,
+                    session_id,
+                    turn_id,
+                    "item.started",
+                    Some(item("agent", "started", "")),
+                )
+                .unwrap(),
+            sequencer
+                .sequence(
+                    13,
+                    session_id,
+                    turn_id,
+                    "item.delta",
+                    Some(item("agent", "delta", "response")),
+                )
+                .unwrap(),
+            sequencer
+                .sequence(
+                    14,
+                    session_id,
+                    turn_id,
+                    "item.completed",
+                    Some(item("agent", "completed", "response")),
+                )
+                .unwrap(),
+            sequencer
+                .sequence(15, session_id, turn_id, "turn.completed", None)
+                .unwrap(),
+        ]
+    }
+
+    #[test]
+    fn prepared_ticket_advances_only_when_committed() {
+        let mut sequencer = EventSequencer::default();
+        let abandoned_id = {
+            let abandoned = sequencer
+                .prepare(10, "session", "turn", "turn.started", None)
+                .unwrap();
+            assert_eq!(abandoned.envelope().sequence, 1);
+            abandoned.envelope().event_id.clone()
+        };
+        assert!(!sequencer.sessions.contains_key("session"));
+
+        let committed = sequencer
+            .prepare(10, "session", "turn", "turn.started", None)
+            .unwrap();
+        let committed = committed.commit(&mut sequencer).unwrap();
+        assert_eq!(committed.event_id, abandoned_id);
+        assert_eq!(sequencer.sessions["session"].sequence, 1);
+
+        {
+            let abandoned_item = sequencer
+                .prepare(
+                    11,
+                    "session",
+                    "turn",
+                    "item.completed",
+                    Some(item("candidate", "completed", "discarded")),
+                )
+                .unwrap();
+            assert_eq!(abandoned_item.envelope().sequence, 2);
+        }
+
+        let committed_item = sequencer
+            .prepare(
+                12,
+                "session",
+                "turn",
+                "item.completed",
+                Some(item("committed", "completed", "kept")),
+            )
+            .unwrap();
+        let committed_item = committed_item.commit(&mut sequencer).unwrap();
+        assert_eq!(committed_item.sequence, 2);
+        assert_eq!(committed_item.item_update.unwrap().revision, 1);
+        let turn = &sequencer.sessions["session"].turns["turn"];
+        assert!(!turn.items.contains_key("candidate"));
+        assert!(turn.items.contains_key("committed"));
+    }
+
+    #[test]
+    fn stale_prepared_ticket_cannot_overwrite_a_committed_event() {
+        let mut sequencer = EventSequencer::default();
+        let first = sequencer
+            .prepare(10, "session", "turn-a", "turn.started", None)
+            .unwrap();
+        let stale = sequencer
+            .prepare(11, "session", "turn-b", "turn.started", None)
+            .unwrap();
+
+        let committed = first.commit(&mut sequencer).unwrap();
+        assert_eq!(committed.sequence, 1);
+        assert_eq!(
+            stale.commit(&mut sequencer),
+            Err(SequenceError::Rejected("prepared-event-stale"))
+        );
+        assert_eq!(sequencer.sessions["session"].sequence, 1);
+        assert!(sequencer.sessions["session"].turns.contains_key("turn-a"));
+        assert!(!sequencer.sessions["session"].turns.contains_key("turn-b"));
+    }
+
+    #[test]
+    fn restores_page_by_page_and_installs_only_the_complete_candidate() {
+        let events = completed_turn_events("session", "turn");
+        let watermark = events.last().unwrap();
+        let mut candidate = EventSequencer::begin_session_restore(
+            "session",
+            watermark.sequence,
+            Some(&watermark.event_id),
+        )
+        .unwrap();
+        let mut target = EventSequencer::default();
+
+        for page in events.chunks(2) {
+            for event in page {
+                candidate = candidate.replay_event(event).unwrap();
+            }
+            assert!(!target.sessions.contains_key("session"));
+        }
+
+        let restored = candidate.complete().unwrap();
+        assert!(!target.sessions.contains_key("session"));
+        target.install_restored_session(restored);
+        assert_eq!(target.sessions["session"].sequence, watermark.sequence);
+        assert_eq!(
+            target.sessions["session"].timestamp_ms,
+            watermark.timestamp_ms
+        );
+
+        let next = target
+            .sequence(16, "session", "next-turn", "turn.started", None)
+            .unwrap();
+        assert_eq!(next.sequence, watermark.sequence + 1);
+    }
+
+    #[test]
+    fn incomplete_or_invalid_restore_cannot_replace_live_state() {
+        let events = completed_turn_events("session", "restored-turn");
+        let watermark = events.last().unwrap();
+        let mut target = EventSequencer::default();
+        target
+            .sequence(20, "session", "live-turn", "turn.started", None)
+            .unwrap();
+
+        let partial = EventSequencer::begin_session_restore(
+            "session",
+            watermark.sequence,
+            Some(&watermark.event_id),
+        )
+        .unwrap()
+        .replay_event(&events[0])
+        .unwrap();
+        let incomplete = match partial.complete() {
+            Ok(_) => panic!("partial restore unexpectedly completed"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            incomplete,
+            SequenceError::Rejected("restored-session-incomplete")
+        );
+
+        let candidate = EventSequencer::begin_session_restore(
+            "session",
+            watermark.sequence,
+            Some(&watermark.event_id),
+        )
+        .unwrap()
+        .replay_event(&events[0])
+        .unwrap();
+        let mut forged = events[1].clone();
+        forged.timestamp_ms += 1;
+        let invalid = match candidate.replay_event(&forged) {
+            Ok(_) => panic!("forged restore event unexpectedly replayed"),
+            Err(error) => error,
+        };
+        assert_eq!(invalid, SequenceError::Rejected("restored-event-invalid"));
+
+        assert_eq!(target.sessions["session"].sequence, 1);
+        assert!(target.sessions["session"].turns.contains_key("live-turn"));
+        assert!(!target.sessions["session"]
+            .turns
+            .contains_key("restored-turn"));
+        let terminal = target
+            .sequence(21, "session", "live-turn", "turn.completed", None)
+            .unwrap();
+        assert_eq!(terminal.sequence, 2);
+    }
+
+    #[test]
+    fn restore_requires_the_exact_final_event_watermark() {
+        let events = completed_turn_events("session", "turn");
+        let watermark = events.last().unwrap();
+        let forged_event_id = format!("event:sha256:{}", "a".repeat(64));
+        assert_ne!(forged_event_id, watermark.event_id);
+        let mut candidate = EventSequencer::begin_session_restore(
+            "session",
+            watermark.sequence,
+            Some(&forged_event_id),
+        )
+        .unwrap();
+        for event in &events {
+            candidate = candidate.replay_event(event).unwrap();
+        }
+        let error = match candidate.complete() {
+            Ok(_) => panic!("forged restore watermark unexpectedly completed"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            SequenceError::Rejected("restored-watermark-mismatch")
+        );
     }
 
     #[test]

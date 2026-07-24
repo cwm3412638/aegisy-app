@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-24
+Last updated: 2026-07-25
 
 ## Mandatory First Step
 
@@ -155,24 +155,29 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   the exact 4 MiB frame boundary. Qt mirrors Runtime terminal semantics: structured
   failure retains accepted `started`/`delta` partial Items, while completed and
   interrupted terminals reject those open streams; repeatable `updated` snapshots may
-  remain at terminal, and a revision-one atomic `truncated` marker is valid. Public
-  Timeline journaling, snapshot/replay,
-  subscription, heartbeat, reconnect catch-up, and gap recovery remain under `3.5`;
-  Agent/Codex remains read-only.
-- OpenSpec task `3.5` now has a durable Public Timeline Journal Store foundation.
-  Workbench schema v15 registers one empty cursor per Session and stores exact
-  validated `timeline-event/0.1` envelopes with their content hash. Event append and
-  cursor advancement are one compare-and-swap SQLite transaction. Fixed-watermark
-  pages bind sequence plus Event ID, cap count and aggregate bytes below the 4 MiB
-  AAP frame, and startup replays every bounded Session through `EventSequencer` to
-  detect hash-consistent lifecycle drift. The v14-to-v15 migration uses the normal
-  WAL-consistent backup and backfills empty cursors without inventing history.
-  Session purge removes public envelopes and resets the retained tombstone cursor in
-  the same transaction. This is not Runtime/AAP/Qt integration: projection plus
-  Journal are not yet atomic, live user Items do not yet use the exact sanitized
-  stored projection, `timeline/sync` is not advertised, and Qt gap freeze/catch-up,
-  snapshot, subscription, heartbeat, reconnect, retention-gap, and acknowledgement
-  remain open. Keep `3.5` unchecked.
+  remain at terminal, and a revision-one atomic `truncated` marker is valid. Durable
+  public journaling and fixed-watermark catch-up are now partially implemented under
+  `3.5`; snapshot, subscription, heartbeat, complete reconnect, structured
+  retention-gap recovery, and acknowledgement remain open. Agent/Codex remains
+  read-only.
+- OpenSpec task `3.5` now has an end-to-end fixed-watermark catch-up slice. Workbench
+  schema v15 stores exact validated `timeline-event/0.1` envelopes behind one
+  compare-and-swap cursor per Session, restores Sequencer state page by page, and
+  serves exact sequence/Event-ID anchors through negotiated `timeline/sync` below the
+  4 MiB frame limit. Normal durable Codex Turn start, sanitized Item, command
+  Item/Blob, and completed/failed/interrupted terminal paths commit projection,
+  internal event, and Public Journal in one SQLite transaction. Prepared Sequencer
+  tickets reject stale baselines, and projection timestamps use the Sequencer's
+  non-decreasing timestamp when the system wall clock moves backward. Qt freezes
+  only the affected Session on a gap, validates all fixed-watermark pages privately,
+  publishes the complete batch atomically, drains bounded queued live events, retries
+  after disconnect, and syncs new/resumed/history Sessions before enabling a Turn.
+  Aggregate pending state is capped at 10,000 events/64 MiB and tracking fails closed
+  at 10,000 Sessions. Preview still journals its synthetic six-event Timeline after
+  projection, and adapter/persistence compensation can finish a Trace before a later
+  public terminal/Error transaction. Snapshot, structured retention-gap recovery,
+  live subscription, heartbeat, complete reconnect orchestration, explicit
+  acknowledgement, and Windows recovery evidence remain open. Keep `3.5` unchecked.
 - Model catalog foundation (2026-07-21): the sidecar now validates an internal
   `model-catalog/0.1` metadata contract and exposes the read-only AAP capability
   `model.catalog.read-only` with `model/catalog`. The current projection is
@@ -1236,7 +1241,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   failure best-effort archives the newly created Codex thread. Event failure rolls
   back all local rows. Schema v14 adds the bounded authority-free model-profile
   projection and full-chain verification described above. Schema v15 adds the
-  registered Public Timeline Journal/cursor foundation described under task `3.5`.
+  registered Public Timeline Journal/cursor and negotiated fixed-watermark catch-up
+  described under task `3.5`.
   The normal WAL-consistent migration backup covers v12-to-v13, v13-to-v14, and
   v14-to-v15. Final two-phase Session purge
   removes the binding in the same transaction as Turns, Items, and events. No
@@ -2643,22 +2649,24 @@ Implemented visual baseline:
 - Do not layer Qt-Material, QDarkStyleSheet, or Fluent QSS over the current 400+
   local style rules. Continue consolidating local QSS into semantic components.
 
-## Verification Snapshot (2026-07-24)
+## Verification Snapshot (2026-07-25)
 
-- The Public Timeline Journal Store foundation advances OpenSpec `3.5` without
-  completing it. Schema v15 supplies registered per-Session cursors, transactional
-  append/cursor CAS, sequence-plus-Event-ID fixed watermarks, bounded byte paging,
-  v14 backup migration, startup hash/redundant-column/lifecycle replay validation,
-  and deletion-purge cleanup. Failure tests cover rollback, restart, forged anchors,
-  removed or semantically invalid streams, large pages, and oversized events. The
-  complete Rust workspace passes 17 AAP type tests, 652 sidecar tests plus one
-  ignored live fixture, 6 daemon-main, 10 threshold, 13 handshake Runtime, 12
-  Schema, 63 protocol, and 23 stdio/Codex tests, with strict Clippy, formatting,
-  the complete desktop build, all 16 CTests, strict OpenSpec validation, and
-  `git diff --check`.
-  Runtime projection/Journal atomicity, sanitized live/replay identity, AAP sync, Qt
-  gap recovery, snapshot, subscription, heartbeat, reconnect, retention-gap, and
-  acknowledgement remain absent.
+- The Public Timeline fixed-watermark slice advances OpenSpec `3.5` without
+  completing it. Schema v15 Journal/cursor CAS, bounded replay restoration,
+  negotiated AAP `timeline/sync`, exact sanitized normal Codex transactions, and Qt
+  per-Session atomic gap catch-up now operate end to end. Failure coverage includes
+  rollback, restart, forged anchors, semantic tampering, oversized pages/events,
+  stale prepared tickets, wall-clock rollback, terminal Item boundary enforcement,
+  aggregate pending limits, 10,001st-Session fail-closed behavior, initial/history
+  sync, pending-deletion read-only sync, and real disconnect signal ordering. The
+  complete Rust workspace passes 22 AAP type tests, 661 sidecar tests plus one
+  ignored live fixture, 6 daemon-main, 10 threshold, 13 handshake Runtime, 15
+  Schema, 66 protocol, and 23 stdio/Codex tests, with strict Clippy and formatting.
+  The complete desktop build, all 16 CTests, strict OpenSpec validation, and
+  `git diff --check` also pass. Preview and adapter/persistence compensation remain
+  outside the atomic producer boundary; snapshot, structured retention-gap
+  recovery, subscription, heartbeat, complete reconnect orchestration, explicit
+  acknowledgement, and Windows recovery evidence remain absent.
 
 - The AAP initialization-negotiation stage completes OpenSpec `3.3`. Rust and Qt
   implement the exact two-stage `initialize`/`initialized` state machine, numeric
@@ -2688,7 +2696,8 @@ Implemented visual baseline:
   type tests, 644 sidecar library tests plus one ignored live fixture, 6 daemon-main,
   10 threshold, 13 handshake Runtime, 12 Schema, 63 protocol, 23 stdio/Codex, all
   16 desktop CTests, strict Clippy, formatting, strict OpenSpec validation, and
-  `git diff --check`. Durable public Timeline replay/reconnect remains `3.5`.
+  `git diff --check`. The partial fixed-watermark replay/gap slice is now recorded
+  above; full snapshot/subscription/heartbeat/reconnect/ack behavior remains `3.5`.
 
 - The Codex degradation/provider hardening stage passes 630 `aegisy-agentd`
   library tests with one ignored live fixture, 63 protocol tests, and 21 stdio/Codex
@@ -2697,15 +2706,15 @@ Implemented visual baseline:
   own cursor; Chat/Work mode switching is blocked while the single active Turn is
   running. Duplicate, decreasing, and gapped events remain inert. Rust formatting,
   `git diff --check`, the focused Qt degradation/Timeline run, and the ordinary Qt
-  render run pass. Durable public event replay/reconnect, complete gap recovery,
-  Windows evidence, complete vendor capability negotiation, and remaining runtime-
-  only desktop surfaces are still absent, so OpenSpec `3.5` and `7.9` remain
-  unchecked.
+  render run pass. Fixed-watermark replay and per-Session gap catch-up are now
+  partial `3.5` foundations; snapshot, subscription, heartbeat, complete reconnect,
+  acknowledgement, Windows evidence, complete vendor capability negotiation, and
+  remaining runtime-only desktop surfaces are still absent, so OpenSpec `3.5` and
+  `7.9` remain unchecked.
 
-- The Rust workspace passes `cargo fmt --all -- --check`, `cargo test
-  --workspace` (616 `aegisy-agentd` library tests passed, one ignored, 10
-  context-threshold contract tests, 63 AAP protocol tests, and 19 stdio/Codex
-  tests), and strict workspace Clippy.
+- The current Rust workspace passes formatting, full workspace tests, and strict
+  workspace Clippy with the exact current counts recorded in the first snapshot
+  bullet above.
 - The previously verified bundled application Node runtime passes both local gateway
   integration suites and JavaScript syntax checks. The current Homebrew OpenSpec CLI
   passes `openspec validate build-aegisy-agent-workbench --strict`; the earlier
@@ -2787,10 +2796,11 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Continue OpenSpec `3.5` with sequencer prepare/commit and one transaction for the
-   exact sanitized projection plus Journal append, then add AAP fixed-watermark sync
-   and Qt per-Session gap freeze/catch-up. Follow with subscription, heartbeat,
-   reconnect, snapshot, retention-gap, and acknowledgement behavior.
+1. Continue OpenSpec `3.5` by making Preview's six-event projection/Journal commit
+   atomic and bringing adapter/persistence compensation terminal/Error paths into
+   the same producer transaction. Then add snapshot plus structured retention-gap
+   recovery, followed by subscription, heartbeat, complete reconnect orchestration,
+   explicit acknowledgement, and Windows recovery evidence.
 2. Validate the hardened TLS installer on a clean Windows x64 VM.
 3. Reproduce and correlate any remaining streaming disconnect with redacted logs.
 4. Continue consolidating widget-local QSS and replace remaining Qt stock icons;

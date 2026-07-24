@@ -245,8 +245,126 @@ public:
         widget.m_itemRoles.clear();
         widget.m_itemStates.clear();
         widget.m_itemRevisions.clear();
+        widget.m_timelineSessions.clear();
+        widget.m_timelineTrackedEventCount = 0;
+        widget.m_timelinePendingEventCount = 0;
+        widget.m_timelinePendingBytes = 0;
+        widget.m_timelineTrackingExhausted = false;
+        widget.m_timelineSyncAvailable = false;
         widget.m_unknownTimelineEventCounts.clear();
         widget.m_unknownTimelineEventOverflowCount = 0;
+        widget.updateTurnAction();
+    }
+
+    static void prepareTimelineSync(AgentWorkbenchWidget &widget,
+                                    const QString &sessionId,
+                                    const QString &requestId)
+    {
+        auto &state = widget.m_timelineSessions[sessionId];
+        state.recovery = AgentWorkbenchWidget::TimelineRecoveryState::Syncing;
+        state.syncRequestId = requestId;
+        state.requestedAfterSequence = state.projection.sequence;
+        state.requestedAfterEventId = state.projection.eventId;
+        state.watermark = {};
+        state.syncProjection = state.projection;
+        state.syncProjectionValid = true;
+        state.stagedSyncEvents.clear();
+        state.stagedSyncBytes = 0;
+        state.retryOnReconnect = false;
+    }
+
+    static QString timelineRecoveryState(const AgentWorkbenchWidget &widget,
+                                         const QString &sessionId)
+    {
+        const auto state = widget.m_timelineSessions.constFind(sessionId);
+        if (state == widget.m_timelineSessions.cend()) return QStringLiteral("missing");
+        switch (state->recovery) {
+        case AgentWorkbenchWidget::TimelineRecoveryState::Untracked:
+            return QStringLiteral("untracked");
+        case AgentWorkbenchWidget::TimelineRecoveryState::Live:
+            return QStringLiteral("live");
+        case AgentWorkbenchWidget::TimelineRecoveryState::Syncing:
+            return QStringLiteral("syncing");
+        case AgentWorkbenchWidget::TimelineRecoveryState::Frozen:
+            return QStringLiteral("frozen");
+        case AgentWorkbenchWidget::TimelineRecoveryState::Unrecoverable:
+            return QStringLiteral("unrecoverable");
+        }
+        return QStringLiteral("invalid");
+    }
+
+    static QString timelineEventId(const AgentWorkbenchWidget &widget,
+                                   const QString &sessionId)
+    {
+        return widget.m_timelineSessions.value(sessionId).projection.eventId;
+    }
+
+    static qsizetype queuedTimelineEvents(const AgentWorkbenchWidget &widget,
+                                          const QString &sessionId)
+    {
+        return widget.m_timelineSessions.value(sessionId).queuedLiveEvents.size();
+    }
+
+    static QString timelineSyncRequestId(const AgentWorkbenchWidget &widget,
+                                         const QString &sessionId)
+    {
+        return widget.m_timelineSessions.value(sessionId).syncRequestId;
+    }
+
+    static bool timelineRetriesOnReconnect(const AgentWorkbenchWidget &widget,
+                                           const QString &sessionId)
+    {
+        return widget.m_timelineSessions.value(sessionId).retryOnReconnect;
+    }
+
+    static void exhaustTimelinePendingBytes(AgentWorkbenchWidget &widget)
+    {
+        widget.m_timelinePendingBytes = 64 * 1024 * 1024;
+    }
+
+    static qsizetype timelinePendingEventCount(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_timelinePendingEventCount;
+    }
+
+    static void fillTimelineSessionCapacity(AgentWorkbenchWidget &widget)
+    {
+        for (qsizetype index = 0; index < 10000; ++index) {
+            widget.m_timelineSessions.insert(
+                QStringLiteral("capacity-session-%1").arg(index), {});
+        }
+    }
+
+    static void beginTimelineSync(AgentWorkbenchWidget &widget,
+                                  const QString &sessionId)
+    {
+        widget.beginTimelineSync(sessionId);
+    }
+
+    static bool timelineTrackingExhausted(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_timelineTrackingExhausted;
+    }
+
+    static void setTimelineSyncAvailable(AgentWorkbenchWidget &widget, bool available)
+    {
+        widget.m_timelineSyncAvailable = available;
+    }
+
+    static bool timelineAllowsNewTurn(const AgentWorkbenchWidget &widget)
+    {
+        return !widget.currentTimelineSessionFrozen();
+    }
+
+    static void presentHistoryTimelineItem(AgentWorkbenchWidget &widget,
+                                           const QJsonObject &item)
+    {
+        widget.addTimelineItem(item);
+    }
+
+    static void suspendTimelinesForDisconnect(AgentWorkbenchWidget &widget)
+    {
+        widget.suspendTimelinesForDisconnect();
     }
 
     static bool hasTimelineItem(const AgentWorkbenchWidget &widget, const QString &id)
@@ -569,6 +687,31 @@ QJsonObject timelineEnvelope(const QString &event, const QString &sessionId,
     envelope.insert(QStringLiteral("event_id"),
                     AgentRuntimeClient::timelineEventIdentity(envelope));
     return envelope;
+}
+
+QJsonObject timelineAnchorForEvent(const QJsonObject &event)
+{
+    return {
+        {QStringLiteral("sequence"), event.value(QStringLiteral("sequence"))},
+        {QStringLiteral("event_id"), event.value(QStringLiteral("event_id"))},
+    };
+}
+
+QJsonObject timelineSyncPage(const QString &sessionId, const QJsonObject &after,
+                             const QJsonObject &watermark, const QJsonArray &events,
+                             bool complete)
+{
+    return {
+        {QStringLiteral("schema_version"), QStringLiteral("timeline-sync-page/0.1")},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("after"), after},
+        {QStringLiteral("watermark"), watermark},
+        {QStringLiteral("events"), events},
+        {QStringLiteral("next_after"), complete || events.isEmpty()
+             ? QJsonValue(QJsonValue::Null)
+             : QJsonValue(timelineAnchorForEvent(events.last().toObject()))},
+        {QStringLiteral("complete"), complete},
+    };
 }
 
 QJsonObject timelineMessage(const QString &id, const QString &state,
@@ -1646,6 +1789,330 @@ bool verifySessionScopedTimelineSequences(QApplication &application,
                   "interleaved Session Timeline state, generic kind, or UI isolation failed");
 }
 
+bool verifyTimelineGapRecovery(QApplication &application,
+                               AgentWorkbenchWidget &workbench,
+                               AgentRuntimeClient *runtimeClient)
+{
+    if (!runtimeClient) return false;
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    const QString sessionA = QStringLiteral("timeline-gap-session-a");
+    const QString sessionB = QStringLiteral("timeline-gap-session-b");
+    const QString turnA = QStringLiteral("timeline-gap-turn-a");
+    const QString turnB = QStringLiteral("timeline-gap-turn-b");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, sessionA);
+
+    const QJsonObject eventA1 = timelineEnvelope(
+        QStringLiteral("turn.started"), sessionA, turnA,
+        QJsonValue(QJsonValue::Null), 1, 10'001);
+    const QJsonObject eventA2 = timelineEnvelope(
+        QStringLiteral("item.completed"), sessionA, turnA,
+        timelineMessage(QStringLiteral("timeline-gap-item"),
+                        QStringLiteral("completed"), QStringLiteral("recovered")),
+        2, 10'002, 1);
+    const QJsonObject eventA3 = timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionA, turnA,
+        QJsonValue(QJsonValue::Null), 3, 10'003);
+    AgentWorkbenchWidgetTestAccess::presentHistoryTimelineItem(
+        workbench, eventA2.value(QStringLiteral("item")).toObject());
+    runtimeClient->timelineEvent(eventA1);
+    AgentWorkbenchWidgetTestAccess::setTimelineSyncAvailable(workbench, true);
+    runtimeClient->timelineEvent(eventA3);
+    const QString firstPageRequest =
+        AgentWorkbenchWidgetTestAccess::timelineSyncRequestId(workbench, sessionA);
+
+    const QJsonObject eventB1 = timelineEnvelope(
+        QStringLiteral("turn.started"), sessionB, turnB,
+        QJsonValue(QJsonValue::Null), 1, 20'001);
+    const QJsonObject eventB2 = timelineEnvelope(
+        QStringLiteral("item.completed"), sessionB, turnB,
+        timelineMessage(QStringLiteral("timeline-background-item"),
+                        QStringLiteral("completed"), QStringLiteral("background")),
+        2, 20'002, 1);
+    const QJsonObject eventB3 = timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionB, turnB,
+        QJsonValue(QJsonValue::Null), 3, 20'003);
+    runtimeClient->timelineEvent(eventB1);
+    runtimeClient->timelineEvent(eventB3);
+    const QString backgroundPageRequest =
+        AgentWorkbenchWidgetTestAccess::timelineSyncRequestId(workbench, sessionB);
+    runtimeClient->timelineSynced(
+        backgroundPageRequest,
+        timelineSyncPage(sessionB, timelineAnchorForEvent(eventB1),
+                         timelineAnchorForEvent(eventB3),
+                         QJsonArray{eventB2, eventB3}, true));
+    if (!expect(!firstPageRequest.isEmpty()
+                    && !backgroundPageRequest.isEmpty()
+                    && AgentWorkbenchWidgetTestAccess::queuedTimelineEvents(
+                           workbench, sessionA) == 1
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, sessionA) == 1
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, sessionB) == 3
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionB) == QStringLiteral("live")
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                           workbench, QStringLiteral("timeline-background-item")),
+                "a Session gap blocked an independent Session or failed to queue live data")) {
+        return false;
+    }
+
+    runtimeClient->timelineSynced(
+        firstPageRequest,
+        timelineSyncPage(sessionA, timelineAnchorForEvent(eventA1),
+                         timelineAnchorForEvent(eventA3), QJsonArray{eventA2}, false));
+    const QString secondPageRequest =
+        AgentWorkbenchWidgetTestAccess::timelineSyncRequestId(workbench, sessionA);
+    if (!expect(!secondPageRequest.isEmpty()
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, sessionA) == 1
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionA) == QStringLiteral("syncing")
+                    && AgentWorkbenchWidgetTestAccess::queuedTimelineEvents(
+                           workbench, sessionA) == 1
+                    && AgentWorkbenchWidgetTestAccess::timelineItemPresentationCount(
+                           workbench, QStringLiteral("timeline-gap-item")) == 1,
+                "an incomplete replay page advanced its confirmed projection or rendered early")) {
+        return false;
+    }
+    runtimeClient->timelineSynced(
+        secondPageRequest,
+        timelineSyncPage(sessionA, timelineAnchorForEvent(eventA2),
+                         timelineAnchorForEvent(eventA3), QJsonArray{eventA3}, true));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                    workbench, sessionA) == 3
+                    && AgentWorkbenchWidgetTestAccess::timelineEventId(
+                           workbench, sessionA)
+                        == eventA3.value(QStringLiteral("event_id")).toString()
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionA) == QStringLiteral("live")
+                    && AgentWorkbenchWidgetTestAccess::queuedTimelineEvents(
+                           workbench, sessionA) == 0
+                    && AgentWorkbenchWidgetTestAccess::timelineItemPresentationCount(
+                           workbench, QStringLiteral("timeline-gap-item")) == 1,
+                "fixed-watermark replay did not atomically commit and drain live events")) {
+        return false;
+    }
+
+    runtimeClient->timelineEvent(eventA3);
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                    workbench, sessionA) == 3
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionA) == QStringLiteral("live"),
+                "an exact duplicate Timeline event was not idempotent")) {
+        return false;
+    }
+    QJsonObject driftedA3 = eventA3;
+    driftedA3.insert(QStringLiteral("timestamp_ms"), 10'004);
+    driftedA3.insert(QStringLiteral("event_id"), QString());
+    driftedA3.insert(QStringLiteral("event_id"),
+                     AgentRuntimeClient::timelineEventIdentity(driftedA3));
+    runtimeClient->timelineEvent(driftedA3);
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                    workbench, sessionA) == QStringLiteral("frozen")
+                    && !AgentWorkbenchWidgetTestAccess::timelineAllowsNewTurn(workbench),
+                "same-sequence anchor drift did not freeze only the affected Session")) {
+        return false;
+    }
+
+    const QString sessionC = QStringLiteral("timeline-gap-session-c");
+    const QString turnC = QStringLiteral("timeline-gap-turn-c");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, sessionC);
+    const QJsonObject eventC1 = timelineEnvelope(
+        QStringLiteral("turn.started"), sessionC, turnC,
+        QJsonValue(QJsonValue::Null), 1, 30'001);
+    const QJsonObject eventC2 = timelineEnvelope(
+        QStringLiteral("item.completed"), sessionC, turnC,
+        timelineMessage(QStringLiteral("timeline-page-must-not-render"),
+                        QStringLiteral("completed"), QStringLiteral("candidate")),
+        2, 30'002, 1);
+    const QJsonObject eventC3 = timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionC, turnC,
+        QJsonValue(QJsonValue::Null), 3, 30'003);
+    runtimeClient->timelineEvent(eventC1);
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSync(
+        workbench, sessionC, QStringLiteral("timeline-sync-c"));
+    QJsonObject malformedC3 = eventC3;
+    malformedC3.insert(QStringLiteral("event_id"),
+                       QStringLiteral("event:sha256:") + QString(64, QLatin1Char('f')));
+    runtimeClient->timelineSynced(
+        QStringLiteral("timeline-sync-c"),
+        timelineSyncPage(sessionC, timelineAnchorForEvent(eventC1),
+                         timelineAnchorForEvent(eventC3), QJsonArray{eventC2}, false));
+    const QString malformedPageRequest =
+        AgentWorkbenchWidgetTestAccess::timelineSyncRequestId(workbench, sessionC);
+    if (!expect(!malformedPageRequest.isEmpty()
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, sessionC) == 1
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                           workbench, QStringLiteral("timeline-page-must-not-render")),
+                "the first replay page escaped its atomic staging boundary")) {
+        return false;
+    }
+    runtimeClient->timelineSynced(
+        malformedPageRequest,
+        timelineSyncPage(sessionC, timelineAnchorForEvent(eventC2),
+                         timelineAnchorForEvent(eventC3), QJsonArray{malformedC3}, true));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                    workbench, sessionC) == 1
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionC) == QStringLiteral("frozen")
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                           workbench, QStringLiteral("timeline-page-must-not-render")),
+                "a malformed replay page partially changed projection or presentation")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    const QString sessionF = QStringLiteral("timeline-gap-session-f");
+    const QString turnF = QStringLiteral("timeline-gap-turn-f");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, sessionF);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), sessionF, turnF,
+        QJsonValue(QJsonValue::Null), 1, 32'001));
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSync(
+        workbench, sessionF, QStringLiteral("timeline-sync-f"));
+    for (quint64 index = 0; index < 257; ++index) {
+        runtimeClient->timelineEvent(timelineEnvelope(
+            QStringLiteral("future.notice"), sessionF, turnF,
+            QJsonValue(QJsonValue::Null), index + 2, 32'002 + index));
+    }
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                    workbench, sessionF) == QStringLiteral("frozen")
+                    && AgentWorkbenchWidgetTestAccess::queuedTimelineEvents(
+                           workbench, sessionF) == 0
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, sessionF) == 1,
+                "live queue overflow retained untrusted events or advanced the cursor")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    const QString sessionG = QStringLiteral("timeline-gap-session-g");
+    const QString turnG = QStringLiteral("timeline-gap-turn-g");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, sessionG);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), sessionG, turnG,
+        QJsonValue(QJsonValue::Null), 1, 34'001));
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSync(
+        workbench, sessionG, QStringLiteral("timeline-sync-g"));
+    AgentWorkbenchWidgetTestAccess::setPendingPrompt(
+        workbench, QStringLiteral("preserve-prompt-during-timeline-sync"));
+    runtimeClient->requestFailed(QStringLiteral("timeline-sync-g"),
+                                 QStringLiteral("timeline/sync"),
+                                 QStringLiteral("redacted"), -32160);
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                    workbench, sessionG) == QStringLiteral("frozen")
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, sessionG) == 1
+                    && AgentWorkbenchWidgetTestAccess::pendingPrompt(workbench)
+                        == QStringLiteral("preserve-prompt-during-timeline-sync"),
+                "Timeline sync error did not freeze the cursor or preserve pending input")) {
+        return false;
+    }
+    AgentWorkbenchWidgetTestAccess::setPendingPrompt(workbench, QString());
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    const QString sessionH = QStringLiteral("timeline-gap-session-h");
+    const QString turnH = QStringLiteral("timeline-gap-turn-h");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, sessionH);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), sessionH, turnH,
+        QJsonValue(QJsonValue::Null), 1, 33'001));
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSync(
+        workbench, sessionH, QStringLiteral("timeline-sync-h"));
+    AgentWorkbenchWidgetTestAccess::exhaustTimelinePendingBytes(workbench);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("future.notice"), sessionH, turnH,
+        QJsonValue(QJsonValue::Null), 2, 33'002));
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                    workbench, sessionH) == QStringLiteral("frozen")
+                    && AgentWorkbenchWidgetTestAccess::queuedTimelineEvents(
+                           workbench, sessionH) == 0
+                    && AgentWorkbenchWidgetTestAccess::timelinePendingEventCount(workbench) == 0
+                    && !AgentWorkbenchWidgetTestAccess::timelineAllowsNewTurn(workbench),
+                "aggregate Timeline pending-byte exhaustion did not fail closed")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    const QString capacitySession = QStringLiteral("timeline-capacity-overflow");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, capacitySession);
+    AgentWorkbenchWidgetTestAccess::fillTimelineSessionCapacity(workbench);
+    AgentWorkbenchWidgetTestAccess::beginTimelineSync(workbench, capacitySession);
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                    workbench, capacitySession) == QStringLiteral("missing")
+                    && AgentWorkbenchWidgetTestAccess::timelineTrackingExhausted(workbench)
+                    && !AgentWorkbenchWidgetTestAccess::timelineAllowsNewTurn(workbench),
+                "the 10001st Timeline Session bypassed the global capacity gate")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    const QString sessionE = QStringLiteral("timeline-gap-session-e");
+    const QString turnE = QStringLiteral("timeline-gap-turn-e");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, sessionE);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), sessionE, turnE,
+        QJsonValue(QJsonValue::Null), 1, 35'001));
+    AgentWorkbenchWidgetTestAccess::setTimelineSyncAvailable(workbench, false);
+    runtimeClient->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionE, turnE,
+        QJsonValue(QJsonValue::Null), 3, 35'003));
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                    workbench, sessionE) == QStringLiteral("frozen")
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, sessionE) == 1
+                    && !AgentWorkbenchWidgetTestAccess::timelineAllowsNewTurn(workbench),
+                "missing replay capability did not preserve and freeze the confirmed cursor")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    const QString sessionD = QStringLiteral("timeline-gap-session-d");
+    const QString turnD = QStringLiteral("timeline-gap-turn-d");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, sessionD);
+    const QJsonObject eventD1 = timelineEnvelope(
+        QStringLiteral("turn.started"), sessionD, turnD,
+        QJsonValue(QJsonValue::Null), 1, 40'001);
+    const QJsonObject eventD3 = timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionD, turnD,
+        QJsonValue(QJsonValue::Null), 3, 40'003);
+    runtimeClient->timelineEvent(eventD1);
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSync(
+        workbench, sessionD, QStringLiteral("timeline-sync-d"));
+    runtimeClient->timelineEvent(eventD3);
+    const QString confirmedEventId = AgentWorkbenchWidgetTestAccess::timelineEventId(
+        workbench, sessionD);
+    runtimeClient->connectionStateChanged(false, QStringLiteral("runtime disconnected"));
+    runtimeClient->requestFailed(QStringLiteral("timeline-sync-d"),
+                                 QStringLiteral("timeline/sync"),
+                                 QStringLiteral("runtime disconnected"), -1);
+    application.processEvents();
+    QPushButton *sendButton = workbench.findChild<QPushButton *>(
+        QStringLiteral("agentSendButton"));
+    const bool disconnectedStatePreserved =
+        AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(workbench, sessionD) == 1
+        && AgentWorkbenchWidgetTestAccess::timelineEventId(workbench, sessionD)
+            == confirmedEventId
+        && AgentWorkbenchWidgetTestAccess::timelineTurnState(workbench, sessionD, turnD)
+            == QStringLiteral("running")
+        && AgentWorkbenchWidgetTestAccess::queuedTimelineEvents(workbench, sessionD) == 0
+        && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(workbench, sessionD)
+            == QStringLiteral("frozen")
+        && AgentWorkbenchWidgetTestAccess::timelineRetriesOnReconnect(
+               workbench, sessionD)
+        && !AgentWorkbenchWidgetTestAccess::timelineAllowsNewTurn(workbench)
+        && sendButton && sendButton->text() == QStringLiteral("发送")
+        && !sendButton->isEnabled();
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    return expect(disconnectedStatePreserved,
+                  "disconnect lost its confirmed projection, pending bounds, or reconnect retry");
+}
+
 bool runGit(const QString &executable, const QString &root, const QStringList &arguments,
             QString *standardOutput = nullptr)
 {
@@ -1785,6 +2252,7 @@ int main(int argc, char *argv[])
                 && verifyStrictTimelineValidation(application, workbench, runtimeClient)
                 && verifySessionScopedTimelineSequences(
                     application, workbench, runtimeClient)
+                && verifyTimelineGapRecovery(application, workbench, runtimeClient)
                 && verifyRuntimeDegradationFailures(
                     application, workbench, runtimeClient, runtimeCapability)
                 && expect(AgentWorkbenchWidgetTestAccess::activeTurnSubmitIsInert(
@@ -2178,6 +2646,7 @@ int main(int argc, char *argv[])
                 QStringLiteral("model.catalog.cache.read-only"),
                 QStringLiteral("model.catalog.refresh.status.read-only"),
                 QStringLiteral("model.profile.read-only"),
+                QStringLiteral("timeline.replay.fixed-watermark"),
             }},
             {QStringLiteral("experimental"), QJsonArray{}},
         }},
@@ -2477,6 +2946,22 @@ int main(int argc, char *argv[])
             {QStringLiteral("automatic_compaction_authority"), false},
         }},
     });
+    application.processEvents();
+    const QString recoveryTimelineSync =
+        AgentWorkbenchWidgetTestAccess::timelineSyncRequestId(
+            workbench, QStringLiteral("session-recovery-render"));
+    const QJsonObject emptyTimelineAnchor{
+        {QStringLiteral("sequence"), 0},
+        {QStringLiteral("event_id"), QJsonValue::Null},
+    };
+    if (!expect(!recoveryTimelineSync.isEmpty(),
+                "restored Session did not request its initial Timeline sync")) {
+        return 1;
+    }
+    runtimeClient->timelineSynced(
+        recoveryTimelineSync,
+        timelineSyncPage(QStringLiteral("session-recovery-render"),
+                         emptyTimelineAnchor, emptyTimelineAnchor, {}, true));
     application.processEvents();
     if (!verifyBoundedContextThresholdCache(
             workbench, QStringLiteral("session-recovery-render"))) {
@@ -3179,11 +3664,19 @@ int main(int argc, char *argv[])
     // Synthetic Timeline fixtures above bypass the sidecar and use their own
     // sequence space. Start the real sidecar workflow with a clean client view.
     AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    AgentWorkbenchWidgetTestAccess::setTimelineSyncAvailable(workbench, true);
     runtime->startSession(QStringLiteral("work"), openedProjectId);
     if (!expect(waitUntil(application, [&previewSessionId]() {
                     return !previewSessionId.isEmpty();
                 }),
                 "workspace edit preview fixture did not create a Work session")) {
+        return 1;
+    }
+    if (!expect(waitUntil(application, [&workbench, &previewSessionId]() {
+                    return AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                               workbench, previewSessionId) == QStringLiteral("live");
+                }),
+                "new Work session did not complete its initial Timeline sync")) {
         return 1;
     }
     if (!expect(AgentWorkbenchWidgetTestAccess::activateMode(
@@ -3617,15 +4110,21 @@ int main(int argc, char *argv[])
     }
     deletionChangeRequest = runtime->undoSessionDeletion(
         deletionReceipt.value(QStringLiteral("deletion_id")).toString());
-    if (!expect(waitUntil(application, [sessionList, send, &deletionReceipt]() {
+    const bool deletionUndoRestored = waitUntil(
+        application, [sessionList, send, &deletionReceipt]() {
                     return deletionReceipt.value(QStringLiteral("state")).toString()
                                == QStringLiteral("cancelled")
                         && sessionList->count() > 0
                         && !sessionList->item(0)->text().contains(QStringLiteral("待删除"))
                         && send->text() == QStringLiteral("发送")
                         && send->isEnabled();
-                }),
-                "session deletion undo did not restore the Qt workflow")) {
+                });
+    if (!expect(deletionUndoRestored,
+                qPrintable(QStringLiteral(
+                    "session deletion undo did not restore the Qt workflow: state=%1 send=%2 enabled=%3")
+                    .arg(deletionReceipt.value(QStringLiteral("state")).toString(),
+                         send->text(), send->isEnabled() ? QStringLiteral("true")
+                                                        : QStringLiteral("false"))))) {
         return 1;
     }
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)

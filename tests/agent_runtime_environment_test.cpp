@@ -112,6 +112,38 @@ QJsonObject validInitializeResult()
     };
 }
 
+QString timelineEventId(QLatin1Char fill)
+{
+    return QStringLiteral("event:sha256:") + QString(64, fill);
+}
+
+QJsonObject timelineAnchor(int sequence, const QJsonValue &eventId)
+{
+    return {
+        {QStringLiteral("sequence"), sequence},
+        {QStringLiteral("event_id"), eventId},
+    };
+}
+
+QJsonObject timelineSyncPage(const QJsonObject &requestParams)
+{
+    const QJsonObject after = requestParams.value(QStringLiteral("after")).toObject();
+    QJsonValue watermark = requestParams.value(QStringLiteral("watermark"));
+    if (watermark.isNull()) {
+        watermark = timelineAnchor(0, QJsonValue(QJsonValue::Null));
+    }
+    return {
+        {QStringLiteral("schema_version"), QStringLiteral("timeline-sync-page/0.1")},
+        {QStringLiteral("session_id"),
+         requestParams.value(QStringLiteral("session_id"))},
+        {QStringLiteral("after"), after},
+        {QStringLiteral("watermark"), watermark},
+        {QStringLiteral("events"), QJsonArray{}},
+        {QStringLiteral("next_after"), QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("complete"), true},
+    };
+}
+
 QJsonObject validTimelineEnvelope()
 {
     const QString sessionId(128, QLatin1Char('s'));
@@ -288,6 +320,11 @@ int runFakeRuntime(const QString &testCase)
         QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
                                       .value(QStringLiteral("stable")).toArray();
         capabilities.append(QStringLiteral("session.portable.import"));
+        setStableCapabilities(capabilities);
+    } else if (testCase.startsWith(QStringLiteral("timeline-sync-"))) {
+        QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
+                                      .value(QStringLiteral("stable")).toArray();
+        capabilities.append(QStringLiteral("timeline.replay.fixed-watermark"));
         setStableCapabilities(capabilities);
     } else if (testCase == QStringLiteral("notification-valid-event-envelope")
                || testCase == QStringLiteral("notification-valid-large-generic-event")
@@ -480,6 +517,7 @@ int runFakeRuntime(const QString &testCase)
     bool ordinaryViolationSent = false;
     QJsonValue combinedFirstId;
     bool hasCombinedFirstId = false;
+    int timelineSyncRequests = 0;
     while (std::getline(std::cin, rawLine)) {
         const QByteArray line = QByteArray::fromStdString(rawLine);
         appendLogLine(&log, line);
@@ -604,6 +642,31 @@ int runFakeRuntime(const QString &testCase)
                 << QJsonDocument(shutdownResponse).toJson(QJsonDocument::Compact).constData()
                 << std::endl;
             return 0;
+        }
+        if (message.value(QStringLiteral("method")).toString()
+                == QStringLiteral("timeline/sync")
+            && testCase.startsWith(QStringLiteral("timeline-sync-"))) {
+            ++timelineSyncRequests;
+            if (testCase == QStringLiteral("timeline-sync-disconnect")) return 0;
+            QJsonObject timelineResponse{
+                {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+            };
+            if (testCase == QStringLiteral("timeline-sync-error-cleanup")
+                && timelineSyncRequests == 1) {
+                timelineResponse.insert(QStringLiteral("error"), QJsonObject{
+                    {QStringLiteral("code"), -32160},
+                    {QStringLiteral("message"), QStringLiteral("timeline sync rejected")},
+                });
+            } else {
+                timelineResponse.insert(
+                    QStringLiteral("result"),
+                    timelineSyncPage(message.value(QStringLiteral("params")).toObject()));
+            }
+            std::cout
+                << QJsonDocument(timelineResponse).toJson(QJsonDocument::Compact).constData()
+                << std::endl;
+            continue;
         }
         if (message.value(QStringLiteral("id")).isString()) {
             if (testCase == QStringLiteral("combined-legal-frames")) {
@@ -964,18 +1027,22 @@ bool runCapabilityGateCase()
     bool initialized = false;
     bool capabilityRejected = false;
     bool searchCapabilityRejected = false;
+    bool timelineSyncCapabilityRejected = false;
     {
         AgentRuntimeClient client;
         QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
                          [&initialized](const QJsonObject &) { initialized = true; });
         QObject::connect(&client, &AgentRuntimeClient::requestFailed,
-                         [&capabilityRejected, &searchCapabilityRejected](
+                         [&capabilityRejected, &searchCapabilityRejected,
+                          &timelineSyncCapabilityRejected](
                              const QString &, const QString &method,
                              const QString &, int code) {
             if (method == QStringLiteral("project/list") && code == -32601) {
                 capabilityRejected = true;
             } else if (method == QStringLiteral("session/search") && code == -32601) {
                 searchCapabilityRejected = true;
+            } else if (method == QStringLiteral("timeline/sync") && code == -32601) {
+                timelineSyncCapabilityRejected = true;
             }
         });
         client.start();
@@ -996,6 +1063,11 @@ bool runCapabilityGateCase()
                     "session.list incorrectly authorized session/search")) {
             return false;
         }
+        if (!expect(client.syncTimeline(QStringLiteral("session-1"), 0).isEmpty()
+                        && timelineSyncCapabilityRejected,
+                    "missing Timeline replay capability did not reject timeline/sync")) {
+            return false;
+        }
         if (!expect(!client.runtimeHealth().isEmpty(),
                     "negotiated capability did not allow its method")) {
             return false;
@@ -1008,7 +1080,238 @@ bool runCapabilityGateCase()
         && expect(logContainsMethod(logPath, QStringLiteral("session/list")),
                   "negotiated session/list request did not reach the runtime")
         && expect(!logContainsMethod(logPath, QStringLiteral("session/search")),
-                  "session/search escaped without session.search.branch");
+                  "session/search escaped without session.search.branch")
+        && expect(!logContainsMethod(logPath, QStringLiteral("timeline/sync")),
+                  "timeline/sync escaped without its negotiated capability");
+}
+
+bool runTimelineSyncContractCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create Timeline sync directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("timeline-sync-contract"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    const QString eventA = timelineEventId(QLatin1Char('a'));
+    const QString eventB = timelineEventId(QLatin1Char('b'));
+    const QJsonObject fixedWatermark = timelineAnchor(9, eventB);
+    bool initialized = false;
+    int invalidRequests = 0;
+    QHash<QString, QJsonObject> pages;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::timelineSynced,
+                         [&pages](const QString &requestId, const QJsonObject &page) {
+            pages.insert(requestId, page);
+        });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                         [&invalidRequests](const QString &requestId,
+                                            const QString &method,
+                                            const QString &, int code) {
+            if (requestId.isEmpty() && method == QStringLiteral("timeline/sync")
+                && code == -32602) {
+                ++invalidRequests;
+            }
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "Timeline sync handshake timed out")) {
+            return false;
+        }
+        const QJsonObject invalidWatermark = timelineAnchor(0, eventA);
+        const QJsonObject earlierWatermark = timelineAnchor(8, eventA);
+        if (!expect(client.syncTimeline(QStringLiteral("session-1"), 0, eventA).isEmpty()
+                        && client.syncTimeline(QStringLiteral("session-1"), 1).isEmpty()
+                        && client.syncTimeline(QStringLiteral("session-1"), 0, {},
+                                               invalidWatermark).isEmpty()
+                        && client.syncTimeline(QStringLiteral("session-1"), 9, eventB,
+                                               earlierWatermark).isEmpty()
+                        && invalidRequests == 4,
+                    "invalid Timeline anchors were not rejected before transport")) {
+            return false;
+        }
+
+        const QString firstRequest = client.syncTimeline(
+            QStringLiteral("session-1"), 0, {}, {}, 999);
+        if (!expect(!firstRequest.isEmpty()
+                        && waitUntil([&]() { return pages.contains(firstRequest); }),
+                    "initial Timeline sync page was not signalled")) {
+            return false;
+        }
+        const QString secondRequest = client.syncTimeline(
+            QStringLiteral("session-1"), 9, eventB, fixedWatermark, 25);
+        if (!expect(!secondRequest.isEmpty() && secondRequest != firstRequest
+                        && waitUntil([&]() { return pages.contains(secondRequest); }),
+                    "fixed-watermark Timeline sync page was not signalled")) {
+            return false;
+        }
+        if (!expect(pages.value(firstRequest).value(QStringLiteral("schema_version"))
+                            == QStringLiteral("timeline-sync-page/0.1")
+                        && pages.value(firstRequest).value(QStringLiteral("session_id"))
+                            == QStringLiteral("session-1")
+                        && pages.value(secondRequest).value(QStringLiteral("watermark"))
+                            == fixedWatermark,
+                    "Timeline sync response signal did not preserve the page contract")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+
+    QList<QJsonObject> syncRequests;
+    QJsonObject initializeRequest;
+    for (const QJsonObject &message : readLogMessages(logPath)) {
+        const QString method = message.value(QStringLiteral("method")).toString();
+        if (method == QStringLiteral("initialize")) initializeRequest = message;
+        if (method == QStringLiteral("timeline/sync")) syncRequests.append(message);
+    }
+    const QJsonArray declared = initializeRequest.value(QStringLiteral("params")).toObject()
+                                    .value(QStringLiteral("capabilities")).toObject()
+                                    .value(QStringLiteral("stable")).toArray();
+    if (!expect(declared.contains(QStringLiteral("timeline.replay.fixed-watermark")),
+                "initialize did not declare the Timeline replay capability")
+        || !expect(syncRequests.size() == 2,
+                   "invalid Timeline requests reached the runtime")) {
+        return false;
+    }
+    const QJsonObject firstParams = syncRequests.at(0).value(QStringLiteral("params")).toObject();
+    const QJsonObject secondParams = syncRequests.at(1).value(QStringLiteral("params")).toObject();
+    return expect(firstParams == QJsonObject{
+                      {QStringLiteral("session_id"), QStringLiteral("session-1")},
+                      {QStringLiteral("after"),
+                       timelineAnchor(0, QJsonValue(QJsonValue::Null))},
+                      {QStringLiteral("watermark"), QJsonValue(QJsonValue::Null)},
+                      {QStringLiteral("limit"), 200},
+                  }, "initial Timeline sync request did not normalize its anchor")
+        && expect(secondParams == QJsonObject{
+                      {QStringLiteral("session_id"), QStringLiteral("session-1")},
+                      {QStringLiteral("after"), timelineAnchor(9, eventB)},
+                      {QStringLiteral("watermark"), fixedWatermark},
+                      {QStringLiteral("limit"), 25},
+                  }, "fixed-watermark Timeline sync request changed its contract");
+}
+
+bool runTimelineSyncErrorCleanupCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create Timeline error directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("timeline-sync-error-cleanup"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    QString failedRequest;
+    QString completedRequest;
+    int failedCount = 0;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                         [&failedRequest, &failedCount](const QString &requestId,
+                                                       const QString &method,
+                                                       const QString &, int code) {
+            if (method == QStringLiteral("timeline/sync") && code == -32160) {
+                failedRequest = requestId;
+                ++failedCount;
+            }
+        });
+        QObject::connect(&client, &AgentRuntimeClient::timelineSynced,
+                         [&completedRequest](const QString &requestId,
+                                             const QJsonObject &) {
+            completedRequest = requestId;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "Timeline error cleanup handshake timed out")) {
+            return false;
+        }
+        const QString firstRequest = client.syncTimeline(QStringLiteral("session-1"), 0);
+        if (!expect(!firstRequest.isEmpty()
+                        && waitUntil([&]() { return failedRequest == firstRequest; })
+                        && failedCount == 1,
+                    "Timeline error did not clear the exact pending request")) {
+            return false;
+        }
+        const QString secondRequest = client.syncTimeline(QStringLiteral("session-1"), 0);
+        if (!expect(!secondRequest.isEmpty() && secondRequest != firstRequest
+                        && waitUntil([&]() { return completedRequest == secondRequest; })
+                        && client.isReady(),
+                    "request tracking did not recover after a Timeline error")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+    return true;
+}
+
+bool runTimelineSyncDisconnectCleanupCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create Timeline disconnect directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("timeline-sync-disconnect"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool disconnected = false;
+    QString requestId;
+    int exactFailures = 0;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                         [&requestId, &exactFailures](const QString &failedId,
+                                                     const QString &method,
+                                                     const QString &, int) {
+            if (!requestId.isEmpty() && failedId == requestId
+                && method == QStringLiteral("timeline/sync")) {
+                ++exactFailures;
+            }
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "Timeline disconnect handshake timed out")) {
+            return false;
+        }
+        requestId = client.syncTimeline(QStringLiteral("session-1"), 0);
+        if (!expect(!requestId.isEmpty()
+                        && waitUntil([&]() { return disconnected && exactFailures == 1; })
+                        && !client.isReady(),
+                    "disconnect did not fail and clear the exact Timeline request")) {
+            return false;
+        }
+        if (!expect(client.syncTimeline(QStringLiteral("session-1"), 0).isEmpty()
+                        && exactFailures == 1,
+                    "cleared Timeline capability or request survived disconnect")) {
+            return false;
+        }
+    }
+    int syncCount = 0;
+    for (const QJsonObject &message : readLogMessages(logPath)) {
+        if (message.value(QStringLiteral("method")) == QStringLiteral("timeline/sync")) {
+            ++syncCount;
+        }
+    }
+    return expect(syncCount == 1, "a Timeline request escaped after disconnect cleanup");
 }
 
 bool runValidTimelineNotificationCase()
@@ -1327,6 +1630,9 @@ int main(int argc, char *argv[])
                           QStringLiteral("upgrade-runtime")) && ok;
     ok = runHandshakeCase(QStringLiteral("malformed-upgrade-error"), false) && ok;
     ok = runCapabilityGateCase() && ok;
+    ok = runTimelineSyncContractCase() && ok;
+    ok = runTimelineSyncErrorCleanupCase() && ok;
+    ok = runTimelineSyncDisconnectCleanupCase() && ok;
     ok = runValidTimelineNotificationCase() && ok;
     ok = runLargeGenericTimelineNotificationCase() && ok;
     ok = runMathematicalIntegerTimelineNotificationCase() && ok;

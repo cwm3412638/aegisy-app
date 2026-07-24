@@ -8,6 +8,7 @@
 #include <QSet>
 #include <QStringList>
 #include <QWidget>
+#include <functional>
 
 class AgentRuntimeClient;
 #ifdef AEGISY_HAS_MONACO
@@ -53,6 +54,45 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    enum class TimelineRecoveryState {
+        Untracked,
+        Live,
+        Syncing,
+        Frozen,
+        Unrecoverable,
+    };
+    struct TimelineProjection {
+        quint64 sequence = 0;
+        quint64 timestampMs = 0;
+        QString eventId;
+        QHash<quint64, QString> eventIds;
+        QHash<QString, QString> turnStates;
+        QHash<QString, QString> itemKinds;
+        QHash<QString, QString> itemRoles;
+        QHash<QString, QString> itemStates;
+        QHash<QString, quint64> itemRevisions;
+    };
+    struct TimelineStagedEvent {
+        QJsonObject event;
+        QJsonObject item;
+        bool recognized = false;
+    };
+    struct TimelineSessionState {
+        TimelineRecoveryState recovery = TimelineRecoveryState::Untracked;
+        TimelineProjection projection;
+        TimelineProjection syncProjection;
+        bool syncProjectionValid = false;
+        QString syncRequestId;
+        quint64 requestedAfterSequence = 0;
+        QString requestedAfterEventId;
+        QJsonObject watermark;
+        QList<TimelineStagedEvent> stagedSyncEvents;
+        qsizetype stagedSyncBytes = 0;
+        QList<QJsonObject> queuedLiveEvents;
+        qsizetype queuedLiveBytes = 0;
+        bool retryOnReconnect = false;
+    };
+
     void buildUi();
     QWidget *buildProductRail();
     QWidget *buildAgentSurface();
@@ -148,8 +188,26 @@ private:
                               QHash<QString, QString> *itemKinds,
                               QHash<QString, QString> *itemRoles) const;
     bool validateTimelineEvent(const QJsonObject &event,
+                               TimelineProjection *projection,
                                QJsonObject *validatedItem = nullptr,
                                bool *recognizedEvent = nullptr) const;
+    void handleLiveTimelineEvent(const QJsonObject &event);
+    void handleTimelineSyncPage(const QString &requestId, const QJsonObject &page);
+    TimelineSessionState *ensureTimelineSession(const QString &sessionId);
+    void beginTimelineSync(const QString &sessionId);
+    void suspendTimelinesForDisconnect();
+    void releaseTimelinePendingAccounting(const TimelineSessionState &state);
+    void clearTimelinePending(TimelineSessionState &state);
+    void freezeTimelineSession(const QString &sessionId, bool unrecoverable,
+                               bool retryOnReconnect = false);
+    void publishTimelineProjection(const QString &sessionId,
+                                   const TimelineProjection &projection);
+    void restoreActiveTurnFromTimeline();
+    void applyTimelineEventPresentation(const QJsonObject &event,
+                                        const QJsonObject &item,
+                                        bool recognizedEvent);
+    QString currentTimelineSessionId() const;
+    bool currentTimelineSessionFrozen() const;
     void addNotice(const QString &text, bool error = false);
     bool storeSessionRuntimeBinding(const QString &sessionId, const QJsonObject &runtime);
     bool storeSessionContextThreshold(const QString &sessionId,
@@ -390,6 +448,13 @@ private:
     QHash<QString, QString> m_turnStates;
     QHash<QString, quint64> m_unknownTimelineEventCounts;
     quint64 m_unknownTimelineEventOverflowCount = 0;
+    QHash<QString, TimelineSessionState> m_timelineSessions;
+    qsizetype m_timelineTrackedEventCount = 0;
+    qsizetype m_timelinePendingEventCount = 0;
+    qsizetype m_timelinePendingBytes = 0;
+    bool m_timelineTrackingExhausted = false;
+    bool m_timelineSyncAvailable = false;
+    std::function<void(const QJsonObject &, const QJsonObject &, bool)> m_timelinePresenter;
     QHash<QString, QString> m_commandArtifactRequests;
     QHash<QString, QTreeWidgetItem *> m_treeItems;
     QHash<QString, QString> m_workspaceListRequests;

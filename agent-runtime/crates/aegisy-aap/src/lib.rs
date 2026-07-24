@@ -17,6 +17,7 @@ pub const MAX_TIMELINE_KIND_BYTES: usize = 64;
 pub const MAX_TIMELINE_CONTENT_CHARACTERS: usize = 64 * 1024;
 pub const MAX_TIMELINE_DATA_DEPTH: usize = 16;
 pub const MAX_TIMELINE_DATA_NODES: usize = 4096;
+pub const MAX_TIMELINE_SYNC_EVENTS: usize = 200;
 
 fn valid_ascii_graphical(value: &str, maximum_bytes: usize) -> bool {
     !value.is_empty()
@@ -141,6 +142,40 @@ where
             serde::de::Error::custom("value must be a positive JSON-safe mathematical integer")
         })?;
     u64::try_from(value).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_nonnegative_safe_json_integer<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let number = Number::deserialize(deserializer)?;
+    let value = canonical_safe_json_integer(&number)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            serde::de::Error::custom("value must be a non-negative JSON-safe mathematical integer")
+        })?;
+    u64::try_from(value).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_timeline_sync_limit<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let limit = deserialize_positive_safe_json_integer(deserializer)?;
+    if limit > MAX_TIMELINE_SYNC_EVENTS as u64 {
+        return Err(serde::de::Error::custom(
+            "timeline sync limit exceeds the maximum",
+        ));
+    }
+    Ok(limit)
+}
+
+fn valid_timeline_event_id(value: &str) -> bool {
+    value.len() == 77
+        && value.starts_with("event:sha256:")
+        && value[13..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn valid_initialize_capability(value: &str) -> bool {
@@ -663,12 +698,7 @@ pub mod stable {
                 if self.schema_version != "timeline-event/0.1" {
                     return Err("timeline event schema version is invalid");
                 }
-                if self.event_id.len() != 77
-                    || !self.event_id.starts_with("event:sha256:")
-                    || !self.event_id[13..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                {
+                if !valid_timeline_event_id(&self.event_id) {
                     return Err("timeline event identity is invalid");
                 }
                 if self.sequence == 0 || self.sequence > MAX_SAFE_JSON_INTEGER {
@@ -921,17 +951,424 @@ pub mod stable {
                 .serialize(serializer)
             }
         }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct TimelineAnchor {
+            pub sequence: u64,
+            pub event_id: Option<String>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TimelineAnchorWire {
+            #[serde(deserialize_with = "deserialize_nonnegative_safe_json_integer")]
+            sequence: u64,
+            event_id: Value,
+        }
+
+        impl TimelineAnchor {
+            pub fn validate(&self) -> Result<(), &'static str> {
+                if self.sequence > MAX_SAFE_JSON_INTEGER {
+                    return Err("timeline anchor sequence is outside the safe integer range");
+                }
+                match (self.sequence, self.event_id.as_deref()) {
+                    (0, None) => Ok(()),
+                    (0, Some(_)) => Err("timeline anchor zero sequence must not have an event ID"),
+                    (_, Some(event_id)) if valid_timeline_event_id(event_id) => Ok(()),
+                    (_, Some(_)) => Err("timeline anchor event identity is invalid"),
+                    (_, None) => Err("positive timeline anchor must have an event ID"),
+                }
+            }
+
+            pub fn initial() -> Self {
+                Self {
+                    sequence: 0,
+                    event_id: None,
+                }
+            }
+        }
+
+        impl TryFrom<TimelineAnchorWire> for TimelineAnchor {
+            type Error = &'static str;
+
+            fn try_from(value: TimelineAnchorWire) -> Result<Self, Self::Error> {
+                let event_id = match value.event_id {
+                    Value::Null => None,
+                    Value::String(event_id) => Some(event_id),
+                    _ => return Err("timeline anchor event identity must be a string or null"),
+                };
+                let anchor = Self {
+                    sequence: value.sequence,
+                    event_id,
+                };
+                anchor.validate()?;
+                Ok(anchor)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for TimelineAnchor {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                TimelineAnchorWire::deserialize(deserializer)?
+                    .try_into()
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl Serialize for TimelineAnchor {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                self.validate().map_err(serde::ser::Error::custom)?;
+                #[derive(Serialize)]
+                struct AnchorRef<'a> {
+                    sequence: u64,
+                    event_id: Option<&'a str>,
+                }
+                AnchorRef {
+                    sequence: self.sequence,
+                    event_id: self.event_id.as_deref(),
+                }
+                .serialize(serializer)
+            }
+        }
+
+        fn parse_nullable_timeline_anchor(
+            value: Value,
+        ) -> Result<Option<TimelineAnchor>, &'static str> {
+            if value.is_null() {
+                Ok(None)
+            } else {
+                serde_json::from_value(value)
+                    .map(Some)
+                    .map_err(|_| "nullable timeline anchor is invalid")
+            }
+        }
+
+        fn validate_timeline_window(
+            after: &TimelineAnchor,
+            watermark: &TimelineAnchor,
+        ) -> Result<(), &'static str> {
+            after.validate()?;
+            watermark.validate()?;
+            if after.sequence > watermark.sequence {
+                return Err("timeline sync after anchor exceeds the fixed watermark");
+            }
+            if after.sequence == watermark.sequence && after != watermark {
+                return Err("timeline sync anchors disagree at the same sequence");
+            }
+            Ok(())
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct TimelineSyncParams {
+            pub session_id: String,
+            pub after: TimelineAnchor,
+            pub watermark: Option<TimelineAnchor>,
+            pub limit: u64,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TimelineSyncParamsWire {
+            session_id: String,
+            after: TimelineAnchor,
+            watermark: Value,
+            #[serde(deserialize_with = "deserialize_timeline_sync_limit")]
+            limit: u64,
+        }
+
+        impl TimelineSyncParams {
+            pub fn validate(&self) -> Result<(), &'static str> {
+                if !valid_ascii_graphical(&self.session_id, MAX_TIMELINE_IDENTIFIER_BYTES) {
+                    return Err("timeline sync session identity is invalid");
+                }
+                self.after.validate()?;
+                if let Some(watermark) = &self.watermark {
+                    validate_timeline_window(&self.after, watermark)?;
+                }
+                if self.limit == 0 || self.limit > MAX_TIMELINE_SYNC_EVENTS as u64 {
+                    return Err("timeline sync limit is outside the supported range");
+                }
+                Ok(())
+            }
+        }
+
+        impl TryFrom<TimelineSyncParamsWire> for TimelineSyncParams {
+            type Error = &'static str;
+
+            fn try_from(value: TimelineSyncParamsWire) -> Result<Self, Self::Error> {
+                let params = Self {
+                    session_id: value.session_id,
+                    after: value.after,
+                    watermark: parse_nullable_timeline_anchor(value.watermark)?,
+                    limit: value.limit,
+                };
+                params.validate()?;
+                Ok(params)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for TimelineSyncParams {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                TimelineSyncParamsWire::deserialize(deserializer)?
+                    .try_into()
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl Serialize for TimelineSyncParams {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                self.validate().map_err(serde::ser::Error::custom)?;
+                #[derive(Serialize)]
+                struct ParamsRef<'a> {
+                    session_id: &'a str,
+                    after: &'a TimelineAnchor,
+                    watermark: Option<&'a TimelineAnchor>,
+                    limit: u64,
+                }
+                ParamsRef {
+                    session_id: &self.session_id,
+                    after: &self.after,
+                    watermark: self.watermark.as_ref(),
+                    limit: self.limit,
+                }
+                .serialize(serializer)
+            }
+        }
+
+        fn deserialize_timeline_sync_events<'de, D>(
+            deserializer: D,
+        ) -> Result<Vec<EventEnvelope>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            struct TimelineEventsVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for TimelineEventsVisitor {
+                type Value = Vec<EventEnvelope>;
+
+                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str("a bounded array of timeline events")
+                }
+
+                fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+                where
+                    A: serde::de::SeqAccess<'de>,
+                {
+                    let mut events = Vec::with_capacity(
+                        sequence
+                            .size_hint()
+                            .unwrap_or_default()
+                            .min(MAX_TIMELINE_SYNC_EVENTS),
+                    );
+                    while let Some(event) = sequence.next_element()? {
+                        if events.len() == MAX_TIMELINE_SYNC_EVENTS {
+                            return Err(serde::de::Error::custom(
+                                "timeline sync event count exceeds the limit",
+                            ));
+                        }
+                        events.push(event);
+                    }
+                    Ok(events)
+                }
+            }
+
+            deserializer.deserialize_seq(TimelineEventsVisitor)
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct TimelineSyncPage {
+            pub schema_version: String,
+            pub session_id: String,
+            pub after: TimelineAnchor,
+            pub watermark: TimelineAnchor,
+            pub events: Vec<EventEnvelope>,
+            pub next_after: Option<TimelineAnchor>,
+            pub complete: bool,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TimelineSyncPageWire {
+            schema_version: String,
+            session_id: String,
+            after: TimelineAnchor,
+            watermark: TimelineAnchor,
+            #[serde(deserialize_with = "deserialize_timeline_sync_events")]
+            events: Vec<EventEnvelope>,
+            next_after: Value,
+            complete: bool,
+        }
+
+        impl TimelineSyncPage {
+            pub fn validate(&self) -> Result<(), &'static str> {
+                if self.schema_version != "timeline-sync-page/0.1" {
+                    return Err("timeline sync page schema version is invalid");
+                }
+                if !valid_ascii_graphical(&self.session_id, MAX_TIMELINE_IDENTIFIER_BYTES) {
+                    return Err("timeline sync page session identity is invalid");
+                }
+                validate_timeline_window(&self.after, &self.watermark)?;
+                if self.events.len() > MAX_TIMELINE_SYNC_EVENTS {
+                    return Err("timeline sync event count exceeds the limit");
+                }
+
+                let mut expected_sequence = self.after.sequence;
+                for event in &self.events {
+                    event.validate()?;
+                    expected_sequence = expected_sequence
+                        .checked_add(1)
+                        .ok_or("timeline sync event sequence overflowed")?;
+                    if event.session_id != self.session_id {
+                        return Err("timeline sync event belongs to a different session");
+                    }
+                    if event.sequence != expected_sequence {
+                        return Err("timeline sync events are not contiguous after the anchor");
+                    }
+                    if event.sequence > self.watermark.sequence {
+                        return Err("timeline sync event exceeds the fixed watermark");
+                    }
+                    if event.sequence == self.watermark.sequence
+                        && self.watermark.event_id.as_deref() != Some(event.event_id.as_str())
+                    {
+                        return Err("timeline sync watermark identity does not match its event");
+                    }
+                }
+
+                let final_anchor = self.events.last().map(|event| TimelineAnchor {
+                    sequence: event.sequence,
+                    event_id: Some(event.event_id.clone()),
+                });
+                if self.complete {
+                    if self.next_after.is_some() {
+                        return Err("complete timeline sync page must not have a next anchor");
+                    }
+                    let reached = final_anchor.as_ref().unwrap_or(&self.after);
+                    if reached != &self.watermark {
+                        return Err("complete timeline sync page did not reach its watermark");
+                    }
+                } else {
+                    let final_anchor = final_anchor
+                        .as_ref()
+                        .ok_or("incomplete timeline sync page must contain an event")?;
+                    if self.next_after.as_ref() != Some(final_anchor) {
+                        return Err("timeline sync next anchor does not match the final event");
+                    }
+                    if final_anchor.sequence >= self.watermark.sequence {
+                        return Err("incomplete timeline sync page reached its watermark");
+                    }
+                }
+                if let Some(next_after) = &self.next_after {
+                    next_after.validate()?;
+                }
+                Ok(())
+            }
+
+            pub fn validate_for_request(
+                &self,
+                request: &TimelineSyncParams,
+            ) -> Result<(), &'static str> {
+                request.validate()?;
+                self.validate()?;
+                if self.session_id != request.session_id {
+                    return Err("timeline sync response session does not match the request");
+                }
+                if self.after != request.after {
+                    return Err("timeline sync response after anchor does not match the request");
+                }
+                if request
+                    .watermark
+                    .as_ref()
+                    .is_some_and(|watermark| watermark != &self.watermark)
+                {
+                    return Err("timeline sync response changed the requested fixed watermark");
+                }
+                if self.events.len() as u64 > request.limit {
+                    return Err("timeline sync response exceeds the requested limit");
+                }
+                Ok(())
+            }
+        }
+
+        impl TryFrom<TimelineSyncPageWire> for TimelineSyncPage {
+            type Error = &'static str;
+
+            fn try_from(value: TimelineSyncPageWire) -> Result<Self, Self::Error> {
+                let page = Self {
+                    schema_version: value.schema_version,
+                    session_id: value.session_id,
+                    after: value.after,
+                    watermark: value.watermark,
+                    events: value.events,
+                    next_after: parse_nullable_timeline_anchor(value.next_after)?,
+                    complete: value.complete,
+                };
+                page.validate()?;
+                Ok(page)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for TimelineSyncPage {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                TimelineSyncPageWire::deserialize(deserializer)?
+                    .try_into()
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl Serialize for TimelineSyncPage {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                self.validate().map_err(serde::ser::Error::custom)?;
+                #[derive(Serialize)]
+                struct PageRef<'a> {
+                    schema_version: &'a str,
+                    session_id: &'a str,
+                    after: &'a TimelineAnchor,
+                    watermark: &'a TimelineAnchor,
+                    events: &'a [EventEnvelope],
+                    next_after: Option<&'a TimelineAnchor>,
+                    complete: bool,
+                }
+                PageRef {
+                    schema_version: &self.schema_version,
+                    session_id: &self.session_id,
+                    after: &self.after,
+                    watermark: &self.watermark,
+                    events: &self.events,
+                    next_after: self.next_after.as_ref(),
+                    complete: self.complete,
+                }
+                .serialize(serializer)
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::stable::v0_1::{
-        timeline_event_id, EventEnvelope, InitializeParams, ItemUpdate, TimelineItem, TurnState,
+        timeline_event_id, EventEnvelope, InitializeParams, ItemUpdate, TimelineAnchor,
+        TimelineItem, TimelineSyncPage, TimelineSyncParams, TurnState,
     };
     use super::{
         MAX_INITIALIZE_CAPABILITIES, MAX_INITIALIZE_CAPABILITY_BYTES, MAX_SAFE_JSON_INTEGER,
-        MAX_TIMELINE_CONTENT_CHARACTERS, MAX_TIMELINE_DATA_DEPTH,
+        MAX_TIMELINE_CONTENT_CHARACTERS, MAX_TIMELINE_DATA_DEPTH, MAX_TIMELINE_SYNC_EVENTS,
     };
     use serde_json::{json, Value};
 
@@ -1399,6 +1836,248 @@ mod tests {
 
         let persistence_failed = base_timeline_event("turn.persistence-failed");
         assert!(serde_json::from_value::<EventEnvelope>(persistence_failed).is_err());
+    }
+
+    fn sync_event(sequence: u64) -> EventEnvelope {
+        let mut value = base_timeline_event("turn.started");
+        value["sequence"] = json!(sequence);
+        value["timestamp_ms"] = json!(1_784_851_200_000_u64 + sequence);
+        seal_timeline_event(&mut value);
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn anchor_for(event: &EventEnvelope) -> Value {
+        json!({"sequence": event.sequence, "event_id": event.event_id})
+    }
+
+    #[test]
+    fn timeline_sync_request_round_trips_initial_and_fixed_watermark_forms() {
+        let initial = json!({
+            "session_id": "session-1",
+            "after": {"sequence": 0, "event_id": null},
+            "watermark": null,
+            "limit": 200
+        });
+        let params: TimelineSyncParams = serde_json::from_value(initial.clone()).unwrap();
+        assert_eq!(params.after, TimelineAnchor::initial());
+        assert!(params.watermark.is_none());
+        assert_eq!(serde_json::to_value(params).unwrap(), initial);
+
+        let event = sync_event(1);
+        let fixed = json!({
+            "session_id": "session-1",
+            "after": anchor_for(&event),
+            "watermark": anchor_for(&event),
+            "limit": 1.0
+        });
+        let params: TimelineSyncParams = serde_json::from_value(fixed).unwrap();
+        assert_eq!(params.limit, 1);
+        assert_eq!(params.after, params.watermark.unwrap());
+    }
+
+    #[test]
+    fn timeline_anchor_and_sync_request_reject_noncanonical_pairs_bounds_and_fields() {
+        for invalid in [
+            json!({"sequence": 0, "event_id": format!("event:sha256:{}", "a".repeat(64))}),
+            json!({"sequence": 1, "event_id": null}),
+            json!({"sequence": 1, "event_id": format!("event:sha256:{}", "A".repeat(64))}),
+            json!({"sequence": MAX_SAFE_JSON_INTEGER + 1, "event_id": null}),
+            json!({"sequence": -1, "event_id": null}),
+            json!({"sequence": 0, "event_id": null, "legacy": true}),
+        ] {
+            assert!(serde_json::from_value::<TimelineAnchor>(invalid).is_err());
+        }
+
+        for limit in [json!(0), json!(201), json!(1.5)] {
+            let invalid = json!({
+                "session_id": "session-1",
+                "after": {"sequence": 0, "event_id": null},
+                "watermark": null,
+                "limit": limit
+            });
+            assert!(serde_json::from_value::<TimelineSyncParams>(invalid).is_err());
+        }
+
+        let event = sync_event(1);
+        let mut missing_watermark = json!({
+            "session_id": "session-1",
+            "after": {"sequence": 0, "event_id": null},
+            "watermark": null,
+            "limit": 1
+        });
+        missing_watermark
+            .as_object_mut()
+            .unwrap()
+            .remove("watermark");
+        assert!(serde_json::from_value::<TimelineSyncParams>(missing_watermark).is_err());
+
+        let after_watermark = json!({
+            "session_id": "session-1",
+            "after": anchor_for(&event),
+            "watermark": {"sequence": 0, "event_id": null},
+            "limit": 1
+        });
+        assert!(serde_json::from_value::<TimelineSyncParams>(after_watermark).is_err());
+
+        let different_same_sequence = json!({
+            "session_id": "session-1",
+            "after": anchor_for(&event),
+            "watermark": {
+                "sequence": 1,
+                "event_id": format!("event:sha256:{}", "f".repeat(64))
+            },
+            "limit": 1
+        });
+        assert!(serde_json::from_value::<TimelineSyncParams>(different_same_sequence).is_err());
+
+        let invalid = TimelineSyncParams {
+            session_id: "session-1".into(),
+            after: TimelineAnchor::initial(),
+            watermark: None,
+            limit: 201,
+        };
+        assert!(serde_json::to_value(invalid).is_err());
+    }
+
+    #[test]
+    fn timeline_sync_pages_bind_fixed_watermark_contiguous_events_and_completion() {
+        let first = sync_event(1);
+        let second = sync_event(2);
+        let watermark = TimelineAnchor {
+            sequence: second.sequence,
+            event_id: Some(second.event_id.clone()),
+        };
+        let request: TimelineSyncParams = serde_json::from_value(json!({
+            "session_id": "session-1",
+            "after": {"sequence": 0, "event_id": null},
+            "watermark": anchor_for(&second),
+            "limit": 1
+        }))
+        .unwrap();
+        let first_page = TimelineSyncPage {
+            schema_version: "timeline-sync-page/0.1".into(),
+            session_id: "session-1".into(),
+            after: TimelineAnchor::initial(),
+            watermark: watermark.clone(),
+            events: vec![first.clone()],
+            next_after: Some(TimelineAnchor {
+                sequence: first.sequence,
+                event_id: Some(first.event_id.clone()),
+            }),
+            complete: false,
+        };
+        first_page.validate_for_request(&request).unwrap();
+        let encoded = serde_json::to_value(&first_page).unwrap();
+        assert_eq!(encoded["schema_version"], "timeline-sync-page/0.1");
+        assert_eq!(encoded["watermark"], anchor_for(&second));
+        assert_eq!(
+            serde_json::from_value::<TimelineSyncPage>(encoded).unwrap(),
+            first_page
+        );
+
+        let next_request: TimelineSyncParams = serde_json::from_value(json!({
+            "session_id": "session-1",
+            "after": anchor_for(&first),
+            "watermark": anchor_for(&second),
+            "limit": 200
+        }))
+        .unwrap();
+        let final_page: TimelineSyncPage = serde_json::from_value(json!({
+            "schema_version": "timeline-sync-page/0.1",
+            "session_id": "session-1",
+            "after": anchor_for(&first),
+            "watermark": anchor_for(&second),
+            "events": [serde_json::to_value(&second).unwrap()],
+            "next_after": null,
+            "complete": true
+        }))
+        .unwrap();
+        final_page.validate_for_request(&next_request).unwrap();
+
+        let empty: TimelineSyncPage = serde_json::from_value(json!({
+            "schema_version": "timeline-sync-page/0.1",
+            "session_id": "session-empty",
+            "after": {"sequence": 0, "event_id": null},
+            "watermark": {"sequence": 0, "event_id": null},
+            "events": [],
+            "next_after": null,
+            "complete": true
+        }))
+        .unwrap();
+        assert!(empty.events.is_empty());
+    }
+
+    #[test]
+    fn timeline_sync_pages_reject_gap_drift_forged_continuation_and_request_mismatch() {
+        let first = sync_event(1);
+        let second = sync_event(2);
+        let valid = json!({
+            "schema_version": "timeline-sync-page/0.1",
+            "session_id": "session-1",
+            "after": {"sequence": 0, "event_id": null},
+            "watermark": anchor_for(&second),
+            "events": [serde_json::to_value(&first).unwrap()],
+            "next_after": anchor_for(&first),
+            "complete": false
+        });
+
+        let mut extra = valid.clone();
+        extra["legacy"] = json!(true);
+        assert!(serde_json::from_value::<TimelineSyncPage>(extra).is_err());
+
+        let mut no_events = valid.clone();
+        no_events["events"] = json!([]);
+        no_events["next_after"] = Value::Null;
+        assert!(serde_json::from_value::<TimelineSyncPage>(no_events).is_err());
+
+        let mut forged_next = valid.clone();
+        forged_next["next_after"] = anchor_for(&second);
+        assert!(serde_json::from_value::<TimelineSyncPage>(forged_next).is_err());
+
+        let mut premature_complete = valid.clone();
+        premature_complete["complete"] = json!(true);
+        premature_complete["next_after"] = Value::Null;
+        assert!(serde_json::from_value::<TimelineSyncPage>(premature_complete).is_err());
+
+        let mut gap = valid.clone();
+        gap["events"] = json!([serde_json::to_value(&second).unwrap()]);
+        gap["next_after"] = anchor_for(&second);
+        assert!(serde_json::from_value::<TimelineSyncPage>(gap).is_err());
+
+        let page: TimelineSyncPage = serde_json::from_value(valid).unwrap();
+        let wrong_session: TimelineSyncParams = serde_json::from_value(json!({
+            "session_id": "session-2",
+            "after": {"sequence": 0, "event_id": null},
+            "watermark": anchor_for(&second),
+            "limit": 1
+        }))
+        .unwrap();
+        assert!(page.validate_for_request(&wrong_session).is_err());
+
+        let wrong_watermark: TimelineSyncParams = serde_json::from_value(json!({
+            "session_id": "session-1",
+            "after": {"sequence": 0, "event_id": null},
+            "watermark": anchor_for(&first),
+            "limit": 1
+        }))
+        .unwrap();
+        assert!(page.validate_for_request(&wrong_watermark).is_err());
+    }
+
+    #[test]
+    fn timeline_sync_page_deserializer_caps_events_before_projection() {
+        let first = sync_event(1);
+        let events = vec![serde_json::to_value(first).unwrap(); MAX_TIMELINE_SYNC_EVENTS + 1];
+        let page = json!({
+            "schema_version": "timeline-sync-page/0.1",
+            "session_id": "session-1",
+            "after": {"sequence": 0, "event_id": null},
+            "watermark": {"sequence": 0, "event_id": null},
+            "events": events,
+            "next_after": null,
+            "complete": true
+        });
+        assert!(serde_json::from_value::<TimelineSyncPage>(page).is_err());
     }
 }
 

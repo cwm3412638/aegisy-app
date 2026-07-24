@@ -498,7 +498,46 @@ pub fn sync_page(
     Ok(page)
 }
 
+pub fn sync_page_from_anchor(
+    connection: &Connection,
+    session_id: &str,
+    after: &TimelineWatermark,
+    requested_watermark: Option<&TimelineWatermark>,
+    limit: usize,
+) -> Result<TimelineSyncPage, JournalError> {
+    validate_watermark(after)?;
+    if after.sequence > 0 {
+        let stored_event_id = connection
+            .query_row(
+                "SELECT event_id FROM public_timeline_events
+                 WHERE session_id = ?1 AND sequence = ?2",
+                params![
+                    session_id,
+                    i64::try_from(after.sequence)
+                        .map_err(|_| JournalError::new("timeline-sync-request-invalid"))?
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|_| JournalError::new("timeline-sync-anchor-read-failed"))?;
+        if stored_event_id.as_deref() != after.event_id.as_deref() {
+            return Err(JournalError::new("timeline-sync-anchor-drift"));
+        }
+    }
+    sync_page(
+        connection,
+        session_id,
+        after.sequence,
+        requested_watermark,
+        limit,
+    )
+}
+
 pub fn verify_all(connection: &Connection) -> Result<(), JournalError> {
+    restore_all(connection).map(drop)
+}
+
+pub(crate) fn restore_all(connection: &Connection) -> Result<EventSequencer, JournalError> {
     let total_events: i64 = connection
         .query_row("SELECT COUNT(*) FROM public_timeline_events", [], |row| {
             row.get(0)
@@ -527,6 +566,7 @@ pub fn verify_all(connection: &Connection) -> Result<(), JournalError> {
     if sessions.len() as u64 > MAX_JOURNAL_SESSIONS {
         return Err(JournalError::new("timeline-journal-session-limit"));
     }
+    let mut sequencer = EventSequencer::default();
     for session_id in sessions {
         let count: i64 = connection
             .query_row(
@@ -542,7 +582,12 @@ pub fn verify_all(connection: &Connection) -> Result<(), JournalError> {
             return Err(JournalError::new("timeline-journal-cursor-mismatch"));
         }
         let mut after = 0;
-        let mut sequencer = EventSequencer::default();
+        let mut candidate = EventSequencer::begin_session_restore(
+            &session_id,
+            watermark.sequence,
+            watermark.event_id.as_deref(),
+        )
+        .map_err(|_| JournalError::new("timeline-journal-lifecycle-invalid"))?;
         while after < watermark.sequence {
             let page = sync_page(
                 connection,
@@ -552,18 +597,9 @@ pub fn verify_all(connection: &Connection) -> Result<(), JournalError> {
                 MAX_SYNC_PAGE,
             )?;
             for event in &page.events {
-                let reproduced = sequencer
-                    .sequence(
-                        event.timestamp_ms,
-                        &event.session_id,
-                        &event.turn_id,
-                        &event.event,
-                        event.item.clone(),
-                    )
+                candidate = candidate
+                    .replay_event(event)
                     .map_err(|_| JournalError::new("timeline-journal-lifecycle-invalid"))?;
-                if reproduced != *event {
-                    return Err(JournalError::new("timeline-journal-lifecycle-invalid"));
-                }
             }
             after = page.next_after_sequence.unwrap_or_else(|| {
                 page.events
@@ -578,8 +614,12 @@ pub fn verify_all(connection: &Connection) -> Result<(), JournalError> {
         if after != watermark.sequence {
             return Err(JournalError::new("timeline-journal-verify-incomplete"));
         }
+        let restored = candidate
+            .complete()
+            .map_err(|_| JournalError::new("timeline-journal-lifecycle-invalid"))?;
+        sequencer.install_restored_session(restored);
     }
-    Ok(())
+    Ok(sequencer)
 }
 
 #[cfg(test)]

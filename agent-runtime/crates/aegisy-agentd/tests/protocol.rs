@@ -60,6 +60,15 @@ fn image_png(width: u32, height: u32) -> Vec<u8> {
     output.into_inner()
 }
 
+fn assert_aap_frame_within_limit(message: &Value) -> usize {
+    let bytes = serde_json::to_vec(message).unwrap().len() + 1;
+    assert!(
+        bytes <= usize::try_from(MAX_AAP_FRAME_BYTES).unwrap(),
+        "AAP response frame exceeded the negotiated limit: {bytes}"
+    );
+    bytes
+}
+
 fn ready_runtime() -> Runtime {
     let mut runtime = Runtime::default();
     let messages = runtime.handle_line(&request("1", "initialize", initialize_params("test")));
@@ -3098,6 +3107,22 @@ fn durable_session_deletion_protocol_requires_preview_and_supports_undo() {
         }),
     ));
     assert_eq!(frozen[0]["error"]["code"], -32131);
+    let timeline = runtime.handle_line(&request(
+        "timeline-pending",
+        "timeline/sync",
+        json!({
+            "session_id": &session_id,
+            "after": {"sequence": 0, "event_id": null},
+            "watermark": null,
+            "limit": 100
+        }),
+    ));
+    assert_eq!(
+        timeline[0]["result"]["schema_version"],
+        "timeline-sync-page/0.1"
+    );
+    assert_eq!(timeline[0]["result"]["session_id"], session_id);
+    assert_eq!(timeline[0]["result"]["complete"], true);
     let operation_status = runtime.handle_line(&request(
         "operation-status-pending",
         "operation/status",
@@ -3369,6 +3394,582 @@ fn emits_ordered_turn_lifecycle() {
     ));
     assert_eq!(resumed_messages[1]["params"]["sequence"], 7);
     assert_eq!(resumed_messages[6]["params"]["sequence"], 12);
+}
+
+#[test]
+fn timeline_sync_capability_requires_a_negotiated_healthy_durable_store() {
+    let sync_params = json!({
+        "session_id": "missing-session",
+        "after": {"sequence": 0, "event_id": null},
+        "watermark": null,
+        "limit": 1
+    });
+
+    let mut memory_runtime = Runtime::default();
+    let memory_initialize = memory_runtime.handle_line(&request(
+        "timeline-memory-initialize",
+        "initialize",
+        initialize_params("timeline-memory"),
+    ));
+    assert!(!memory_initialize[0]["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "timeline.replay.fixed-watermark"));
+    memory_runtime.handle_line(&notification("initialized", json!({})));
+    assert_eq!(
+        memory_runtime.handle_line(&request(
+            "timeline-memory-sync",
+            "timeline/sync",
+            sync_params.clone(),
+        ))[0]["error"]["code"],
+        -32006
+    );
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-timeline-capability-{unique}"));
+    let healthy_root = root.join("healthy");
+    fs::create_dir_all(&healthy_root).unwrap();
+    let mut healthy_runtime = Runtime::with_store(&healthy_root).unwrap();
+    let healthy_initialize = healthy_runtime.handle_line(&request(
+        "timeline-healthy-initialize",
+        "initialize",
+        initialize_params("timeline-healthy"),
+    ));
+    assert!(healthy_initialize[0]["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "timeline.replay.fixed-watermark"));
+    healthy_runtime.handle_line(&notification("initialized", json!({})));
+    let empty_session = healthy_runtime.handle_line(&request(
+        "timeline-empty-session",
+        "session/start",
+        json!({"mode": "chat", "title": "Empty Timeline"}),
+    ));
+    let empty_session_id = empty_session[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap();
+    let empty_page = healthy_runtime.handle_line(&request(
+        "timeline-empty-sync",
+        "timeline/sync",
+        json!({
+            "session_id": empty_session_id,
+            "after": {"sequence": 0, "event_id": null},
+            "watermark": null,
+            "limit": 1
+        }),
+    ));
+    assert_aap_frame_within_limit(&empty_page[0]);
+    assert_eq!(
+        empty_page[0]["result"]["after"],
+        json!({"sequence": 0, "event_id": null})
+    );
+    assert_eq!(
+        empty_page[0]["result"]["watermark"],
+        json!({"sequence": 0, "event_id": null})
+    );
+    assert_eq!(empty_page[0]["result"]["events"], json!([]));
+    assert!(empty_page[0]["result"]["next_after"].is_null());
+    assert_eq!(empty_page[0]["result"]["complete"], true);
+    assert_eq!(
+        healthy_runtime.handle_line(&request(
+            "timeline-healthy-sync",
+            "timeline/sync",
+            sync_params.clone(),
+        ))[0]["error"]["code"],
+        -32147
+    );
+    drop(healthy_runtime);
+
+    let unnegotiated_root = root.join("unnegotiated");
+    fs::create_dir_all(&unnegotiated_root).unwrap();
+    let mut unnegotiated_runtime = Runtime::with_store(&unnegotiated_root).unwrap();
+    let mut unnegotiated_params = initialize_params("timeline-unnegotiated");
+    unnegotiated_params["capabilities"]["stable"] = Value::Array(
+        STABLE_CAPABILITY_REGISTRY
+            .iter()
+            .filter(|capability| **capability != "timeline.replay.fixed-watermark")
+            .map(|capability| Value::String((*capability).into()))
+            .collect(),
+    );
+    let unnegotiated_initialize = unnegotiated_runtime.handle_line(&request(
+        "timeline-unnegotiated-initialize",
+        "initialize",
+        unnegotiated_params,
+    ));
+    assert!(
+        !unnegotiated_initialize[0]["result"]["capabilities"]["stable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "timeline.replay.fixed-watermark")
+    );
+    unnegotiated_runtime.handle_line(&notification("initialized", json!({})));
+    assert_eq!(
+        unnegotiated_runtime.handle_line(&request(
+            "timeline-unnegotiated-sync",
+            "timeline/sync",
+            sync_params.clone(),
+        ))[0]["error"]["code"],
+        -32006
+    );
+    drop(unnegotiated_runtime);
+
+    let recovery_root = root.join("recovery");
+    fs::create_dir_all(&recovery_root).unwrap();
+    fs::write(
+        recovery_root.join("aegisy-workbench.sqlite3"),
+        b"not-a-sqlite-database",
+    )
+    .unwrap();
+    let mut recovery_runtime = Runtime::with_store(&recovery_root).unwrap();
+    let recovery_initialize = recovery_runtime.handle_line(&request(
+        "timeline-recovery-initialize",
+        "initialize",
+        initialize_params("timeline-recovery"),
+    ));
+    assert!(!recovery_initialize[0]["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "timeline.replay.fixed-watermark"));
+    recovery_runtime.handle_line(&notification("initialized", json!({})));
+    assert_eq!(
+        recovery_runtime.handle_line(&request(
+            "timeline-recovery-sync",
+            "timeline/sync",
+            sync_params,
+        ))[0]["error"]["code"],
+        -32006
+    );
+    drop(recovery_runtime);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn durable_timeline_sync_fixes_watermark_rejects_forgery_and_survives_restart() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-timeline-sync-{unique}"));
+    fs::create_dir_all(&root).unwrap();
+    let mut runtime = Runtime::with_store(&root).unwrap();
+    let initialized = runtime.handle_line(&request(
+        "timeline-initialize",
+        "initialize",
+        initialize_params("timeline-sync"),
+    ));
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "timeline.replay.fixed-watermark"));
+    runtime.handle_line(&notification("initialized", json!({})));
+
+    let session = runtime.handle_line(&request(
+        "timeline-session",
+        "session/start",
+        json!({"mode": "chat", "title": "Timeline sync"}),
+    ));
+    let session_id = session[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first_turn = runtime.handle_line(&request(
+        "timeline-turn-one",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "first fixed-watermark turn",
+            "idempotency_key": "timeline-turn-one"
+        }),
+    ));
+    assert_eq!(first_turn.len(), 7);
+    let first_event_id = first_turn[1]["params"]["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second_event_id = first_turn[2]["params"]["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sixth_event_id = first_turn[6]["params"]["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let first_page = runtime.handle_line(&request(
+        "timeline-page-one",
+        "timeline/sync",
+        json!({
+            "session_id": session_id,
+            "after": {"sequence": 0, "event_id": null},
+            "watermark": null,
+            "limit": 2
+        }),
+    ));
+    assert_aap_frame_within_limit(&first_page[0]);
+    assert_eq!(
+        first_page[0]["result"]["schema_version"],
+        "timeline-sync-page/0.1"
+    );
+    assert_eq!(
+        first_page[0]["result"]["after"],
+        json!({"sequence": 0, "event_id": null})
+    );
+    assert_eq!(
+        first_page[0]["result"]["watermark"],
+        json!({"sequence": 6, "event_id": sixth_event_id})
+    );
+    assert_eq!(first_page[0]["result"]["complete"], false);
+    assert_eq!(
+        first_page[0]["result"]["next_after"],
+        json!({"sequence": 2, "event_id": second_event_id})
+    );
+    assert_eq!(
+        first_page[0]["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["sequence"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        first_page[0]["result"]["events"][0]["event_id"],
+        first_event_id
+    );
+    let fixed_watermark = first_page[0]["result"]["watermark"].clone();
+    let mut next_after = first_page[0]["result"]["next_after"].clone();
+
+    let second_turn = runtime.handle_line(&request(
+        "timeline-turn-two",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "event arriving after the fixed watermark",
+            "idempotency_key": "timeline-turn-two"
+        }),
+    ));
+    assert_eq!(second_turn[1]["params"]["sequence"], 7);
+    assert_eq!(second_turn[6]["params"]["sequence"], 12);
+    let twelfth_event_id = second_turn[6]["params"]["event_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    for (request_id, expected_sequences, complete) in [
+        ("timeline-page-two", vec![3, 4], false),
+        ("timeline-page-three", vec![5, 6], true),
+    ] {
+        let page = runtime.handle_line(&request(
+            request_id,
+            "timeline/sync",
+            json!({
+                "session_id": session_id,
+                "after": next_after,
+                "watermark": fixed_watermark,
+                "limit": 2
+            }),
+        ));
+        assert_aap_frame_within_limit(&page[0]);
+        assert_eq!(page[0]["result"]["watermark"], fixed_watermark);
+        assert_eq!(page[0]["result"]["complete"], complete);
+        assert_eq!(
+            page[0]["result"]["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|event| event["sequence"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            expected_sequences
+        );
+        next_after = page[0]["result"]["next_after"].clone();
+    }
+    assert!(next_after.is_null());
+
+    let other_session = runtime.handle_line(&request(
+        "timeline-other-session",
+        "session/start",
+        json!({"mode": "chat", "title": "Other Timeline"}),
+    ));
+    let other_session_id = other_session[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let other_turn = runtime.handle_line(&request(
+        "timeline-other-turn",
+        "turn/start",
+        json!({
+            "session_id": other_session_id,
+            "input": "other session",
+            "idempotency_key": "timeline-other-turn"
+        }),
+    ));
+    let other_watermark = json!({
+        "sequence": 6,
+        "event_id": other_turn[6]["params"]["event_id"].clone()
+    });
+    let other_after = json!({
+        "sequence": 1,
+        "event_id": other_turn[1]["params"]["event_id"].clone()
+    });
+
+    for (request_id, params, expected_code) in [
+        (
+            "timeline-forged-after",
+            json!({
+                "session_id": session_id,
+                "after": {
+                    "sequence": 1,
+                    "event_id": "event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "watermark": null,
+                "limit": 2
+            }),
+            -32147,
+        ),
+        (
+            "timeline-cross-session-after",
+            json!({
+                "session_id": session_id,
+                "after": other_after,
+                "watermark": null,
+                "limit": 2
+            }),
+            -32147,
+        ),
+        (
+            "timeline-forged-watermark",
+            json!({
+                "session_id": session_id,
+                "after": {"sequence": 0, "event_id": null},
+                "watermark": {
+                    "sequence": 6,
+                    "event_id": "event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "limit": 2
+            }),
+            -32147,
+        ),
+        (
+            "timeline-cross-session-watermark",
+            json!({
+                "session_id": session_id,
+                "after": {"sequence": 0, "event_id": null},
+                "watermark": other_watermark,
+                "limit": 2
+            }),
+            -32147,
+        ),
+        (
+            "timeline-missing-session",
+            json!({
+                "session_id": "missing-session",
+                "after": {"sequence": 0, "event_id": null},
+                "watermark": null,
+                "limit": 2
+            }),
+            -32147,
+        ),
+        (
+            "timeline-zero-limit",
+            json!({
+                "session_id": session_id,
+                "after": {"sequence": 0, "event_id": null},
+                "watermark": null,
+                "limit": 0
+            }),
+            -32602,
+        ),
+        (
+            "timeline-oversized-limit",
+            json!({
+                "session_id": session_id,
+                "after": {"sequence": 0, "event_id": null},
+                "watermark": null,
+                "limit": 201
+            }),
+            -32602,
+        ),
+    ] {
+        let error = runtime.handle_line(&request(request_id, "timeline/sync", params));
+        assert_eq!(error[0]["error"]["code"], expected_code, "{request_id}");
+    }
+    drop(runtime);
+
+    let mut restarted = Runtime::with_store(&root).unwrap();
+    let restarted_initialize = restarted.handle_line(&request(
+        "timeline-restarted-initialize",
+        "initialize",
+        initialize_params("timeline-restarted"),
+    ));
+    assert!(restarted_initialize[0]["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "timeline.replay.fixed-watermark"));
+    restarted.handle_line(&notification("initialized", json!({})));
+    let restart_page = restarted.handle_line(&request(
+        "timeline-restart-page",
+        "timeline/sync",
+        json!({
+            "session_id": session_id,
+            "after": {"sequence": 6, "event_id": sixth_event_id},
+            "watermark": null,
+            "limit": 200
+        }),
+    ));
+    assert_aap_frame_within_limit(&restart_page[0]);
+    assert_eq!(restart_page[0]["result"]["watermark"]["sequence"], 12);
+    assert_eq!(
+        restart_page[0]["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["sequence"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![7, 8, 9, 10, 11, 12]
+    );
+    assert_eq!(restart_page[0]["result"]["complete"], true);
+
+    let resumed = restarted.handle_line(&request(
+        "timeline-restart-resume",
+        "session/resume",
+        json!({"session_id": session_id}),
+    ));
+    assert_eq!(resumed[0]["result"]["resumed"], true);
+    let third_turn = restarted.handle_line(&request(
+        "timeline-turn-three",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "turn after Runtime restart",
+            "idempotency_key": "timeline-turn-three"
+        }),
+    ));
+    assert_eq!(third_turn[1]["params"]["sequence"], 13);
+    assert_eq!(third_turn[6]["params"]["sequence"], 18);
+    let continued = restarted.handle_line(&request(
+        "timeline-restart-continued",
+        "timeline/sync",
+        json!({
+            "session_id": session_id,
+            "after": {"sequence": 12, "event_id": twelfth_event_id},
+            "watermark": null,
+            "limit": 200
+        }),
+    ));
+    assert_aap_frame_within_limit(&continued[0]);
+    assert_eq!(continued[0]["result"]["watermark"]["sequence"], 18);
+    assert_eq!(
+        continued[0]["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["sequence"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![13, 14, 15, 16, 17, 18]
+    );
+    assert_eq!(continued[0]["result"]["complete"], true);
+    drop(restarted);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn durable_timeline_sync_pages_large_history_below_the_aap_frame_limit() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-aap-timeline-frame-{unique}"));
+    fs::create_dir_all(&root).unwrap();
+    let mut runtime = Runtime::with_store(&root).unwrap();
+    runtime.handle_line(&request(
+        "timeline-frame-initialize",
+        "initialize",
+        initialize_params("timeline-frame"),
+    ));
+    runtime.handle_line(&notification("initialized", json!({})));
+    let session = runtime.handle_line(&request(
+        "timeline-frame-session",
+        "session/start",
+        json!({"mode": "chat", "title": "Timeline frame bound"}),
+    ));
+    let session_id = session[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let body = "x".repeat(48 * 1024);
+    for turn in 0..32 {
+        let messages = runtime.handle_line(&request(
+            &format!("timeline-frame-turn-{turn}"),
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": format!("{turn}:{body}"),
+                "idempotency_key": format!("timeline-frame-turn-{turn}")
+            }),
+        ));
+        assert!(
+            messages[0].get("result").is_some(),
+            "turn {turn}: {messages:?}"
+        );
+        assert_eq!(messages[6]["params"]["sequence"], (turn + 1) * 6);
+    }
+
+    let mut after = json!({"sequence": 0, "event_id": null});
+    let mut watermark = Value::Null;
+    let mut observed = Vec::new();
+    let mut first_page_count = None;
+    let mut largest_frame_bytes = 0;
+    for page_number in 0..10 {
+        let response = runtime.handle_line(&request(
+            &format!("timeline-frame-page-{page_number}"),
+            "timeline/sync",
+            json!({
+                "session_id": session_id,
+                "after": after,
+                "watermark": watermark,
+                "limit": 200
+            }),
+        ));
+        largest_frame_bytes = largest_frame_bytes.max(assert_aap_frame_within_limit(&response[0]));
+        assert!(response[0].get("result").is_some(), "{response:?}");
+        if page_number == 0 {
+            watermark = response[0]["result"]["watermark"].clone();
+            assert_eq!(watermark["sequence"], 192);
+            first_page_count = response[0]["result"]["events"].as_array().map(Vec::len);
+            assert_eq!(response[0]["result"]["complete"], false);
+        } else {
+            assert_eq!(response[0]["result"]["watermark"], watermark);
+        }
+        observed.extend(
+            response[0]["result"]["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|event| event["sequence"].as_u64().unwrap()),
+        );
+        if response[0]["result"]["complete"] == true {
+            break;
+        }
+        after = response[0]["result"]["next_after"].clone();
+        assert!(after.is_object());
+    }
+    assert!(first_page_count.is_some_and(|count| count > 0 && count < 192));
+    assert!(
+        largest_frame_bytes > 3 * 1024 * 1024,
+        "byte-boundary fixture did not exercise a near-limit frame: {largest_frame_bytes}"
+    );
+    assert_eq!(observed, (1_u64..=192).collect::<Vec<_>>());
+    drop(runtime);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -135,10 +135,78 @@ and bound to the active Turn. An older client advances its cursor and records a
 bounded content-free diagnostic without projecting UI state. An unknown event
 cannot carry an Item or create authority.
 
-The live sequence in this section is not yet a durable reconnect cursor. OpenSpec
-`3.5` owns the dedicated public Event Journal, snapshots, subscriptions, replay,
-heartbeats, reconnect, and gap recovery. Internal Workbench projection events are
-not public Timeline replay data and must not be exposed as AAP sequence authority.
+The dedicated public Event Journal, not the internal Workbench projection-event
+stream, owns durable reconnect sequence authority. A fixed-watermark catch-up page
+uses the following AAP `0.1` data contract. Runtime advertises
+`timeline.replay.fixed-watermark` only when its durable Workbench Store is healthy;
+`timeline/sync` otherwise remains unavailable. The Qt client declares and gates the
+same capability instead of attempting an unnegotiated fallback.
+
+```jsonl
+{"jsonrpc":"2.0","id":"timeline-sync-empty","method":"timeline/sync","params":{"session_id":"session-empty","after":{"sequence":0,"event_id":null},"watermark":null,"limit":200}}
+{"jsonrpc":"2.0","id":"timeline-sync-empty","result":{"schema_version":"timeline-sync-page/0.1","session_id":"session-empty","after":{"sequence":0,"event_id":null},"watermark":{"sequence":0,"event_id":null},"events":[],"next_after":null,"complete":true}}
+```
+
+Every anchor is the exact pair `{sequence,event_id}`. Sequence zero is represented
+only as `{0,null}`. Every positive sequence requires the exact 77-byte lowercase
+`event:sha256:` identity of that event; a null, uppercase, malformed, or substituted
+ID is invalid. All sequences are JSON-safe mathematical integers. The request
+contains exactly `session_id`, `after`, nullable `watermark`, and `limit`; the limit
+is 1 through 200.
+
+On the first request, `watermark:null` asks Runtime to capture the Session Journal
+head once. The response always returns that fixed anchor. Every continuation repeats
+it verbatim, so events appended while paging cannot move the target or make catch-up
+chase a live head. The response schema is `timeline-sync-page/0.1` and repeats the
+same Session and `after`, then returns only contiguous same-Session events after that
+anchor and at or below the watermark. Runtime also keeps the serialized page below
+the 4 MiB AAP frame budget; the 200-event count is not permission to exceed it.
+
+An incomplete non-empty page sets `next_after` to the exact sequence/Event-ID pair
+of its final event and `complete:false`. A complete page reaches the fixed watermark,
+sets `next_after:null`, and uses `complete:true`; an empty Journal therefore completes
+at `{0,null}`. Schema validation closes every object and enforces local bounds. Typed
+Rust and Qt validation additionally enforces request/response identity, anchor
+ordering, event continuity, Event-ID agreement, final-anchor semantics, and the
+requested page limit before any Timeline projection changes.
+
+Runtime sequencing is a prepare/commit boundary. `prepare` clones the Session
+lifecycle state and returns the candidate envelope without advancing sequence,
+timestamp, Turn, or Item state. Runtime serializes the notification and durably
+appends the envelope before `commit` verifies the exact sequence/Event-ID baseline
+and installs that candidate. A stale prepared ticket is rejected rather than
+overwriting newer Session state. Dropping a prepared event after serialization or
+persistence failure therefore advances no in-memory lifecycle cursor.
+
+For durable Codex Turn creation, sanitized Item append, Item plus command Artifact,
+and normal completed/failed/interrupted Turn Trace terminal paths, the Workbench
+projection event, affected projection rows, Blob reference when present, and public
+Journal append commit in one SQLite transaction. A public Item must exactly equal the
+Store's sanitized persisted Item projection, including Session/Turn binding, kind,
+role, state, content, non-null data, and projection timestamp; Runtime constructs the
+live/replay Item from that same sanitized preview. A mismatch or Journal failure
+rolls back the projection transaction and leaves the prepared sequencer state
+uncommitted. Streaming and control-only Timeline events that have no durable Item or
+Turn projection append only to the public Journal before sequencer commit.
+
+Qt owns an independent recovery state for each Session. A live sequence gap freezes
+projection for only that Session, queues bounded later live events, and starts
+fixed-watermark sync from the last confirmed sequence/Event-ID anchor. Every replay
+page is validated into a private candidate; incomplete pages remain invisible. Only
+after the final page reaches the unchanged watermark does Qt publish the complete
+candidate once, render the staged events, and drain the queued live events through
+normal validation. Anchor drift, malformed pages, request failure, capability loss,
+or queue/batch overflow preserves the last confirmed projection and freezes the
+affected Session.
+
+The Preview backend still persists its Turn/Item projections before journaling its
+six-event synthetic Timeline and is not covered by the atomic producer boundary
+above. Adapter and persistence compensation paths can also durably finish a Turn
+Trace before appending the public terminal/Error event in a later transaction; those
+fallbacks remain outside the atomic producer boundary. Snapshot, structured
+retention-gap recovery, live subscription, heartbeat, complete reconnect
+orchestration, explicit acknowledgement, and Windows recovery evidence also remain
+later parts of OpenSpec `3.5`; keep that task incomplete.
 
 ## Structured Errors And Cancellation
 

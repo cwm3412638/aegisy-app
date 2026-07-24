@@ -1,6 +1,6 @@
 use aegisy_aap::stable::v0_1::{
     timeline_event_id, EventEnvelope, InitializeParams, InitializeResult, ItemUpdate, TimelineItem,
-    TurnState,
+    TimelineSyncPage, TimelineSyncParams, TurnState,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -48,6 +48,18 @@ fn guide_timeline_messages() -> Vec<Value> {
         .collect()
 }
 
+fn guide_timeline_sync_messages() -> Vec<Value> {
+    fs::read_to_string(guide_path())
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|message| {
+            message["method"] == "timeline/sync"
+                || message["result"]["schema_version"] == "timeline-sync-page/0.1"
+        })
+        .collect()
+}
+
 fn has_exact_keys(object: &Map<String, Value>, expected: &[&str]) -> bool {
     object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
 }
@@ -63,6 +75,18 @@ fn schema_validator() -> &'static jsonschema::Validator {
 
 fn strict_envelope_valid(message: &Value) -> bool {
     schema_validator().is_valid(message)
+}
+
+fn schema_definition_valid(name: &str, value: &Value) -> bool {
+    let schema: Value = serde_json::from_str(&fs::read_to_string(schema_path()).unwrap()).unwrap();
+    let document = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": format!("#/$defs/{name}"),
+        "$defs": schema["$defs"].clone()
+    });
+    jsonschema::validator_for(&document)
+        .expect("AAP definition schema must compile")
+        .is_valid(value)
 }
 
 fn valid_method_name(method: &str) -> bool {
@@ -227,11 +251,18 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
         "initializeIncompatibleData",
         "initializeIncompatibleErrorResponse",
         "safePositiveInteger",
+        "safeNonNegativeInteger",
         "boundedGraphicalId",
+        "timelineEventId",
+        "timelineAnchor",
         "timelineEventName",
         "timelineItem",
         "timelineItemUpdate",
         "timelineEvent",
+        "timelineSyncParams",
+        "timelineSyncPage",
+        "timelineSyncRequest",
+        "timelineSyncSuccessResponse",
     ] {
         assert!(
             definitions.contains_key(required),
@@ -258,6 +289,11 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
         "timelineItem",
         "timelineItemUpdate",
         "timelineEvent",
+        "timelineAnchor",
+        "timelineSyncParams",
+        "timelineSyncPage",
+        "timelineSyncRequest",
+        "timelineSyncSuccessResponse",
     ] {
         assert_eq!(
             definitions[strict_object]["additionalProperties"], false,
@@ -927,4 +963,185 @@ fn timeline_event_schema_requires_structured_failed_terminal_item() {
     let mut wrong_role = failed;
     wrong_role["params"]["item"]["role"] = json!("agent");
     assert!(!strict_envelope_valid(&wrong_role));
+}
+
+#[test]
+fn timeline_sync_fixture_matches_fixed_watermark_schema_and_rust_contract() {
+    let messages = fixture_messages("aap-timeline-sync.jsonl");
+    assert_eq!(messages.len(), 4);
+    messages.iter().for_each(assert_content_free);
+
+    let mut requests = Vec::new();
+    let mut pages = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        assert!(
+            strict_envelope_valid(message),
+            "invalid sync fixture: {message}"
+        );
+        if index % 2 == 0 {
+            assert!(schema_definition_valid("timelineSyncRequest", message));
+            assert_eq!(message["method"], "timeline/sync");
+            let params: TimelineSyncParams =
+                serde_json::from_value(message["params"].clone()).unwrap();
+            assert_eq!(serde_json::to_value(&params).unwrap(), message["params"]);
+            requests.push(params);
+        } else {
+            assert!(schema_definition_valid(
+                "timelineSyncSuccessResponse",
+                message
+            ));
+            let page: TimelineSyncPage = serde_json::from_value(message["result"].clone()).unwrap();
+            assert_eq!(serde_json::to_value(&page).unwrap(), message["result"]);
+            pages.push(page);
+        }
+    }
+
+    assert_eq!(requests.len(), 2);
+    assert_eq!(pages.len(), 2);
+    pages[0].validate_for_request(&requests[0]).unwrap();
+    pages[1].validate_for_request(&requests[1]).unwrap();
+    assert_eq!(pages[0].watermark, pages[1].watermark);
+    assert_eq!(pages[0].next_after.as_ref(), Some(&requests[1].after));
+    assert!(!pages[0].complete);
+    assert!(pages[1].complete);
+    assert!(pages[1].next_after.is_none());
+    assert_eq!(
+        pages
+            .iter()
+            .flat_map(|page| page.events.iter().map(|event| event.sequence))
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+}
+
+#[test]
+fn timeline_sync_guide_example_is_an_empty_complete_fixed_watermark_page() {
+    let messages = guide_timeline_sync_messages();
+    assert_eq!(messages.len(), 2);
+    assert!(schema_definition_valid("timelineSyncRequest", &messages[0]));
+    assert!(schema_definition_valid(
+        "timelineSyncSuccessResponse",
+        &messages[1]
+    ));
+
+    let request: TimelineSyncParams =
+        serde_json::from_value(messages[0]["params"].clone()).unwrap();
+    let page: TimelineSyncPage = serde_json::from_value(messages[1]["result"].clone()).unwrap();
+    page.validate_for_request(&request).unwrap();
+    assert_eq!(page.after.sequence, 0);
+    assert_eq!(page.watermark.sequence, 0);
+    assert!(page.events.is_empty());
+    assert!(page.complete);
+}
+
+#[test]
+fn timeline_sync_schema_and_types_reject_invalid_anchors_pages_and_drift() {
+    let messages = fixture_messages("aap-timeline-sync.jsonl");
+    let initial_request = messages[0].clone();
+    let first_response = messages[1].clone();
+    let continued_request = messages[2].clone();
+    let final_response = messages[3].clone();
+
+    for invalid_anchor in [
+        json!({
+            "sequence": 0,
+            "event_id": format!("event:sha256:{}", "a".repeat(64))
+        }),
+        json!({"sequence": 1, "event_id": null}),
+        json!({
+            "sequence": 1,
+            "event_id": format!("event:sha256:{}", "A".repeat(64))
+        }),
+        json!({"sequence": 9_007_199_254_740_992_u64, "event_id": null}),
+        json!({"sequence": 0, "event_id": null, "legacy": true}),
+    ] {
+        let mut invalid = initial_request.clone();
+        invalid["params"]["after"] = invalid_anchor;
+        assert!(!strict_envelope_valid(&invalid));
+        assert!(serde_json::from_value::<TimelineSyncParams>(invalid["params"].clone()).is_err());
+    }
+
+    for invalid_limit in [json!(0), json!(201), json!(1.5)] {
+        let mut invalid = initial_request.clone();
+        invalid["params"]["limit"] = invalid_limit;
+        assert!(!strict_envelope_valid(&invalid));
+        assert!(serde_json::from_value::<TimelineSyncParams>(invalid["params"].clone()).is_err());
+    }
+
+    let mut extra_request = initial_request.clone();
+    extra_request["params"]["legacy"] = json!(true);
+    assert!(!strict_envelope_valid(&extra_request));
+
+    let mut missing_watermark = initial_request.clone();
+    missing_watermark["params"]
+        .as_object_mut()
+        .unwrap()
+        .remove("watermark");
+    assert!(!strict_envelope_valid(&missing_watermark));
+
+    let mut incomplete_without_next = first_response.clone();
+    incomplete_without_next["result"]["next_after"] = Value::Null;
+    assert!(!schema_definition_valid(
+        "timelineSyncSuccessResponse",
+        &incomplete_without_next
+    ));
+    assert!(
+        serde_json::from_value::<TimelineSyncPage>(incomplete_without_next["result"].clone())
+            .is_err()
+    );
+
+    let mut complete_with_next = final_response.clone();
+    complete_with_next["result"]["next_after"] = complete_with_next["result"]["watermark"].clone();
+    assert!(!schema_definition_valid(
+        "timelineSyncSuccessResponse",
+        &complete_with_next
+    ));
+
+    let mut extra_response = final_response.clone();
+    extra_response["result"]["legacy"] = json!(true);
+    assert!(!schema_definition_valid(
+        "timelineSyncSuccessResponse",
+        &extra_response
+    ));
+
+    let request: TimelineSyncParams =
+        serde_json::from_value(continued_request["params"].clone()).unwrap();
+    let page: TimelineSyncPage = serde_json::from_value(final_response["result"].clone()).unwrap();
+
+    let changed_after_request: TimelineSyncParams = serde_json::from_value(json!({
+        "session_id": "session-1",
+        "after": {"sequence": 0, "event_id": null},
+        "watermark": final_response["result"]["watermark"].clone(),
+        "limit": 1
+    }))
+    .unwrap();
+    assert!(page.validate_for_request(&changed_after_request).is_err());
+
+    let mut changed_watermark_request = request.clone();
+    changed_watermark_request.watermark = Some(changed_watermark_request.after.clone());
+    assert!(page
+        .validate_for_request(&changed_watermark_request)
+        .is_err());
+
+    let mut sequence_gap = first_response["result"].clone();
+    sequence_gap["events"] = final_response["result"]["events"].clone();
+    sequence_gap["next_after"] = final_response["result"]["watermark"].clone();
+    assert!(schema_definition_valid("timelineSyncPage", &sequence_gap));
+    assert!(serde_json::from_value::<TimelineSyncPage>(sequence_gap).is_err());
+
+    let mut forged_watermark = final_response["result"].clone();
+    forged_watermark["watermark"]["event_id"] = json!(format!("event:sha256:{}", "f".repeat(64)));
+    assert!(schema_definition_valid(
+        "timelineSyncPage",
+        &forged_watermark
+    ));
+    assert!(serde_json::from_value::<TimelineSyncPage>(forged_watermark).is_err());
+
+    let too_many = vec![first_response["result"]["events"][0].clone(); 201];
+    let mut oversized_page = first_response;
+    oversized_page["result"]["events"] = json!(too_many);
+    assert!(!schema_definition_valid(
+        "timelineSyncSuccessResponse",
+        &oversized_page
+    ));
 }

@@ -142,6 +142,84 @@ The public replay sequence SHALL be supplied by a dedicated AAP Event Journal.
 Internal Workbench projection events include metadata operations outside the public
 Timeline and SHALL NOT be exposed directly or used as an accidental replay cursor.
 
+AAP fixed-watermark catch-up SHALL use `timeline/sync`. Its request SHALL contain
+exactly a bounded `session_id`, an `after` anchor, a nullable `watermark`, and a
+`limit` from 1 through 200. Every anchor SHALL contain exactly `sequence` and
+`event_id`. Sequence zero SHALL pair only with a null Event ID; every positive
+JSON-safe sequence SHALL pair with the exact lowercase `event:sha256:` identity of
+that event. A first request with a null watermark SHALL atomically select the current
+Session Journal head. Every response SHALL use `timeline-sync-page/0.1`, repeat the
+same Session and after anchor, return the selected fixed watermark, include only
+contiguous same-Session events after the anchor and no later than the watermark, and
+remain below the AAP frame limit as well as the requested count limit.
+
+An incomplete page SHALL contain at least one event and SHALL return its final exact
+sequence/Event-ID pair as `next_after` with `complete:false`. A complete page SHALL
+reach the fixed watermark and SHALL return `next_after:null` with `complete:true`.
+Every continuation SHALL repeat the same watermark so newly appended live events do
+not move the target. The client SHALL validate the complete page, including envelope
+identity, Session binding, continuity, after/watermark agreement, final anchor, and
+request limit, before advancing its cursor or applying any event.
+
+Runtime SHALL prepare an event against a private Session lifecycle candidate before
+serialization or persistence. Preparation SHALL NOT advance the live sequence,
+timestamp, Turn, or Item state. Runtime SHALL append the exact serialized envelope to
+the public Journal before committing that candidate to the live sequencer; abandoning
+or failing a prepared event SHALL leave the live lifecycle state unchanged.
+
+When a public event represents a durable Turn or Item projection, the affected
+projection rows, internal projection event, durable Blob reference when present, and
+public Journal append SHALL commit in one SQLite transaction. A public Item SHALL
+exactly equal the sanitized durable Item projection and SHALL use the same Session,
+Turn, kind, role, state, content, non-null data, and projection timestamp. Any
+identity mismatch or Journal failure SHALL roll back the complete projection write.
+
+On a live sequence gap, the client SHALL freeze only the affected Session at its last
+confirmed sequence/Event-ID anchor, queue later live events within fixed count and
+byte bounds, and stage every validated sync page in a private candidate. An
+incomplete page SHALL NOT change visible Timeline state. Only a complete page at the
+unchanged watermark SHALL atomically publish the staged candidate, after which the
+client SHALL drain queued live events through the ordinary validator. A malformed
+page, anchor drift, request failure, missing capability, or queue/batch overflow
+SHALL preserve the confirmed projection and leave that Session frozen.
+
+The fixed-watermark slice does not satisfy the complete reconnect requirement by
+itself. Snapshot replacement, retention-gap responses, live subscription, heartbeat,
+reconnect orchestration, and explicit acknowledgement SHALL remain required before
+this requirement is considered complete.
+
+#### Scenario: Prepared event persistence fails
+- **WHEN** Runtime prepares and serializes an event but its Journal or combined projection transaction fails
+- **THEN** Runtime SHALL emit no event, SHALL advance no Session or Item lifecycle cursor, and SHALL leave no partial durable projection or Journal row
+
+#### Scenario: Sanitization changes a durable Item
+- **WHEN** durable Item admission redacts or otherwise sanitizes the requested payload
+- **THEN** the public event and replay Journal SHALL contain exactly that sanitized persisted Item, and a raw or independently reconstructed Item SHALL be rejected before transaction commit
+
+#### Scenario: Client stages multiple recovery pages
+- **WHEN** a gapped Session receives one or more valid incomplete pages followed by a valid complete page at the fixed watermark
+- **THEN** no incomplete page SHALL become visible, the complete staged projection SHALL become visible once, and queued live events SHALL then be validated and applied in sequence
+
+#### Scenario: One Session recovery fails
+- **WHEN** a sync page, anchor, queue, or request fails for one Session while another Session receives valid contiguous live events
+- **THEN** only the affected Session SHALL remain frozen and the independent Session SHALL continue advancing
+
+#### Scenario: Client starts fixed-watermark catch-up
+- **WHEN** the client requests `timeline/sync` with `{sequence: 0, event_id: null}` and a null watermark
+- **THEN** the runtime SHALL return the current Journal head as one fixed sequence/Event-ID watermark and SHALL NOT include an event beyond that anchor
+
+#### Scenario: Catch-up spans multiple pages while live events append
+- **WHEN** a page is incomplete and newer events append after its fixed watermark
+- **THEN** the client SHALL request the returned `next_after` with the unchanged watermark, and the runtime SHALL continue only toward that original watermark without duplicates or a moving target
+
+#### Scenario: Empty Journal is already caught up
+- **WHEN** the Session Journal head is sequence zero
+- **THEN** the runtime SHALL return an empty complete page whose after and watermark are both `{sequence: 0, event_id: null}` and whose `next_after` is null
+
+#### Scenario: Replay anchor or page identity is forged
+- **WHEN** zero is paired with an Event ID, a positive sequence has a null or malformed Event ID, equal sequences carry different IDs, a page changes Session/after/watermark, events gap or cross Session, or `next_after` does not identify the final event
+- **THEN** the peer SHALL reject the complete request or page before cursor advancement or Timeline projection
+
 #### Scenario: Client reconnects after losing transport
 - **WHEN** the client supplies its last acknowledged sequence
 - **THEN** the runtime SHALL replay later persisted events and then continue live streaming without duplicate effects

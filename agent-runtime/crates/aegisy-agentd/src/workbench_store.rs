@@ -56,7 +56,7 @@ use crate::usage_authority::{
 pub use crate::workbench_migration::WorkbenchRecoveryDiagnostic;
 use crate::workbench_migration::{create_pre_upgrade_backup, inspect_recovery};
 use crate::workspace_edit::ContentHash;
-use aegisy_aap::stable::v0_1::EventEnvelope;
+use aegisy_aap::stable::v0_1::{EventEnvelope, TimelineItem, TurnState};
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
@@ -6723,9 +6723,34 @@ impl WorkbenchStore {
         &mut self,
         request: StoredTurnCreate,
     ) -> Result<StoredTurn, WorkbenchStoreError> {
+        self.create_turn_internal(request, None)
+    }
+
+    pub(crate) fn create_turn_with_public_event(
+        &mut self,
+        request: StoredTurnCreate,
+        public_event: &EventEnvelope,
+    ) -> Result<StoredTurn, WorkbenchStoreError> {
+        self.create_turn_internal(request, Some(public_event))
+    }
+
+    fn create_turn_internal(
+        &mut self,
+        request: StoredTurnCreate,
+        public_event: Option<&EventEnvelope>,
+    ) -> Result<StoredTurn, WorkbenchStoreError> {
         validate_identifier(&request.turn_id, "turn ID")?;
         validate_identifier(&request.session_id, "turn session ID")?;
         self.ensure_session_writable(&request.session_id)?;
+        if let Some(public_event) = public_event {
+            validate_public_turn_event(
+                public_event,
+                &request.session_id,
+                &request.turn_id,
+                "turn.started",
+                request.created_at_ms,
+            )?;
+        }
         if let Some(idempotency_key) = &request.idempotency_key {
             validate_identifier(idempotency_key, "turn idempotency key")?;
         }
@@ -6762,8 +6787,17 @@ impl WorkbenchStore {
                         "turn idempotency key is bound to a different request",
                     ));
                 }
-                drop(transaction);
-                return self.load_turn(&request.turn_id);
+                let stored = load_turn_from_connection(&transaction, &request.turn_id)?;
+                if let Some(public_event) = public_event {
+                    public_timeline_journal::append_event_tx(&transaction, public_event)
+                        .map_err(public_timeline_error)?;
+                    transaction
+                        .commit()
+                        .map_err(|_| error("cannot commit idempotent turn timeline transaction"))?;
+                } else {
+                    drop(transaction);
+                }
+                return Ok(stored);
             }
         }
         transaction
@@ -6808,48 +6842,53 @@ impl WorkbenchStore {
                 }),
             },
         )?;
+        if let Some(public_event) = public_event {
+            public_timeline_journal::append_event_tx(&transaction, public_event)
+                .map_err(public_timeline_error)?;
+        }
+        let stored = load_turn_from_connection(&transaction, &request.turn_id)?;
         transaction
             .commit()
             .map_err(|_| error("cannot commit turn transaction"))?;
-        self.load_turn(&request.turn_id)
+        Ok(stored)
     }
 
     pub fn load_turn(&self, turn_id: &str) -> Result<StoredTurn, WorkbenchStoreError> {
         validate_identifier(turn_id, "turn ID")?;
-        self.connection
-            .query_row(
-                "SELECT turn_id, session_id, idempotency_key, input_sha256, input_bytes,
-                        state, created_at_ms, updated_at_ms
-                 FROM turns WHERE turn_id = ?1",
-                [turn_id],
-                |row| {
-                    Ok(StoredTurn {
-                        turn_id: row.get(0)?,
-                        session_id: row.get(1)?,
-                        idempotency_key: row.get(2)?,
-                        input_hash: ContentHash {
-                            sha256: row.get(3)?,
-                            bytes: to_u64_sql(row.get(4)?, "turn input byte count")?,
-                        },
-                        state: row.get(5)?,
-                        created_at_ms: to_u64_sql(row.get(6)?, "turn creation time")?,
-                        updated_at_ms: to_u64_sql(row.get(7)?, "turn update time")?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(|_| error("cannot read turn"))?
-            .ok_or_else(|| error("turn does not exist"))
+        load_turn_from_connection(&self.connection, turn_id)
     }
 
     pub fn append_item(
         &mut self,
         request: StoredItemAppend,
     ) -> Result<StoredItem, WorkbenchStoreError> {
+        self.append_item_internal(request, None)
+    }
+
+    pub(crate) fn append_item_with_public_event(
+        &mut self,
+        request: StoredItemAppend,
+        public_event: &EventEnvelope,
+    ) -> Result<StoredItem, WorkbenchStoreError> {
+        self.append_item_internal(request, Some(public_event))
+    }
+
+    fn append_item_internal(
+        &mut self,
+        request: StoredItemAppend,
+        public_event: Option<&EventEnvelope>,
+    ) -> Result<StoredItem, WorkbenchStoreError> {
         self.ensure_session_writable(&request.session_id)?;
         let prepared = prepare_item_append(&request)?;
+        if let Some(public_event) = public_event {
+            validate_public_item_event(public_event, &request, &prepared, TurnState::Running)?;
+        }
         let transaction = self.begin_database_write("cannot start item transaction")?;
         let stored = append_item_tx(&transaction, &request, &prepared)?;
+        if let Some(public_event) = public_event {
+            public_timeline_journal::append_event_tx(&transaction, public_event)
+                .map_err(public_timeline_error)?;
+        }
         transaction
             .commit()
             .map_err(|_| error("cannot commit item transaction"))?;
@@ -6884,8 +6923,29 @@ impl WorkbenchStore {
         item: StoredItemAppend,
         blob: DurableBlobWrite,
     ) -> Result<(StoredItem, StoredDurableBlobReference), WorkbenchStoreError> {
+        self.append_item_with_durable_blob_internal(item, blob, None)
+    }
+
+    pub(crate) fn append_item_with_durable_blob_and_public_event(
+        &mut self,
+        item: StoredItemAppend,
+        blob: DurableBlobWrite,
+        public_event: &EventEnvelope,
+    ) -> Result<(StoredItem, StoredDurableBlobReference), WorkbenchStoreError> {
+        self.append_item_with_durable_blob_internal(item, blob, Some(public_event))
+    }
+
+    fn append_item_with_durable_blob_internal(
+        &mut self,
+        item: StoredItemAppend,
+        blob: DurableBlobWrite,
+        public_event: Option<&EventEnvelope>,
+    ) -> Result<(StoredItem, StoredDurableBlobReference), WorkbenchStoreError> {
         self.ensure_session_writable(&item.session_id)?;
         let prepared_item = prepare_item_append(&item)?;
+        if let Some(public_event) = public_event {
+            validate_public_item_event(public_event, &item, &prepared_item, TurnState::Running)?;
+        }
         let prepared_blob = prepare_durable_blob(&blob)?;
         if blob.session_id.as_deref() != Some(&item.session_id)
             || blob.owner_kind != "item"
@@ -6934,6 +6994,10 @@ impl WorkbenchStore {
                 self.begin_database_write("cannot start item and durable blob transaction")?;
             let stored_blob = persist_durable_blob_tx(&transaction, &blob, &prepared_blob)?;
             let stored_item = append_item_tx(&transaction, &item, &prepared_item)?;
+            if let Some(public_event) = public_event {
+                public_timeline_journal::append_event_tx(&transaction, public_event)
+                    .map_err(public_timeline_error)?;
+            }
             transaction
                 .commit()
                 .map_err(|_| error("cannot commit item and durable blob transaction"))?;
@@ -6955,7 +7019,26 @@ impl WorkbenchStore {
         state: &str,
         updated_at_ms: u64,
     ) -> Result<StoredTurn, WorkbenchStoreError> {
-        self.finish_turn_internal(session_id, turn_id, state, updated_at_ms, None)
+        self.finish_turn_internal(session_id, turn_id, state, updated_at_ms, None, None)
+    }
+
+    #[cfg(test)]
+    fn finish_turn_with_public_event(
+        &mut self,
+        session_id: &str,
+        turn_id: &str,
+        state: &str,
+        updated_at_ms: u64,
+        public_projection: (Option<StoredItemAppend>, &EventEnvelope),
+    ) -> Result<StoredTurn, WorkbenchStoreError> {
+        self.finish_turn_internal(
+            session_id,
+            turn_id,
+            state,
+            updated_at_ms,
+            None,
+            Some(public_projection),
+        )
     }
 
     pub fn finish_turn_with_trace(
@@ -6973,6 +7056,27 @@ impl WorkbenchStore {
             state,
             updated_at_ms,
             Some(prepared_trace),
+            None,
+        )
+    }
+
+    pub(crate) fn finish_turn_with_trace_and_public_event(
+        &mut self,
+        session_id: &str,
+        turn_id: &str,
+        state: &str,
+        updated_at_ms: u64,
+        trace: &TurnTrace,
+        public_projection: (Option<StoredItemAppend>, &EventEnvelope),
+    ) -> Result<StoredTurn, WorkbenchStoreError> {
+        let prepared_trace = prepare_turn_trace_record(session_id, turn_id, state, trace)?;
+        self.finish_turn_internal(
+            session_id,
+            turn_id,
+            state,
+            updated_at_ms,
+            Some(prepared_trace),
+            Some(public_projection),
         )
     }
 
@@ -6983,12 +7087,58 @@ impl WorkbenchStore {
         state: &str,
         updated_at_ms: u64,
         prepared_trace: Option<PreparedTurnTraceRecord>,
+        public_projection: Option<(Option<StoredItemAppend>, &EventEnvelope)>,
     ) -> Result<StoredTurn, WorkbenchStoreError> {
+        let (terminal_item, public_event) = public_projection
+            .map(|(item, event)| (item, Some(event)))
+            .unwrap_or((None, None));
         validate_identifier(session_id, "turn session ID")?;
         self.ensure_session_writable(session_id)?;
         validate_identifier(turn_id, "turn ID")?;
-        if !matches!(state, "completed" | "failed" | "interrupted" | "cancelled") {
+        let Some(public_terminal_event_name) = public_terminal_event_name(state) else {
             return Err(error("turn terminal state is invalid"));
+        };
+        let public_terminal_turn_state = public_terminal_turn_state(state)
+            .ok_or_else(|| error("turn terminal state is invalid"))?;
+        let prepared_terminal_item = terminal_item
+            .as_ref()
+            .map(prepare_item_append)
+            .transpose()?;
+        if let Some(terminal_item) = terminal_item.as_ref() {
+            if terminal_item.session_id != session_id
+                || terminal_item.turn_id.as_deref() != Some(turn_id)
+                || terminal_item.created_at_ms != updated_at_ms
+            {
+                return Err(error(
+                    "turn terminal item does not match its durable turn projection",
+                ));
+            }
+        }
+        if let Some(public_event) = public_event {
+            validate_public_turn_event(
+                public_event,
+                session_id,
+                turn_id,
+                public_terminal_event_name,
+                updated_at_ms,
+            )?;
+            match (terminal_item.as_ref(), prepared_terminal_item.as_ref()) {
+                (Some(terminal_item), Some(prepared_terminal_item)) => {
+                    validate_public_item_event(
+                        public_event,
+                        terminal_item,
+                        prepared_terminal_item,
+                        public_terminal_turn_state,
+                    )?;
+                }
+                (None, None) if public_event.item.is_some() => {
+                    return Err(error(
+                        "public timeline terminal item has no durable projection",
+                    ));
+                }
+                (None, None) => {}
+                _ => unreachable!("terminal item preparation preserves option shape"),
+            }
         }
         let timestamp = to_i64(updated_at_ms, "turn update time")?;
         let transaction = self.begin_database_write("cannot start turn completion transaction")?;
@@ -7048,14 +7198,28 @@ impl WorkbenchStore {
                         == updated_at_ms
                 {
                     validate_trace_terminal_pair(&transaction, &existing)?;
-                    drop(transaction);
-                    return self.load_turn(turn_id);
+                    let stored = load_turn_from_connection(&transaction, turn_id)?;
+                    if let Some(public_event) = public_event {
+                        public_timeline_journal::append_event_tx(&transaction, public_event)
+                            .map_err(public_timeline_error)?;
+                        transaction.commit().map_err(|_| {
+                            error("cannot commit idempotent turn terminal timeline transaction")
+                        })?;
+                    } else {
+                        drop(transaction);
+                    }
+                    return Ok(stored);
                 }
                 return Err(coded_error(
                     "turn-trace-conflict",
                     "turn already has a different durable trace",
                 ));
             }
+        }
+        if let (Some(terminal_item), Some(prepared_terminal_item)) =
+            (terminal_item.as_ref(), prepared_terminal_item.as_ref())
+        {
+            append_item_tx(&transaction, terminal_item, prepared_terminal_item)?;
         }
         let changed = transaction
             .execute(
@@ -7115,10 +7279,15 @@ impl WorkbenchStore {
                 }),
             },
         )?;
+        if let Some(public_event) = public_event {
+            public_timeline_journal::append_event_tx(&transaction, public_event)
+                .map_err(public_timeline_error)?;
+        }
+        let stored = load_turn_from_connection(&transaction, turn_id)?;
         transaction
             .commit()
             .map_err(|_| error("cannot commit turn completion transaction"))?;
-        self.load_turn(turn_id)
+        Ok(stored)
     }
 
     pub fn read_turn_trace(
@@ -10708,6 +10877,30 @@ impl WorkbenchStore {
             limit,
         )
         .map_err(public_timeline_error)
+    }
+
+    pub(crate) fn sync_public_timeline_from_anchor(
+        &self,
+        session_id: &str,
+        after: TimelineWatermark,
+        watermark: Option<TimelineWatermark>,
+        limit: usize,
+    ) -> Result<TimelineSyncPage, WorkbenchStoreError> {
+        self.ensure_session_readable(session_id)?;
+        public_timeline_journal::sync_page_from_anchor(
+            &self.connection,
+            session_id,
+            &after,
+            watermark.as_ref(),
+            limit,
+        )
+        .map_err(public_timeline_error)
+    }
+
+    pub(crate) fn restore_public_timeline_sequencer(
+        &self,
+    ) -> Result<crate::event_sequencer::EventSequencer, WorkbenchStoreError> {
+        public_timeline_journal::restore_all(&self.connection).map_err(public_timeline_error)
     }
 
     fn configure(&mut self) -> Result<(), WorkbenchStoreError> {
@@ -16843,6 +17036,36 @@ struct PreparedItemAppend {
     timestamp: i64,
 }
 
+fn load_turn_from_connection(
+    connection: &Connection,
+    turn_id: &str,
+) -> Result<StoredTurn, WorkbenchStoreError> {
+    connection
+        .query_row(
+            "SELECT turn_id, session_id, idempotency_key, input_sha256, input_bytes,
+                    state, created_at_ms, updated_at_ms
+             FROM turns WHERE turn_id = ?1",
+            [turn_id],
+            |row| {
+                Ok(StoredTurn {
+                    turn_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    idempotency_key: row.get(2)?,
+                    input_hash: ContentHash {
+                        sha256: row.get(3)?,
+                        bytes: to_u64_sql(row.get(4)?, "turn input byte count")?,
+                    },
+                    state: row.get(5)?,
+                    created_at_ms: to_u64_sql(row.get(6)?, "turn creation time")?,
+                    updated_at_ms: to_u64_sql(row.get(7)?, "turn update time")?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot read turn"))?
+        .ok_or_else(|| error("turn does not exist"))
+}
+
 fn prepare_item_append(
     request: &StoredItemAppend,
 ) -> Result<PreparedItemAppend, WorkbenchStoreError> {
@@ -16865,6 +17088,90 @@ fn prepare_item_append(
         payload_hash,
         timestamp,
     })
+}
+
+fn validate_public_turn_event(
+    event: &EventEnvelope,
+    session_id: &str,
+    turn_id: &str,
+    event_name: &str,
+    projected_at_ms: u64,
+) -> Result<(), WorkbenchStoreError> {
+    event
+        .validate()
+        .map_err(|_| error("public timeline turn event is invalid"))?;
+    if event.session_id != session_id
+        || event.turn_id != turn_id
+        || event.event != event_name
+        || event.timestamp_ms != projected_at_ms
+    {
+        return Err(error(
+            "public timeline turn event does not match its durable projection",
+        ));
+    }
+    Ok(())
+}
+
+fn public_terminal_event_name(state: &str) -> Option<&'static str> {
+    match state {
+        "completed" => Some("turn.completed"),
+        "failed" => Some("turn.failed"),
+        "interrupted" | "cancelled" => Some("turn.interrupted"),
+        _ => None,
+    }
+}
+
+fn public_terminal_turn_state(state: &str) -> Option<TurnState> {
+    match state {
+        "completed" => Some(TurnState::Completed),
+        "failed" => Some(TurnState::Failed),
+        "interrupted" | "cancelled" => Some(TurnState::Interrupted),
+        _ => None,
+    }
+}
+
+fn validate_public_item_event(
+    event: &EventEnvelope,
+    request: &StoredItemAppend,
+    prepared: &PreparedItemAppend,
+    expected_turn_state: TurnState,
+) -> Result<(), WorkbenchStoreError> {
+    event
+        .validate()
+        .map_err(|_| error("public timeline item event is invalid"))?;
+    if event.session_id != request.session_id
+        || request.turn_id.as_deref() != Some(event.turn_id.as_str())
+        || event.timestamp_ms != request.created_at_ms
+        || event.turn_state != expected_turn_state
+    {
+        return Err(error(
+            "public timeline item event does not match its durable projection binding",
+        ));
+    }
+    let content = prepared
+        .persisted_payload
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| error("sanitized item content is invalid"))?;
+    let data = prepared
+        .persisted_payload
+        .get("data")
+        .filter(|value| !value.is_null())
+        .cloned();
+    let expected = TimelineItem {
+        id: request.item_id.clone(),
+        kind: request.item_kind.clone(),
+        role: request.role.clone(),
+        state: request.state.clone(),
+        content: content.to_owned(),
+        data,
+    };
+    if event.item.as_ref() != Some(&expected) {
+        return Err(error(
+            "public timeline item does not equal the sanitized durable projection",
+        ));
+    }
+    Ok(())
 }
 
 fn append_item_tx(
@@ -22469,6 +22776,355 @@ mod tests {
             .sync_public_timeline("timeline-session", 0, None, 10)
             .unwrap();
         assert_eq!(all.events, vec![first, second, third, continued]);
+    }
+
+    #[test]
+    fn cancelled_turn_projection_uses_interrupted_public_semantics() {
+        assert_eq!(
+            public_terminal_event_name("cancelled"),
+            Some("turn.interrupted")
+        );
+        assert_eq!(
+            public_terminal_event_name("interrupted"),
+            Some("turn.interrupted")
+        );
+        assert_eq!(public_terminal_event_name("running"), None);
+    }
+
+    #[test]
+    fn public_timeline_projection_and_sanitized_item_commit_atomically() {
+        let root = Root::new("public-timeline-projection-atomicity");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "timeline-atomic-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Timeline atomicity".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        let mut sequencer = crate::event_sequencer::EventSequencer::default();
+        let started = sequencer
+            .prepare(
+                10,
+                "timeline-atomic-session",
+                "timeline-atomic-turn",
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        store
+            .create_turn_with_public_event(
+                StoredTurnCreate {
+                    turn_id: "timeline-atomic-turn".into(),
+                    session_id: "timeline-atomic-session".into(),
+                    idempotency_key: Some("timeline-atomic-key".into()),
+                    input_hash: ContentHash::for_bytes(b"atomic input"),
+                    created_at_ms: 10,
+                },
+                started.envelope(),
+            )
+            .unwrap();
+        started.commit(&mut sequencer).unwrap();
+
+        let item_request = StoredItemAppend {
+            session_id: "timeline-atomic-session".into(),
+            turn_id: Some("timeline-atomic-turn".into()),
+            item_id: "timeline-atomic-item".into(),
+            item_kind: "message".into(),
+            role: "user".into(),
+            state: "completed".into(),
+            payload: json!({
+                "content": "secret sk-abcdefghijklmnopqrstuvwxyz0123456789",
+                "data": null
+            }),
+            created_at_ms: 11,
+        };
+        let preview = store.preview_item_append(&item_request).unwrap();
+        let sanitized_content = preview.payload["content"].as_str().unwrap().to_owned();
+        assert_ne!(sanitized_content, item_request.payload["content"]);
+
+        let raw = sequencer
+            .prepare(
+                11,
+                "timeline-atomic-session",
+                "timeline-atomic-turn",
+                "item.completed",
+                Some(TimelineItem {
+                    id: "timeline-atomic-item".into(),
+                    kind: "message".into(),
+                    role: "user".into(),
+                    state: "completed".into(),
+                    content: item_request.payload["content"].as_str().unwrap().to_owned(),
+                    data: None,
+                }),
+            )
+            .unwrap();
+        assert!(store
+            .append_item_with_public_event(item_request.clone(), raw.envelope())
+            .is_err());
+        assert!(store
+            .read_session_items("timeline-atomic-session", 0, 10)
+            .unwrap()
+            .is_empty());
+
+        let timestamp_drift = sequencer
+            .prepare(
+                12,
+                "timeline-atomic-session",
+                "timeline-atomic-turn",
+                "item.completed",
+                Some(TimelineItem {
+                    id: "timeline-atomic-item".into(),
+                    kind: "message".into(),
+                    role: "user".into(),
+                    state: "completed".into(),
+                    content: sanitized_content.clone(),
+                    data: None,
+                }),
+            )
+            .unwrap();
+        assert!(store
+            .append_item_with_public_event(item_request.clone(), timestamp_drift.envelope())
+            .is_err());
+        assert!(store
+            .read_session_items("timeline-atomic-session", 0, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .sync_public_timeline("timeline-atomic-session", 0, None, 10)
+                .unwrap()
+                .events
+                .len(),
+            1
+        );
+
+        let prepared = sequencer
+            .prepare(
+                11,
+                "timeline-atomic-session",
+                "timeline-atomic-turn",
+                "item.completed",
+                Some(TimelineItem {
+                    id: "timeline-atomic-item".into(),
+                    kind: "message".into(),
+                    role: "user".into(),
+                    state: "completed".into(),
+                    content: sanitized_content.clone(),
+                    data: None,
+                }),
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_atomic_public_timeline_insert
+                 BEFORE INSERT ON public_timeline_events
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected public timeline failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(store
+            .append_item_with_public_event(item_request.clone(), prepared.envelope())
+            .is_err());
+        assert!(store
+            .read_session_items("timeline-atomic-session", 0, 10)
+            .unwrap()
+            .is_empty());
+        let projected_events: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE session_id = 'timeline-atomic-session'
+                 AND event_kind = 'item.appended'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projected_events, 0);
+        let cursor: i64 = store
+            .connection
+            .query_row(
+                "SELECT next_sequence FROM public_timeline_cursors
+                 WHERE session_id = 'timeline-atomic-session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, 2);
+
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_atomic_public_timeline_insert;")
+            .unwrap();
+        let stored = store
+            .append_item_with_public_event(item_request, prepared.envelope())
+            .unwrap();
+        assert_eq!(stored.payload["content"], sanitized_content);
+        prepared.commit(&mut sequencer).unwrap();
+
+        let completed = sequencer
+            .prepare(
+                12,
+                "timeline-atomic-session",
+                "timeline-atomic-turn",
+                "turn.completed",
+                None,
+            )
+            .unwrap();
+        store
+            .finish_turn_with_public_event(
+                "timeline-atomic-session",
+                "timeline-atomic-turn",
+                "completed",
+                12,
+                (None, completed.envelope()),
+            )
+            .unwrap();
+        completed.commit(&mut sequencer).unwrap();
+
+        let page = store
+            .sync_public_timeline("timeline-atomic-session", 0, None, 10)
+            .unwrap();
+        assert_eq!(page.events.len(), 3);
+        assert_eq!(
+            page.events[1].item.as_ref().unwrap().content,
+            sanitized_content
+        );
+        assert_eq!(
+            store.load_turn("timeline-atomic-turn").unwrap().state,
+            "completed"
+        );
+
+        let failed_started = sequencer
+            .prepare(
+                13,
+                "timeline-atomic-session",
+                "timeline-failed-turn",
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        store
+            .create_turn_with_public_event(
+                StoredTurnCreate {
+                    turn_id: "timeline-failed-turn".into(),
+                    session_id: "timeline-atomic-session".into(),
+                    idempotency_key: Some("timeline-failed-key".into()),
+                    input_hash: ContentHash::for_bytes(b"failed input"),
+                    created_at_ms: 13,
+                },
+                failed_started.envelope(),
+            )
+            .unwrap();
+        failed_started.commit(&mut sequencer).unwrap();
+
+        let failed_item_request = StoredItemAppend {
+            session_id: "timeline-atomic-session".into(),
+            turn_id: Some("timeline-failed-turn".into()),
+            item_id: "timeline-failed-error".into(),
+            item_kind: "error".into(),
+            role: "system".into(),
+            state: "completed".into(),
+            payload: json!({
+                "content": "provider failed with sk-abcdefghijklmnopqrstuvwxyz0123456789",
+                "data": {"class": "transport"}
+            }),
+            created_at_ms: 14,
+        };
+        let failed_preview = store.preview_item_append(&failed_item_request).unwrap();
+        let failed_sanitized = TimelineItem {
+            id: failed_preview.item_id.clone(),
+            kind: failed_preview.item_kind.clone(),
+            role: failed_preview.role.clone(),
+            state: failed_preview.state.clone(),
+            content: failed_preview.payload["content"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            data: failed_preview.payload.get("data").cloned(),
+        };
+        assert_ne!(
+            failed_sanitized.content,
+            failed_item_request.payload["content"]
+        );
+        let failed = sequencer
+            .prepare(
+                14,
+                "timeline-atomic-session",
+                "timeline-failed-turn",
+                "turn.failed",
+                Some(failed_sanitized.clone()),
+            )
+            .unwrap();
+        assert!(store
+            .append_item_with_public_event(failed_item_request.clone(), failed.envelope())
+            .is_err());
+        assert_eq!(
+            store.load_turn("timeline-failed-turn").unwrap().state,
+            "started"
+        );
+        assert!(store
+            .read_session_items("timeline-atomic-session", 1, 10)
+            .unwrap()
+            .is_empty());
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_atomic_terminal_timeline_insert
+                 BEFORE INSERT ON public_timeline_events
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected terminal timeline failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(store
+            .finish_turn_with_public_event(
+                "timeline-atomic-session",
+                "timeline-failed-turn",
+                "failed",
+                14,
+                (Some(failed_item_request.clone()), failed.envelope()),
+            )
+            .is_err());
+        assert_eq!(
+            store.load_turn("timeline-failed-turn").unwrap().state,
+            "started"
+        );
+        assert!(store
+            .read_session_items("timeline-atomic-session", 1, 10)
+            .unwrap()
+            .is_empty());
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_atomic_terminal_timeline_insert;")
+            .unwrap();
+        store
+            .finish_turn_with_public_event(
+                "timeline-atomic-session",
+                "timeline-failed-turn",
+                "failed",
+                14,
+                (Some(failed_item_request), failed.envelope()),
+            )
+            .unwrap();
+        failed.commit(&mut sequencer).unwrap();
+
+        let failed_items = store
+            .read_session_items("timeline-atomic-session", 1, 10)
+            .unwrap();
+        assert_eq!(failed_items.len(), 1);
+        assert_eq!(failed_items[0].payload["content"], failed_sanitized.content);
+        let failed_page = store
+            .sync_public_timeline("timeline-atomic-session", 3, None, 10)
+            .unwrap();
+        assert_eq!(failed_page.events.len(), 2);
+        assert_eq!(failed_page.events[1].item.as_ref(), Some(&failed_sanitized));
     }
 
     #[test]

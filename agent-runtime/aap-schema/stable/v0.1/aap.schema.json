@@ -112,6 +112,19 @@
           "params": { "$ref": "#/$defs/timelineEvent" }
         }
       }
+    },
+    {
+      "if": {
+        "required": ["method"],
+        "properties": { "method": { "const": "timeline/sync" } }
+      },
+      "then": {
+        "required": ["id", "params"],
+        "properties": {
+          "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+          "params": { "$ref": "#/$defs/timelineSyncParams" }
+        }
+      }
     }
   ],
   "$defs": {
@@ -287,6 +300,11 @@
       "minimum": 1,
       "maximum": 9007199254740991
     },
+    "safeNonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
     "jsonSafeValue": {
       "$comment": "The schema enforces recursive value types and per-container bounds. Rust and Qt typed validators additionally enforce a maximum depth of 16 and 4096 total values per item.data tree because JSON Schema cannot express a shared aggregate recursive-node budget.",
       "oneOf": [
@@ -321,6 +339,40 @@
       "pattern": "^[!-~]+$",
       "minLength": 1,
       "maxLength": 128
+    },
+    "timelineEventId": {
+      "type": "string",
+      "pattern": "^event:sha256:[0-9a-f]{64}$",
+      "minLength": 77,
+      "maxLength": 77
+    },
+    "timelineAnchor": {
+      "type": "object",
+      "required": ["sequence", "event_id"],
+      "additionalProperties": false,
+      "properties": {
+        "sequence": { "$ref": "#/$defs/safeNonNegativeInteger" },
+        "event_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineEventId" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "sequence": { "const": 0 },
+            "event_id": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "sequence": { "$ref": "#/$defs/safePositiveInteger" },
+            "event_id": { "$ref": "#/$defs/timelineEventId" }
+          }
+        }
+      ]
     },
     "timelineEventName": {
       "type": "string",
@@ -400,12 +452,7 @@
       "additionalProperties": false,
       "properties": {
         "schema_version": { "const": "timeline-event/0.1" },
-        "event_id": {
-          "type": "string",
-          "pattern": "^event:sha256:[0-9a-f]{64}$",
-          "minLength": 77,
-          "maxLength": 77
-        },
+        "event_id": { "$ref": "#/$defs/timelineEventId" },
         "sequence": { "$ref": "#/$defs/safePositiveInteger" },
         "timestamp_ms": { "$ref": "#/$defs/safePositiveInteger" },
         "correlation_id": { "$ref": "#/$defs/boundedGraphicalId" },
@@ -748,6 +795,95 @@
           ]
         }
       ]
+    },
+    "timelineSyncParams": {
+      "type": "object",
+      "$comment": "When watermark is present, typed peers require after <= watermark and identical Event IDs when both anchors name the same sequence.",
+      "required": ["session_id", "after", "watermark", "limit"],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "after": { "$ref": "#/$defs/timelineAnchor" },
+        "watermark": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineAnchor" },
+            { "type": "null" }
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      }
+    },
+    "timelineSyncPage": {
+      "type": "object",
+      "$comment": "Typed peers require the response session and after anchor to equal the request, preserve a supplied watermark, validate contiguous same-Session events after the anchor, bind the final event to next_after, and set complete only after reaching the fixed watermark.",
+      "required": [
+        "schema_version",
+        "session_id",
+        "after",
+        "watermark",
+        "events",
+        "next_after",
+        "complete"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "timeline-sync-page/0.1" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "after": { "$ref": "#/$defs/timelineAnchor" },
+        "watermark": { "$ref": "#/$defs/timelineAnchor" },
+        "events": {
+          "type": "array",
+          "maxItems": 200,
+          "items": { "$ref": "#/$defs/timelineEvent" }
+        },
+        "next_after": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineAnchor" },
+            { "type": "null" }
+          ]
+        },
+        "complete": { "type": "boolean" }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "complete": { "const": true },
+            "next_after": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "complete": { "const": false },
+            "events": { "minItems": 1 },
+            "next_after": { "$ref": "#/$defs/timelineAnchor" }
+          }
+        }
+      ]
+    },
+    "timelineSyncRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "method": { "const": "timeline/sync" },
+        "params": { "$ref": "#/$defs/timelineSyncParams" }
+      }
+    },
+    "timelineSyncSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "result": { "$ref": "#/$defs/timelineSyncPage" }
+      }
     },
     "initializeParams": {
       "type": "object",

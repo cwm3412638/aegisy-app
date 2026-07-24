@@ -124,7 +124,7 @@ AAP 0.1 ordered Timeline event evidence (`3.4`):
   subscription, heartbeat, reconnect catch-up, or gap recovery. Those remain under
   `3.5`; the current Agent/Codex permission boundary remains read-only.
 
-Public Timeline Journal Store foundation (`3.5`, partial):
+Public Timeline fixed-watermark replay slice (`3.5`, partial):
 
 - Workbench schema v15 adds a dedicated `public_timeline_events` journal and one
   `public_timeline_cursors` source/cursor row per Session. Session insertion registers
@@ -149,21 +149,59 @@ Public Timeline Journal Store foundation (`3.5`, partial):
   tombstone cursor to the registered empty state in the same deletion transaction,
   so deleted conversation content cannot remain replay-readable. Projection rebuild
   may reinsert a Session without resetting an existing public cursor.
-- Focused failure fixtures cover cursor-update rollback, new-Session registration,
-  v14 migration backup/backfill, restart paging, new events between fixed-watermark
-  pages, forged watermark Event IDs, payload and redundant-column tampering, removed
-  streams, invalid terminal-after-Item history, response-byte pagination, oversized
-  event rejection, and deletion purge. The complete Rust gate passes 17 AAP type
-  tests, 652 sidecar library tests plus one ignored live fixture, 6 daemon-main,
-  10 context-threshold, 13 handshake Runtime, 12 handshake Schema, 63 protocol, and
-  23 stdio/Codex tests, plus strict Clippy, formatting, the complete desktop build,
-  all 16 CTests, strict OpenSpec validation, and `git diff --check`.
-- This is Store infrastructure only. Runtime still sequences before persistence,
-  projection writes and Journal append are not yet one transaction, raw live user
-  Items are not yet replaced by the exact sanitized persisted projection, no AAP
-  `timeline/sync` capability is advertised, and Qt does not freeze/catch up a gapped
-  Session. Snapshot, retention-gap response, subscription, heartbeat, reconnect,
-  acknowledgement, and cross-platform UI evidence also remain absent. Keep `3.5`
+- `EventSequencer::prepare` now produces an owned candidate without mutating live
+  Session, Turn, Item, timestamp, or sequence state; `commit` rechecks the exact
+  sequence/Event-ID baseline and installs that candidate only after notification
+  serialization and durable Journal append. A stale ticket is rejected.
+  Paginated startup reconstruction independently replays every exact envelope and
+  requires both the expected final sequence and Event-ID watermark before installing
+  restored state. Focused sequencer tests cover abandoned preparations, preparation
+  failures, stale prepared tickets, pagination, forged watermarks, and lifecycle
+  replay.
+- Normal durable Codex Turn creation, initial user Item, completed Agent/metadata/
+  steering Items, command Item plus Artifact Blob, and completed/failed/interrupted
+  Turn Trace terminal producers now append their public event in the same SQLite
+  transaction as the affected projection rows and internal projection event. Store
+  admission requires a public Item to equal the exact sanitized persisted Item,
+  including binding, kind/role/state, content/data, and timestamp. Failure injection
+  proves a Journal insert failure rolls back Item/projection rows and cursor state;
+  raw or timestamp-drifted public Items are rejected without side effects.
+- The stable AAP capability `timeline.replay.fixed-watermark` and method
+  `timeline/sync` are advertised only with a healthy durable Store. Typed Rust,
+  Draft 2020-12 Schema, fixture, Runtime dispatch, and Qt client agree on closed
+  request/page objects, sequence-plus-Event-ID anchors, nullable first watermark,
+  unchanged continuation watermark, 1-200 limits, contiguous same-Session events,
+  response-size bounds, final-anchor semantics, and complete-page validation.
+  Forged after Event IDs fail with `-32147`; missing capability or durable storage
+  fails closed instead of falling back to projected history.
+- Qt now keeps recovery state per Session. A detected gap freezes only that Session,
+  requests from its last confirmed sequence/Event-ID anchor, stages all validated
+  pages and presentation effects privately, and queues bounded live events. No
+  incomplete page is visible. Reaching the fixed watermark publishes the staged
+  projection once, renders those events, restores active-Turn state, and drains the
+  queued live events through ordinary validation. Fixtures cover independent Session
+  progress, multi-page atomic visibility, malformed-page rollback, same-sequence
+  Event-ID drift, queue overflow, request failure, and missing capability.
+- Focused failure fixtures also cover cursor-update rollback, new-Session
+  registration, v14 migration backup/backfill, restart paging, live appends between
+  fixed-watermark pages, forged watermark Event IDs, payload and redundant-column
+  tampering, removed streams, invalid terminal-after-Item history, response-byte
+  pagination, oversized event rejection, deletion purge, stale prepared tickets,
+  wall-clock rollback, terminal-Item boundary enforcement, aggregate Qt pending
+  limits, the 10,001st Session fail-closed gate, initial Session sync, and real
+  disconnect signal ordering. Complete commands on 2026-07-25 pass 22 AAP type
+  tests, 661 sidecar tests plus one ignored live fixture, 6 daemon-main, 10
+  context-threshold, 13 handshake Runtime, 15 Schema, 66 protocol, and 23
+  stdio/Codex tests; strict Clippy and formatting; the complete desktop build and
+  all 16 CTests; strict OpenSpec validation; and `git diff --check`.
+- Preview Turns still write their durable projection first and append the synthetic
+  six-event public Timeline afterward; that path is outside the atomic producer
+  boundary above. Adapter and persistence compensation paths can also durably finish
+  a Turn Trace before appending the public terminal/Error event in a later
+  transaction. Some streaming/control-only events correctly have no durable Item
+  projection and append only to the Journal. Snapshot, structured retention-gap
+  recovery, live subscription, heartbeat, complete reconnect orchestration, explicit
+  acknowledgement, and cross-platform recovery evidence remain absent. Keep `3.5`
   unchecked.
 
 Model catalog foundation evidence:
@@ -724,9 +762,11 @@ Current editor evidence:
   switching is disabled while the single active Turn is running. The full Rust
   stage passes 630 library tests (one ignored), 63 protocol tests, and 21 stdio
   tests; both the focused degradation/Timeline run and ordinary Qt render run pass.
-  Durable public event persistence/reconnect replay, complete gap recovery, full
-  vendor capability negotiation, and remaining desktop/dependent feature gates are
-  not complete, so `3.5` and `7.9` remain unchecked.
+  The later fixed-watermark slice above now adds durable public replay and bounded
+  per-Session gap catch-up, but snapshot/retention-gap recovery, subscription,
+  heartbeat, complete reconnect and acknowledgement remain incomplete. Full vendor
+  capability negotiation and the remaining desktop/dependent feature gates are also
+  incomplete, so `3.5` and `7.9` remain unchecked.
 - Large command-output tests cover a Unicode-safe 64 KiB head/192 KiB tail,
   1 MiB artifact head/tail, exact omission metadata, 100,000 deltas, and
   content-addressed session isolation/eviction. Output is redacted before capture;

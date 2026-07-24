@@ -245,6 +245,7 @@ const QStringList &declaredCapabilities()
         QStringLiteral("terminal.pty.unsupported"),
         QStringLiteral("terminal.stop.out-of-band"),
         QStringLiteral("timeline.command.structured.read-only"),
+        QStringLiteral("timeline.replay.fixed-watermark"),
         QStringLiteral("timeline.streaming"),
         QStringLiteral("turn.cancel.interrupt"),
         QStringLiteral("turn.context.inspect"),
@@ -304,6 +305,29 @@ bool isSafeJsonInteger(const QJsonValue &value)
     const double number = value.toDouble();
     return std::isfinite(number) && number >= -kMaximumSafeJsonInteger
         && number <= kMaximumSafeJsonInteger && number == std::floor(number);
+}
+
+bool isValidTimelineEventId(const QString &eventId)
+{
+    static const QRegularExpression pattern(
+        QStringLiteral("^event:sha256:[0-9a-f]{64}$"));
+    return pattern.match(eventId).hasMatch();
+}
+
+bool isValidTimelineAnchor(const QJsonObject &anchor)
+{
+    if (!hasExactKeys(anchor, {
+            QStringLiteral("sequence"), QStringLiteral("event_id"),
+        })) {
+        return false;
+    }
+    const QJsonValue sequenceValue = anchor.value(QStringLiteral("sequence"));
+    if (!isSafeJsonInteger(sequenceValue) || sequenceValue.toDouble() < 0.0) return false;
+    const bool isZero = sequenceValue.toDouble() == 0.0;
+    const QJsonValue eventIdValue = anchor.value(QStringLiteral("event_id"));
+    return isZero ? eventIdValue.isNull()
+                  : eventIdValue.isString()
+                        && isValidTimelineEventId(eventIdValue.toString());
 }
 
 bool isValidTimelineDataKey(const QString &key)
@@ -517,11 +541,9 @@ bool isValidTimelineEventEnvelope(const QJsonObject &event)
         return false;
     }
 
-    static const QRegularExpression eventIdPattern(
-        QStringLiteral("^event:sha256:[0-9a-f]{64}$"));
     if (!event.value(QStringLiteral("event_id")).isString()
-        || !eventIdPattern.match(
-                event.value(QStringLiteral("event_id")).toString()).hasMatch()
+        || !isValidTimelineEventId(
+                event.value(QStringLiteral("event_id")).toString())
         || !isValidTimelineName(event.value(QStringLiteral("event")), 128)
         || event.value(QStringLiteral("event")).toString()
             == QStringLiteral("turn.persistence-failed")
@@ -1014,6 +1036,7 @@ QStringList requiredCapabilitiesForMethod(const QString &method,
         {QStringLiteral("retention/policy/remove"), QStringLiteral("retention.policy.manage")},
         {QStringLiteral("retention/maintenance/run"), QStringLiteral("retention.maintenance.host-triggered")},
         {QStringLiteral("session/read"), QStringLiteral("session.history.paginated")},
+        {QStringLiteral("timeline/sync"), QStringLiteral("timeline.replay.fixed-watermark")},
         {QStringLiteral("session/background-notifications"), QStringLiteral("background-notification.outbox.read-only")},
         {QStringLiteral("session/background-recovery"), QStringLiteral("background-job.recovery.inspect")},
         {QStringLiteral("runtime/projection-recovery/status"), QStringLiteral("runtime.projection-recovery.status")},
@@ -1778,6 +1801,44 @@ QString AgentRuntimeClient::readSession(const QString &sessionId, const QString 
     };
     if (!cursor.isEmpty()) params.insert(QStringLiteral("cursor"), cursor);
     return sendRequest(QStringLiteral("session/read"), params);
+}
+
+QString AgentRuntimeClient::syncTimeline(const QString &sessionId,
+                                         quint64 afterSequence,
+                                         const QString &afterEventId,
+                                         const QJsonObject &watermark,
+                                         int limit)
+{
+    const QString method = QStringLiteral("timeline/sync");
+    const QJsonObject after{
+        {QStringLiteral("sequence"), static_cast<double>(afterSequence)},
+        {QStringLiteral("event_id"), afterSequence == 0
+             ? QJsonValue(QJsonValue::Null) : QJsonValue(afterEventId)},
+    };
+    const bool validWatermark = watermark.isEmpty()
+        || (isValidTimelineAnchor(watermark)
+            && watermark.value(QStringLiteral("sequence")).toDouble()
+                >= static_cast<double>(afterSequence)
+            && (watermark.value(QStringLiteral("sequence")).toDouble()
+                    != static_cast<double>(afterSequence)
+                || watermark.value(QStringLiteral("event_id"))
+                    == after.value(QStringLiteral("event_id"))));
+    if (sessionId.isEmpty()
+        || !isBoundedTimelineIdentity(sessionId)
+        || afterSequence > static_cast<quint64>(kMaximumSafeJsonInteger)
+        || (afterSequence == 0 ? !afterEventId.isEmpty()
+                               : !isValidTimelineEventId(afterEventId))
+        || !validWatermark) {
+        emit requestFailed({}, method, QStringLiteral("Timeline 同步游标无效"), -32602);
+        return {};
+    }
+    return sendRequest(method, {
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("after"), after},
+        {QStringLiteral("watermark"), watermark.isEmpty()
+             ? QJsonValue(QJsonValue::Null) : QJsonValue(watermark)},
+        {QStringLiteral("limit"), qBound(1, limit, 200)},
+    });
 }
 
 QString AgentRuntimeClient::backgroundNotifications(const QString &sessionId,
@@ -2671,6 +2732,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit retentionPolicyChanged(id, pendingMethod, result);
     } else if (pendingMethod == QStringLiteral("session/read")) {
         emit sessionRead(id, result);
+    } else if (pendingMethod == QStringLiteral("timeline/sync")) {
+        emit timelineSynced(id, result);
     } else if (pendingMethod == QStringLiteral("session/background-notifications")) {
         emit backgroundNotificationsRead(id, result);
     } else if (pendingMethod == QStringLiteral("session/background-recovery")) {
