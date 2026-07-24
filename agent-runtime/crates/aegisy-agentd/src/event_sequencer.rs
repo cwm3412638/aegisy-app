@@ -2,10 +2,18 @@ use aegisy_aap::stable::v0_1::{
     timeline_event_id, EventEnvelope, ItemUpdate, TimelineItem, TurnState,
 };
 use aegisy_aap::{MAX_SAFE_JSON_INTEGER, MAX_TIMELINE_IDENTIFIER_BYTES};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 const EVENT_SCHEMA_VERSION: &str = "timeline-event/0.1";
 const SNAPSHOT_REPLACEMENT: &str = "snapshot-replacement";
+const CHECKPOINT_SCHEMA_VERSION: &str = "event-sequencer-checkpoint/0.1";
+const CHECKPOINT_IDENTITY_PREFIX: &str = "event-sequencer-checkpoint:sha256:";
+const CHECKPOINT_IDENTITY_DOMAIN: &[u8] = b"aegisy-event-sequencer-checkpoint/0.1\0";
+pub(crate) const MAX_CHECKPOINT_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_CHECKPOINT_TURNS: usize = 100_000;
+pub(crate) const MAX_CHECKPOINT_ITEMS: usize = 100_000;
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct EventSequencer {
@@ -20,6 +28,7 @@ pub(crate) struct PreparedEvent {
     envelope: EventEnvelope,
 }
 
+#[derive(Debug)]
 pub(crate) struct SessionRestoreCandidate {
     session_id: String,
     expected_sequence: u64,
@@ -31,6 +40,50 @@ pub(crate) struct SessionRestoreCandidate {
 pub(crate) struct RestoredSession {
     session_id: String,
     session: SessionSequence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EventSequencerCheckpoint {
+    schema_version: String,
+    session_id: String,
+    anchor: CheckpointAnchor,
+    turns: Vec<CheckpointTurn>,
+    checkpoint_identity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CheckpointAnchor {
+    sequence: u64,
+    timestamp_ms: u64,
+    event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CheckpointTurn {
+    turn_id: String,
+    phase: String,
+    items: Vec<CheckpointItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CheckpointItem {
+    item_id: String,
+    revision: u64,
+    phase: String,
+    kind: String,
+    role: String,
+}
+
+#[derive(Serialize)]
+struct CheckpointIdentityMaterial<'a> {
+    schema_version: &'a str,
+    session_id: &'a str,
+    anchor: &'a CheckpointAnchor,
+    turns: &'a [CheckpointTurn],
 }
 
 #[derive(Debug, Clone, Default)]
@@ -89,6 +142,327 @@ impl SequenceError {
     }
 }
 
+impl EventSequencerCheckpoint {
+    fn from_session(
+        session_id: &str,
+        session: Option<&SessionSequence>,
+    ) -> Result<Self, SequenceError> {
+        if !valid_binding_identity(session_id) {
+            return Err(SequenceError::Rejected(
+                "checkpoint-session-identity-invalid",
+            ));
+        }
+        let (anchor, mut turns) = match session {
+            Some(session) => {
+                let mut turns = session
+                    .turns
+                    .iter()
+                    .map(|(turn_id, turn)| {
+                        let mut items = if turn.phase == TurnPhase::Running {
+                            turn.items
+                                .iter()
+                                .map(|(item_id, item)| CheckpointItem {
+                                    item_id: item_id.clone(),
+                                    revision: item.revision,
+                                    phase: checkpoint_item_phase(item.phase).into(),
+                                    kind: item.kind.clone(),
+                                    role: item.role.clone(),
+                                })
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        };
+                        items.sort_by(|left, right| left.item_id.cmp(&right.item_id));
+                        CheckpointTurn {
+                            turn_id: turn_id.clone(),
+                            phase: checkpoint_turn_phase(turn.phase).into(),
+                            items,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                turns.sort_by(|left, right| left.turn_id.cmp(&right.turn_id));
+                (
+                    CheckpointAnchor {
+                        sequence: session.sequence,
+                        timestamp_ms: session.timestamp_ms,
+                        event_id: session.last_event_id.clone(),
+                    },
+                    turns,
+                )
+            }
+            None => (
+                CheckpointAnchor {
+                    sequence: 0,
+                    timestamp_ms: 0,
+                    event_id: None,
+                },
+                Vec::new(),
+            ),
+        };
+        turns.shrink_to_fit();
+        let mut checkpoint = Self {
+            schema_version: CHECKPOINT_SCHEMA_VERSION.into(),
+            session_id: session_id.into(),
+            anchor,
+            turns,
+            checkpoint_identity: String::new(),
+        };
+        checkpoint.checkpoint_identity = checkpoint_identity(&checkpoint)?;
+        checkpoint.validate_for_session(session_id)?;
+        if checkpoint.to_canonical_json().len() > MAX_CHECKPOINT_BYTES {
+            return Err(SequenceError::Bounds("checkpoint-json-size-invalid"));
+        }
+        Ok(checkpoint)
+    }
+
+    pub(crate) fn from_canonical_json(
+        expected_session_id: &str,
+        json: &str,
+    ) -> Result<Self, SequenceError> {
+        if json.is_empty() || json.len() > MAX_CHECKPOINT_BYTES {
+            return Err(SequenceError::Bounds("checkpoint-json-size-invalid"));
+        }
+        let checkpoint: Self = serde_json::from_str(json)
+            .map_err(|_| SequenceError::Rejected("checkpoint-json-invalid"))?;
+        checkpoint.validate_for_session(expected_session_id)?;
+        if checkpoint.to_canonical_json() != json {
+            return Err(SequenceError::Rejected("checkpoint-json-noncanonical"));
+        }
+        Ok(checkpoint)
+    }
+
+    pub(crate) fn to_canonical_json(&self) -> String {
+        serde_json::to_string(self).expect("checkpoint contains only serializable values")
+    }
+
+    pub(crate) fn validate_for_session(
+        &self,
+        expected_session_id: &str,
+    ) -> Result<(), SequenceError> {
+        if self.schema_version != CHECKPOINT_SCHEMA_VERSION {
+            return Err(SequenceError::Rejected("checkpoint-schema-unsupported"));
+        }
+        if !valid_binding_identity(expected_session_id)
+            || self.session_id != expected_session_id
+            || !valid_binding_identity(&self.session_id)
+        {
+            return Err(SequenceError::Rejected("checkpoint-session-mismatch"));
+        }
+        if self.anchor.sequence > MAX_SAFE_JSON_INTEGER
+            || self.anchor.timestamp_ms > MAX_SAFE_JSON_INTEGER
+        {
+            return Err(SequenceError::Bounds("checkpoint-anchor-out-of-range"));
+        }
+        let empty_anchor = self.anchor.sequence == 0
+            && self.anchor.timestamp_ms == 0
+            && self.anchor.event_id.is_none();
+        let populated_anchor = self.anchor.sequence > 0
+            && self.anchor.timestamp_ms > 0
+            && self.anchor.event_id.as_deref().is_some_and(valid_event_id);
+        if !empty_anchor && !populated_anchor {
+            return Err(SequenceError::Rejected("checkpoint-anchor-invalid"));
+        }
+        if empty_anchor != self.turns.is_empty() {
+            return Err(SequenceError::Rejected("checkpoint-empty-state-invalid"));
+        }
+        if self.turns.len() > MAX_CHECKPOINT_TURNS {
+            return Err(SequenceError::Bounds("checkpoint-turn-limit"));
+        }
+
+        let mut previous_turn_id: Option<&str> = None;
+        let mut running_turns = 0_u64;
+        let mut minimum_sequence = 0_u64;
+        let mut item_count = 0_usize;
+        for turn in &self.turns {
+            if !valid_binding_identity(&turn.turn_id)
+                || previous_turn_id.is_some_and(|previous| previous >= turn.turn_id.as_str())
+            {
+                return Err(SequenceError::Rejected("checkpoint-turn-order-invalid"));
+            }
+            previous_turn_id = Some(&turn.turn_id);
+            let phase = parse_checkpoint_turn_phase(&turn.phase)?;
+            minimum_sequence = minimum_sequence
+                .checked_add(1)
+                .ok_or(SequenceError::Bounds("checkpoint-state-out-of-range"))?;
+            if phase == TurnPhase::Running {
+                running_turns = running_turns
+                    .checked_add(1)
+                    .ok_or(SequenceError::Bounds("checkpoint-state-out-of-range"))?;
+            } else {
+                minimum_sequence = minimum_sequence
+                    .checked_add(1)
+                    .ok_or(SequenceError::Bounds("checkpoint-state-out-of-range"))?;
+                if !turn.items.is_empty() {
+                    return Err(SequenceError::Rejected(
+                        "checkpoint-terminal-turn-items-present",
+                    ));
+                }
+            }
+
+            let mut previous_item_id: Option<&str> = None;
+            for item in &turn.items {
+                item_count = item_count
+                    .checked_add(1)
+                    .ok_or(SequenceError::Bounds("checkpoint-item-limit"))?;
+                if item_count > MAX_CHECKPOINT_ITEMS {
+                    return Err(SequenceError::Bounds("checkpoint-item-limit"));
+                }
+                if !valid_binding_identity(&item.item_id)
+                    || previous_item_id.is_some_and(|previous| previous >= item.item_id.as_str())
+                {
+                    return Err(SequenceError::Rejected("checkpoint-item-order-invalid"));
+                }
+                previous_item_id = Some(&item.item_id);
+                if item.revision == 0 || item.revision > MAX_SAFE_JSON_INTEGER {
+                    return Err(SequenceError::Bounds(
+                        "checkpoint-item-revision-out-of-range",
+                    ));
+                }
+                parse_checkpoint_item_phase(&item.phase)?;
+                if !valid_binding_identity(&item.kind) || !valid_binding_identity(&item.role) {
+                    return Err(SequenceError::Rejected("checkpoint-item-shape-invalid"));
+                }
+                minimum_sequence = minimum_sequence
+                    .checked_add(item.revision)
+                    .ok_or(SequenceError::Bounds("checkpoint-state-out-of-range"))?;
+            }
+        }
+        if running_turns > 1 {
+            return Err(SequenceError::Rejected("checkpoint-multiple-running-turns"));
+        }
+        if minimum_sequence > self.anchor.sequence {
+            return Err(SequenceError::Rejected("checkpoint-state-after-anchor"));
+        }
+        if self.checkpoint_identity.len() != CHECKPOINT_IDENTITY_PREFIX.len() + 64
+            || !self
+                .checkpoint_identity
+                .strip_prefix(CHECKPOINT_IDENTITY_PREFIX)
+                .is_some_and(|digest| {
+                    digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+            || checkpoint_identity(self)? != self.checkpoint_identity
+        {
+            return Err(SequenceError::Rejected("checkpoint-identity-invalid"));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(crate) fn sequence(&self) -> u64 {
+        self.anchor.sequence
+    }
+
+    pub(crate) fn timestamp_ms(&self) -> u64 {
+        self.anchor.timestamp_ms
+    }
+
+    pub(crate) fn event_id(&self) -> Option<&str> {
+        self.anchor.event_id.as_deref()
+    }
+
+    pub(crate) fn identity(&self) -> &str {
+        &self.checkpoint_identity
+    }
+
+    pub(crate) fn turn_count(&self) -> u64 {
+        self.turns.len() as u64
+    }
+
+    pub(crate) fn item_count(&self) -> u64 {
+        self.turns.iter().map(|turn| turn.items.len() as u64).sum()
+    }
+
+    fn session_sequence(&self) -> Result<SessionSequence, SequenceError> {
+        self.validate_for_session(&self.session_id)?;
+        let mut turns = HashMap::with_capacity(self.turns.len());
+        for turn in &self.turns {
+            let phase = parse_checkpoint_turn_phase(&turn.phase)?;
+            let mut items = HashMap::with_capacity(turn.items.len());
+            for item in &turn.items {
+                items.insert(
+                    item.item_id.clone(),
+                    ItemSequence {
+                        revision: item.revision,
+                        phase: parse_checkpoint_item_phase(&item.phase)?,
+                        kind: item.kind.clone(),
+                        role: item.role.clone(),
+                    },
+                );
+            }
+            turns.insert(turn.turn_id.clone(), TurnSequence { phase, items });
+        }
+        Ok(SessionSequence {
+            sequence: self.anchor.sequence,
+            timestamp_ms: self.anchor.timestamp_ms,
+            last_event_id: self.anchor.event_id.clone(),
+            turns,
+        })
+    }
+}
+
+fn checkpoint_identity(checkpoint: &EventSequencerCheckpoint) -> Result<String, SequenceError> {
+    let material = CheckpointIdentityMaterial {
+        schema_version: &checkpoint.schema_version,
+        session_id: &checkpoint.session_id,
+        anchor: &checkpoint.anchor,
+        turns: &checkpoint.turns,
+    };
+    let bytes = serde_json::to_vec(&material)
+        .map_err(|_| SequenceError::Rejected("checkpoint-identity-serialization-failed"))?;
+    let length = u64::try_from(bytes.len())
+        .map_err(|_| SequenceError::Bounds("checkpoint-identity-material-too-large"))?;
+    let mut digest = Sha256::new();
+    digest.update(CHECKPOINT_IDENTITY_DOMAIN);
+    digest.update(length.to_be_bytes());
+    digest.update(&bytes);
+    Ok(format!(
+        "{CHECKPOINT_IDENTITY_PREFIX}{:x}",
+        digest.finalize()
+    ))
+}
+
+fn checkpoint_turn_phase(phase: TurnPhase) -> &'static str {
+    match phase {
+        TurnPhase::Running => "running",
+        TurnPhase::Completed => "completed",
+        TurnPhase::Failed => "failed",
+        TurnPhase::Interrupted => "interrupted",
+    }
+}
+
+fn parse_checkpoint_turn_phase(value: &str) -> Result<TurnPhase, SequenceError> {
+    match value {
+        "running" => Ok(TurnPhase::Running),
+        "completed" => Ok(TurnPhase::Completed),
+        "failed" => Ok(TurnPhase::Failed),
+        "interrupted" => Ok(TurnPhase::Interrupted),
+        _ => Err(SequenceError::Rejected("checkpoint-turn-phase-invalid")),
+    }
+}
+
+fn checkpoint_item_phase(phase: ItemPhase) -> &'static str {
+    match phase {
+        ItemPhase::Streaming => "streaming",
+        ItemPhase::Updating => "updating",
+        ItemPhase::Terminal => "terminal",
+    }
+}
+
+fn parse_checkpoint_item_phase(value: &str) -> Result<ItemPhase, SequenceError> {
+    match value {
+        "streaming" => Ok(ItemPhase::Streaming),
+        "updating" => Ok(ItemPhase::Updating),
+        "terminal" => Ok(ItemPhase::Terminal),
+        _ => Err(SequenceError::Rejected("checkpoint-item-phase-invalid")),
+    }
+}
+
 impl PreparedEvent {
     pub(crate) fn envelope(&self) -> &EventEnvelope {
         &self.envelope
@@ -117,6 +491,11 @@ impl PreparedEvent {
 }
 
 impl SessionRestoreCandidate {
+    #[allow(dead_code)]
+    pub(crate) fn checkpoint_at_current(&self) -> Result<EventSequencerCheckpoint, SequenceError> {
+        EventSequencerCheckpoint::from_session(&self.session_id, Some(&self.session))
+    }
+
     pub(crate) fn replay_event(mut self, event: &EventEnvelope) -> Result<Self, SequenceError> {
         event
             .validate()
@@ -157,6 +536,14 @@ impl SessionRestoreCandidate {
 }
 
 impl EventSequencer {
+    #[cfg(test)]
+    pub(crate) fn checkpoint_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<EventSequencerCheckpoint, SequenceError> {
+        EventSequencerCheckpoint::from_session(session_id, self.sessions.get(session_id))
+    }
+
     pub(crate) fn preflight(
         &self,
         observed_at_ms: u64,
@@ -238,9 +625,22 @@ impl EventSequencer {
         expected_sequence: u64,
         expected_event_id: Option<&str>,
     ) -> Result<SessionRestoreCandidate, SequenceError> {
-        if !valid_binding_identity(session_id) {
-            return Err(SequenceError::Rejected("restored-session-identity-invalid"));
-        }
+        let checkpoint = EventSequencerCheckpoint::from_session(session_id, None)?;
+        Self::begin_session_restore_from_checkpoint(
+            session_id,
+            &checkpoint,
+            expected_sequence,
+            expected_event_id,
+        )
+    }
+
+    pub(crate) fn begin_session_restore_from_checkpoint(
+        session_id: &str,
+        checkpoint: &EventSequencerCheckpoint,
+        expected_sequence: u64,
+        expected_event_id: Option<&str>,
+    ) -> Result<SessionRestoreCandidate, SequenceError> {
+        checkpoint.validate_for_session(session_id)?;
         if expected_sequence > MAX_SAFE_JSON_INTEGER {
             return Err(SequenceError::Bounds("restored-sequence-out-of-range"));
         }
@@ -249,12 +649,20 @@ impl EventSequencer {
         {
             return Err(SequenceError::Rejected("restored-watermark-invalid"));
         }
+        if expected_sequence < checkpoint.sequence()
+            || (expected_sequence == checkpoint.sequence()
+                && expected_event_id != checkpoint.event_id())
+        {
+            return Err(SequenceError::Rejected(
+                "restored-checkpoint-after-watermark",
+            ));
+        }
         Ok(SessionRestoreCandidate {
             session_id: session_id.to_owned(),
             expected_sequence,
             expected_event_id: expected_event_id.map(str::to_owned),
-            session: SessionSequence::default(),
-            last_event_id: None,
+            session: checkpoint.session_sequence()?,
+            last_event_id: checkpoint.event_id().map(str::to_owned),
         })
     }
 
@@ -798,6 +1206,315 @@ mod tests {
         assert_eq!(sequencer.sessions["session"].sequence, 1);
         assert!(sequencer.sessions["session"].turns.contains_key("turn-a"));
         assert!(!sequencer.sessions["session"].turns.contains_key("turn-b"));
+    }
+
+    fn sequencer_from_events(events: &[EventEnvelope]) -> EventSequencer {
+        let watermark = events.last().unwrap();
+        let mut candidate = EventSequencer::begin_session_restore(
+            &watermark.session_id,
+            watermark.sequence,
+            Some(&watermark.event_id),
+        )
+        .unwrap();
+        for event in events {
+            candidate = candidate.replay_event(event).unwrap();
+        }
+        let mut sequencer = EventSequencer::default();
+        sequencer.install_restored_session(candidate.complete().unwrap());
+        sequencer
+    }
+
+    fn reseal_checkpoint(checkpoint: &mut EventSequencerCheckpoint) {
+        checkpoint.checkpoint_identity = checkpoint_identity(checkpoint).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_round_trip_seeds_terminal_state_without_content() {
+        let events = completed_turn_events("session", "turn");
+        let sequencer = sequencer_from_events(&events);
+        let checkpoint = sequencer.checkpoint_for_session("session").unwrap();
+
+        assert_eq!(checkpoint.session_id(), "session");
+        assert_eq!(checkpoint.sequence(), 6);
+        assert_eq!(checkpoint.timestamp_ms(), 15);
+        assert_eq!(checkpoint.event_id(), Some(events[5].event_id.as_str()));
+        assert_eq!(checkpoint.turn_count(), 1);
+        assert_eq!(checkpoint.item_count(), 0);
+        assert!(checkpoint
+            .identity()
+            .starts_with(CHECKPOINT_IDENTITY_PREFIX));
+        let encoded = checkpoint.to_canonical_json();
+        assert!(!encoded.contains("\"content\""));
+        assert!(!encoded.contains("\"data\""));
+        assert!(!encoded.contains("request"));
+        assert!(!encoded.contains("response"));
+        assert_eq!(
+            EventSequencerCheckpoint::from_canonical_json("session", &encoded).unwrap(),
+            checkpoint
+        );
+
+        let restored = EventSequencer::begin_session_restore_from_checkpoint(
+            "session",
+            &checkpoint,
+            checkpoint.sequence(),
+            checkpoint.event_id(),
+        )
+        .unwrap()
+        .complete()
+        .unwrap();
+        let mut target = EventSequencer::default();
+        target.install_restored_session(restored);
+        assert_eq!(
+            target.sequence(16, "session", "turn", "turn.started", None),
+            Err(SequenceError::Rejected("turn-start-rejected"))
+        );
+        let next = target
+            .sequence(16, "session", "next-turn", "turn.started", None)
+            .unwrap();
+        assert_eq!(next.sequence, 7);
+    }
+
+    #[test]
+    fn checkpoint_restores_running_item_revision_and_shape() {
+        let mut sequencer = EventSequencer::default();
+        sequencer
+            .sequence(10, "session", "turn", "turn.started", None)
+            .unwrap();
+        sequencer
+            .sequence(
+                11,
+                "session",
+                "turn",
+                "item.started",
+                Some(item("agent", "started", "first")),
+            )
+            .unwrap();
+        sequencer
+            .sequence(
+                12,
+                "session",
+                "turn",
+                "item.delta",
+                Some(item("agent", "delta", "second")),
+            )
+            .unwrap();
+        sequencer
+            .sequence(
+                13,
+                "session",
+                "turn",
+                "turn.plan.updated",
+                Some(plan_item("updated", "one")),
+            )
+            .unwrap();
+        let checkpoint = sequencer.checkpoint_for_session("session").unwrap();
+        assert_eq!(checkpoint.item_count(), 2);
+
+        let restored = EventSequencer::begin_session_restore_from_checkpoint(
+            "session",
+            &checkpoint,
+            checkpoint.sequence(),
+            checkpoint.event_id(),
+        )
+        .unwrap()
+        .complete()
+        .unwrap();
+        let mut target = EventSequencer::default();
+        target.install_restored_session(restored);
+        let completed = target
+            .sequence(
+                14,
+                "session",
+                "turn",
+                "item.completed",
+                Some(item("agent", "completed", "done")),
+            )
+            .unwrap();
+        assert_eq!(completed.item_update.unwrap().revision, 3);
+        let updated = target
+            .sequence(
+                15,
+                "session",
+                "turn",
+                "turn.plan.updated",
+                Some(plan_item("updated", "two")),
+            )
+            .unwrap();
+        assert_eq!(updated.item_update.unwrap().revision, 2);
+        assert_eq!(
+            target.sequence(
+                16,
+                "session",
+                "turn",
+                "item.completed",
+                Some(TimelineItem {
+                    role: "tool".into(),
+                    ..item("agent", "completed", "wrong shape")
+                }),
+            ),
+            Err(SequenceError::TurnViolation("invalid-item-order"))
+        );
+    }
+
+    #[test]
+    fn checkpoint_is_canonical_and_rejects_semantic_or_identity_tampering() {
+        let mut sequencer = EventSequencer::default();
+        sequencer
+            .sequence(10, "session", "turn-z", "turn.started", None)
+            .unwrap();
+        sequencer
+            .sequence(11, "session", "turn-z", "turn.completed", None)
+            .unwrap();
+        sequencer
+            .sequence(12, "session", "turn-a", "turn.started", None)
+            .unwrap();
+        sequencer
+            .sequence(
+                13,
+                "session",
+                "turn-a",
+                "item.completed",
+                Some(item("item-z", "completed", "z")),
+            )
+            .unwrap();
+        sequencer
+            .sequence(
+                14,
+                "session",
+                "turn-a",
+                "item.completed",
+                Some(item("item-a", "completed", "a")),
+            )
+            .unwrap();
+        let checkpoint = sequencer.checkpoint_for_session("session").unwrap();
+        assert_eq!(
+            checkpoint
+                .turns
+                .iter()
+                .map(|turn| turn.turn_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["turn-a", "turn-z"]
+        );
+        assert_eq!(
+            checkpoint.turns[0]
+                .items
+                .iter()
+                .map(|item| item.item_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["item-a", "item-z"]
+        );
+
+        let canonical = checkpoint.to_canonical_json();
+        let pretty = serde_json::to_string_pretty(&checkpoint).unwrap();
+        assert_eq!(
+            EventSequencerCheckpoint::from_canonical_json("session", &pretty),
+            Err(SequenceError::Rejected("checkpoint-json-noncanonical"))
+        );
+        let mut with_unknown: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+        with_unknown["unknown"] = json!(true);
+        assert_eq!(
+            EventSequencerCheckpoint::from_canonical_json(
+                "session",
+                &serde_json::to_string(&with_unknown).unwrap()
+            ),
+            Err(SequenceError::Rejected("checkpoint-json-invalid"))
+        );
+        assert_eq!(
+            EventSequencerCheckpoint::from_canonical_json("other-session", &canonical),
+            Err(SequenceError::Rejected("checkpoint-session-mismatch"))
+        );
+
+        let mut invalid = checkpoint.clone();
+        invalid.checkpoint_identity = format!("{CHECKPOINT_IDENTITY_PREFIX}{}", "a".repeat(64));
+        assert_eq!(
+            invalid.validate_for_session("session"),
+            Err(SequenceError::Rejected("checkpoint-identity-invalid"))
+        );
+
+        let mut invalid = checkpoint.clone();
+        invalid.turns.swap(0, 1);
+        reseal_checkpoint(&mut invalid);
+        assert_eq!(
+            invalid.validate_for_session("session"),
+            Err(SequenceError::Rejected("checkpoint-turn-order-invalid"))
+        );
+
+        let mut invalid = checkpoint.clone();
+        invalid.turns.insert(1, invalid.turns[0].clone());
+        reseal_checkpoint(&mut invalid);
+        assert_eq!(
+            invalid.validate_for_session("session"),
+            Err(SequenceError::Rejected("checkpoint-turn-order-invalid"))
+        );
+
+        let mut invalid = checkpoint.clone();
+        invalid.turns[0].phase = "unknown".into();
+        reseal_checkpoint(&mut invalid);
+        assert_eq!(
+            invalid.validate_for_session("session"),
+            Err(SequenceError::Rejected("checkpoint-turn-phase-invalid"))
+        );
+
+        let mut invalid = checkpoint.clone();
+        invalid.turns[0].items[0].phase = "unknown".into();
+        reseal_checkpoint(&mut invalid);
+        assert_eq!(
+            invalid.validate_for_session("session"),
+            Err(SequenceError::Rejected("checkpoint-item-phase-invalid"))
+        );
+
+        let mut invalid = checkpoint.clone();
+        invalid.anchor.sequence = 1;
+        reseal_checkpoint(&mut invalid);
+        assert_eq!(
+            invalid.validate_for_session("session"),
+            Err(SequenceError::Rejected("checkpoint-state-after-anchor"))
+        );
+    }
+
+    #[test]
+    fn checkpoint_restore_replays_only_the_retained_tail() {
+        let events = completed_turn_events("session", "turn");
+        let prefix = sequencer_from_events(&events[..2]);
+        let checkpoint = prefix.checkpoint_for_session("session").unwrap();
+        let mut candidate = EventSequencer::begin_session_restore_from_checkpoint(
+            "session",
+            &checkpoint,
+            events.last().unwrap().sequence,
+            Some(&events.last().unwrap().event_id),
+        )
+        .unwrap();
+        for event in &events[2..] {
+            candidate = candidate.replay_event(event).unwrap();
+        }
+        let restored = candidate.complete().unwrap();
+        let mut target = EventSequencer::default();
+        target.install_restored_session(restored);
+        assert_eq!(target.sessions["session"].sequence, 6);
+
+        assert_eq!(
+            EventSequencer::begin_session_restore_from_checkpoint(
+                "session",
+                &checkpoint,
+                1,
+                Some(&events[0].event_id),
+            )
+            .unwrap_err(),
+            SequenceError::Rejected("restored-checkpoint-after-watermark")
+        );
+        let mut forged = events[2].clone();
+        forged.sequence += 1;
+        let candidate = EventSequencer::begin_session_restore_from_checkpoint(
+            "session",
+            &checkpoint,
+            events.last().unwrap().sequence,
+            Some(&events.last().unwrap().event_id),
+        )
+        .unwrap();
+        assert_eq!(
+            candidate.replay_event(&forged).unwrap_err(),
+            SequenceError::Rejected("restored-event-invalid")
+        );
     }
 
     #[test]

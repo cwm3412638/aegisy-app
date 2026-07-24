@@ -207,9 +207,14 @@ Protocol properties:
   without changing product state; their names are retained only as bounded
   content-free diagnostics.
 - Snapshot plus replay from sequence number for reconnect and crash recovery.
-  This is a separate `3.5` public Event Journal contract: the current live
-  sequence is not durable across Runtime restart, and the internal Workbench
-  projection-event sequence must not be exposed as AAP replay authority.
+  This is a separate `3.5` public Event Journal contract: the public sequence is
+  durable and independent of the internal Workbench projection-event sequence.
+  Schema v16 adds a per-Session durable retention floor and one validated
+  checkpoint projection so startup can restore Sequencer lifecycle state from a
+  compacted prefix plus the retained Journal tail. This checkpoint is internal
+  recovery authority, not the user-visible current-Session snapshot required for
+  retention-gap recovery; AAP must not expose it as Item content or claim that it
+  completes reconnect.
 - Bounded outbound queues, overload errors, cancellation, heartbeat, and
   backpressure.
 - Idempotency keys for turn start, approval responses, writes, and background job
@@ -301,6 +306,26 @@ Session-derived views are rebuildable from events. Schema migrations are
 transactional, versioned, backed up before upgrade, and tested from every
 supported previous version. A failed migration starts the workbench read-only
 and offers diagnostic export; it never deletes history automatically.
+
+Public Timeline retention uses the schema v16 cursor floor plus exactly one
+`public-timeline-checkpoint/0.1` projection per Session. Its canonical inner
+`event-sequencer-checkpoint/0.1` value binds the Session and exact sequence,
+Event-ID, and timestamp anchor, plus only the Turn/Item lifecycle state needed to
+validate later events. It excludes Item content and data, is capped at 16 MiB,
+100,000 Turns, and 100,000 Items, and has a domain-separated
+`event-sequencer-checkpoint:sha256:` identity. Checkpoint replacement, floor
+advancement, and prefix deletion are one SQLite transaction. Startup validates
+the checkpoint and retained contiguous tail before restoring the Sequencer;
+tampering, anchor drift, gaps, or bounds failures fail closed. The v15-to-v16
+migration initializes an empty floor/checkpoint without rewriting existing public
+events, and Session purge resets Journal, checkpoint, and floor atomically.
+Public Timeline foreign keys restrict Session deletion instead of cascading, so a
+missing rebuildable Session projection cannot silently erase replay authority.
+Startup may replay a complete cursor/checkpoint/tail while that projection is
+temporarily missing, but it enforces exact Session ownership immediately after
+projection recovery and before the Store becomes writable.
+Automatic production pruning remains disabled until a versioned current-Session
+snapshot, structured retention-gap response, and client recovery flow exist.
 
 Credentials remain in OS secure storage. The database contains credential IDs or
 short-lived token references, never API keys or long-lived Aegisy JWT values.

@@ -132,6 +132,27 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
   SQLite transaction with compare-and-swap state. A normal WAL-consistent migration
   backup precedes v14-to-v15, and migration backfills an empty registered cursor for
   every existing Session without fabricating historical public events.
+- The schema v16 retention foundation extends each cursor with a durable
+  sequence/Event-ID/timestamp floor and adds one
+  `public-timeline-checkpoint/0.1` projection per Session. The v15-to-v16 migration
+  preserves the existing Journal and head exactly while initializing a zero floor
+  and no fabricated nonzero checkpoint. The canonical inner
+  `event-sequencer-checkpoint/0.1` records the Session anchor plus Turn/Item
+  lifecycle only, never Item content/data; it is bounded to 16 MiB, 100,000 Turns,
+  and 100,000 Items and uses the domain-separated
+  `event-sequencer-checkpoint:sha256:<64 lowercase hex>` identity.
+- Internal checkpoint/prune coverage binds checkpoint replacement, floor movement,
+  and prefix deletion to one SQLite transaction, restores the Sequencer from the
+  checkpoint plus retained tail on restart, rejects identity/anchor/lifecycle/tail
+  tampering, and resets Journal/checkpoint/floor atomically during Session purge.
+  Public Timeline foreign keys use `ON DELETE RESTRICT`; a regression fixture proves
+  a Session delete cannot cascade away Journal authority. A separate startup fixture
+  removes a Session projection with foreign keys disabled while preserving a nonzero
+  checkpoint and retained tail, then proves pre-recovery replay, Session rebuild,
+  final strict ownership verification, anchor sync, and continued Sequencer numbering.
+  The prune entry point is intentionally not reachable by automatic maintenance:
+  there is still no public current-Session snapshot or structured retention-gap
+  recovery response.
 - Stored envelopes retain exact JSON bytes, SHA-256, Event ID, timestamp, Turn, and
   Session-local sequence. Startup verifies the registered cursor/event count and
   anchor, redundant columns, envelope hash/bytes, Event ID, contiguous order, and
@@ -190,7 +211,7 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
   wall-clock rollback, terminal-Item boundary enforcement, aggregate Qt pending
   limits, the 10,001st Session fail-closed gate, initial Session sync, and real
   disconnect signal ordering. Complete commands on 2026-07-25 pass 22 AAP type
-  tests, 663 sidecar tests plus one ignored live fixture, 6 daemon-main, 10
+  tests, 675 sidecar tests plus one ignored live fixture, 6 daemon-main, 10
   context-threshold, 13 handshake Runtime, 15 Schema, 66 protocol, and 23
   stdio/Codex tests; strict Clippy and formatting; the complete desktop build and
   all 16 CTests; strict OpenSpec validation; and `git diff --check`.
@@ -208,10 +229,11 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
   Item and timestamp. An existing Trace cannot receive a later Public Journal repair,
   and the Trace-only Store helper is unavailable in production builds.
   Some streaming/control-only events correctly have no durable Item projection and
-  append only to the Journal. Snapshot, structured retention-gap recovery, live
-  subscription, heartbeat, complete reconnect orchestration, explicit
-  acknowledgement, and cross-platform recovery evidence remain absent. Keep `3.5`
-  unchecked.
+  append only to the Journal. The schema v16 floor/checkpoint is an internal
+  retention and restart foundation only. A current Session snapshot, structured
+  retention-gap recovery, live subscription, heartbeat, complete reconnect
+  orchestration, explicit acknowledgement, and Windows recovery/runtime evidence
+  remain absent. Keep `3.5` unchecked.
 
 Model catalog foundation evidence:
 
@@ -771,11 +793,13 @@ Current editor evidence:
   switching is disabled while the single active Turn is running. The full Rust
   stage passes 630 library tests (one ignored), 63 protocol tests, and 21 stdio
   tests; both the focused degradation/Timeline run and ordinary Qt render run pass.
-  The later fixed-watermark slice above now adds durable public replay and bounded
-  per-Session gap catch-up, but snapshot/retention-gap recovery, subscription,
-  heartbeat, complete reconnect and acknowledgement remain incomplete. Full vendor
-  capability negotiation and the remaining desktop/dependent feature gates are also
-  incomplete, so `3.5` and `7.9` remain unchecked.
+  The later fixed-watermark and schema v16 retention-foundation slices above now add
+  durable public replay, bounded per-Session gap catch-up, and internal
+  checkpoint-plus-tail restart authority, but current snapshot/structured
+  retention-gap recovery, subscription, heartbeat, complete reconnect,
+  acknowledgement, and Windows recovery/runtime evidence remain incomplete. Full
+  vendor capability negotiation and the remaining desktop/dependent feature gates
+  are also incomplete, so `3.5` and `7.9` remain unchecked.
 - Large command-output tests cover a Unicode-safe 64 KiB head/192 KiB tail,
   1 MiB artifact head/tail, exact omission metadata, 100,000 deltas, and
   content-addressed session isolation/eviction. Output is redacted before capture;

@@ -161,7 +161,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   retention-gap recovery, and acknowledgement remain open. Agent/Codex remains
   read-only.
 - OpenSpec task `3.5` now has an end-to-end fixed-watermark catch-up slice. Workbench
-  schema v15 stores exact validated `timeline-event/0.1` envelopes behind one
+  schema v16 stores exact validated `timeline-event/0.1` envelopes behind one
   compare-and-swap cursor per Session, restores Sequencer state page by page, and
   serves exact sequence/Event-ID anchors through negotiated `timeline/sync` below the
   4 MiB frame limit. Normal durable Codex Turn start, sanitized Item, command
@@ -181,8 +181,19 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Turn Trace, terminal state, internal trace/terminal events, and public terminal
   event in one transaction before notification. An existing Trace cannot receive a
   later Public Journal repair, and the Trace-only Store helper is compiled only for
-  tests so production callers cannot bypass the atomic producer API. Snapshot,
-  structured retention-gap recovery, live
+  tests so production callers cannot bypass the atomic producer API. Schema v16
+  adds a durable sequence/Event-ID/timestamp retention floor and one canonical,
+  content-free Sequencer checkpoint per Session. Checkpoint replacement, floor
+  movement, and exact prefix deletion commit in one transaction; startup restores
+  from the checkpoint plus retained tail, v15 migration preserves every existing
+  Journal event, and Session purge resets Journal/checkpoint/floor atomically.
+  Public Timeline foreign keys restrict Session projection deletion rather than
+  cascading authority loss. Pre-recovery replay may validate a complete cursor,
+  checkpoint, and retained tail while its rebuildable Session projection is
+  temporarily absent; strict ownership is enforced after recovery before the Store
+  becomes writable.
+  Automatic pruning remains unreachable until public snapshot recovery exists.
+  Snapshot, structured retention-gap recovery, live
   subscription, heartbeat, complete reconnect orchestration, explicit
   acknowledgement, and Windows recovery evidence remain open. Keep `3.5` unchecked.
 - Model catalog foundation (2026-07-21): the sidecar now validates an internal
@@ -1105,8 +1116,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   `WorkbenchStore::finish_turn_with_trace` still writes the unchanged outer
   `turn.trace.recorded/0.1` event immediately before the terminal event in one SQLite
   transaction. Turn Trace itself required no migration, backfill, or legacy event
-  rewrite; schema v14 remains the model-profile projection introduction, while the
-  Store is now schema v15 for the separate Public Timeline Journal foundation.
+  rewrite; schema v14 remains the model-profile projection introduction, schema v15
+  introduced the separate Public Timeline Journal, and schema v16 adds its durable
+  retention floor and validated Sequencer checkpoint.
   The Trace remains content-free: no prompt, provider body, path, command, diff,
   output, or credential content is recorded. Complete genuine-user
   Approval/Change/Test production, non-command Tool families,
@@ -1249,9 +1261,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   back all local rows. Schema v14 adds the bounded authority-free model-profile
   projection and full-chain verification described above. Schema v15 adds the
   registered Public Timeline Journal/cursor and negotiated fixed-watermark catch-up
-  described under task `3.5`.
+  described under task `3.5`. Schema v16 adds one validated content-free lifecycle
+  checkpoint and retention floor per Session so a pruned prefix plus retained tail
+  can restore the exact Sequencer state without reusing public sequences.
   The normal WAL-consistent migration backup covers v12-to-v13, v13-to-v14, and
-  v14-to-v15. Final two-phase Session purge
+  v14-to-v15 plus the populated v15-to-v16 migration. Final two-phase Session purge
   removes the binding in the same transaction as Turns, Items, and events. No
   repository absolute path, permission,
   dedicated-worktree claim, or mutation authority enters the binding. Extensions,
@@ -2658,15 +2672,15 @@ Implemented visual baseline:
 
 ## Verification Snapshot (2026-07-25)
 
-- The Public Timeline fixed-watermark slice advances OpenSpec `3.5` without
-  completing it. Schema v15 Journal/cursor CAS, bounded replay restoration,
+- The Public Timeline retention/checkpoint slice advances OpenSpec `3.5` without
+  completing it. Schema v16 Journal/cursor CAS, bounded replay restoration,
   negotiated AAP `timeline/sync`, exact sanitized normal Codex transactions, and Qt
   per-Session atomic gap catch-up now operate end to end. Failure coverage includes
   rollback, restart, forged anchors, semantic tampering, oversized pages/events,
   stale prepared tickets, wall-clock rollback, terminal Item boundary enforcement,
   aggregate pending limits, 10,001st-Session fail-closed behavior, initial/history
   sync, pending-deletion read-only sync, and real disconnect signal ordering. The
-  complete Rust workspace passes 22 AAP type tests, 663 sidecar tests plus one
+  complete Rust workspace passes 22 AAP type tests, 675 sidecar tests plus one
   ignored live fixture, 6 daemon-main, 10 threshold, 13 handshake Runtime, 15
   Schema, 66 protocol, and 23 stdio/Codex tests, with strict Clippy and formatting.
   The complete desktop build, all 16 CTests, strict OpenSpec validation, and
@@ -2677,7 +2691,10 @@ Implemented visual baseline:
   cursor, and Journal together. Stdio failure fixtures prove the unique durable
   Error Item exactly matches the replayed failed terminal event. Existing Traces
   reject later Public Journal repair, and production builds expose no Trace-only
-  terminal Store helper. Snapshot, structured retention-gap recovery,
+  terminal Store helper. The durable retention floor and content-free Sequencer
+  checkpoint restore only internal lifecycle authority; they are not a public
+  current-Session snapshot. Automatic pruning remains disabled. Snapshot,
+  structured retention-gap recovery,
   subscription, heartbeat, complete reconnect orchestration, explicit
   acknowledgement, and Windows recovery evidence remain absent.
 
@@ -2809,10 +2826,10 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Continue OpenSpec `3.5` with a schema v16 durable Timeline retention floor and
-   validated checkpoint, then add snapshot plus structured retention-gap recovery,
-   followed by subscription, heartbeat, complete reconnect orchestration, explicit
-   acknowledgement, and Windows recovery evidence.
+1. Continue OpenSpec `3.5` with a bounded current-Session snapshot and structured
+   retention-gap response, then add Qt atomic snapshot replacement, subscription,
+   heartbeat, complete reconnect orchestration, explicit acknowledgement, and
+   Windows recovery evidence.
 2. Validate the hardened TLS installer on a clean Windows x64 VM.
 3. Reproduce and correlate any remaining streaming disconnect with redacted logs.
 4. Continue consolidating widget-local QSS and replace remaining Qt stock icons;

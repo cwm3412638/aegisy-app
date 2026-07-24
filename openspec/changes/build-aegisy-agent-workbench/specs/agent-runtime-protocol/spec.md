@@ -142,6 +142,33 @@ The public replay sequence SHALL be supplied by a dedicated AAP Event Journal.
 Internal Workbench projection events include metadata operations outside the public
 Timeline and SHALL NOT be exposed directly or used as an accidental replay cursor.
 
+Workbench schema v16 SHALL durably bind each Session cursor to a retention floor
+containing the exact pruned-through sequence, Event ID, and Runtime timestamp, and
+SHALL maintain exactly one `public-timeline-checkpoint/0.1` projection for that
+Session. A nonzero floor SHALL bind a canonical
+`event-sequencer-checkpoint/0.1` value containing the Session anchor and only the
+Turn/Item lifecycle state required to validate later events. The checkpoint SHALL
+NOT contain Item content or Item data. Its identity SHALL be
+`event-sequencer-checkpoint:sha256:` followed by exactly 64 lowercase hexadecimal
+digits over domain-separated canonical material. One checkpoint SHALL be limited
+to 16 MiB, 100,000 Turns, and 100,000 Items.
+
+Advancing the retention floor SHALL validate the existing checkpoint and retained
+prefix through the same Sequencer rules used for live events, then replace the
+checkpoint, advance the cursor floor, and delete the exact Journal prefix in one
+SQLite transaction. Any validation, checkpoint write, floor write, or deletion
+failure SHALL preserve the previous checkpoint, floor, cursor head, and Journal.
+Startup SHALL validate the checkpoint identity, anchor, lifecycle bounds, cursor,
+and contiguous retained tail before restoring the Sequencer and continuing at the
+existing head sequence. A schema v15-to-v16 migration SHALL initialize a zero floor
+and empty checkpoint projection without fabricating a nonzero checkpoint or
+rewriting existing Journal events. Session purge SHALL reset Journal, checkpoint,
+and floor in the same deletion transaction. Public Timeline foreign keys SHALL
+restrict deletion of a Session projection rather than cascading authority loss.
+Pre-recovery validation MAY replay an otherwise complete Journal whose rebuildable
+Session projection is temporarily absent, but strict Session ownership SHALL pass
+after projection recovery and before the Store becomes writable.
+
 AAP fixed-watermark catch-up SHALL use `timeline/sync`. Its request SHALL contain
 exactly a bounded `session_id`, an `after` anchor, a nullable `watermark`, and a
 `limit` from 1 through 200. Every anchor SHALL contain exactly `sequence` and
@@ -184,9 +211,12 @@ page, anchor drift, request failure, missing capability, or queue/batch overflow
 SHALL preserve the confirmed projection and leave that Session frozen.
 
 The fixed-watermark slice does not satisfy the complete reconnect requirement by
-itself. Snapshot replacement, retention-gap responses, live subscription, heartbeat,
-reconnect orchestration, and explicit acknowledgement SHALL remain required before
-this requirement is considered complete.
+itself. The schema v16 floor/checkpoint is internal retention and startup authority,
+not a current-Session snapshot or public recovery response. Automatic production
+pruning SHALL remain unreachable until snapshot replacement and structured
+retention-gap recovery exist. Live subscription, heartbeat, reconnect orchestration,
+and explicit acknowledgement SHALL also remain required before this requirement is
+considered complete.
 
 #### Scenario: Prepared event persistence fails
 - **WHEN** Runtime prepares and serializes an event but its Journal or combined projection transaction fails
@@ -228,13 +258,38 @@ this requirement is considered complete.
 - **WHEN** zero is paired with an Event ID, a positive sequence has a null or malformed Event ID, equal sequences carry different IDs, a page changes Session/after/watermark, events gap or cross Session, or `next_after` does not identify the final event
 - **THEN** the peer SHALL reject the complete request or page before cursor advancement or Timeline projection
 
+#### Scenario: Internal retention advances atomically
+- **WHEN** maintenance checkpoints a validated Session prefix and prunes through its exact sequence/Event-ID/timestamp anchor
+- **THEN** the checkpoint projection, cursor floor, and Journal deletion SHALL commit together, and a failure at any step SHALL retain the complete previous state
+
+#### Scenario: Runtime restarts after an internal prefix prune
+- **WHEN** a Session has a validated nonzero checkpoint and a contiguous retained Journal tail
+- **THEN** startup SHALL restore Turn/Item lifecycle state from the content-free checkpoint, replay the retained tail, and allocate the next event after the durable head without reusing a sequence
+
+#### Scenario: Existing v15 Journal migrates to schema v16
+- **WHEN** migration opens a populated schema v15 Public Journal
+- **THEN** it SHALL preserve every existing event and head anchor, initialize the retention floor at zero, and SHALL NOT fabricate a nonzero lifecycle checkpoint
+
+#### Scenario: Session with retained history is purged
+- **WHEN** Session deletion commits after its Public Journal has a nonzero floor
+- **THEN** the Journal rows, checkpoint projection, and floor SHALL reset or delete atomically so no purged conversation content remains replay-readable
+
+#### Scenario: Rebuildable Session projection is temporarily missing
+- **WHEN** a complete Public Timeline checkpoint and retained tail exist but the rebuildable Session projection row is absent
+- **THEN** foreign-key behavior SHALL NOT delete the Timeline authority, startup SHALL validate and replay it without exposing public sync, Session recovery SHALL rebuild the owner, and final strict ownership validation SHALL pass before writes are enabled
+
 #### Scenario: Client reconnects after losing transport
 - **WHEN** the client supplies its last acknowledged sequence
 - **THEN** the runtime SHALL replay later persisted events and then continue live streaming without duplicate effects
 
 #### Scenario: Requested replay point is no longer retained
 - **WHEN** the event sequence predates retained replay data
-- **THEN** the runtime SHALL return a current session snapshot plus the first available sequence and SHALL identify any non-replayable diagnostic gap
+- **THEN** the runtime SHALL return a current Session snapshot plus the first available sequence, SHALL identify any non-replayable diagnostic gap, and SHALL let the client atomically replace only that Session before continuing live delivery
+
+The schema v16 retention foundation does not yet satisfy this scenario. Until the
+versioned snapshot and structured retention-gap response land, the Runtime fails
+closed without returning a partial tail or fabricating a snapshot, and the affected
+Session remains frozen.
 
 ### Requirement: Mutating protocol requests are idempotent
 The protocol SHALL require or accept client-generated idempotency keys for turn

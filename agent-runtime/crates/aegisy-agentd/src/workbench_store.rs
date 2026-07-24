@@ -27,7 +27,8 @@ use crate::operation_reconciliation::{
     reconcile as reconcile_operation, EventState, ReconciliationInput, ReconciliationResult,
 };
 use crate::public_timeline_journal::{
-    self, JournalError as PublicTimelineJournalError, TimelineSyncPage, TimelineWatermark,
+    self, JournalError as PublicTimelineJournalError, TimelinePruneResult, TimelineSyncPage,
+    TimelineWatermark,
 };
 use crate::session_compaction::{activate_review, CompactionCheckpointReview};
 use crate::session_compaction_store::{
@@ -69,7 +70,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = crate::turn_trace::MAX_DURABLE_EVENT_BYTES;
@@ -157,8 +158,11 @@ const REQUIRED_MODEL_PROFILE_INDEXES: [&str; 3] = [
     "model_profiles_state_updated_idx",
     "model_profiles_active_profile_id_idx",
 ];
-const REQUIRED_PUBLIC_TIMELINE_TABLES: [&str; 2] =
-    ["public_timeline_events", "public_timeline_cursors"];
+const REQUIRED_PUBLIC_TIMELINE_TABLES: [&str; 3] = [
+    "public_timeline_events",
+    "public_timeline_cursors",
+    "public_timeline_checkpoints",
+];
 const REQUIRED_PUBLIC_TIMELINE_INDEXES: [&str; 1] = ["public_timeline_events_turn_idx"];
 const REQUIRED_PUBLIC_TIMELINE_TRIGGERS: [&str; 1] = ["public_timeline_session_cursor_insert"];
 const REQUIRED_SESSION_SEARCH_INDEXES: [&str; 4] = [
@@ -1590,6 +1594,14 @@ impl WorkbenchStore {
         store
             .claim_application_id()
             .map_err(|cause| coded_error("workbench-application-id-failed", cause.message))?;
+        public_timeline_journal::verify_before_projection_recovery(&store.connection).map_err(
+            |cause| {
+                coded_error(
+                    cause.code,
+                    "cannot verify the public timeline journal before startup recovery",
+                )
+            },
+        )?;
         store.startup_recovery = Box::new(
             store
                 .recover_session_projections_at_startup()
@@ -6147,23 +6159,8 @@ impl WorkbenchStore {
                     [&member.session_id],
                 )
                 .map_err(|_| error("cannot purge deleted session event cursor"))?;
-            transaction
-                .execute(
-                    "DELETE FROM public_timeline_events WHERE session_id = ?1",
-                    [&member.session_id],
-                )
-                .map_err(|_| error("cannot purge deleted public timeline events"))?;
-            let cursor_reset = transaction
-                .execute(
-                    "UPDATE public_timeline_cursors
-                     SET next_sequence = 1, last_timestamp_ms = 0, latest_event_id = NULL
-                     WHERE session_id = ?1",
-                    [&member.session_id],
-                )
-                .map_err(|_| error("cannot reset deleted public timeline cursor"))?;
-            if cursor_reset != 1 {
-                return Err(error("deleted public timeline cursor is missing"));
-            }
+            public_timeline_journal::reset_session_tx(&transaction, &member.session_id)
+                .map_err(public_timeline_error)?;
             transaction
                 .execute(
                     "UPDATE sessions SET title = 'Deleted session', status = 'archived',
@@ -11025,6 +11022,30 @@ impl WorkbenchStore {
             .map_err(|_| error("cannot commit public timeline journal transaction"))
     }
 
+    // Snapshot recovery must land before maintenance can safely invoke pruning.
+    #[allow(dead_code)]
+    pub(crate) fn checkpoint_and_prune_public_timeline(
+        &mut self,
+        session_id: &str,
+        through: &TimelineWatermark,
+        created_at_ms: u64,
+    ) -> Result<TimelinePruneResult, WorkbenchStoreError> {
+        self.ensure_session_writable(session_id)?;
+        let transaction =
+            self.begin_database_write("cannot start public timeline prune transaction")?;
+        let result = public_timeline_journal::checkpoint_and_prune_tx(
+            &transaction,
+            session_id,
+            through,
+            created_at_ms,
+        )
+        .map_err(public_timeline_error)?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit public timeline prune transaction"))?;
+        Ok(result)
+    }
+
     pub fn sync_public_timeline(
         &self,
         session_id: &str,
@@ -11142,6 +11163,21 @@ impl WorkbenchStore {
         }
         if version == SCHEMA_VERSION {
             return Ok(());
+        }
+        if version == 15 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start public timeline retention migration"))?;
+            public_timeline_journal::migrate_v15_to_v16(&transaction)
+                .map_err(public_timeline_error)?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit public timeline retention migration"));
         }
         if version == 14 {
             let transaction = self
@@ -16764,6 +16800,39 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             return Err(error("workbench database schema is incomplete"));
         }
     }
+    verify_required_table_columns(
+        connection,
+        "public_timeline_cursors",
+        &[
+            "session_id",
+            "next_sequence",
+            "last_timestamp_ms",
+            "latest_event_id",
+            "pruned_through_sequence",
+            "pruned_through_event_id",
+            "pruned_through_timestamp_ms",
+        ],
+    )?;
+    verify_required_table_columns(
+        connection,
+        "public_timeline_checkpoints",
+        &[
+            "session_id",
+            "schema_version",
+            "through_sequence",
+            "through_event_id",
+            "through_timestamp_ms",
+            "checkpoint_json",
+            "checkpoint_identity",
+            "checkpoint_bytes",
+            "turn_count",
+            "item_count",
+            "created_at_ms",
+        ],
+    )?;
+    for table in REQUIRED_PUBLIC_TIMELINE_TABLES {
+        verify_required_session_delete_restriction(connection, table)?;
+    }
     for index in REQUIRED_SESSION_SEARCH_INDEXES {
         let exists: Option<String> = connection
             .query_row(
@@ -16869,6 +16938,59 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         if exists.as_deref() != Some(trigger) {
             return Err(error("public timeline journal triggers are incomplete"));
         }
+    }
+    Ok(())
+}
+
+fn verify_required_table_columns(
+    connection: &Connection,
+    table: &str,
+    required: &[&str],
+) -> Result<(), WorkbenchStoreError> {
+    let mut statement = connection
+        .prepare("SELECT name FROM pragma_table_info(?1)")
+        .map_err(|_| error("cannot prepare workbench column verification"))?;
+    let columns = statement
+        .query_map([table], |row| row.get::<_, String>(0))
+        .map_err(|_| error("cannot verify workbench table columns"))?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|_| error("workbench table column metadata is invalid"))?;
+    if required.iter().any(|column| !columns.contains(*column)) {
+        return Err(error("workbench database table columns are incomplete"));
+    }
+    Ok(())
+}
+
+fn verify_required_session_delete_restriction(
+    connection: &Connection,
+    table: &str,
+) -> Result<(), WorkbenchStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT \"table\", \"from\", \"to\", on_delete
+             FROM pragma_foreign_key_list(?1)",
+        )
+        .map_err(|_| error("cannot prepare public timeline foreign key verification"))?;
+    let rows = statement
+        .query_map([table], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|_| error("cannot verify public timeline foreign keys"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("public timeline foreign key metadata is invalid"))?;
+    let matching = rows
+        .iter()
+        .filter(|(target, from, to, _)| {
+            target == "sessions" && from == "session_id" && to == "session_id"
+        })
+        .collect::<Vec<_>>();
+    if matching.len() != 1 || matching[0].3 != "RESTRICT" {
+        return Err(error("public timeline session deletion must be restricted"));
     }
     Ok(())
 }
@@ -22986,6 +23108,165 @@ mod tests {
     }
 
     #[test]
+    fn upgrades_populated_schema_v15_to_retention_checkpoint_after_backup() {
+        let root = Root::new("schema-v15-public-timeline-retention");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "session-v15".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Preserved from v15".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        let mut sequencer = crate::event_sequencer::EventSequencer::default();
+        let started = sequencer
+            .sequence(10, "session-v15", "turn-v15", "turn.started", None)
+            .unwrap();
+        let completed = sequencer
+            .sequence(11, "session-v15", "turn-v15", "turn.completed", None)
+            .unwrap();
+        store.append_public_timeline_event(&started).unwrap();
+        store.append_public_timeline_event(&completed).unwrap();
+        let preserved = store
+            .connection
+            .prepare(
+                "SELECT sequence, event_id, timestamp_ms, turn_id,
+                        envelope_json, envelope_sha256, envelope_bytes
+                 FROM public_timeline_events
+                 WHERE session_id = 'session-v15' ORDER BY sequence",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(store);
+
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER public_timeline_session_cursor_insert;
+                 DROP TABLE public_timeline_checkpoints;
+                 ALTER TABLE public_timeline_cursors RENAME TO public_timeline_cursors_v16;
+                 CREATE TABLE public_timeline_cursors (
+                    session_id TEXT PRIMARY KEY,
+                    next_sequence INTEGER NOT NULL CHECK(next_sequence >= 1 AND next_sequence <= 9007199254740991),
+                    last_timestamp_ms INTEGER NOT NULL CHECK(last_timestamp_ms >= 0 AND last_timestamp_ms <= 9007199254740991),
+                    latest_event_id TEXT,
+                    CHECK(
+                        (next_sequence = 1 AND last_timestamp_ms = 0 AND latest_event_id IS NULL)
+                        OR
+                        (next_sequence > 1 AND last_timestamp_ms >= 1 AND latest_event_id IS NOT NULL)
+                    ),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                 ) STRICT;
+                 INSERT INTO public_timeline_cursors (
+                    session_id, next_sequence, last_timestamp_ms, latest_event_id
+                 ) SELECT session_id, next_sequence, last_timestamp_ms, latest_event_id
+                   FROM public_timeline_cursors_v16;
+                 DROP TABLE public_timeline_cursors_v16;
+                 CREATE TRIGGER public_timeline_session_cursor_insert
+                 AFTER INSERT ON sessions
+                 BEGIN
+                    INSERT OR IGNORE INTO public_timeline_cursors (
+                        session_id, next_sequence, last_timestamp_ms, latest_event_id
+                    ) VALUES (NEW.session_id, 1, 0, NULL);
+                 END;
+                 PRAGMA user_version = 15;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        let migrated = reopened
+            .connection
+            .prepare(
+                "SELECT sequence, event_id, timestamp_ms, turn_id,
+                        envelope_json, envelope_sha256, envelope_bytes
+                 FROM public_timeline_events
+                 WHERE session_id = 'session-v15' ORDER BY sequence",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(migrated, preserved);
+        let cursor: (i64, i64, Option<String>, i64, Option<String>, i64) = reopened
+            .connection
+            .query_row(
+                "SELECT next_sequence, last_timestamp_ms, latest_event_id,
+                        pruned_through_sequence, pruned_through_event_id,
+                        pruned_through_timestamp_ms
+                 FROM public_timeline_cursors WHERE session_id = 'session-v15'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            cursor,
+            (3, 11, Some(completed.event_id.clone()), 0, None, 0)
+        );
+        let checkpoint: (i64, Option<String>, i64, Option<String>, i64) = reopened
+            .connection
+            .query_row(
+                "SELECT through_sequence, through_event_id, through_timestamp_ms,
+                        checkpoint_identity, checkpoint_bytes
+                 FROM public_timeline_checkpoints WHERE session_id = 'session-v15'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(checkpoint, (0, None, 0, None, 0));
+        let manifests = migration_backup_manifests(&root.path).unwrap();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].source_schema_version, 15);
+        assert_eq!(manifests[0].target_schema_version, 16);
+    }
+
+    #[test]
     fn public_timeline_journal_is_restart_safe_and_uses_fixed_watermarks() {
         let root = Root::new("public-timeline-journal");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
@@ -23057,11 +23338,225 @@ mod tests {
             Some(continued.event_id.as_str())
         );
         assert_eq!(fresh.events, vec![continued.clone()]);
-
-        let all = reopened
-            .sync_public_timeline("timeline-session", 0, None, 10)
+        let checkpoint = reopened
+            .checkpoint_and_prune_public_timeline(
+                "timeline-session",
+                &TimelineWatermark {
+                    sequence: third.sequence,
+                    event_id: Some(third.event_id.clone()),
+                },
+                14,
+            )
             .unwrap();
-        assert_eq!(all.events, vec![first, second, third, continued]);
+        assert_eq!(checkpoint.floor.sequence, 3);
+        assert_eq!(checkpoint.head.sequence, 4);
+        drop(reopened);
+
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        let mut restored = reopened.restore_public_timeline_sequencer().unwrap();
+        let terminal = restored
+            .sequence(15, "timeline-session", "turn-two", "turn.completed", None)
+            .unwrap();
+        assert_eq!(terminal.sequence, 5);
+        reopened.append_public_timeline_event(&terminal).unwrap();
+        let retained = reopened
+            .sync_public_timeline_from_anchor(
+                "timeline-session",
+                TimelineWatermark {
+                    sequence: third.sequence,
+                    event_id: Some(third.event_id.clone()),
+                },
+                None,
+                10,
+            )
+            .unwrap();
+        assert_eq!(retained.events, vec![continued, terminal]);
+        assert!(retained.complete);
+        assert_eq!(
+            reopened
+                .sync_public_timeline("timeline-session", 0, None, 10)
+                .unwrap_err()
+                .code,
+            "timeline-sync-retention-gap"
+        );
+    }
+
+    #[test]
+    fn corrupt_timeline_checkpoint_blocks_projection_recovery_writes() {
+        let root = Root::new("timeline-checkpoint-before-projection-recovery");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_rebuildable_session(&mut store, "checkpoint-recovery-session");
+        let public_event = crate::event_sequencer::EventSequencer::default()
+            .sequence(
+                50,
+                "checkpoint-recovery-session",
+                "checkpoint-recovery-turn",
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        store.append_public_timeline_event(&public_event).unwrap();
+        store
+            .checkpoint_and_prune_public_timeline(
+                "checkpoint-recovery-session",
+                &TimelineWatermark {
+                    sequence: public_event.sequence,
+                    event_id: Some(public_event.event_id),
+                },
+                51,
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE sessions SET title = 'Drifted before recovery'
+                 WHERE session_id = 'checkpoint-recovery-session'",
+                [],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE public_timeline_checkpoints
+                 SET checkpoint_json = '{}', checkpoint_bytes = 2
+                 WHERE session_id = 'checkpoint-recovery-session'",
+                [],
+            )
+            .unwrap();
+        drop(store);
+
+        let error = WorkbenchStore::open(&root.path).unwrap_err();
+        assert_eq!(error.code, "timeline-journal-checkpoint-invalid");
+        let raw = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        assert_eq!(
+            raw.query_row(
+                "SELECT title FROM sessions
+                 WHERE session_id = 'checkpoint-recovery-session'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "Drifted before recovery"
+        );
+        assert_eq!(
+            raw.query_row(
+                "SELECT COUNT(*) FROM events
+                 WHERE event_kind = 'session.projection-rebuilt'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn startup_recovery_preserves_checkpoint_and_retained_tail_for_missing_session_projection() {
+        let root = Root::new("timeline-checkpoint-missing-session-projection");
+        let session_id = "checkpoint-missing-session";
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_rebuildable_session(&mut store, session_id);
+
+        let mut sequencer = crate::event_sequencer::EventSequencer::default();
+        let started = sequencer
+            .sequence(50, session_id, "public-turn-one", "turn.started", None)
+            .unwrap();
+        let item = sequencer
+            .sequence(
+                51,
+                session_id,
+                "public-turn-one",
+                "item.completed",
+                Some(aegisy_aap::stable::v0_1::TimelineItem {
+                    id: "checkpoint-public-item".into(),
+                    kind: "message".into(),
+                    role: "agent".into(),
+                    state: "completed".into(),
+                    content: "safe checkpoint content".into(),
+                    data: None,
+                }),
+            )
+            .unwrap();
+        let completed = sequencer
+            .sequence(52, session_id, "public-turn-one", "turn.completed", None)
+            .unwrap();
+        let retained_started = sequencer
+            .sequence(53, session_id, "public-turn-two", "turn.started", None)
+            .unwrap();
+        for event in [&started, &item, &completed, &retained_started] {
+            store.append_public_timeline_event(event).unwrap();
+        }
+        let checkpoint = store
+            .checkpoint_and_prune_public_timeline(
+                session_id,
+                &TimelineWatermark {
+                    sequence: completed.sequence,
+                    event_id: Some(completed.event_id.clone()),
+                },
+                54,
+            )
+            .unwrap();
+        assert_eq!(checkpoint.floor.sequence, completed.sequence);
+        assert_eq!(checkpoint.head.sequence, retained_started.sequence);
+        assert!(checkpoint.checkpoint_identity.is_some());
+        drop(store);
+
+        let connection = Connection::open(root.path.join(DATABASE_FILE)).unwrap();
+        connection
+            .execute_batch(&format!(
+                "PRAGMA foreign_keys = OFF;
+                 DELETE FROM sessions WHERE session_id = '{session_id}';"
+            ))
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM public_timeline_events WHERE session_id = ?1",
+                    [session_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
+
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        let recovery = reopened.startup_projection_recovery();
+        assert_eq!(recovery.rebuilt_sessions, 1);
+        assert_eq!(recovery.quarantined_sessions, 0);
+        assert_eq!(
+            reopened.load_session(session_id).unwrap().title,
+            "Authoritative title"
+        );
+        assert!(
+            reopened
+                .verify_session_projection(session_id)
+                .unwrap()
+                .consistent
+        );
+        public_timeline_journal::verify_all(&reopened.connection).unwrap();
+
+        let retained = reopened
+            .sync_public_timeline_from_anchor(
+                session_id,
+                TimelineWatermark {
+                    sequence: completed.sequence,
+                    event_id: Some(completed.event_id.clone()),
+                },
+                None,
+                10,
+            )
+            .unwrap();
+        assert_eq!(retained.events, vec![retained_started.clone()]);
+        assert!(retained.complete);
+
+        let mut restored = reopened.restore_public_timeline_sequencer().unwrap();
+        let terminal = restored
+            .sequence(55, session_id, "public-turn-two", "turn.completed", None)
+            .unwrap();
+        assert_eq!(terminal.sequence, retained_started.sequence + 1);
+        reopened.append_public_timeline_event(&terminal).unwrap();
+        public_timeline_journal::verify_all(&reopened.connection).unwrap();
     }
 
     #[test]
@@ -29050,6 +29545,18 @@ mod tests {
             .sequence(51, "purge-parent", "public-turn", "turn.started", None)
             .unwrap();
         store.append_public_timeline_event(&public_event).unwrap();
+        let pruned = store
+            .checkpoint_and_prune_public_timeline(
+                "purge-parent",
+                &TimelineWatermark {
+                    sequence: public_event.sequence,
+                    event_id: Some(public_event.event_id.clone()),
+                },
+                52,
+            )
+            .unwrap();
+        assert_eq!(pruned.floor.sequence, public_event.sequence);
+        assert!(pruned.checkpoint_identity.is_some());
         let preview = store
             .preview_session_deletion("purge-parent", SessionDeletionScope::SessionOnly)
             .unwrap();
@@ -29098,16 +29605,46 @@ mod tests {
             )
             .unwrap();
         assert_eq!(public_event_count, 0);
-        let public_cursor: (i64, i64, Option<String>) = store
+        let public_cursor: (i64, i64, Option<String>, i64, Option<String>, i64) = store
             .connection
             .query_row(
-                "SELECT next_sequence, last_timestamp_ms, latest_event_id
+                "SELECT next_sequence, last_timestamp_ms, latest_event_id,
+                        pruned_through_sequence, pruned_through_event_id,
+                        pruned_through_timestamp_ms
                  FROM public_timeline_cursors WHERE session_id = ?1",
                 ["purge-parent"],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .unwrap();
-        assert_eq!(public_cursor, (1, 0, None));
+        assert_eq!(public_cursor, (1, 0, None, 0, None, 0));
+        let public_checkpoint: (i64, Option<String>, i64, Option<String>, i64) = store
+            .connection
+            .query_row(
+                "SELECT through_sequence, through_event_id, through_timestamp_ms,
+                        checkpoint_identity, checkpoint_bytes
+                 FROM public_timeline_checkpoints WHERE session_id = ?1",
+                ["purge-parent"],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(public_checkpoint, (0, None, 0, None, 0));
         let released =
             load_durable_blob_reference(&store.connection, &artifact.reference_id).unwrap();
         assert_eq!(released.state, "released");
@@ -29148,6 +29685,25 @@ mod tests {
                 .as_deref(),
             Some("purge-parent")
         );
+        let reopened_checkpoint: (i64, Option<String>, i64, Option<String>, i64) = reopened
+            .connection
+            .query_row(
+                "SELECT through_sequence, through_event_id, through_timestamp_ms,
+                        checkpoint_identity, checkpoint_bytes
+                 FROM public_timeline_checkpoints WHERE session_id = 'purge-parent'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(reopened_checkpoint, (0, None, 0, None, 0));
     }
 
     #[test]
@@ -29155,6 +29711,27 @@ mod tests {
         let root = Root::new("session-deletion-storage-failure");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
         create_rebuildable_session(&mut store, "delete-failure-parent");
+        let public_event = crate::event_sequencer::EventSequencer::default()
+            .sequence(
+                51,
+                "delete-failure-parent",
+                "delete-failure-turn",
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        store.append_public_timeline_event(&public_event).unwrap();
+        let checkpoint = store
+            .checkpoint_and_prune_public_timeline(
+                "delete-failure-parent",
+                &TimelineWatermark {
+                    sequence: public_event.sequence,
+                    event_id: Some(public_event.event_id.clone()),
+                },
+                52,
+            )
+            .unwrap();
+        let checkpoint_identity = checkpoint.checkpoint_identity.clone().unwrap();
         let preview = store
             .preview_session_deletion("delete-failure-parent", SessionDeletionScope::SessionOnly)
             .unwrap();
@@ -29172,8 +29749,13 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "CREATE TRIGGER fail_session_deletion_item_purge
-                 BEFORE DELETE ON items
+                "CREATE TRIGGER fail_session_deletion_checkpoint_reset
+                 BEFORE UPDATE OF through_sequence ON public_timeline_checkpoints
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected session deletion storage failure');
+                 END;
+                 CREATE TRIGGER fail_session_deletion_checkpoint_delete
+                 BEFORE DELETE ON public_timeline_checkpoints
                  BEGIN
                     SELECT RAISE(ABORT, 'injected session deletion storage failure');
                  END;",
@@ -29187,6 +29769,37 @@ mod tests {
                 .unwrap()
                 .state,
             "pending"
+        );
+        let preserved_checkpoint: (i64, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT through_sequence, checkpoint_identity
+                 FROM public_timeline_checkpoints
+                 WHERE session_id = 'delete-failure-parent'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved_checkpoint,
+            (public_event.sequence as i64, Some(checkpoint_identity))
+        );
+        let preserved_floor: (i64, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT pruned_through_sequence, pruned_through_event_id
+                 FROM public_timeline_cursors
+                 WHERE session_id = 'delete-failure-parent'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved_floor,
+            (
+                public_event.sequence as i64,
+                Some(public_event.event_id.clone())
+            )
         );
         assert_eq!(
             store
@@ -29207,7 +29820,10 @@ mod tests {
         assert_eq!(purge_audits, 0);
         store
             .connection
-            .execute_batch("DROP TRIGGER fail_session_deletion_item_purge;")
+            .execute_batch(
+                "DROP TRIGGER fail_session_deletion_checkpoint_reset;
+                 DROP TRIGGER fail_session_deletion_checkpoint_delete;",
+            )
             .unwrap();
         assert_eq!(store.sweep_session_deletions(undo_until).unwrap().purged, 1);
     }
@@ -29319,6 +29935,46 @@ mod tests {
         let root = Root::new("session-projection-storage-failure");
         let mut store = WorkbenchStore::open(&root.path).unwrap();
         create_rebuildable_session(&mut store, "session-storage-rebuild");
+        let public_event = crate::event_sequencer::EventSequencer::default()
+            .sequence(
+                50,
+                "session-storage-rebuild",
+                "projection-public-turn",
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        store.append_public_timeline_event(&public_event).unwrap();
+        store
+            .checkpoint_and_prune_public_timeline(
+                "session-storage-rebuild",
+                &TimelineWatermark {
+                    sequence: public_event.sequence,
+                    event_id: Some(public_event.event_id.clone()),
+                },
+                51,
+            )
+            .unwrap();
+        let timeline_before: (i64, Option<String>, String, i64, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT c.pruned_through_sequence, c.pruned_through_event_id,
+                        p.checkpoint_json, p.checkpoint_bytes, p.checkpoint_identity
+                 FROM public_timeline_cursors c
+                 JOIN public_timeline_checkpoints p ON p.session_id = c.session_id
+                 WHERE c.session_id = 'session-storage-rebuild'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
         store
             .connection
             .execute(
@@ -29372,6 +30028,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(audit_count, 0);
+        let timeline_after_failed_rebuild: (i64, Option<String>, String, i64, Option<String>) =
+            store
+                .connection
+                .query_row(
+                    "SELECT c.pruned_through_sequence, c.pruned_through_event_id,
+                            p.checkpoint_json, p.checkpoint_bytes, p.checkpoint_identity
+                     FROM public_timeline_cursors c
+                     JOIN public_timeline_checkpoints p ON p.session_id = c.session_id
+                     WHERE c.session_id = 'session-storage-rebuild'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .unwrap();
+        assert_eq!(timeline_after_failed_rebuild, timeline_before);
         store
             .connection
             .execute_batch("DROP TRIGGER fail_session_projection_item_insert;")
@@ -29385,6 +30063,27 @@ mod tests {
             store.load_session("session-storage-rebuild").unwrap().title,
             "Authoritative title"
         );
+        let timeline_after_rebuild: (i64, Option<String>, String, i64, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT c.pruned_through_sequence, c.pruned_through_event_id,
+                        p.checkpoint_json, p.checkpoint_bytes, p.checkpoint_identity
+                 FROM public_timeline_cursors c
+                 JOIN public_timeline_checkpoints p ON p.session_id = c.session_id
+                 WHERE c.session_id = 'session-storage-rebuild'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(timeline_after_rebuild, timeline_before);
     }
 
     #[test]
