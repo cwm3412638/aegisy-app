@@ -123,7 +123,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   retained file-change state is capped at 16 MiB per Turn. The Runtime compiles
   add/update/delete/pure-rename data into the shared `WorkspaceEdit` preview without
   writing the project. Workbench schema v18 commits
-  one immutable `workspace-edit-proposal/0.1`, exact content/diff Blob references,
+  one immutable `workspace-edit-proposal/0.2`, exact content/diff Blob references,
   and a metadata-only Session event in one SQLite transaction before the adapter may
   send its fixed read-only decline. Proposal admission binds Session, durable Turn,
   project/root/filesystem, read-only Runtime backend thread, provider item/time,
@@ -131,8 +131,15 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   mutation, user approval, and apply authority are fixed false. Store failure sends
   no decline and fails the Turn closed; a post-commit caller fault never removes
   committed Blob references, and Proposal/Blob corruption quarantines only the owning
-  Session. Public Proposal read, Qt Changes restart
-  recovery, genuine approval, checkpoint/apply, and rollback authority remain absent.
+  Session. New `0.2` records include aggregate and ordered per-file summaries whose
+  complete diff statistics and text formats are rechecked from persisted Blobs;
+  exact legacy `0.1` bytes and identities remain readable as explicitly incomplete.
+  Negotiated `workspace.edit.proposal.read-only` plus `permission.read-only` exposes
+  Session-scoped latest/exact Proposal reads and Proposal-owned 64 KiB artifact pages
+  with typed domain-separated identities. Every public mutation, approval, and apply
+  authority field is fixed false. A durable Change Timeline reference, Qt Changes
+  restart recovery, genuine approval, checkpoint/apply, and rollback authority remain
+  absent.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies
   sensitive paths and symlinks, honors ignore rules, preserves UTF-8/BOM and
   LF/CRLF, uses revision checks, and performs atomic user saves.
@@ -2738,18 +2745,21 @@ Implemented visual baseline:
 
 ## Verification Snapshot (2026-07-25)
 
-- The immutable Codex file-change Proposal stage passes 710 `aegisy-agentd` library
-  tests with one ignored live fixture, 6 daemon-main, 10 context-threshold, 13
-  handshake Runtime, 17 Schema, 66 protocol, and 23 stdio/Codex tests. Strict workspace
-  Clippy, formatting, all 16 desktop CTests, strict OpenSpec validation, and
-  `git diff --check` pass. Schema v18 migration/backup,
+- The immutable Codex file-change Proposal read stage passes 27 AAP tests, 720
+  `aegisy-agentd` library tests with one ignored live fixture, 6 daemon-main, 10
+  context-threshold, 13 handshake Runtime, 17 Schema, 67 protocol, and 23 stdio/Codex
+  tests. Strict workspace Clippy, formatting, strict OpenSpec validation, and
+  `git diff --check` pass. The existing desktop baseline remains 16 passing CTests;
+  this stage changes no Qt source. Schema v18 migration/backup,
   immutable Proposal/artifact/event persistence, nested domain-separated identities,
   retry/conflict/rollback/tamper/restart behavior, Runtime/provider/root binding, and
   the real read-only decline lifecycle are covered. The stdio fixture verifies exact
   `codex-app-server` / `codex-cli 0.144.5`, provider/backend thread,
   `read-only` permission, Session/Turn/root/time bindings, all three authority flags
-  false, restart read, and unchanged workspace. Public Proposal AAP/Qt read and all
-  Apply authority remain open.
+  false, restart read, and unchanged workspace. Public latest/exact Proposal AAP,
+  Proposal-bound artifact paging, fixed page identity, `-32149`/`-32150`, semantic
+  summary rechecks, and exact legacy `0.1` compatibility are covered. Durable Change
+  Timeline reference, Qt restart recovery, and all Apply authority remain open.
 
 - The Timeline Snapshot recovery stage passes 27 AAP type tests, the full
   `aegisy-agentd --lib` suite (`690` passed and one ignored live fixture), 13
@@ -2921,10 +2931,10 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Complete the user-visible Codex edit review slice: add bounded Proposal file
-   summaries, read-only latest/exact Proposal AAP, Proposal-bound artifact paging,
-   one durable Change Timeline reference, and Qt Changes auto-open/restart recovery.
-   Keep Apply and user Approval unavailable in this slice.
+1. Complete the remaining user-visible Codex edit review slice: add one durable
+   Change Timeline reference and Qt Changes auto-open/restart recovery on top of the
+   implemented `0.2` summaries and read-only Proposal AAP. Keep Apply and user
+   Approval unavailable in this slice.
 2. Continue OpenSpec `3.5` with subscription, heartbeat, complete reconnect
    orchestration, explicit acknowledgement, and Windows recovery evidence. The
    structured retention-gap response, schema-v17 visible-state persistence, Runtime

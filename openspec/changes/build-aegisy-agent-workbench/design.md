@@ -435,8 +435,16 @@ it is no longer model context.
   commit atomically; all mutation, user-approval, and apply authority fields remain
   false. A caller fault after commit cannot compensate away committed Proposal or
   Blob references, while Proposal/Blob corruption quarantines only its owning
-  Session. Provider `completed` is treated as a potential unauthorized write until
-  the later approval/checkpoint/apply pipeline exists.
+  Session. Current `workspace-edit-proposal/0.2` records bind complete aggregate and
+  ordered per-file summaries, with semantic statistics rechecked from untruncated
+  persisted diff Blobs. Exact `0.1` canonical bytes and identities remain readable
+  through an explicitly incomplete public projection. Negotiated
+  `workspace.edit.proposal.read-only` plus `permission.read-only` exposes
+  Session-scoped latest/exact Proposal reads and 64 KiB Proposal-owned artifact
+  pages with typed domain-separated identities; every public authority field remains
+  false. Qt Changes restart recovery is still absent. Provider `completed` is
+  treated as a potential unauthorized write until the later
+  approval/checkpoint/apply pipeline exists.
 - A file watcher invalidates context and UI state. Agent and user changes carry
   origin metadata.
 - Diagnostics come from build/test output first, then language servers. The UI

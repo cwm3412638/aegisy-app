@@ -156,7 +156,7 @@ use workbench_store::{
     StoredProjectTrustAcknowledge, StoredProjectTrustAcknowledgement, StoredSessionCreate,
     StoredSessionLineage, StoredSessionMode, StoredSessionRuntimeBindingCreate,
     StoredSessionWorkspaceBinding, StoredSessionWorkspaceBindingCreate, StoredTurnCreate,
-    WorkbenchRecoveryDiagnostic, WorkbenchStore, WorkbenchStoreOpen,
+    StoredWorkspaceEditProposal, WorkbenchRecoveryDiagnostic, WorkbenchStore, WorkbenchStoreOpen,
     WorkspaceEditProposalArtifactWrite,
 };
 use workspace::{
@@ -167,6 +167,7 @@ use workspace_edit::{ContentHash, WorkspaceEdit, WorkspaceEditOperation};
 use workspace_edit_preview::{ContentInput, PreviewArtifactSnapshot, WorkspaceEditPreviewStore};
 use workspace_edit_proposal::{
     WorkspaceEditProposal, WorkspaceEditProposalArtifact, WorkspaceEditProposalArtifactKind,
+    WorkspaceEditProposalOperation,
 };
 
 const DURABLE_COMMAND_ARTIFACT_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
@@ -264,6 +265,7 @@ pub const STABLE_CAPABILITY_REGISTRY: &[&str] = &[
     "workspace.diagnostics.observed",
     "workspace.diagnostics.raw-reference",
     "workspace.edit.preview.read-only",
+    "workspace.edit.proposal.read-only",
     "workspace.git-context.read-only",
     "workspace.git-query.read-only",
     "workspace.git-status",
@@ -1862,6 +1864,31 @@ struct WorkspaceEditArtifactParams {
     session_id: String,
     project_id: String,
     edit_id: String,
+    reference: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_workspace_edit_page_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceEditProposalLatestParams {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceEditProposalReadParams {
+    session_id: String,
+    proposal_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceEditProposalArtifactParams {
+    session_id: String,
+    proposal_id: String,
     reference: String,
     #[serde(default)]
     offset: usize,
@@ -4569,6 +4596,9 @@ impl Runtime {
                     | "terminal/remove-user"
                     | "artifact/read-command-output"
                     | "workspace/edit/artifact/read"
+                    | "workspace/edit/proposal/latest"
+                    | "workspace/edit/proposal/read"
+                    | "workspace/edit/proposal/artifact/read"
             )
         {
             self.emit_all(
@@ -4608,6 +4638,9 @@ impl Runtime {
                 | "terminal/remove-user"
                 | "artifact/read-command-output"
                 | "workspace/edit/artifact/read"
+                | "workspace/edit/proposal/latest"
+                | "workspace/edit/proposal/read"
+                | "workspace/edit/proposal/artifact/read"
         );
         if deletion_state.as_deref() == Some("pending") && !pending_deletion_read {
             self.emit_all(
@@ -4763,6 +4796,11 @@ impl Runtime {
             "artifact/read-command-output" => self.command_artifact_read(request),
             "workspace/edit/preview" => self.workspace_edit_preview(request),
             "workspace/edit/artifact/read" => self.workspace_edit_artifact_read(request),
+            "workspace/edit/proposal/latest" => self.workspace_edit_proposal_latest(request),
+            "workspace/edit/proposal/read" => self.workspace_edit_proposal_read(request),
+            "workspace/edit/proposal/artifact/read" => {
+                self.workspace_edit_proposal_artifact_read(request)
+            }
             "terminal/open-user" => self.terminal_open_user(request),
             "terminal/read" => self.terminal_read(request),
             "terminal/excerpt/read" => self.terminal_excerpt_read(request),
@@ -4883,6 +4921,9 @@ impl Runtime {
             "workspace/edit/preview" | "workspace/edit/artifact/read" => {
                 "workspace.edit.preview.read-only"
             }
+            "workspace/edit/proposal/latest"
+            | "workspace/edit/proposal/read"
+            | "workspace/edit/proposal/artifact/read" => "workspace.edit.proposal.read-only",
             "terminal/excerpt/read" => "terminal.excerpt.read",
             "terminal/stop-user" => "terminal.lifecycle.named",
             "terminal/open-user"
@@ -4913,6 +4954,14 @@ impl Runtime {
         }
         if request.method == "terminal/stop-user" {
             required.push("terminal.stop.out-of-band");
+        }
+        if matches!(
+            request.method.as_str(),
+            "workspace/edit/proposal/latest"
+                | "workspace/edit/proposal/read"
+                | "workspace/edit/proposal/artifact/read"
+        ) {
+            required.push("permission.read-only");
         }
         if matches!(
             request.method.as_str(),
@@ -5628,6 +5677,7 @@ impl Runtime {
                     "timeline.snapshot.current".into(),
                     "workspace.image.import-user".into(),
                     "workspace.image.preview".into(),
+                    "workspace.edit.proposal.read-only".into(),
                 ]);
             }
             if self.model_profile_store.is_some() {
@@ -16113,6 +16163,219 @@ impl Runtime {
         }
     }
 
+    fn workspace_edit_proposal_latest(&self, request: Request) -> Vec<Value> {
+        let params: WorkspaceEditProposalLatestParams =
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => params,
+                Err(cause) => {
+                    return self.error_for(&request, -32602, format!("invalid params: {cause}"))
+                }
+            };
+        if !valid_bounded_identifier(&params.session_id) {
+            return self.error_for(&request, -32602, "invalid Proposal session identity");
+        }
+        let Some(store) = self.workbench_store.as_ref() else {
+            return self.error_for(&request, -32120, "durable Proposal store is unavailable");
+        };
+        match store.read_latest_workspace_edit_proposal(&params.session_id) {
+            Ok(proposal) => {
+                let proposal = match proposal
+                    .as_ref()
+                    .map(workspace_edit_proposal_public_view)
+                    .transpose()
+                {
+                    Ok(proposal) => proposal,
+                    Err(()) => {
+                        return self.error_for(
+                            &request,
+                            -32115,
+                            "workspace edit Proposal failed integrity verification",
+                        )
+                    }
+                };
+                self.success_for(
+                    &request,
+                    json!({
+                        "schema_version": "workspace-edit-proposal-latest/0.1",
+                        "session_id": params.session_id,
+                        "proposal": proposal,
+                        "file_mutation_authority": false,
+                        "approval_recorded": false,
+                        "apply_available": false
+                    }),
+                )
+            }
+            Err(cause) => self.workspace_edit_proposal_store_error(&request, &cause, false),
+        }
+    }
+
+    fn workspace_edit_proposal_read(&self, request: Request) -> Vec<Value> {
+        let params: WorkspaceEditProposalReadParams =
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => params,
+                Err(cause) => {
+                    return self.error_for(&request, -32602, format!("invalid params: {cause}"))
+                }
+            };
+        if !valid_bounded_identifier(&params.session_id)
+            || !valid_workspace_edit_proposal_id(&params.proposal_id)
+        {
+            return self.error_for(&request, -32602, "invalid Proposal identity");
+        }
+        let Some(store) = self.workbench_store.as_ref() else {
+            return self.error_for(&request, -32120, "durable Proposal store is unavailable");
+        };
+        match store
+            .read_workspace_edit_proposal_for_session(&params.session_id, &params.proposal_id)
+        {
+            Ok(proposal) => match workspace_edit_proposal_public_view(&proposal) {
+                Ok(proposal) => self.success_for(
+                    &request,
+                    json!({
+                        "schema_version": "workspace-edit-proposal-read/0.1",
+                        "session_id": params.session_id,
+                        "proposal": proposal,
+                        "file_mutation_authority": false,
+                        "approval_recorded": false,
+                        "apply_available": false
+                    }),
+                ),
+                Err(()) => self.error_for(
+                    &request,
+                    -32115,
+                    "workspace edit Proposal failed integrity verification",
+                ),
+            },
+            Err(cause) => self.workspace_edit_proposal_store_error(&request, &cause, false),
+        }
+    }
+
+    fn workspace_edit_proposal_artifact_read(&self, request: Request) -> Vec<Value> {
+        let params: WorkspaceEditProposalArtifactParams =
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => params,
+                Err(cause) => {
+                    return self.error_for(&request, -32602, format!("invalid params: {cause}"))
+                }
+            };
+        if !valid_bounded_identifier(&params.session_id)
+            || !valid_workspace_edit_proposal_id(&params.proposal_id)
+            || !valid_workspace_edit_artifact_reference(&params.reference)
+            || params.limit == 0
+            || params.limit > workspace_edit_preview::MAX_PAGE_BYTES
+        {
+            return self.error_for(&request, -32602, "invalid Proposal artifact request");
+        }
+        let Some(store) = self.workbench_store.as_ref() else {
+            return self.error_for(&request, -32120, "durable Proposal store is unavailable");
+        };
+        let artifact = match store.read_workspace_edit_proposal_artifact_for_session(
+            &params.session_id,
+            &params.proposal_id,
+            &params.reference,
+        ) {
+            Ok(artifact) => artifact,
+            Err(cause) => return self.workspace_edit_proposal_store_error(&request, &cause, true),
+        };
+        if params.offset > artifact.content.len() {
+            return self.error_for(&request, -32150, "Proposal artifact page is unavailable");
+        }
+        let end = params
+            .offset
+            .saturating_add(params.limit)
+            .min(artifact.content.len());
+        let chunk = &artifact.content[params.offset..end];
+        let chunk_sha256 = ContentHash::for_bytes(chunk).sha256;
+        let next_offset = (end < artifact.content.len()).then_some(end);
+        let artifact_kind = artifact
+            .reference
+            .metadata
+            .get("artifact_kind")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let Some(project_id) = artifact.reference.project_id.as_deref() else {
+            return self.error_for(
+                &request,
+                -32115,
+                "workspace edit Proposal artifact binding is invalid",
+            );
+        };
+        let page_identity = workspace_edit_proposal_page_identity(
+            &WorkspaceEditProposalArtifactPageIdentityMaterial {
+                schema_version: "workspace-edit-proposal-artifact-page/0.1",
+                session_id: &params.session_id,
+                proposal_id: &params.proposal_id,
+                project_id,
+                edit_id: &artifact.reference.owner_id,
+                artifact_kind,
+                reference: &artifact.reference.content_reference,
+                sha256: &artifact.reference.content_hash.sha256,
+                bytes: artifact.reference.content_hash.bytes,
+                media_type: &artifact.reference.media_type,
+                offset: params.offset,
+                next_offset,
+                chunk_sha256: &chunk_sha256,
+            },
+        );
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "workspace-edit-proposal-artifact-page/0.1",
+                "session_id": &params.session_id,
+                "proposal_id": &params.proposal_id,
+                "project_id": project_id,
+                "edit_id": &artifact.reference.owner_id,
+                "artifact": {
+                    "kind": artifact_kind,
+                    "reference": &artifact.reference.content_reference,
+                    "sha256": &artifact.reference.content_hash.sha256,
+                    "bytes": artifact.reference.content_hash.bytes,
+                    "media_type": &artifact.reference.media_type
+                },
+                "offset": params.offset,
+                "next_offset": next_offset,
+                "total_bytes": artifact.content.len(),
+                "data_base64": BASE64_STANDARD.encode(chunk),
+                "chunk_sha256": &chunk_sha256,
+                "page_identity": page_identity,
+                "file_mutation_authority": false,
+                "approval_recorded": false,
+                "apply_available": false
+            }),
+        )
+    }
+
+    fn workspace_edit_proposal_store_error(
+        &self,
+        request: &Request,
+        cause: &workbench_store::WorkbenchStoreError,
+        artifact: bool,
+    ) -> Vec<Value> {
+        match cause.code.as_str() {
+            "workspace-edit-proposal-not-found" => self.error_for(
+                request,
+                if artifact { -32150 } else { -32149 },
+                if artifact {
+                    "Proposal artifact page is unavailable"
+                } else {
+                    "workspace edit Proposal is unavailable"
+                },
+            ),
+            "workspace-edit-proposal-artifact-not-found" => {
+                self.error_for(request, -32150, "Proposal artifact page is unavailable")
+            }
+            "session-deleted" => self.error_for(request, -32023, "session not found"),
+            "session-read-only-recovery" => {
+                self.error_for(request, -32115, "session is in read-only recovery")
+            }
+            _ => self.error_for(
+                request,
+                -32115,
+                "workspace edit Proposal failed integrity verification",
+            ),
+        }
+    }
+
     fn command_artifact_read(&mut self, request: Request) -> Vec<Value> {
         let params: CommandArtifactParams = match serde_json::from_value(request.params.clone()) {
             Ok(params) => params,
@@ -17033,6 +17296,279 @@ impl Runtime {
             None => Vec::new(),
         }
     }
+}
+
+fn workspace_edit_proposal_public_view(stored: &StoredWorkspaceEditProposal) -> Result<Value, ()> {
+    let proposal = &stored.proposal;
+    let preview_value = serde_json::to_value(&proposal.preview).map_err(|_| ())?;
+    let files_complete = preview_value.get("files").is_some_and(Value::is_array);
+    let files = if let Some(files) = preview_value.get("files").and_then(Value::as_array) {
+        files
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(ordinal, mut file)| {
+                let object = file.as_object_mut().ok_or(())?;
+                let operation = proposal.operations.get(ordinal).ok_or(())?;
+                let (base, proposed) = workspace_edit_proposal_operation_descriptors(operation)?;
+                object.insert("summary_state".into(), Value::String("complete".into()));
+                object.insert("base".into(), base);
+                object.insert("proposed".into(), proposed);
+                Ok(file)
+            })
+            .collect::<Result<Vec<_>, ()>>()?
+    } else {
+        proposal
+            .operations
+            .iter()
+            .zip(&proposal.preview.file_diff_references)
+            .enumerate()
+            .map(|(ordinal, (operation, diff_reference))| {
+                let diff = proposal
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.reference == *diff_reference)
+                    .ok_or(())?;
+                let (kind, path, from_path, base, proposed) = match operation {
+                    WorkspaceEditProposalOperation::Create { path, content } => (
+                        "create",
+                        path.as_str(),
+                        None,
+                        Value::Null,
+                        serde_json::to_value(content).map_err(|_| ())?,
+                    ),
+                    WorkspaceEditProposalOperation::Update {
+                        path,
+                        base,
+                        content,
+                    } => (
+                        "update",
+                        path.as_str(),
+                        None,
+                        serde_json::to_value(base).map_err(|_| ())?,
+                        serde_json::to_value(content).map_err(|_| ())?,
+                    ),
+                    WorkspaceEditProposalOperation::Delete { path, base } => (
+                        "delete",
+                        path.as_str(),
+                        None,
+                        serde_json::to_value(base).map_err(|_| ())?,
+                        Value::Null,
+                    ),
+                    WorkspaceEditProposalOperation::Rename {
+                        from_path,
+                        to_path,
+                        base,
+                    } => (
+                        "rename",
+                        to_path.as_str(),
+                        Some(from_path.as_str()),
+                        serde_json::to_value(base).map_err(|_| ())?,
+                        Value::Null,
+                    ),
+                };
+                Ok(json!({
+                    "ordinal": ordinal,
+                    "summary_state": "legacy-incomplete",
+                    "kind": kind,
+                    "path": path,
+                    "from_path": from_path,
+                    "additions": Value::Null,
+                    "deletions": Value::Null,
+                    "base_matches": Value::Null,
+                    "base": base,
+                    "proposed": proposed,
+                    "warnings": Value::Null,
+                    "diff": {
+                        "reference": diff.reference,
+                        "sha256": diff.sha256,
+                        "bytes": diff.bytes,
+                        "media_type": diff.media_type,
+                        "inline_truncated": Value::Null,
+                        "source_truncated": Value::Null
+                    }
+                }))
+            })
+            .collect::<Result<Vec<_>, ()>>()?
+    };
+    let aggregate_artifact = proposal
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.reference == proposal.preview.aggregate_diff_reference)
+        .ok_or(())?;
+    let aggregate_diff = preview_value
+        .get("aggregate_diff")
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "reference": aggregate_artifact.reference,
+                "sha256": aggregate_artifact.sha256,
+                "bytes": aggregate_artifact.bytes,
+                "media_type": aggregate_artifact.media_type,
+                "inline_truncated": Value::Null,
+                "source_truncated": Value::Null
+            })
+        });
+    Ok(json!({
+        "schema_version": "workspace-edit-proposal-view/0.1",
+        "internal_schema_version": proposal.schema_version,
+        "proposal_id": proposal.proposal_id,
+        "session_id": proposal.session_id,
+        "turn_id": proposal.turn_id,
+        "project_id": proposal.project_id,
+        "root_id": proposal.root_id,
+        "edit_id": proposal.edit_id,
+        "canonical_edit_identity": proposal.canonical_edit_identity,
+        "preview_identity": proposal.preview.identity,
+        "proposal_sha256": stored.proposal_hash.sha256,
+        "proposal_bytes": stored.proposal_hash.bytes,
+        "event_sequence": stored.event_sequence,
+        "created_at_ms": proposal.created_at_ms,
+        "approval_started_at_ms": proposal.approval_started_at_ms,
+        "provider_identity": proposal.provider_identity(),
+        "provider_thread_identity": proposal.provider_thread_identity(),
+        "provider_item_identity": proposal.provider_item_identity(),
+        "runtime": {
+            "adapter": codex_capability_matrix::CODEX_ADAPTER,
+            "adapter_version": codex_capability_matrix::CODEX_VERSION,
+            "permission": "read-only"
+        },
+        "summary": {
+            "files_complete": files_complete,
+            "file_count": proposal.preview.file_count,
+            "additions": proposal.preview.additions,
+            "deletions": proposal.preview.deletions,
+            "warning_count": proposal.preview.warning_count,
+            "applicable": proposal.preview.applicable,
+            "aggregate_diff": aggregate_diff,
+            "files": files
+        },
+        "file_mutation_authority": false,
+        "approval_recorded": false,
+        "apply_available": false
+    }))
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct WorkspaceEditProposalArtifactPageIdentityMaterial<'a> {
+    schema_version: &'a str,
+    session_id: &'a str,
+    proposal_id: &'a str,
+    project_id: &'a str,
+    edit_id: &'a str,
+    artifact_kind: &'a str,
+    reference: &'a str,
+    sha256: &'a str,
+    bytes: u64,
+    media_type: &'a str,
+    offset: usize,
+    next_offset: Option<usize>,
+    chunk_sha256: &'a str,
+}
+
+fn workspace_edit_proposal_page_identity(
+    binding: &WorkspaceEditProposalArtifactPageIdentityMaterial<'_>,
+) -> String {
+    let mut bytes = b"workspace-edit-proposal-artifact-page\0".to_vec();
+    bytes.extend(serde_json::to_vec(binding).expect("Proposal page identity serialization"));
+    format!(
+        "workspace-edit-proposal-artifact-page:sha256:{}",
+        ContentHash::for_bytes(&bytes).sha256
+    )
+}
+
+#[cfg(test)]
+mod workspace_edit_proposal_page_identity_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_edit_proposal_page_identity_has_a_fixed_complete_binding() {
+        let artifact_sha256 = "a".repeat(64);
+        let chunk_sha256 = "b".repeat(64);
+        let proposal_id = format!("workspace-edit-proposal:sha256:{artifact_sha256}");
+        let reference = format!("workspace-edit-diff:sha256:{artifact_sha256}");
+        let material = WorkspaceEditProposalArtifactPageIdentityMaterial {
+            schema_version: "workspace-edit-proposal-artifact-page/0.1",
+            session_id: "session-1",
+            proposal_id: &proposal_id,
+            project_id: "project-1",
+            edit_id: "edit-1",
+            artifact_kind: "diff",
+            reference: &reference,
+            sha256: &artifact_sha256,
+            bytes: 10,
+            media_type: "text/x-diff; charset=utf-8",
+            offset: 0,
+            next_offset: Some(8),
+            chunk_sha256: &chunk_sha256,
+        };
+        assert_eq!(
+            workspace_edit_proposal_page_identity(&material),
+            "workspace-edit-proposal-artifact-page:sha256:fd4145716f3279056834c7807195135ac7d021fb21717adb5695d0a774abfd88"
+        );
+
+        let mut drifted = material;
+        drifted.project_id = "project-2";
+        assert_ne!(
+            workspace_edit_proposal_page_identity(&material),
+            workspace_edit_proposal_page_identity(&drifted)
+        );
+        drifted = material;
+        drifted.edit_id = "edit-2";
+        assert_ne!(
+            workspace_edit_proposal_page_identity(&material),
+            workspace_edit_proposal_page_identity(&drifted)
+        );
+        drifted = material;
+        drifted.next_offset = None;
+        assert_ne!(
+            workspace_edit_proposal_page_identity(&material),
+            workspace_edit_proposal_page_identity(&drifted)
+        );
+    }
+}
+
+fn workspace_edit_proposal_operation_descriptors(
+    operation: &WorkspaceEditProposalOperation,
+) -> Result<(Value, Value), ()> {
+    match operation {
+        WorkspaceEditProposalOperation::Create { content, .. } => {
+            Ok((Value::Null, serde_json::to_value(content).map_err(|_| ())?))
+        }
+        WorkspaceEditProposalOperation::Update { base, content, .. } => Ok((
+            serde_json::to_value(base).map_err(|_| ())?,
+            serde_json::to_value(content).map_err(|_| ())?,
+        )),
+        WorkspaceEditProposalOperation::Delete { base, .. }
+        | WorkspaceEditProposalOperation::Rename { base, .. } => {
+            Ok((serde_json::to_value(base).map_err(|_| ())?, Value::Null))
+        }
+    }
+}
+
+fn valid_bounded_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_workspace_edit_proposal_id(value: &str) -> bool {
+    valid_prefixed_lower_sha256(value, "workspace-edit-proposal:sha256:")
+}
+
+fn valid_workspace_edit_artifact_reference(value: &str) -> bool {
+    valid_prefixed_lower_sha256(value, "workspace-edit-content:sha256:")
+        || valid_prefixed_lower_sha256(value, "workspace-edit-diff:sha256:")
+}
+
+fn valid_prefixed_lower_sha256(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
 }
 
 #[cfg(test)]
@@ -20529,6 +21065,93 @@ mod durable_runtime_tests {
                 .unwrap()
                 >= 2
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_edit_proposal_read_capability_is_durable_scoped_and_read_only() {
+        let root = std::env::temp_dir().join(format!(
+            "aegisy-runtime-proposal-read-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let data_root = root.join("data");
+        let project_root = root.join("project");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+
+        let mut runtime = Runtime::with_store(&data_root).unwrap();
+        let initialized = ready(&mut runtime);
+        assert!(initialized["result"]["capabilities"]["stable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "workspace.edit.proposal.read-only"));
+        let opened = runtime.handle_line(&request(
+            "project-open",
+            "project/open",
+            json!({"root": project_root.canonicalize().unwrap()}),
+        ));
+        let project_id = opened[0]["result"]["project"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let started = runtime.handle_line(&request(
+            "session-start",
+            "session/start",
+            json!({"mode": "work", "project_id": project_id}),
+        ));
+        let session_id = started[0]["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let latest = runtime.handle_line(&request(
+            "proposal-latest",
+            "workspace/edit/proposal/latest",
+            json!({"session_id": &session_id}),
+        ));
+        assert_eq!(
+            latest[0]["result"]["schema_version"],
+            "workspace-edit-proposal-latest/0.1"
+        );
+        assert!(latest[0]["result"]["proposal"].is_null());
+        assert_eq!(latest[0]["result"]["file_mutation_authority"], false);
+        assert_eq!(latest[0]["result"]["approval_recorded"], false);
+        assert_eq!(latest[0]["result"]["apply_available"], false);
+
+        let proposal_id = format!("workspace-edit-proposal:sha256:{}", "a".repeat(64));
+        let missing = runtime.handle_line(&request(
+            "proposal-read",
+            "workspace/edit/proposal/read",
+            json!({"session_id": &session_id, "proposal_id": &proposal_id}),
+        ));
+        assert_eq!(missing[0]["error"]["code"], -32149);
+        let missing_artifact = runtime.handle_line(&request(
+            "proposal-artifact",
+            "workspace/edit/proposal/artifact/read",
+            json!({
+                "session_id": &session_id,
+                "proposal_id": &proposal_id,
+                "reference": format!("workspace-edit-diff:sha256:{}", "b".repeat(64)),
+                "offset": 0,
+                "limit": 64
+            }),
+        ));
+        assert_eq!(missing_artifact[0]["error"]["code"], -32150);
+        let unknown_field = runtime.handle_line(&request(
+            "proposal-invalid",
+            "workspace/edit/proposal/latest",
+            json!({"session_id": &session_id, "project_id": "caller-selected"}),
+        ));
+        assert_eq!(unknown_field[0]["error"]["code"], -32602);
+        let apply = runtime.handle_line(&request(
+            "proposal-apply",
+            "workspace/edit/apply",
+            json!({"session_id": &session_id, "proposal_id": &proposal_id}),
+        ));
+        assert_eq!(apply[0]["error"]["code"], -32601);
 
         let _ = fs::remove_dir_all(root);
     }

@@ -1247,6 +1247,89 @@ automatically. Provider `thread/compact/start`, activation, automatic thresholds
 model-generated summaries, and cross-resource failure compensation remain
 unavailable.
 
+## Workspace Edit Proposal Read
+
+The stable capability is `workspace.edit.proposal.read-only`. It is advertised
+only with a healthy durable Workbench Store, and every method below additionally
+requires negotiated `permission.read-only`. The capability exposes an immutable
+review record and its already-persisted artifacts; it grants no file mutation,
+user approval, apply, checkpoint, restore, or provider authority.
+
+`workspace/edit/proposal/latest` accepts exactly `session_id`. It returns
+`workspace-edit-proposal-latest/0.1` and either the latest validated Proposal for
+that Session or `proposal:null`; an empty Session is not an error.
+`workspace/edit/proposal/read` accepts exactly `session_id` and a typed
+`workspace-edit-proposal:sha256:` Proposal ID and returns
+`workspace-edit-proposal-read/0.1`. Exact reads are Session-scoped, so an unknown,
+purged, cross-Session, or substituted Proposal identity is never disclosed as a
+different Session's record.
+
+```jsonl
+{"jsonrpc":"2.0","id":"proposal-latest-1","method":"workspace/edit/proposal/latest","params":{"session_id":"session-1"}}
+{"jsonrpc":"2.0","id":"proposal-latest-1","result":{"schema_version":"workspace-edit-proposal-latest/0.1","session_id":"session-1","proposal":null,"file_mutation_authority":false,"approval_recorded":false,"apply_available":false}}
+{"jsonrpc":"2.0","id":"proposal-read-1","method":"workspace/edit/proposal/read","params":{"session_id":"session-1","proposal_id":"workspace-edit-proposal:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+{"jsonrpc":"2.0","id":"proposal-read-1","error":{"code":-32149,"message":"workspace edit Proposal is unavailable"}}
+```
+
+A returned Proposal uses public schema `workspace-edit-proposal-view/0.1`. It
+contains Session, Turn, project, root, edit, event-sequence, creation/lifecycle,
+Runtime, and content-free Provider identity bindings; raw Provider, thread, and
+item IDs are omitted. It also carries the stored Proposal byte count/SHA-256,
+canonical edit and preview identities, and a summary whose artifact descriptors
+can be read through the Proposal-scoped method below. The response wrapper and
+the Proposal view independently fix `file_mutation_authority`,
+`approval_recorded`, and `apply_available` to `false`.
+
+New records use internal schema `workspace-edit-proposal/0.2`. Their complete
+summary contains aggregate and ordered per-file diff descriptors, operation kind,
+target and optional rename-source path, base/proposed descriptors, additions,
+deletions, base-match state, proposed text format, blocking warnings, and explicit
+inline/source truncation. Store admission, direct read, and startup verification
+recheck those aggregates, order, warnings, applicability, content format, and
+artifact bindings. For every diff with `source_truncated:false`, statistics are
+recomputed from the exact persisted untruncated Blob, even when its inline display
+was truncated. A genuinely source-truncated diff remains explicitly labelled and
+is not treated as having an independently recomputable complete source.
+
+Legacy `workspace-edit-proposal/0.1` compatibility is exact rather than a
+migration or backfill. Its canonical serialization, Proposal ID, preview identity,
+operations, artifact descriptors, and authority fields remain unchanged, and a
+valid `0.1` record must omit the `0.2` aggregate/file detail fields. The public
+view reports `files_complete:false`; each synthesized operation row has
+`summary_state:"legacy-incomplete"` and leaves additions, deletions, base-match,
+warnings, and diff truncation fields `null`. It preserves the authoritative
+base/proposed descriptors and artifact references but never fabricates missing
+summary semantics. A `0.2` row instead reports `files_complete:true` and
+`summary_state:"complete"` for every file.
+
+Proposal, canonical-edit, preview, overlap-baseline, Provider, Provider-thread,
+Provider-item, and artifact-page identities are typed and domain-separated SHA-256
+values; a digest valid in one domain cannot substitute in another. The artifact
+page identity hashes the fixed-order compact JSON binding of schema, Session,
+Proposal, project, edit, artifact kind/reference/hash/bytes/media type, offset,
+next offset, and chunk SHA-256 after the domain bytes
+`workspace-edit-proposal-artifact-page\0`.
+
+`workspace/edit/proposal/artifact/read` accepts exactly `session_id`,
+`proposal_id`, `reference`, optional `offset` (default zero), and optional `limit`
+(default 65,536). `limit` must be 1 through 65,536 bytes. The result is
+`workspace-edit-proposal-artifact-page/0.1` and returns at most one 64 KiB Base64
+chunk with exact artifact metadata, total bytes, next offset, chunk SHA-256, and
+the page identity. The reference must belong to the exact Proposal and Session;
+there is no generic Blob read fallback.
+
+```jsonl
+{"jsonrpc":"2.0","id":"proposal-artifact-1","method":"workspace/edit/proposal/artifact/read","params":{"session_id":"session-1","proposal_id":"workspace-edit-proposal:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reference":"workspace-edit-diff:sha256:7c4604d03f399eac32a48edbb7be1710838b70c83ad0e94b60137920945d6c40","offset":0,"limit":65536}}
+{"jsonrpc":"2.0","id":"proposal-artifact-1","result":{"schema_version":"workspace-edit-proposal-artifact-page/0.1","session_id":"session-1","proposal_id":"workspace-edit-proposal:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","project_id":"project-1","edit_id":"edit-1","artifact":{"kind":"diff","reference":"workspace-edit-diff:sha256:7c4604d03f399eac32a48edbb7be1710838b70c83ad0e94b60137920945d6c40","sha256":"7c4604d03f399eac32a48edbb7be1710838b70c83ad0e94b60137920945d6c40","bytes":5,"media_type":"text/x-diff; charset=utf-8"},"offset":0,"next_offset":null,"total_bytes":5,"data_base64":"ZGlmZgo=","chunk_sha256":"7c4604d03f399eac32a48edbb7be1710838b70c83ad0e94b60137920945d6c40","page_identity":"workspace-edit-proposal-artifact-page:sha256:d6669806e19a8648ee1bfa52ed6a987ff1cfdd372a777b0050d80d631341125b","file_mutation_authority":false,"approval_recorded":false,"apply_available":false}}
+```
+
+`-32149` means the exact Session-scoped Proposal is unavailable. `-32150` means
+the exact Proposal artifact/page is unavailable, including an offset beyond the
+artifact. Invalid request shape or identity syntax remains `-32602`; integrity or
+Session quarantine fails closed instead of degrading to a partial Proposal. The
+method `workspace/edit/apply` remains unavailable, and no Qt Changes recovery
+consumer exists in this slice.
+
 ## Security Boundary
 
 - AAP never carries desktop login tokens, API keys, authenticated proxy values,

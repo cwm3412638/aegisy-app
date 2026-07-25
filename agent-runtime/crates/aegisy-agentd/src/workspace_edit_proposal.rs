@@ -1,14 +1,19 @@
-use crate::workspace_edit::{ContentHash, ProposedContent, WorkspaceEdit, WorkspaceEditOperation};
+use crate::workspace_edit::{
+    ContentHash, ProposedContent, ProposedTextFormat, WorkspaceEdit, WorkspaceEditOperation,
+};
 use crate::workspace_edit_overlap::{
     proposal_overlap_baseline, ExpectedWorkspacePathState, WorkspaceEditOverlapPhase,
 };
-use crate::workspace_edit_preview::{PreviewArtifactSnapshot, WorkspaceEditPreview};
+use crate::workspace_edit_preview::{
+    PreviewArtifactDescriptor, PreviewArtifactSnapshot, WorkspaceEditPreview,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
-pub const SCHEMA_VERSION: &str = "workspace-edit-proposal/0.1";
+pub const SCHEMA_VERSION: &str = "workspace-edit-proposal/0.2";
+pub const LEGACY_SCHEMA_VERSION: &str = "workspace-edit-proposal/0.1";
 pub const EVENT_SCHEMA_VERSION: &str = "workspace-edit.proposal-recorded/0.1";
 const BASELINE_SCHEMA_VERSION: &str = "workspace-edit-proposal-baseline/0.1";
 const MAX_IDENTIFIER_BYTES: usize = 256;
@@ -17,6 +22,10 @@ const MAX_PATH_BYTES: usize = 4 * 1024;
 const MAX_OPERATIONS: usize = 256;
 const MAX_ARTIFACTS: usize = 513;
 const MAX_CONTENT_BYTES: u64 = 512 * 1024;
+const MAX_FILE_DIFF_BYTES: u64 = 512 * 1024;
+const MAX_AGGREGATE_DIFF_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_INLINE_FILE_DIFF_BYTES: u64 = 32 * 1024;
+const MAX_INLINE_AGGREGATE_DIFF_BYTES: u64 = 64 * 1024;
 const CONTENT_REFERENCE_PREFIX: &str = "workspace-edit-content:sha256:";
 const DIFF_REFERENCE_PREFIX: &str = "workspace-edit-diff:sha256:";
 
@@ -144,6 +153,54 @@ pub struct WorkspaceEditProposalPreview {
     pub applicable: bool,
     pub aggregate_diff_reference: String,
     pub file_diff_references: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_diff: Option<WorkspaceEditProposalDiffSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<WorkspaceEditProposalFileSummary>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceEditProposalFileSummary {
+    pub ordinal: u64,
+    pub kind: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_path: Option<String>,
+    pub additions: u64,
+    pub deletions: u64,
+    pub base_matches: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_format: Option<WorkspaceEditProposalTextFormat>,
+    pub warnings: Vec<WorkspaceEditProposalWarning>,
+    pub diff: WorkspaceEditProposalDiffSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceEditProposalTextFormat {
+    pub encoding: String,
+    pub newline: String,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceEditProposalWarning {
+    pub code: String,
+    pub severity: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceEditProposalDiffSummary {
+    pub reference: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub media_type: String,
+    pub inline_truncated: bool,
+    pub source_truncated: bool,
 }
 
 #[derive(Deserialize)]
@@ -166,11 +223,81 @@ struct WorkspaceEditProposalWire {
     operations: Vec<WorkspaceEditProposalOperation>,
     artifacts: Vec<WorkspaceEditProposalArtifact>,
     overlap_baseline: WorkspaceEditProposalBaseline,
-    preview: WorkspaceEditProposalPreview,
+    preview: WorkspaceEditProposalPreviewWire,
     created_at_ms: u64,
     file_mutation_authority: bool,
     approval_recorded: bool,
     apply_available: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceEditProposalPreviewWire {
+    identity: String,
+    file_count: u64,
+    additions: u64,
+    deletions: u64,
+    warning_count: u64,
+    applicable: bool,
+    aggregate_diff_reference: String,
+    file_diff_references: Vec<String>,
+    #[serde(default)]
+    aggregate_diff: PresentOption<WorkspaceEditProposalDiffSummary>,
+    #[serde(default)]
+    files: PresentOption<Vec<WorkspaceEditProposalFileSummary>>,
+}
+
+#[derive(Default)]
+enum PresentOption<T> {
+    #[default]
+    Missing,
+    Present(Option<T>),
+}
+
+impl<'de, T> Deserialize<'de> for PresentOption<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(Self::Present)
+    }
+}
+
+impl WorkspaceEditProposalPreviewWire {
+    fn into_preview(
+        self,
+        schema_version: &str,
+    ) -> Result<WorkspaceEditProposalPreview, WorkspaceEditProposalError> {
+        let (aggregate_diff, files) = match (schema_version, self.aggregate_diff, self.files) {
+            (LEGACY_SCHEMA_VERSION, PresentOption::Missing, PresentOption::Missing) => (None, None),
+            (
+                SCHEMA_VERSION,
+                PresentOption::Present(Some(aggregate_diff)),
+                PresentOption::Present(Some(files)),
+            ) => (Some(aggregate_diff), Some(files)),
+            (LEGACY_SCHEMA_VERSION | SCHEMA_VERSION, _, _) => {
+                return Err(error(
+                    "proposal preview detail presence does not match its schema version",
+                ));
+            }
+            _ => return Err(error("unsupported workspace edit proposal schema")),
+        };
+        Ok(WorkspaceEditProposalPreview {
+            identity: self.identity,
+            file_count: self.file_count,
+            additions: self.additions,
+            deletions: self.deletions,
+            warning_count: self.warning_count,
+            applicable: self.applicable,
+            aggregate_diff_reference: self.aggregate_diff_reference,
+            file_diff_references: self.file_diff_references,
+            aggregate_diff,
+            files,
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -216,6 +343,10 @@ struct PreviewIdentity<'a> {
     applicable: bool,
     aggregate_diff_reference: &'a str,
     file_diff_references: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aggregate_diff: Option<&'a WorkspaceEditProposalDiffSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    files: Option<&'a [WorkspaceEditProposalFileSummary]>,
 }
 
 impl WorkspaceEditProposal {
@@ -266,6 +397,37 @@ impl WorkspaceEditProposal {
             },
         )?;
         let overlap_baseline = proposal_baseline(edit, &operations)?;
+        let aggregate_diff = proposal_diff_summary(&preview.aggregate_diff)?;
+        let files = preview
+            .files
+            .iter()
+            .enumerate()
+            .map(|(ordinal, file)| {
+                Ok(WorkspaceEditProposalFileSummary {
+                    ordinal: to_u64(ordinal, "proposal file ordinal")?,
+                    kind: file.kind.clone(),
+                    path: file.path.clone(),
+                    from_path: file.from_path.clone(),
+                    additions: to_u64(file.additions, "proposal file additions")?,
+                    deletions: to_u64(file.deletions, "proposal file deletions")?,
+                    base_matches: file.base_matches,
+                    proposed_format: file
+                        .proposed_format
+                        .as_ref()
+                        .map(WorkspaceEditProposalTextFormat::from),
+                    warnings: file
+                        .warnings
+                        .iter()
+                        .map(|warning| WorkspaceEditProposalWarning {
+                            code: warning.code.clone(),
+                            severity: warning.severity.clone(),
+                            path: warning.path.clone(),
+                        })
+                        .collect(),
+                    diff: proposal_diff_summary(&file.diff)?,
+                })
+            })
+            .collect::<Result<Vec<_>, WorkspaceEditProposalError>>()?;
         let mut preview = WorkspaceEditProposalPreview {
             identity: String::new(),
             file_count: to_u64(preview.files.len(), "preview file count")?,
@@ -279,6 +441,8 @@ impl WorkspaceEditProposal {
                 .iter()
                 .map(|file| file.diff.reference.clone())
                 .collect(),
+            aggregate_diff: Some(aggregate_diff),
+            files: Some(files),
         };
         preview.identity = preview_identity(&preview)?;
         let mut proposal = Self {
@@ -311,7 +475,10 @@ impl WorkspaceEditProposal {
     }
 
     pub fn validate(&self) -> Result<(), WorkspaceEditProposalError> {
-        if self.schema_version != SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version.as_str(),
+            SCHEMA_VERSION | LEGACY_SCHEMA_VERSION
+        ) {
             return Err(error("unsupported workspace edit proposal schema"));
         }
         validate_identifier(&self.session_id, "proposal session ID")?;
@@ -420,6 +587,10 @@ impl<'de> Deserialize<'de> for WorkspaceEditProposal {
         D: Deserializer<'de>,
     {
         let wire = WorkspaceEditProposalWire::deserialize(deserializer)?;
+        let preview = wire
+            .preview
+            .into_preview(&wire.schema_version)
+            .map_err(|cause| serde::de::Error::custom(cause.message))?;
         let proposal = Self {
             schema_version: wire.schema_version,
             proposal_id: wire.proposal_id,
@@ -438,7 +609,7 @@ impl<'de> Deserialize<'de> for WorkspaceEditProposal {
             operations: wire.operations,
             artifacts: wire.artifacts,
             overlap_baseline: wire.overlap_baseline,
-            preview: wire.preview,
+            preview,
             created_at_ms: wire.created_at_ms,
             file_mutation_authority: wire.file_mutation_authority,
             approval_recorded: wire.approval_recorded,
@@ -499,6 +670,26 @@ impl From<&ProposedContent> for WorkspaceEditProposalContent {
             encoding: value.format.encoding.clone(),
             newline: value.format.newline.clone(),
             mode: value.format.mode.clone(),
+        }
+    }
+}
+
+impl From<&ProposedTextFormat> for WorkspaceEditProposalTextFormat {
+    fn from(value: &ProposedTextFormat) -> Self {
+        Self {
+            encoding: value.encoding.clone(),
+            newline: value.newline.clone(),
+            mode: value.mode.clone(),
+        }
+    }
+}
+
+impl WorkspaceEditProposalTextFormat {
+    fn from_content(content: &WorkspaceEditProposalContent) -> Self {
+        Self {
+            encoding: content.encoding.clone(),
+            newline: content.newline.clone(),
+            mode: content.mode.clone(),
         }
     }
 }
@@ -844,6 +1035,22 @@ fn validate_preview_summary(
     {
         return Err(error("proposal preview summary is invalid"));
     }
+    match (
+        proposal.schema_version.as_str(),
+        proposal.preview.aggregate_diff.as_ref(),
+        proposal.preview.files.as_deref(),
+    ) {
+        (LEGACY_SCHEMA_VERSION, None, None) => {}
+        (SCHEMA_VERSION, Some(aggregate), Some(files)) => {
+            validate_complete_preview_summary(proposal, aggregate, files)?;
+        }
+        (LEGACY_SCHEMA_VERSION | SCHEMA_VERSION, _, _) => {
+            return Err(error(
+                "proposal preview detail does not match its schema version",
+            ));
+        }
+        _ => return Err(error("unsupported workspace edit proposal schema")),
+    }
     if proposal.preview.identity != preview_identity(&proposal.preview)? {
         return Err(error(
             "proposal preview identity does not match its summary",
@@ -865,8 +1072,205 @@ fn preview_identity(
             applicable: preview.applicable,
             aggregate_diff_reference: &preview.aggregate_diff_reference,
             file_diff_references: &preview.file_diff_references,
+            aggregate_diff: preview.aggregate_diff.as_ref(),
+            files: preview.files.as_deref(),
         },
     )
+}
+
+fn validate_complete_preview_summary(
+    proposal: &WorkspaceEditProposal,
+    aggregate: &WorkspaceEditProposalDiffSummary,
+    files: &[WorkspaceEditProposalFileSummary],
+) -> Result<(), WorkspaceEditProposalError> {
+    if files.len() != proposal.operations.len()
+        || aggregate.reference != proposal.preview.aggregate_diff_reference
+    {
+        return Err(error("proposal preview detail is incomplete"));
+    }
+    validate_diff_summary(
+        proposal,
+        aggregate,
+        MAX_AGGREGATE_DIFF_BYTES,
+        MAX_INLINE_AGGREGATE_DIFF_BYTES,
+        "aggregate diff",
+    )?;
+
+    let mut additions = 0_u64;
+    let mut deletions = 0_u64;
+    let mut warning_count = 0_u64;
+    for (index, (operation, file)) in proposal.operations.iter().zip(files).enumerate() {
+        if file.ordinal != index as u64
+            || proposal.preview.file_diff_references[index] != file.diff.reference
+        {
+            return Err(error("proposal file summary order is invalid"));
+        }
+        validate_file_summary(proposal, operation, file)?;
+        additions = additions
+            .checked_add(file.additions)
+            .ok_or_else(|| error("proposal additions overflow"))?;
+        deletions = deletions
+            .checked_add(file.deletions)
+            .ok_or_else(|| error("proposal deletions overflow"))?;
+        warning_count = warning_count
+            .checked_add(to_u64(file.warnings.len(), "proposal warning count")?)
+            .ok_or_else(|| error("proposal warning count overflow"))?;
+    }
+    let applicable = files.iter().all(|file| {
+        file.warnings
+            .iter()
+            .all(|warning| warning.severity != "blocking")
+    });
+    if additions != proposal.preview.additions
+        || deletions != proposal.preview.deletions
+        || warning_count != proposal.preview.warning_count
+        || applicable != proposal.preview.applicable
+        || (files.iter().any(|file| file.diff.source_truncated) && !aggregate.source_truncated)
+    {
+        return Err(error(
+            "proposal preview aggregates do not match file summaries",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_file_summary(
+    proposal: &WorkspaceEditProposal,
+    operation: &WorkspaceEditProposalOperation,
+    file: &WorkspaceEditProposalFileSummary,
+) -> Result<(), WorkspaceEditProposalError> {
+    validate_path(&file.path)?;
+    if let Some(from_path) = file.from_path.as_deref() {
+        validate_path(from_path)?;
+    }
+    let (kind, path, from_path, proposed_format, base_path) = match operation {
+        WorkspaceEditProposalOperation::Create { path, content } => (
+            "create",
+            path.as_str(),
+            None,
+            Some(WorkspaceEditProposalTextFormat::from_content(content)),
+            None,
+        ),
+        WorkspaceEditProposalOperation::Update { path, content, .. } => (
+            "update",
+            path.as_str(),
+            None,
+            Some(WorkspaceEditProposalTextFormat::from_content(content)),
+            Some(path.as_str()),
+        ),
+        WorkspaceEditProposalOperation::Delete { path, .. } => {
+            ("delete", path.as_str(), None, None, Some(path.as_str()))
+        }
+        WorkspaceEditProposalOperation::Rename {
+            from_path, to_path, ..
+        } => (
+            "rename",
+            to_path.as_str(),
+            Some(from_path.as_str()),
+            None,
+            Some(from_path.as_str()),
+        ),
+    };
+    if file.kind != kind
+        || file.path != path
+        || file.from_path.as_deref() != from_path
+        || file.proposed_format != proposed_format
+        || (kind == "create" && file.base_matches.is_some())
+        || (kind == "rename"
+            && (file.additions != 0 || file.deletions != 0 || file.diff.source_truncated))
+    {
+        return Err(error("proposal file summary does not match its operation"));
+    }
+    if let Some(format) = file.proposed_format.as_ref() {
+        validate_text_format(format)?;
+    }
+    validate_diff_summary(
+        proposal,
+        &file.diff,
+        MAX_FILE_DIFF_BYTES,
+        MAX_INLINE_FILE_DIFF_BYTES,
+        "file diff",
+    )?;
+    validate_warnings(file, base_path)?;
+    Ok(())
+}
+
+fn validate_warnings(
+    file: &WorkspaceEditProposalFileSummary,
+    base_path: Option<&str>,
+) -> Result<(), WorkspaceEditProposalError> {
+    let mut warnings = BTreeSet::new();
+    for warning in &file.warnings {
+        if !matches!(
+            warning.code.as_str(),
+            "target-exists"
+                | "mixed-line-endings"
+                | "stale-base"
+                | "base-unavailable"
+                | "sensitive-path"
+                | "ignored-path"
+                | "unsafe-path"
+        ) || warning.severity != "blocking"
+            || (warning.path != file.path
+                && file.from_path.as_deref() != Some(warning.path.as_str()))
+            || !warnings.insert((warning.code.as_str(), warning.path.as_str()))
+        {
+            return Err(error("proposal warning summary is invalid"));
+        }
+    }
+    if let Some(base_path) = base_path {
+        let stale = file
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "stale-base" && warning.path == base_path);
+        let unavailable = file.warnings.iter().any(|warning| {
+            warning.path == base_path
+                && matches!(
+                    warning.code.as_str(),
+                    "base-unavailable" | "sensitive-path" | "ignored-path" | "unsafe-path"
+                )
+        });
+        if matches!(file.base_matches, Some(false)) != stale
+            || (file.base_matches.is_none() && !unavailable)
+            || (file.base_matches.is_some() && unavailable)
+        {
+            return Err(error("proposal base-match summary is invalid"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_diff_summary(
+    proposal: &WorkspaceEditProposal,
+    diff: &WorkspaceEditProposalDiffSummary,
+    max_bytes: u64,
+    inline_limit: u64,
+    label: &str,
+) -> Result<(), WorkspaceEditProposalError> {
+    validate_prefixed_sha256(&diff.reference, DIFF_REFERENCE_PREFIX, label)?;
+    validate_lower_sha256(&diff.sha256, label)?;
+    if diff.reference.strip_prefix(DIFF_REFERENCE_PREFIX) != Some(diff.sha256.as_str())
+        || diff.bytes > max_bytes
+        || diff.media_type != "text/x-diff; charset=utf-8"
+        || diff.inline_truncated != (diff.bytes > inline_limit)
+    {
+        return Err(error(format!("{label} summary is invalid")));
+    }
+    let artifact = proposal
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.reference == diff.reference)
+        .ok_or_else(|| error(format!("{label} artifact is missing")))?;
+    if artifact.kind != WorkspaceEditProposalArtifactKind::Diff
+        || artifact.sha256 != diff.sha256
+        || artifact.bytes != diff.bytes
+        || artifact.media_type != diff.media_type
+    {
+        return Err(error(format!(
+            "{label} artifact does not match its summary"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_preview(
@@ -904,6 +1308,12 @@ fn validate_preview(
     {
         return Err(error("workspace edit preview does not match the edit"));
     }
+    validate_preview_descriptor(
+        &preview.aggregate_diff,
+        MAX_AGGREGATE_DIFF_BYTES,
+        MAX_INLINE_AGGREGATE_DIFF_BYTES,
+        "aggregate diff",
+    )?;
     for (operation, file) in edit.operations.iter().zip(&preview.files) {
         let matches = match operation {
             WorkspaceEditOperation::Create { path, .. } => {
@@ -926,6 +1336,73 @@ fn validate_preview(
         if !matches {
             return Err(error("workspace edit preview file binding is invalid"));
         }
+        validate_preview_descriptor(
+            &file.diff,
+            MAX_FILE_DIFF_BYTES,
+            MAX_INLINE_FILE_DIFF_BYTES,
+            "file diff",
+        )?;
+        if file.warnings.iter().any(|warning| {
+            warning.message.is_empty()
+                || warning.message.len() > MAX_PATH_BYTES
+                || warning.message.chars().any(char::is_control)
+        }) {
+            return Err(error("workspace edit preview warning is invalid"));
+        }
+    }
+    if preview.files.iter().any(|file| file.diff.source_truncated)
+        && !preview.aggregate_diff.source_truncated
+    {
+        return Err(error("workspace edit aggregate truncation is invalid"));
+    }
+    Ok(())
+}
+
+fn proposal_diff_summary(
+    descriptor: &PreviewArtifactDescriptor,
+) -> Result<WorkspaceEditProposalDiffSummary, WorkspaceEditProposalError> {
+    let sha256 = descriptor
+        .reference
+        .strip_prefix(DIFF_REFERENCE_PREFIX)
+        .ok_or_else(|| error("workspace edit preview diff reference is invalid"))?
+        .to_owned();
+    validate_lower_sha256(&sha256, "workspace edit preview diff hash")?;
+    Ok(WorkspaceEditProposalDiffSummary {
+        reference: descriptor.reference.clone(),
+        sha256,
+        bytes: to_u64(descriptor.bytes, "workspace edit preview diff bytes")?,
+        media_type: descriptor.media_type.clone(),
+        inline_truncated: descriptor.inline_truncated,
+        source_truncated: descriptor.source_truncated,
+    })
+}
+
+fn validate_preview_descriptor(
+    descriptor: &PreviewArtifactDescriptor,
+    max_bytes: u64,
+    inline_limit: u64,
+    label: &str,
+) -> Result<(), WorkspaceEditProposalError> {
+    validate_prefixed_sha256(&descriptor.reference, DIFF_REFERENCE_PREFIX, label)?;
+    let bytes = to_u64(descriptor.bytes, label)?;
+    if bytes > max_bytes
+        || descriptor.media_type != "text/x-diff; charset=utf-8"
+        || descriptor.inline.len() > inline_limit as usize
+        || descriptor.inline_truncated != (bytes > inline_limit)
+    {
+        return Err(error(format!("workspace edit preview {label} is invalid")));
+    }
+    Ok(())
+}
+
+fn validate_text_format(
+    format: &WorkspaceEditProposalTextFormat,
+) -> Result<(), WorkspaceEditProposalError> {
+    if !matches!(format.encoding.as_str(), "utf-8" | "utf-8-bom")
+        || !matches!(format.newline.as_str(), "none" | "lf" | "crlf")
+        || !matches!(format.mode.as_str(), "preserve" | "regular" | "executable")
+    {
+        return Err(error("proposal text format is invalid"));
     }
     Ok(())
 }
@@ -1058,6 +1535,7 @@ fn error(message: impl Into<String>) -> WorkspaceEditProposalError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workbench_store::StoredWorkspaceEditProposal;
     use crate::workspace_edit::{ProposedContent, WorkspaceEditOperation};
     use crate::workspace_edit_preview::{ContentInput, WorkspaceEditPreviewStore};
     use std::collections::HashSet;
@@ -1066,6 +1544,11 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    const LEGACY_PROPOSAL_ID_FIXTURE: &str =
+        "workspace-edit-proposal:sha256:0b7c50b6f395d2709744741854ed81fb9c659c03c8e4fc7d09e720537c83b833";
+    const LEGACY_PREVIEW_ID_FIXTURE: &str =
+        "workspace-edit-preview:sha256:56faa6585dcdf09eef6cfc2ff54cd2383c3c031ae7f62be47281d3a02a769a5b";
+    const LEGACY_PROPOSAL_JSON_FIXTURE: &str = r#"{"schema_version":"workspace-edit-proposal/0.1","proposal_id":"workspace-edit-proposal:sha256:0b7c50b6f395d2709744741854ed81fb9c659c03c8e4fc7d09e720537c83b833","session_id":"session-1","turn_id":"turn-1","provider":"openai","provider_thread_id":"provider-thread-1","provider_item_id":"provider-item-1","approval_started_at_ms":10,"project_id":"project-1","root_id":"root-1","filesystem_root_identity":"filesystem-root:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","workspace_edit_root_identity":"workspace-root:sha256:68b7d8fdb16f0a901d973688fb3f25837669ab0a2429ad919213628f81afa20c","edit_id":"edit-1","canonical_edit_identity":"workspace-edit-canonical:sha256:59bc1e657e3961ef220de1bb39031e60baee8c986aa6ab290e76afe9b36fde3d","operations":[{"kind":"update","path":"old.txt","base":{"sha256":"01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee","bytes":4},"content":{"reference":"workspace-edit-content:sha256:7aa7a5359173d05b63cfd682e3c38487f3cb4f7f1d60659fe59fab1505977d4c","hash":{"sha256":"7aa7a5359173d05b63cfd682e3c38487f3cb4f7f1d60659fe59fab1505977d4c","bytes":4},"encoding":"utf-8","newline":"lf","mode":"preserve"}}],"artifacts":[{"kind":"proposed-content","reference":"workspace-edit-content:sha256:7aa7a5359173d05b63cfd682e3c38487f3cb4f7f1d60659fe59fab1505977d4c","sha256":"7aa7a5359173d05b63cfd682e3c38487f3cb4f7f1d60659fe59fab1505977d4c","bytes":4,"media_type":"text/plain; charset=utf-8"},{"kind":"diff","reference":"workspace-edit-diff:sha256:2ca8ab2ff3700e34b5f1e23baa2c7da4027fe934fdd6a3d2d802ffc745e6ba61","sha256":"2ca8ab2ff3700e34b5f1e23baa2c7da4027fe934fdd6a3d2d802ffc745e6ba61","bytes":50,"media_type":"text/x-diff; charset=utf-8"}],"overlap_baseline":{"schema_version":"workspace-edit-proposal-baseline/0.1","identity":"workspace-edit-proposal-baseline:sha256:592766619e330d78ea71ad0b0d4b97fab61234c522018f91a855b296d2a7613e","paths":[{"operation_index":0,"operation":"update","role":"target","path":"old.txt","expected":{"kind":"file","hash":{"sha256":"01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee","bytes":4}}}]},"preview":{"identity":"workspace-edit-preview:sha256:56faa6585dcdf09eef6cfc2ff54cd2383c3c031ae7f62be47281d3a02a769a5b","file_count":1,"additions":1,"deletions":1,"warning_count":0,"applicable":true,"aggregate_diff_reference":"workspace-edit-diff:sha256:2ca8ab2ff3700e34b5f1e23baa2c7da4027fe934fdd6a3d2d802ffc745e6ba61","file_diff_references":["workspace-edit-diff:sha256:2ca8ab2ff3700e34b5f1e23baa2c7da4027fe934fdd6a3d2d802ffc745e6ba61"]},"created_at_ms":10,"file_mutation_authority":false,"approval_recorded":false,"apply_available":false}"#;
 
     struct Root(PathBuf);
 
@@ -1149,7 +1632,26 @@ mod tests {
     fn proposal_is_deterministic_strict_and_read_only() {
         let proposal = proposal_fixture();
         proposal.validate().unwrap();
+        assert_eq!(proposal.schema_version, SCHEMA_VERSION);
+        let files = proposal.preview.files.as_ref().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].ordinal, 0);
+        assert_eq!(files[0].kind, "update");
+        assert_eq!(files[0].path, "old.txt");
+        assert_eq!(files[0].from_path, None);
+        assert_eq!(files[0].base_matches, Some(true));
+        assert_eq!(files[0].proposed_format.as_ref().unwrap().newline, "lf");
+        assert!(files[0].warnings.is_empty());
+        assert_eq!(
+            files[0].diff.reference,
+            proposal.preview.file_diff_references[0]
+        );
+        assert_eq!(
+            proposal.preview.aggregate_diff.as_ref().unwrap().reference,
+            proposal.preview.aggregate_diff_reference
+        );
         let encoded = serde_json::to_string(&proposal).unwrap();
+        assert!(!encoded.contains("\"message\""));
         assert_eq!(
             serde_json::from_str::<WorkspaceEditProposal>(&encoded).unwrap(),
             proposal
@@ -1160,6 +1662,159 @@ mod tests {
 
         let mut tampered = serde_json::from_str::<serde_json::Value>(&encoded).unwrap();
         tampered["apply_available"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<WorkspaceEditProposal>(tampered).is_err());
+    }
+
+    #[test]
+    fn public_view_distinguishes_complete_and_legacy_file_summaries() {
+        fn stored(proposal: WorkspaceEditProposal) -> StoredWorkspaceEditProposal {
+            let encoded = serde_json::to_vec(&proposal).unwrap();
+            let artifact_reference_ids = proposal
+                .artifacts
+                .iter()
+                .enumerate()
+                .map(|(ordinal, _)| format!("proposal-artifact-reference-{ordinal}"))
+                .collect();
+            StoredWorkspaceEditProposal {
+                proposal,
+                proposal_hash: ContentHash::for_bytes(&encoded),
+                event_sequence: 7,
+                artifact_reference_ids,
+            }
+        }
+
+        let proposal = proposal_fixture();
+        let complete = crate::workspace_edit_proposal_public_view(&stored(proposal.clone()))
+            .expect("complete Proposal public view");
+        let complete_file = &complete["summary"]["files"][0];
+        assert_eq!(complete["summary"]["files_complete"], true);
+        assert_eq!(complete_file["summary_state"], "complete");
+        assert_eq!(complete_file["kind"], "update");
+        assert_eq!(
+            complete_file["base"]["sha256"],
+            ContentHash::for_bytes(b"old\n").sha256
+        );
+        assert_eq!(
+            complete_file["proposed"]["hash"]["sha256"],
+            ContentHash::for_bytes(b"new\n").sha256
+        );
+        assert_eq!(complete_file["additions"], 1);
+        assert_eq!(complete_file["deletions"], 1);
+        assert_eq!(complete["file_mutation_authority"], false);
+        assert_eq!(complete["approval_recorded"], false);
+        assert_eq!(complete["apply_available"], false);
+
+        let mut legacy = proposal;
+        legacy.schema_version = LEGACY_SCHEMA_VERSION.into();
+        legacy.preview.aggregate_diff = None;
+        legacy.preview.files = None;
+        legacy.preview.identity = preview_identity(&legacy.preview).unwrap();
+        legacy.proposal_id = legacy.expected_proposal_id().unwrap();
+        legacy.validate().unwrap();
+        let legacy = crate::workspace_edit_proposal_public_view(&stored(legacy))
+            .expect("legacy Proposal public view");
+        let legacy_file = &legacy["summary"]["files"][0];
+        assert_eq!(legacy["summary"]["files_complete"], false);
+        assert_eq!(legacy_file["summary_state"], "legacy-incomplete");
+        assert!(legacy_file["additions"].is_null());
+        assert!(legacy_file["deletions"].is_null());
+        assert!(legacy_file["warnings"].is_null());
+        assert_eq!(
+            legacy_file["base"]["sha256"],
+            ContentHash::for_bytes(b"old\n").sha256
+        );
+        assert_eq!(
+            legacy_file["proposed"]["hash"]["sha256"],
+            ContentHash::for_bytes(b"new\n").sha256
+        );
+        assert!(legacy_file["diff"]["inline_truncated"].is_null());
+        assert!(legacy_file["diff"]["source_truncated"].is_null());
+    }
+
+    #[test]
+    fn legacy_proposal_preserves_canonical_reserialization_and_identity() {
+        let mut proposal = proposal_fixture();
+        proposal.schema_version = LEGACY_SCHEMA_VERSION.into();
+        proposal.preview.aggregate_diff = None;
+        proposal.preview.files = None;
+        proposal.preview.identity = preview_identity(&proposal.preview).unwrap();
+        proposal.proposal_id = proposal.expected_proposal_id().unwrap();
+        proposal.validate().unwrap();
+
+        let proposal_id = proposal.proposal_id.clone();
+        let preview_id = proposal.preview.identity.clone();
+        let encoded = serde_json::to_string(&proposal).unwrap();
+        assert!(!encoded.contains("\"aggregate_diff\""));
+        assert!(!encoded.contains("\"files\""));
+        let decoded = serde_json::from_str::<WorkspaceEditProposal>(&encoded).unwrap();
+        assert_eq!(decoded.proposal_id, proposal_id);
+        assert_eq!(decoded.preview.identity, preview_id);
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
+        let fixed = serde_json::from_str::<WorkspaceEditProposal>(LEGACY_PROPOSAL_JSON_FIXTURE)
+            .expect("fixed 0.1 Proposal fixture");
+        assert_eq!(fixed.proposal_id, LEGACY_PROPOSAL_ID_FIXTURE);
+        assert_eq!(fixed.preview.identity, LEGACY_PREVIEW_ID_FIXTURE);
+        assert_eq!(
+            serde_json::to_string(&fixed).unwrap(),
+            LEGACY_PROPOSAL_JSON_FIXTURE
+        );
+
+        let mut invalid = serde_json::to_value(&decoded).unwrap();
+        invalid["preview"]["files"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<WorkspaceEditProposal>(invalid).is_err());
+
+        for fields in [
+            ["aggregate_diff"].as_slice(),
+            ["files"].as_slice(),
+            ["aggregate_diff", "files"].as_slice(),
+        ] {
+            let mut invalid = serde_json::to_value(&decoded).unwrap();
+            for field in fields {
+                invalid["preview"][field] = serde_json::Value::Null;
+            }
+            assert!(serde_json::from_value::<WorkspaceEditProposal>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn proposal_rejects_complete_summary_substitution() {
+        let proposal = proposal_fixture();
+
+        let mut tampered = proposal.clone();
+        tampered.preview.files.as_mut().unwrap()[0].ordinal = 1;
+        tampered.preview.identity = preview_identity(&tampered.preview).unwrap();
+        tampered.proposal_id = tampered.expected_proposal_id().unwrap();
+        assert!(tampered.validate().is_err());
+
+        let mut tampered = proposal.clone();
+        tampered.preview.files.as_mut().unwrap()[0]
+            .proposed_format
+            .as_mut()
+            .unwrap()
+            .newline = "crlf".into();
+        tampered.preview.identity = preview_identity(&tampered.preview).unwrap();
+        tampered.proposal_id = tampered.expected_proposal_id().unwrap();
+        assert!(tampered.validate().is_err());
+
+        let mut tampered = proposal.clone();
+        tampered.preview.files.as_mut().unwrap()[0].additions += 1;
+        tampered.preview.identity = preview_identity(&tampered.preview).unwrap();
+        tampered.proposal_id = tampered.expected_proposal_id().unwrap();
+        assert!(tampered.validate().is_err());
+
+        let mut tampered = proposal.clone();
+        tampered.preview.files.as_mut().unwrap()[0].diff.bytes += 1;
+        tampered.preview.identity = preview_identity(&tampered.preview).unwrap();
+        tampered.proposal_id = tampered.expected_proposal_id().unwrap();
+        assert!(tampered.validate().is_err());
+
+        let mut tampered = serde_json::to_value(&proposal).unwrap();
+        tampered["preview"]["files"][0]["warnings"] = serde_json::json!([{
+            "code": "stale-base",
+            "severity": "blocking",
+            "path": "old.txt",
+            "message": "dynamic provider or filesystem text"
+        }]);
         assert!(serde_json::from_value::<WorkspaceEditProposal>(tampered).is_err());
     }
 

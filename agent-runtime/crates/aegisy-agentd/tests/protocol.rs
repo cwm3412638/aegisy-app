@@ -487,6 +487,99 @@ fn codex_provider_lifecycle_failure_fixture_is_redacted_and_recoverable() {
     assert_eq!(health_states, ["exited", "unavailable", "running"]);
 }
 
+#[test]
+fn workspace_edit_proposal_fixture_binds_read_only_errors_and_artifact_page_identity() {
+    #[derive(serde::Serialize)]
+    struct PageIdentityMaterial<'a> {
+        schema_version: &'a str,
+        session_id: &'a str,
+        proposal_id: &'a str,
+        project_id: &'a str,
+        edit_id: &'a str,
+        artifact_kind: &'a str,
+        reference: &'a str,
+        sha256: &'a str,
+        bytes: u64,
+        media_type: &'a str,
+        offset: u64,
+        next_offset: Option<u64>,
+        chunk_sha256: &'a str,
+    }
+
+    let path = format!(
+        "{}/../../aap-schema/fixtures/aap-workspace-edit-proposal.jsonl",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let fixture = fs::read_to_string(path).unwrap();
+    let messages = fixture
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 8);
+    assert!(messages.iter().all(stable_envelope_valid));
+    assert_eq!(messages[3]["error"]["code"], -32149);
+    assert_eq!(messages[7]["error"]["code"], -32150);
+    for (request_index, response_index) in [(0, 1), (2, 3), (4, 5), (6, 7)] {
+        assert_eq!(
+            messages[request_index]["id"],
+            messages[response_index]["id"]
+        );
+    }
+
+    let latest = &messages[1]["result"];
+    assert!(latest["proposal"].is_null());
+    let page = &messages[5]["result"];
+    for result in [latest, page] {
+        assert_eq!(result["file_mutation_authority"], false);
+        assert_eq!(result["approval_recorded"], false);
+        assert_eq!(result["apply_available"], false);
+    }
+    let chunk = BASE64_STANDARD
+        .decode(page["data_base64"].as_str().unwrap())
+        .unwrap();
+    let chunk_sha256 = format!("{:x}", Sha256::digest(&chunk));
+    assert_eq!(page["chunk_sha256"], chunk_sha256);
+    assert_eq!(page["artifact"]["sha256"], chunk_sha256);
+    assert_eq!(page["artifact"]["bytes"], chunk.len());
+    assert_eq!(page["total_bytes"], chunk.len());
+
+    let material = PageIdentityMaterial {
+        schema_version: page["schema_version"].as_str().unwrap(),
+        session_id: page["session_id"].as_str().unwrap(),
+        proposal_id: page["proposal_id"].as_str().unwrap(),
+        project_id: page["project_id"].as_str().unwrap(),
+        edit_id: page["edit_id"].as_str().unwrap(),
+        artifact_kind: page["artifact"]["kind"].as_str().unwrap(),
+        reference: page["artifact"]["reference"].as_str().unwrap(),
+        sha256: page["artifact"]["sha256"].as_str().unwrap(),
+        bytes: page["artifact"]["bytes"].as_u64().unwrap(),
+        media_type: page["artifact"]["media_type"].as_str().unwrap(),
+        offset: page["offset"].as_u64().unwrap(),
+        next_offset: page["next_offset"].as_u64(),
+        chunk_sha256: page["chunk_sha256"].as_str().unwrap(),
+    };
+    let mut identity_bytes = b"workspace-edit-proposal-artifact-page\0".to_vec();
+    identity_bytes.extend(serde_json::to_vec(&material).unwrap());
+    assert_eq!(
+        page["page_identity"],
+        format!(
+            "workspace-edit-proposal-artifact-page:sha256:{:x}",
+            Sha256::digest(identity_bytes)
+        )
+    );
+    for forbidden in [
+        "authorization",
+        "api_key",
+        "provider_thread_id",
+        "provider_item_id",
+        "file_mutation_authority\":true",
+        "approval_recorded\":true",
+        "apply_available\":true",
+    ] {
+        assert!(!fixture.to_ascii_lowercase().contains(forbidden));
+    }
+}
+
 fn stable_envelope_valid(message: &Value) -> bool {
     if message["jsonrpc"] != "2.0" {
         return false;
@@ -527,6 +620,7 @@ fn stable_aap_schema_accepts_checked_fixtures_and_rejects_envelope_drift() {
         "codex-recovery.jsonl",
         "codex-provider-lifecycle-failures.jsonl",
         "turn-lifecycle.jsonl",
+        "aap-workspace-edit-proposal.jsonl",
     ];
     for fixture_name in fixtures {
         let path = format!(

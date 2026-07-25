@@ -166,17 +166,27 @@
     and a Provider `completed` file change is a potential read-only boundary violation.
     Add/update/delete/pure-rename conversion preserves raw UTF-8 BOM and LF/CRLF,
     binds raw base hashes, rejects stale/escaping/duplicate/oversized changes, and
-    never writes the workspace. Message/reasoning/review/image and complete Tool
-    families remain incomplete.
+    never writes the workspace. New durable records use
+    `workspace-edit-proposal/0.2` with aggregate and ordered per-file summaries;
+    untruncated diff Blobs are semantically re-read for additions/deletions on
+    admission, direct read, and startup/restart. Exact legacy `0.1` records retain
+    their canonical bytes/identities and project as explicitly incomplete summaries.
+    Message/reasoning/review/image, Qt Changes recovery, and complete Tool families
+    remain incomplete.
 - [ ] 7.6 Map command, file, permission, MCP elicitation, and user-input server requests to AAP approvals/questions
   - Partial file-request boundary: before the fixed Runtime-policy `decline` is
     written, the exact Codex file change is compiled into an immutable
-    `workspace-edit-proposal/0.1` and committed with its content/diff Blob
+    `workspace-edit-proposal/0.2` and committed with its content/diff Blob
     references plus a metadata-only Session event. Store or Proposal failure returns
     false to the adapter, sends no decline, and fails the Turn closed. The Proposal
     records no user decision and fixes mutation, approval, and apply authority to
-    false. Genuine user approval/questions, durable decision consumption, MCP
-    elicitation, and all write authority remain absent.
+    false. Negotiated `workspace.edit.proposal.read-only` plus
+    `permission.read-only` now exposes Session-scoped latest/exact reads and bounded
+    Proposal-owned artifact pages; `-32149` and `-32150` keep missing Proposal and
+    artifact/page state distinct. Exact `0.1` read compatibility remains available
+    without rewriting legacy identities. Genuine user approval/questions, durable
+    decision consumption, MCP elicitation, Qt recovery, and all write authority
+    remain absent.
 - [ ] 7.7 Map background terminals, filesystem read/write/watch, fuzzy search, Skills, hooks, plugins, and MCP capability state
 - [ ] 7.8 Configure Aegisy custom provider and short-lived token flow without writing the desktop login token into Codex config
 - [ ] 7.9 Implement adapter degradation flags for experimental or missing Codex methods

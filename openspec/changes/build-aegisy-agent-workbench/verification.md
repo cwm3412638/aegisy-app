@@ -899,8 +899,15 @@ Current editor evidence:
   the shared 256 pending/Started Item and 16 MiB retained-state limits;
   rejects root escape, duplicates, malformed/stale bases, NUL/size/format drift,
   completed-write status, and lifecycle/request mismatches; and preserves BOM plus
-  LF/CRLF without touching disk. Workbench schema v18 fixtures prove immutable
-  Proposal identity, domain-separated nested identities, exact artifact coverage,
+  LF/CRLF without touching disk. New records use
+  `workspace-edit-proposal/0.2`; Store admission, direct read, and startup/restart
+  revalidate aggregate/ordered per-file summaries and recompute
+  additions/deletions from every untruncated persisted diff Blob. Hand-written
+  `workspace-edit-proposal/0.1` fixtures preserve exact canonical serialization,
+  Proposal/preview identities, and read back only as `files_complete:false` /
+  `legacy-incomplete`, with unavailable summary semantics left null rather than
+  fabricated. Workbench schema v18 fixtures prove immutable Proposal identity,
+  domain-separated nested identities, exact artifact coverage,
   false mutation/approval/apply authority, same-edit idempotency/conflict, atomic
   Proposal/Blob-reference/event rollback, restart read, tamper rejection, and
   WAL-consistent v17 migration backup. Failure injection after SQLite commit proves
@@ -912,12 +919,19 @@ Current editor evidence:
   its decline path, reopens the Proposal after shutdown, and verifies the proposed
   file was never created. The fixture additionally binds the exact
   `codex-app-server` / `codex-cli 0.144.5` Runtime, provider/backend thread, and
-  `read-only` permission. The complete Rust workspace passes 710 `aegisy-agentd`
-  library tests with one ignored live fixture, 6 daemon-main, 10 threshold, 13
-  handshake Runtime, 17 Schema, 66 protocol, and 23 stdio/Codex tests. Strict workspace Clippy,
-  formatting, all 16 desktop CTests, strict OpenSpec validation, and
-  `git diff --check` pass. Public Proposal read/Qt restart recovery and all Approval/
-  Apply/checkpoint authority remain absent.
+  `read-only` permission. Negotiated `workspace.edit.proposal.read-only` plus
+  `permission.read-only` now covers `workspace/edit/proposal/latest`, exact
+  `workspace/edit/proposal/read`, and Proposal-owned
+  `workspace/edit/proposal/artifact/read`; the fixture verifies empty latest,
+  `-32149` Proposal absence, `-32150` artifact/page absence, the 64 KiB page bound,
+  Base64/chunk SHA-256, fixed-order domain-separated page identity, Session scoping,
+  restart reads, and false authority in every public result. The complete Rust gate
+  passes 27 AAP tests, 720 `aegisy-agentd` library tests with one ignored live
+  fixture, 6 daemon-main, 10 threshold, 13 handshake Runtime, 17 Schema, 67 protocol,
+  and 23 stdio/Codex tests. Strict workspace Clippy and formatting pass; strict
+  OpenSpec validation and `git diff --check` are required below. Qt Changes restart
+  recovery and all Approval/Apply/checkpoint authority remain absent, so tasks `7.5`
+  and `7.6` stay unchecked.
 - Workspace-edit apply tests cover same-directory staged create/update content,
   immediate optimistic base/target rechecks, no-clobber hard-link backups, all four
   operation kinds, reverse rollback after partial and complete multi-file commit,
