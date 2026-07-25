@@ -2144,6 +2144,26 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
 
     send(
         &mut stdin,
+        &request(
+            "approval-session-read",
+            "session/read",
+            json!({"session_id": &session_id, "limit": 200}),
+        ),
+    );
+    let replay = receive_until(&receiver, |message| {
+        message["id"] == "approval-session-read"
+    });
+    let replay_change = replay["result"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "file-change")
+        .expect("session/read must retain the durable file-change Item");
+    assert_eq!(replay_change["turn_id"], "turn-approval");
+    assert_eq!(replay_change["data"]["turn_id"], "turn-approval");
+
+    send(
+        &mut stdin,
         &request("approval-shutdown", "shutdown", json!({})),
     );
     receive_until(&receiver, |message| message["id"] == "approval-shutdown");
@@ -2164,6 +2184,41 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
     let stored_proposal = store
         .read_workspace_edit_proposal(proposal_id)
         .expect("immutable Proposal must be readable after sidecar shutdown");
+    let timeline_reference = stored_proposal
+        .timeline_reference
+        .as_ref()
+        .expect("new Proposal must retain its durable Change Timeline reference");
+    assert_eq!(
+        timeline_reference.schema_version,
+        "workspace-edit-proposal-reference/0.1"
+    );
+    assert_eq!(timeline_reference.proposal_id, proposal_id);
+    assert!(!timeline_reference.file_mutation_authority);
+    assert!(!timeline_reference.approval_recorded);
+    assert!(!timeline_reference.apply_available);
+    let timeline = store
+        .sync_public_timeline(&session_id, 0, None, 20)
+        .unwrap();
+    let change = timeline
+        .events
+        .iter()
+        .find(|event| {
+            event.event == "item.completed"
+                && event
+                    .item
+                    .as_ref()
+                    .is_some_and(|item| item.kind == "file-change")
+        })
+        .expect("Proposal must be projected into the durable public Timeline");
+    assert!(change.sequence > 0);
+    assert_eq!(
+        change.item.as_ref().unwrap().data.as_ref().unwrap()["reference_id"],
+        timeline_reference.reference_id
+    );
+    assert_eq!(
+        change.item.as_ref().unwrap().data.as_ref().unwrap()["proposal_id"],
+        proposal_id
+    );
     assert_eq!(stored_proposal.proposal.session_id, session_id);
     assert_eq!(stored_proposal.proposal.turn_id, "turn-approval");
     assert_eq!(

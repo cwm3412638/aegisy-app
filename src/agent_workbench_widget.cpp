@@ -266,6 +266,96 @@ bool hasReadOnlyProposalAuthority(const QJsonObject &object)
         && !object.value(QStringLiteral("apply_available")).toBool();
 }
 
+bool isWorkspaceEditProposalReference(const QJsonValue &value,
+                                      const QString &expectedSessionId,
+                                      const QString &expectedTurnId,
+                                      const QString &expectedItemId)
+{
+    static const QSet<QString> keys{
+        QStringLiteral("schema_version"), QStringLiteral("reference_id"),
+        QStringLiteral("session_id"), QStringLiteral("turn_id"),
+        QStringLiteral("proposal_id"), QStringLiteral("project_id"),
+        QStringLiteral("root_id"), QStringLiteral("edit_id"),
+        QStringLiteral("preview_identity"), QStringLiteral("file_count"),
+        QStringLiteral("additions"), QStringLiteral("deletions"),
+        QStringLiteral("warning_count"), QStringLiteral("applicable"),
+        QStringLiteral("file_mutation_authority"),
+        QStringLiteral("approval_recorded"), QStringLiteral("apply_available"),
+    };
+    if (!value.isObject()) return false;
+    const QJsonObject reference = value.toObject();
+    QJsonObject identityMaterial = reference;
+    identityMaterial.remove(QStringLiteral("reference_id"));
+    identityMaterial.insert(QStringLiteral("item_id"), expectedItemId);
+    const QString expectedReferenceId = QStringLiteral(
+        "workspace-edit-proposal-reference:sha256:%1").arg(QString::fromLatin1(
+            QCryptographicHash::hash(
+                QJsonDocument(identityMaterial).toJson(QJsonDocument::Compact),
+                QCryptographicHash::Sha256).toHex()));
+    if (!hasExactJsonKeys(reference, keys)
+        || reference.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("workspace-edit-proposal-reference/0.1")
+        || !isLowerSha256(reference.value(QStringLiteral("reference_id")).toString(),
+                          QStringLiteral("workspace-edit-proposal-reference:sha256:"))
+        || reference.value(QStringLiteral("reference_id")).toString()
+            != expectedReferenceId
+        || reference.value(QStringLiteral("session_id")).toString()
+            != expectedSessionId
+        || reference.value(QStringLiteral("turn_id")).toString() != expectedTurnId
+        || !isBoundedGraphicalId(reference.value(QStringLiteral("session_id")), 128)
+        || !isBoundedGraphicalId(reference.value(QStringLiteral("turn_id")), 128)
+        || !isLowerSha256(reference.value(QStringLiteral("proposal_id")).toString(),
+                          QStringLiteral("workspace-edit-proposal:sha256:"))
+        || !isBoundedGraphicalId(reference.value(QStringLiteral("project_id")), 256)
+        || !isBoundedGraphicalId(reference.value(QStringLiteral("root_id")), 256)
+        || !isBoundedGraphicalId(reference.value(QStringLiteral("edit_id")), 256)
+        || !isLowerSha256(reference.value(QStringLiteral("preview_identity")).toString(),
+                          QStringLiteral("workspace-edit-preview:sha256:"))
+        || !isPositiveSafeJsonInteger(reference.value(QStringLiteral("file_count")))
+        || reference.value(QStringLiteral("file_count")).toDouble()
+            > kMaxWorkspaceEditProposalFiles
+        || !isNonnegativeSafeJsonInteger(reference.value(QStringLiteral("additions")))
+        || !isNonnegativeSafeJsonInteger(reference.value(QStringLiteral("deletions")))
+        || !isNonnegativeSafeJsonInteger(reference.value(QStringLiteral("warning_count")))
+        || !reference.value(QStringLiteral("applicable")).isBool()
+        || !hasReadOnlyProposalAuthority(reference)) {
+        return false;
+    }
+    return true;
+}
+
+bool workspaceEditProposalReferenceMatches(const QJsonObject &reference,
+                                           const QJsonObject &proposal)
+{
+    const QJsonObject summary = proposal.value(QStringLiteral("summary")).toObject();
+    return proposal.value(QStringLiteral("session_id"))
+            == reference.value(QStringLiteral("session_id"))
+        && proposal.value(QStringLiteral("turn_id"))
+            == reference.value(QStringLiteral("turn_id"))
+        && proposal.value(QStringLiteral("proposal_id"))
+            == reference.value(QStringLiteral("proposal_id"))
+        && proposal.value(QStringLiteral("project_id"))
+            == reference.value(QStringLiteral("project_id"))
+        && proposal.value(QStringLiteral("root_id"))
+            == reference.value(QStringLiteral("root_id"))
+        && proposal.value(QStringLiteral("edit_id"))
+            == reference.value(QStringLiteral("edit_id"))
+        && proposal.value(QStringLiteral("preview_identity"))
+            == reference.value(QStringLiteral("preview_identity"))
+        && summary.value(QStringLiteral("file_count"))
+            == reference.value(QStringLiteral("file_count"))
+        && summary.value(QStringLiteral("additions"))
+            == reference.value(QStringLiteral("additions"))
+        && summary.value(QStringLiteral("deletions"))
+            == reference.value(QStringLiteral("deletions"))
+        && summary.value(QStringLiteral("warning_count"))
+            == reference.value(QStringLiteral("warning_count"))
+        && summary.value(QStringLiteral("applicable"))
+            == reference.value(QStringLiteral("applicable"))
+        && hasReadOnlyProposalAuthority(reference)
+        && hasReadOnlyProposalAuthority(proposal);
+}
+
 bool isProposalHashDescriptor(const QJsonValue &value, quint64 maximumBytes)
 {
     static const QSet<QString> keys{QStringLiteral("sha256"), QStringLiteral("bytes")};
@@ -2022,6 +2112,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
             clearWorkspaceEditProposalPending();
             if (m_workspaceEditDurableProposal) {
+                m_workspaceEditDisplayedReferenceSessionId.clear();
+                m_workspaceEditDisplayedReferenceProposalId.clear();
                 m_workspaceEditDurableProposal = false;
                 m_workspaceEditFiles->clear();
                 m_workspaceEditDiff->clear();
@@ -2235,6 +2327,16 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             ++m_workspaceEditProposalArtifactGeneration;
         }
         m_workspaceEditProposalRequests.clear();
+        if (m_workspaceEditProposalReferenceGeneration
+                == std::numeric_limits<quint64>::max()) {
+            m_workspaceEditProposalReferenceGeneration = 1;
+        } else {
+            ++m_workspaceEditProposalReferenceGeneration;
+        }
+        m_workspaceEditReferenceSelectionSessionId.clear();
+        m_workspaceEditReferenceSelectionProposalId.clear();
+        m_workspaceEditDisplayedReferenceSessionId.clear();
+        m_workspaceEditDisplayedReferenceProposalId.clear();
         m_workspaceEditId.clear();
         m_workspaceEditReference.clear();
         m_workspaceEditProposalSessionId.clear();
@@ -2814,7 +2916,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             ? m_itemRoles : QHash<QString, QString>{};
         QHash<QString, QString> validatedStates = appendingHistory
             ? m_itemStates : QHash<QString, QString>{};
-        QSet<QString> pageItemIds;
+        QSet<QString> pageItemKeys;
         quint64 firstSequence = 0;
         quint64 lastSequence = 0;
         for (const QJsonValue &value : items) {
@@ -2824,16 +2926,26 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
             const QJsonObject replayItem = value.toObject();
             const QString replayItemId = replayItem.value(QStringLiteral("id")).toString();
-            const QString replayItemKey = timelineItemKey(id, QString(), replayItemId);
+            const QJsonValue replayTurnValue = replayItem.value(QStringLiteral("turn_id"));
+            const bool hasReplayTurn = !replayTurnValue.isUndefined();
+            const QString replayTurnId = hasReplayTurn ? replayTurnValue.toString() : QString();
+            QJsonObject timelineItem = replayItem;
+            timelineItem.remove(QStringLiteral("turn_id"));
+            const QString replayItemKey = timelineItemKey(id, replayTurnId, replayItemId);
+            const bool validReplayTurn = !hasReplayTurn
+                || isBoundedGraphicalId(replayTurnValue, 128);
+            const bool requiresReplayTurn = timelineItem.value(QStringLiteral("kind")).toString()
+                == QStringLiteral("file-change");
             if ((appendingHistory && m_itemKinds.contains(replayItemKey))
-                    || pageItemIds.contains(replayItemId)
+                    || pageItemKeys.contains(replayItemKey)
                     || !replayItem.contains(QStringLiteral("sequence"))
-                    || !validateTimelineItem(replayItem, id, QString(),
+                    || !validReplayTurn || (requiresReplayTurn && !hasReplayTurn)
+                    || !validateTimelineItem(timelineItem, id, replayTurnId,
                                              &validatedKinds, &validatedRoles)) {
                 validPage = false;
                 break;
             }
-            pageItemIds.insert(replayItemId);
+            pageItemKeys.insert(replayItemKey);
             validatedStates.insert(
                 replayItemKey, replayItem.value(QStringLiteral("state")).toString());
             const quint64 sequence = static_cast<quint64>(
@@ -2913,6 +3025,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
             m_itemLabels.clear();
             m_itemArtifactButtons.clear();
+            m_itemProposalButtons.clear();
+            m_itemProposalStatusLabels.clear();
             m_itemKinds.clear();
             m_itemRoles.clear();
             m_itemStates.clear();
@@ -2925,7 +3039,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_itemStates = validatedStates;
         if (appendingHistory) {
             for (int index = items.size() - 1; index >= 0; --index) {
-                addTimelineItem(items.at(index).toObject(), true);
+                QJsonObject item = items.at(index).toObject();
+                const QString turnId = item.take(QStringLiteral("turn_id")).toString();
+                addTimelineItem(item, true, timelineItemKey(
+                    id, turnId, item.value(QStringLiteral("id")).toString()));
             }
             QTimer::singleShot(0, this, [this]() {
                 if (!m_timelineScroll) return;
@@ -2934,7 +3051,12 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 bar->setValue(m_sessionHistoryScrollValue + addedHeight);
             });
         } else {
-            for (const QJsonValue &value : items) addTimelineItem(value.toObject());
+            for (const QJsonValue &value : items) {
+                QJsonObject item = value.toObject();
+                const QString turnId = item.take(QStringLiteral("turn_id")).toString();
+                addTimelineItem(item, false, timelineItemKey(
+                    id, turnId, item.value(QStringLiteral("id")).toString()));
+            }
             addNotice(QStringLiteral("已恢复会话：%1")
                 .arg(session.value(QStringLiteral("title")).toString(id)));
         }
@@ -3980,18 +4102,43 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                    || method == QStringLiteral("workspace/edit/proposal/read")) {
             const WorkspaceEditProposalRequest request =
                 m_workspaceEditProposalRequests.take(requestId);
+            if (method == QStringLiteral("workspace/edit/proposal/read")) {
+                if (!request.sessionId.isEmpty()) {
+                    if (QPushButton *button =
+                            m_itemProposalButtons.value(request.itemKey, nullptr)) {
+                        button->setEnabled(true);
+                    }
+                    if (QLabel *status =
+                            m_itemProposalStatusLabels.value(request.itemKey, nullptr)) {
+                        status->setText(request.generation
+                                == m_workspaceEditProposalReferenceGeneration
+                            ? QStringLiteral("引用读取失败（错误码 %1）· 重试").arg(code)
+                            : QStringLiteral("引用请求已过期 · 重试"));
+                    }
+                    if (request.generation == m_workspaceEditProposalReferenceGeneration
+                            && m_workspaceEditReferenceSelectionSessionId
+                                == request.sessionId
+                            && m_workspaceEditReferenceSelectionProposalId
+                                == request.proposalId) {
+                        m_workspaceEditReferenceSelectionSessionId.clear();
+                        m_workspaceEditReferenceSelectionProposalId.clear();
+                    }
+                }
+                return;
+            }
             const QString confirmedId = m_confirmedWorkspaceEditProposals
                 .value(request.sessionId).value(QStringLiteral("proposal_id")).toString();
             const bool invalidatesConfirmed = !request.sessionId.isEmpty()
                 && m_workspaceEditProposalGenerations.value(request.sessionId)
                     == request.generation
                 && !confirmedId.isEmpty()
-                && (method == QStringLiteral("workspace/edit/proposal/latest")
-                    || confirmedId == request.proposalId);
+                && method == QStringLiteral("workspace/edit/proposal/latest");
             if (invalidatesConfirmed) {
                 m_unverifiedWorkspaceEditProposalSessions.insert(request.sessionId);
                 if (request.sessionId == m_workSessionId
-                    && m_workspaceEditDurableProposal) {
+                    && m_workspaceEditDurableProposal
+                    && m_workspaceEditDisplayedReferenceSessionId
+                        != request.sessionId) {
                     invalidateWorkspaceEditProposalArtifactRequests();
                     m_workspaceEditDurableProposal = false;
                     m_workspaceEditFiles->clear();
@@ -4410,6 +4557,12 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
         clearContextItems();
         m_itemLabels.clear();
         m_itemArtifactButtons.clear();
+        m_itemProposalButtons.clear();
+        m_itemProposalStatusLabels.clear();
+        m_workspaceEditReferenceSelectionSessionId.clear();
+        m_workspaceEditReferenceSelectionProposalId.clear();
+        m_workspaceEditDisplayedReferenceSessionId.clear();
+        m_workspaceEditDisplayedReferenceProposalId.clear();
         m_itemKinds.clear();
         m_itemRoles.clear();
         m_itemStates.clear();
@@ -5957,7 +6110,54 @@ void AgentWorkbenchWidget::requestLatestWorkspaceEditProposal(const QString &ses
     else ++generation;
     const QString requestId = m_runtime->latestWorkspaceEditProposal(sessionId);
     if (requestId.isEmpty()) return;
-    m_workspaceEditProposalRequests.insert(requestId, {sessionId, {}, generation});
+    m_workspaceEditProposalRequests.insert(requestId, {sessionId, {}, generation, {}, {}});
+}
+
+void AgentWorkbenchWidget::requestWorkspaceEditProposalReference(
+    const QString &itemKey, const QJsonObject &reference)
+{
+    QPushButton *button = m_itemProposalButtons.value(itemKey, nullptr);
+    QLabel *status = m_itemProposalStatusLabels.value(itemKey, nullptr);
+    const QString sessionId = reference.value(QStringLiteral("session_id")).toString();
+    const QString proposalId = reference.value(QStringLiteral("proposal_id")).toString();
+    const QJsonObject workspace = m_sessionWorkspaceBindings.value(sessionId);
+    const QJsonObject runtime = m_sessionRuntimeBindings.value(sessionId);
+    const bool available = m_runtime && m_runtime->isReady()
+        && m_workspaceEditProposalAvailable && m_mode == QStringLiteral("work")
+        && sessionId == m_workSessionId
+        && reference.value(QStringLiteral("project_id")).toString() == m_projectId
+        && workspace.value(QStringLiteral("project_id")).toString() == m_projectId
+        && workspace.value(QStringLiteral("root_id"))
+            == reference.value(QStringLiteral("root_id"))
+        && runtime.value(QStringLiteral("permission_profile")).toString()
+            == QStringLiteral("read-only")
+        && isWorkspaceEditProposalReference(
+            reference, sessionId, reference.value(QStringLiteral("turn_id")).toString(),
+            itemKey.section(QChar(0x1f), -1));
+    if (!available) {
+        if (status) status->setText(QStringLiteral("引用当前不可用 · 可稍后重试"));
+        if (button) button->setEnabled(true);
+        return;
+    }
+    if (m_workspaceEditProposalReferenceGeneration
+            == std::numeric_limits<quint64>::max()) {
+        m_workspaceEditProposalReferenceGeneration = 1;
+    } else {
+        ++m_workspaceEditProposalReferenceGeneration;
+    }
+    const quint64 generation = m_workspaceEditProposalReferenceGeneration;
+    const QString requestId = m_runtime->readWorkspaceEditProposal(sessionId, proposalId);
+    if (requestId.isEmpty()) {
+        if (status) status->setText(QStringLiteral("引用读取失败 · 重试"));
+        if (button) button->setEnabled(true);
+        return;
+    }
+    m_workspaceEditReferenceSelectionSessionId = sessionId;
+    m_workspaceEditReferenceSelectionProposalId = proposalId;
+    m_workspaceEditProposalRequests.insert(
+        requestId, {sessionId, proposalId, generation, itemKey, reference});
+    if (status) status->setText(QStringLiteral("正在读取持久化只读提案…"));
+    if (button) button->setEnabled(false);
 }
 
 void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
@@ -5967,9 +6167,25 @@ void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
     if (found == m_workspaceEditProposalRequests.cend()) return;
     const WorkspaceEditProposalRequest request = *found;
     m_workspaceEditProposalRequests.remove(requestId);
-    if (m_workspaceEditProposalGenerations.value(request.sessionId) != request.generation) {
+    const bool expectedRequestKind = latest == request.proposalId.isEmpty();
+    const bool currentGeneration = latest
+        ? m_workspaceEditProposalGenerations.value(request.sessionId) == request.generation
+        : m_workspaceEditProposalReferenceGeneration == request.generation;
+    if (!expectedRequestKind || !currentGeneration) {
+        if (!latest) {
+            if (QPushButton *button =
+                    m_itemProposalButtons.value(request.itemKey, nullptr)) {
+                button->setEnabled(true);
+            }
+            if (QLabel *status =
+                    m_itemProposalStatusLabels.value(request.itemKey, nullptr)) {
+                status->setText(QStringLiteral("引用请求已过期 · 重试"));
+            }
+        }
         return;
     }
+    QPushButton *referenceButton = m_itemProposalButtons.value(request.itemKey, nullptr);
+    QLabel *referenceStatus = m_itemProposalStatusLabels.value(request.itemKey, nullptr);
     const QSet<QString> expectedKeys{
         QStringLiteral("schema_version"), QStringLiteral("session_id"),
         QStringLiteral("proposal"), QStringLiteral("file_mutation_authority"),
@@ -6002,12 +6218,26 @@ void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
         && sessionBindingValid
         && ((latest && proposalValue.isNull())
             || isWorkspaceEditProposalView(proposalValue, request.sessionId,
-                                           request.proposalId));
+                                           request.proposalId))
+        && (latest || workspaceEditProposalReferenceMatches(request.reference, proposal));
     if (!valid) {
         if (latest && m_confirmedWorkspaceEditProposals.contains(request.sessionId)) {
             m_unverifiedWorkspaceEditProposalSessions.insert(request.sessionId);
         }
-        if (request.sessionId == m_workSessionId) {
+        if (!latest) {
+            if (referenceButton) referenceButton->setEnabled(true);
+            if (referenceStatus) {
+                referenceStatus->setText(QStringLiteral("引用校验失败 · 重试"));
+            }
+            if (m_workspaceEditReferenceSelectionSessionId == request.sessionId
+                    && m_workspaceEditReferenceSelectionProposalId
+                        == request.proposalId) {
+                m_workspaceEditReferenceSelectionSessionId.clear();
+                m_workspaceEditReferenceSelectionProposalId.clear();
+            }
+        } else if (request.sessionId == m_workSessionId
+                && m_workspaceEditDisplayedReferenceSessionId
+                    != request.sessionId) {
             invalidateWorkspaceEditProposalArtifactRequests();
             m_workspaceEditDurableProposal = false;
             m_workspaceEditFiles->clear();
@@ -6019,16 +6249,39 @@ void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
         }
         return;
     }
-    if (!latest && m_unverifiedWorkspaceEditProposalSessions.contains(request.sessionId)) {
+    if (!latest) {
+        if (referenceButton) referenceButton->setEnabled(true);
+        if (referenceStatus) referenceStatus->clear();
+        const QJsonObject workspace = m_sessionWorkspaceBindings.value(request.sessionId);
+        const bool foreground = m_mode == QStringLiteral("work")
+            && request.sessionId == m_workSessionId
+            && proposal.value(QStringLiteral("project_id")).toString() == m_projectId
+            && workspace.value(QStringLiteral("project_id")).toString() == m_projectId
+            && workspace.value(QStringLiteral("root_id"))
+                == request.reference.value(QStringLiteral("root_id"))
+            && m_workspaceEditReferenceSelectionSessionId == request.sessionId
+            && m_workspaceEditReferenceSelectionProposalId == request.proposalId;
+        if (foreground) {
+            m_workspaceEditDisplayedReferenceSessionId = request.sessionId;
+            m_workspaceEditDisplayedReferenceProposalId = request.proposalId;
+            showWorkspaceEditProposal(proposal, true);
+        }
+        else if (m_workspaceEditReferenceSelectionSessionId == request.sessionId
+                && m_workspaceEditReferenceSelectionProposalId == request.proposalId) {
+            m_workspaceEditReferenceSelectionSessionId.clear();
+            m_workspaceEditReferenceSelectionProposalId.clear();
+        }
         return;
     }
-    if (latest) m_unverifiedWorkspaceEditProposalSessions.remove(request.sessionId);
+    m_unverifiedWorkspaceEditProposalSessions.remove(request.sessionId);
     if (proposalValue.isNull()) {
         m_confirmedWorkspaceEditProposals.remove(request.sessionId);
         m_workspaceEditProposalRecency.removeAll(request.sessionId);
         m_unreadWorkspaceEditProposalSessions.remove(request.sessionId);
         m_unverifiedWorkspaceEditProposalSessions.remove(request.sessionId);
-        if (request.sessionId == m_workSessionId && m_workspaceEditDurableProposal) {
+        if (request.sessionId == m_workSessionId && m_workspaceEditDurableProposal
+                && m_workspaceEditDisplayedReferenceSessionId
+                    != request.sessionId) {
             invalidateWorkspaceEditProposalArtifactRequests();
             m_workspaceEditDurableProposal = false;
             m_workspaceEditProposalSessionId.clear();
@@ -6059,7 +6312,12 @@ void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
     const bool foreground = m_mode == QStringLiteral("work")
         && request.sessionId == m_workSessionId
         && proposal.value(QStringLiteral("project_id")).toString() == m_projectId;
-    if (foreground) {
+    const bool explicitReferenceSelected =
+        m_workspaceEditReferenceSelectionSessionId == request.sessionId
+        && !m_workspaceEditReferenceSelectionProposalId.isEmpty()
+        && m_workspaceEditReferenceSelectionProposalId
+            != proposal.value(QStringLiteral("proposal_id")).toString();
+    if (foreground && !explicitReferenceSelected) {
         showConfirmedWorkspaceEditProposal(request.sessionId, true);
     } else if (priorId != proposal.value(QStringLiteral("proposal_id")).toString()) {
         m_unreadWorkspaceEditProposalSessions.insert(request.sessionId);
@@ -6067,14 +6325,10 @@ void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
     }
 }
 
-void AgentWorkbenchWidget::showConfirmedWorkspaceEditProposal(
-    const QString &sessionId, bool activate)
+void AgentWorkbenchWidget::showWorkspaceEditProposal(
+    const QJsonObject &proposal, bool activate)
 {
-    const QJsonObject proposal = m_confirmedWorkspaceEditProposals.value(sessionId);
-    if (proposal.isEmpty()
-        || m_unverifiedWorkspaceEditProposalSessions.contains(sessionId)
-        || proposal.value(QStringLiteral("session_id")).toString() != sessionId
-        || proposal.value(QStringLiteral("project_id")).toString() != m_projectId) return;
+    const QString sessionId = proposal.value(QStringLiteral("session_id")).toString();
     QJsonObject preview = proposal.value(QStringLiteral("summary")).toObject();
     preview.insert(QStringLiteral("edit_id"), proposal.value(QStringLiteral("edit_id")));
     preview.insert(QStringLiteral("project_id"), proposal.value(QStringLiteral("project_id")));
@@ -6101,8 +6355,6 @@ void AgentWorkbenchWidget::showConfirmedWorkspaceEditProposal(
     m_workspaceEditSummary->setText(
         QStringLiteral("%1 · 持久化只读提案 · 不可批准或应用")
             .arg(m_workspaceEditSummary->text()));
-    m_unreadWorkspaceEditProposalSessions.remove(sessionId);
-    updateWorkspaceEditUnreadMarker();
     QTimer::singleShot(0, this, [this, sessionId]() {
         if (m_workspaceEditDurableProposal
             && m_workspaceEditProposalSessionId == sessionId) {
@@ -6111,9 +6363,34 @@ void AgentWorkbenchWidget::showConfirmedWorkspaceEditProposal(
     });
 }
 
+void AgentWorkbenchWidget::showConfirmedWorkspaceEditProposal(
+    const QString &sessionId, bool activate)
+{
+    const QJsonObject proposal = m_confirmedWorkspaceEditProposals.value(sessionId);
+    if (proposal.isEmpty()
+        || m_unverifiedWorkspaceEditProposalSessions.contains(sessionId)
+        || proposal.value(QStringLiteral("session_id")).toString() != sessionId
+        || proposal.value(QStringLiteral("project_id")).toString() != m_projectId) return;
+    m_workspaceEditReferenceSelectionSessionId.clear();
+    m_workspaceEditReferenceSelectionProposalId.clear();
+    m_workspaceEditDisplayedReferenceSessionId.clear();
+    m_workspaceEditDisplayedReferenceProposalId.clear();
+    showWorkspaceEditProposal(proposal, activate);
+    m_unreadWorkspaceEditProposalSessions.remove(sessionId);
+    updateWorkspaceEditUnreadMarker();
+}
+
 void AgentWorkbenchWidget::clearWorkspaceEditProposalPending()
 {
     m_workspaceEditProposalRequests.clear();
+    if (m_workspaceEditProposalReferenceGeneration
+            == std::numeric_limits<quint64>::max()) {
+        m_workspaceEditProposalReferenceGeneration = 1;
+    } else {
+        ++m_workspaceEditProposalReferenceGeneration;
+    }
+    m_workspaceEditReferenceSelectionSessionId.clear();
+    m_workspaceEditReferenceSelectionProposalId.clear();
     invalidateWorkspaceEditProposalArtifactRequests();
 }
 
@@ -12948,6 +13225,8 @@ void AgentWorkbenchWidget::handleTimelineSnapshotPage(
         }
         m_itemLabels.clear();
         m_itemArtifactButtons.clear();
+        m_itemProposalButtons.clear();
+        m_itemProposalStatusLabels.clear();
         m_itemKinds = stateIt->projection.itemKinds;
         m_itemRoles = stateIt->projection.itemRoles;
         m_itemStates = stateIt->projection.itemStates;
@@ -13066,6 +13345,14 @@ bool AgentWorkbenchWidget::validateTimelineItem(
         QStringLiteral("unavailable"),
     };
     if (!validRoles.contains(role) || !validStates.contains(state)) return false;
+    if (kind == QStringLiteral("file-change")
+            && (role != QStringLiteral("tool")
+                || state != QStringLiteral("completed")
+                || !isWorkspaceEditProposalReference(
+                    item.value(QStringLiteral("data")), expectedSessionId,
+                    expectedTurnId, id))) {
+        return false;
+    }
 
     const auto kindIt = itemKinds->constFind(itemKey);
     const auto roleIt = itemRoles->constFind(itemKey);
@@ -13368,6 +13655,12 @@ void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend
             if (QPushButton *button = m_itemArtifactButtons.value(id, nullptr)) {
                 m_itemArtifactButtons.insert(key, button);
             }
+            if (QPushButton *button = m_itemProposalButtons.value(id, nullptr)) {
+                m_itemProposalButtons.insert(key, button);
+            }
+            if (QLabel *status = m_itemProposalStatusLabels.value(id, nullptr)) {
+                m_itemProposalStatusLabels.insert(key, status);
+            }
         }
     }
     const UsageAuthorityPresentation usagePresentation = kind == QStringLiteral("usage")
@@ -13400,6 +13693,8 @@ void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend
         .value(QStringLiteral("level")).toString();
     const QString roleText = role == QStringLiteral("user") ? QStringLiteral("你")
         : kind == QStringLiteral("usage") ? QStringLiteral("用量 · 只读")
+        : kind == QStringLiteral("file-change")
+            ? QStringLiteral("变更 · 持久化只读提案")
         : role == QStringLiteral("system") ? QStringLiteral("运行时")
         : kind == QStringLiteral("command")
             ? QStringLiteral("命令 · 只读沙箱 · 风险 %1").arg(risk)
@@ -13475,11 +13770,63 @@ void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend
         layout->addWidget(artifactButton);
         m_itemArtifactButtons.insert(key, artifactButton);
     }
+    if (kind == QStringLiteral("file-change")) {
+        const quint64 fileCount = data.value(
+            QStringLiteral("file_count")).toVariant().toULongLong();
+        const quint64 additions = data.value(
+            QStringLiteral("additions")).toVariant().toULongLong();
+        const quint64 deletions = data.value(
+            QStringLiteral("deletions")).toVariant().toULongLong();
+        const quint64 warningCount = data.value(
+            QStringLiteral("warning_count")).toVariant().toULongLong();
+        auto *summary = new QLabel(
+            QStringLiteral("%1 个文件 · +%2 / -%3 · %4")
+                .arg(fileCount).arg(additions).arg(deletions)
+                .arg(warningCount == 0
+                    ? QStringLiteral("无警告")
+                    : QStringLiteral("%1 个警告").arg(warningCount)),
+            bubble);
+        summary->setObjectName(QStringLiteral("timelineFileChangeSummary"));
+        summary->setTextFormat(Qt::PlainText);
+        summary->setWordWrap(true);
+        summary->setStyleSheet(QStringLiteral(
+            "background:transparent; color:#475467; font-size:10px;"));
+        layout->addWidget(summary);
+
+        auto *proposalButton = new QPushButton(QStringLiteral("查看变更"), bubble);
+        proposalButton->setObjectName(QStringLiteral("timelineFileChangeButton"));
+        proposalButton->setFixedHeight(26);
+        proposalButton->setToolTip(QStringLiteral("读取此时间线引用绑定的持久化只读提案"));
+        proposalButton->setStyleSheet(QStringLiteral(
+            "QPushButton { background:#ffffff; color:#344054; border:1px solid #d0d5dd;"
+            "border-radius:5px; padding:2px 8px; font-size:9px; text-align:left; }"
+            "QPushButton:hover { background:#f2f4f7; }"
+            "QPushButton:disabled { color:#98a2b3; background:#f2f4f7; }"));
+        layout->addWidget(proposalButton);
+
+        auto *proposalStatus = new QLabel(bubble);
+        proposalStatus->setObjectName(QStringLiteral("timelineFileChangeStatus"));
+        proposalStatus->setTextFormat(Qt::PlainText);
+        proposalStatus->setWordWrap(true);
+        proposalStatus->setStyleSheet(QStringLiteral(
+            "background:transparent; color:#b54708; font-size:9px;"));
+        layout->addWidget(proposalStatus);
+        m_itemProposalButtons.insert(key, proposalButton);
+        m_itemProposalStatusLabels.insert(key, proposalStatus);
+        connect(proposalButton, &QPushButton::clicked, this,
+                [this, key, data]() {
+            requestWorkspaceEditProposalReference(key, data);
+        });
+    }
     m_itemLabels.insert(key, message);
     // The raw ID remains a current-item alias for existing artifact/UI lookups.
     // Lifecycle updates always use the scoped key above, so another Turn cannot
     // overwrite a prior Turn's visible Item when an adapter reuses an Item ID.
     m_itemLabels.insert(id, message);
+    if (kind == QStringLiteral("file-change")) {
+        m_itemProposalButtons.insert(id, m_itemProposalButtons.value(key));
+        m_itemProposalStatusLabels.insert(id, m_itemProposalStatusLabels.value(key));
+    }
     const int insertAt = prepend ? 1 : qMax(0, m_timelineLayout->count() - 1);
     m_timelineLayout->insertWidget(insertAt, bubble, 0,
         role == QStringLiteral("user") ? Qt::AlignRight : Qt::AlignLeft);

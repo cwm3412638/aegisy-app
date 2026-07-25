@@ -938,9 +938,39 @@ Current editor evidence:
   response binding, zero-byte and 64 KiB page boundaries, UTF-8 characters crossing
   pages, verified intermediate UTF-8 prefixes, immediate rejection of irreparable
   continuation/overlong/out-of-range UTF-8 tails, Windows drive-prefix denial, and
-  the absence of Approval/Apply controls. Durable Change Timeline references and all
-  Approval/Apply/checkpoint authority remain absent, so tasks `7.5` and `7.6` stay
-  unchecked.
+  the absence of Approval/Apply controls.
+- The schema-v19 Change reference slice adds an immutable
+  `workspace-edit-proposal-reference/0.1` binding and a completed public
+  `file-change` Item for each new Proposal. Focused Store fixtures prove the Proposal,
+  artifacts/Blob references, Item plus internal `item.appended`, unchanged internal
+  `workspace-edit.proposal-recorded`, public `item.completed`, cursor advancement,
+  and binding commit atomically; an injected public-Journal insert failure restores
+  every row count and both internal/public sequences, and removes uncommitted Blob
+  references. Exact retry writes one of each row/event, drift conflicts, and an
+  injected post-commit caller fault leaves the complete committed graph for an
+  exactly-once retry.
+- The v18-to-v19 migration fixture requires one WAL-consistent backup, preserves the
+  exact legacy Proposal bytes/identity and `timeline_reference:null`, sets the legacy
+  requirement marker to false, and fabricates no Item, public event, or binding. New
+  v19 reads require exactly one binding and revalidate its canonical reference JSON,
+  Item payload/hash/sequence, stored public envelope bytes/hash/anchor, and all false
+  authority fields. Semantic binding tamper quarantines only the owning Session.
+  A dedicated prune/restart fixture deletes the Journal envelope through the existing
+  checkpoint path while retaining a readable Proposal, binding, and Item; the read is
+  accepted only because the saved public sequence is at or below the validated floor.
+  Deferred Item ownership also survives destructive Session projection rebuild, and
+  final Session purge removes Proposal/reference/Item/events, resets public retention,
+  and releases artifact references with the normal undo window.
+- The real stdio decline fixture now finds the exact durable `file-change`
+  `item.completed` and matches its Reference ID/Proposal ID to the restarted Store
+  record before confirming the workspace is unchanged. Qt render coverage rejects a
+  forged reference identity, unknown/path fields, true Apply authority, drifted exact
+  Proposal responses, stale generations, focus theft, and cross-bound/unavailable
+  reads. It preserves the latest cache while a validated explicit reference opens the
+  bound historical Proposal in Changes with no Approval or Apply control. The durable
+  Change reference slice is therefore present, but message/reasoning/review/image and
+  complete Tool mappings plus genuine Approval/Apply/checkpoint authority remain
+  absent, so tasks `7.5` and `7.6` stay unchecked.
 - Workspace-edit apply tests cover same-directory staged create/update content,
   immediate optimistic base/target rechecks, no-clobber hard-link backups, all four
   operation kinds, reverse rollback after partial and complete multi-file commit,

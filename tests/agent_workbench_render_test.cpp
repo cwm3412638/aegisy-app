@@ -12,6 +12,7 @@
 #include <QDebug>
 #include <QDialog>
 #include <QImage>
+#include <QJsonDocument>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
@@ -83,6 +84,30 @@ public:
         widget.m_workspaceEditProposalGenerations.insert(sessionId, generation);
         widget.m_workspaceEditProposalRequests.insert(
             requestId, {sessionId, QString(), generation});
+    }
+
+    static void prepareProposalReferenceRequest(
+        AgentWorkbenchWidget &widget, const QString &requestId,
+        const QString &itemId, const QJsonObject &reference,
+        quint64 generation)
+    {
+        const QString sessionId = reference.value(QStringLiteral("session_id")).toString();
+        const QString proposalId = reference.value(QStringLiteral("proposal_id")).toString();
+        const QString itemKey = sessionId + QChar(0x1f)
+            + reference.value(QStringLiteral("turn_id")).toString()
+            + QChar(0x1f) + itemId;
+        widget.m_workspaceEditProposalReferenceGeneration = generation;
+        widget.m_workspaceEditReferenceSelectionSessionId = sessionId;
+        widget.m_workspaceEditReferenceSelectionProposalId = proposalId;
+        widget.m_workspaceEditProposalRequests.insert(
+            requestId, {sessionId, proposalId, generation, itemKey, reference});
+    }
+
+    static void setWorkSession(AgentWorkbenchWidget &widget,
+                               const QString &sessionId)
+    {
+        widget.m_mode = QStringLiteral("work");
+        widget.m_workSessionId = sessionId;
     }
 
     static bool hasConfirmedProposal(const AgentWorkbenchWidget &widget,
@@ -567,6 +592,16 @@ public:
         return label ? label->text() : QString();
     }
 
+    static bool validateTimelineItem(const AgentWorkbenchWidget &widget,
+                                     const QJsonObject &item,
+                                     const QString &sessionId,
+                                     const QString &turnId)
+    {
+        QHash<QString, QString> kinds;
+        QHash<QString, QString> roles;
+        return widget.validateTimelineItem(item, sessionId, turnId, &kinds, &roles);
+    }
+
     static int timelineItemPresentationCount(const AgentWorkbenchWidget &widget,
                                              const QString &id)
     {
@@ -1023,6 +1058,12 @@ QJsonObject replaySnapshot(const QString &sessionId, const QJsonArray &items,
         }},
     };
 }
+
+QJsonObject proposalReadResult(const QString &sessionId, QLatin1Char fill);
+QJsonObject proposalTimelineReference(const QJsonObject &proposalResult,
+                                      const QString &itemId);
+QJsonObject proposalTimelineItem(const QString &itemId,
+                                 const QJsonObject &reference);
 
 bool verifyRuntimeDegradationFailures(QApplication &application,
                                       AgentWorkbenchWidget &workbench,
@@ -1941,16 +1982,110 @@ bool verifyStrictTimelineValidation(QApplication &application,
         QStringLiteral("valid-older"),
         replaySnapshot(sessionId, QJsonArray{olderGood, olderSecond}, 1, 2, 3));
     application.processEvents();
-    return expect(AgentWorkbenchWidgetTestAccess::hasTimelineItem(
-                      workbench, QStringLiteral("older-good"))
+    if (!expect(AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("older-good"))
+                    && AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("older-second"))
+                    && AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("replay-good"))
+                    && AgentWorkbenchWidgetTestAccess::historyCursor(workbench).isEmpty()
+                    && AgentWorkbenchWidgetTestAccess::historyFirstSequence(workbench) == 1
+                    && AgentWorkbenchWidgetTestAccess::historyLatestSequence(workbench) == 3,
+                "valid older page did not prepend atomically or close pagination")) {
+        return false;
+    }
+
+    const QString proposalItemId = QStringLiteral("replay-proposal-item");
+    const QJsonObject initialProposal = proposalReadResult(sessionId, QLatin1Char('6'));
+    const QJsonObject initialReference = proposalTimelineReference(
+        initialProposal, proposalItemId);
+    const QString initialTurnId = initialReference.value(
+        QStringLiteral("turn_id")).toString();
+    QJsonObject initialProposalItem = proposalTimelineItem(
+        proposalItemId, initialReference);
+    initialProposalItem.insert(QStringLiteral("sequence"), 3);
+    initialProposalItem.insert(QStringLiteral("turn_id"), initialTurnId);
+
+    QJsonObject forgedInitialItem = initialProposalItem;
+    forgedInitialItem.insert(QStringLiteral("turn_id"), QStringLiteral("forged-replay-turn"));
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("forged-initial-proposal-turn"), sessionId, false);
+    runtimeClient->sessionRead(
+        QStringLiteral("forged-initial-proposal-turn"),
+        replaySnapshot(sessionId, QJsonArray{forgedInitialItem}, 3, 3, 3));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, QStringLiteral("replay-good"))
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, proposalItemId),
+                "initial Proposal replay accepted a forged outer Turn binding")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("valid-initial-proposal"), sessionId, false);
+    runtimeClient->sessionRead(
+        QStringLiteral("valid-initial-proposal"),
+        replaySnapshot(sessionId, QJsonArray{initialProposalItem}, 3, 3, 3));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                    workbench, proposalItemId)
+                    && AgentWorkbenchWidgetTestAccess::timelineItemPresentationCount(
+                        workbench, proposalItemId) == 1
+                    && AgentWorkbenchWidgetTestAccess::historyCursor(workbench)
+                        == QStringLiteral("before:3"),
+                "initial Proposal replay did not retain its explicit Turn binding")) {
+        return false;
+    }
+
+    const QJsonObject olderProposal = proposalReadResult(sessionId, QLatin1Char('7'));
+    const QJsonObject olderReference = proposalTimelineReference(
+        olderProposal, proposalItemId);
+    const QString olderTurnId = olderReference.value(QStringLiteral("turn_id")).toString();
+    QJsonObject olderProposalItem = proposalTimelineItem(proposalItemId, olderReference);
+    olderProposalItem.insert(QStringLiteral("sequence"), 1);
+    olderProposalItem.insert(QStringLiteral("turn_id"), olderTurnId);
+    QJsonObject compatibleLegacyItem = timelineMessage(
+        QStringLiteral("older-legacy-item"), QStringLiteral("completed"),
+        QStringLiteral("older item without an outer Turn"));
+    compatibleLegacyItem.insert(QStringLiteral("sequence"), 2);
+
+    QJsonObject forgedOlderItem = olderProposalItem;
+    forgedOlderItem.insert(QStringLiteral("turn_id"), QStringLiteral("forged-older-turn"));
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("forged-older-proposal-turn"), sessionId, true,
+        QStringLiteral("before:3"), 100, 3, 3);
+    runtimeClient->sessionRead(
+        QStringLiteral("forged-older-proposal-turn"),
+        replaySnapshot(sessionId, QJsonArray{forgedOlderItem, compatibleLegacyItem},
+                       1, 2, 3));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineItemPresentationCount(
+                    workbench, proposalItemId) == 1
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("older-legacy-item"))
+                    && AgentWorkbenchWidgetTestAccess::historyCursor(workbench)
+                        == QStringLiteral("before:3"),
+                "older Proposal replay accepted forged Turn data or partially prepended")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, QStringLiteral("valid-older-proposal"), sessionId, true,
+        QStringLiteral("before:3"), 100, 3, 3);
+    runtimeClient->sessionRead(
+        QStringLiteral("valid-older-proposal"),
+        replaySnapshot(sessionId, QJsonArray{olderProposalItem, compatibleLegacyItem},
+                       1, 2, 3));
+    application.processEvents();
+    return expect(AgentWorkbenchWidgetTestAccess::timelineItemPresentationCount(
+                      workbench, proposalItemId) == 2
                       && AgentWorkbenchWidgetTestAccess::hasTimelineItem(
-                          workbench, QStringLiteral("older-second"))
-                      && AgentWorkbenchWidgetTestAccess::hasTimelineItem(
-                          workbench, QStringLiteral("replay-good"))
+                          workbench, QStringLiteral("older-legacy-item"))
                       && AgentWorkbenchWidgetTestAccess::historyCursor(workbench).isEmpty()
                       && AgentWorkbenchWidgetTestAccess::historyFirstSequence(workbench) == 1
                       && AgentWorkbenchWidgetTestAccess::historyLatestSequence(workbench) == 3,
-                  "valid older page did not prepend atomically or close pagination");
+                  "older Proposal replay did not preserve scoped Item identity or legacy Items");
 }
 
 bool verifySessionScopedTimelineSequences(QApplication &application,
@@ -2959,6 +3094,63 @@ QJsonObject proposalLatestResult(const QString &sessionId, QLatin1Char fill,
     };
 }
 
+QJsonObject proposalReadResult(const QString &sessionId, QLatin1Char fill)
+{
+    QJsonObject result = proposalLatestResult(sessionId, fill);
+    result.insert(QStringLiteral("schema_version"),
+                  QStringLiteral("workspace-edit-proposal-read/0.1"));
+    return result;
+}
+
+QJsonObject proposalTimelineReference(const QJsonObject &proposalResult,
+                                      const QString &itemId)
+{
+    const QJsonObject proposal = proposalResult.value(QStringLiteral("proposal")).toObject();
+    const QJsonObject summary = proposal.value(QStringLiteral("summary")).toObject();
+    QJsonObject reference{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("workspace-edit-proposal-reference/0.1")},
+        {QStringLiteral("session_id"), proposal.value(QStringLiteral("session_id"))},
+        {QStringLiteral("turn_id"), proposal.value(QStringLiteral("turn_id"))},
+        {QStringLiteral("proposal_id"), proposal.value(QStringLiteral("proposal_id"))},
+        {QStringLiteral("project_id"), proposal.value(QStringLiteral("project_id"))},
+        {QStringLiteral("root_id"), proposal.value(QStringLiteral("root_id"))},
+        {QStringLiteral("edit_id"), proposal.value(QStringLiteral("edit_id"))},
+        {QStringLiteral("preview_identity"),
+         proposal.value(QStringLiteral("preview_identity"))},
+        {QStringLiteral("file_count"), summary.value(QStringLiteral("file_count"))},
+        {QStringLiteral("additions"), summary.value(QStringLiteral("additions"))},
+        {QStringLiteral("deletions"), summary.value(QStringLiteral("deletions"))},
+        {QStringLiteral("warning_count"),
+         summary.value(QStringLiteral("warning_count"))},
+        {QStringLiteral("applicable"), summary.value(QStringLiteral("applicable"))},
+        {QStringLiteral("file_mutation_authority"), false},
+        {QStringLiteral("approval_recorded"), false},
+        {QStringLiteral("apply_available"), false},
+    };
+    QJsonObject identityMaterial = reference;
+    identityMaterial.insert(QStringLiteral("item_id"), itemId);
+    reference.insert(QStringLiteral("reference_id"),
+        QStringLiteral("workspace-edit-proposal-reference:sha256:")
+            + QString::fromLatin1(QCryptographicHash::hash(
+                QJsonDocument(identityMaterial).toJson(QJsonDocument::Compact),
+                QCryptographicHash::Sha256).toHex()));
+    return reference;
+}
+
+QJsonObject proposalTimelineItem(const QString &itemId,
+                                 const QJsonObject &reference)
+{
+    return {
+        {QStringLiteral("id"), itemId},
+        {QStringLiteral("kind"), QStringLiteral("file-change")},
+        {QStringLiteral("role"), QStringLiteral("tool")},
+        {QStringLiteral("state"), QStringLiteral("completed")},
+        {QStringLiteral("content"), QStringLiteral("持久化只读变更提案")},
+        {QStringLiteral("data"), reference},
+    };
+}
+
 QJsonObject completeProposalAllKindsResult(const QString &sessionId,
                                            QLatin1Char fill)
 {
@@ -3494,6 +3686,175 @@ bool verifyDurableProposalProjection(AgentWorkbenchWidget &workbench,
                   "disconnect cleanup discarded confirmed Proposal or retained pending generation");
 }
 
+bool verifyTimelineProposalReference(AgentWorkbenchWidget &workbench,
+                                     AgentRuntimeClient *runtime,
+                                     QTabWidget *tabs,
+                                     QLabel *changesSummary)
+{
+    if (!runtime || !tabs || !changesSummary) return false;
+    const QString sessionId = QStringLiteral("proposal-timeline-session");
+    const QString itemId = QStringLiteral("proposal-timeline-reference");
+    const QJsonObject exactResult = proposalReadResult(sessionId, QLatin1Char('3'));
+    const QJsonObject exactProposal = exactResult.value(QStringLiteral("proposal")).toObject();
+    const QString exactProposalId = exactProposal.value(
+        QStringLiteral("proposal_id")).toString();
+    const QString turnId = exactProposal.value(QStringLiteral("turn_id")).toString();
+    const QJsonObject reference = proposalTimelineReference(exactResult, itemId);
+    const QJsonObject timelineItem = proposalTimelineItem(itemId, reference);
+    AgentWorkbenchWidgetTestAccess::setProposalContext(
+        workbench, sessionId, QStringLiteral("project-proposal"));
+
+    if (!expect(AgentWorkbenchWidgetTestAccess::validateTimelineItem(
+                    workbench, timelineItem, sessionId, turnId),
+                "valid file-change Timeline reference was rejected")) {
+        return false;
+    }
+    QJsonObject forgedIdentityItem = timelineItem;
+    QJsonObject forgedIdentityData = reference;
+    forgedIdentityData.insert(QStringLiteral("reference_id"),
+        QStringLiteral("workspace-edit-proposal-reference:sha256:")
+            + QString(64, QLatin1Char('f')));
+    forgedIdentityItem.insert(QStringLiteral("data"), forgedIdentityData);
+    if (!expect(!AgentWorkbenchWidgetTestAccess::validateTimelineItem(
+                    workbench, forgedIdentityItem, sessionId, turnId),
+                "file-change Timeline reference accepted a forged identity")) {
+        return false;
+    }
+    QJsonObject unknownKeyItem = timelineItem;
+    QJsonObject unknownKeyData = reference;
+    unknownKeyData.insert(QStringLiteral("path"), QStringLiteral("secret.txt"));
+    unknownKeyItem.insert(QStringLiteral("data"), unknownKeyData);
+    if (!expect(!AgentWorkbenchWidgetTestAccess::validateTimelineItem(
+                    workbench, unknownKeyItem, sessionId, turnId),
+                "file-change Timeline reference accepted an unknown/path field")) {
+        return false;
+    }
+    QJsonObject authorityItem = timelineItem;
+    QJsonObject authorityData = reference;
+    authorityData.insert(QStringLiteral("apply_available"), true);
+    authorityItem.insert(QStringLiteral("data"), authorityData);
+    if (!expect(!AgentWorkbenchWidgetTestAccess::validateTimelineItem(
+                    workbench, authorityItem, sessionId, turnId),
+                "file-change Timeline reference accepted Apply authority")) {
+        return false;
+    }
+
+    runtime->timelineEvent(timelineEnvelope(
+        QStringLiteral("turn.started"), sessionId, turnId));
+    runtime->timelineEvent(timelineEnvelope(
+        QStringLiteral("item.completed"), sessionId, turnId, timelineItem));
+    QPushButton *viewButton = workbench.findChild<QPushButton *>(
+        QStringLiteral("timelineFileChangeButton"));
+    QLabel *referenceSummary = workbench.findChild<QLabel *>(
+        QStringLiteral("timelineFileChangeSummary"));
+    QLabel *referenceStatus = workbench.findChild<QLabel *>(
+        QStringLiteral("timelineFileChangeStatus"));
+    if (!expect(viewButton && referenceSummary && referenceStatus
+                    && viewButton->text() == QStringLiteral("查看变更")
+                    && referenceSummary->text().contains(QStringLiteral("1 个文件"))
+                    && referenceSummary->text().contains(QStringLiteral("+1 / -1")),
+                "file-change Timeline reference did not render its read-only action")) {
+        return false;
+    }
+
+    const QJsonObject latest = proposalLatestResult(sessionId, QLatin1Char('1'));
+    const QString latestProposalId = latest.value(QStringLiteral("proposal")).toObject()
+        .value(QStringLiteral("proposal_id")).toString();
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("timeline-reference-latest"), sessionId, 1);
+    runtime->workspaceEditProposalLatestRead(
+        QStringLiteral("timeline-reference-latest"), latest);
+    AgentWorkbenchWidgetTestAccess::prepareProposalReferenceRequest(
+        workbench, QStringLiteral("timeline-reference-exact"), itemId, reference, 1);
+    tabs->setCurrentIndex(0);
+    runtime->workspaceEditProposalRead(
+        QStringLiteral("timeline-reference-exact"), exactResult);
+    if (!expect(tabs->currentIndex()
+                    == AgentWorkbenchWidgetTestAccess::workspaceEditTab(workbench)
+                    && AgentWorkbenchWidgetTestAccess::currentProposalId(workbench)
+                        == exactProposalId
+                    && AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
+                        workbench, sessionId, latestProposalId)
+                    && referenceStatus->text().isEmpty(),
+                "exact Timeline Proposal read polluted latest cache or failed to focus")) {
+        return false;
+    }
+
+    QJsonObject drifted = exactResult;
+    QJsonObject driftedProposal = drifted.value(QStringLiteral("proposal")).toObject();
+    driftedProposal.insert(QStringLiteral("turn_id"), QStringLiteral("turn-drifted"));
+    drifted.insert(QStringLiteral("proposal"), driftedProposal);
+    AgentWorkbenchWidgetTestAccess::prepareProposalReferenceRequest(
+        workbench, QStringLiteral("timeline-reference-drift"), itemId, reference, 2);
+    runtime->workspaceEditProposalRead(QStringLiteral("timeline-reference-drift"), drifted);
+    if (!expect(AgentWorkbenchWidgetTestAccess::currentProposalId(workbench)
+                    == exactProposalId
+                    && AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
+                        workbench, sessionId, latestProposalId)
+                    && referenceStatus->text().contains(QStringLiteral("校验失败")),
+                "drifted exact Proposal response changed visible or latest state")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::prepareProposalReferenceRequest(
+        workbench, QStringLiteral("timeline-reference-race"), itemId, reference, 3);
+    const QJsonObject newerLatest = proposalLatestResult(sessionId, QLatin1Char('5'));
+    const QString newerLatestId = newerLatest.value(QStringLiteral("proposal")).toObject()
+        .value(QStringLiteral("proposal_id")).toString();
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("timeline-reference-racing-latest"), sessionId, 2);
+    runtime->workspaceEditProposalLatestRead(
+        QStringLiteral("timeline-reference-racing-latest"), newerLatest);
+    if (!expect(AgentWorkbenchWidgetTestAccess::currentProposalId(workbench)
+                    == exactProposalId
+                    && AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
+                        workbench, sessionId, newerLatestId),
+                "latest refresh stole focus from an explicit Timeline reference")) {
+        return false;
+    }
+    runtime->workspaceEditProposalRead(
+        QStringLiteral("timeline-reference-race"), exactResult);
+
+    AgentWorkbenchWidgetTestAccess::prepareProposalReferenceRequest(
+        workbench, QStringLiteral("timeline-reference-background"), itemId, reference, 4);
+    AgentWorkbenchWidgetTestAccess::setWorkSession(
+        workbench, QStringLiteral("another-work-session"));
+    tabs->setCurrentIndex(0);
+    runtime->workspaceEditProposalRead(
+        QStringLiteral("timeline-reference-background"), exactResult);
+    if (!expect(tabs->currentIndex() == 0
+                    && AgentWorkbenchWidgetTestAccess::currentProposalId(workbench)
+                        == exactProposalId,
+                "background exact Proposal response stole focus or visible state")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::setProposalContext(
+        workbench, sessionId, QStringLiteral("project-proposal"));
+    AgentWorkbenchWidgetTestAccess::prepareProposalReferenceRequest(
+        workbench, QStringLiteral("timeline-reference-error"), itemId, reference, 5);
+    runtime->requestFailed(QStringLiteral("timeline-reference-error"),
+                           QStringLiteral("workspace/edit/proposal/read"),
+                           QStringLiteral("redacted"), -32149);
+    if (!expect(referenceStatus->text().contains(QStringLiteral("错误码 -32149"))
+                    && AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
+                        workbench, sessionId, newerLatestId),
+                "exact Proposal failure invalidated latest cache or omitted retry state")) {
+        return false;
+    }
+    for (QPushButton *button : workbench.findChildren<QPushButton *>()) {
+        const QString text = button->text().toLower();
+        if (!expect(!text.contains(QStringLiteral("apply"))
+                        && !text.contains(QStringLiteral("approve"))
+                        && !text.contains(QStringLiteral("应用"))
+                        && !text.contains(QStringLiteral("批准")),
+                    "Timeline Proposal reference exposed mutation authority")) {
+            return false;
+        }
+    }
+    return true;
+}
+
 QPushButton *buttonWithText(QWidget &root, const QString &text)
 {
     for (QPushButton *button : root.findChildren<QPushButton *>()) {
@@ -3992,6 +4353,22 @@ int main(int argc, char *argv[])
             pagingWorkbench.findChild<AgentRuntimeClient *>();
         if (!verifyDurableProposalUtf8Paging(
                 pagingWorkbench, pagingRuntime, pagingSummary, pagingDiff, pagingMore)) {
+            return 1;
+        }
+    }
+
+    {
+        AgentWorkbenchWidget referenceWorkbench;
+        referenceWorkbench.resize(900, 620);
+        QTabWidget *referenceTabs = referenceWorkbench.findChild<QTabWidget *>(
+            QStringLiteral("agentWorkspaceTabs"));
+        QLabel *referenceChangesSummary = referenceWorkbench.findChild<QLabel *>(
+            QStringLiteral("agentWorkspaceEditSummary"));
+        AgentRuntimeClient *referenceRuntime =
+            referenceWorkbench.findChild<AgentRuntimeClient *>();
+        if (!verifyTimelineProposalReference(
+                referenceWorkbench, referenceRuntime, referenceTabs,
+                referenceChangesSummary)) {
             return 1;
         }
     }

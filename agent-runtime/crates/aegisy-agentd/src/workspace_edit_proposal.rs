@@ -1680,6 +1680,7 @@ mod tests {
                 proposal_hash: ContentHash::for_bytes(&encoded),
                 event_sequence: 7,
                 artifact_reference_ids,
+                timeline_reference: None,
             }
         }
 

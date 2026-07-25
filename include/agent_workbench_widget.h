@@ -294,9 +294,12 @@ private:
     QWidget *buildWorkspaceEditPage();
     void populateWorkspaceEditPreview(const QJsonObject &preview, bool activate = true);
     void requestLatestWorkspaceEditProposal(const QString &sessionId);
+    void requestWorkspaceEditProposalReference(const QString &itemKey,
+                                               const QJsonObject &reference);
     void acceptWorkspaceEditProposalResult(const QString &requestId,
                                            const QJsonObject &result,
                                            bool latest);
+    void showWorkspaceEditProposal(const QJsonObject &proposal, bool activate);
     void showConfirmedWorkspaceEditProposal(const QString &sessionId,
                                             bool activate);
     void clearWorkspaceEditProposalPending();
@@ -468,6 +471,8 @@ private:
     QTimer *m_runtimeHealthTimer = nullptr;
     QHash<QString, QLabel *> m_itemLabels;
     QHash<QString, QPushButton *> m_itemArtifactButtons;
+    QHash<QString, QPushButton *> m_itemProposalButtons;
+    QHash<QString, QLabel *> m_itemProposalStatusLabels;
     QHash<QString, QString> m_itemKinds;
     QHash<QString, QString> m_itemRoles;
     QHash<QString, QString> m_itemStates;
@@ -547,9 +552,16 @@ private:
         QString sessionId;
         QString proposalId;
         quint64 generation = 0;
+        QString itemKey;
+        QJsonObject reference;
     };
     QHash<QString, WorkspaceEditProposalRequest> m_workspaceEditProposalRequests;
     QHash<QString, quint64> m_workspaceEditProposalGenerations;
+    quint64 m_workspaceEditProposalReferenceGeneration = 0;
+    QString m_workspaceEditReferenceSelectionSessionId;
+    QString m_workspaceEditReferenceSelectionProposalId;
+    QString m_workspaceEditDisplayedReferenceSessionId;
+    QString m_workspaceEditDisplayedReferenceProposalId;
     QHash<QString, QJsonObject> m_confirmedWorkspaceEditProposals;
     QStringList m_workspaceEditProposalRecency;
     QSet<QString> m_unreadWorkspaceEditProposalSessions;

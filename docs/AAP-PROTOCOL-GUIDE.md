@@ -1291,6 +1291,63 @@ recomputed from the exact persisted untruncated Blob, even when its inline displ
 was truncated. A genuinely source-truncated diff remains explicitly labelled and
 is not treated as having an independently recomputable complete source.
 
+### Durable Change Timeline Reference
+
+Workbench schema v19 projects every newly recorded Proposal into exactly one
+completed public `file-change` Item. Its content is the fixed plain text
+`File changes proposed (read-only)` and its `data` is the closed
+`workspace-edit-proposal-reference/0.1` object. The reference contains exactly:
+
+- its typed `reference_id`, Session ID, Turn ID, Proposal ID, project ID, root ID,
+  edit ID, and preview identity;
+- aggregate file/addition/deletion/warning counts and applicability; and
+- `file_mutation_authority:false`, `approval_recorded:false`, and
+  `apply_available:false`.
+
+The Reference ID is SHA-256 over compact identity material containing those fields,
+the exact Timeline Item ID, and the fixed schema/false-authority values. The Item ID
+is itself derived from the Proposal ID. The public object omits the Item ID because
+it is already the enclosing Item identity; consumers must include that enclosing ID
+when reproducing the Reference ID. Paths, diff text, source bodies, raw Provider IDs,
+credentials, approval decisions, and apply/checkpoint tokens are forbidden.
+
+Runtime prepares the public `item.completed` envelope before persistence. One SQLite
+transaction then commits the Proposal artifact Blob references, the completed Item
+and internal `item.appended` event, the unchanged internal
+`workspace-edit.proposal-recorded` event, Proposal/artifact rows, exact public
+envelope, and immutable Proposal/Timeline binding. Runtime commits the prepared
+in-memory Sequencer state and emits the notification only after that transaction
+commits. A failed Store write advances neither durable cursor and publishes no Change
+notification; an exact retry returns the original graph, while any binding drift is a
+conflict. A caller error after commit does not compensate away the committed rows or
+Blob objects.
+
+The binding retains the Item sequence/payload hash and exact public envelope
+sequence/ID/canonical JSON/hash even after Public Timeline retention. It intentionally
+has no foreign key to `public_timeline_events`: a reviewed checkpoint/prune may delete
+the Journal copy. Reads then require the missing sequence to be at or below the
+validated retention floor; an absent event above the floor is corruption. The Item
+foreign key is deferred so a verified projection rebuild can delete and reinsert the
+Item in one transaction. The floor-visible snapshot retains the completed Change
+Item, so retention recovery still shows the durable review link. Final Session purge
+removes the Proposal/reference/Item/event graph and releases artifacts through the
+ordinary retention window.
+
+The v18-to-v19 migration never backfills history. Existing Proposals keep their exact
+bytes and identities, are explicitly marked as not requiring a Timeline reference,
+and receive no fabricated Item, public event, or binding. Every Proposal produced by
+the v19 Runtime requires the reference; a missing or unexpected binding fails Store
+verification and quarantines only the owning Session.
+
+Qt accepts this Item only as a completed `tool` `file-change`, recomputes the
+Reference ID with the enclosing Item ID, checks exact keys and false authority, and
+binds Session/Turn before rendering `View changes`. That action uses the existing
+Session-scoped `workspace/edit/proposal/read`, then compares the returned Proposal's
+Session/Turn/project/root/edit/preview identity and aggregate summary with the
+reference. A forged, stale, cross-bound, unavailable, or raced response leaves both
+the visible Changes view and latest-Proposal cache unchanged. This reference is
+durable navigation to a read-only Proposal, not approval or file mutation authority.
+
 Legacy `workspace-edit-proposal/0.1` compatibility is exact rather than a
 migration or backfill. Its canonical serialization, Proposal ID, preview identity,
 operations, artifact descriptors, and authority fields remain unchanged, and a

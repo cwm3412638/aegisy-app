@@ -149,14 +149,15 @@ use turn_trace_producer::{
 };
 use usage_authority::from_provider_token_usage;
 use workbench_store::{
-    durable_blob_reference_id, BackgroundNotificationCursor, DurableBlobKind, DurableBlobWrite,
-    PortableSessionImportCommand, PortableSessionPackage, PreviewTurnCommit, RetentionPolicy,
-    SessionDeletionScope, SessionProjectionConsistency, SessionSearchRequest, StoredItem,
-    StoredItemAppend, StoredProjectCreate, StoredProjectNavigationEntry,
-    StoredProjectTrustAcknowledge, StoredProjectTrustAcknowledgement, StoredSessionCreate,
-    StoredSessionLineage, StoredSessionMode, StoredSessionRuntimeBindingCreate,
-    StoredSessionWorkspaceBinding, StoredSessionWorkspaceBindingCreate, StoredTurnCreate,
-    StoredWorkspaceEditProposal, WorkbenchRecoveryDiagnostic, WorkbenchStore, WorkbenchStoreOpen,
+    durable_blob_reference_id, workspace_edit_proposal_timeline_projection,
+    BackgroundNotificationCursor, DurableBlobKind, DurableBlobWrite, PortableSessionImportCommand,
+    PortableSessionPackage, PreviewTurnCommit, RetentionPolicy, SessionDeletionScope,
+    SessionProjectionConsistency, SessionSearchRequest, StoredItem, StoredItemAppend,
+    StoredProjectCreate, StoredProjectNavigationEntry, StoredProjectTrustAcknowledge,
+    StoredProjectTrustAcknowledgement, StoredSessionCreate, StoredSessionLineage,
+    StoredSessionMode, StoredSessionRuntimeBindingCreate, StoredSessionWorkspaceBinding,
+    StoredSessionWorkspaceBindingCreate, StoredTurnCreate, StoredWorkspaceEditProposal,
+    WorkbenchRecoveryDiagnostic, WorkbenchStore, WorkbenchStoreOpen,
     WorkspaceEditProposalArtifactWrite,
 };
 use workspace::{
@@ -3512,10 +3513,13 @@ fn session_history_window(
     Ok((end_sequence.saturating_sub(page_len as u64), page_len))
 }
 
-fn timeline_item_value(item: &TimelineItem, sequence: u64) -> Value {
+fn timeline_item_value(item: &TimelineItem, sequence: u64, turn_id: Option<&str>) -> Value {
     let mut value = serde_json::to_value(item).expect("timeline item serialization");
     if let Some(object) = value.as_object_mut() {
         object.insert("sequence".into(), json!(sequence));
+        if let Some(turn_id) = turn_id {
+            object.insert("turn_id".into(), json!(turn_id));
+        }
     }
     value
 }
@@ -12276,7 +12280,7 @@ impl Runtime {
                                     return;
                                 }
                             };
-                            let artifact_writes = artifacts
+                            let artifact_writes: Vec<WorkspaceEditProposalArtifactWrite> = artifacts
                                 .into_iter()
                                 .map(|artifact| WorkspaceEditProposalArtifactWrite {
                                     reference: artifact.reference,
@@ -12284,6 +12288,45 @@ impl Runtime {
                                     retain_until_ms,
                                 })
                                 .collect();
+                            let (mut timeline_append, timeline_item) =
+                                match workspace_edit_proposal_timeline_projection(&proposal) {
+                                    Ok(projection) => projection,
+                                    Err(_) => {
+                                        self.workspace_edit_previews
+                                            .remove(&params.session_id, &edit_id);
+                                        persistence_error = Some(
+                                            "Codex file change Timeline reference is invalid"
+                                                .to_owned(),
+                                        );
+                                        cancellation.request();
+                                        return;
+                                    }
+                                };
+                            let prepared_event = match self.event_sequencer.prepare(
+                                proposal.created_at_ms,
+                                &params.session_id,
+                                &proposal.turn_id,
+                                "item.completed",
+                                Some(timeline_item.clone()),
+                            ) {
+                                Ok(prepared) => prepared,
+                                Err(error) => {
+                                    sequencing_error = Some(error);
+                                    cancellation.request();
+                                    return;
+                                }
+                            };
+                            timeline_append.created_at_ms = prepared_event.envelope().timestamp_ms;
+                            let event_message = match timeline_notification(
+                                prepared_event.envelope(),
+                            ) {
+                                Ok(message) => message,
+                                Err(error) => {
+                                    persistence_error = Some(error);
+                                    cancellation.request();
+                                    return;
+                                }
+                            };
                             let Some(store) = self.workbench_store.as_mut() else {
                                 self.workspace_edit_previews
                                     .remove(&params.session_id, &edit_id);
@@ -12294,16 +12337,42 @@ impl Runtime {
                                 cancellation.request();
                                 return;
                             };
-                            if let Err(_cause) =
-                                store.record_workspace_edit_proposal(proposal, artifact_writes)
-                            {
+                            let persisted = store
+                                .record_workspace_edit_proposal_with_timeline(
+                                    proposal.clone(),
+                                    artifact_writes.clone(),
+                                    timeline_append.clone(),
+                                    prepared_event.envelope(),
+                                )
+                                .or_else(|_| {
+                                    store.record_workspace_edit_proposal_with_timeline(
+                                        proposal,
+                                        artifact_writes,
+                                        timeline_append,
+                                        prepared_event.envelope(),
+                                    )
+                                });
+                            if persisted.is_err() {
                                 self.workspace_edit_previews
                                     .remove(&params.session_id, &edit_id);
                                 persistence_error = Some(
                                     "Codex file change proposal could not be persisted".to_owned(),
                                 );
                                 cancellation.request();
+                                return;
                             }
+                            if let Err(error) = prepared_event.commit(&mut self.event_sequencer) {
+                                persistence_error = Some(format!(
+                                    "cannot commit file change Timeline item: {}",
+                                    error.code()
+                                ));
+                                cancellation.request();
+                                return;
+                            }
+                            if let Some(state) = self.sessions.get_mut(&params.session_id) {
+                                state.items.push(timeline_item);
+                            }
+                            emit(event_message);
                         }
                         CodexEvent::TokenUsage { turn_id, mut usage } => {
                             let key = format!("usage:{turn_id}");
@@ -13535,8 +13604,9 @@ impl Runtime {
                 .into_iter()
                 .map(|item| {
                     let sequence = item.sequence;
+                    let turn_id = item.turn_id.clone();
                     let timeline_item = stored_timeline_item(item);
-                    timeline_item_value(&timeline_item, sequence)
+                    timeline_item_value(&timeline_item, sequence, turn_id.as_deref())
                 })
                 .collect::<Vec<_>>();
             // Prefer the live Runtime latch when this session is active. A
@@ -13610,7 +13680,9 @@ impl Runtime {
         let items = state.items[start..end]
             .iter()
             .enumerate()
-            .map(|(offset, item)| timeline_item_value(item, after_sequence + offset as u64 + 1))
+            .map(|(offset, item)| {
+                timeline_item_value(item, after_sequence + offset as u64 + 1, None)
+            })
             .collect::<Vec<_>>();
         let first_sequence = (page_len > 0).then_some(after_sequence + 1);
         let last_sequence = (page_len > 0).then_some(after_sequence + page_len as u64);

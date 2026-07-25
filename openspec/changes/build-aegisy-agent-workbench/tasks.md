@@ -31,6 +31,7 @@
 - [ ] 3.5 Define snapshot, replay, subscription, heartbeat, reconnect, and sequence-gap behavior
   - Fixed-watermark replay, the durable Journal/checkpoint/floor, schema-v17 floor-visible snapshot, Runtime fixed-head paging, and per-Session Qt private staging/atomic replacement are implemented. A genuine pre-floor request returns closed `timeline-retention-gap/0.1` data on `-32148`; it reports `snapshot_available:true` only when the current connection negotiated `timeline.snapshot.current`, otherwise false, and never permits replay directly from the floor. Retained forged anchors remain ordinary drift failures.
   - Snapshot pages bind null-only first capture, exact continuation, first/latest Item anchors, active-Turn started/latest anchors and ordered open Item IDs, plus domain-separated Item/full/page identities. Complete materialization is bounded to 10,000 Items/64 MiB, pages to 200 Items and the 4 MiB frame. Qt changes no visible state until the complete identity-valid snapshot replaces one Session, then validates queued post-watermark live events normally. Automatic pruning remains disabled; subscription, heartbeat, complete reconnect orchestration, explicit acknowledgement, and Windows recovery evidence remain open, so keep task `3.5` unchecked.
+  - Schema v19 file-change Proposal references preserve the exact originating public envelope in an immutable binding without a foreign key to the prunable Journal. A retained row must match byte-for-byte; after reviewed pruning, absence is valid only at or below the durable floor, while the completed Item remains in the visible snapshot. This retention-compatible producer does not enable automatic pruning or complete the remaining `3.5` gates.
 - [ ] 3.6 Define idempotency semantics for turns, approvals, file writes, Git mutations, and job submission
 - [ ] 3.7 Define cancellation, steering, structured user input, credential refresh, and extension elicitation methods
 - [ ] 3.8 Define content references, hashes, MIME types, previews, pagination, and negotiated inline-size limits
@@ -171,18 +172,31 @@
     untruncated diff Blobs are semantically re-read for additions/deletions on
     admission, direct read, and startup/restart. Exact legacy `0.1` records retain
     their canonical bytes/identities and project as explicitly incomplete summaries.
+    Schema v19 now projects every newly persisted Proposal as one completed `tool`
+    `file-change` Item whose `workspace-edit-proposal-reference/0.1` metadata binds
+    the Session, Turn, Proposal, project/root/edit, preview identity, aggregate
+    counts/applicability, and false mutation/approval/apply authority. The Item,
+    public `item.completed` envelope, internal Item/Proposal events, Proposal,
+    artifacts, Blob references, and immutable binding share one Store transaction;
+    Runtime commits the prepared in-memory sequence and emits only afterward.
     Qt restores strictly validated durable file-change Proposals into Changes with
     foreground auto-open, background unread state, reconnect revalidation, bounded
-    artifact paging, and no approval/apply controls. Message/reasoning/review/image
-    and complete Tool families remain incomplete.
+    artifact paging, and no approval/apply controls. Qt also validates the exact
+    Timeline reference, offers a read-only `View changes` action, and rechecks an
+    exact Proposal response without allowing it to overwrite the latest cache on
+    drift or race. Message/reasoning/review/image and complete Tool families remain
+    incomplete, so keep `7.5` unchecked.
 - [ ] 7.6 Map command, file, permission, MCP elicitation, and user-input server requests to AAP approvals/questions
   - Partial file-request boundary: before the fixed Runtime-policy `decline` is
     written, the exact Codex file change is compiled into an immutable
     `workspace-edit-proposal/0.2` and committed with its content/diff Blob
-    references plus a metadata-only Session event. Store or Proposal failure returns
-    false to the adapter, sends no decline, and fails the Turn closed. The Proposal
-    records no user decision and fixes mutation, approval, and apply authority to
-    false. Negotiated `workspace.edit.proposal.read-only` plus
+    references, completed metadata-only Change Item, internal Item/Proposal events,
+    public `item.completed` envelope, and v19 immutable Timeline binding. Store,
+    sequencing, serialization, or Proposal failure sends no decline and fails the
+    Turn closed; notification and in-memory sequence commit occur only after the
+    SQLite commit. The Proposal and reference record no user decision and fix
+    mutation, approval, and apply authority to false. Negotiated
+    `workspace.edit.proposal.read-only` plus
     `permission.read-only` now exposes Session-scoped latest/exact reads and bounded
     Proposal-owned artifact pages; `-32149` and `-32150` keep missing Proposal and
     artifact/page state distinct. Exact `0.1` read compatibility remains available
@@ -479,19 +493,26 @@
   - AAP exposes only `workspace/edit/preview` and session/project/edit-scoped `workspace/edit/artifact/read`; exact Work-session project ID, canonical root, and root identity must match before the edit is deserialized or any base is read. Qt replaces the Changes placeholder with a file review table, aggregate/per-file plain-text diff, `+/-` totals, blocking-warning state, selectable context excerpts, and paged continuation. Rust unit/protocol and Qt render fixtures cover all operation kinds, long Unicode content, stale/sensitive/ignored/symlink cases, hash/content mismatch, root/session denial, paging, visible warnings, and unchanged disk state. `workspace/edit/apply` remains absent and Agent/Codex remains read-only.
   - Codex file-change approval requests now reuse the same preview compiler and
     persist an immutable Proposal before Runtime sends its fixed read-only decline.
-    Workbench schema v18 stores the Proposal, normalized operations, overlap
+    Workbench schema v19 stores the Proposal, normalized operations, overlap
     baseline, preview summary, provider/thread/item lifecycle binding, and exact
     artifact descriptors in rows protected from update and delete, except that the
     reviewed Session-retention purge may remove the complete owned Proposal graph.
-    Blob references plus a content-free Session event are transactionally linked.
+    Blob references, one completed metadata-only `file-change` Item, its internal
+    event, the content-free Proposal event, the public `item.completed` envelope, and
+    an immutable `workspace-edit-proposal-reference/0.1` binding are transactionally
+    linked. The binding retains the exact public envelope independently of Journal
+    retention; its deferred Item foreign key permits projection rebuild, and reviewed
+    pruning may remove only the Journal copy. Existing v18 Proposals migrate with an
+    explicit no-reference marker and receive no fabricated Item or public event.
     Admission and restart revalidate
     the Work Session, active Turn at write time, project/root/filesystem identity,
     exact `codex-app-server` / `codex-cli 0.144.5` Runtime binding, provider/backend
     thread, `read-only` permission, domain-separated identities, artifacts, and false
-    authority fields. A real stdio fixture proves restart readability and that
-    the proposed file is never created. Public Proposal read and durable Qt Changes
-    restoration are now implemented without mutation authority. A durable Change
-    Timeline reference, genuine approval, and Apply remain later slices.
+    authority fields. A real stdio fixture proves restart readability, the durable
+    public Change reference, and that the proposed file is never created. Public
+    Proposal read, durable Timeline-to-Changes navigation, and Qt Changes restoration
+    are implemented without mutation authority. Genuine approval and Apply remain
+    later slices; task `15.2` stays complete and `7.5`/`7.6` stay unchecked.
 - [x] 15.3 Implement atomic apply with optimistic hash checks, stale-patch rejection, rollback journal, and final hashes
   - The sidecar library now has an internal, non-AAP apply transaction for validated `WorkspaceEdit` values. It revalidates the canonical root and path policy, validates every referenced content hash, reads and bounds every UTF-8 base, rejects stale bases or newly occupied targets before mutation, stages create/update content with `create_new` in the destination directory, flushes staged bytes, and preserves update permissions. Same-directory hard links provide no-clobber target creation and no-clobber rollback backups instead of relying on Unix replacement-style rename semantics.
   - Every operation receives an immediate optimistic recheck before commit. The undo journal is registered before destructive removal, runs in reverse order on commit/sync/final-verification failure, and only removes a target when its SHA-256 still matches content installed by this transaction. A later external rewrite is preserved, rollback is reported incomplete, authoritative per-path states are returned, and any retained hidden backup/stage is named as a recovery artifact. Success requires directory sync where supported and exact final SHA-256 verification for create/update/rename, with deletion absence verified explicitly.

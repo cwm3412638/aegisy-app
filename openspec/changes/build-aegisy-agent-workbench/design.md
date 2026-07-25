@@ -326,6 +326,22 @@ missing rebuildable Session projection cannot silently erase replay authority.
 Startup may replay a complete cursor/checkpoint/tail while that projection is
 temporarily missing, but it enforces exact Session ownership immediately after
 projection recovery and before the Store becomes writable.
+Schema v19 adds one durable Change reference for each newly recorded Codex
+file-change Proposal without making the prunable Journal row permanent. The
+producer prepares a metadata-only completed `file-change` Item and public
+`item.completed` envelope, then one SQLite transaction commits the Item and its
+internal `item.appended` event, the unchanged internal
+`workspace-edit.proposal-recorded` event, Proposal and artifact/Blob-reference
+rows, the public envelope, and an immutable
+`workspace-edit-proposal-reference/0.1` binding. Only after commit may Runtime
+advance its in-memory Sequencer and notify Qt. The binding retains the exact public
+envelope bytes/hash and sequence plus the Item identity, sequence, and payload
+hash. Its Item foreign key is deferred so projection recovery can delete and
+reinsert Items in the same transaction; it deliberately has no foreign key to
+`public_timeline_events`, because a reviewed checkpoint/prune may remove that
+envelope while the durable Item and Proposal reference remain valid. Reads require
+the exact retained envelope when present, or prove that its sequence is at or below
+the validated retention floor after pruning.
 Automatic production pruning remains disabled until a later reviewed stage enables
 it, even though the versioned current-Session snapshot, structured retention-gap
 response, and client recovery flow now exist.
@@ -431,14 +447,19 @@ it is no longer model context.
   before the adapter sends its fixed policy denial. The Proposal binds the exact
   Session, durable Turn, provider thread/item, project/root/filesystem identity,
   normalized operations, overlap baseline, preview summary, and content-addressed
-  artifacts. Proposal, artifact references, and the metadata-only Session event
-  commit atomically; all mutation, user-approval, and apply authority fields remain
-  false. A caller fault after commit cannot compensate away committed Proposal or
-  Blob references, while Proposal/Blob corruption quarantines only its owning
-  Session. Current `workspace-edit-proposal/0.2` records bind complete aggregate and
+  artifacts. For new schema-v19 writes, the Proposal, artifact references, completed
+  metadata-only `file-change` Item, both internal events, public `item.completed`
+  envelope, and immutable Proposal/Timeline binding commit atomically; all mutation,
+  user-approval, and apply authority fields remain false. A caller fault after commit
+  cannot compensate away committed rows or Blob references, while Proposal, binding,
+  Item, public-envelope, or Blob corruption quarantines only its owning Session.
+  Current `workspace-edit-proposal/0.2` records bind complete aggregate and
   ordered per-file summaries, with semantic statistics rechecked from untruncated
   persisted diff Blobs. Exact `0.1` canonical bytes and identities remain readable
-  through an explicitly incomplete public projection. Negotiated
+  through an explicitly incomplete public projection. A v18-to-v19 migration marks
+  every existing Proposal as legitimately reference-less and fabricates no Item or
+  public history; every Proposal created by the v19 Runtime requires exactly one
+  reference. Negotiated
   `workspace.edit.proposal.read-only` plus `permission.read-only` exposes
   Session-scoped latest/exact Proposal reads and 64 KiB Proposal-owned artifact
   pages with typed domain-separated identities; every public authority field remains
@@ -452,6 +473,17 @@ it is no longer model context.
   complete UTF-8 decoding before treating a diff as complete. Provider `completed`
   is treated as a potential unauthorized write until the later
   approval/checkpoint/apply pipeline exists.
+- The public `file-change` Item contains only the fixed text
+  `File changes proposed (read-only)` and a closed
+  `workspace-edit-proposal-reference/0.1` value. The value binds Session, Turn,
+  Proposal, project, root, edit, preview identity, aggregate counts/applicability,
+  the Item identity through its domain-separated Reference ID, and three false
+  authority fields; it contains no path, diff, source body, raw Provider identity,
+  approval, or apply token. Qt validates that exact identity and binding before
+  rendering `View changes`, then performs the existing Session-scoped exact Proposal
+  read and rechecks the returned Proposal summary. A stale, forged, cross-bound, or
+  failed exact read changes neither the latest-Proposal cache nor the visible Changes
+  view. This is a durable review link, not an Approval or mutation capability.
 - A file watcher invalidates context and UI state. Agent and user changes carry
   origin metadata.
 - Diagnostics come from build/test output first, then language servers. The UI

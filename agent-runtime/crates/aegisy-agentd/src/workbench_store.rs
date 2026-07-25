@@ -75,7 +75,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = crate::turn_trace::MAX_DURABLE_EVENT_BYTES;
@@ -105,6 +105,8 @@ const MAX_WORKSPACE_EDIT_PROPOSAL_CONTENT_BYTES: u64 = 512 * 1024;
 const MAX_WORKSPACE_EDIT_PROPOSAL_FILE_DIFF_BYTES: u64 = 512 * 1024;
 const MAX_WORKSPACE_EDIT_PROPOSAL_AGGREGATE_DIFF_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_WORKSPACE_EDIT_PROPOSAL_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
+const WORKSPACE_EDIT_PROPOSAL_REFERENCE_SCHEMA_VERSION: &str =
+    "workspace-edit-proposal-reference/0.1";
 const WORKSPACE_EDIT_PROPOSAL_NOT_FOUND: &str = "workspace-edit-proposal-not-found";
 const WORKSPACE_EDIT_PROPOSAL_ARTIFACT_NOT_FOUND: &str =
     "workspace-edit-proposal-artifact-not-found";
@@ -172,17 +174,20 @@ const REQUIRED_MODEL_PROFILE_INDEXES: [&str; 3] = [
     "model_profiles_state_updated_idx",
     "model_profiles_active_profile_id_idx",
 ];
-const REQUIRED_WORKSPACE_EDIT_PROPOSAL_TABLES: [&str; 2] = [
+const REQUIRED_WORKSPACE_EDIT_PROPOSAL_TABLES: [&str; 3] = [
     "workspace_edit_proposals",
     "workspace_edit_proposal_artifacts",
+    "workspace_edit_proposal_timeline_references",
 ];
-const REQUIRED_WORKSPACE_EDIT_PROPOSAL_INDEXES: [&str; 2] = [
+const REQUIRED_WORKSPACE_EDIT_PROPOSAL_INDEXES: [&str; 3] = [
     "workspace_edit_proposals_session_created_idx",
     "workspace_edit_proposal_artifacts_reference_idx",
+    "workspace_edit_proposal_timeline_session_idx",
 ];
-const REQUIRED_WORKSPACE_EDIT_PROPOSAL_TRIGGERS: [&str; 2] = [
+const REQUIRED_WORKSPACE_EDIT_PROPOSAL_TRIGGERS: [&str; 3] = [
     "workspace_edit_proposals_immutable_update",
     "workspace_edit_proposal_artifacts_immutable_update",
+    "workspace_edit_proposal_timeline_immutable_update",
 ];
 const REQUIRED_PUBLIC_TIMELINE_TABLES: [&str; 5] = [
     "public_timeline_events",
@@ -651,6 +656,8 @@ const WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL: &str = "
         file_mutation_authority INTEGER NOT NULL CHECK(file_mutation_authority = 0),
         approval_recorded INTEGER NOT NULL CHECK(approval_recorded = 0),
         apply_available INTEGER NOT NULL CHECK(apply_available = 0),
+        timeline_reference_required INTEGER NOT NULL DEFAULT 0
+            CHECK(timeline_reference_required IN (0,1)),
         UNIQUE(session_id, edit_id),
         UNIQUE(provider_thread_id, provider_item_id),
         UNIQUE(session_id, event_sequence),
@@ -680,12 +687,47 @@ const WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL: &str = "
         ON workspace_edit_proposals(session_id, created_at_ms DESC, proposal_id ASC);
     CREATE INDEX IF NOT EXISTS workspace_edit_proposal_artifacts_reference_idx
         ON workspace_edit_proposal_artifacts(reference_id, proposal_id);
+    CREATE TABLE IF NOT EXISTS workspace_edit_proposal_timeline_references (
+        proposal_id TEXT PRIMARY KEY,
+        schema_version TEXT NOT NULL
+            CHECK(schema_version = 'workspace-edit-proposal-reference/0.1'),
+        reference_id TEXT NOT NULL UNIQUE,
+        session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        item_id TEXT NOT NULL UNIQUE,
+        item_sequence INTEGER NOT NULL CHECK(item_sequence >= 1),
+        item_payload_sha256 TEXT NOT NULL CHECK(length(item_payload_sha256) = 64),
+        item_payload_bytes INTEGER NOT NULL CHECK(item_payload_bytes > 0),
+        public_event_id TEXT NOT NULL UNIQUE,
+        public_event_sequence INTEGER NOT NULL CHECK(public_event_sequence >= 1),
+        public_event_json TEXT NOT NULL,
+        public_event_sha256 TEXT NOT NULL CHECK(length(public_event_sha256) = 64),
+        public_event_bytes INTEGER NOT NULL CHECK(public_event_bytes > 0),
+        reference_json TEXT NOT NULL,
+        reference_sha256 TEXT NOT NULL CHECK(length(reference_sha256) = 64),
+        reference_bytes INTEGER NOT NULL CHECK(reference_bytes > 0),
+        projected_at_ms INTEGER NOT NULL CHECK(projected_at_ms > 0),
+        file_mutation_authority INTEGER NOT NULL CHECK(file_mutation_authority = 0),
+        approval_recorded INTEGER NOT NULL CHECK(approval_recorded = 0),
+        apply_available INTEGER NOT NULL CHECK(apply_available = 0),
+        FOREIGN KEY(proposal_id) REFERENCES workspace_edit_proposals(proposal_id)
+            ON DELETE CASCADE,
+        FOREIGN KEY(session_id, item_sequence) REFERENCES items(session_id, item_sequence)
+            DEFERRABLE INITIALLY DEFERRED
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS workspace_edit_proposal_timeline_session_idx
+        ON workspace_edit_proposal_timeline_references(
+            session_id, public_event_sequence, proposal_id
+        );
     CREATE TRIGGER IF NOT EXISTS workspace_edit_proposals_immutable_update
         BEFORE UPDATE ON workspace_edit_proposals
         BEGIN SELECT RAISE(ABORT, 'workspace edit proposal is immutable'); END;
     CREATE TRIGGER IF NOT EXISTS workspace_edit_proposal_artifacts_immutable_update
         BEFORE UPDATE ON workspace_edit_proposal_artifacts
         BEGIN SELECT RAISE(ABORT, 'workspace edit proposal artifact is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS workspace_edit_proposal_timeline_immutable_update
+        BEFORE UPDATE ON workspace_edit_proposal_timeline_references
+        BEGIN SELECT RAISE(ABORT, 'workspace edit proposal timeline reference is immutable'); END;
 ";
 
 #[derive(Debug)]
@@ -1463,6 +1505,29 @@ pub struct StoredWorkspaceEditProposal {
     pub proposal_hash: ContentHash,
     pub event_sequence: u64,
     pub artifact_reference_ids: Vec<String>,
+    pub timeline_reference: Option<WorkspaceEditProposalTimelineReference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceEditProposalTimelineReference {
+    pub schema_version: String,
+    pub reference_id: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub proposal_id: String,
+    pub project_id: String,
+    pub root_id: String,
+    pub edit_id: String,
+    pub preview_identity: String,
+    pub file_count: u64,
+    pub additions: u64,
+    pub deletions: u64,
+    pub warning_count: u64,
+    pub applicable: bool,
+    pub file_mutation_authority: bool,
+    pub approval_recorded: bool,
+    pub apply_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2066,10 +2131,34 @@ impl WorkbenchStore {
         result
     }
 
+    #[cfg(test)]
     pub fn record_workspace_edit_proposal(
         &mut self,
         proposal: WorkspaceEditProposal,
         artifact_writes: Vec<WorkspaceEditProposalArtifactWrite>,
+    ) -> Result<StoredWorkspaceEditProposal, WorkbenchStoreError> {
+        self.record_workspace_edit_proposal_internal(proposal, artifact_writes, None)
+    }
+
+    pub(crate) fn record_workspace_edit_proposal_with_timeline(
+        &mut self,
+        proposal: WorkspaceEditProposal,
+        artifact_writes: Vec<WorkspaceEditProposalArtifactWrite>,
+        item: StoredItemAppend,
+        public_event: &EventEnvelope,
+    ) -> Result<StoredWorkspaceEditProposal, WorkbenchStoreError> {
+        self.record_workspace_edit_proposal_internal(
+            proposal,
+            artifact_writes,
+            Some((item, public_event)),
+        )
+    }
+
+    fn record_workspace_edit_proposal_internal(
+        &mut self,
+        proposal: WorkspaceEditProposal,
+        artifact_writes: Vec<WorkspaceEditProposalArtifactWrite>,
+        timeline: Option<(StoredItemAppend, &EventEnvelope)>,
     ) -> Result<StoredWorkspaceEditProposal, WorkbenchStoreError> {
         self.ensure_session_writable(&proposal.session_id)?;
         let (proposal_json, proposal_hash) = prepare_workspace_edit_proposal(&proposal)?;
@@ -2078,6 +2167,12 @@ impl WorkbenchStore {
             .iter()
             .map(prepare_durable_blob)
             .collect::<Result<Vec<_>, _>>()?;
+        let prepared_timeline = timeline
+            .as_ref()
+            .map(|(item, public_event)| {
+                prepare_workspace_edit_proposal_timeline(&proposal, item, public_event)
+            })
+            .transpose()?;
         validate_workspace_edit_proposal_binding(&self.connection, &proposal, true)?;
 
         if let Some(existing_id) = workspace_edit_proposal_id_for_edit(
@@ -2099,6 +2194,11 @@ impl WorkbenchStore {
                 ));
             }
             validate_workspace_edit_proposal_retry_content(&proposal, &requests, &existing)?;
+            validate_workspace_edit_proposal_timeline_retry(
+                &self.connection,
+                prepared_timeline.as_ref(),
+                &existing,
+            )?;
             return Ok(existing);
         }
 
@@ -2205,6 +2305,12 @@ impl WorkbenchStore {
                 .zip(&prepared)
                 .map(|(request, prepared)| persist_durable_blob_tx(&transaction, request, prepared))
                 .collect::<Result<Vec<_>, _>>()?;
+            let stored_item = prepared_timeline
+                .as_ref()
+                .map(|prepared| {
+                    append_item_tx(&transaction, &prepared.item, &prepared.prepared_item)
+                })
+                .transpose()?;
             let event_id = derived_event_id(
                 "workspace-edit-proposal-recorded",
                 proposal.proposal_id.as_bytes(),
@@ -2234,11 +2340,11 @@ impl WorkbenchStore {
                         operation_count, artifact_count, file_count,
                         additions, deletions, warning_count, applicable,
                         event_sequence, created_at_ms, file_mutation_authority,
-                        approval_recorded, apply_available
+                        approval_recorded, apply_available, timeline_reference_required
                      ) VALUES (
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                         ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-                        ?21, ?22, ?23, ?24, ?25, 0, 0, 0
+                        ?21, ?22, ?23, ?24, ?25, 0, 0, 0, ?26
                      )",
                     params![
                         proposal.proposal_id,
@@ -2269,6 +2375,7 @@ impl WorkbenchStore {
                         i64::from(proposal.preview.applicable),
                         to_i64(event.sequence, "proposal event sequence")?,
                         to_i64(proposal.created_at_ms, "proposal creation time")?,
+                        i64::from(prepared_timeline.is_some()),
                     ],
                 )
                 .map_err(|_| error("cannot insert immutable workspace edit proposal"))?;
@@ -2294,6 +2401,16 @@ impl WorkbenchStore {
                     )
                     .map_err(|_| error("cannot bind workspace edit proposal artifact"))?;
             }
+            if let (Some(prepared), Some(stored_item)) = (&prepared_timeline, &stored_item) {
+                public_timeline_journal::append_event_tx(&transaction, &prepared.public_event)
+                    .map_err(public_timeline_error)?;
+                insert_workspace_edit_proposal_timeline_reference_tx(
+                    &transaction,
+                    &proposal,
+                    prepared,
+                    stored_item,
+                )?;
+            }
             let stored = StoredWorkspaceEditProposal {
                 proposal: proposal.clone(),
                 proposal_hash: proposal_hash.clone(),
@@ -2302,6 +2419,9 @@ impl WorkbenchStore {
                     .iter()
                     .map(|blob| blob.reference_id.clone())
                     .collect(),
+                timeline_reference: prepared_timeline
+                    .as_ref()
+                    .map(|prepared| prepared.reference.clone()),
             };
             transaction
                 .commit()
@@ -10215,6 +10335,58 @@ impl WorkbenchStore {
                 event.timestamp_ms.max(session.updated_at_ms)
             });
 
+        let candidate_turn_ids = candidate
+            .turns
+            .iter()
+            .map(|turn| turn.turn_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut proposal_turn_statement = transaction
+            .prepare(
+                "SELECT turn_id FROM workspace_edit_proposals
+                 WHERE session_id = ?1 ORDER BY turn_id",
+            )
+            .map_err(|_| error("cannot prepare proposal turn rebuild protection"))?;
+        let proposal_turn_ids = proposal_turn_statement
+            .query_map([&candidate.session_id], |row| row.get::<_, String>(0))
+            .map_err(|_| error("cannot inspect proposal turn rebuild protection"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| error("proposal turn rebuild protection is invalid"))?;
+        drop(proposal_turn_statement);
+        if proposal_turn_ids
+            .iter()
+            .any(|turn_id| !candidate_turn_ids.contains(turn_id.as_str()))
+        {
+            return Err(error(
+                "session projection rebuild would remove an immutable proposal turn",
+            ));
+        }
+
+        let mut existing_turn_statement = transaction
+            .prepare("SELECT turn_id FROM turns WHERE session_id = ?1 ORDER BY turn_id")
+            .map_err(|_| error("cannot prepare existing session turns for rebuild"))?;
+        let existing_turn_ids = existing_turn_statement
+            .query_map([&candidate.session_id], |row| row.get::<_, String>(0))
+            .map_err(|_| error("cannot inspect existing session turns for rebuild"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| error("existing session turn projection is invalid"))?;
+        drop(existing_turn_statement);
+        for turn in &candidate.turns {
+            let existing_owner = transaction
+                .query_row(
+                    "SELECT session_id FROM turns WHERE turn_id = ?1",
+                    [&turn.turn_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|_| error("cannot inspect rebuilt turn ownership"))?;
+            if existing_owner
+                .as_deref()
+                .is_some_and(|owner| owner != candidate.session_id)
+            {
+                return Err(error("rebuilt turn is owned by another session"));
+            }
+        }
+
         transaction
             .execute(
                 "DELETE FROM items WHERE session_id = ?1",
@@ -10223,10 +10395,21 @@ impl WorkbenchStore {
             .map_err(|_| error("cannot clear item projection for rebuild"))?;
         transaction
             .execute(
-                "DELETE FROM turns WHERE session_id = ?1",
+                "UPDATE turns SET idempotency_key = NULL WHERE session_id = ?1",
                 [&candidate.session_id],
             )
-            .map_err(|_| error("cannot clear turn projection for rebuild"))?;
+            .map_err(|_| error("cannot prepare turn projection for rebuild"))?;
+        for turn_id in existing_turn_ids
+            .iter()
+            .filter(|turn_id| !candidate_turn_ids.contains(turn_id.as_str()))
+        {
+            transaction
+                .execute(
+                    "DELETE FROM turns WHERE session_id = ?1 AND turn_id = ?2",
+                    params![candidate.session_id, turn_id],
+                )
+                .map_err(|_| error("cannot remove stale turn projection for rebuild"))?;
+        }
         projection_rebuild_crash_point("session-after-projection-clear");
         transaction
             .execute(
@@ -10264,7 +10447,15 @@ impl WorkbenchStore {
                     "INSERT INTO turns (
                         turn_id, session_id, idempotency_key, input_sha256, input_bytes,
                         state, created_at_ms, updated_at_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(turn_id) DO UPDATE SET
+                        session_id = excluded.session_id,
+                        idempotency_key = excluded.idempotency_key,
+                        input_sha256 = excluded.input_sha256,
+                        input_bytes = excluded.input_bytes,
+                        state = excluded.state,
+                        created_at_ms = excluded.created_at_ms,
+                        updated_at_ms = excluded.updated_at_ms",
                     params![
                         turn.turn_id,
                         turn.session_id,
@@ -11785,6 +11976,30 @@ impl WorkbenchStore {
         }
         if version == SCHEMA_VERSION {
             return Ok(());
+        }
+        if version == 18 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start proposal Timeline reference migration"))?;
+            transaction
+                .execute_batch(
+                    "DROP TRIGGER workspace_edit_proposals_immutable_update;
+                     ALTER TABLE workspace_edit_proposals
+                       ADD COLUMN timeline_reference_required INTEGER NOT NULL DEFAULT 0
+                         CHECK(timeline_reference_required IN (0,1));",
+                )
+                .map_err(|_| error("cannot add proposal Timeline reference requirement"))?;
+            transaction
+                .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply proposal Timeline reference migration"))?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit proposal Timeline reference migration"));
         }
         if version == 17 {
             let transaction = self
@@ -18108,6 +18323,18 @@ struct PreparedItemAppend {
     timestamp: i64,
 }
 
+#[derive(Debug)]
+struct PreparedWorkspaceEditProposalTimeline {
+    item: StoredItemAppend,
+    prepared_item: PreparedItemAppend,
+    public_event: EventEnvelope,
+    public_event_json: String,
+    public_event_hash: ContentHash,
+    reference: WorkspaceEditProposalTimelineReference,
+    reference_json: String,
+    reference_hash: ContentHash,
+}
+
 fn load_turn_from_connection(
     connection: &Connection,
     turn_id: &str,
@@ -18160,6 +18387,238 @@ fn prepare_item_append(
         payload_hash,
         timestamp,
     })
+}
+
+pub(crate) fn workspace_edit_proposal_timeline_projection(
+    proposal: &WorkspaceEditProposal,
+) -> Result<(StoredItemAppend, TimelineItem), WorkbenchStoreError> {
+    proposal.validate().map_err(|cause| error(cause.message))?;
+    let item_id = derived_event_id(
+        "workspace-edit-proposal-item",
+        proposal.proposal_id.as_bytes(),
+    );
+    let reference = workspace_edit_proposal_timeline_reference(proposal, &item_id)?;
+    let item = StoredItemAppend {
+        session_id: proposal.session_id.clone(),
+        turn_id: Some(proposal.turn_id.clone()),
+        item_id,
+        item_kind: "file-change".into(),
+        role: "tool".into(),
+        state: "completed".into(),
+        payload: json!({
+            "content": "File changes proposed (read-only)",
+            "data": reference,
+        }),
+        created_at_ms: proposal.created_at_ms,
+    };
+    let prepared = prepare_item_append(&item)?;
+    let timeline_item = projected_timeline_item(&item, &prepared)?;
+    Ok((item, timeline_item))
+}
+
+fn workspace_edit_proposal_timeline_reference(
+    proposal: &WorkspaceEditProposal,
+    item_id: &str,
+) -> Result<WorkspaceEditProposalTimelineReference, WorkbenchStoreError> {
+    let reference = workspace_edit_proposal_timeline_reference_unchecked(proposal, item_id)?;
+    validate_workspace_edit_proposal_timeline_reference(&reference, proposal, item_id)?;
+    Ok(reference)
+}
+
+fn validate_workspace_edit_proposal_timeline_reference(
+    reference: &WorkspaceEditProposalTimelineReference,
+    proposal: &WorkspaceEditProposal,
+    item_id: &str,
+) -> Result<(), WorkbenchStoreError> {
+    validate_identifier(item_id, "workspace edit proposal Timeline item ID")?;
+    validate_event_identifier(
+        &reference.reference_id,
+        "workspace edit proposal Timeline reference ID",
+    )?;
+    let expected = workspace_edit_proposal_timeline_reference_unchecked(proposal, item_id)?;
+    if *reference != expected {
+        return Err(error(
+            "workspace edit proposal Timeline reference binding is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn workspace_edit_proposal_timeline_reference_unchecked(
+    proposal: &WorkspaceEditProposal,
+    item_id: &str,
+) -> Result<WorkspaceEditProposalTimelineReference, WorkbenchStoreError> {
+    let identity_material = serde_json::to_vec(&json!({
+        "schema_version": WORKSPACE_EDIT_PROPOSAL_REFERENCE_SCHEMA_VERSION,
+        "session_id": proposal.session_id,
+        "turn_id": proposal.turn_id,
+        "proposal_id": proposal.proposal_id,
+        "project_id": proposal.project_id,
+        "root_id": proposal.root_id,
+        "edit_id": proposal.edit_id,
+        "preview_identity": proposal.preview.identity,
+        "file_count": proposal.preview.file_count,
+        "additions": proposal.preview.additions,
+        "deletions": proposal.preview.deletions,
+        "warning_count": proposal.preview.warning_count,
+        "applicable": proposal.preview.applicable,
+        "item_id": item_id,
+        "file_mutation_authority": false,
+        "approval_recorded": false,
+        "apply_available": false,
+    }))
+    .map_err(|_| error("workspace edit proposal Timeline reference is not serializable"))?;
+    Ok(WorkspaceEditProposalTimelineReference {
+        schema_version: WORKSPACE_EDIT_PROPOSAL_REFERENCE_SCHEMA_VERSION.into(),
+        reference_id: format!(
+            "workspace-edit-proposal-reference:sha256:{}",
+            sha256_hex(&identity_material)
+        ),
+        session_id: proposal.session_id.clone(),
+        turn_id: proposal.turn_id.clone(),
+        proposal_id: proposal.proposal_id.clone(),
+        project_id: proposal.project_id.clone(),
+        root_id: proposal.root_id.clone(),
+        edit_id: proposal.edit_id.clone(),
+        preview_identity: proposal.preview.identity.clone(),
+        file_count: proposal.preview.file_count,
+        additions: proposal.preview.additions,
+        deletions: proposal.preview.deletions,
+        warning_count: proposal.preview.warning_count,
+        applicable: proposal.preview.applicable,
+        file_mutation_authority: false,
+        approval_recorded: false,
+        apply_available: false,
+    })
+}
+
+fn prepare_workspace_edit_proposal_timeline(
+    proposal: &WorkspaceEditProposal,
+    item: &StoredItemAppend,
+    public_event: &EventEnvelope,
+) -> Result<PreparedWorkspaceEditProposalTimeline, WorkbenchStoreError> {
+    let expected_reference = workspace_edit_proposal_timeline_reference(proposal, &item.item_id)?;
+    let prepared_item = prepare_item_append(item)?;
+    let expected_item = projected_timeline_item(item, &prepared_item)?;
+    validate_public_item_event(public_event, item, &prepared_item, TurnState::Running)?;
+    if item.session_id != proposal.session_id
+        || item.turn_id.as_deref() != Some(proposal.turn_id.as_str())
+        || item.item_id
+            != derived_event_id(
+                "workspace-edit-proposal-item",
+                proposal.proposal_id.as_bytes(),
+            )
+        || item.item_kind != "file-change"
+        || item.role != "tool"
+        || item.state != "completed"
+        || public_event.event != "item.completed"
+        || public_event.item.as_ref() != Some(&expected_item)
+        || public_event.timestamp_ms != item.created_at_ms
+    {
+        return Err(error(
+            "workspace edit proposal Timeline item binding is invalid",
+        ));
+    }
+    let data: WorkspaceEditProposalTimelineReference = serde_json::from_value(
+        expected_item
+            .data
+            .clone()
+            .ok_or_else(|| error("workspace edit proposal Timeline reference is missing"))?,
+    )
+    .map_err(|_| error("workspace edit proposal Timeline reference is invalid"))?;
+    if data != expected_reference {
+        return Err(error(
+            "workspace edit proposal Timeline reference payload is invalid",
+        ));
+    }
+    let public_event_json = serde_json::to_string(public_event)
+        .map_err(|_| error("workspace edit proposal public event is not serializable"))?;
+    let public_event_hash = ContentHash::for_bytes(public_event_json.as_bytes());
+    let reference_json = serde_json::to_string(&expected_reference)
+        .map_err(|_| error("workspace edit proposal Timeline reference is not serializable"))?;
+    let reference_hash = ContentHash::for_bytes(reference_json.as_bytes());
+    Ok(PreparedWorkspaceEditProposalTimeline {
+        item: item.clone(),
+        prepared_item,
+        public_event: public_event.clone(),
+        public_event_json,
+        public_event_hash,
+        reference: expected_reference,
+        reference_json,
+        reference_hash,
+    })
+}
+
+fn insert_workspace_edit_proposal_timeline_reference_tx(
+    transaction: &Transaction<'_>,
+    proposal: &WorkspaceEditProposal,
+    prepared: &PreparedWorkspaceEditProposalTimeline,
+    stored_item: &StoredItem,
+) -> Result<(), WorkbenchStoreError> {
+    if stored_item.session_id != proposal.session_id
+        || stored_item.turn_id.as_deref() != Some(proposal.turn_id.as_str())
+        || stored_item.item_id != prepared.item.item_id
+        || stored_item.item_kind != "file-change"
+        || stored_item.role != "tool"
+        || stored_item.state != "completed"
+        || stored_item.payload_hash != prepared.prepared_item.payload_hash
+        || stored_item.created_at_ms != prepared.public_event.timestamp_ms
+    {
+        return Err(error(
+            "workspace edit proposal stored Timeline item binding is invalid",
+        ));
+    }
+    transaction
+        .execute(
+            "INSERT INTO workspace_edit_proposal_timeline_references (
+                proposal_id, schema_version, reference_id, session_id, turn_id,
+                item_id, item_sequence, item_payload_sha256, item_payload_bytes,
+                public_event_id, public_event_sequence, public_event_json,
+                public_event_sha256, public_event_bytes, reference_json,
+                reference_sha256, reference_bytes, projected_at_ms,
+                file_mutation_authority, approval_recorded, apply_available
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                ?14, ?15, ?16, ?17, ?18, 0, 0, 0
+             )",
+            params![
+                proposal.proposal_id,
+                WORKSPACE_EDIT_PROPOSAL_REFERENCE_SCHEMA_VERSION,
+                prepared.reference.reference_id,
+                proposal.session_id,
+                proposal.turn_id,
+                stored_item.item_id,
+                to_i64(stored_item.sequence, "proposal Timeline item sequence")?,
+                stored_item.payload_hash.sha256,
+                to_i64(
+                    stored_item.payload_hash.bytes,
+                    "proposal Timeline item payload byte count"
+                )?,
+                prepared.public_event.event_id,
+                to_i64(
+                    prepared.public_event.sequence,
+                    "proposal public Timeline sequence"
+                )?,
+                prepared.public_event_json,
+                prepared.public_event_hash.sha256,
+                to_i64(
+                    prepared.public_event_hash.bytes,
+                    "proposal public Timeline event byte count"
+                )?,
+                prepared.reference_json,
+                prepared.reference_hash.sha256,
+                to_i64(
+                    prepared.reference_hash.bytes,
+                    "proposal Timeline reference byte count"
+                )?,
+                to_i64(
+                    prepared.public_event.timestamp_ms,
+                    "proposal Timeline projection time"
+                )?,
+            ],
+        )
+        .map_err(|_| error("cannot bind workspace edit proposal Timeline reference"))?;
+    Ok(())
 }
 
 fn validate_public_turn_event(
@@ -19056,6 +19515,52 @@ fn validate_workspace_edit_proposal_retry_content(
     Ok(())
 }
 
+fn validate_workspace_edit_proposal_timeline_retry(
+    connection: &Connection,
+    prepared: Option<&PreparedWorkspaceEditProposalTimeline>,
+    existing: &StoredWorkspaceEditProposal,
+) -> Result<(), WorkbenchStoreError> {
+    match (prepared, existing.timeline_reference.as_ref()) {
+        (None, None) => return Ok(()),
+        (Some(prepared), Some(reference)) if prepared.reference == *reference => {}
+        _ => {
+            return Err(coded_error(
+                "workspace-edit-proposal-conflict",
+                "workspace edit proposal Timeline retry does not match immutable data",
+            ));
+        }
+    }
+    let prepared = prepared.expect("matched Timeline retry");
+    let stored: Option<(String, String, String, i64)> = connection
+        .query_row(
+            "SELECT public_event_json, item_id, item_payload_sha256, item_payload_bytes
+             FROM workspace_edit_proposal_timeline_references WHERE proposal_id = ?1",
+            [&existing.proposal.proposal_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|_| error("cannot inspect workspace edit proposal Timeline retry"))?;
+    let Some((public_event_json, item_id, item_payload_sha256, item_payload_bytes)) = stored else {
+        return Err(error(
+            "workspace edit proposal Timeline retry reference is missing",
+        ));
+    };
+    if public_event_json != prepared.public_event_json
+        || item_id != prepared.item.item_id
+        || item_payload_sha256 != prepared.prepared_item.payload_hash.sha256
+        || to_u64(
+            item_payload_bytes,
+            "proposal Timeline retry payload byte count",
+        )? != prepared.prepared_item.payload_hash.bytes
+    {
+        return Err(coded_error(
+            "workspace-edit-proposal-conflict",
+            "workspace edit proposal Timeline retry changed immutable event data",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct WorkspaceEditProposalRow {
     proposal_json: String,
@@ -19085,6 +19590,7 @@ struct WorkspaceEditProposalRow {
     file_mutation_authority: i64,
     approval_recorded: i64,
     apply_available: i64,
+    timeline_reference_required: i64,
 }
 
 fn load_workspace_edit_proposal(
@@ -19102,7 +19608,7 @@ fn load_workspace_edit_proposal(
                     operation_count, artifact_count, file_count,
                     additions, deletions, warning_count, applicable,
                     event_sequence, created_at_ms, file_mutation_authority,
-                    approval_recorded, apply_available
+                    approval_recorded, apply_available, timeline_reference_required
              FROM workspace_edit_proposals WHERE proposal_id = ?1",
             [proposal_id],
             |row| {
@@ -19134,6 +19640,7 @@ fn load_workspace_edit_proposal(
                     file_mutation_authority: row.get(24)?,
                     approval_recorded: row.get(25)?,
                     apply_available: row.get(26)?,
+                    timeline_reference_required: row.get(27)?,
                 })
             },
         )
@@ -19183,6 +19690,7 @@ fn load_workspace_edit_proposal(
         || row.file_mutation_authority != 0
         || row.approval_recorded != 0
         || row.apply_available != 0
+        || !matches!(row.timeline_reference_required, 0 | 1)
     {
         return Err(error(
             "workspace edit proposal redundant metadata is invalid",
@@ -19278,12 +19786,285 @@ fn load_workspace_edit_proposal(
         .map(|(reference, content)| (reference.as_str(), content.as_slice()))
         .collect::<BTreeMap<_, _>>();
     validate_workspace_edit_proposal_artifact_semantics(&proposal, &artifact_content_refs)?;
+    let timeline_reference = load_workspace_edit_proposal_timeline_reference(
+        store,
+        &proposal,
+        row.timeline_reference_required == 1,
+    )?;
     Ok(StoredWorkspaceEditProposal {
         proposal,
         proposal_hash,
         event_sequence,
         artifact_reference_ids,
+        timeline_reference,
     })
+}
+
+fn load_workspace_edit_proposal_timeline_reference(
+    store: &WorkbenchStore,
+    proposal: &WorkspaceEditProposal,
+    required: bool,
+) -> Result<Option<WorkspaceEditProposalTimelineReference>, WorkbenchStoreError> {
+    let row = store
+        .connection
+        .query_row(
+            "SELECT schema_version, reference_id, session_id, turn_id,
+                    item_id, item_sequence, item_payload_sha256, item_payload_bytes,
+                    public_event_id, public_event_sequence, public_event_json,
+                    public_event_sha256, public_event_bytes, reference_json,
+                    reference_sha256, reference_bytes, projected_at_ms,
+                    file_mutation_authority, approval_recorded, apply_available
+             FROM workspace_edit_proposal_timeline_references
+             WHERE proposal_id = ?1",
+            [&proposal.proposal_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, String>(14)?,
+                    row.get::<_, i64>(15)?,
+                    row.get::<_, i64>(16)?,
+                    row.get::<_, i64>(17)?,
+                    row.get::<_, i64>(18)?,
+                    row.get::<_, i64>(19)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot load workspace edit proposal Timeline reference"))?;
+    let Some(row) = row else {
+        if required {
+            return Err(error(
+                "workspace edit proposal Timeline reference is missing",
+            ));
+        }
+        return Ok(None);
+    };
+    if !required {
+        return Err(error(
+            "legacy workspace edit proposal has an unexpected Timeline reference",
+        ));
+    }
+    let (
+        schema_version,
+        reference_id,
+        session_id,
+        turn_id,
+        item_id,
+        item_sequence,
+        item_payload_sha256,
+        item_payload_bytes,
+        public_event_id,
+        public_event_sequence,
+        public_event_json,
+        public_event_sha256,
+        public_event_bytes,
+        reference_json,
+        reference_sha256,
+        reference_bytes,
+        projected_at_ms,
+        file_mutation_authority,
+        approval_recorded,
+        apply_available,
+    ) = row;
+    let item_sequence = to_u64(item_sequence, "proposal Timeline item sequence")?;
+    let public_event_sequence = to_u64(
+        public_event_sequence,
+        "proposal public Timeline event sequence",
+    )?;
+    let projected_at_ms = to_u64(projected_at_ms, "proposal Timeline projection time")?;
+    let reference_hash = ContentHash {
+        sha256: reference_sha256,
+        bytes: to_u64(reference_bytes, "proposal Timeline reference byte count")?,
+    };
+    let public_event_hash = ContentHash {
+        sha256: public_event_sha256,
+        bytes: to_u64(
+            public_event_bytes,
+            "proposal public Timeline event byte count",
+        )?,
+    };
+    if schema_version != WORKSPACE_EDIT_PROPOSAL_REFERENCE_SCHEMA_VERSION
+        || session_id != proposal.session_id
+        || turn_id != proposal.turn_id
+        || file_mutation_authority != 0
+        || approval_recorded != 0
+        || apply_available != 0
+        || ContentHash::for_bytes(reference_json.as_bytes()) != reference_hash
+        || ContentHash::for_bytes(public_event_json.as_bytes()) != public_event_hash
+    {
+        return Err(error(
+            "workspace edit proposal Timeline reference metadata is invalid",
+        ));
+    }
+    let reference: WorkspaceEditProposalTimelineReference =
+        serde_json::from_str(&reference_json)
+            .map_err(|_| error("workspace edit proposal Timeline reference JSON is invalid"))?;
+    if serde_json::to_string(&reference)
+        .map_err(|_| error("workspace edit proposal Timeline reference JSON is invalid"))?
+        != reference_json
+        || reference.reference_id != reference_id
+    {
+        return Err(error(
+            "workspace edit proposal Timeline reference JSON is not canonical",
+        ));
+    }
+    validate_workspace_edit_proposal_timeline_reference(&reference, proposal, &item_id)?;
+
+    let stored_item = store
+        .connection
+        .query_row(
+            "SELECT session_id, item_sequence, item_id, turn_id, item_kind, role, state,
+                    payload_json, payload_sha256, payload_bytes, created_at_ms
+             FROM items WHERE session_id = ?1 AND item_sequence = ?2",
+            params![
+                proposal.session_id,
+                to_i64(item_sequence, "proposal Timeline item sequence")?
+            ],
+            |row| {
+                let payload_json: String = row.get(7)?;
+                let payload = serde_json::from_str(&payload_json).map_err(|cause| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        payload_json.len(),
+                        rusqlite::types::Type::Text,
+                        Box::new(cause),
+                    )
+                })?;
+                Ok(StoredItem {
+                    session_id: row.get(0)?,
+                    sequence: to_u64_sql(row.get(1)?, "proposal Timeline item sequence")?,
+                    item_id: row.get(2)?,
+                    turn_id: row.get(3)?,
+                    item_kind: row.get(4)?,
+                    role: row.get(5)?,
+                    state: row.get(6)?,
+                    payload,
+                    payload_hash: ContentHash {
+                        sha256: row.get(8)?,
+                        bytes: to_u64_sql(
+                            row.get(9)?,
+                            "proposal Timeline item payload byte count",
+                        )?,
+                    },
+                    created_at_ms: to_u64_sql(row.get(10)?, "proposal Timeline item time")?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot read workspace edit proposal Timeline item"))?
+        .ok_or_else(|| error("workspace edit proposal Timeline item is missing"))?;
+    let expected_payload_json = validate_item_payload(&stored_item.payload)?;
+    let expected_reference = workspace_edit_proposal_timeline_reference(proposal, &item_id)?;
+    if stored_item.session_id != proposal.session_id
+        || stored_item.sequence != item_sequence
+        || stored_item.item_id != item_id
+        || stored_item.turn_id.as_deref() != Some(proposal.turn_id.as_str())
+        || stored_item.item_kind != "file-change"
+        || stored_item.role != "tool"
+        || stored_item.state != "completed"
+        || stored_item.created_at_ms != projected_at_ms
+        || stored_item.payload_hash.sha256 != item_payload_sha256
+        || stored_item.payload_hash.bytes
+            != to_u64(
+                item_payload_bytes,
+                "proposal Timeline item payload byte count",
+            )?
+        || ContentHash::for_bytes(expected_payload_json.as_bytes()) != stored_item.payload_hash
+        || stored_item.payload
+            != json!({
+                "content": "File changes proposed (read-only)",
+                "data": expected_reference,
+            })
+    {
+        return Err(error(
+            "workspace edit proposal Timeline item integrity is invalid",
+        ));
+    }
+    let public_event: EventEnvelope = serde_json::from_str(&public_event_json)
+        .map_err(|_| error("workspace edit proposal public Timeline event is invalid"))?;
+    public_event
+        .validate()
+        .map_err(|_| error("workspace edit proposal public Timeline event is invalid"))?;
+    let expected_timeline_item = TimelineItem {
+        id: stored_item.item_id.clone(),
+        kind: stored_item.item_kind.clone(),
+        role: stored_item.role.clone(),
+        state: stored_item.state.clone(),
+        content: stored_item.payload["content"]
+            .as_str()
+            .ok_or_else(|| error("proposal Timeline item content is invalid"))?
+            .to_owned(),
+        data: Some(stored_item.payload["data"].clone()),
+    };
+    if serde_json::to_string(&public_event)
+        .map_err(|_| error("workspace edit proposal public Timeline event is invalid"))?
+        != public_event_json
+        || public_event.event_id != public_event_id
+        || public_event.sequence != public_event_sequence
+        || public_event.timestamp_ms != projected_at_ms
+        || public_event.session_id != proposal.session_id
+        || public_event.turn_id != proposal.turn_id
+        || public_event.turn_state != TurnState::Running
+        || public_event.event != "item.completed"
+        || public_event.item.as_ref() != Some(&expected_timeline_item)
+    {
+        return Err(error(
+            "workspace edit proposal public Timeline binding is invalid",
+        ));
+    }
+    let retained: Option<String> = store
+        .connection
+        .query_row(
+            "SELECT envelope_json FROM public_timeline_events
+             WHERE session_id = ?1 AND sequence = ?2",
+            params![
+                proposal.session_id,
+                to_i64(
+                    public_event_sequence,
+                    "proposal public Timeline event sequence"
+                )?
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| error("cannot inspect proposal public Timeline event"))?;
+    if let Some(retained) = retained {
+        if retained != public_event_json {
+            return Err(error(
+                "workspace edit proposal retained public Timeline event is invalid",
+            ));
+        }
+    } else {
+        let pruned_through: i64 = store
+            .connection
+            .query_row(
+                "SELECT pruned_through_sequence FROM public_timeline_cursors
+                 WHERE session_id = ?1",
+                [&proposal.session_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| error("cannot inspect proposal public Timeline retention"))?;
+        if public_event_sequence
+            > to_u64(pruned_through, "proposal public Timeline retention floor")?
+        {
+            return Err(error(
+                "workspace edit proposal public Timeline event is missing",
+            ));
+        }
+    }
+    Ok(Some(reference))
 }
 
 fn verify_workspace_edit_proposals_for_session(
@@ -20797,6 +21578,51 @@ mod tests {
         (proposal, writes)
     }
 
+    fn prepared_workspace_edit_proposal_timeline_fixture(
+        store: &mut WorkbenchStore,
+        root: &Root,
+        label: &str,
+    ) -> (
+        WorkspaceEditProposal,
+        Vec<WorkspaceEditProposalArtifactWrite>,
+        StoredItemAppend,
+        EventEnvelope,
+    ) {
+        let (proposal, writes) = workspace_edit_proposal_fixture_with_ids(
+            store,
+            root,
+            &format!("proposal-{label}-turn"),
+            &format!("proposal-{label}-edit"),
+            &format!("provider-item-{label}"),
+            3,
+            4,
+        );
+        let mut sequencer = crate::event_sequencer::EventSequencer::default();
+        let started = sequencer
+            .sequence(
+                3,
+                &proposal.session_id,
+                &proposal.turn_id,
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        store.append_public_timeline_event(&started).unwrap();
+        let (mut item, timeline_item) =
+            workspace_edit_proposal_timeline_projection(&proposal).unwrap();
+        let envelope = sequencer
+            .sequence(
+                proposal.created_at_ms,
+                &proposal.session_id,
+                &proposal.turn_id,
+                "item.completed",
+                Some(timeline_item),
+            )
+            .unwrap();
+        item.created_at_ms = envelope.timestamp_ms;
+        (proposal, writes, item, envelope)
+    }
+
     #[test]
     fn immutable_workspace_edit_proposal_is_atomic_idempotent_and_restart_safe() {
         let root = Root::new("workspace-edit-proposal");
@@ -20839,6 +21665,518 @@ mod tests {
                 .unwrap(),
             stored
         );
+    }
+
+    #[test]
+    fn workspace_edit_proposal_timeline_reference_is_atomic_idempotent_and_restart_safe() {
+        let root = Root::new("workspace-edit-proposal-timeline");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes) = workspace_edit_proposal_fixture_with_ids(
+            &mut store,
+            &root,
+            "proposal-timeline-turn",
+            "proposal-timeline-edit",
+            "provider-item-timeline",
+            3,
+            4,
+        );
+        let mut sequencer = crate::event_sequencer::EventSequencer::default();
+        let started = sequencer
+            .prepare(
+                3,
+                &proposal.session_id,
+                &proposal.turn_id,
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        store
+            .append_public_timeline_event(started.envelope())
+            .unwrap();
+        started.commit(&mut sequencer).unwrap();
+        let (mut item, timeline_item) =
+            workspace_edit_proposal_timeline_projection(&proposal).unwrap();
+        let prepared = sequencer
+            .prepare(
+                proposal.created_at_ms,
+                &proposal.session_id,
+                &proposal.turn_id,
+                "item.completed",
+                Some(timeline_item),
+            )
+            .unwrap();
+        item.created_at_ms = prepared.envelope().timestamp_ms;
+        let envelope = prepared.envelope().clone();
+        let stored = store
+            .record_workspace_edit_proposal_with_timeline(
+                proposal.clone(),
+                writes.clone(),
+                item.clone(),
+                &envelope,
+            )
+            .unwrap();
+        prepared.commit(&mut sequencer).unwrap();
+        let reference = stored.timeline_reference.as_ref().unwrap();
+        assert_eq!(
+            reference.schema_version,
+            WORKSPACE_EDIT_PROPOSAL_REFERENCE_SCHEMA_VERSION
+        );
+        assert_eq!(reference.proposal_id, proposal.proposal_id);
+        assert!(!reference.file_mutation_authority);
+        assert!(!reference.approval_recorded);
+        assert!(!reference.apply_available);
+        assert_eq!(
+            store
+                .record_workspace_edit_proposal_with_timeline(
+                    proposal.clone(),
+                    writes,
+                    item,
+                    &envelope,
+                )
+                .unwrap(),
+            stored
+        );
+        let counts: (i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM workspace_edit_proposals
+                     WHERE proposal_id = ?1 AND timeline_reference_required = 1),
+                    (SELECT COUNT(*) FROM workspace_edit_proposal_timeline_references
+                     WHERE proposal_id = ?1),
+                    (SELECT COUNT(*) FROM items
+                     WHERE item_id = ?2 AND item_kind = 'file-change'
+                       AND role = 'tool' AND state = 'completed')",
+                params![proposal.proposal_id, envelope.item.as_ref().unwrap().id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 1, 1));
+        let page = store
+            .sync_public_timeline(&proposal.session_id, 0, None, 10)
+            .unwrap();
+        assert_eq!(page.events.len(), 2);
+        assert_eq!(page.events[1], envelope);
+
+        drop(store);
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .read_workspace_edit_proposal(&proposal.proposal_id)
+                .unwrap(),
+            stored
+        );
+    }
+
+    #[test]
+    fn workspace_edit_proposal_timeline_failure_rolls_back_every_durable_projection() {
+        let root = Root::new("workspace-edit-proposal-timeline-rollback");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes) = workspace_edit_proposal_fixture_with_ids(
+            &mut store,
+            &root,
+            "proposal-timeline-rollback-turn",
+            "proposal-timeline-rollback-edit",
+            "provider-item-timeline-rollback",
+            3,
+            4,
+        );
+        let mut sequencer = crate::event_sequencer::EventSequencer::default();
+        let started = sequencer
+            .prepare(
+                3,
+                &proposal.session_id,
+                &proposal.turn_id,
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        store
+            .append_public_timeline_event(started.envelope())
+            .unwrap();
+        started.commit(&mut sequencer).unwrap();
+        let (mut item, timeline_item) =
+            workspace_edit_proposal_timeline_projection(&proposal).unwrap();
+        let prepared = sequencer
+            .prepare(
+                proposal.created_at_ms,
+                &proposal.session_id,
+                &proposal.turn_id,
+                "item.completed",
+                Some(timeline_item),
+            )
+            .unwrap();
+        item.created_at_ms = prepared.envelope().timestamp_ms;
+        let envelope = prepared.envelope().clone();
+        let baseline: (i64, i64, i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM events WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM items WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM durable_blob_references WHERE session_id = ?1),
+                    (SELECT next_sequence FROM public_timeline_cursors WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM public_timeline_events WHERE session_id = ?1)",
+                [&proposal.session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_proposal_timeline_public_event
+                 BEFORE INSERT ON public_timeline_events
+                 WHEN NEW.sequence = 2
+                 BEGIN SELECT RAISE(ABORT, 'fail proposal Timeline event'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .record_workspace_edit_proposal_with_timeline(
+                proposal.clone(),
+                writes.clone(),
+                item.clone(),
+                &envelope,
+            )
+            .is_err());
+        let after: (i64, i64, i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM events WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM items WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM durable_blob_references WHERE session_id = ?1),
+                    (SELECT next_sequence FROM public_timeline_cursors WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM public_timeline_events WHERE session_id = ?1)",
+                [&proposal.session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(after, baseline);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM workspace_edit_proposals
+                     WHERE proposal_id = ?1",
+                    [&proposal.proposal_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_proposal_timeline_public_event;")
+            .unwrap();
+        store
+            .record_workspace_edit_proposal_with_timeline(proposal, writes, item, &envelope)
+            .unwrap();
+    }
+
+    #[test]
+    fn workspace_edit_proposal_timeline_reference_tamper_quarantines_only_owning_session() {
+        let root = Root::new("workspace-edit-proposal-timeline-reference-tamper");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes, item, envelope) =
+            prepared_workspace_edit_proposal_timeline_fixture(&mut store, &root, "tamper");
+        store
+            .record_workspace_edit_proposal_with_timeline(proposal.clone(), writes, item, &envelope)
+            .unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "proposal-timeline-healthy-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Healthy Timeline peer".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 20,
+            })
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER workspace_edit_proposal_timeline_immutable_update;
+                 UPDATE workspace_edit_proposal_timeline_references
+                 SET public_event_id = 'tampered-proposal-public-event'
+                 WHERE session_id = 'proposal-session';
+                 CREATE TRIGGER workspace_edit_proposal_timeline_immutable_update
+                 BEFORE UPDATE ON workspace_edit_proposal_timeline_references
+                 BEGIN SELECT RAISE(ABORT, 'workspace edit proposal timeline reference is immutable'); END;",
+            )
+            .unwrap();
+        drop(store);
+
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert!(reopened.session_requires_recovery("proposal-session"));
+        assert!(!reopened.session_requires_recovery("proposal-timeline-healthy-session"));
+        assert_eq!(reopened.quarantined_session_count(), 1);
+        assert!(reopened
+            .read_workspace_edit_proposal(&proposal.proposal_id)
+            .is_err());
+        reopened
+            .update_session_title(
+                "proposal-timeline-healthy-session",
+                "Healthy after peer reference tamper",
+                21,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn workspace_edit_proposal_timeline_reference_survives_public_journal_prune_and_restart() {
+        let root = Root::new("workspace-edit-proposal-timeline-reference-prune");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes, item, envelope) =
+            prepared_workspace_edit_proposal_timeline_fixture(&mut store, &root, "prune");
+        let stored = store
+            .record_workspace_edit_proposal_with_timeline(proposal.clone(), writes, item, &envelope)
+            .unwrap();
+        let checkpoint = store
+            .checkpoint_and_prune_public_timeline(
+                &proposal.session_id,
+                &TimelineWatermark {
+                    sequence: envelope.sequence,
+                    event_id: Some(envelope.event_id.clone()),
+                },
+                5,
+            )
+            .unwrap();
+        assert_eq!(checkpoint.floor.sequence, envelope.sequence);
+        assert!(checkpoint.checkpoint_identity.is_some());
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM public_timeline_events WHERE session_id = ?1",
+                    [&proposal.session_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .read_workspace_edit_proposal(&proposal.proposal_id)
+                .unwrap(),
+            stored
+        );
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .read_workspace_edit_proposal(&proposal.proposal_id)
+                .unwrap(),
+            stored
+        );
+    }
+
+    #[test]
+    fn workspace_edit_proposal_timeline_reference_session_purge_cascades_and_releases_blobs() {
+        let root = Root::new("workspace-edit-proposal-timeline-reference-purge");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes, item, envelope) =
+            prepared_workspace_edit_proposal_timeline_fixture(&mut store, &root, "purge");
+        let stored = store
+            .record_workspace_edit_proposal_with_timeline(proposal.clone(), writes, item, &envelope)
+            .unwrap();
+        store
+            .finish_turn(&proposal.session_id, &proposal.turn_id, "completed", 5)
+            .unwrap();
+        store.archive_session(&proposal.session_id, 6).unwrap();
+        let preview = store
+            .preview_session_deletion(&proposal.session_id, SessionDeletionScope::SessionOnly)
+            .unwrap();
+        let receipt = store
+            .schedule_session_deletion(
+                "proposal-timeline-reference-deletion",
+                &proposal.session_id,
+                SessionDeletionScope::SessionOnly,
+                &preview.plan_hash,
+                10,
+                MIN_SESSION_DELETE_UNDO_MS,
+            )
+            .unwrap();
+        let sweep = store
+            .sweep_session_deletions(receipt.undo_until_ms)
+            .unwrap();
+        assert_eq!(sweep.purged, 1);
+        assert_eq!(
+            sweep.released_artifact_references,
+            stored.artifact_reference_ids.len() as u64
+        );
+        let counts: (i64, i64, i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM workspace_edit_proposals WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM workspace_edit_proposal_timeline_references
+                     WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM items WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM events WHERE session_id = ?1),
+                    (SELECT COUNT(*) FROM public_timeline_events WHERE session_id = ?1)",
+                [&proposal.session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0, 0, 0));
+        let public_retention: (i64, i64, Option<String>, i64, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT c.next_sequence, c.pruned_through_sequence,
+                        c.pruned_through_event_id, p.through_sequence,
+                        p.checkpoint_identity
+                 FROM public_timeline_cursors c
+                 JOIN public_timeline_checkpoints p ON p.session_id = c.session_id
+                 WHERE c.session_id = ?1",
+                [&proposal.session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(public_retention, (1, 0, None, 0, None));
+        for reference_id in &stored.artifact_reference_ids {
+            let reference = load_durable_blob_reference(&store.connection, reference_id).unwrap();
+            assert_eq!(reference.state, "released");
+            assert_eq!(reference.released_at_ms, Some(receipt.undo_until_ms));
+            assert!(reference.retain_until_ms >= receipt.undo_until_ms + MIN_BLOB_RETENTION_MS);
+        }
+        assert!(store
+            .read_workspace_edit_proposal(&proposal.proposal_id)
+            .is_err());
+    }
+
+    #[test]
+    fn workspace_edit_proposal_timeline_reference_survives_session_projection_rebuild() {
+        let root = Root::new("workspace-edit-proposal-timeline-reference-rebuild");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes, item, envelope) =
+            prepared_workspace_edit_proposal_timeline_fixture(&mut store, &root, "rebuild");
+        let stored = store
+            .record_workspace_edit_proposal_with_timeline(proposal.clone(), writes, item, &envelope)
+            .unwrap();
+        let item_id = envelope.item.as_ref().unwrap().id.clone();
+        store
+            .connection
+            .execute(
+                "UPDATE items SET state = 'failed' WHERE item_id = ?1",
+                [&item_id],
+            )
+            .unwrap();
+        let candidate = store
+            .rebuild_session_projection_candidate(&proposal.session_id)
+            .unwrap();
+        assert!(projection_candidate_is_rebuildable(&candidate));
+        assert!(candidate
+            .items
+            .iter()
+            .any(|candidate_item| candidate_item.item_id == item_id));
+        store
+            .apply_session_projection_candidate(&candidate)
+            .unwrap();
+        assert_eq!(
+            store
+                .read_workspace_edit_proposal(&proposal.proposal_id)
+                .unwrap(),
+            stored
+        );
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .read_workspace_edit_proposal(&proposal.proposal_id)
+                .unwrap(),
+            stored
+        );
+    }
+
+    #[test]
+    fn workspace_edit_proposal_timeline_post_commit_retry_is_exactly_once() {
+        let root = Root::new("workspace-edit-proposal-timeline-post-commit");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes, item, envelope) =
+            prepared_workspace_edit_proposal_timeline_fixture(&mut store, &root, "post-commit");
+        store.workspace_edit_proposal_post_commit_error = true;
+        assert_eq!(
+            store
+                .record_workspace_edit_proposal_with_timeline(
+                    proposal.clone(),
+                    writes.clone(),
+                    item.clone(),
+                    &envelope,
+                )
+                .unwrap_err()
+                .code,
+            "workspace-edit-proposal-post-commit-fixture"
+        );
+        store.workspace_edit_proposal_post_commit_error = false;
+
+        let committed = store
+            .read_workspace_edit_proposal(&proposal.proposal_id)
+            .unwrap();
+        assert_eq!(
+            store
+                .record_workspace_edit_proposal_with_timeline(
+                    proposal.clone(),
+                    writes,
+                    item,
+                    &envelope,
+                )
+                .unwrap(),
+            committed
+        );
+        let counts: (i64, i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM workspace_edit_proposals WHERE proposal_id = ?1),
+                    (SELECT COUNT(*) FROM workspace_edit_proposal_timeline_references
+                     WHERE proposal_id = ?1),
+                    (SELECT COUNT(*) FROM items WHERE item_id = ?2),
+                    (SELECT COUNT(*) FROM public_timeline_events WHERE event_id = ?3)",
+                params![
+                    proposal.proposal_id,
+                    envelope.item.as_ref().unwrap().id,
+                    envelope.event_id
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 1, 1, 1));
     }
 
     #[test]
@@ -21677,6 +23015,59 @@ mod tests {
         let backups = migration_backup_manifests(&root.path).unwrap();
         assert_eq!(backups.len(), 1);
         assert_eq!(backups[0].source_schema_version, 17);
+        assert_eq!(backups[0].target_schema_version, SCHEMA_VERSION as u64);
+    }
+
+    #[test]
+    fn upgrades_schema_v18_without_fabricating_proposal_timeline_history() {
+        let root = Root::new("workspace-edit-proposal-timeline-migration");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes) =
+            workspace_edit_proposal_fixture(&mut store, &root, "provider-item-v18");
+        let legacy = store
+            .record_workspace_edit_proposal(proposal.clone(), writes)
+            .unwrap();
+        assert!(legacy.timeline_reference.is_none());
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER workspace_edit_proposal_timeline_immutable_update;
+                 DROP TABLE workspace_edit_proposal_timeline_references;
+                 DROP TRIGGER workspace_edit_proposals_immutable_update;
+                 ALTER TABLE workspace_edit_proposals DROP COLUMN timeline_reference_required;
+                 CREATE TRIGGER workspace_edit_proposals_immutable_update
+                   BEFORE UPDATE ON workspace_edit_proposals
+                   BEGIN SELECT RAISE(ABORT, 'workspace edit proposal is immutable'); END;",
+            )
+            .unwrap();
+        store
+            .connection
+            .pragma_update(None, "user_version", 18_i64)
+            .unwrap();
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        let migrated = reopened
+            .read_workspace_edit_proposal(&proposal.proposal_id)
+            .unwrap();
+        assert_eq!(migrated, legacy);
+        assert!(migrated.timeline_reference.is_none());
+        let counts: (i64, i64, i64) = reopened
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT timeline_reference_required FROM workspace_edit_proposals
+                     WHERE proposal_id = ?1),
+                    (SELECT COUNT(*) FROM workspace_edit_proposal_timeline_references),
+                    (SELECT COUNT(*) FROM public_timeline_events WHERE session_id = ?2)",
+                params![proposal.proposal_id, proposal.session_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0));
+        let backups = migration_backup_manifests(&root.path).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].source_schema_version, 18);
         assert_eq!(backups[0].target_schema_version, SCHEMA_VERSION as u64);
     }
 
@@ -28251,7 +29642,13 @@ mod tests {
         let store = WorkbenchStore::open(&root.path).unwrap();
         store
             .connection
-            .execute_batch("DROP TABLE items; DROP TABLE turns;")
+            .execute_batch(
+                "DROP TABLE workspace_edit_proposal_timeline_references;
+                 DROP TABLE workspace_edit_proposal_artifacts;
+                 DROP TABLE workspace_edit_proposals;
+                 DROP TABLE items;
+                 DROP TABLE turns;",
+            )
             .unwrap();
         store
             .connection
