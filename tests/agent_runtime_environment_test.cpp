@@ -1084,6 +1084,8 @@ bool runHandshakeCase(const QString &testCase, bool expectAccepted,
                     == QStringLiteral("aegisy-client")
                 && params.value(QStringLiteral("platform")).toObject() == testPlatform()
                 && !capabilities.value(QStringLiteral("stable")).toArray().isEmpty()
+                && capabilities.value(QStringLiteral("stable")).toArray().contains(
+                    QStringLiteral("workspace.edit.proposal.read-only"))
                 && capabilities.value(QStringLiteral("experimental")).toArray().isEmpty()
                 && limits.value(QStringLiteral("max_frame_bytes")).toInt()
                     == 4 * 1024 * 1024
@@ -1243,13 +1245,14 @@ bool runCapabilityGateCase()
     bool capabilityRejected = false;
     bool searchCapabilityRejected = false;
     bool timelineSyncCapabilityRejected = false;
+    bool proposalCapabilityRejected = false;
     {
         AgentRuntimeClient client;
         QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
                          [&initialized](const QJsonObject &) { initialized = true; });
         QObject::connect(&client, &AgentRuntimeClient::requestFailed,
                          [&capabilityRejected, &searchCapabilityRejected,
-                          &timelineSyncCapabilityRejected](
+                          &timelineSyncCapabilityRejected, &proposalCapabilityRejected](
                              const QString &, const QString &method,
                              const QString &, int code) {
             if (method == QStringLiteral("project/list") && code == -32601) {
@@ -1258,6 +1261,9 @@ bool runCapabilityGateCase()
                 searchCapabilityRejected = true;
             } else if (method == QStringLiteral("timeline/sync") && code == -32601) {
                 timelineSyncCapabilityRejected = true;
+            } else if (method == QStringLiteral("workspace/edit/proposal/latest")
+                       && code == -32601) {
+                proposalCapabilityRejected = true;
             }
         });
         client.start();
@@ -1283,6 +1289,11 @@ bool runCapabilityGateCase()
                     "missing Timeline replay capability did not reject timeline/sync")) {
             return false;
         }
+        if (!expect(client.latestWorkspaceEditProposal(QStringLiteral("session-1")).isEmpty()
+                        && proposalCapabilityRejected,
+                    "missing Proposal capability did not reject latest read")) {
+            return false;
+        }
         if (!expect(!client.runtimeHealth().isEmpty(),
                     "negotiated capability did not allow its method")) {
             return false;
@@ -1297,7 +1308,9 @@ bool runCapabilityGateCase()
         && expect(!logContainsMethod(logPath, QStringLiteral("session/search")),
                   "session/search escaped without session.search.branch")
         && expect(!logContainsMethod(logPath, QStringLiteral("timeline/sync")),
-                  "timeline/sync escaped without its negotiated capability");
+                  "timeline/sync escaped without its negotiated capability")
+        && expect(!logContainsMethod(logPath, QStringLiteral("workspace/edit/proposal/latest")),
+                  "Proposal latest escaped without its negotiated capability");
 }
 
 bool runTimelineSyncContractCase()
@@ -1968,6 +1981,85 @@ bool runOutboundFrameLimitCase()
                   "oversized outbound frame reached the runtime");
 }
 
+bool workspaceEditProposalPageIdentityMatchesRustFixture()
+{
+    const QString digest = QStringLiteral(
+        "7c4604d03f399eac32a48edbb7be1710838b70c83ad0e94b60137920945d6c40");
+    const QJsonObject page{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("workspace-edit-proposal-artifact-page/0.1")},
+        {QStringLiteral("session_id"), QStringLiteral("session-1")},
+        {QStringLiteral("proposal_id"), QStringLiteral("workspace-edit-proposal:sha256:")
+            + QString(64, QLatin1Char('a'))},
+        {QStringLiteral("project_id"), QStringLiteral("project-1")},
+        {QStringLiteral("edit_id"), QStringLiteral("edit-1")},
+        {QStringLiteral("artifact"), QJsonObject{
+            {QStringLiteral("kind"), QStringLiteral("diff")},
+            {QStringLiteral("reference"),
+             QStringLiteral("workspace-edit-diff:sha256:") + digest},
+            {QStringLiteral("sha256"), digest},
+            {QStringLiteral("bytes"), 5},
+            {QStringLiteral("media_type"),
+             QStringLiteral("text/x-diff; charset=utf-8")},
+        }},
+        {QStringLiteral("offset"), 0},
+        {QStringLiteral("next_offset"), QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("total_bytes"), 5},
+        {QStringLiteral("data_base64"), QStringLiteral("ZGlmZgo=")},
+        {QStringLiteral("chunk_sha256"), digest},
+        {QStringLiteral("page_identity"),
+         QStringLiteral("workspace-edit-proposal-artifact-page:sha256:d6669806e19a8648ee1bfa52ed6a987ff1cfdd372a777b0050d80d631341125b")},
+        {QStringLiteral("file_mutation_authority"), false},
+        {QStringLiteral("approval_recorded"), false},
+        {QStringLiteral("apply_available"), false},
+    };
+    QJsonObject drifted = page;
+    drifted.insert(QStringLiteral("offset"), 1);
+    return expect(AgentRuntimeClient::workspaceEditProposalArtifactPageIdentity(page)
+                      == page.value(QStringLiteral("page_identity")).toString(),
+                  "Qt Proposal artifact page identity diverged from Rust fixture")
+        && expect(AgentRuntimeClient::workspaceEditProposalArtifactPageIdentity(drifted)
+                      != page.value(QStringLiteral("page_identity")).toString(),
+                  "Proposal page identity omitted offset binding");
+}
+
+bool workspaceEditProposalPreviewIdentityMatchesRustFixture()
+{
+    const QString diffReference = QStringLiteral("workspace-edit-diff:sha256:")
+        + QStringLiteral("2ca8ab2ff3700e34b5f1e23baa2c7da4027fe934fdd6a3d2d802ffc745e6ba61");
+    const QJsonObject proposal{
+        {QStringLiteral("internal_schema_version"),
+         QStringLiteral("workspace-edit-proposal/0.1")},
+        {QStringLiteral("summary"), QJsonObject{
+            {QStringLiteral("file_count"), 1},
+            {QStringLiteral("additions"), 1},
+            {QStringLiteral("deletions"), 1},
+            {QStringLiteral("warning_count"), 0},
+            {QStringLiteral("applicable"), true},
+            {QStringLiteral("aggregate_diff"), QJsonObject{
+                {QStringLiteral("reference"), diffReference},
+            }},
+            {QStringLiteral("files"), QJsonArray{QJsonObject{
+                {QStringLiteral("diff"), QJsonObject{
+                    {QStringLiteral("reference"), diffReference},
+                }},
+            }}},
+        }},
+    };
+    QJsonObject drifted = proposal;
+    QJsonObject summary = drifted.value(QStringLiteral("summary")).toObject();
+    summary.insert(QStringLiteral("additions"), 2);
+    drifted.insert(QStringLiteral("summary"), summary);
+    const QString expected = QStringLiteral(
+        "workspace-edit-preview:sha256:56faa6585dcdf09eef6cfc2ff54cd2383c3c031ae7f62be47281d3a02a769a5b");
+    return expect(AgentRuntimeClient::workspaceEditProposalPreviewIdentity(proposal)
+                      == expected,
+                  "Qt Proposal preview identity diverged from Rust legacy fixture")
+        && expect(AgentRuntimeClient::workspaceEditProposalPreviewIdentity(drifted)
+                      != expected,
+                  "Proposal preview identity omitted aggregate count binding");
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -2016,6 +2108,8 @@ int main(int argc, char *argv[])
     ok = expect(verifyRustTimelineIdentityFixture(),
                 "Qt Timeline Event identity diverged from the Rust fixture") && ok;
     ok = verifyRustTimelineSnapshotIdentityFixture() && ok;
+    ok = workspaceEditProposalPreviewIdentityMatchesRustFixture() && ok;
+    ok = workspaceEditProposalPageIdentityMatchesRustFixture() && ok;
     ok = runHandshakeCase(QStringLiteral("valid-preview"), true) && ok;
     ok = runHandshakeCase(QStringLiteral("valid-codex"), true) && ok;
     ok = runHandshakeCase(QStringLiteral("valid-recovery"), true, true, true) && ok;

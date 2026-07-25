@@ -1,6 +1,7 @@
 #ifndef AGENT_WORKBENCH_WIDGET_H
 #define AGENT_WORKBENCH_WIDGET_H
 
+#include <QByteArray>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -291,7 +292,16 @@ private:
     void updateResponsiveEditorChrome();
     QWidget *buildTerminalPage();
     QWidget *buildWorkspaceEditPage();
-    void populateWorkspaceEditPreview(const QJsonObject &preview);
+    void populateWorkspaceEditPreview(const QJsonObject &preview, bool activate = true);
+    void requestLatestWorkspaceEditProposal(const QString &sessionId);
+    void acceptWorkspaceEditProposalResult(const QString &requestId,
+                                           const QJsonObject &result,
+                                           bool latest);
+    void showConfirmedWorkspaceEditProposal(const QString &sessionId,
+                                            bool activate);
+    void clearWorkspaceEditProposalPending();
+    void invalidateWorkspaceEditProposalArtifactRequests();
+    void updateWorkspaceEditUnreadMarker();
     void showWorkspaceEditFile(QTreeWidgetItem *item);
     void loadMoreWorkspaceEditDiff();
     void requestTerminalList();
@@ -533,6 +543,38 @@ private:
     QString m_workspaceEditArtifactRequestId;
     QString m_workspaceEditId;
     QString m_workspaceEditReference;
+    struct WorkspaceEditProposalRequest {
+        QString sessionId;
+        QString proposalId;
+        quint64 generation = 0;
+    };
+    QHash<QString, WorkspaceEditProposalRequest> m_workspaceEditProposalRequests;
+    QHash<QString, quint64> m_workspaceEditProposalGenerations;
+    QHash<QString, QJsonObject> m_confirmedWorkspaceEditProposals;
+    QStringList m_workspaceEditProposalRecency;
+    QSet<QString> m_unreadWorkspaceEditProposalSessions;
+    QSet<QString> m_unverifiedWorkspaceEditProposalSessions;
+    struct WorkspaceEditProposalArtifactRequest {
+        QString sessionId;
+        QString proposalId;
+        QString projectId;
+        QString editId;
+        QString reference;
+        QString sha256;
+        qint64 bytes = 0;
+        qint64 offset = 0;
+        quint64 generation = 0;
+        QByteArray accumulatedBytes;
+    };
+    QHash<QString, WorkspaceEditProposalArtifactRequest>
+        m_workspaceEditProposalArtifactRequests;
+    QByteArray m_workspaceEditProposalArtifactBytes;
+    quint64 m_workspaceEditProposalArtifactGeneration = 0;
+    QString m_workspaceEditProposalSessionId;
+    QString m_workspaceEditProposalId;
+    QString m_workspaceEditExpectedArtifactSha256;
+    qint64 m_workspaceEditExpectedArtifactBytes = 0;
+    bool m_workspaceEditDurableProposal = false;
     QString m_gitOverviewRequestId;
     QString m_gitLogRequestId;
     QString m_gitDiffRequestId;
@@ -644,6 +686,7 @@ private:
     bool m_pinnedContextAvailable = false;
     bool m_imageContextAvailable = false;
     bool m_gitContextAvailable = false;
+    bool m_workspaceEditProposalAvailable = false;
     enum class RuntimeDegradationState {
         NotRequested,
         Pending,

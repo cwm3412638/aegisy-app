@@ -97,6 +97,8 @@ constexpr int kContextRole = Qt::UserRole + 8;
 constexpr int kPatchDiffRole = Qt::UserRole + 9;
 constexpr int kPatchReferenceRole = Qt::UserRole + 10;
 constexpr int kPatchInlineTruncatedRole = Qt::UserRole + 11;
+constexpr int kPatchSha256Role = Qt::UserRole + 12;
+constexpr int kPatchBytesRole = Qt::UserRole + 13;
 constexpr int kSessionIdRole = Qt::UserRole + 20;
 constexpr int kSessionModeRole = Qt::UserRole + 21;
 constexpr int kSessionProjectRole = Qt::UserRole + 22;
@@ -133,6 +135,9 @@ constexpr int kTimelineSyncPageLimit = 100;
 constexpr int kTimelineSnapshotPageLimit = 200;
 constexpr quint64 kMaxTimelineSnapshotItems = 10000;
 constexpr quint64 kMaxTimelineSnapshotBytes = 64ULL * 1024ULL * 1024ULL;
+constexpr qsizetype kMaxConfirmedWorkspaceEditProposals = 128;
+constexpr quint64 kMaxWorkspaceEditProposalFiles = 256;
+constexpr quint64 kMaxWorkspaceEditAggregateDiffBytes = 2ULL * 1024ULL * 1024ULL;
 
 struct RuntimeDegradationExpectation {
     QString state;
@@ -153,6 +158,463 @@ bool hasExactJsonKeys(const QJsonObject &object, const QSet<QString> &expected)
 bool isNonnegativeSafeJsonInteger(const QJsonValue &value);
 bool isPositiveSafeJsonInteger(const QJsonValue &value);
 bool isBoundedGraphicalId(const QJsonValue &value, qsizetype maxBytes);
+
+bool checkedAdd(quint64 value, quint64 *total)
+{
+    if (value > std::numeric_limits<quint64>::max() - *total) return false;
+    *total += value;
+    return true;
+}
+
+bool decodeVerifiedUtf8Prefix(const QByteArray &bytes, bool complete, QString *decoded)
+{
+    if (!decoded) return false;
+    qsizetype index = 0;
+    qsizetype verifiedBytes = bytes.size();
+    const auto byteAt = [&bytes](qsizetype offset) {
+        return static_cast<unsigned char>(bytes.at(offset));
+    };
+    while (index < bytes.size()) {
+        const unsigned char lead = byteAt(index);
+        if (lead <= 0x7f) {
+            ++index;
+            continue;
+        }
+        qsizetype width = 0;
+        unsigned char secondMinimum = 0x80;
+        unsigned char secondMaximum = 0xbf;
+        if (lead >= 0xc2 && lead <= 0xdf) {
+            width = 2;
+        } else if (lead == 0xe0) {
+            width = 3;
+            secondMinimum = 0xa0;
+        } else if ((lead >= 0xe1 && lead <= 0xec)
+                   || (lead >= 0xee && lead <= 0xef)) {
+            width = 3;
+        } else if (lead == 0xed) {
+            width = 3;
+            secondMaximum = 0x9f;
+        } else if (lead == 0xf0) {
+            width = 4;
+            secondMinimum = 0x90;
+        } else if (lead >= 0xf1 && lead <= 0xf3) {
+            width = 4;
+        } else if (lead == 0xf4) {
+            width = 4;
+            secondMaximum = 0x8f;
+        } else {
+            return false;
+        }
+        const qsizetype available = bytes.size() - index;
+        const qsizetype present = qMin(width, available);
+        for (qsizetype offset = 1; offset < present; ++offset) {
+            const unsigned char continuation = byteAt(index + offset);
+            const unsigned char minimum = offset == 1 ? secondMinimum : 0x80;
+            const unsigned char maximum = offset == 1 ? secondMaximum : 0xbf;
+            if (continuation < minimum || continuation > maximum) return false;
+        }
+        if (available < width) {
+            if (complete) return false;
+            verifiedBytes = index;
+            break;
+        }
+        index += width;
+    }
+    const QByteArray prefix = bytes.left(verifiedBytes);
+    const QString candidate = QString::fromUtf8(prefix);
+    if (candidate.toUtf8() != prefix) return false;
+    *decoded = candidate;
+    return true;
+}
+
+bool isLowerSha256(const QString &value, const QString &prefix = QString())
+{
+    static const QRegularExpression digest(QStringLiteral("^[0-9a-f]{64}$"));
+    return value.startsWith(prefix)
+        && digest.match(value.mid(prefix.size())).hasMatch();
+}
+
+bool isWorkspaceEditPath(const QJsonValue &value)
+{
+    if (!value.isString()) return false;
+    const QString path = value.toString();
+    const QStringList segments = path.split(QLatin1Char('/'));
+    bool platformPrefixValid = true;
+#ifdef Q_OS_WIN
+    static const QRegularExpression drivePrefix(QStringLiteral("^[A-Za-z]:"));
+    platformPrefixValid = !drivePrefix.match(path).hasMatch();
+#endif
+    return platformPrefixValid && !path.isEmpty() && path.toUtf8().size() <= 4096
+        && !path.startsWith(QLatin1Char('/')) && !path.contains(QLatin1Char('\\'))
+        && !path.contains(QChar::Null)
+        && std::none_of(segments.cbegin(), segments.cend(), [](const QString &segment) {
+               return segment.isEmpty() || segment == QStringLiteral(".")
+                   || segment == QStringLiteral("..")
+                   || std::any_of(segment.cbegin(), segment.cend(), [](QChar character) {
+                          return character.category() == QChar::Other_Control;
+                      });
+           });
+}
+
+bool hasReadOnlyProposalAuthority(const QJsonObject &object)
+{
+    return object.value(QStringLiteral("file_mutation_authority")).isBool()
+        && !object.value(QStringLiteral("file_mutation_authority")).toBool()
+        && object.value(QStringLiteral("approval_recorded")).isBool()
+        && !object.value(QStringLiteral("approval_recorded")).toBool()
+        && object.value(QStringLiteral("apply_available")).isBool()
+        && !object.value(QStringLiteral("apply_available")).toBool();
+}
+
+bool isProposalHashDescriptor(const QJsonValue &value, quint64 maximumBytes)
+{
+    static const QSet<QString> keys{QStringLiteral("sha256"), QStringLiteral("bytes")};
+    if (!value.isObject()) return false;
+    const QJsonObject hash = value.toObject();
+    return hasExactJsonKeys(hash, keys)
+        && isLowerSha256(hash.value(QStringLiteral("sha256")).toString())
+        && isNonnegativeSafeJsonInteger(hash.value(QStringLiteral("bytes")))
+        && static_cast<quint64>(hash.value(QStringLiteral("bytes")).toDouble())
+            <= maximumBytes;
+}
+
+bool isProposalContentDescriptor(const QJsonValue &value, bool create)
+{
+    static const QSet<QString> keys{
+        QStringLiteral("reference"), QStringLiteral("hash"),
+        QStringLiteral("encoding"), QStringLiteral("newline"), QStringLiteral("mode"),
+    };
+    if (!value.isObject()) return false;
+    const QJsonObject content = value.toObject();
+    const QString reference = content.value(QStringLiteral("reference")).toString();
+    const QJsonObject hash = content.value(QStringLiteral("hash")).toObject();
+    const QString encoding = content.value(QStringLiteral("encoding")).toString();
+    const QString newline = content.value(QStringLiteral("newline")).toString();
+    const QString mode = content.value(QStringLiteral("mode")).toString();
+    return hasExactJsonKeys(content, keys)
+        && isProposalHashDescriptor(hash, 512ULL * 1024ULL)
+        && isLowerSha256(reference, QStringLiteral("workspace-edit-content:sha256:"))
+        && reference.mid(QStringLiteral("workspace-edit-content:sha256:").size())
+            == hash.value(QStringLiteral("sha256")).toString()
+        && (encoding == QStringLiteral("utf-8") || encoding == QStringLiteral("utf-8-bom"))
+        && (newline == QStringLiteral("none") || newline == QStringLiteral("lf")
+            || newline == QStringLiteral("crlf"))
+        && (mode == QStringLiteral("preserve") || mode == QStringLiteral("regular")
+            || mode == QStringLiteral("executable"))
+        && (!create || mode != QStringLiteral("preserve"));
+}
+
+bool isProposalTextFormat(const QJsonValue &value)
+{
+    static const QSet<QString> keys{
+        QStringLiteral("encoding"), QStringLiteral("newline"), QStringLiteral("mode"),
+    };
+    if (!value.isObject()) return false;
+    const QJsonObject format = value.toObject();
+    const QString encoding = format.value(QStringLiteral("encoding")).toString();
+    const QString newline = format.value(QStringLiteral("newline")).toString();
+    const QString mode = format.value(QStringLiteral("mode")).toString();
+    return hasExactJsonKeys(format, keys)
+        && (encoding == QStringLiteral("utf-8") || encoding == QStringLiteral("utf-8-bom"))
+        && (newline == QStringLiteral("none") || newline == QStringLiteral("lf")
+            || newline == QStringLiteral("crlf"))
+        && (mode == QStringLiteral("preserve") || mode == QStringLiteral("regular")
+            || mode == QStringLiteral("executable"));
+}
+
+bool isProposalDiffDescriptor(const QJsonValue &value, quint64 maximumBytes,
+                              quint64 inlineLimit, bool complete)
+{
+    static const QSet<QString> keys{
+        QStringLiteral("reference"), QStringLiteral("sha256"),
+        QStringLiteral("bytes"), QStringLiteral("media_type"),
+        QStringLiteral("inline_truncated"), QStringLiteral("source_truncated"),
+    };
+    if (!value.isObject()) return false;
+    const QJsonObject diff = value.toObject();
+    const QString reference = diff.value(QStringLiteral("reference")).toString();
+    const QString sha256 = diff.value(QStringLiteral("sha256")).toString();
+    const QJsonValue inlineTruncated = diff.value(QStringLiteral("inline_truncated"));
+    const QJsonValue sourceTruncated = diff.value(QStringLiteral("source_truncated"));
+    return hasExactJsonKeys(diff, keys)
+        && isLowerSha256(reference, QStringLiteral("workspace-edit-diff:sha256:"))
+        && isLowerSha256(sha256)
+        && reference.mid(QStringLiteral("workspace-edit-diff:sha256:").size()) == sha256
+        && isNonnegativeSafeJsonInteger(diff.value(QStringLiteral("bytes")))
+        && static_cast<quint64>(diff.value(QStringLiteral("bytes")).toDouble())
+            <= maximumBytes
+        && diff.value(QStringLiteral("media_type")).toString()
+            == QStringLiteral("text/x-diff; charset=utf-8")
+        && (complete ? inlineTruncated.isBool() && sourceTruncated.isBool()
+                         && inlineTruncated.toBool()
+                             == (static_cast<quint64>(
+                                     diff.value(QStringLiteral("bytes")).toDouble())
+                                 > inlineLimit)
+                     : inlineTruncated.isNull() && sourceTruncated.isNull());
+}
+
+bool isWorkspaceEditProposalView(const QJsonValue &value,
+                                 const QString &expectedSessionId,
+                                 const QString &expectedProposalId = QString())
+{
+    static const QSet<QString> proposalKeys{
+        QStringLiteral("schema_version"), QStringLiteral("internal_schema_version"),
+        QStringLiteral("proposal_id"), QStringLiteral("session_id"),
+        QStringLiteral("turn_id"), QStringLiteral("project_id"), QStringLiteral("root_id"),
+        QStringLiteral("edit_id"), QStringLiteral("canonical_edit_identity"),
+        QStringLiteral("preview_identity"), QStringLiteral("proposal_sha256"),
+        QStringLiteral("proposal_bytes"), QStringLiteral("event_sequence"),
+        QStringLiteral("created_at_ms"), QStringLiteral("approval_started_at_ms"),
+        QStringLiteral("provider_identity"), QStringLiteral("provider_thread_identity"),
+        QStringLiteral("provider_item_identity"), QStringLiteral("runtime"),
+        QStringLiteral("summary"), QStringLiteral("file_mutation_authority"),
+        QStringLiteral("approval_recorded"), QStringLiteral("apply_available"),
+    };
+    static const QSet<QString> runtimeKeys{
+        QStringLiteral("adapter"), QStringLiteral("adapter_version"),
+        QStringLiteral("permission"),
+    };
+    static const QSet<QString> summaryKeys{
+        QStringLiteral("files_complete"), QStringLiteral("file_count"),
+        QStringLiteral("additions"), QStringLiteral("deletions"),
+        QStringLiteral("warning_count"), QStringLiteral("applicable"),
+        QStringLiteral("aggregate_diff"), QStringLiteral("files"),
+    };
+    static const QSet<QString> fileKeys{
+        QStringLiteral("ordinal"), QStringLiteral("summary_state"),
+        QStringLiteral("kind"), QStringLiteral("path"),
+        QStringLiteral("additions"), QStringLiteral("deletions"),
+        QStringLiteral("base_matches"), QStringLiteral("base"),
+        QStringLiteral("proposed"), QStringLiteral("warnings"), QStringLiteral("diff"),
+    };
+    if (!value.isObject()) return false;
+    const QJsonObject proposal = value.toObject();
+    const QString internalSchema = proposal.value(QStringLiteral("internal_schema_version"))
+        .toString();
+    const QString proposalId = proposal.value(QStringLiteral("proposal_id")).toString();
+    const QJsonObject runtime = proposal.value(QStringLiteral("runtime")).toObject();
+    const QJsonObject summary = proposal.value(QStringLiteral("summary")).toObject();
+    const bool complete = summary.value(QStringLiteral("files_complete")).toBool();
+    if (!hasExactJsonKeys(proposal, proposalKeys)
+        || proposal.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("workspace-edit-proposal-view/0.1")
+        || (internalSchema != QStringLiteral("workspace-edit-proposal/0.1")
+            && internalSchema != QStringLiteral("workspace-edit-proposal/0.2"))
+        || proposal.value(QStringLiteral("session_id")).toString() != expectedSessionId
+        || !isLowerSha256(proposalId, QStringLiteral("workspace-edit-proposal:sha256:"))
+        || (!expectedProposalId.isEmpty() && proposalId != expectedProposalId)
+        || !isBoundedGraphicalId(proposal.value(QStringLiteral("turn_id")), 256)
+        || !isBoundedGraphicalId(proposal.value(QStringLiteral("project_id")), 256)
+        || !isBoundedGraphicalId(proposal.value(QStringLiteral("root_id")), 256)
+        || !isBoundedGraphicalId(proposal.value(QStringLiteral("edit_id")), 256)
+        || !isLowerSha256(proposal.value(QStringLiteral("canonical_edit_identity")).toString(),
+                          QStringLiteral("workspace-edit-canonical:sha256:"))
+        || !isLowerSha256(proposal.value(QStringLiteral("preview_identity")).toString(),
+                          QStringLiteral("workspace-edit-preview:sha256:"))
+        || proposal.value(QStringLiteral("preview_identity")).toString()
+            != AgentRuntimeClient::workspaceEditProposalPreviewIdentity(proposal)
+        || !isLowerSha256(proposal.value(QStringLiteral("proposal_sha256")).toString())
+        || !isPositiveSafeJsonInteger(proposal.value(QStringLiteral("proposal_bytes")))
+        || proposal.value(QStringLiteral("proposal_bytes")).toDouble() > 4 * 1024 * 1024
+        || !isPositiveSafeJsonInteger(proposal.value(QStringLiteral("event_sequence")))
+        || !isPositiveSafeJsonInteger(proposal.value(QStringLiteral("created_at_ms")))
+        || !isPositiveSafeJsonInteger(proposal.value(QStringLiteral("approval_started_at_ms")))
+        || proposal.value(QStringLiteral("approval_started_at_ms")).toDouble()
+            > proposal.value(QStringLiteral("created_at_ms")).toDouble()
+        || (!proposal.value(QStringLiteral("provider_identity")).isNull()
+            && !isLowerSha256(proposal.value(QStringLiteral("provider_identity")).toString(),
+                              QStringLiteral("codex-provider:sha256:")))
+        || !isLowerSha256(proposal.value(QStringLiteral("provider_thread_identity")).toString(),
+                          QStringLiteral("codex-provider-thread:sha256:"))
+        || !isLowerSha256(proposal.value(QStringLiteral("provider_item_identity")).toString(),
+                          QStringLiteral("codex-file-change-item:sha256:"))
+        || !hasExactJsonKeys(runtime, runtimeKeys)
+        || runtime.value(QStringLiteral("adapter")).toString()
+            != QStringLiteral("codex-app-server")
+        || runtime.value(QStringLiteral("adapter_version")).toString()
+            != QStringLiteral("codex-cli 0.144.5")
+        || runtime.value(QStringLiteral("permission")).toString() != QStringLiteral("read-only")
+        || !hasExactJsonKeys(summary, summaryKeys)
+        || !summary.value(QStringLiteral("files_complete")).isBool()
+        || summary.value(QStringLiteral("files_complete")).toBool()
+            != (internalSchema == QStringLiteral("workspace-edit-proposal/0.2"))
+        || !isPositiveSafeJsonInteger(summary.value(QStringLiteral("file_count")))
+        || summary.value(QStringLiteral("file_count")).toDouble()
+            > kMaxWorkspaceEditProposalFiles
+        || !isNonnegativeSafeJsonInteger(summary.value(QStringLiteral("additions")))
+        || !isNonnegativeSafeJsonInteger(summary.value(QStringLiteral("deletions")))
+        || !isNonnegativeSafeJsonInteger(summary.value(QStringLiteral("warning_count")))
+        || !summary.value(QStringLiteral("applicable")).isBool()
+        || !isProposalDiffDescriptor(summary.value(QStringLiteral("aggregate_diff")),
+                                     kMaxWorkspaceEditAggregateDiffBytes,
+                                     64ULL * 1024ULL, complete)
+        || !summary.value(QStringLiteral("files")).isArray()
+        || !hasReadOnlyProposalAuthority(proposal)) {
+        return false;
+    }
+    const QJsonArray files = summary.value(QStringLiteral("files")).toArray();
+    if (files.size() != static_cast<qsizetype>(summary.value(QStringLiteral("file_count")).toDouble())) {
+        return false;
+    }
+    quint64 additions = 0;
+    quint64 deletions = 0;
+    quint64 warnings = 0;
+    QSet<QString> claimedPaths;
+    bool fileSourceTruncated = false;
+    for (qsizetype index = 0; index < files.size(); ++index) {
+        if (!files.at(index).isObject()) return false;
+        const QJsonObject file = files.at(index).toObject();
+        const QString kind = file.value(QStringLiteral("kind")).toString();
+        const bool hasProposed = kind == QStringLiteral("create")
+            || kind == QStringLiteral("update");
+        QSet<QString> expectedFileKeys = fileKeys;
+        if (complete) {
+            if (kind == QStringLiteral("rename")) {
+                expectedFileKeys.insert(QStringLiteral("from_path"));
+            }
+            if (hasProposed) expectedFileKeys.insert(QStringLiteral("proposed_format"));
+        } else {
+            expectedFileKeys.insert(QStringLiteral("from_path"));
+        }
+        if (!hasExactJsonKeys(file, expectedFileKeys)
+            || !isNonnegativeSafeJsonInteger(file.value(QStringLiteral("ordinal")))
+            || file.value(QStringLiteral("ordinal")).toDouble() != index
+            || file.value(QStringLiteral("summary_state")).toString()
+                != (complete ? QStringLiteral("complete")
+                             : QStringLiteral("legacy-incomplete"))
+            || (kind != QStringLiteral("create") && kind != QStringLiteral("update")
+                && kind != QStringLiteral("delete") && kind != QStringLiteral("rename"))
+            || !isWorkspaceEditPath(file.value(QStringLiteral("path")))
+            || (kind == QStringLiteral("rename")
+                ? !isWorkspaceEditPath(file.value(QStringLiteral("from_path")))
+                : (complete ? file.contains(QStringLiteral("from_path"))
+                            : !file.value(QStringLiteral("from_path")).isNull()))
+            || !isProposalDiffDescriptor(file.value(QStringLiteral("diff")),
+                                         512ULL * 1024ULL,
+                                         32ULL * 1024ULL, complete)) {
+            return false;
+        }
+        const QString path = file.value(QStringLiteral("path")).toString();
+        if (claimedPaths.contains(path)) return false;
+        claimedPaths.insert(path);
+        if (kind == QStringLiteral("rename")) {
+            const QString fromPath = file.value(QStringLiteral("from_path")).toString();
+            if (fromPath == path || claimedPaths.contains(fromPath)) return false;
+            claimedPaths.insert(fromPath);
+        }
+        const bool hasBase = kind != QStringLiteral("create");
+        if ((hasBase ? !isProposalHashDescriptor(file.value(QStringLiteral("base")),
+                                                  512ULL * 1024ULL)
+                     : !file.value(QStringLiteral("base")).isNull())
+            || (hasProposed ? !isProposalContentDescriptor(
+                                  file.value(QStringLiteral("proposed")),
+                                  kind == QStringLiteral("create"))
+                            : !file.value(QStringLiteral("proposed")).isNull())
+            || (complete && hasProposed
+                && (!isProposalTextFormat(file.value(QStringLiteral("proposed_format")))
+                    || file.value(QStringLiteral("proposed_format")).toObject()
+                        != QJsonObject{
+                            {QStringLiteral("encoding"), file.value(QStringLiteral("proposed"))
+                                .toObject().value(QStringLiteral("encoding"))},
+                            {QStringLiteral("newline"), file.value(QStringLiteral("proposed"))
+                                .toObject().value(QStringLiteral("newline"))},
+                            {QStringLiteral("mode"), file.value(QStringLiteral("proposed"))
+                                .toObject().value(QStringLiteral("mode"))},
+                        }))) {
+            return false;
+        }
+        if (complete) {
+            const QJsonObject diff = file.value(QStringLiteral("diff")).toObject();
+            if (!isNonnegativeSafeJsonInteger(file.value(QStringLiteral("additions")))
+                || !isNonnegativeSafeJsonInteger(file.value(QStringLiteral("deletions")))
+                || (!file.value(QStringLiteral("base_matches")).isBool()
+                    && !file.value(QStringLiteral("base_matches")).isNull())
+                || !file.value(QStringLiteral("warnings")).isArray()
+                || (kind == QStringLiteral("create")
+                    && !file.value(QStringLiteral("base_matches")).isNull())
+                || (kind == QStringLiteral("rename")
+                    && (file.value(QStringLiteral("additions")).toDouble() != 0
+                        || file.value(QStringLiteral("deletions")).toDouble() != 0
+                        || diff.value(QStringLiteral("source_truncated")).toBool()))) {
+                return false;
+            }
+            if (!checkedAdd(static_cast<quint64>(
+                                file.value(QStringLiteral("additions")).toDouble()),
+                            &additions)
+                || !checkedAdd(static_cast<quint64>(
+                                   file.value(QStringLiteral("deletions")).toDouble()),
+                               &deletions)) {
+                return false;
+            }
+            const QJsonArray fileWarnings = file.value(QStringLiteral("warnings")).toArray();
+            if (fileWarnings.size() > 128) return false;
+            if (!checkedAdd(static_cast<quint64>(fileWarnings.size()), &warnings)) return false;
+            static const QSet<QString> allowedWarningCodes{
+                QStringLiteral("target-exists"), QStringLiteral("mixed-line-endings"),
+                QStringLiteral("stale-base"), QStringLiteral("base-unavailable"),
+                QStringLiteral("sensitive-path"), QStringLiteral("ignored-path"),
+                QStringLiteral("unsafe-path"),
+            };
+            QSet<QString> warningKeys;
+            const QString fromPath = file.value(QStringLiteral("from_path")).toString();
+            const QString basePath = kind == QStringLiteral("rename") ? fromPath : path;
+            bool staleBase = false;
+            bool unavailableBase = false;
+            for (const QJsonValue &warningValue : fileWarnings) {
+                if (!warningValue.isObject()) return false;
+                const QJsonObject warning = warningValue.toObject();
+                const QString code = warning.value(QStringLiteral("code")).toString();
+                const QString warningPath = warning.value(QStringLiteral("path")).toString();
+                const QString warningKey = code + QChar::Null + warningPath;
+                if (!hasExactJsonKeys(warning, {
+                        QStringLiteral("code"), QStringLiteral("severity"),
+                        QStringLiteral("path")})
+                    || !allowedWarningCodes.contains(code)
+                    || warning.value(QStringLiteral("severity")).toString()
+                        != QStringLiteral("blocking")
+                    || !isWorkspaceEditPath(warning.value(QStringLiteral("path")))
+                    || (warningPath != path && warningPath != fromPath)
+                    || warningKeys.contains(warningKey)) {
+                    return false;
+                }
+                warningKeys.insert(warningKey);
+                if (warningPath == basePath && code == QStringLiteral("stale-base")) {
+                    staleBase = true;
+                }
+                if (warningPath == basePath
+                    && (code == QStringLiteral("base-unavailable")
+                        || code == QStringLiteral("sensitive-path")
+                        || code == QStringLiteral("ignored-path")
+                        || code == QStringLiteral("unsafe-path"))) {
+                    unavailableBase = true;
+                }
+            }
+            if (hasBase) {
+                const QJsonValue baseMatches = file.value(QStringLiteral("base_matches"));
+                const bool falseBaseMatch = baseMatches.isBool() && !baseMatches.toBool();
+                if (falseBaseMatch != staleBase
+                    || (baseMatches.isNull() && !unavailableBase)
+                    || (baseMatches.isBool() && unavailableBase)) {
+                    return false;
+                }
+            }
+            fileSourceTruncated = fileSourceTruncated
+                || diff.value(QStringLiteral("source_truncated")).toBool();
+        } else if (!file.value(QStringLiteral("additions")).isNull()
+                   || !file.value(QStringLiteral("deletions")).isNull()
+                   || !file.value(QStringLiteral("base_matches")).isNull()
+                   || !file.value(QStringLiteral("warnings")).isNull()) {
+            return false;
+        }
+    }
+    const bool aggregateSourceTruncated = summary.value(QStringLiteral("aggregate_diff"))
+        .toObject().value(QStringLiteral("source_truncated")).toBool();
+    return !complete || (additions == static_cast<quint64>(summary.value(QStringLiteral("additions")).toDouble())
+        && deletions == static_cast<quint64>(summary.value(QStringLiteral("deletions")).toDouble())
+        && warnings == static_cast<quint64>(summary.value(QStringLiteral("warning_count")).toDouble())
+        && summary.value(QStringLiteral("applicable")).toBool() == (warnings == 0)
+        && (!fileSourceTruncated || aggregateSourceTruncated));
+}
 
 bool readTimelineAnchor(const QJsonValue &value, quint64 *sequence, QString *eventId)
 {
@@ -1109,6 +1571,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_pinnedContextAvailable = false;
         m_imageContextAvailable = false;
         m_gitContextAvailable = false;
+        m_workspaceEditProposalAvailable = false;
         bool imageImportAvailable = false;
         bool imagePreviewAvailable = false;
         const QJsonObject negotiatedCapabilities =
@@ -1138,6 +1601,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 m_timelineSyncAvailable = true;
             } else if (name == QStringLiteral("timeline.snapshot.current")) {
                 m_timelineSnapshotAvailable = true;
+            } else if (name == QStringLiteral("workspace.edit.proposal.read-only")) {
+                m_workspaceEditProposalAvailable = true;
             }
         }
         m_imageContextAvailable = imageImportAvailable && imagePreviewAvailable;
@@ -1152,6 +1617,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
         });
         if (m_pinnedContextAvailable && !m_projectId.isEmpty()) requestPinnedContext();
+        if (m_workspaceEditProposalAvailable && !m_workSessionId.isEmpty()) {
+            requestLatestWorkspaceEditProposal(m_workSessionId);
+        }
         if (m_pinFileContextAction) {
             m_pinFileContextAction->setEnabled(
                 m_pinnedContextAvailable && !m_runtimeRecoveryMode && !m_projectId.isEmpty());
@@ -1547,6 +2015,20 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_unknownTimelineEventCounts.clear();
             m_unknownTimelineEventOverflowCount = 0;
             m_turnCancelRequestId.clear();
+            const QStringList cachedProposalSessions =
+                m_confirmedWorkspaceEditProposals.keys();
+            for (const QString &sessionId : cachedProposalSessions) {
+                m_unverifiedWorkspaceEditProposalSessions.insert(sessionId);
+            }
+            clearWorkspaceEditProposalPending();
+            if (m_workspaceEditDurableProposal) {
+                m_workspaceEditDurableProposal = false;
+                m_workspaceEditFiles->clear();
+                m_workspaceEditDiff->clear();
+                m_workspaceEditMoreButton->setEnabled(false);
+                m_workspaceEditSummary->setText(
+                    QStringLiteral("持久化变更提案等待运行时重新验证"));
+            }
         }
         updateTurnAction();
         updateEditorActions();
@@ -1744,8 +2226,20 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_terminalStatus->setText(QStringLiteral("创建 Work 会话后可使用项目终端"));
         }
         m_workspaceEditArtifactRequestId.clear();
+        m_workspaceEditProposalArtifactRequests.clear();
+        m_workspaceEditProposalArtifactBytes.clear();
+        if (m_workspaceEditProposalArtifactGeneration
+            == std::numeric_limits<quint64>::max()) {
+            m_workspaceEditProposalArtifactGeneration = 1;
+        } else {
+            ++m_workspaceEditProposalArtifactGeneration;
+        }
+        m_workspaceEditProposalRequests.clear();
         m_workspaceEditId.clear();
         m_workspaceEditReference.clear();
+        m_workspaceEditProposalSessionId.clear();
+        m_workspaceEditProposalId.clear();
+        m_workspaceEditDurableProposal = false;
         m_workspaceEditOffset = 0;
         if (m_workspaceEditFiles) m_workspaceEditFiles->clear();
         if (m_workspaceEditDiff) m_workspaceEditDiff->clear();
@@ -2005,6 +2499,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         addNotice(QStringLiteral("已连接 %1 / %2（只读）").arg(provider, model));
         beginTimelineSync(id);
         if (mode == QStringLiteral("work")) {
+            requestLatestWorkspaceEditProposal(id);
             if (!m_pendingTerminalKind.isEmpty()) {
                 const QString kind = m_pendingTerminalKind;
                 const QString name = m_pendingTerminalName;
@@ -2029,7 +2524,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         const QString mode = session.value(QStringLiteral("mode")).toString();
         if (id.isEmpty() || mode.isEmpty()) return;
         setMode(mode);
-        if (mode == QStringLiteral("work")) m_workSessionId = id;
+        if (mode == QStringLiteral("work")) {
+            m_workSessionId = id;
+        }
         else {
             m_chatSessionId = id;
             m_chatSessionProjectId = session.value(QStringLiteral("project_id")).toString();
@@ -2041,6 +2538,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             id, result.value(QStringLiteral("context_threshold")).toObject());
         storeSessionWorkspaceBinding(
             id, result.value(QStringLiteral("workspace")).toObject());
+        if (mode == QStringLiteral("work")) requestLatestWorkspaceEditProposal(id);
         resetSessionHistoryPagination();
         requestSessionHistory(id);
         addNotice(QStringLiteral("会话已恢复，可继续发送新任务。"));
@@ -2055,7 +2553,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         const QString mode = session.value(QStringLiteral("mode")).toString();
         if (id.isEmpty() || mode.isEmpty()) return;
         setMode(mode);
-        if (mode == QStringLiteral("work")) m_workSessionId = id;
+        if (mode == QStringLiteral("work")) {
+            m_workSessionId = id;
+        }
         else {
             m_chatSessionId = id;
             m_chatSessionProjectId = session.value(QStringLiteral("project_id")).toString();
@@ -2067,6 +2567,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             id, result.value(QStringLiteral("context_threshold")).toObject());
         storeSessionWorkspaceBinding(
             id, result.value(QStringLiteral("workspace")).toObject());
+        if (mode == QStringLiteral("work")) requestLatestWorkspaceEditProposal(id);
         resetSessionHistoryPagination();
         requestSessionHistory(id);
         addNotice(QStringLiteral("已创建会话分支，历史已复制到最新边界。"));
@@ -2459,7 +2960,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         if (!appendingHistory) beginTimelineSync(id);
         updateTurnAction();
         updateTerminalControls();
-        if (mode == QStringLiteral("work")) requestTerminalList();
+        if (mode == QStringLiteral("work")) {
+            requestTerminalList();
+            requestLatestWorkspaceEditProposal(id);
+        }
     });
     connect(m_runtime, &AgentRuntimeClient::timelineSynced,
             this, &AgentWorkbenchWidget::handleTimelineSyncPage);
@@ -2474,6 +2978,12 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             ? m_workSessionId : m_chatSessionId;
         const bool visibleEvent = !visibleSessionId.isEmpty()
             && sessionId == visibleSessionId;
+        if (m_workspaceEditProposalAvailable
+            && (eventName == QStringLiteral("turn.completed")
+                || eventName == QStringLiteral("turn.failed")
+                || eventName == QStringLiteral("turn.interrupted"))) {
+            requestLatestWorkspaceEditProposal(sessionId);
+        }
         if (!recognizedEvent) {
             const QString methodHash = QStringLiteral("sha256:%1").arg(
                 QString::fromLatin1(QCryptographicHash::hash(
@@ -3045,6 +3555,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     connect(m_runtime, &AgentRuntimeClient::workspaceEditPreviewed,
             this, [this](const QString &, const QJsonObject &preview) {
         if (preview.value(QStringLiteral("project_id")).toString() != m_projectId) return;
+        m_workspaceEditDurableProposal = false;
+        m_workspaceEditProposalSessionId.clear();
+        m_workspaceEditProposalId.clear();
         populateWorkspaceEditPreview(preview);
     });
     connect(m_runtime, &AgentRuntimeClient::workspaceEditArtifactRead,
@@ -3065,6 +3578,109 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_workspaceEditOffset = nextOffset.isNull()
             ? page.value(QStringLiteral("total_bytes")).toVariant().toLongLong()
             : nextOffset.toVariant().toLongLong();
+        m_workspaceEditMoreButton->setEnabled(!nextOffset.isNull());
+    });
+    connect(m_runtime, &AgentRuntimeClient::workspaceEditProposalLatestRead,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        acceptWorkspaceEditProposalResult(requestId, result, true);
+    });
+    connect(m_runtime, &AgentRuntimeClient::workspaceEditProposalRead,
+            this, [this](const QString &requestId, const QJsonObject &result) {
+        acceptWorkspaceEditProposalResult(requestId, result, false);
+    });
+    connect(m_runtime, &AgentRuntimeClient::workspaceEditProposalArtifactRead,
+            this, [this](const QString &requestId, const QJsonObject &page) {
+        const auto found = m_workspaceEditProposalArtifactRequests.constFind(requestId);
+        if (found == m_workspaceEditProposalArtifactRequests.cend()) return;
+        const WorkspaceEditProposalArtifactRequest request = *found;
+        m_workspaceEditProposalArtifactRequests.remove(requestId);
+        const bool bindingValid = page.value(QStringLiteral("session_id")).toString()
+                == request.sessionId
+            && page.value(QStringLiteral("proposal_id")).toString()
+                == request.proposalId
+            && page.value(QStringLiteral("project_id")).toString() == request.projectId
+            && page.value(QStringLiteral("edit_id")).toString() == request.editId
+            && request.generation == m_workspaceEditProposalArtifactGeneration
+            && request.sessionId == m_workspaceEditProposalSessionId
+            && request.proposalId == m_workspaceEditProposalId
+            && request.projectId == m_projectId
+            && request.editId == m_workspaceEditId
+            && request.reference == m_workspaceEditReference
+            && request.sha256 == m_workspaceEditExpectedArtifactSha256
+            && request.bytes == m_workspaceEditExpectedArtifactBytes
+            && request.offset == m_workspaceEditOffset
+            && request.accumulatedBytes == m_workspaceEditProposalArtifactBytes;
+        const QJsonObject artifact = page.value(QStringLiteral("artifact")).toObject();
+        const QByteArray encoded = page.value(QStringLiteral("data_base64")).toString().toLatin1();
+        const QByteArray bytes = QByteArray::fromBase64(
+            encoded,
+            QByteArray::AbortOnBase64DecodingErrors);
+        const qint64 totalBytes = page.value(QStringLiteral("total_bytes")).toVariant().toLongLong();
+        const QJsonValue nextOffset = page.value(QStringLiteral("next_offset"));
+        const qint64 parsedNextOffset = nextOffset.isNull()
+            ? totalBytes : nextOffset.toVariant().toLongLong();
+        const QString chunkSha256 = QString::fromLatin1(
+            QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+        const QString computedPageIdentity =
+            AgentRuntimeClient::workspaceEditProposalArtifactPageIdentity(page);
+        const bool valid = bindingValid
+            && isNonnegativeSafeJsonInteger(page.value(QStringLiteral("offset")))
+            && isNonnegativeSafeJsonInteger(page.value(QStringLiteral("total_bytes")))
+            && (nextOffset.isNull() || isNonnegativeSafeJsonInteger(nextOffset))
+            && page.value(QStringLiteral("offset")).toDouble() == request.offset
+            && page.value(QStringLiteral("data_base64")).isString()
+            && encoded == bytes.toBase64()
+            && bytes.size() <= 64 * 1024
+            && (!bytes.isEmpty()
+                || (request.offset == 0 && totalBytes == 0 && nextOffset.isNull()))
+            && artifact.value(QStringLiteral("kind")).toString()
+                == QStringLiteral("diff")
+            && artifact.value(QStringLiteral("reference")).toString()
+                == request.reference
+            && artifact.value(QStringLiteral("sha256")).toString()
+                == request.sha256
+            && artifact.value(QStringLiteral("bytes")).toVariant().toLongLong()
+                == request.bytes
+            && artifact.value(QStringLiteral("media_type")).toString()
+                == QStringLiteral("text/x-diff; charset=utf-8")
+            && totalBytes == request.bytes
+            && parsedNextOffset == request.offset + bytes.size()
+            && parsedNextOffset <= totalBytes
+            && (nextOffset.isNull() ? parsedNextOffset == totalBytes
+                                    : parsedNextOffset < totalBytes)
+            && page.value(QStringLiteral("chunk_sha256")).toString() == chunkSha256
+            && !computedPageIdentity.isEmpty()
+            && page.value(QStringLiteral("page_identity")).toString()
+                == computedPageIdentity
+            && hasReadOnlyProposalAuthority(page);
+        if (!valid) {
+            m_workspaceEditMoreButton->setEnabled(false);
+            m_workspaceEditSummary->setText(QStringLiteral("持久化变更差异响应无效"));
+            m_workspaceEditSummary->setStyleSheet(QStringLiteral(
+                "color:#B42318; font-size:11px; font-weight:600;"));
+            return;
+        }
+        QByteArray accumulated = request.accumulatedBytes;
+        accumulated += bytes;
+        const bool complete = nextOffset.isNull();
+        QString decoded;
+        const QString artifactSha256 = complete
+            ? QString::fromLatin1(QCryptographicHash::hash(
+                  accumulated, QCryptographicHash::Sha256).toHex())
+            : QString();
+        if (!decodeVerifiedUtf8Prefix(accumulated, complete, &decoded)
+            || (complete && (accumulated.size() != totalBytes
+                             || artifactSha256 != request.sha256))) {
+            m_workspaceEditMoreButton->setEnabled(false);
+            m_workspaceEditSummary->setText(
+                QStringLiteral("持久化变更差异完整性校验失败"));
+            m_workspaceEditSummary->setStyleSheet(QStringLiteral(
+                "color:#B42318; font-size:11px; font-weight:600;"));
+            return;
+        }
+        m_workspaceEditDiff->setPlainText(decoded);
+        m_workspaceEditProposalArtifactBytes = accumulated;
+        m_workspaceEditOffset = parsedNextOffset;
         m_workspaceEditMoreButton->setEnabled(!nextOffset.isNull());
     });
     connect(m_runtime, &AgentRuntimeClient::commandArtifactRead,
@@ -3359,6 +3975,43 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             if (requestId == m_workspaceEditArtifactRequestId) {
                 m_workspaceEditArtifactRequestId.clear();
                 m_workspaceEditMoreButton->setEnabled(true);
+            }
+        } else if (method == QStringLiteral("workspace/edit/proposal/latest")
+                   || method == QStringLiteral("workspace/edit/proposal/read")) {
+            const WorkspaceEditProposalRequest request =
+                m_workspaceEditProposalRequests.take(requestId);
+            const QString confirmedId = m_confirmedWorkspaceEditProposals
+                .value(request.sessionId).value(QStringLiteral("proposal_id")).toString();
+            const bool invalidatesConfirmed = !request.sessionId.isEmpty()
+                && m_workspaceEditProposalGenerations.value(request.sessionId)
+                    == request.generation
+                && !confirmedId.isEmpty()
+                && (method == QStringLiteral("workspace/edit/proposal/latest")
+                    || confirmedId == request.proposalId);
+            if (invalidatesConfirmed) {
+                m_unverifiedWorkspaceEditProposalSessions.insert(request.sessionId);
+                if (request.sessionId == m_workSessionId
+                    && m_workspaceEditDurableProposal) {
+                    invalidateWorkspaceEditProposalArtifactRequests();
+                    m_workspaceEditDurableProposal = false;
+                    m_workspaceEditFiles->clear();
+                    m_workspaceEditDiff->clear();
+                    m_workspaceEditMoreButton->setEnabled(false);
+                    m_workspaceEditSummary->setText(
+                        QStringLiteral("持久化变更提案重新验证失败（错误码 %1）")
+                            .arg(code));
+                    m_workspaceEditSummary->setStyleSheet(QStringLiteral(
+                        "color:#B42318; font-size:11px; font-weight:600;"));
+                }
+            }
+        } else if (method == QStringLiteral("workspace/edit/proposal/artifact/read")) {
+            const WorkspaceEditProposalArtifactRequest request =
+                m_workspaceEditProposalArtifactRequests.take(requestId);
+            if (!request.sessionId.isEmpty()
+                && request.generation == m_workspaceEditProposalArtifactGeneration
+                && request.reference == m_workspaceEditReference) {
+                m_workspaceEditMoreButton->setEnabled(
+                    request.offset < request.bytes);
             }
         } else if (method == QStringLiteral("workspace/list")) {
             markDirectoryUnavailable(m_workspaceListRequests.take(requestId), message);
@@ -5222,7 +5875,8 @@ QWidget *AgentWorkbenchWidget::buildWorkspaceEditPage()
     return page;
 }
 
-void AgentWorkbenchWidget::populateWorkspaceEditPreview(const QJsonObject &preview)
+void AgentWorkbenchWidget::populateWorkspaceEditPreview(const QJsonObject &preview,
+                                                        bool activate)
 {
     m_workspaceEditId = preview.value(QStringLiteral("edit_id")).toString();
     const int additions = preview.value(QStringLiteral("additions")).toInt();
@@ -5255,6 +5909,10 @@ void AgentWorkbenchWidget::populateWorkspaceEditPreview(const QJsonObject &previ
                       diff.value(QStringLiteral("reference")).toString());
         item->setData(0, kPatchInlineTruncatedRole,
                       diff.value(QStringLiteral("inline_truncated")).toBool());
+        item->setData(0, kPatchSha256Role,
+                      diff.value(QStringLiteral("sha256")).toString());
+        item->setData(0, kPatchBytesRole,
+                      diff.value(QStringLiteral("bytes")).toVariant().toLongLong());
         return item;
     };
 
@@ -5287,12 +5945,203 @@ void AgentWorkbenchWidget::populateWorkspaceEditPreview(const QJsonObject &previ
                 warningDetails.join(QStringLiteral("\n")));
     }
     m_workspaceEditFiles->setCurrentItem(aggregateItem);
-    m_workspaceTabs->setCurrentIndex(m_workspaceEditTab);
+    if (activate) m_workspaceTabs->setCurrentIndex(m_workspaceEditTab);
+}
+
+void AgentWorkbenchWidget::requestLatestWorkspaceEditProposal(const QString &sessionId)
+{
+    if (!m_runtime || !m_runtime->isReady() || !m_workspaceEditProposalAvailable
+        || sessionId.isEmpty()) return;
+    quint64 &generation = m_workspaceEditProposalGenerations[sessionId];
+    if (generation == std::numeric_limits<quint64>::max()) generation = 1;
+    else ++generation;
+    const QString requestId = m_runtime->latestWorkspaceEditProposal(sessionId);
+    if (requestId.isEmpty()) return;
+    m_workspaceEditProposalRequests.insert(requestId, {sessionId, {}, generation});
+}
+
+void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
+    const QString &requestId, const QJsonObject &result, bool latest)
+{
+    const auto found = m_workspaceEditProposalRequests.constFind(requestId);
+    if (found == m_workspaceEditProposalRequests.cend()) return;
+    const WorkspaceEditProposalRequest request = *found;
+    m_workspaceEditProposalRequests.remove(requestId);
+    if (m_workspaceEditProposalGenerations.value(request.sessionId) != request.generation) {
+        return;
+    }
+    const QSet<QString> expectedKeys{
+        QStringLiteral("schema_version"), QStringLiteral("session_id"),
+        QStringLiteral("proposal"), QStringLiteral("file_mutation_authority"),
+        QStringLiteral("approval_recorded"), QStringLiteral("apply_available"),
+    };
+    const QString expectedSchema = latest
+        ? QStringLiteral("workspace-edit-proposal-latest/0.1")
+        : QStringLiteral("workspace-edit-proposal-read/0.1");
+    const QJsonValue proposalValue = result.value(QStringLiteral("proposal"));
+    const QJsonObject proposal = proposalValue.toObject();
+    const QJsonObject proposalRuntime = proposal.value(QStringLiteral("runtime")).toObject();
+    const QJsonObject sessionRuntime = m_sessionRuntimeBindings.value(request.sessionId);
+    const QJsonObject sessionWorkspace = m_sessionWorkspaceBindings.value(request.sessionId);
+    const bool sessionBindingValid = proposalValue.isNull()
+        || (!sessionRuntime.isEmpty() && !sessionWorkspace.isEmpty()
+            && proposal.value(QStringLiteral("project_id")).toString()
+                == sessionWorkspace.value(QStringLiteral("project_id")).toString()
+            && proposal.value(QStringLiteral("root_id")).toString()
+                == sessionWorkspace.value(QStringLiteral("root_id")).toString()
+            && proposalRuntime.value(QStringLiteral("adapter")).toString()
+                == sessionRuntime.value(QStringLiteral("adapter")).toString()
+            && proposalRuntime.value(QStringLiteral("adapter_version")).toString()
+                == sessionRuntime.value(QStringLiteral("version")).toString()
+            && proposalRuntime.value(QStringLiteral("permission")).toString()
+                == sessionRuntime.value(QStringLiteral("permission_profile")).toString());
+    const bool valid = hasExactJsonKeys(result, expectedKeys)
+        && result.value(QStringLiteral("schema_version")).toString() == expectedSchema
+        && result.value(QStringLiteral("session_id")).toString() == request.sessionId
+        && hasReadOnlyProposalAuthority(result)
+        && sessionBindingValid
+        && ((latest && proposalValue.isNull())
+            || isWorkspaceEditProposalView(proposalValue, request.sessionId,
+                                           request.proposalId));
+    if (!valid) {
+        if (latest && m_confirmedWorkspaceEditProposals.contains(request.sessionId)) {
+            m_unverifiedWorkspaceEditProposalSessions.insert(request.sessionId);
+        }
+        if (request.sessionId == m_workSessionId) {
+            invalidateWorkspaceEditProposalArtifactRequests();
+            m_workspaceEditDurableProposal = false;
+            m_workspaceEditFiles->clear();
+            m_workspaceEditDiff->clear();
+            m_workspaceEditMoreButton->setEnabled(false);
+            m_workspaceEditSummary->setText(QStringLiteral("持久化变更提案响应无效"));
+            m_workspaceEditSummary->setStyleSheet(QStringLiteral(
+                "color:#B42318; font-size:11px; font-weight:600;"));
+        }
+        return;
+    }
+    if (!latest && m_unverifiedWorkspaceEditProposalSessions.contains(request.sessionId)) {
+        return;
+    }
+    if (latest) m_unverifiedWorkspaceEditProposalSessions.remove(request.sessionId);
+    if (proposalValue.isNull()) {
+        m_confirmedWorkspaceEditProposals.remove(request.sessionId);
+        m_workspaceEditProposalRecency.removeAll(request.sessionId);
+        m_unreadWorkspaceEditProposalSessions.remove(request.sessionId);
+        m_unverifiedWorkspaceEditProposalSessions.remove(request.sessionId);
+        if (request.sessionId == m_workSessionId && m_workspaceEditDurableProposal) {
+            invalidateWorkspaceEditProposalArtifactRequests();
+            m_workspaceEditDurableProposal = false;
+            m_workspaceEditProposalSessionId.clear();
+            m_workspaceEditProposalId.clear();
+            m_workspaceEditFiles->clear();
+            m_workspaceEditDiff->clear();
+            m_workspaceEditMoreButton->setEnabled(false);
+            m_workspaceEditSummary->setText(QStringLiteral("暂无持久化变更提案"));
+        }
+        updateWorkspaceEditUnreadMarker();
+        return;
+    }
+    const QString priorId = m_confirmedWorkspaceEditProposals
+        .value(request.sessionId).value(QStringLiteral("proposal_id")).toString();
+    m_confirmedWorkspaceEditProposals.insert(request.sessionId, proposal);
+    m_workspaceEditProposalRecency.removeAll(request.sessionId);
+    m_workspaceEditProposalRecency.append(request.sessionId);
+    while (m_workspaceEditProposalRecency.size() > kMaxConfirmedWorkspaceEditProposals) {
+        const QString evicted = m_workspaceEditProposalRecency.takeFirst();
+        if (evicted == m_workSessionId) {
+            m_workspaceEditProposalRecency.append(evicted);
+            continue;
+        }
+        m_confirmedWorkspaceEditProposals.remove(evicted);
+        m_unreadWorkspaceEditProposalSessions.remove(evicted);
+        m_unverifiedWorkspaceEditProposalSessions.remove(evicted);
+    }
+    const bool foreground = m_mode == QStringLiteral("work")
+        && request.sessionId == m_workSessionId
+        && proposal.value(QStringLiteral("project_id")).toString() == m_projectId;
+    if (foreground) {
+        showConfirmedWorkspaceEditProposal(request.sessionId, true);
+    } else if (priorId != proposal.value(QStringLiteral("proposal_id")).toString()) {
+        m_unreadWorkspaceEditProposalSessions.insert(request.sessionId);
+        updateWorkspaceEditUnreadMarker();
+    }
+}
+
+void AgentWorkbenchWidget::showConfirmedWorkspaceEditProposal(
+    const QString &sessionId, bool activate)
+{
+    const QJsonObject proposal = m_confirmedWorkspaceEditProposals.value(sessionId);
+    if (proposal.isEmpty()
+        || m_unverifiedWorkspaceEditProposalSessions.contains(sessionId)
+        || proposal.value(QStringLiteral("session_id")).toString() != sessionId
+        || proposal.value(QStringLiteral("project_id")).toString() != m_projectId) return;
+    QJsonObject preview = proposal.value(QStringLiteral("summary")).toObject();
+    preview.insert(QStringLiteral("edit_id"), proposal.value(QStringLiteral("edit_id")));
+    preview.insert(QStringLiteral("project_id"), proposal.value(QStringLiteral("project_id")));
+    const auto normalizeDiff = [](QJsonObject diff) {
+        diff.insert(QStringLiteral("inline"), QString());
+        diff.insert(QStringLiteral("inline_truncated"),
+                    diff.value(QStringLiteral("bytes")).toDouble() > 0);
+        return diff;
+    };
+    preview.insert(QStringLiteral("aggregate_diff"), normalizeDiff(
+        preview.value(QStringLiteral("aggregate_diff")).toObject()));
+    QJsonArray files;
+    for (const QJsonValue &value : preview.value(QStringLiteral("files")).toArray()) {
+        QJsonObject file = value.toObject();
+        file.insert(QStringLiteral("diff"), normalizeDiff(
+            file.value(QStringLiteral("diff")).toObject()));
+        files.append(file);
+    }
+    preview.insert(QStringLiteral("files"), files);
+    m_workspaceEditDurableProposal = true;
+    m_workspaceEditProposalSessionId = sessionId;
+    m_workspaceEditProposalId = proposal.value(QStringLiteral("proposal_id")).toString();
+    populateWorkspaceEditPreview(preview, activate);
+    m_workspaceEditSummary->setText(
+        QStringLiteral("%1 · 持久化只读提案 · 不可批准或应用")
+            .arg(m_workspaceEditSummary->text()));
+    m_unreadWorkspaceEditProposalSessions.remove(sessionId);
+    updateWorkspaceEditUnreadMarker();
+    QTimer::singleShot(0, this, [this, sessionId]() {
+        if (m_workspaceEditDurableProposal
+            && m_workspaceEditProposalSessionId == sessionId) {
+            loadMoreWorkspaceEditDiff();
+        }
+    });
+}
+
+void AgentWorkbenchWidget::clearWorkspaceEditProposalPending()
+{
+    m_workspaceEditProposalRequests.clear();
+    invalidateWorkspaceEditProposalArtifactRequests();
+}
+
+void AgentWorkbenchWidget::invalidateWorkspaceEditProposalArtifactRequests()
+{
+    m_workspaceEditProposalArtifactRequests.clear();
+    m_workspaceEditProposalArtifactBytes.clear();
+    if (m_workspaceEditProposalArtifactGeneration
+        == std::numeric_limits<quint64>::max()) {
+        m_workspaceEditProposalArtifactGeneration = 1;
+    } else {
+        ++m_workspaceEditProposalArtifactGeneration;
+    }
+    m_workspaceEditArtifactRequestId.clear();
+}
+
+void AgentWorkbenchWidget::updateWorkspaceEditUnreadMarker()
+{
+    if (!m_workspaceTabs || m_workspaceEditTab < 0) return;
+    m_workspaceTabs->setTabText(
+        m_workspaceEditTab,
+        m_unreadWorkspaceEditProposalSessions.isEmpty()
+            ? QStringLiteral("变更") : QStringLiteral("变更 •"));
 }
 
 void AgentWorkbenchWidget::showWorkspaceEditFile(QTreeWidgetItem *item)
 {
-    m_workspaceEditArtifactRequestId.clear();
+    invalidateWorkspaceEditProposalArtifactRequests();
     if (!item) {
         m_workspaceEditReference.clear();
         m_workspaceEditOffset = 0;
@@ -5302,24 +6151,60 @@ void AgentWorkbenchWidget::showWorkspaceEditFile(QTreeWidgetItem *item)
     }
     const QString text = item->data(0, kPatchDiffRole).toString();
     m_workspaceEditReference = item->data(0, kPatchReferenceRole).toString();
+    m_workspaceEditExpectedArtifactSha256 = item->data(0, kPatchSha256Role).toString();
+    m_workspaceEditExpectedArtifactBytes = item->data(0, kPatchBytesRole).toLongLong();
     m_workspaceEditOffset = text.toUtf8().size();
+    if (m_workspaceEditDurableProposal) {
+        m_workspaceEditProposalArtifactBytes = text.toUtf8();
+    }
     m_workspaceEditDiff->setPlainText(text);
     m_workspaceEditMoreButton->setEnabled(
         item->data(0, kPatchInlineTruncatedRole).toBool()
-        && !m_workspaceEditReference.isEmpty());
+        && !m_workspaceEditReference.isEmpty()
+        && (!m_workspaceEditDurableProposal
+            || (isLowerSha256(m_workspaceEditExpectedArtifactSha256)
+                && m_workspaceEditExpectedArtifactBytes > 0)));
 }
 
 void AgentWorkbenchWidget::loadMoreWorkspaceEditDiff()
 {
     if (m_workspaceEditReference.isEmpty() || m_workspaceEditId.isEmpty()
             || m_workSessionId.isEmpty() || m_projectId.isEmpty()
-            || !m_workspaceEditArtifactRequestId.isEmpty()) {
+            || !m_workspaceEditArtifactRequestId.isEmpty()
+            || std::any_of(m_workspaceEditProposalArtifactRequests.cbegin(),
+                           m_workspaceEditProposalArtifactRequests.cend(),
+                           [this](const WorkspaceEditProposalArtifactRequest &request) {
+                               return request.generation
+                                   == m_workspaceEditProposalArtifactGeneration;
+                           })) {
         return;
     }
     m_workspaceEditMoreButton->setEnabled(false);
-    m_workspaceEditArtifactRequestId = m_runtime->readWorkspaceEditArtifact(
-        m_workSessionId, m_projectId, m_workspaceEditId,
-        m_workspaceEditReference, m_workspaceEditOffset);
+    if (m_workspaceEditDurableProposal) {
+        if (m_workspaceEditProposalSessionId != m_workSessionId
+            || m_workspaceEditProposalId.isEmpty()) return;
+        const QString requestId = m_runtime->readWorkspaceEditProposalArtifact(
+            m_workspaceEditProposalSessionId, m_workspaceEditProposalId,
+            m_workspaceEditReference, m_workspaceEditOffset);
+        if (!requestId.isEmpty()) {
+            m_workspaceEditProposalArtifactRequests.insert(requestId, {
+                m_workspaceEditProposalSessionId,
+                m_workspaceEditProposalId,
+                m_projectId,
+                m_workspaceEditId,
+                m_workspaceEditReference,
+                m_workspaceEditExpectedArtifactSha256,
+                m_workspaceEditExpectedArtifactBytes,
+                m_workspaceEditOffset,
+                m_workspaceEditProposalArtifactGeneration,
+                m_workspaceEditProposalArtifactBytes,
+            });
+        }
+    } else {
+        m_workspaceEditArtifactRequestId = m_runtime->readWorkspaceEditArtifact(
+            m_workSessionId, m_projectId, m_workspaceEditId,
+            m_workspaceEditReference, m_workspaceEditOffset);
+    }
 }
 
 QWidget *AgentWorkbenchWidget::buildTerminalPage()
@@ -9666,7 +10551,11 @@ void AgentWorkbenchWidget::loadSessionFromList(QListWidgetItem *item)
         if (button->property("mode").toString() == mode) button->setChecked(true);
     }
     setMode(mode);
-    if (mode == QStringLiteral("work")) m_workSessionId = sessionId;
+    if (mode == QStringLiteral("work")) {
+        m_workSessionId = sessionId;
+        showConfirmedWorkspaceEditProposal(sessionId, false);
+        requestLatestWorkspaceEditProposal(sessionId);
+    }
     else {
         m_chatSessionId = sessionId;
         m_chatSessionProjectId = projectId;

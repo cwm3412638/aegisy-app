@@ -41,6 +41,8 @@ public:
                                             quint64 totalCanonicalBytes,
                                             const QStringList &orderedItemIdentities);
     static QString timelineSnapshotPageIdentity(const QJsonObject &page);
+    static QString workspaceEditProposalPreviewIdentity(const QJsonObject &proposal);
+    static QString workspaceEditProposalArtifactPageIdentity(const QJsonObject &page);
 
     void start();
     void stop();
@@ -208,6 +210,13 @@ public:
     QString readWorkspaceEditArtifact(const QString &sessionId, const QString &projectId,
                                       const QString &editId, const QString &reference,
                                       qint64 offset = 0, int limit = 64 * 1024);
+    QString latestWorkspaceEditProposal(const QString &sessionId);
+    QString readWorkspaceEditProposal(const QString &sessionId, const QString &proposalId);
+    QString readWorkspaceEditProposalArtifact(const QString &sessionId,
+                                              const QString &proposalId,
+                                              const QString &reference,
+                                              qint64 offset = 0,
+                                              int limit = 64 * 1024);
     QString watchWorkspace(const QString &projectId, const QStringList &paths,
                            const QString &watchId = QString(),
                            const QString &rootId = QString());
@@ -322,6 +331,11 @@ signals:
     void diagnosticRawRead(const QString &requestId, const QJsonObject &result);
     void workspaceEditPreviewed(const QString &requestId, const QJsonObject &preview);
     void workspaceEditArtifactRead(const QString &requestId, const QJsonObject &page);
+    void workspaceEditProposalLatestRead(const QString &requestId,
+                                         const QJsonObject &result);
+    void workspaceEditProposalRead(const QString &requestId, const QJsonObject &result);
+    void workspaceEditProposalArtifactRead(const QString &requestId,
+                                           const QJsonObject &page);
     void workspaceWatchConfigured(const QString &requestId, const QJsonObject &watch);
     void workspaceChanged(const QString &requestId, const QJsonObject &result);
     void terminalOpened(const QString &requestId, const QJsonObject &terminal);

@@ -39,6 +39,134 @@
 class AgentWorkbenchWidgetTestAccess
 {
 public:
+    static void setProposalContext(AgentWorkbenchWidget &widget,
+                                   const QString &sessionId,
+                                   const QString &projectId)
+    {
+        widget.m_mode = QStringLiteral("work");
+        widget.m_workSessionId = sessionId;
+        widget.m_projectId = projectId;
+        widget.m_workspaceEditProposalAvailable = true;
+        widget.m_sessionRuntimeBindings.insert(sessionId, QJsonObject{
+            {QStringLiteral("adapter"), QStringLiteral("codex-app-server")},
+            {QStringLiteral("version"), QStringLiteral("codex-cli 0.144.5")},
+            {QStringLiteral("provider"), QStringLiteral("openai")},
+            {QStringLiteral("model"), QStringLiteral("test-model")},
+            {QStringLiteral("permission_profile"), QStringLiteral("read-only")},
+        });
+        widget.m_sessionWorkspaceBindings.insert(sessionId, QJsonObject{
+            {QStringLiteral("project_id"), projectId},
+            {QStringLiteral("root_id"), QStringLiteral("root-1")},
+        });
+    }
+
+    static void prepareProposalRequest(AgentWorkbenchWidget &widget,
+                                       const QString &requestId,
+                                       const QString &sessionId,
+                                       quint64 generation)
+    {
+        if (!widget.m_sessionRuntimeBindings.contains(sessionId)) {
+            widget.m_sessionRuntimeBindings.insert(sessionId, QJsonObject{
+                {QStringLiteral("adapter"), QStringLiteral("codex-app-server")},
+                {QStringLiteral("version"), QStringLiteral("codex-cli 0.144.5")},
+                {QStringLiteral("provider"), QStringLiteral("openai")},
+                {QStringLiteral("model"), QStringLiteral("test-model")},
+                {QStringLiteral("permission_profile"), QStringLiteral("read-only")},
+            });
+        }
+        if (!widget.m_sessionWorkspaceBindings.contains(sessionId)) {
+            widget.m_sessionWorkspaceBindings.insert(sessionId, QJsonObject{
+                {QStringLiteral("project_id"), widget.m_projectId},
+                {QStringLiteral("root_id"), QStringLiteral("root-1")},
+            });
+        }
+        widget.m_workspaceEditProposalGenerations.insert(sessionId, generation);
+        widget.m_workspaceEditProposalRequests.insert(
+            requestId, {sessionId, QString(), generation});
+    }
+
+    static bool hasConfirmedProposal(const AgentWorkbenchWidget &widget,
+                                     const QString &sessionId,
+                                     const QString &proposalId)
+    {
+        return widget.m_confirmedWorkspaceEditProposals.value(sessionId)
+            .value(QStringLiteral("proposal_id")).toString() == proposalId;
+    }
+
+    static bool proposalUnread(const AgentWorkbenchWidget &widget,
+                               const QString &sessionId)
+    {
+        return widget.m_unreadWorkspaceEditProposalSessions.contains(sessionId);
+    }
+
+    static qsizetype proposalPendingCount(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_workspaceEditProposalRequests.size();
+    }
+
+    static void clearProposalPending(AgentWorkbenchWidget &widget)
+    {
+        widget.clearWorkspaceEditProposalPending();
+    }
+
+    static void prepareCurrentProposalArtifactRequest(AgentWorkbenchWidget &widget,
+                                                      const QString &requestId)
+    {
+        widget.m_workspaceEditProposalArtifactRequests.insert(requestId, {
+            widget.m_workspaceEditProposalSessionId,
+            widget.m_workspaceEditProposalId,
+            widget.m_projectId,
+            widget.m_workspaceEditId,
+            widget.m_workspaceEditReference,
+            widget.m_workspaceEditExpectedArtifactSha256,
+            widget.m_workspaceEditExpectedArtifactBytes,
+            widget.m_workspaceEditOffset,
+            widget.m_workspaceEditProposalArtifactGeneration,
+            widget.m_workspaceEditProposalArtifactBytes,
+        });
+    }
+
+    static QByteArray proposalArtifactBytes(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_workspaceEditProposalArtifactBytes;
+    }
+
+    static qint64 proposalArtifactOffset(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_workspaceEditOffset;
+    }
+
+    static QString proposalArtifactReference(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_workspaceEditReference;
+    }
+
+    static QString currentProposalId(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_workspaceEditProposalId;
+    }
+
+    static quint64 proposalArtifactGeneration(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_workspaceEditProposalArtifactGeneration;
+    }
+
+    static qsizetype proposalArtifactPendingCount(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_workspaceEditProposalArtifactRequests.size();
+    }
+
+    static bool proposalUnverified(const AgentWorkbenchWidget &widget,
+                                   const QString &sessionId)
+    {
+        return widget.m_unverifiedWorkspaceEditProposalSessions.contains(sessionId);
+    }
+
+    static int workspaceEditTab(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_workspaceEditTab;
+    }
+
     static bool storeContextThreshold(AgentWorkbenchWidget &widget,
                                       const QString &sessionId,
                                       const QJsonObject &summary)
@@ -2728,6 +2856,644 @@ bool runGit(const QString &executable, const QString &root, const QStringList &a
     return true;
 }
 
+QJsonObject proposalLatestResult(const QString &sessionId, QLatin1Char fill,
+                                 const QByteArray &diffBytes = QByteArrayLiteral("diff\n"))
+{
+    const QString proposalId = QStringLiteral("workspace-edit-proposal:sha256:")
+        + QString(64, fill);
+    const QString diffSha = QString::fromLatin1(
+        QCryptographicHash::hash(diffBytes, QCryptographicHash::Sha256).toHex());
+    const QString baseSha(64, QLatin1Char('a'));
+    const QString contentSha(64, QLatin1Char('b'));
+    const QJsonObject format{
+        {QStringLiteral("encoding"), QStringLiteral("utf-8")},
+        {QStringLiteral("newline"), QStringLiteral("lf")},
+        {QStringLiteral("mode"), QStringLiteral("preserve")},
+    };
+    const QJsonObject diff{
+        {QStringLiteral("reference"),
+         QStringLiteral("workspace-edit-diff:sha256:") + diffSha},
+        {QStringLiteral("sha256"), diffSha},
+        {QStringLiteral("bytes"), diffBytes.size()},
+        {QStringLiteral("media_type"), QStringLiteral("text/x-diff; charset=utf-8")},
+        {QStringLiteral("inline_truncated"), diffBytes.size() > 32 * 1024},
+        {QStringLiteral("source_truncated"), false},
+    };
+    const QJsonObject file{
+        {QStringLiteral("ordinal"), 0},
+        {QStringLiteral("summary_state"), QStringLiteral("complete")},
+        {QStringLiteral("kind"), QStringLiteral("update")},
+        {QStringLiteral("path"), QStringLiteral("src/main.cpp")},
+        {QStringLiteral("additions"), 1},
+        {QStringLiteral("deletions"), 1},
+        {QStringLiteral("base_matches"), true},
+        {QStringLiteral("base"), QJsonObject{
+            {QStringLiteral("sha256"), baseSha}, {QStringLiteral("bytes"), 4},
+        }},
+        {QStringLiteral("proposed"), QJsonObject{
+            {QStringLiteral("reference"),
+             QStringLiteral("workspace-edit-content:sha256:") + contentSha},
+            {QStringLiteral("hash"), QJsonObject{
+                {QStringLiteral("sha256"), contentSha}, {QStringLiteral("bytes"), 4},
+            }},
+            {QStringLiteral("encoding"), QStringLiteral("utf-8")},
+            {QStringLiteral("newline"), QStringLiteral("lf")},
+            {QStringLiteral("mode"), QStringLiteral("preserve")},
+        }},
+        {QStringLiteral("proposed_format"), format},
+        {QStringLiteral("warnings"), QJsonArray{}},
+        {QStringLiteral("diff"), diff},
+    };
+    QJsonObject proposal{
+        {QStringLiteral("schema_version"), QStringLiteral("workspace-edit-proposal-view/0.1")},
+        {QStringLiteral("internal_schema_version"), QStringLiteral("workspace-edit-proposal/0.2")},
+        {QStringLiteral("proposal_id"), proposalId},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("turn_id"), QStringLiteral("turn-proposal")},
+        {QStringLiteral("project_id"), QStringLiteral("project-proposal")},
+        {QStringLiteral("root_id"), QStringLiteral("root-1")},
+        {QStringLiteral("edit_id"), QStringLiteral("edit-proposal")},
+        {QStringLiteral("canonical_edit_identity"),
+         QStringLiteral("workspace-edit-canonical:sha256:") + QString(64, QLatin1Char('d'))},
+        {QStringLiteral("preview_identity"),
+         QStringLiteral("workspace-edit-preview:sha256:") + QString(64, QLatin1Char('e'))},
+        {QStringLiteral("proposal_sha256"), QString(64, QLatin1Char('f'))},
+        {QStringLiteral("proposal_bytes"), 2048},
+        {QStringLiteral("event_sequence"), 7},
+        {QStringLiteral("created_at_ms"), 1000},
+        {QStringLiteral("approval_started_at_ms"), 999},
+        {QStringLiteral("provider_identity"),
+         QStringLiteral("codex-provider:sha256:") + QString(64, QLatin1Char('a'))},
+        {QStringLiteral("provider_thread_identity"),
+         QStringLiteral("codex-provider-thread:sha256:") + QString(64, QLatin1Char('b'))},
+        {QStringLiteral("provider_item_identity"),
+         QStringLiteral("codex-file-change-item:sha256:") + QString(64, QLatin1Char('c'))},
+        {QStringLiteral("runtime"), QJsonObject{
+            {QStringLiteral("adapter"), QStringLiteral("codex-app-server")},
+            {QStringLiteral("adapter_version"), QStringLiteral("codex-cli 0.144.5")},
+            {QStringLiteral("permission"), QStringLiteral("read-only")},
+        }},
+        {QStringLiteral("summary"), QJsonObject{
+            {QStringLiteral("files_complete"), true},
+            {QStringLiteral("file_count"), 1},
+            {QStringLiteral("additions"), 1},
+            {QStringLiteral("deletions"), 1},
+            {QStringLiteral("warning_count"), 0},
+            {QStringLiteral("applicable"), true},
+            {QStringLiteral("aggregate_diff"), diff},
+            {QStringLiteral("files"), QJsonArray{file}},
+        }},
+        {QStringLiteral("file_mutation_authority"), false},
+        {QStringLiteral("approval_recorded"), false},
+        {QStringLiteral("apply_available"), false},
+    };
+    proposal.insert(QStringLiteral("preview_identity"),
+                    AgentRuntimeClient::workspaceEditProposalPreviewIdentity(proposal));
+    return {
+        {QStringLiteral("schema_version"), QStringLiteral("workspace-edit-proposal-latest/0.1")},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("proposal"), proposal},
+        {QStringLiteral("file_mutation_authority"), false},
+        {QStringLiteral("approval_recorded"), false},
+        {QStringLiteral("apply_available"), false},
+    };
+}
+
+QJsonObject completeProposalAllKindsResult(const QString &sessionId,
+                                           QLatin1Char fill)
+{
+    QJsonObject result = proposalLatestResult(sessionId, fill);
+    QJsonObject proposal = result.value(QStringLiteral("proposal")).toObject();
+    QJsonObject summary = proposal.value(QStringLiteral("summary")).toObject();
+    const QJsonObject updateTemplate = summary.value(QStringLiteral("files"))
+        .toArray().first().toObject();
+    const QJsonObject base = updateTemplate.value(QStringLiteral("base")).toObject();
+    const QJsonObject proposed = updateTemplate.value(QStringLiteral("proposed")).toObject();
+    const QJsonObject format = updateTemplate.value(QStringLiteral("proposed_format")).toObject();
+    const QJsonObject diff = updateTemplate.value(QStringLiteral("diff")).toObject();
+    auto file = [&](int ordinal, const QString &kind, const QString &path,
+                    int additions, int deletions) {
+        QJsonObject proposedValue = proposed;
+        QJsonObject formatValue = format;
+        if (kind == QStringLiteral("create")) {
+            proposedValue.insert(QStringLiteral("mode"), QStringLiteral("regular"));
+            formatValue.insert(QStringLiteral("mode"), QStringLiteral("regular"));
+        }
+        QJsonObject value{
+            {QStringLiteral("ordinal"), ordinal},
+            {QStringLiteral("summary_state"), QStringLiteral("complete")},
+            {QStringLiteral("kind"), kind},
+            {QStringLiteral("path"), path},
+            {QStringLiteral("additions"), additions},
+            {QStringLiteral("deletions"), deletions},
+            {QStringLiteral("base_matches"),
+             kind == QStringLiteral("create") ? QJsonValue(QJsonValue::Null)
+                                               : QJsonValue(true)},
+            {QStringLiteral("base"),
+             kind == QStringLiteral("create") ? QJsonValue(QJsonValue::Null)
+                                               : QJsonValue(base)},
+            {QStringLiteral("proposed"),
+             (kind == QStringLiteral("create") || kind == QStringLiteral("update"))
+                 ? QJsonValue(proposedValue) : QJsonValue(QJsonValue::Null)},
+            {QStringLiteral("warnings"), QJsonArray{}},
+            {QStringLiteral("diff"), diff},
+        };
+        if (kind == QStringLiteral("rename")) {
+            value.insert(QStringLiteral("from_path"), QStringLiteral("src/old-name.cpp"));
+        }
+        if (kind == QStringLiteral("create") || kind == QStringLiteral("update")) {
+            value.insert(QStringLiteral("proposed_format"), formatValue);
+        }
+        return value;
+    };
+    const QJsonArray files{
+        file(0, QStringLiteral("create"), QStringLiteral("src/new.cpp"), 1, 0),
+        file(1, QStringLiteral("update"), QStringLiteral("src/main.cpp"), 2, 1),
+        file(2, QStringLiteral("delete"), QStringLiteral("src/obsolete.cpp"), 0, 2),
+        file(3, QStringLiteral("rename"), QStringLiteral("src/new-name.cpp"), 0, 0),
+    };
+    summary.insert(QStringLiteral("file_count"), files.size());
+    summary.insert(QStringLiteral("additions"), 3);
+    summary.insert(QStringLiteral("deletions"), 3);
+    summary.insert(QStringLiteral("files"), files);
+    proposal.insert(QStringLiteral("summary"), summary);
+    proposal.insert(QStringLiteral("preview_identity"),
+                    AgentRuntimeClient::workspaceEditProposalPreviewIdentity(proposal));
+    result.insert(QStringLiteral("proposal"), proposal);
+    return result;
+}
+
+QJsonObject legacyProposalLatestResult(const QString &sessionId, QLatin1Char fill)
+{
+    QJsonObject result = proposalLatestResult(sessionId, fill);
+    QJsonObject proposal = result.value(QStringLiteral("proposal")).toObject();
+    proposal.insert(QStringLiteral("internal_schema_version"),
+                    QStringLiteral("workspace-edit-proposal/0.1"));
+    QJsonObject summary = proposal.value(QStringLiteral("summary")).toObject();
+    summary.insert(QStringLiteral("files_complete"), false);
+    QJsonObject aggregate = summary.value(QStringLiteral("aggregate_diff")).toObject();
+    aggregate.insert(QStringLiteral("inline_truncated"), QJsonValue(QJsonValue::Null));
+    aggregate.insert(QStringLiteral("source_truncated"), QJsonValue(QJsonValue::Null));
+    summary.insert(QStringLiteral("aggregate_diff"), aggregate);
+    QJsonObject file = summary.value(QStringLiteral("files")).toArray().first().toObject();
+    file.insert(QStringLiteral("summary_state"), QStringLiteral("legacy-incomplete"));
+    file.insert(QStringLiteral("from_path"), QJsonValue(QJsonValue::Null));
+    file.insert(QStringLiteral("additions"), QJsonValue(QJsonValue::Null));
+    file.insert(QStringLiteral("deletions"), QJsonValue(QJsonValue::Null));
+    file.insert(QStringLiteral("base_matches"), QJsonValue(QJsonValue::Null));
+    file.insert(QStringLiteral("warnings"), QJsonValue(QJsonValue::Null));
+    file.remove(QStringLiteral("proposed_format"));
+    QJsonObject fileDiff = file.value(QStringLiteral("diff")).toObject();
+    fileDiff.insert(QStringLiteral("inline_truncated"), QJsonValue(QJsonValue::Null));
+    fileDiff.insert(QStringLiteral("source_truncated"), QJsonValue(QJsonValue::Null));
+    file.insert(QStringLiteral("diff"), fileDiff);
+    summary.insert(QStringLiteral("files"), QJsonArray{file});
+    proposal.insert(QStringLiteral("summary"), summary);
+    proposal.insert(QStringLiteral("preview_identity"),
+                    AgentRuntimeClient::workspaceEditProposalPreviewIdentity(proposal));
+    result.insert(QStringLiteral("proposal"), proposal);
+    return result;
+}
+
+QJsonObject proposalArtifactPage(const QJsonObject &latestResult,
+                                 const QByteArray &content,
+                                 int offset,
+                                 int limit = 64 * 1024)
+{
+    const QJsonObject proposal = latestResult.value(QStringLiteral("proposal")).toObject();
+    const QJsonObject diff = proposal.value(QStringLiteral("summary")).toObject()
+        .value(QStringLiteral("aggregate_diff")).toObject();
+    const QByteArray chunk = content.mid(offset, limit);
+    const int end = offset + chunk.size();
+    QJsonObject page{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("workspace-edit-proposal-artifact-page/0.1")},
+        {QStringLiteral("session_id"), proposal.value(QStringLiteral("session_id"))},
+        {QStringLiteral("proposal_id"), proposal.value(QStringLiteral("proposal_id"))},
+        {QStringLiteral("project_id"), proposal.value(QStringLiteral("project_id"))},
+        {QStringLiteral("edit_id"), proposal.value(QStringLiteral("edit_id"))},
+        {QStringLiteral("artifact"), QJsonObject{
+            {QStringLiteral("kind"), QStringLiteral("diff")},
+            {QStringLiteral("reference"), diff.value(QStringLiteral("reference"))},
+            {QStringLiteral("sha256"), diff.value(QStringLiteral("sha256"))},
+            {QStringLiteral("bytes"), content.size()},
+            {QStringLiteral("media_type"),
+             QStringLiteral("text/x-diff; charset=utf-8")},
+        }},
+        {QStringLiteral("offset"), offset},
+        {QStringLiteral("next_offset"),
+         end < content.size() ? QJsonValue(end) : QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("total_bytes"), content.size()},
+        {QStringLiteral("data_base64"), QString::fromLatin1(chunk.toBase64())},
+        {QStringLiteral("chunk_sha256"), QString::fromLatin1(
+            QCryptographicHash::hash(chunk, QCryptographicHash::Sha256).toHex())},
+        {QStringLiteral("page_identity"), QString()},
+        {QStringLiteral("file_mutation_authority"), false},
+        {QStringLiteral("approval_recorded"), false},
+        {QStringLiteral("apply_available"), false},
+    };
+    page.insert(QStringLiteral("page_identity"),
+                AgentRuntimeClient::workspaceEditProposalArtifactPageIdentity(page));
+    return page;
+}
+
+bool verifyDurableProposalUtf8Paging(AgentWorkbenchWidget &workbench,
+                                     AgentRuntimeClient *runtime,
+                                     QLabel *summary,
+                                     QPlainTextEdit *diffView,
+                                     QPushButton *moreButton)
+{
+    if (!runtime || !summary || !diffView || !moreButton) return false;
+    QByteArray artifact(65535, 'a');
+    artifact += QByteArray::fromHex("e7958c");
+    artifact += '\n';
+    const QString sessionId = QStringLiteral("proposal-utf8-session");
+    const QJsonObject result = proposalLatestResult(
+        sessionId, QLatin1Char('3'), artifact);
+    AgentWorkbenchWidgetTestAccess::setProposalContext(
+        workbench, sessionId, QStringLiteral("project-proposal"));
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-utf8"), sessionId, 1);
+    runtime->workspaceEditProposalLatestRead(QStringLiteral("proposal-utf8"), result);
+
+    AgentWorkbenchWidgetTestAccess::prepareCurrentProposalArtifactRequest(
+        workbench, QStringLiteral("proposal-utf8-page-1"));
+    runtime->workspaceEditProposalArtifactRead(
+        QStringLiteral("proposal-utf8-page-1"),
+        proposalArtifactPage(result, artifact, 0));
+    if (!expect(AgentWorkbenchWidgetTestAccess::proposalArtifactOffset(workbench)
+                        == 64 * 1024
+                    && AgentWorkbenchWidgetTestAccess::proposalArtifactBytes(workbench)
+                        == artifact.left(64 * 1024)
+                    && moreButton->isEnabled()
+                    && diffView->toPlainText().toUtf8() == artifact.left(65535)
+                    && !diffView->toPlainText().contains(QChar::ReplacementCharacter)
+                    && !summary->text().contains(QStringLiteral("无效"))
+                    && !summary->text().contains(QStringLiteral("完整性校验失败")),
+                "first Proposal artifact page corrupted a split UTF-8 sequence")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::prepareCurrentProposalArtifactRequest(
+        workbench, QStringLiteral("proposal-utf8-page-2"));
+    runtime->workspaceEditProposalArtifactRead(
+        QStringLiteral("proposal-utf8-page-2"),
+        proposalArtifactPage(result, artifact, 64 * 1024));
+    if (!expect(AgentWorkbenchWidgetTestAccess::proposalArtifactBytes(workbench)
+                        == artifact
+                    && AgentWorkbenchWidgetTestAccess::proposalArtifactOffset(workbench)
+                        == artifact.size()
+                    && diffView->toPlainText().toUtf8() == artifact
+                    && !diffView->toPlainText().contains(QChar::ReplacementCharacter)
+                    && !moreButton->isEnabled()
+                    && AgentWorkbenchWidgetTestAccess::proposalArtifactPendingCount(workbench)
+                        == 0,
+                "complete Proposal artifact did not decode from whole UTF-8 bytes")) {
+        return false;
+    }
+
+    const QString emptySession = QStringLiteral("proposal-empty-session");
+    const QByteArray emptyArtifact;
+    const QJsonObject emptyResult = proposalLatestResult(
+        emptySession, QLatin1Char('6'), emptyArtifact);
+    AgentWorkbenchWidgetTestAccess::setProposalContext(
+        workbench, emptySession, QStringLiteral("project-proposal"));
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-empty"), emptySession, 1);
+    runtime->workspaceEditProposalLatestRead(QStringLiteral("proposal-empty"), emptyResult);
+    AgentWorkbenchWidgetTestAccess::prepareCurrentProposalArtifactRequest(
+        workbench, QStringLiteral("proposal-empty-page"));
+    runtime->workspaceEditProposalArtifactRead(
+        QStringLiteral("proposal-empty-page"),
+        proposalArtifactPage(emptyResult, emptyArtifact, 0));
+    if (!expect(AgentWorkbenchWidgetTestAccess::proposalArtifactOffset(workbench) == 0
+                    && AgentWorkbenchWidgetTestAccess::proposalArtifactBytes(workbench).isEmpty()
+                    && diffView->toPlainText().isEmpty()
+                    && !moreButton->isEnabled()
+                    && AgentWorkbenchWidgetTestAccess::proposalArtifactPendingCount(workbench)
+                        == 0
+                    && !summary->text().contains(QStringLiteral("无效"))
+                    && !summary->text().contains(QStringLiteral("完整性校验失败")),
+                "zero-byte Proposal artifact page was rejected")) {
+        return false;
+    }
+
+    const QList<QPair<QByteArray, char>> invalidTails{
+        {QByteArray(1, static_cast<char>(0x80)), '9'},
+        {QByteArray(1, static_cast<char>(0xc0)), 'a'},
+        {QByteArray(1, static_cast<char>(0xf5)), 'b'},
+    };
+    for (qsizetype index = 0; index < invalidTails.size(); ++index) {
+        QByteArray invalidArtifact(65535, 'a');
+        invalidArtifact += invalidTails.at(index).first;
+        invalidArtifact += 'x';
+        const QString invalidSession = QStringLiteral("proposal-invalid-utf8-%1")
+            .arg(index);
+        const QJsonObject invalidResult = proposalLatestResult(
+            invalidSession, QLatin1Char(invalidTails.at(index).second), invalidArtifact);
+        AgentWorkbenchWidgetTestAccess::setProposalContext(
+            workbench, invalidSession, QStringLiteral("project-proposal"));
+        const QString proposalRequest = QStringLiteral("proposal-invalid-utf8-request-%1")
+            .arg(index);
+        AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+            workbench, proposalRequest, invalidSession, 1);
+        runtime->workspaceEditProposalLatestRead(proposalRequest, invalidResult);
+        const QString pageRequest = QStringLiteral("proposal-invalid-utf8-page-%1")
+            .arg(index);
+        AgentWorkbenchWidgetTestAccess::prepareCurrentProposalArtifactRequest(
+            workbench, pageRequest);
+        runtime->workspaceEditProposalArtifactRead(
+            pageRequest, proposalArtifactPage(invalidResult, invalidArtifact, 0));
+        if (!expect(AgentWorkbenchWidgetTestAccess::proposalArtifactOffset(workbench) == 0
+                        && AgentWorkbenchWidgetTestAccess::proposalArtifactBytes(workbench).isEmpty()
+                        && !moreButton->isEnabled()
+                        && summary->text().contains(QStringLiteral("完整性校验失败")),
+                    "invalid UTF-8 tail was accepted as a repairable page prefix")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool verifyStaleProposalArtifactResponseDiscarded(AgentWorkbenchWidget &workbench,
+                                                  AgentRuntimeClient *runtime,
+                                                  QLabel *summary,
+                                                  QPlainTextEdit *diffView,
+                                                  QPushButton *moreButton)
+{
+    if (!runtime || !summary || !diffView || !moreButton) return false;
+    const QString projectId = QStringLiteral("project-proposal");
+    const QString sessionA = QStringLiteral("proposal-race-session-a");
+    const QByteArray artifactA("proposal A diff\n");
+    const QJsonObject resultA = proposalLatestResult(
+        sessionA, QLatin1Char('4'), artifactA);
+    AgentWorkbenchWidgetTestAccess::setProposalContext(workbench, sessionA, projectId);
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-race-a"), sessionA, 1);
+    runtime->workspaceEditProposalLatestRead(QStringLiteral("proposal-race-a"), resultA);
+    AgentWorkbenchWidgetTestAccess::prepareCurrentProposalArtifactRequest(
+        workbench, QStringLiteral("proposal-race-old-page"));
+
+    const QString sessionB = QStringLiteral("proposal-race-session-b");
+    const QByteArray artifactB("proposal B different diff\n");
+    const QJsonObject resultB = proposalLatestResult(
+        sessionB, QLatin1Char('5'), artifactB);
+    AgentWorkbenchWidgetTestAccess::setProposalContext(workbench, sessionB, projectId);
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-race-b"), sessionB, 1);
+    runtime->workspaceEditProposalLatestRead(QStringLiteral("proposal-race-b"), resultB);
+
+    const QString proposalBefore =
+        AgentWorkbenchWidgetTestAccess::currentProposalId(workbench);
+    const QString referenceBefore =
+        AgentWorkbenchWidgetTestAccess::proposalArtifactReference(workbench);
+    const quint64 generationBefore =
+        AgentWorkbenchWidgetTestAccess::proposalArtifactGeneration(workbench);
+    const qint64 offsetBefore =
+        AgentWorkbenchWidgetTestAccess::proposalArtifactOffset(workbench);
+    const QByteArray bytesBefore =
+        AgentWorkbenchWidgetTestAccess::proposalArtifactBytes(workbench);
+    const QString textBefore = diffView->toPlainText();
+    const QString summaryBefore = summary->text();
+    const bool moreBefore = moreButton->isEnabled();
+
+    runtime->workspaceEditProposalArtifactRead(
+        QStringLiteral("proposal-race-old-page"),
+        proposalArtifactPage(resultA, artifactA, 0));
+    return expect(AgentWorkbenchWidgetTestAccess::currentProposalId(workbench)
+                          == proposalBefore
+                      && AgentWorkbenchWidgetTestAccess::proposalArtifactReference(workbench)
+                          == referenceBefore
+                      && AgentWorkbenchWidgetTestAccess::proposalArtifactGeneration(workbench)
+                          == generationBefore
+                      && AgentWorkbenchWidgetTestAccess::proposalArtifactOffset(workbench)
+                          == offsetBefore
+                      && AgentWorkbenchWidgetTestAccess::proposalArtifactBytes(workbench)
+                          == bytesBefore
+                      && diffView->toPlainText() == textBefore
+                      && summary->text() == summaryBefore
+                      && moreButton->isEnabled() == moreBefore
+                      && AgentWorkbenchWidgetTestAccess::proposalArtifactPendingCount(workbench)
+                          == 0,
+                  "stale Proposal artifact response contaminated the active view");
+}
+
+bool verifyProposalSchemaVariants(AgentWorkbenchWidget &workbench,
+                                  AgentRuntimeClient *runtime,
+                                  QTreeWidget *files)
+{
+    if (!runtime || !files) return false;
+    const QString projectId = QStringLiteral("project-proposal");
+    const QString completeSession = QStringLiteral("proposal-all-kinds-session");
+    const QJsonObject complete = completeProposalAllKindsResult(
+        completeSession, QLatin1Char('7'));
+    const QString completeId = complete.value(QStringLiteral("proposal")).toObject()
+        .value(QStringLiteral("proposal_id")).toString();
+    AgentWorkbenchWidgetTestAccess::setProposalContext(
+        workbench, completeSession, projectId);
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-all-kinds"), completeSession, 1);
+    runtime->workspaceEditProposalLatestRead(
+        QStringLiteral("proposal-all-kinds"), complete);
+    if (!expect(files->topLevelItemCount() == 5
+                    && AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
+                        workbench, completeSession, completeId)
+                    && files->topLevelItem(1)->text(1) == QStringLiteral("create")
+                    && files->topLevelItem(2)->text(1) == QStringLiteral("update")
+                    && files->topLevelItem(3)->text(1) == QStringLiteral("delete")
+                    && files->topLevelItem(4)->text(1) == QStringLiteral("rename"),
+                "complete Proposal did not accept all four operation kinds")) {
+        return false;
+    }
+
+    const QString legacySession = QStringLiteral("proposal-legacy-session");
+    const QJsonObject legacy = legacyProposalLatestResult(
+        legacySession, QLatin1Char('8'));
+    const QString legacyId = legacy.value(QStringLiteral("proposal")).toObject()
+        .value(QStringLiteral("proposal_id")).toString();
+    AgentWorkbenchWidgetTestAccess::setProposalContext(
+        workbench, legacySession, projectId);
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-legacy"), legacySession, 1);
+    runtime->workspaceEditProposalLatestRead(QStringLiteral("proposal-legacy"), legacy);
+    if (!expect(files->topLevelItemCount() == 2
+                    && AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
+                        workbench, legacySession, legacyId),
+                "exact legacy Proposal public view was rejected")) {
+        return false;
+    }
+
+    QJsonObject invalid = complete;
+    QJsonObject invalidProposal = invalid.value(QStringLiteral("proposal")).toObject();
+    QJsonObject invalidSummary = invalidProposal.value(QStringLiteral("summary")).toObject();
+    QJsonArray invalidFiles = invalidSummary.value(QStringLiteral("files")).toArray();
+    QJsonObject invalidUpdate = invalidFiles.at(1).toObject();
+    invalidUpdate.insert(QStringLiteral("from_path"), QJsonValue(QJsonValue::Null));
+    invalidFiles.replace(1, invalidUpdate);
+    invalidSummary.insert(QStringLiteral("files"), invalidFiles);
+    invalidProposal.insert(QStringLiteral("summary"), invalidSummary);
+    invalidProposal.insert(QStringLiteral("preview_identity"),
+        AgentRuntimeClient::workspaceEditProposalPreviewIdentity(invalidProposal));
+    invalid.insert(QStringLiteral("proposal"), invalidProposal);
+    AgentWorkbenchWidgetTestAccess::setProposalContext(
+        workbench, completeSession, projectId);
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-invalid-optional-key"), completeSession, 2);
+    runtime->workspaceEditProposalLatestRead(
+        QStringLiteral("proposal-invalid-optional-key"), invalid);
+    if (!expect(AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
+                    workbench, completeSession, completeId)
+                    && AgentWorkbenchWidgetTestAccess::proposalUnverified(
+                        workbench, completeSession)
+                    && files->topLevelItemCount() == 0,
+                "complete Proposal accepted a forbidden optional field")) {
+        return false;
+    }
+#ifdef Q_OS_WIN
+    const QString driveSession = QStringLiteral("proposal-drive-prefix-session");
+    QJsonObject driveResult = complete;
+    driveResult.insert(QStringLiteral("session_id"), driveSession);
+    QJsonObject driveProposal = driveResult.value(QStringLiteral("proposal")).toObject();
+    driveProposal.insert(QStringLiteral("session_id"), driveSession);
+    QJsonObject driveSummary = driveProposal.value(QStringLiteral("summary")).toObject();
+    QJsonArray driveFiles = driveSummary.value(QStringLiteral("files")).toArray();
+    QJsonObject driveCreate = driveFiles.at(0).toObject();
+    driveCreate.insert(QStringLiteral("path"), QStringLiteral("C:relative.txt"));
+    driveFiles.replace(0, driveCreate);
+    driveSummary.insert(QStringLiteral("files"), driveFiles);
+    driveProposal.insert(QStringLiteral("summary"), driveSummary);
+    driveProposal.insert(QStringLiteral("preview_identity"),
+        AgentRuntimeClient::workspaceEditProposalPreviewIdentity(driveProposal));
+    driveResult.insert(QStringLiteral("proposal"), driveProposal);
+    AgentWorkbenchWidgetTestAccess::setProposalContext(
+        workbench, driveSession, projectId);
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-drive-prefix"), driveSession, 1);
+    runtime->workspaceEditProposalLatestRead(
+        QStringLiteral("proposal-drive-prefix"), driveResult);
+    if (!expect(!AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
+                        workbench, driveSession,
+                        driveProposal.value(QStringLiteral("proposal_id")).toString())
+                    && files->topLevelItemCount() == 0,
+                "Windows Proposal accepted a drive-prefixed workspace path")) {
+        return false;
+    }
+#endif
+    return true;
+}
+
+bool verifyDurableProposalProjection(AgentWorkbenchWidget &workbench,
+                                     AgentRuntimeClient *runtime,
+                                     QTabWidget *tabs,
+                                     QLabel *summary,
+                                     QTreeWidget *files)
+{
+    if (!runtime || !tabs || !summary || !files) return false;
+    const QString foreground = QStringLiteral("proposal-foreground-session");
+    const QJsonObject valid = proposalLatestResult(foreground, QLatin1Char('1'));
+    const QString proposalId = valid.value(QStringLiteral("proposal")).toObject()
+        .value(QStringLiteral("proposal_id")).toString();
+    AgentWorkbenchWidgetTestAccess::setProposalContext(
+        workbench, foreground, QStringLiteral("project-proposal"));
+    tabs->setCurrentIndex(0);
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-valid"), foreground, 1);
+    runtime->workspaceEditProposalLatestRead(QStringLiteral("proposal-valid"), valid);
+    const int changesTab = AgentWorkbenchWidgetTestAccess::workspaceEditTab(workbench);
+    if (!expect(tabs->currentIndex() == changesTab
+                    && summary->text().contains(QStringLiteral("持久化只读提案"))
+                    && files->topLevelItemCount() == 2
+                    && AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
+                        workbench, foreground, proposalId),
+                "foreground durable Proposal did not auto-open validated Changes")) {
+        return false;
+    }
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-refresh-failure"), foreground, 2);
+    runtime->requestFailed(QStringLiteral("proposal-refresh-failure"),
+                           QStringLiteral("workspace/edit/proposal/latest"),
+                           QStringLiteral("redacted"), -32115);
+    if (!expect(AgentWorkbenchWidgetTestAccess::proposalUnverified(
+                        workbench, foreground)
+                    && AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
+                        workbench, foreground, proposalId)
+                    && summary->text().contains(QStringLiteral("重新验证失败")),
+                "failed latest Proposal refresh left the confirmed cache active")) {
+        return false;
+    }
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-refresh-recovered"), foreground, 3);
+    runtime->workspaceEditProposalLatestRead(
+        QStringLiteral("proposal-refresh-recovered"), valid);
+    if (!expect(!AgentWorkbenchWidgetTestAccess::proposalUnverified(
+                        workbench, foreground)
+                    && summary->text().contains(QStringLiteral("持久化只读提案")),
+                "valid latest Proposal refresh did not reactivate the cache")) {
+        return false;
+    }
+    QWidget *changesPage = summary->parentWidget();
+    for (QPushButton *button : changesPage->findChildren<QPushButton *>()) {
+        const QString text = button->text().toLower();
+        if (!expect(!text.contains(QStringLiteral("apply"))
+                        && !text.contains(QStringLiteral("approve"))
+                        && !text.contains(QStringLiteral("reject"))
+                        && !text.contains(QStringLiteral("应用"))
+                        && !text.contains(QStringLiteral("批准"))
+                        && !text.contains(QStringLiteral("拒绝")),
+                    "Changes exposed a forbidden mutation or approval control")) return false;
+    }
+    tabs->setCurrentIndex(1);
+    const QString background = QStringLiteral("proposal-background-session");
+    const QJsonObject backgroundResult = proposalLatestResult(background, QLatin1Char('2'));
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-background"), background, 1);
+    runtime->workspaceEditProposalLatestRead(
+        QStringLiteral("proposal-background"), backgroundResult);
+    if (!expect(tabs->currentIndex() == 1
+                    && AgentWorkbenchWidgetTestAccess::proposalUnread(workbench, background)
+                    && tabs->tabText(changesTab).contains(QChar(0x2022)),
+                "background Proposal stole focus or omitted unread state")) return false;
+
+    QJsonObject invalidAuthority = valid;
+    invalidAuthority.insert(QStringLiteral("file_mutation_authority"), true);
+    AgentWorkbenchWidgetTestAccess::prepareCurrentProposalArtifactRequest(
+        workbench, QStringLiteral("proposal-invalidated-artifact"));
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-authority"), foreground, 4);
+    runtime->workspaceEditProposalLatestRead(
+        QStringLiteral("proposal-authority"), invalidAuthority);
+    const QString invalidatedSummary = summary->text();
+    runtime->workspaceEditProposalArtifactRead(
+        QStringLiteral("proposal-invalidated-artifact"),
+        proposalArtifactPage(valid, QByteArrayLiteral("diff\n"), 0));
+    if (!expect(summary->text() == invalidatedSummary
+                    && files->topLevelItemCount() == 0
+                    && AgentWorkbenchWidgetTestAccess::proposalArtifactPendingCount(workbench)
+                        == 0,
+                "invalid Proposal refresh left an artifact response able to repopulate Changes")) {
+        return false;
+    }
+    QJsonObject invalidSchema = valid;
+    QJsonObject invalidProposal = invalidSchema.value(QStringLiteral("proposal")).toObject();
+    invalidProposal.insert(QStringLiteral("internal_schema_version"),
+                           QStringLiteral("workspace-edit-proposal/0.1"));
+    invalidSchema.insert(QStringLiteral("proposal"), invalidProposal);
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-schema"), foreground, 5);
+    runtime->workspaceEditProposalLatestRead(QStringLiteral("proposal-schema"), invalidSchema);
+    if (!expect(AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
+                    workbench, foreground, proposalId),
+                "invalid Proposal authority/schema replaced confirmed cache")) return false;
+
+    AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
+        workbench, QStringLiteral("proposal-pending"), foreground, 6);
+    AgentWorkbenchWidgetTestAccess::clearProposalPending(workbench);
+    return expect(AgentWorkbenchWidgetTestAccess::proposalPendingCount(workbench) == 0
+                    && AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
+                        workbench, foreground, proposalId),
+                  "disconnect cleanup discarded confirmed Proposal or retained pending generation");
+}
+
 QPushButton *buttonWithText(QWidget &root, const QString &text)
 {
     for (QPushButton *button : root.findChildren<QPushButton *>()) {
@@ -3194,6 +3960,68 @@ int main(int argc, char *argv[])
             || !expect(chat && work && runtimeClient && chat->isChecked() && !work->isChecked(),
                        "Chat must be the explicit default mode")) {
         return 1;
+    }
+
+    {
+        AgentWorkbenchWidget proposalWorkbench;
+        proposalWorkbench.resize(900, 620);
+        QTabWidget *proposalTabs = proposalWorkbench.findChild<QTabWidget *>(
+            QStringLiteral("agentWorkspaceTabs"));
+        QLabel *proposalSummary = proposalWorkbench.findChild<QLabel *>(
+            QStringLiteral("agentWorkspaceEditSummary"));
+        QTreeWidget *proposalFiles = proposalWorkbench.findChild<QTreeWidget *>(
+            QStringLiteral("agentWorkspaceEditFiles"));
+        AgentRuntimeClient *proposalRuntime =
+            proposalWorkbench.findChild<AgentRuntimeClient *>();
+        if (!verifyDurableProposalProjection(
+                proposalWorkbench, proposalRuntime, proposalTabs,
+                proposalSummary, proposalFiles)) {
+            return 1;
+        }
+    }
+
+    {
+        AgentWorkbenchWidget pagingWorkbench;
+        QLabel *pagingSummary = pagingWorkbench.findChild<QLabel *>(
+            QStringLiteral("agentWorkspaceEditSummary"));
+        QPlainTextEdit *pagingDiff = pagingWorkbench.findChild<QPlainTextEdit *>(
+            QStringLiteral("agentWorkspaceEditDiff"));
+        QPushButton *pagingMore = pagingWorkbench.findChild<QPushButton *>(
+            QStringLiteral("agentWorkspaceEditMoreButton"));
+        AgentRuntimeClient *pagingRuntime =
+            pagingWorkbench.findChild<AgentRuntimeClient *>();
+        if (!verifyDurableProposalUtf8Paging(
+                pagingWorkbench, pagingRuntime, pagingSummary, pagingDiff, pagingMore)) {
+            return 1;
+        }
+    }
+
+    {
+        AgentWorkbenchWidget raceWorkbench;
+        QLabel *raceSummary = raceWorkbench.findChild<QLabel *>(
+            QStringLiteral("agentWorkspaceEditSummary"));
+        QPlainTextEdit *raceDiff = raceWorkbench.findChild<QPlainTextEdit *>(
+            QStringLiteral("agentWorkspaceEditDiff"));
+        QPushButton *raceMore = raceWorkbench.findChild<QPushButton *>(
+            QStringLiteral("agentWorkspaceEditMoreButton"));
+        AgentRuntimeClient *raceRuntime =
+            raceWorkbench.findChild<AgentRuntimeClient *>();
+        if (!verifyStaleProposalArtifactResponseDiscarded(
+                raceWorkbench, raceRuntime, raceSummary, raceDiff, raceMore)) {
+            return 1;
+        }
+    }
+
+    {
+        AgentWorkbenchWidget schemaWorkbench;
+        QTreeWidget *schemaFiles = schemaWorkbench.findChild<QTreeWidget *>(
+            QStringLiteral("agentWorkspaceEditFiles"));
+        AgentRuntimeClient *schemaRuntime =
+            schemaWorkbench.findChild<AgentRuntimeClient *>();
+        if (!verifyProposalSchemaVariants(
+                schemaWorkbench, schemaRuntime, schemaFiles)) {
+            return 1;
+        }
     }
 
     runtimeClient->runtimeInitialized(QJsonObject{

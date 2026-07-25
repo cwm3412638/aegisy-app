@@ -929,9 +929,18 @@ Current editor evidence:
   passes 27 AAP tests, 720 `aegisy-agentd` library tests with one ignored live
   fixture, 6 daemon-main, 10 threshold, 13 handshake Runtime, 17 Schema, 67 protocol,
   and 23 stdio/Codex tests. Strict workspace Clippy and formatting pass; strict
-  OpenSpec validation and `git diff --check` are required below. Qt Changes restart
-  recovery and all Approval/Apply/checkpoint authority remain absent, so tasks `7.5`
-  and `7.6` stay unchecked.
+  OpenSpec validation and `git diff --check` are required below. Qt client coverage
+  verifies capability gating plus Rust-compatible legacy preview and artifact-page
+  identities. Qt render coverage verifies strict `0.2` create/update/delete/rename
+  and exact legacy `0.1` projection, foreground auto-open, background unread state
+  without focus theft, invalid authority/schema cache protection, Proposal
+  invalidation of in-flight artifact reads, frozen Session/Proposal/file/generation
+  response binding, zero-byte and 64 KiB page boundaries, UTF-8 characters crossing
+  pages, verified intermediate UTF-8 prefixes, immediate rejection of irreparable
+  continuation/overlong/out-of-range UTF-8 tails, Windows drive-prefix denial, and
+  the absence of Approval/Apply controls. Durable Change Timeline references and all
+  Approval/Apply/checkpoint authority remain absent, so tasks `7.5` and `7.6` stay
+  unchecked.
 - Workspace-edit apply tests cover same-directory staged create/update content,
   immediate optimistic base/target rechecks, no-clobber hard-link backups, all four
   operation kinds, reverse rollback after partial and complete multi-file commit,

@@ -137,9 +137,12 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   Negotiated `workspace.edit.proposal.read-only` plus `permission.read-only` exposes
   Session-scoped latest/exact Proposal reads and Proposal-owned 64 KiB artifact pages
   with typed domain-separated identities. Every public mutation, approval, and apply
-  authority field is fixed false. A durable Change Timeline reference, Qt Changes
-  restart recovery, genuine approval, checkpoint/apply, and rollback authority remain
-  absent.
+  authority field is fixed false. Qt negotiates this capability and restores strictly
+  validated durable Proposals into Changes across Work Session recovery and reconnect,
+  with foreground auto-open, background unread state, revalidated disconnected caches,
+  generation-bound artifact paging, and no Approval/Apply controls. A durable Change
+  Timeline reference, genuine approval, checkpoint/apply, and rollback authority
+  remain absent.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies
   sensitive paths and symlinks, honors ignore rules, preserves UTF-8/BOM and
   LF/CRLF, uses revision checks, and performs atomic user saves.
@@ -1241,8 +1244,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   scoped and page-readable after restart. No AAP or UI apply operation exists.
 - Codex fileChange now reaches the same preview compiler and persists an immutable
   Proposal before Runtime denial. A real stdio fixture proves the Proposal survives
-  sidecar shutdown/reopen and that the proposed project path remains absent. The
-  current UI still cannot read or restore that Proposal automatically.
+  sidecar shutdown/reopen and that the proposed project path remains absent. Qt now
+  reads and restores the latest strictly validated Session-bound Proposal into
+  Changes, revalidates cached state after reconnect, auto-opens foreground Proposals,
+  marks background Proposals unread without stealing focus, and keeps the surface
+  explicitly read-only with no Approval or Apply action.
 - A sidecar-library-only workspace-edit transaction now stages content in destination
   directories, performs optimistic base/target rechecks, uses no-clobber hard-link
   backups, rolls partial commits back in reverse order, preserves later external
@@ -2745,12 +2751,11 @@ Implemented visual baseline:
 
 ## Verification Snapshot (2026-07-25)
 
-- The immutable Codex file-change Proposal read stage passes 27 AAP tests, 720
+- The immutable Codex file-change Proposal and Qt Changes recovery stage passes 27 AAP tests, 720
   `aegisy-agentd` library tests with one ignored live fixture, 6 daemon-main, 10
   context-threshold, 13 handshake Runtime, 17 Schema, 67 protocol, and 23 stdio/Codex
-  tests. Strict workspace Clippy, formatting, strict OpenSpec validation, and
-  `git diff --check` pass. The existing desktop baseline remains 16 passing CTests;
-  this stage changes no Qt source. Schema v18 migration/backup,
+  tests. Strict workspace Clippy, formatting, strict OpenSpec validation,
+  `git diff --check`, and all 16 desktop CTests pass. Schema v18 migration/backup,
   immutable Proposal/artifact/event persistence, nested domain-separated identities,
   retry/conflict/rollback/tamper/restart behavior, Runtime/provider/root binding, and
   the real read-only decline lifecycle are covered. The stdio fixture verifies exact
@@ -2758,8 +2763,13 @@ Implemented visual baseline:
   `read-only` permission, Session/Turn/root/time bindings, all three authority flags
   false, restart read, and unchanged workspace. Public latest/exact Proposal AAP,
   Proposal-bound artifact paging, fixed page identity, `-32149`/`-32150`, semantic
-  summary rechecks, and exact legacy `0.1` compatibility are covered. Durable Change
-  Timeline reference, Qt restart recovery, and all Apply authority remain open.
+  summary rechecks, and exact legacy `0.1` compatibility are covered. Qt verifies
+  strict Proposal semantics, foreground/background behavior, reconnect cache
+  invalidation, stale-response isolation, zero-byte and 64 KiB artifact pages, and
+  UTF-8 crossing page boundaries while rejecting irreparable invalid UTF-8 page tails
+  without exposing Approval or Apply. Windows Qt also rejects drive-prefixed Proposal
+  paths to match the Runtime path boundary. Durable Change Timeline reference and all
+  Approval/Apply/checkpoint authority remain open.
 
 - The Timeline Snapshot recovery stage passes 27 AAP type tests, the full
   `aegisy-agentd --lib` suite (`690` passed and one ignored live fixture), 13
@@ -2931,10 +2941,10 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Complete the remaining user-visible Codex edit review slice: add one durable
-   Change Timeline reference and Qt Changes auto-open/restart recovery on top of the
-   implemented `0.2` summaries and read-only Proposal AAP. Keep Apply and user
-   Approval unavailable in this slice.
+1. Complete the remaining user-visible Codex edit review slice by adding one durable
+   Change Timeline reference on top of the implemented `0.2` summaries, read-only
+   Proposal AAP, and Qt Changes recovery. Keep Apply and user Approval unavailable in
+   this slice.
 2. Continue OpenSpec `3.5` with subscription, heartbeat, complete reconnect
    orchestration, explicit acknowledgement, and Windows recovery evidence. The
    structured retention-gap response, schema-v17 visible-state persistence, Runtime

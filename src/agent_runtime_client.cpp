@@ -261,6 +261,7 @@ const QStringList &declaredCapabilities()
         QStringLiteral("workspace.diagnostics.observed"),
         QStringLiteral("workspace.diagnostics.raw-reference"),
         QStringLiteral("workspace.edit.preview.read-only"),
+        QStringLiteral("workspace.edit.proposal.read-only"),
         QStringLiteral("workspace.git-context.read-only"),
         QStringLiteral("workspace.git-query.read-only"),
         QStringLiteral("workspace.git-status"),
@@ -1346,6 +1347,9 @@ QStringList requiredCapabilitiesForMethod(const QString &method,
         {QStringLiteral("workspace/diagnostics/raw"), QStringLiteral("workspace.diagnostics.raw-reference")},
         {QStringLiteral("workspace/edit/preview"), QStringLiteral("workspace.edit.preview.read-only")},
         {QStringLiteral("workspace/edit/artifact/read"), QStringLiteral("workspace.edit.preview.read-only")},
+        {QStringLiteral("workspace/edit/proposal/latest"), QStringLiteral("workspace.edit.proposal.read-only")},
+        {QStringLiteral("workspace/edit/proposal/read"), QStringLiteral("workspace.edit.proposal.read-only")},
+        {QStringLiteral("workspace/edit/proposal/artifact/read"), QStringLiteral("workspace.edit.proposal.read-only")},
         {QStringLiteral("workspace/watch"), QStringLiteral("workspace.watch.poll")},
         {QStringLiteral("workspace/watch/poll"), QStringLiteral("workspace.watch.poll")},
         {QStringLiteral("terminal/open-user"), QStringLiteral("terminal.lifecycle.named")},
@@ -1380,6 +1384,9 @@ QStringList requiredCapabilitiesForMethod(const QString &method,
          || method == QStringLiteral("turn/context/inspect"))
         && !params.value(QStringLiteral("context")).toArray().isEmpty()) {
         required.append(QStringLiteral("turn.context.structured"));
+    }
+    if (method.startsWith(QStringLiteral("workspace/edit/proposal/"))) {
+        required.append(QStringLiteral("permission.read-only"));
     }
     if ((method == QStringLiteral("turn/start")
          || method == QStringLiteral("turn/context/inspect"))
@@ -1672,6 +1679,200 @@ QString AgentRuntimeClient::timelineSnapshotPageIdentity(const QJsonObject &page
     return domainSeparatedSnapshotIdentity(
         "aegisy-timeline-session-snapshot-page/0.1\0",
         "timeline-session-snapshot-page:sha256:", material);
+}
+
+QString AgentRuntimeClient::workspaceEditProposalPreviewIdentity(
+    const QJsonObject &proposal)
+{
+    const QString schema = proposal.value(QStringLiteral("internal_schema_version"))
+        .toString();
+    const QJsonObject summary = proposal.value(QStringLiteral("summary")).toObject();
+    if ((schema != QStringLiteral("workspace-edit-proposal/0.1")
+         && schema != QStringLiteral("workspace-edit-proposal/0.2"))
+        || summary.isEmpty()) {
+        return {};
+    }
+
+    const auto encodeDiff = [](const QJsonObject &diff) {
+        QByteArray encoded = QByteArrayLiteral("{\"reference\":");
+        encoded += compactJsonValue(diff.value(QStringLiteral("reference")));
+        encoded += QByteArrayLiteral(",\"sha256\":");
+        encoded += compactJsonValue(diff.value(QStringLiteral("sha256")));
+        encoded += QByteArrayLiteral(",\"bytes\":");
+        encoded += compactJsonValue(diff.value(QStringLiteral("bytes")));
+        encoded += QByteArrayLiteral(",\"media_type\":");
+        encoded += compactJsonValue(diff.value(QStringLiteral("media_type")));
+        encoded += QByteArrayLiteral(",\"inline_truncated\":");
+        encoded += compactJsonValue(diff.value(QStringLiteral("inline_truncated")));
+        encoded += QByteArrayLiteral(",\"source_truncated\":");
+        encoded += compactJsonValue(diff.value(QStringLiteral("source_truncated")));
+        encoded += '}';
+        return encoded;
+    };
+    const auto encodeFormat = [](const QJsonObject &format) {
+        QByteArray encoded = QByteArrayLiteral("{\"encoding\":");
+        encoded += compactJsonValue(format.value(QStringLiteral("encoding")));
+        encoded += QByteArrayLiteral(",\"newline\":");
+        encoded += compactJsonValue(format.value(QStringLiteral("newline")));
+        encoded += QByteArrayLiteral(",\"mode\":");
+        encoded += compactJsonValue(format.value(QStringLiteral("mode")));
+        encoded += '}';
+        return encoded;
+    };
+    const auto encodeWarnings = [](const QJsonArray &warnings) {
+        QByteArray encoded(1, '[');
+        for (qsizetype index = 0; index < warnings.size(); ++index) {
+            if (index > 0) encoded += ',';
+            const QJsonObject warning = warnings.at(index).toObject();
+            encoded += QByteArrayLiteral("{\"code\":");
+            encoded += compactJsonValue(warning.value(QStringLiteral("code")));
+            encoded += QByteArrayLiteral(",\"severity\":");
+            encoded += compactJsonValue(warning.value(QStringLiteral("severity")));
+            encoded += QByteArrayLiteral(",\"path\":");
+            encoded += compactJsonValue(warning.value(QStringLiteral("path")));
+            encoded += '}';
+        }
+        encoded += ']';
+        return encoded;
+    };
+
+    const QJsonObject aggregate = summary.value(QStringLiteral("aggregate_diff")).toObject();
+    const QJsonArray files = summary.value(QStringLiteral("files")).toArray();
+    QByteArray references(1, '[');
+    QByteArray encodedFiles(1, '[');
+    for (qsizetype index = 0; index < files.size(); ++index) {
+        const QJsonObject file = files.at(index).toObject();
+        const QJsonObject diff = file.value(QStringLiteral("diff")).toObject();
+        if (index > 0) {
+            references += ',';
+            encodedFiles += ',';
+        }
+        references += compactJsonValue(diff.value(QStringLiteral("reference")));
+        encodedFiles += QByteArrayLiteral("{\"ordinal\":");
+        encodedFiles += compactJsonValue(file.value(QStringLiteral("ordinal")));
+        encodedFiles += QByteArrayLiteral(",\"kind\":");
+        encodedFiles += compactJsonValue(file.value(QStringLiteral("kind")));
+        encodedFiles += QByteArrayLiteral(",\"path\":");
+        encodedFiles += compactJsonValue(file.value(QStringLiteral("path")));
+        if (file.contains(QStringLiteral("from_path"))
+            && !file.value(QStringLiteral("from_path")).isNull()) {
+            encodedFiles += QByteArrayLiteral(",\"from_path\":");
+            encodedFiles += compactJsonValue(file.value(QStringLiteral("from_path")));
+        }
+        encodedFiles += QByteArrayLiteral(",\"additions\":");
+        encodedFiles += compactJsonValue(file.value(QStringLiteral("additions")));
+        encodedFiles += QByteArrayLiteral(",\"deletions\":");
+        encodedFiles += compactJsonValue(file.value(QStringLiteral("deletions")));
+        encodedFiles += QByteArrayLiteral(",\"base_matches\":");
+        encodedFiles += compactJsonValue(file.value(QStringLiteral("base_matches")));
+        if (file.contains(QStringLiteral("proposed_format"))) {
+            encodedFiles += QByteArrayLiteral(",\"proposed_format\":");
+            encodedFiles += encodeFormat(
+                file.value(QStringLiteral("proposed_format")).toObject());
+        }
+        encodedFiles += QByteArrayLiteral(",\"warnings\":");
+        encodedFiles += encodeWarnings(file.value(QStringLiteral("warnings")).toArray());
+        encodedFiles += QByteArrayLiteral(",\"diff\":");
+        encodedFiles += encodeDiff(diff);
+        encodedFiles += '}';
+    }
+    references += ']';
+    encodedFiles += ']';
+
+    QByteArray material = QByteArrayLiteral("{\"file_count\":");
+    material += compactJsonValue(summary.value(QStringLiteral("file_count")));
+    material += QByteArrayLiteral(",\"additions\":");
+    material += compactJsonValue(summary.value(QStringLiteral("additions")));
+    material += QByteArrayLiteral(",\"deletions\":");
+    material += compactJsonValue(summary.value(QStringLiteral("deletions")));
+    material += QByteArrayLiteral(",\"warning_count\":");
+    material += compactJsonValue(summary.value(QStringLiteral("warning_count")));
+    material += QByteArrayLiteral(",\"applicable\":");
+    material += compactJsonValue(summary.value(QStringLiteral("applicable")));
+    material += QByteArrayLiteral(",\"aggregate_diff_reference\":");
+    material += compactJsonValue(aggregate.value(QStringLiteral("reference")));
+    material += QByteArrayLiteral(",\"file_diff_references\":");
+    material += references;
+    if (schema == QStringLiteral("workspace-edit-proposal/0.2")) {
+        material += QByteArrayLiteral(",\"aggregate_diff\":");
+        material += encodeDiff(aggregate);
+        material += QByteArrayLiteral(",\"files\":");
+        material += encodedFiles;
+    }
+    material += '}';
+    QByteArray input = QByteArrayLiteral("workspace-edit-preview\0");
+    input += material;
+    return QStringLiteral("workspace-edit-preview:sha256:%1")
+        .arg(QString::fromLatin1(
+            QCryptographicHash::hash(input, QCryptographicHash::Sha256).toHex()));
+}
+
+QString AgentRuntimeClient::workspaceEditProposalArtifactPageIdentity(
+    const QJsonObject &page)
+{
+    const QJsonObject artifact = page.value(QStringLiteral("artifact")).toObject();
+    const QJsonValue nextOffset = page.value(QStringLiteral("next_offset"));
+    const auto safeInteger = [](const QJsonValue &value) {
+        if (!value.isDouble()) return false;
+        const double number = value.toDouble();
+        return std::isfinite(number) && std::floor(number) == number
+            && number >= 0 && number <= kMaximumSafeJsonInteger;
+    };
+    if (!hasExactKeys(page, {
+            QStringLiteral("schema_version"), QStringLiteral("session_id"),
+            QStringLiteral("proposal_id"), QStringLiteral("project_id"),
+            QStringLiteral("edit_id"), QStringLiteral("artifact"),
+            QStringLiteral("offset"), QStringLiteral("next_offset"),
+            QStringLiteral("total_bytes"), QStringLiteral("data_base64"),
+            QStringLiteral("chunk_sha256"), QStringLiteral("page_identity"),
+            QStringLiteral("file_mutation_authority"),
+            QStringLiteral("approval_recorded"), QStringLiteral("apply_available"),
+        })
+        || !hasExactKeys(artifact, {
+            QStringLiteral("kind"), QStringLiteral("reference"),
+            QStringLiteral("sha256"), QStringLiteral("bytes"),
+            QStringLiteral("media_type"),
+        })
+        || page.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("workspace-edit-proposal-artifact-page/0.1")
+        || !safeInteger(artifact.value(QStringLiteral("bytes")))
+        || !safeInteger(page.value(QStringLiteral("offset")))
+        || !safeInteger(page.value(QStringLiteral("total_bytes")))
+        || (!nextOffset.isNull() && !safeInteger(nextOffset))) {
+        return {};
+    }
+    QByteArray material = QByteArrayLiteral(
+        "{\"schema_version\":\"workspace-edit-proposal-artifact-page/0.1\",\"session_id\":");
+    material += compactJsonValue(page.value(QStringLiteral("session_id")));
+    material += QByteArrayLiteral(",\"proposal_id\":");
+    material += compactJsonValue(page.value(QStringLiteral("proposal_id")));
+    material += QByteArrayLiteral(",\"project_id\":");
+    material += compactJsonValue(page.value(QStringLiteral("project_id")));
+    material += QByteArrayLiteral(",\"edit_id\":");
+    material += compactJsonValue(page.value(QStringLiteral("edit_id")));
+    material += QByteArrayLiteral(",\"artifact_kind\":");
+    material += compactJsonValue(artifact.value(QStringLiteral("kind")));
+    material += QByteArrayLiteral(",\"reference\":");
+    material += compactJsonValue(artifact.value(QStringLiteral("reference")));
+    material += QByteArrayLiteral(",\"sha256\":");
+    material += compactJsonValue(artifact.value(QStringLiteral("sha256")));
+    material += QByteArrayLiteral(",\"bytes\":");
+    material += compactJsonValue(artifact.value(QStringLiteral("bytes")));
+    material += QByteArrayLiteral(",\"media_type\":");
+    material += compactJsonValue(artifact.value(QStringLiteral("media_type")));
+    material += QByteArrayLiteral(",\"offset\":");
+    material += compactJsonValue(page.value(QStringLiteral("offset")));
+    material += QByteArrayLiteral(",\"next_offset\":");
+    material += nextOffset.isNull() ? QByteArrayLiteral("null")
+                                    : compactJsonValue(nextOffset);
+    material += QByteArrayLiteral(",\"chunk_sha256\":");
+    material += compactJsonValue(page.value(QStringLiteral("chunk_sha256")));
+    material += '}';
+    QByteArray input = QByteArrayLiteral("workspace-edit-proposal-artifact-page\0");
+    input += material;
+    return QStringLiteral("workspace-edit-proposal-artifact-page:sha256:%1")
+        .arg(QString::fromLatin1(
+            QCryptographicHash::hash(input, QCryptographicHash::Sha256).toHex()));
 }
 
 bool AgentRuntimeClient::isReady() const
@@ -2703,6 +2904,35 @@ QString AgentRuntimeClient::readWorkspaceEditArtifact(const QString &sessionId,
     });
 }
 
+QString AgentRuntimeClient::latestWorkspaceEditProposal(const QString &sessionId)
+{
+    return sendRequest(QStringLiteral("workspace/edit/proposal/latest"), {
+        {QStringLiteral("session_id"), sessionId},
+    });
+}
+
+QString AgentRuntimeClient::readWorkspaceEditProposal(const QString &sessionId,
+                                                      const QString &proposalId)
+{
+    return sendRequest(QStringLiteral("workspace/edit/proposal/read"), {
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("proposal_id"), proposalId},
+    });
+}
+
+QString AgentRuntimeClient::readWorkspaceEditProposalArtifact(
+    const QString &sessionId, const QString &proposalId,
+    const QString &reference, qint64 offset, int limit)
+{
+    return sendRequest(QStringLiteral("workspace/edit/proposal/artifact/read"), {
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("proposal_id"), proposalId},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("offset"), offset},
+        {QStringLiteral("limit"), limit},
+    });
+}
+
 QString AgentRuntimeClient::watchWorkspace(const QString &projectId, const QStringList &paths,
                                            const QString &watchId,
                                            const QString &rootId)
@@ -3306,6 +3536,12 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         emit workspaceEditPreviewed(id, result);
     } else if (pendingMethod == QStringLiteral("workspace/edit/artifact/read")) {
         emit workspaceEditArtifactRead(id, result);
+    } else if (pendingMethod == QStringLiteral("workspace/edit/proposal/latest")) {
+        emit workspaceEditProposalLatestRead(id, result);
+    } else if (pendingMethod == QStringLiteral("workspace/edit/proposal/read")) {
+        emit workspaceEditProposalRead(id, result);
+    } else if (pendingMethod == QStringLiteral("workspace/edit/proposal/artifact/read")) {
+        emit workspaceEditProposalArtifactRead(id, result);
     } else if (pendingMethod == QStringLiteral("workspace/watch")) {
         emit workspaceWatchConfigured(id, result);
     } else if (pendingMethod == QStringLiteral("workspace/watch/poll")) {

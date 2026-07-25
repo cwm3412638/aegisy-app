@@ -171,8 +171,10 @@
     untruncated diff Blobs are semantically re-read for additions/deletions on
     admission, direct read, and startup/restart. Exact legacy `0.1` records retain
     their canonical bytes/identities and project as explicitly incomplete summaries.
-    Message/reasoning/review/image, Qt Changes recovery, and complete Tool families
-    remain incomplete.
+    Qt restores strictly validated durable file-change Proposals into Changes with
+    foreground auto-open, background unread state, reconnect revalidation, bounded
+    artifact paging, and no approval/apply controls. Message/reasoning/review/image
+    and complete Tool families remain incomplete.
 - [ ] 7.6 Map command, file, permission, MCP elicitation, and user-input server requests to AAP approvals/questions
   - Partial file-request boundary: before the fixed Runtime-policy `decline` is
     written, the exact Codex file change is compiled into an immutable
@@ -184,9 +186,9 @@
     `permission.read-only` now exposes Session-scoped latest/exact reads and bounded
     Proposal-owned artifact pages; `-32149` and `-32150` keep missing Proposal and
     artifact/page state distinct. Exact `0.1` read compatibility remains available
-    without rewriting legacy identities. Genuine user approval/questions, durable
-    decision consumption, MCP elicitation, Qt recovery, and all write authority
-    remain absent.
+    without rewriting legacy identities. Qt read-only Proposal recovery is
+    implemented. Genuine user approval/questions, durable decision consumption, MCP
+    elicitation, and all write authority remain absent.
 - [ ] 7.7 Map background terminals, filesystem read/write/watch, fuzzy search, Skills, hooks, plugins, and MCP capability state
 - [ ] 7.8 Configure Aegisy custom provider and short-lived token flow without writing the desktop login token into Codex config
 - [ ] 7.9 Implement adapter degradation flags for experimental or missing Codex methods
@@ -487,8 +489,9 @@
     exact `codex-app-server` / `codex-cli 0.144.5` Runtime binding, provider/backend
     thread, `read-only` permission, domain-separated identities, artifacts, and false
     authority fields. A real stdio fixture proves restart readability and that
-    the proposed file is never created. Public Proposal read, durable Changes
-    restoration, genuine approval, and Apply remain the next slice.
+    the proposed file is never created. Public Proposal read and durable Qt Changes
+    restoration are now implemented without mutation authority. A durable Change
+    Timeline reference, genuine approval, and Apply remain later slices.
 - [x] 15.3 Implement atomic apply with optimistic hash checks, stale-patch rejection, rollback journal, and final hashes
   - The sidecar library now has an internal, non-AAP apply transaction for validated `WorkspaceEdit` values. It revalidates the canonical root and path policy, validates every referenced content hash, reads and bounds every UTF-8 base, rejects stale bases or newly occupied targets before mutation, stages create/update content with `create_new` in the destination directory, flushes staged bytes, and preserves update permissions. Same-directory hard links provide no-clobber target creation and no-clobber rollback backups instead of relying on Unix replacement-style rename semantics.
   - Every operation receives an immediate optimistic recheck before commit. The undo journal is registered before destructive removal, runs in reverse order on commit/sync/final-verification failure, and only removes a target when its SHA-256 still matches content installed by this transaction. A later external rewrite is preserved, rollback is reported incomplete, authoritative per-path states are returned, and any retained hidden backup/stage is named as a recovery artifact. Success requires directory sync where supported and exact final SHA-256 verification for create/update/rename, with deletion absence verified explicitly.

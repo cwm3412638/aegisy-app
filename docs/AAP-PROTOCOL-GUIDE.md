@@ -1327,8 +1327,11 @@ there is no generic Blob read fallback.
 the exact Proposal artifact/page is unavailable, including an offset beyond the
 artifact. Invalid request shape or identity syntax remains `-32602`; integrity or
 Session quarantine fails closed instead of degrading to a partial Proposal. The
-method `workspace/edit/apply` remains unavailable, and no Qt Changes recovery
-consumer exists in this slice.
+method `workspace/edit/apply` remains unavailable. Qt negotiates the read-only
+Proposal capability, restores the latest strictly validated Work Session Proposal
+into Changes after initialization, reconnect, and Session recovery, and keeps
+approval and apply unavailable. A confirmed cached Proposal becomes unverified on
+disconnect and is not rendered again until a fresh latest read revalidates it.
 
 ## Security Boundary
 

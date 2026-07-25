@@ -442,8 +442,15 @@ it is no longer model context.
   `workspace.edit.proposal.read-only` plus `permission.read-only` exposes
   Session-scoped latest/exact Proposal reads and 64 KiB Proposal-owned artifact
   pages with typed domain-separated identities; every public authority field remains
-  false. Qt Changes restart recovery is still absent. Provider `completed` is
-  treated as a potential unauthorized write until the later
+  false. Qt negotiates the capability and restores strictly validated Session-bound
+  Proposals into Changes after initialization, reconnect, and Work Session recovery.
+  Foreground Proposals auto-open Changes, background Proposals add an unread marker
+  without stealing focus, and disconnected cached records remain unverified until a
+  fresh latest read confirms them. Artifact pages are bound to the frozen Session,
+  Proposal, file/reference, offset, accumulated bytes, and generation; Qt verifies
+  Base64, chunk and complete hashes, the fixed page identity, byte boundaries, and
+  complete UTF-8 decoding before treating a diff as complete. Provider `completed`
+  is treated as a potential unauthorized write until the later
   approval/checkpoint/apply pipeline exists.
 - A file watcher invalidates context and UI state. Agent and user changes carry
   origin metadata.
