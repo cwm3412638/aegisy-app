@@ -335,6 +335,7 @@ signals:
     void terminalRestarted(const QString &requestId, const QJsonObject &terminal);
     void terminalRemoved(const QString &requestId, const QJsonObject &result);
     void commandArtifactRead(const QString &requestId, const QJsonObject &artifact);
+    void timelineRetentionGap(const QString &requestId, const QJsonObject &data);
     void requestFailed(const QString &requestId, const QString &method,
                        const QString &message, int code);
     void diagnosticMessage(const QString &message);
@@ -356,6 +357,7 @@ private:
     QTimer *m_startupTimer = nullptr;
     QByteArray m_stdoutBuffer;
     QHash<QString, QString> m_pendingMethods;
+    QHash<QString, QJsonObject> m_pendingTimelineSyncRequests;
     quint64 m_nextRequestId = 0;
     quint64 m_nextTurnKey = 0;
     QString m_initializeRequestId;

@@ -130,6 +130,9 @@ constexpr qsizetype kMaxTimelineTrackedEvents = 100000;
 constexpr qsizetype kMaxTimelinePendingEvents = 10000;
 constexpr qsizetype kMaxTimelinePendingBytes = 64 * 1024 * 1024;
 constexpr int kTimelineSyncPageLimit = 100;
+constexpr int kTimelineSnapshotPageLimit = 200;
+constexpr quint64 kMaxTimelineSnapshotItems = 10000;
+constexpr quint64 kMaxTimelineSnapshotBytes = 64ULL * 1024ULL * 1024ULL;
 
 struct RuntimeDegradationExpectation {
     QString state;
@@ -148,6 +151,8 @@ bool hasExactJsonKeys(const QJsonObject &object, const QSet<QString> &expected)
 }
 
 bool isNonnegativeSafeJsonInteger(const QJsonValue &value);
+bool isPositiveSafeJsonInteger(const QJsonValue &value);
+bool isBoundedGraphicalId(const QJsonValue &value, qsizetype maxBytes);
 
 bool readTimelineAnchor(const QJsonValue &value, quint64 *sequence, QString *eventId)
 {
@@ -177,6 +182,44 @@ bool readTimelineAnchor(const QJsonValue &value, quint64 *sequence, QString *eve
     }
     *sequence = parsedSequence;
     return true;
+}
+
+bool isValidTimelineSnapshotIdentity(const QJsonValue &value)
+{
+    static const QRegularExpression pattern(
+        QStringLiteral("^timeline-session-snapshot:sha256:[0-9a-f]{64}$"));
+    return value.isString() && value.toString().toUtf8().size() <= kMaxTimelineIdentityBytes
+        && pattern.match(value.toString()).hasMatch();
+}
+
+bool isValidTimelineSnapshotItemIdentity(const QJsonValue &value)
+{
+    static const QRegularExpression pattern(
+        QStringLiteral("^timeline-session-snapshot-item:sha256:[0-9a-f]{64}$"));
+    return value.isString() && value.toString().toUtf8().size() <= kMaxTimelineIdentityBytes
+        && pattern.match(value.toString()).hasMatch();
+}
+
+bool isValidTimelineSnapshotPageIdentity(const QJsonValue &value)
+{
+    static const QRegularExpression pattern(
+        QStringLiteral("^timeline-session-snapshot-page:sha256:[0-9a-f]{64}$"));
+    return value.isString() && value.toString().toUtf8().size() <= kMaxTimelineIdentityBytes
+        && pattern.match(value.toString()).hasMatch();
+}
+
+bool isValidTimelineSnapshotCursor(const QJsonValue &value)
+{
+    if (!value.isObject()) return false;
+    const QJsonObject cursor = value.toObject();
+    return hasExactJsonKeys(cursor, {
+               QStringLiteral("ordinal"), QStringLiteral("item_id"),
+               QStringLiteral("item_identity"),
+           })
+        && isPositiveSafeJsonInteger(cursor.value(QStringLiteral("ordinal")))
+        && cursor.value(QStringLiteral("ordinal")).toDouble() <= 9007199254740991.0
+        && isBoundedGraphicalId(cursor.value(QStringLiteral("item_id")), 128)
+        && isValidTimelineSnapshotItemIdentity(cursor.value(QStringLiteral("item_identity")));
 }
 
 bool isBoundedDiagnosticText(const QJsonValue &value, qsizetype maxBytes)
@@ -1044,6 +1087,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_unknownTimelineEventCounts.clear();
         m_unknownTimelineEventOverflowCount = 0;
         m_timelineSyncAvailable = false;
+        m_timelineSnapshotAvailable = false;
         const QJsonObject backend = result.value(QStringLiteral("backend")).toObject();
         m_runtimeRecoveryMode = backend.value(QStringLiteral("status")).toString()
             == QStringLiteral("read-only-recovery");
@@ -1092,6 +1136,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 m_modelCapabilityReadOnlyAvailable = true;
             } else if (name == QStringLiteral("timeline.replay.fixed-watermark")) {
                 m_timelineSyncAvailable = true;
+            } else if (name == QStringLiteral("timeline.snapshot.current")) {
+                m_timelineSnapshotAvailable = true;
             }
         }
         m_imageContextAvailable = imageImportAvailable && imagePreviewAvailable;
@@ -1100,7 +1146,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             for (const QString &sessionId : timelineSessions) {
                 const auto state = m_timelineSessions.constFind(sessionId);
                 if (state != m_timelineSessions.cend() && state->retryOnReconnect) {
-                    beginTimelineSync(sessionId);
+                    if (state->snapshotRecoveryRequired) beginTimelineSnapshot(sessionId);
+                    else beginTimelineSync(sessionId);
                 }
             }
         });
@@ -1539,6 +1586,21 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
             return;
         }
+        if (method == QStringLiteral("timeline/snapshot")) {
+            if (requestId.isEmpty()) return;
+            for (auto state = m_timelineSessions.begin();
+                 state != m_timelineSessions.end(); ++state) {
+                if (state->snapshotRequestId != requestId) continue;
+                const QString sessionId = state.key();
+                freezeTimelineForSnapshotRecovery(sessionId, true);
+                if (sessionId == currentTimelineSessionId()) {
+                    addNotice(QStringLiteral("时间线快照恢复失败（错误码 %1），当前会话保持冻结。")
+                                  .arg(code), true);
+                }
+                return;
+            }
+            return;
+        }
         if (method == QStringLiteral("operation/status")) {
             if (requestId.isEmpty() || requestId != m_operationStatusRequestId) return;
             m_operationStatusRequestId.clear();
@@ -1596,6 +1658,42 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         if (m_runtimeRestartButton) m_runtimeRestartButton->setText(QStringLiteral("重试 Codex"));
         m_runtimeStatus->setToolTip(safeRuntimeRestartFailure(code));
         updateRecoveryUi();
+    });
+    connect(m_runtime, &AgentRuntimeClient::timelineRetentionGap,
+            this, [this](const QString &requestId, const QJsonObject &data) {
+        if (requestId.isEmpty()) return;
+        for (auto state = m_timelineSessions.begin();
+             state != m_timelineSessions.end(); ++state) {
+            if (state->syncRequestId != requestId) continue;
+            const QString sessionId = state.key();
+            if (data.value(QStringLiteral("session_id")).toString() != sessionId) {
+                freezeTimelineSession(sessionId, false);
+                if (sessionId == currentTimelineSessionId()) {
+                    addNotice(QStringLiteral("时间线保留响应与当前会话不匹配，当前会话保持冻结。"),
+                              true);
+                }
+                return;
+            }
+            state->syncRequestId.clear();
+            const bool snapshotAvailable = m_timelineSnapshotAvailable
+                && data.value(QStringLiteral("snapshot_available")).toBool(false);
+            if (!snapshotAvailable) {
+                freezeTimelineForSnapshotRecovery(sessionId, true);
+                if (sessionId == currentTimelineSessionId()) {
+                    addNotice(QStringLiteral("时间线历史已过期，但当前运行时未提供快照恢复。"),
+                              true);
+                }
+                return;
+            }
+            state = m_timelineSessions.find(sessionId);
+            if (state == m_timelineSessions.end()) return;
+            state->snapshotRecoveryRequired = true;
+            beginTimelineSnapshot(sessionId);
+            if (sessionId == currentTimelineSessionId()) {
+                addNotice(QStringLiteral("时间线保留范围不足，正在恢复完整快照…"));
+            }
+            return;
+        }
     });
     connect(m_runtime, &AgentRuntimeClient::projectsListed,
             this, [this](const QString &requestId, const QJsonObject &result) {
@@ -2365,6 +2463,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::timelineSynced,
             this, &AgentWorkbenchWidget::handleTimelineSyncPage);
+    connect(m_runtime, &AgentRuntimeClient::timelineSnapshotReceived,
+            this, &AgentWorkbenchWidget::handleTimelineSnapshotPage);
     m_timelinePresenter = [this](const QJsonObject &event, const QJsonObject &item,
                                  bool recognizedEvent) {
         const QString sessionId = event.value(QStringLiteral("session_id")).toString();
@@ -3099,7 +3199,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         }
         // Timeline catch-up has its own fail-closed handler. It must not consume a
         // prompt which is merely waiting for the confirmed Session projection.
-        if (method == QStringLiteral("timeline/sync")) return;
+        if (method == QStringLiteral("timeline/sync")
+                || method == QStringLiteral("timeline/snapshot")) return;
         m_pendingPrompt.clear();
         m_pendingContext = {};
         m_pendingPinnedContextSetIdentity.clear();
@@ -11091,8 +11192,10 @@ void AgentWorkbenchWidget::releaseTimelinePendingAccounting(
     const TimelineSessionState &state)
 {
     const qsizetype events = state.stagedSyncEvents.size()
+        + state.stagedSnapshotItems.size()
         + state.queuedLiveEvents.size();
-    const qsizetype bytes = state.stagedSyncBytes + state.queuedLiveBytes;
+    const qsizetype bytes = state.stagedSyncBytes + state.stagedSnapshotBytes
+        + state.queuedLiveBytes;
     m_timelinePendingEventCount = events >= m_timelinePendingEventCount
         ? 0 : m_timelinePendingEventCount - events;
     m_timelinePendingBytes = bytes >= m_timelinePendingBytes
@@ -11104,8 +11207,56 @@ void AgentWorkbenchWidget::clearTimelinePending(TimelineSessionState &state)
     releaseTimelinePendingAccounting(state);
     state.stagedSyncEvents.clear();
     state.stagedSyncBytes = 0;
+    state.stagedSnapshotItems.clear();
+    state.stagedSnapshotBytes = 0;
+    state.snapshotRequestId.clear();
+    state.snapshotIdentity.clear();
+    state.snapshotFloor = {};
+    state.snapshotWatermark = {};
+    state.snapshotAfter = {};
+    state.snapshotActiveTurn = {};
+    state.snapshotTotalItems = 0;
+    state.snapshotExpectedCanonicalBytes = 0;
+    state.snapshotTotalCanonicalBytes = 0;
     state.queuedLiveEvents.clear();
     state.queuedLiveBytes = 0;
+}
+
+void AgentWorkbenchWidget::freezeTimelineForSnapshotRecovery(
+    const QString &sessionId, bool retryOnReconnect)
+{
+    TimelineSessionState *state = ensureTimelineSession(sessionId);
+    if (!state) return;
+    const qsizetype abandonedEvents = state->stagedSyncEvents.size()
+        + state->stagedSnapshotItems.size();
+    const qsizetype abandonedBytes = state->stagedSyncBytes + state->stagedSnapshotBytes;
+    m_timelinePendingEventCount = abandonedEvents >= m_timelinePendingEventCount
+        ? 0 : m_timelinePendingEventCount - abandonedEvents;
+    m_timelinePendingBytes = abandonedBytes >= m_timelinePendingBytes
+        ? 0 : m_timelinePendingBytes - abandonedBytes;
+    state->recovery = TimelineRecoveryState::Frozen;
+    state->syncRequestId.clear();
+    state->snapshotRequestId.clear();
+    state->snapshotRecoveryRequired = true;
+    state->requestedAfterSequence = state->projection.sequence;
+    state->requestedAfterEventId = state->projection.eventId;
+    state->watermark = {};
+    state->syncProjection = {};
+    state->syncProjectionValid = false;
+    state->stagedSyncEvents.clear();
+    state->stagedSyncBytes = 0;
+    state->stagedSnapshotItems.clear();
+    state->stagedSnapshotBytes = 0;
+    state->snapshotIdentity.clear();
+    state->snapshotFloor = {};
+    state->snapshotWatermark = {};
+    state->snapshotAfter = {};
+    state->snapshotActiveTurn = {};
+    state->snapshotTotalItems = 0;
+    state->snapshotExpectedCanonicalBytes = 0;
+    state->snapshotTotalCanonicalBytes = 0;
+    state->retryOnReconnect = retryOnReconnect;
+    if (sessionId == currentTimelineSessionId()) updateTurnAction();
 }
 
 void AgentWorkbenchWidget::freezeTimelineSession(const QString &sessionId,
@@ -11117,6 +11268,8 @@ void AgentWorkbenchWidget::freezeTimelineSession(const QString &sessionId,
     state->recovery = unrecoverable ? TimelineRecoveryState::Unrecoverable
                                     : TimelineRecoveryState::Frozen;
     state->syncRequestId.clear();
+    state->snapshotRequestId.clear();
+    state->snapshotRecoveryRequired = false;
     state->requestedAfterSequence = state->projection.sequence;
     state->requestedAfterEventId = state->projection.eventId;
     state->watermark = {};
@@ -11130,11 +11283,20 @@ void AgentWorkbenchWidget::freezeTimelineSession(const QString &sessionId,
 void AgentWorkbenchWidget::suspendTimelinesForDisconnect()
 {
     m_timelineSyncAvailable = false;
+    m_timelineSnapshotAvailable = false;
     for (auto state = m_timelineSessions.begin();
          state != m_timelineSessions.end(); ++state) {
+        if (state->snapshotRecoveryRequired) {
+            const QString sessionId = state.key();
+            freezeTimelineForSnapshotRecovery(sessionId, true);
+            state = m_timelineSessions.find(sessionId);
+            if (state == m_timelineSessions.end()) break;
+            continue;
+        }
         const bool wasRecoverable = state->recovery == TimelineRecoveryState::Live
             || state->recovery == TimelineRecoveryState::Syncing;
         state->syncRequestId.clear();
+        state->snapshotRequestId.clear();
         state->watermark = {};
         state->syncProjection = {};
         state->syncProjectionValid = false;
@@ -11257,6 +11419,59 @@ void AgentWorkbenchWidget::beginTimelineSync(const QString &sessionId)
         {}, kTimelineSyncPageLimit);
     if (state->syncRequestId.isEmpty()) {
         freezeTimelineSession(sessionId, false, true);
+    } else if (sessionId == currentTimelineSessionId()) {
+        updateTurnAction();
+    }
+}
+
+void AgentWorkbenchWidget::beginTimelineSnapshot(const QString &sessionId)
+{
+    TimelineSessionState *state = ensureTimelineSession(sessionId);
+    if (!state) return;
+    if (state->recovery == TimelineRecoveryState::Unrecoverable
+            || !state->snapshotRequestId.isEmpty()) {
+        return;
+    }
+    const bool requesterReady = static_cast<bool>(m_timelineSnapshotRequester)
+        || (m_runtime && m_runtime->isReady());
+    if (!requesterReady || !m_timelineSnapshotAvailable) {
+        state->snapshotRecoveryRequired = true;
+        freezeTimelineForSnapshotRecovery(sessionId, true);
+        return;
+    }
+    const qsizetype abandonedEvents = state->stagedSyncEvents.size()
+        + state->stagedSnapshotItems.size();
+    const qsizetype abandonedBytes = state->stagedSyncBytes + state->stagedSnapshotBytes;
+    if (abandonedEvents > 0 || abandonedBytes > 0) {
+        m_timelinePendingEventCount = abandonedEvents
+                >= m_timelinePendingEventCount
+            ? 0 : m_timelinePendingEventCount - abandonedEvents;
+        m_timelinePendingBytes = abandonedBytes >= m_timelinePendingBytes
+            ? 0 : m_timelinePendingBytes - abandonedBytes;
+    }
+    state->stagedSyncEvents.clear();
+    state->stagedSyncBytes = 0;
+    state->syncProjection = {};
+    state->syncProjectionValid = false;
+    state->watermark = {};
+    state->stagedSnapshotItems.clear();
+    state->stagedSnapshotBytes = 0;
+    state->snapshotIdentity.clear();
+    state->snapshotFloor = {};
+    state->snapshotWatermark = {};
+    state->snapshotAfter = {};
+    state->snapshotActiveTurn = {};
+    state->snapshotTotalItems = 0;
+    state->snapshotExpectedCanonicalBytes = 0;
+    state->snapshotTotalCanonicalBytes = 0;
+    state->snapshotRecoveryRequired = true;
+    state->recovery = TimelineRecoveryState::Syncing;
+    state->retryOnReconnect = false;
+    state->snapshotRequestId = m_timelineSnapshotRequester
+        ? m_timelineSnapshotRequester(sessionId, {}, {}, {}, kTimelineSnapshotPageLimit)
+        : m_runtime->timelineSnapshot(sessionId, {}, {}, {}, kTimelineSnapshotPageLimit);
+    if (state->snapshotRequestId.isEmpty()) {
+        freezeTimelineForSnapshotRecovery(sessionId, true);
     } else if (sessionId == currentTimelineSessionId()) {
         updateTurnAction();
     }
@@ -11484,6 +11699,408 @@ void AgentWorkbenchWidget::handleTimelineSyncPage(const QString &requestId,
     if (stateIt->syncRequestId.isEmpty()) freezeTimelineSession(sessionId, false);
 }
 
+void AgentWorkbenchWidget::handleTimelineSnapshotPage(
+    const QString &requestId, const QJsonObject &page)
+{
+    auto stateIt = std::find_if(
+        m_timelineSessions.begin(), m_timelineSessions.end(),
+        [&requestId](const TimelineSessionState &state) {
+            return state.snapshotRequestId == requestId;
+        });
+    if (stateIt == m_timelineSessions.end()) return;
+    const QString sessionId = stateIt.key();
+    const qsizetype encodedBytes = QJsonDocument(page).toJson(QJsonDocument::Compact).size();
+    const QSet<QString> pageKeys{
+        QStringLiteral("schema_version"), QStringLiteral("session_id"),
+        QStringLiteral("snapshot_identity"), QStringLiteral("floor"),
+        QStringLiteral("watermark"), QStringLiteral("active_turn"),
+        QStringLiteral("total_items"), QStringLiteral("total_canonical_bytes"),
+        QStringLiteral("after"), QStringLiteral("items"),
+        QStringLiteral("next_after"), QStringLiteral("complete"),
+        QStringLiteral("page_identity"),
+    };
+    bool valid = encodedBytes > 0 && encodedBytes <= 4 * 1024 * 1024
+        && hasExactJsonKeys(page, pageKeys)
+        && page.value(QStringLiteral("schema_version")).toString()
+            == QStringLiteral("timeline-session-snapshot-page/0.1")
+        && page.value(QStringLiteral("session_id")).toString() == sessionId
+        && isValidTimelineSnapshotIdentity(page.value(QStringLiteral("snapshot_identity")))
+        && page.value(QStringLiteral("items")).isArray()
+        && page.value(QStringLiteral("items")).toArray().size() <= kTimelineSnapshotPageLimit
+        && page.value(QStringLiteral("complete")).isBool()
+        && isValidTimelineSnapshotPageIdentity(page.value(QStringLiteral("page_identity")));
+    quint64 floorSequence = 0;
+    quint64 watermarkSequence = 0;
+    QString floorEventId;
+    QString watermarkEventId;
+    valid = valid
+        && readTimelineAnchor(page.value(QStringLiteral("floor")),
+                              &floorSequence, &floorEventId)
+        && readTimelineAnchor(page.value(QStringLiteral("watermark")),
+                              &watermarkSequence, &watermarkEventId)
+        && watermarkSequence >= floorSequence
+        && (watermarkSequence != floorSequence || watermarkEventId == floorEventId)
+        && isNonnegativeSafeJsonInteger(page.value(QStringLiteral("total_items")))
+        && page.value(QStringLiteral("total_items")).toDouble() <= kMaxTimelineSnapshotItems
+        && isNonnegativeSafeJsonInteger(page.value(QStringLiteral("total_canonical_bytes")))
+        && page.value(QStringLiteral("total_canonical_bytes")).toDouble()
+            <= static_cast<double>(kMaxTimelineSnapshotBytes);
+    const QJsonValue activeValue = page.value(QStringLiteral("active_turn"));
+    const QJsonObject activeObject = activeValue.isNull()
+        ? QJsonObject{} : activeValue.toObject();
+    if (!activeValue.isNull()) {
+        const QSet<QString> activeKeys{
+            QStringLiteral("turn_id"), QStringLiteral("correlation_id"),
+            QStringLiteral("state"), QStringLiteral("started_event"),
+            QStringLiteral("latest_event"), QStringLiteral("open_item_ids"),
+        };
+        quint64 startedSequence = 0;
+        quint64 latestSequence = 0;
+        QString startedEventId;
+        QString latestEventId;
+        QSet<QString> openIds;
+        const QJsonArray openItems = activeObject.value(QStringLiteral("open_item_ids")).toArray();
+        valid = valid && activeValue.isObject() && hasExactJsonKeys(activeObject, activeKeys)
+            && isBoundedGraphicalId(activeObject.value(QStringLiteral("turn_id")), 128)
+            && activeObject.value(QStringLiteral("correlation_id"))
+                == activeObject.value(QStringLiteral("turn_id"))
+            && activeObject.value(QStringLiteral("state")).toString() == QStringLiteral("running")
+            && readTimelineAnchor(activeObject.value(QStringLiteral("started_event")),
+                                  &startedSequence, &startedEventId)
+            && readTimelineAnchor(activeObject.value(QStringLiteral("latest_event")),
+                                  &latestSequence, &latestEventId)
+            && startedSequence > 0 && latestSequence >= startedSequence
+            && latestSequence <= watermarkSequence
+            && (startedSequence != latestSequence || startedEventId == latestEventId)
+            && (latestSequence != watermarkSequence || latestEventId == watermarkEventId)
+            && activeObject.value(QStringLiteral("open_item_ids")).isArray()
+            && openItems.size() <= static_cast<int>(kMaxTimelineSnapshotItems);
+        for (const QJsonValue &open : openItems) {
+            valid = valid && isBoundedGraphicalId(open, 128)
+                && !openIds.contains(open.toString());
+            openIds.insert(open.toString());
+        }
+    }
+    const QJsonValue afterValue = page.value(QStringLiteral("after"));
+    const QJsonValue nextAfterValue = page.value(QStringLiteral("next_after"));
+    valid = valid && (afterValue.isNull() || isValidTimelineSnapshotCursor(afterValue))
+        && (nextAfterValue.isNull() || isValidTimelineSnapshotCursor(nextAfterValue));
+    const QJsonObject pageFloor = page.value(QStringLiteral("floor")).toObject();
+    const QJsonObject pageWatermark = page.value(QStringLiteral("watermark")).toObject();
+    const QString pageSnapshotIdentity = page.value(QStringLiteral("snapshot_identity"))
+        .toString();
+    if (stateIt->snapshotIdentity.isEmpty()) {
+        valid = valid && afterValue.isNull();
+    } else {
+        valid = valid && stateIt->snapshotIdentity == pageSnapshotIdentity
+            && stateIt->snapshotFloor == pageFloor
+            && stateIt->snapshotWatermark == pageWatermark
+            && stateIt->snapshotActiveTurn == activeObject
+            && stateIt->snapshotAfter == (afterValue.isNull()
+                                           ? QJsonObject{} : afterValue.toObject());
+    }
+    const quint64 totalItems = static_cast<quint64>(
+        page.value(QStringLiteral("total_items")).toDouble());
+    const quint64 totalBytes = static_cast<quint64>(
+        page.value(QStringLiteral("total_canonical_bytes")).toDouble());
+    if (!stateIt->snapshotIdentity.isEmpty()) {
+        valid = valid && stateIt->snapshotTotalItems == totalItems
+            && stateIt->snapshotExpectedCanonicalBytes == totalBytes;
+    }
+    valid = valid && AgentRuntimeClient::timelineSnapshotPageIdentity(page)
+        == page.value(QStringLiteral("page_identity")).toString();
+
+    QList<QJsonObject> pageItems;
+    QHash<QString, QString> candidateKinds;
+    QHash<QString, QString> candidateRoles;
+    QHash<QString, QString> candidateTurnStates;
+    QSet<QString> seenIds;
+    for (const QJsonObject &staged : std::as_const(stateIt->stagedSnapshotItems)) {
+        seenIds.insert(staged.value(QStringLiteral("item")).toObject()
+                           .value(QStringLiteral("id")).toString());
+        candidateTurnStates.insert(
+            staged.value(QStringLiteral("turn_id")).toString(),
+            staged.value(QStringLiteral("turn_state")).toString());
+    }
+    quint64 expectedOrdinal = stateIt->stagedSnapshotItems.isEmpty()
+        ? 1 : static_cast<quint64>(stateIt->stagedSnapshotItems.size() + 1);
+    quint64 canonicalBytes = 0;
+    for (const QJsonValue &value : page.value(QStringLiteral("items")).toArray()) {
+        if (!valid || !value.isObject()) { valid = false; break; }
+        const QJsonObject snapshotItem = value.toObject();
+        const QSet<QString> itemKeys{
+            QStringLiteral("ordinal"), QStringLiteral("item_identity"),
+            QStringLiteral("turn_id"), QStringLiteral("correlation_id"),
+            QStringLiteral("turn_state"), QStringLiteral("first_event"),
+            QStringLiteral("latest_event"), QStringLiteral("item"),
+            QStringLiteral("item_update"),
+        };
+        quint64 firstSequence = 0;
+        quint64 latestSequence = 0;
+        QString firstEventId;
+        QString latestEventId;
+        const QJsonObject item = snapshotItem.value(QStringLiteral("item")).toObject();
+        const QJsonObject update = snapshotItem.value(QStringLiteral("item_update")).toObject();
+        valid = valid && hasExactJsonKeys(snapshotItem, itemKeys)
+            && isPositiveSafeJsonInteger(snapshotItem.value(QStringLiteral("ordinal")))
+            && static_cast<quint64>(snapshotItem.value(QStringLiteral("ordinal")).toDouble())
+                == expectedOrdinal
+            && isValidTimelineSnapshotItemIdentity(snapshotItem.value(QStringLiteral("item_identity")))
+            && isBoundedGraphicalId(snapshotItem.value(QStringLiteral("turn_id")), 128)
+            && snapshotItem.value(QStringLiteral("correlation_id"))
+                == snapshotItem.value(QStringLiteral("turn_id"))
+            && readTimelineAnchor(snapshotItem.value(QStringLiteral("first_event")),
+                                  &firstSequence, &firstEventId)
+            && readTimelineAnchor(snapshotItem.value(QStringLiteral("latest_event")),
+                                  &latestSequence, &latestEventId)
+            && firstSequence > 0 && latestSequence >= firstSequence
+            && latestSequence <= watermarkSequence
+            && (firstSequence != latestSequence || firstEventId == latestEventId)
+            && (latestSequence != watermarkSequence || latestEventId == watermarkEventId)
+            && hasExactJsonKeys(update, {
+                   QStringLiteral("revision"), QStringLiteral("content_mode")})
+            && isPositiveSafeJsonInteger(update.value(QStringLiteral("revision")))
+            && update.value(QStringLiteral("content_mode")).toString()
+                == QStringLiteral("snapshot-replacement")
+            && validateTimelineItem(item, sessionId,
+                                    snapshotItem.value(QStringLiteral("turn_id")).toString(),
+                                    &candidateKinds, &candidateRoles)
+            && !seenIds.contains(item.value(QStringLiteral("id")).toString())
+            && AgentRuntimeClient::timelineSnapshotItemIdentity(sessionId, snapshotItem)
+                == snapshotItem.value(QStringLiteral("item_identity")).toString();
+        const QString turnId = snapshotItem.value(QStringLiteral("turn_id")).toString();
+        const QString turnState = snapshotItem.value(QStringLiteral("turn_state")).toString();
+        static const QSet<QString> validSnapshotTurnStates{
+            QStringLiteral("running"), QStringLiteral("completed"),
+            QStringLiteral("failed"), QStringLiteral("interrupted"),
+        };
+        const QString activeTurnId = activeObject.value(QStringLiteral("turn_id")).toString();
+        valid = valid && validSnapshotTurnStates.contains(turnState)
+            && ((turnState == QStringLiteral("running"))
+                == (!activeTurnId.isEmpty() && turnId == activeTurnId))
+            && (!candidateTurnStates.contains(turnId)
+                || candidateTurnStates.value(turnId) == turnState);
+        const quint64 itemBytes = AgentRuntimeClient::timelineSnapshotItemCanonicalBytes(
+            sessionId, snapshotItem);
+        valid = valid && itemBytes > 0
+            && canonicalBytes <= kMaxTimelineSnapshotBytes - itemBytes;
+        if (!valid) break;
+        canonicalBytes += itemBytes;
+        seenIds.insert(item.value(QStringLiteral("id")).toString());
+        candidateTurnStates.insert(turnId, turnState);
+        pageItems.append(snapshotItem);
+        ++expectedOrdinal;
+    }
+    QStringList allIdentities;
+    allIdentities.reserve(stateIt->stagedSnapshotItems.size() + pageItems.size());
+    for (const QJsonObject &item : std::as_const(stateIt->stagedSnapshotItems)) {
+        allIdentities.append(item.value(QStringLiteral("item_identity")).toString());
+    }
+    for (const QJsonObject &item : std::as_const(pageItems)) {
+        allIdentities.append(item.value(QStringLiteral("item_identity")).toString());
+    }
+    QStringList observedOpenItemIds;
+    const QJsonArray expectedOpenArray = activeObject.value(
+        QStringLiteral("open_item_ids")).toArray();
+    const auto collectOpenItem = [&activeObject, &expectedOpenArray,
+                                  &observedOpenItemIds, &valid](
+                                     const QJsonObject &snapshotItem) {
+        const QJsonObject item = snapshotItem.value(QStringLiteral("item")).toObject();
+        const QString state = item.value(QStringLiteral("state")).toString();
+        if (state != QStringLiteral("started") && state != QStringLiteral("delta")) return;
+        if (activeObject.isEmpty()
+                || snapshotItem.value(QStringLiteral("turn_id"))
+                    != activeObject.value(QStringLiteral("turn_id"))
+                || !expectedOpenArray.contains(item.value(QStringLiteral("id")))) {
+            valid = false;
+            return;
+        }
+        observedOpenItemIds.append(item.value(QStringLiteral("id")).toString());
+    };
+    for (const QJsonObject &item : std::as_const(stateIt->stagedSnapshotItems)) {
+        collectOpenItem(item);
+    }
+    for (const QJsonObject &item : std::as_const(pageItems)) collectOpenItem(item);
+    QStringList expectedOpenItemIds;
+    if (!activeObject.isEmpty()) {
+        for (const QJsonValue &value : expectedOpenArray) {
+            expectedOpenItemIds.append(value.toString());
+        }
+    }
+    valid = valid && (!page.value(QStringLiteral("complete")).toBool()
+        || observedOpenItemIds == expectedOpenItemIds);
+    if (page.value(QStringLiteral("complete")).toBool()) {
+        for (auto turn = candidateTurnStates.cbegin();
+             turn != candidateTurnStates.cend(); ++turn) {
+            if (turn.value() == QStringLiteral("running")) {
+                valid = valid && !activeObject.isEmpty()
+                    && turn.key() == activeObject.value(QStringLiteral("turn_id")).toString();
+            }
+        }
+    }
+    valid = valid && (!page.value(QStringLiteral("complete")).toBool()
+        || AgentRuntimeClient::timelineSnapshotIdentity(
+            sessionId, pageFloor, pageWatermark, activeObject, totalItems, totalBytes,
+            allIdentities) == pageSnapshotIdentity);
+    const quint64 stagedCount = static_cast<quint64>(stateIt->stagedSnapshotItems.size());
+    valid = valid && stagedCount <= totalItems
+        && pageItems.size() <= static_cast<int>(totalItems - stagedCount)
+        && stateIt->snapshotTotalCanonicalBytes <= totalBytes
+        && canonicalBytes <= totalBytes - stateIt->snapshotTotalCanonicalBytes
+        && pageItems.size() <= kMaxTimelinePendingEvents - qMin(
+            m_timelinePendingEventCount, kMaxTimelinePendingEvents)
+        && encodedBytes <= kMaxTimelinePendingBytes
+        && m_timelinePendingBytes <= kMaxTimelinePendingBytes - encodedBytes
+        && stateIt->stagedSnapshotBytes <= kMaxTimelineSnapshotBytes - encodedBytes;
+    const bool complete = page.value(QStringLiteral("complete")).toBool();
+    if (complete) {
+        valid = valid && nextAfterValue.isNull()
+            && stagedCount + static_cast<quint64>(pageItems.size()) == totalItems
+            && stateIt->snapshotTotalCanonicalBytes + canonicalBytes == totalBytes;
+    } else if (!pageItems.isEmpty() && nextAfterValue.isObject()) {
+        const QJsonObject last = pageItems.last();
+        const QJsonObject next = nextAfterValue.toObject();
+        valid = valid
+            && next.value(QStringLiteral("ordinal")) == last.value(QStringLiteral("ordinal"))
+            && next.value(QStringLiteral("item_id"))
+                == last.value(QStringLiteral("item")).toObject()
+                    .value(QStringLiteral("id"))
+            && next.value(QStringLiteral("item_identity"))
+                == last.value(QStringLiteral("item_identity"))
+            && static_cast<quint64>(next.value(QStringLiteral("ordinal")).toDouble())
+                < totalItems;
+    } else {
+        valid = false;
+    }
+    if (!valid) { freezeTimelineForSnapshotRecovery(sessionId, true); return; }
+
+    stateIt = m_timelineSessions.find(sessionId);
+    if (stateIt == m_timelineSessions.end() || stateIt->snapshotRequestId != requestId) return;
+    stateIt->snapshotIdentity = pageSnapshotIdentity;
+    stateIt->snapshotFloor = pageFloor;
+    stateIt->snapshotWatermark = pageWatermark;
+    stateIt->snapshotActiveTurn = activeObject;
+    stateIt->snapshotTotalItems = totalItems;
+    stateIt->snapshotExpectedCanonicalBytes = totalBytes;
+    stateIt->snapshotTotalCanonicalBytes += canonicalBytes;
+    stateIt->snapshotAfter = nextAfterValue.isNull() ? QJsonObject{} : nextAfterValue.toObject();
+    stateIt->stagedSnapshotItems.append(pageItems);
+    stateIt->stagedSnapshotBytes += encodedBytes;
+    m_timelinePendingEventCount += pageItems.size();
+    m_timelinePendingBytes += encodedBytes;
+    stateIt->snapshotRequestId.clear();
+    if (!complete) {
+        stateIt->snapshotRequestId = m_timelineSnapshotRequester
+            ? m_timelineSnapshotRequester(
+                sessionId, stateIt->snapshotIdentity, stateIt->snapshotWatermark,
+                stateIt->snapshotAfter, kTimelineSnapshotPageLimit)
+            : m_runtime->timelineSnapshot(
+                sessionId, stateIt->snapshotIdentity, stateIt->snapshotWatermark,
+                stateIt->snapshotAfter, kTimelineSnapshotPageLimit);
+        if (stateIt->snapshotRequestId.isEmpty()) {
+            freezeTimelineForSnapshotRecovery(sessionId, true);
+        }
+        return;
+    }
+
+    TimelineProjection candidate;
+    candidate.sequence = watermarkSequence;
+    candidate.eventId = watermarkEventId;
+    candidate.timestampKnown = false;
+    if (watermarkSequence > 0) candidate.eventIds.insert(watermarkSequence, watermarkEventId);
+    if (!activeObject.isEmpty()) {
+        candidate.turnStates.insert(
+            timelineTurnKey(sessionId, activeObject.value(QStringLiteral("turn_id")).toString()),
+            QStringLiteral("running"));
+    }
+    for (const QJsonObject &snapshotItem : std::as_const(stateIt->stagedSnapshotItems)) {
+        const QString turnId = snapshotItem.value(QStringLiteral("turn_id")).toString();
+        const QJsonObject item = snapshotItem.value(QStringLiteral("item")).toObject();
+        const QString itemKey = timelineItemKey(sessionId, turnId,
+                                                 item.value(QStringLiteral("id")).toString());
+        candidate.itemKinds.insert(itemKey, item.value(QStringLiteral("kind")).toString());
+        candidate.itemRoles.insert(itemKey, item.value(QStringLiteral("role")).toString());
+        candidate.itemStates.insert(itemKey, item.value(QStringLiteral("state")).toString());
+        candidate.itemRevisions.insert(itemKey, static_cast<quint64>(
+            snapshotItem.value(QStringLiteral("item_update")).toObject()
+                .value(QStringLiteral("revision")).toDouble()));
+        candidate.turnStates.insert(timelineTurnKey(sessionId, turnId),
+            snapshotItem.value(QStringLiteral("turn_state")).toString());
+    }
+    releaseTimelinePendingAccounting(*stateIt);
+    QList<QJsonObject> committedItems = std::move(stateIt->stagedSnapshotItems);
+    QList<QJsonObject> queuedEvents = std::move(stateIt->queuedLiveEvents);
+    stateIt->projection = std::move(candidate);
+    stateIt->syncProjection = {};
+    stateIt->syncProjectionValid = false;
+    stateIt->stagedSyncEvents.clear();
+    stateIt->stagedSyncBytes = 0;
+    stateIt->watermark = {};
+    stateIt->stagedSnapshotBytes = 0;
+    stateIt->queuedLiveEvents.clear();
+    stateIt->queuedLiveBytes = 0;
+    stateIt->snapshotIdentity.clear();
+    stateIt->snapshotFloor = {};
+    stateIt->snapshotWatermark = {};
+    stateIt->snapshotAfter = {};
+    stateIt->snapshotActiveTurn = {};
+    stateIt->snapshotTotalItems = 0;
+    stateIt->snapshotExpectedCanonicalBytes = 0;
+    stateIt->snapshotTotalCanonicalBytes = 0;
+    stateIt->snapshotRecoveryRequired = false;
+    stateIt->recovery = TimelineRecoveryState::Live;
+    stateIt->retryOnReconnect = false;
+    publishTimelineProjection(sessionId, stateIt->projection);
+    if (sessionId == currentTimelineSessionId()) {
+        while (m_timelineLayout && m_timelineLayout->count() > 2) {
+            QLayoutItem *layoutItem = m_timelineLayout->takeAt(1);
+            if (layoutItem->widget()) layoutItem->widget()->deleteLater();
+            delete layoutItem;
+        }
+        m_itemLabels.clear();
+        m_itemArtifactButtons.clear();
+        m_itemKinds = stateIt->projection.itemKinds;
+        m_itemRoles = stateIt->projection.itemRoles;
+        m_itemStates = stateIt->projection.itemStates;
+        m_itemRevisions = stateIt->projection.itemRevisions;
+        m_emptyTimeline->show();
+        for (const QJsonObject &snapshotItem : committedItems) {
+            const QJsonObject item = snapshotItem.value(QStringLiteral("item")).toObject();
+            addTimelineItem(item, false, timelineItemKey(
+                sessionId, snapshotItem.value(QStringLiteral("turn_id")).toString(),
+                item.value(QStringLiteral("id")).toString()));
+        }
+    }
+    if (m_activeTurnSessionId == sessionId) {
+        const QString activeKey = timelineTurnKey(sessionId, m_activeTurnId);
+        if (m_activeTurnId.isEmpty()
+                || stateIt->projection.turnStates.value(activeKey)
+                    != QStringLiteral("running")) {
+            m_turnRunning = false;
+            m_turnCancelling = false;
+            m_activeTurnSessionId.clear();
+            m_activeTurnId.clear();
+            m_turnCancelRequestId.clear();
+        }
+    }
+    restoreActiveTurnFromTimeline();
+    if (sessionId == currentTimelineSessionId()) {
+        updateTurnAction();
+        startPendingTurnIfReady();
+    }
+    for (const QJsonObject &event : queuedEvents) {
+        quint64 sequence = 0;
+        QString eventId;
+        const QJsonObject anchor{
+            {QStringLiteral("sequence"), event.value(QStringLiteral("sequence"))},
+            {QStringLiteral("event_id"), event.value(QStringLiteral("event_id"))},
+        };
+        if (readTimelineAnchor(anchor, &sequence, &eventId)
+                && sequence <= watermarkSequence) continue;
+        handleLiveTimelineEvent(event);
+    }
+}
+
 bool AgentWorkbenchWidget::validateTimelineItem(
     const QJsonObject &item, const QString &expectedSessionId,
     const QString &expectedTurnId, QHash<QString, QString> *itemKinds,
@@ -11628,7 +12245,7 @@ bool AgentWorkbenchWidget::validateTimelineEvent(
     const quint64 timestamp = static_cast<quint64>(
         event.value(QStringLiteral("timestamp_ms")).toDouble());
     if (sequence != projection->sequence + 1
-            || timestamp < projection->timestampMs
+            || (projection->timestampKnown && timestamp < projection->timestampMs)
             || projection->eventIds.size() >= kMaxTimelineTrackedEvents) {
         return false;
     }
@@ -11761,6 +12378,7 @@ bool AgentWorkbenchWidget::validateTimelineEvent(
         if (turnState != QStringLiteral("running") || hasItem) return false;
         projection->sequence = sequence;
         projection->timestampMs = timestamp;
+        projection->timestampKnown = true;
         projection->eventId = event.value(QStringLiteral("event_id")).toString();
         projection->eventIds.insert(sequence, projection->eventId);
         if (validatedItem) *validatedItem = QJsonObject{};
@@ -11815,6 +12433,7 @@ bool AgentWorkbenchWidget::validateTimelineEvent(
     }
     projection->sequence = sequence;
     projection->timestampMs = timestamp;
+    projection->timestampKnown = true;
     projection->eventId = event.value(QStringLiteral("event_id")).toString();
     projection->eventIds.insert(sequence, projection->eventId);
     if (starting) {

@@ -1158,7 +1158,7 @@
         "retained_floor": { "$ref": "#/$defs/timelineAnchor" },
         "head": { "$ref": "#/$defs/timelineAnchor" },
         "snapshot_required": { "const": true },
-        "snapshot_available": { "const": false },
+        "snapshot_available": { "type": "boolean" },
         "snapshot_capability": { "const": "timeline.snapshot.current" },
         "snapshot_method": { "const": "timeline/snapshot" },
         "event_history_complete": { "const": false },

@@ -64,6 +64,7 @@ private:
     struct TimelineProjection {
         quint64 sequence = 0;
         quint64 timestampMs = 0;
+        bool timestampKnown = false;
         QString eventId;
         QHash<quint64, QString> eventIds;
         QHash<QString, QString> turnStates;
@@ -83,6 +84,18 @@ private:
         TimelineProjection syncProjection;
         bool syncProjectionValid = false;
         QString syncRequestId;
+        QString snapshotRequestId;
+        bool snapshotRecoveryRequired = false;
+        QString snapshotIdentity;
+        QJsonObject snapshotFloor;
+        QJsonObject snapshotWatermark;
+        QJsonObject snapshotAfter;
+        QJsonObject snapshotActiveTurn;
+        quint64 snapshotTotalItems = 0;
+        quint64 snapshotExpectedCanonicalBytes = 0;
+        quint64 snapshotTotalCanonicalBytes = 0;
+        QList<QJsonObject> stagedSnapshotItems;
+        qsizetype stagedSnapshotBytes = 0;
         quint64 requestedAfterSequence = 0;
         QString requestedAfterEventId;
         QJsonObject watermark;
@@ -193,11 +206,15 @@ private:
                                bool *recognizedEvent = nullptr) const;
     void handleLiveTimelineEvent(const QJsonObject &event);
     void handleTimelineSyncPage(const QString &requestId, const QJsonObject &page);
+    void handleTimelineSnapshotPage(const QString &requestId, const QJsonObject &page);
     TimelineSessionState *ensureTimelineSession(const QString &sessionId);
     void beginTimelineSync(const QString &sessionId);
+    void beginTimelineSnapshot(const QString &sessionId);
     void suspendTimelinesForDisconnect();
     void releaseTimelinePendingAccounting(const TimelineSessionState &state);
     void clearTimelinePending(TimelineSessionState &state);
+    void freezeTimelineForSnapshotRecovery(const QString &sessionId,
+                                           bool retryOnReconnect);
     void freezeTimelineSession(const QString &sessionId, bool unrecoverable,
                                bool retryOnReconnect = false);
     void publishTimelineProjection(const QString &sessionId,
@@ -454,6 +471,9 @@ private:
     qsizetype m_timelinePendingBytes = 0;
     bool m_timelineTrackingExhausted = false;
     bool m_timelineSyncAvailable = false;
+    bool m_timelineSnapshotAvailable = false;
+    std::function<QString(const QString &, const QString &, const QJsonObject &,
+                          const QJsonObject &, int)> m_timelineSnapshotRequester;
     std::function<void(const QJsonObject &, const QJsonObject &, bool)> m_timelinePresenter;
     QHash<QString, QString> m_commandArtifactRequests;
     QHash<QString, QTreeWidgetItem *> m_treeItems;

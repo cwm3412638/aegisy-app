@@ -150,9 +150,9 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
   removes a Session projection with foreign keys disabled while preserving a nonzero
   checkpoint and retained tail, then proves pre-recovery replay, Session rebuild,
   final strict ownership verification, anchor sync, and continued Sequencer numbering.
-  The prune entry point is intentionally not reachable by automatic maintenance:
-  there is still no public current-Session snapshot or structured retention-gap
-  recovery response.
+  The prune entry point remains intentionally unreachable by automatic maintenance
+  even though public current-Session snapshot recovery is now implemented; enabling
+  production pruning remains a separate reviewed stage.
 - Stored envelopes retain exact JSON bytes, SHA-256, Event ID, timestamp, Turn, and
   Session-local sequence. Startup verifies the registered cursor/event count and
   anchor, redundant columns, envelope hash/bytes, Event ID, contiguous order, and
@@ -198,33 +198,41 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
 - A true pre-floor request now maps to the closed `timeline-retention-gap/0.1`
   JSON-RPC `-32148` response. Typed Rust and Draft 2020-12 Schema require exact
   requested after/watermark, durable floor/head, snapshot-required metadata,
-  `snapshot_available:false`, incomplete event history, and
+  boolean `snapshot_available`, incomplete event history, and
   `replay_from_floor_allowed:false`; the response contains no checkpoint or Item
-  content. A retained after or watermark with a substituted Event ID remains
-  `-32147`. Runtime coverage exercises gap, retained forgery, and missing Session;
-  public snapshot recovery and Qt consumption remain the next stage.
-- The next snapshot stage has a closed verification target but no implementation
-  evidence yet. Persistence evidence must prove that a sanitized visible-state
-  snapshot at the exact floor advances atomically with the content-free Sequencer
-  checkpoint, floor, and prefix deletion, and that the retained tail reduces it
-  through one fixed Public Timeline head. Restart, transaction-failure, semantic-
-  tamper, missing-tail, over-10,000-Item, and over-64-MiB fixtures must preserve the
-  prior authority without truncation or automatic pruning.
-- Protocol evidence now covers the strict request/page Schema and Rust contract for
+  content. Runtime returns availability true only for a connection that negotiated
+  `timeline.snapshot.current`, while a snapshot-unaware client receives false. A
+  retained after or watermark with a substituted Event ID remains `-32147`.
+- Schema v17 persists a sanitized visible-state snapshot at the exact floor in the
+  same transaction as the content-free Sequencer checkpoint, floor movement, and
+  exact prefix deletion. Runtime reconstructs one fixed head from that floor plus the
+  retained tail. Restart, transaction-failure, semantic-tamper, ownership, active/open
+  Item, and bound fixtures preserve the prior authority without truncation or
+  automatic pruning.
+- Protocol and Runtime evidence covers the strict request/page Schema and Rust contract for
   null-only first-page capture; exact continuation snapshot identity/watermark/cursor;
   domain-separated complete snapshot, page, and Item identities; contiguous ordinals;
   first/latest Item anchors; active-Turn started/latest anchors and ordered open Item
   IDs; 1-200 Item pages below 4 MiB; and complete-state bounds of 10,000 Items/64 MiB.
-  Runtime dispatch still must prove empty and terminal Sessions plus a fixed head
-  inside an active running Turn with current `started`/`delta` revisions. Capability
-  advertisement must remain absent until every durable, dispatch, and Qt replacement
-  prerequisite is healthy.
-- Qt evidence must prove that all pages, totals, identities, active-Turn state, and
-  cursors remain in private per-Session staging; incomplete, malformed, substituted,
-  expired, and over-bound pages leave the prior projection visible; a complete page
-  atomically replaces only the affected Session once; and queued post-watermark live
-  events then pass through the ordinary validator while unrelated Sessions continue.
-  These are future required fixtures, not passing results. Keep `3.5` unchecked.
+  Runtime fixtures cover empty, terminal, and active running-Turn materialization.
+  The capability is advertised only with a healthy Store and must be negotiated.
+- Qt keeps all pages, totals, identities, active-Turn state, and cursors in private
+  per-Session staging. Focused fixtures prove that incomplete, malformed, substituted,
+  header-drifted, and invalid-state pages leave the prior projection visible; a
+  complete page atomically replaces only the affected Session; delayed events through
+  the watermark are dropped; later events pass through ordinary validation; and a
+  background Session never contaminates the visible Timeline. Disconnect drops
+  incomplete page staging and its accounting while preserving confirmed UI, bounded
+  queued live events, their accounting, and snapshot-recovery intent. A negotiated
+  `snapshot_available:false` fixture proves that Qt issues no snapshot request and
+  retains the confirmed projection and queued event across a later disconnect.
+- The Qt AAP client retains each pending `timeline/sync` request until response
+  validation and accepts `-32148` only when its exact Schema, Session, after,
+  watermark, floor/head window, and snapshot route bind to that request. The
+  environment fixture accepts negotiated `snapshot_available:true` and
+  unnegotiated `false` responses without disconnecting, while rejecting a
+  cross-Session substitution and an unnegotiated `true` claim as protocol violations
+  without signalling recovery.
 - Qt now keeps recovery state per Session. A detected gap freezes only that Session,
   requests from its last confirmed sequence/Event-ID anchor, stages all validated
   pages and presentation effects privately, and queues bounded live events. No
@@ -240,11 +248,10 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
   pagination, oversized event rejection, deletion purge, stale prepared tickets,
   wall-clock rollback, terminal-Item boundary enforcement, aggregate Qt pending
   limits, the 10,001st Session fail-closed gate, initial Session sync, and real
-  disconnect signal ordering. Complete commands on 2026-07-25 pass 22 AAP type
-  tests, 675 sidecar tests plus one ignored live fixture, 6 daemon-main, 10
-  context-threshold, 13 handshake Runtime, 15 Schema, 66 protocol, and 23
-  stdio/Codex tests; strict Clippy and formatting; the complete desktop build and
-  all 16 CTests; strict OpenSpec validation; and `git diff --check`.
+  disconnect signal ordering. The snapshot stage on 2026-07-25 passes 27 AAP type
+  tests, 690 sidecar tests plus one ignored live fixture, 13 handshake Runtime and
+  17 Schema tests; strict workspace Clippy and formatting; the focused Qt snapshot
+  run; all 16 desktop CTests; strict OpenSpec validation; and final diff checks.
 - Preview Turns now prepare all six synthetic events through a cloned Sequencer and
   commit the Turn, sanitized user/agent Items, internal projection events, terminal
   state, and all six Public Journal rows in one SQLite transaction. The live
@@ -259,11 +266,12 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
   Item and timestamp. An existing Trace cannot receive a later Public Journal repair,
   and the Trace-only Store helper is unavailable in production builds.
   Some streaming/control-only events correctly have no durable Item projection and
-  append only to the Journal. The schema v16 floor/checkpoint is an internal
-  retention and restart foundation only. A current Session snapshot, structured
-  retention-gap recovery, live subscription, heartbeat, complete reconnect
-  orchestration, explicit acknowledgement, and Windows recovery/runtime evidence
-  remain absent. Keep `3.5` unchecked.
+  append only to the Journal. The schema v16 floor/checkpoint remains internal
+  retention and restart authority, while schema v17 plus fixed-head paging and Qt
+  atomic replacement now provide structured retention-gap snapshot recovery. Live
+  subscription, heartbeat, complete reconnect orchestration, explicit
+  acknowledgement, automatic pruning enablement, and Windows recovery/runtime
+  evidence remain absent. Keep `3.5` unchecked.
 
 Model catalog foundation evidence:
 
@@ -389,10 +397,9 @@ Model catalog foundation evidence:
   `selection_allowed=true` cache response becomes an explicit invalid state;
   it is never silently cleared or treated as a usable catalog. The render
   fixture covers offline plus fresh/stale/expired/empty lifecycle states and
-  malformed catalog/cache responses. The test binary compiles, but this host
-  still kills the Qt process at startup with exit 137, so execution evidence
-  must be rerun on a host with sufficient memory before this milestone can
-  close.
+  malformed catalog/cache responses. The complete desktop CTest suite now executes
+  these assertions successfully on this host; product-authority and cross-platform
+  gates still prevent the milestone from closing.
 - The Qt host also consumes the read-only `model/capability-check` projection
   for the current catalog-bound model. Chat and Work requirements are rebuilt
   on mode changes; result validation binds the exact model identity, bounds
@@ -400,8 +407,7 @@ Model catalog foundation evidence:
   Compatible, blocked, unknown, and malformed results render as explicit
   metadata-only status, with compatible still labeled read-only. No picker,
   routing, credential, Turn, or execution authority is granted. The render
-  fixture covers all four outcomes; execution remains subject to the host
-  resource limitation above.
+  fixture executes all four outcomes in the passing desktop CTest suite.
 - The 2026-07-21 catalog, matcher, profile, catalog-policy, cache, and profile-store
   foundation stage passed 428 Rust unit tests with one ignored live fixture, 62 protocol tests,
   11 stdio/Codex tests, strict Clippy, the complete CMake build, and CTest

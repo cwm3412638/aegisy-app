@@ -1227,9 +1227,6 @@ pub mod stable {
                 if !self.snapshot_required {
                     return Err("timeline retention gap must require snapshot recovery");
                 }
-                if self.snapshot_available {
-                    return Err("timeline retention gap snapshot is not available in this version");
-                }
                 if self.snapshot_capability != "timeline.snapshot.current"
                     || self.snapshot_method != "timeline/snapshot"
                 {
@@ -3277,7 +3274,6 @@ mod tests {
 
         for (key, invalid) in [
             ("snapshot_required", json!(false)),
-            ("snapshot_available", json!(true)),
             ("event_history_complete", json!(true)),
             ("replay_from_floor_allowed", json!(true)),
             ("snapshot_method", json!("session/read")),
@@ -3286,6 +3282,11 @@ mod tests {
             candidate[key] = invalid;
             assert!(serde_json::from_value::<TimelineRetentionGapData>(candidate).is_err());
         }
+
+        let mut available = value.clone();
+        available["snapshot_available"] = json!(true);
+        let available: TimelineRetentionGapData = serde_json::from_value(available).unwrap();
+        available.validate_for_request(&request).unwrap();
 
         for (key, mismatch) in [
             ("session_id", json!("session-2")),
@@ -3485,7 +3486,12 @@ mod tests {
             item: TimelineItem {
                 id: id.into(),
                 kind: "message".into(),
-                role: if ordinal % 2 == 0 { "agent" } else { "user" }.into(),
+                role: if ordinal.is_multiple_of(2) {
+                    "agent"
+                } else {
+                    "user"
+                }
+                .into(),
                 state: "completed".into(),
                 content: format!("snapshot item {ordinal}"),
                 data: None,
@@ -3719,7 +3725,7 @@ mod tests {
     fn timeline_snapshot_contract_enforces_complete_and_frame_bounds() {
         assert_eq!(MAX_TIMELINE_SNAPSHOT_TOTAL_ITEMS, 10_000);
         assert_eq!(MAX_TIMELINE_SNAPSHOT_TOTAL_BYTES, 64 * 1024 * 1024);
-        assert!(MAX_TIMELINE_SNAPSHOT_PAGE_BYTES < 4 * 1024 * 1024);
+        const { assert!(MAX_TIMELINE_SNAPSHOT_PAGE_BYTES < 4 * 1024 * 1024) };
 
         let mut items = (1..=64)
             .map(|ordinal| {

@@ -244,6 +244,7 @@ pub const STABLE_CAPABILITY_REGISTRY: &[&str] = &[
     "terminal.stop.out-of-band",
     "timeline.command.structured.read-only",
     "timeline.replay.fixed-watermark",
+    "timeline.snapshot.current",
     "timeline.streaming",
     "turn.cancel.interrupt",
     "turn.context.inspect",
@@ -5618,6 +5619,7 @@ impl Runtime {
                     "background-notification.outbox.read-only".into(),
                     "background-job.recovery.inspect".into(),
                     "timeline.replay.fixed-watermark".into(),
+                    "timeline.snapshot.current".into(),
                     "workspace.image.import-user".into(),
                     "workspace.image.preview".into(),
                 ]);
@@ -16406,7 +16408,9 @@ impl Runtime {
                             event_id: state.head.event_id,
                         },
                         snapshot_required: true,
-                        snapshot_available: false,
+                        snapshot_available: self
+                            .negotiated_capabilities
+                            .contains("timeline.snapshot.current"),
                         snapshot_capability: "timeline.snapshot.current".into(),
                         snapshot_method: "timeline/snapshot".into(),
                         event_history_complete: false,
@@ -17097,6 +17101,22 @@ mod timeline_event_runtime_tests {
         drop(runtime);
 
         let mut reopened = Runtime::with_store(&data_root).unwrap();
+        let mut legacy_params = test_initialize_params("snapshot-unaware-client");
+        legacy_params["capabilities"]["stable"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|capability| capability != "timeline.snapshot.current");
+        let initialized = reopened.initialize(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("initialize-snapshot-unaware")),
+            method: "initialize".into(),
+            params: legacy_params,
+        });
+        assert!(!initialized[0]["result"]["capabilities"]["stable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "timeline.snapshot.current"));
         let third = reopened
             .event(
                 "runtime-timeline-session",
@@ -17248,6 +17268,35 @@ mod timeline_event_runtime_tests {
         let missing = reopened.timeline_sync(missing);
         assert_eq!(missing[0]["error"]["code"], -32147);
         drop(reopened);
+
+        let mut snapshot_capable = Runtime::with_store(&data_root).unwrap();
+        let initialized = snapshot_capable.initialize(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("initialize-snapshot-capable")),
+            method: "initialize".into(),
+            params: test_initialize_params("snapshot-capable-client"),
+        });
+        assert!(initialized[0]["result"]["capabilities"]["stable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "timeline.snapshot.current"));
+        let gap: Request = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": "timeline-sync-gap-snapshot-capable",
+            "method": "timeline/sync",
+            "params": {
+                "session_id": "runtime-timeline-session",
+                "after": { "sequence": 0, "event_id": null },
+                "watermark": null,
+                "limit": 200
+            }
+        }))
+        .unwrap();
+        let gap = snapshot_capable.timeline_sync(gap);
+        assert_eq!(gap[0]["error"]["code"], -32148);
+        assert_eq!(gap[0]["error"]["data"]["snapshot_available"], true);
+        drop(snapshot_capable);
         fs::remove_dir_all(data_root).unwrap();
     }
 }

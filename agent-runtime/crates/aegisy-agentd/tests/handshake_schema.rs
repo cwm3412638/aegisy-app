@@ -1185,13 +1185,24 @@ fn timeline_retention_gap_fixture_is_strict_content_free_and_requires_snapshot()
         messages[1]["error"]["data"]
     );
     assert!(data.snapshot_required);
-    assert!(!data.snapshot_available);
+    assert!(data.snapshot_available);
     assert!(!data.event_history_complete);
     assert!(!data.replay_from_floor_allowed);
 
+    let mut unavailable = messages[1].clone();
+    unavailable["error"]["data"]["snapshot_available"] = json!(false);
+    assert!(schema_definition_valid(
+        "timelineSyncRetentionGapErrorResponse",
+        &unavailable
+    ));
+    let unavailable: TimelineRetentionGapData =
+        serde_json::from_value(unavailable["error"]["data"].clone()).unwrap();
+    unavailable.validate_for_request(&request).unwrap();
+    assert!(!unavailable.snapshot_available);
+
     for (key, invalid) in [
         ("snapshot_required", json!(false)),
-        ("snapshot_available", json!(true)),
+        ("snapshot_available", json!("true")),
         ("event_history_complete", json!(true)),
         ("replay_from_floor_allowed", json!(true)),
         ("snapshot_capability", json!("session.history")),

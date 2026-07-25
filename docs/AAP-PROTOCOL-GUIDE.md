@@ -151,11 +151,12 @@ If the requested anchor is older than the durable retention floor, Runtime retur
 the distinct structured error below. This response does not contain a Session
 snapshot, does not expose the internal Sequencer checkpoint, and does not authorize
 the client to resume from `retained_floor` while silently discarding older visible
-state. Until `timeline.snapshot.current` is negotiated, the affected Session remains
-frozen while unrelated Sessions can continue.
+state. `snapshot_available` is true only when this connection negotiated
+`timeline.snapshot.current`; an older client receives false and the affected Session
+remains frozen while unrelated Sessions can continue.
 
 ```jsonl
-{"jsonrpc":"2.0","id":"timeline-gap-1","error":{"code":-32148,"message":"requested Timeline history is no longer retained","data":{"schema_version":"timeline-retention-gap/0.1","reason":"requested-anchor-not-retained","session_id":"session-1","requested_after":{"sequence":0,"event_id":null},"requested_watermark":null,"retained_floor":{"sequence":2,"event_id":"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"head":{"sequence":3,"event_id":"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"snapshot_required":true,"snapshot_available":false,"snapshot_capability":"timeline.snapshot.current","snapshot_method":"timeline/snapshot","event_history_complete":false,"replay_from_floor_allowed":false}}}
+{"jsonrpc":"2.0","id":"timeline-gap-1","error":{"code":-32148,"message":"requested Timeline history is no longer retained","data":{"schema_version":"timeline-retention-gap/0.1","reason":"requested-anchor-not-retained","session_id":"session-1","requested_after":{"sequence":0,"event_id":null},"requested_watermark":null,"retained_floor":{"sequence":2,"event_id":"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"head":{"sequence":3,"event_id":"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"snapshot_required":true,"snapshot_available":true,"snapshot_capability":"timeline.snapshot.current","snapshot_method":"timeline/snapshot","event_history_complete":false,"replay_from_floor_allowed":false}}}
 ```
 
 Only a genuine pre-floor request uses `-32148`. A malformed, substituted, or
@@ -166,10 +167,9 @@ misrepresented as normal retention recovery.
 The recovery target named by that error is deliberately separate from
 `session/read`. Its stable capability is exactly `timeline.snapshot.current`, its
 method is `timeline/snapshot`, and its page schema is
-`timeline-session-snapshot-page/0.1`. The strict wire contract, Schema, and fixture
-are implemented and tested, but Runtime does not advertise or dispatch this method
-until durable materialization and Qt atomic replacement are complete; the following
-is therefore not a currently callable example.
+`timeline-session-snapshot-page/0.1`. Runtime advertises it only with a healthy
+durable Store, and the client must declare it during initialization before the
+following request is callable.
 
 The first request contains exactly a Session, null snapshot identity, null
 watermark, null Item cursor, and a 1-200 Item limit. Runtime captures the current
@@ -216,10 +216,16 @@ No incomplete page changes the UI. Qt verifies repeated Session/floor/watermark,
 active-Turn state, totals, ordinals, Item/page/snapshot identities, and the cursor
 chain. Only after the final page proves the complete ordered identity does Qt
 atomically replace that one Session's Timeline and lifecycle cursor, then drain live
-events after the watermark through the ordinary validator. Any failure preserves
-the last confirmed projection and freezes only that Session. Until this entire path
-is implemented, `snapshot_available` remains false, automatic pruning remains
-disabled, and OpenSpec task `3.5` remains unchecked.
+events after the watermark through the ordinary validator; delayed events at or
+below the watermark are discarded. Any failure preserves the last confirmed
+projection and freezes only that Session. A transport loss discards private staging
+but retains the confirmed projection and recovery intent, so a fresh negotiated
+connection restarts capture from a null first-page request. Snapshot pages carry no
+timestamp baseline; the first valid post-watermark live event establishes the new Qt
+baseline while Runtime remains responsible for non-decreasing event time. Automatic
+pruning remains disabled, and OpenSpec task `3.5` remains unchecked until
+subscription, heartbeat, complete reconnect orchestration, acknowledgement, and
+Windows recovery evidence are complete.
 
 Every anchor is the exact pair `{sequence,event_id}`. Sequence zero is represented
 only as `{0,null}`. Every positive sequence requires the exact 77-byte lowercase

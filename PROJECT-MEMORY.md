@@ -156,10 +156,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   failure retains accepted `started`/`delta` partial Items, while completed and
   interrupted terminals reject those open streams; repeatable `updated` snapshots may
   remain at terminal, and a revision-one atomic `truncated` marker is valid. Durable
-  public journaling and fixed-watermark catch-up are now partially implemented under
-  `3.5`; snapshot, subscription, heartbeat, complete reconnect, structured
-  retention-gap recovery, and acknowledgement remain open. Agent/Codex remains
-  read-only.
+  public journaling, fixed-watermark catch-up, and structured retention-gap snapshot
+  recovery are now partially implemented under `3.5`; subscription, heartbeat,
+  complete reconnect orchestration, and acknowledgement remain open. Agent/Codex
+  remains read-only.
 - OpenSpec task `3.5` now has an end-to-end fixed-watermark catch-up slice. Workbench
   schema v16 stores exact validated `timeline-event/0.1` envelopes behind one
   compare-and-swap cursor per Session, restores Sequencer state page by page, and
@@ -195,33 +195,27 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   A genuine `timeline/sync` request whose after anchor is before the validated floor
   now returns JSON-RPC `-32148` with closed `timeline-retention-gap/0.1` data. It
   exposes only the requested anchors and durable floor/head, requires
-  `timeline.snapshot.current` through `timeline/snapshot`, reports that snapshot as
-  unavailable in the current stage, declares event history incomplete, and forbids
-  replay from the floor. The response contains no Item/checkpoint content or internal
-  checkpoint identity. A retained after or fixed watermark with a substituted Event
-  ID remains ordinary `-32147` drift, including when another requested anchor is
-  already before the floor.
+  `timeline.snapshot.current` through `timeline/snapshot`, reports availability true
+  only when the current connection negotiated that capability, declares event history
+  incomplete, and forbids replay from the floor. The response contains no Item/
+  checkpoint content or internal checkpoint identity. A retained after or fixed
+  watermark with a substituted Event ID remains ordinary `-32147` drift.
   `session/read` cannot serve as the public recovery snapshot: it pages projected
   Items without a fixed Public Timeline head and omits live `started`/`delta` state,
-  while the v16 Sequencer checkpoint intentionally omits Item content/data. The next
-  persistence stage must add a bounded durable visible-state floor snapshot and
-  atomically advance it with checkpoint/floor/prune before Runtime can materialize a
-  fixed-head paged snapshot and Qt can replace one Session atomically.
-  Automatic pruning remains unreachable until public snapshot recovery exists.
-  Snapshot, structured retention-gap recovery, live
-  subscription, heartbeat, complete reconnect orchestration, explicit
+  while the v16 Sequencer checkpoint intentionally omits Item content/data. Schema
+  v17 supplies that separate floor-visible state in the checkpoint/floor/prune
+  transaction; Runtime materializes a fixed-head page set and Qt replaces one Session
+  only after complete private validation. Automatic pruning remains disabled.
+  Live subscription, heartbeat, complete reconnect orchestration, explicit
   acknowledgement, and Windows recovery evidence remain open. Keep `3.5` unchecked.
-- The Timeline snapshot wire-contract stage is now implemented and schema-tested,
-  without advertising the capability. AAP types and the stable Schema define the
+- The Timeline snapshot recovery slice is implemented end to end. AAP types and the
+  stable Schema define the
   exact null-only `timeline/snapshot` request, fixed floor/watermark, strict
   continuation cursor, complete Item `first_event`/`latest_event` anchors, active
   Turn `started_event`/`latest_event`/ordered `open_item_ids`, and domain-separated
   Item/full-snapshot/page identities. Rust enforces the 10,000-Item/64 MiB complete
-  materialization bound, 200-Item page bound, and 4 MiB frame budget; fixtures cover
-  multi-page cursor chaining and identity drift. This is only the protocol boundary:
-  schema-v17 durable visible-state materialization, Runtime fixed-head paging, Qt
-  atomic replacement, and `snapshot_available` advertisement remain absent.
-- Schema v17 visible-state persistence is now implemented behind the same
+  materialization bound, 200-Item page bound, and 4 MiB frame budget. Schema v17
+  visible-state persistence runs behind the same
   checkpoint/floor/prune SQLite transaction. Each Session starts with a strict
   empty visible snapshot; pruning reconstructs the public projection from the
   prior durable visible floor and only replays events through the requested
@@ -233,19 +227,19 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   prevents stale replacement. Snapshot, checkpoint, floor movement, and exact
   prefix deletion remain one rollback boundary. Focused tests cover durable
   materialization, visible Item recovery, active/open state, tamper rejection,
-  and Session ownership. WorkbenchStore now has an internal validated snapshot
-  read API. Runtime fixed-head paging, Qt atomic Session replacement,
-  subscription/heartbeat/reconnect/acknowledgement, and `snapshot_available`
-  advertisement are still absent, so automatic pruning remains disabled and
-  OpenSpec `3.5` stays open.
-- Runtime now has an internal, capability-gated `timeline/snapshot` handler.
-  It materializes one fixed head from the durable visible floor plus retained
+  and Session ownership. Runtime's capability-gated handler materializes one fixed
+  head from the durable visible floor plus retained
   tail, converts validated Items/active Turn metadata into the AAP snapshot
   contract, computes complete snapshot/Item/page identities, and enforces
-  continuation cursor, watermark, page-size, and response validation. The
-  capability is deliberately not advertised yet; no subscription, heartbeat,
-  reconnect orchestration, acknowledgement, Qt atomic replacement, or Windows
-  recovery evidence has been added.
+  continuation cursor, watermark, page-size, and response validation. Qt validates
+  fixed headers, totals, open Items, Turn states, cursors, and identities in private
+  staging, then atomically replaces only the target Session, drops delayed events at
+  or below the watermark, and validates later events normally. Snapshot carries no
+  timestamp, so the first post-watermark event establishes Qt's new baseline. A
+  disconnect releases incomplete page staging but preserves confirmed UI, bounded
+  queued live events, their accounting, and recovery intent for a fresh negotiated
+  first-page request. The capability is advertised only with a healthy Store and
+  `snapshot_available` is per-connection negotiation.
 - Model catalog foundation (2026-07-21): the sidecar now validates an internal
   `model-catalog/0.1` metadata contract and exposes the read-only AAP capability
   `model.catalog.read-only` with `model/catalog`. The current projection is
@@ -323,10 +317,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   catalog/cache results, including a cache response claiming
   `selection_allowed=true`, become explicit invalid status and cannot leave a
   previous usable-looking state behind. Deterministic render coverage exercises
-  the lifecycle and fail-closed cases; the test binary compiles, while this host
-  still kills the Qt process during startup with exit 137. This remains metadata
-  only: no picker, catalog refresh, cache install, routing, token, or Turn
-  authority was added, and OpenSpec `10.1` remains unchecked.
+  the lifecycle and fail-closed cases, and the complete desktop CTest suite now
+  executes successfully on this host. This remains metadata only: no picker,
+  catalog refresh, cache install, routing, token, or Turn authority was added, and
+  OpenSpec `10.1` remains unchecked.
 - Model profile foundation (2026-07-21): internal `model-profile/0.1` now
   validates global/project scope, bounded role bindings for Agent/plan/apply/
   review/utility/embedding/rerank, secret-free source metadata, and a
@@ -2706,10 +2700,9 @@ Implemented visual baseline:
   and grant no permission. The live read-only Git overview is comparison-only: a
   mismatch marks the persisted branch as drifted and never overwrites the Session
   binding.
-  The render fixture now locates the strip by a stable object name and asserts the
+  The render fixture locates the strip by a stable object name and executes the
   empty read-only state plus a real Git fixture branch, `root-1`, and active Runtime/
-  Workspace binding; execution remains pending
-  because this host kills the Qt process before the test body runs.
+  Workspace binding as part of the passing desktop CTest suite.
   The model control is still a binding display, not the model-profile picker or
   switching control required by OpenSpec `10.3` through `10.6`.
 - Primary workbench actions use a small vendored Lucide SVG set with accessible
@@ -2722,14 +2715,20 @@ Implemented visual baseline:
 
 ## Verification Snapshot (2026-07-25)
 
-- The schema-v17 visible-state floor persistence stage now passes the focused
-  Public Timeline Journal suite and the full `aegisy-agentd --lib` suite (`690`
-  passed, one ignored live fixture), strict Clippy, formatting, and
-  `git diff --check`. It materializes canonical visible Items and active/open
-  Turn state at the requested floor, validates redundant rows and snapshot
-  identity on restart/read, and atomically rolls back with checkpoint/floor/
-  prefix deletion. Runtime snapshot paging and Qt replacement are not yet
-  connected; this does not advertise `snapshot_available` or enable pruning.
+- The Timeline Snapshot recovery stage passes 27 AAP type tests, the full
+  `aegisy-agentd --lib` suite (`690` passed and one ignored live fixture), 13
+  handshake Runtime tests, 17 Schema tests, the focused Qt Snapshot render run,
+  all 16 desktop CTests, strict workspace Clippy, formatting, strict OpenSpec
+  validation, and `git diff --check`. Schema v17 materializes canonical visible
+  Items and active/open Turn state at the requested floor, validates redundant rows
+  and snapshot identity on restart/read, and atomically rolls back with checkpoint,
+  floor movement, and prefix deletion. Runtime serves capability-gated fixed-head
+  pages, and Qt validates them privately before atomically replacing one Session.
+  `snapshot_available` is true only for a connection that negotiated
+  `timeline.snapshot.current`. Qt additionally binds a `-32148` response to the
+  exact pending sync Session and after/watermark request before signalling recovery;
+  malformed or request-drifted gap data closes the protocol instead of starting a
+  snapshot. Automatic pruning remains disabled.
 
 - The Public Timeline retention/checkpoint slice advances OpenSpec `3.5` without
   completing it. Schema v16 Journal/cursor CAS, bounded replay restoration,
@@ -2751,12 +2750,12 @@ Implemented visual baseline:
   Error Item exactly matches the replayed failed terminal event. Existing Traces
   reject later Public Journal repair, and production builds expose no Trace-only
   terminal Store helper. The durable retention floor and content-free Sequencer
-  checkpoint restore only internal lifecycle authority; they are not a public
-  current-Session snapshot. The strict content-free `-32148` retention-gap response
-  is implemented, while snapshot-based retention-gap recovery remains unavailable.
-  Automatic pruning remains disabled. Snapshot, subscription, heartbeat, complete
-  reconnect orchestration, explicit
-  acknowledgement, and Windows recovery evidence remain absent.
+  checkpoint restore only internal lifecycle authority; schema v17 supplies the
+  separate public visible-state snapshot. The strict content-free `-32148`
+  retention-gap response and fixed-head snapshot recovery are implemented end to
+  end. Automatic pruning remains disabled. Subscription, heartbeat, complete
+  reconnect orchestration, explicit acknowledgement, and Windows recovery evidence
+  remain absent.
 
 - The AAP initialization-negotiation stage completes OpenSpec `3.3`. Rust and Qt
   implement the exact two-stage `initialize`/`initialized` state machine, numeric
@@ -2787,7 +2786,7 @@ Implemented visual baseline:
   10 threshold, 13 handshake Runtime, 12 Schema, 63 protocol, 23 stdio/Codex, all
   16 desktop CTests, strict Clippy, formatting, strict OpenSpec validation, and
   `git diff --check`. The partial fixed-watermark replay/gap slice is now recorded
-  above; full snapshot/subscription/heartbeat/reconnect/ack behavior remains `3.5`.
+  above; subscription/heartbeat/complete reconnect/ack behavior remains `3.5`.
 
 - The Codex degradation/provider hardening stage passes 630 `aegisy-agentd`
   library tests with one ignored live fixture, 63 protocol tests, and 21 stdio/Codex
@@ -2797,7 +2796,7 @@ Implemented visual baseline:
   running. Duplicate, decreasing, and gapped events remain inert. Rust formatting,
   `git diff --check`, the focused Qt degradation/Timeline run, and the ordinary Qt
   render run pass. Fixed-watermark replay and per-Session gap catch-up are now
-  partial `3.5` foundations; snapshot, subscription, heartbeat, complete reconnect,
+  partial `3.5` foundations; subscription, heartbeat, complete reconnect,
   acknowledgement, Windows evidence, complete vendor capability negotiation, and
   remaining runtime-only desktop surfaces are still absent, so OpenSpec `3.5` and
   `7.9` remain unchecked.
@@ -2886,19 +2885,18 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Continue OpenSpec `3.5` with the schema v17 durable visible-state floor snapshot,
-   fixed-head bounded `timeline/snapshot` paging, and Qt atomic single-Session
-   replacement; the strict wire contract is now complete but still unadvertised.
-   Then add subscription, heartbeat, complete reconnect orchestration,
-   explicit acknowledgement, and Windows recovery evidence. The structured
-   retention-gap response is implemented; keep automatic pruning disabled until the
-   complete snapshot recovery path is verified.
+1. Continue OpenSpec `3.5` with subscription, heartbeat, complete reconnect
+   orchestration, explicit acknowledgement, and Windows recovery evidence. The
+   structured retention-gap response, schema-v17 visible-state persistence, Runtime
+   fixed-head paging, negotiated capability, and Qt atomic single-Session replacement
+   are implemented. Keep automatic pruning disabled until the remaining recovery
+   path and cross-platform gates are verified.
 2. Validate the hardened TLS installer on a clean Windows x64 VM.
 3. Reproduce and correlate any remaining streaming disconnect with redacted logs.
 4. Continue consolidating widget-local QSS and replace remaining Qt stock icons;
    the Codex health/restart toolbar state is now covered by the render suite.
-   The context-inspection render target remains subject to host resource pressure
-   and must be rerun on a machine that can keep the Qt process alive.
+   Keep the context-inspection and model-state fixtures in the complete desktop
+   render gate as local and CI resource usage changes.
 5. Run the Windows packaging workflow or a clean Windows VM to validate ConPTY,
    Unicode, resize, Ctrl+C, exit status, and Job Object process-tree cleanup, then
    close `14.2` without exposing Agent execution permissions.

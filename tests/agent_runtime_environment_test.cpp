@@ -469,6 +469,11 @@ int runFakeRuntime(const QString &testCase)
         QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
                                       .value(QStringLiteral("stable")).toArray();
         capabilities.append(QStringLiteral("timeline.replay.fixed-watermark"));
+        if (testCase.startsWith(QStringLiteral("timeline-sync-retention-gap"))
+            && testCase != QStringLiteral("timeline-sync-retention-gap-unnegotiated")
+            && testCase != QStringLiteral("timeline-sync-retention-gap-unavailable")) {
+            capabilities.append(QStringLiteral("timeline.snapshot.current"));
+        }
         setStableCapabilities(capabilities);
     } else if (testCase.startsWith(QStringLiteral("timeline-snapshot-"))) {
         QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
@@ -807,6 +812,42 @@ int runFakeRuntime(const QString &testCase)
                 timelineResponse.insert(QStringLiteral("error"), QJsonObject{
                     {QStringLiteral("code"), -32160},
                     {QStringLiteral("message"), QStringLiteral("timeline sync rejected")},
+                });
+            } else if (testCase.startsWith(
+                           QStringLiteral("timeline-sync-retention-gap"))) {
+                const QJsonObject params = message.value(QStringLiteral("params")).toObject();
+                QJsonObject data{
+                    {QStringLiteral("schema_version"),
+                     QStringLiteral("timeline-retention-gap/0.1")},
+                    {QStringLiteral("reason"),
+                     QStringLiteral("requested-anchor-not-retained")},
+                    {QStringLiteral("session_id"), params.value(QStringLiteral("session_id"))},
+                    {QStringLiteral("requested_after"), params.value(QStringLiteral("after"))},
+                    {QStringLiteral("requested_watermark"),
+                     params.value(QStringLiteral("watermark"))},
+                    {QStringLiteral("retained_floor"),
+                     timelineAnchor(2, timelineEventId(QLatin1Char('a')))},
+                    {QStringLiteral("head"),
+                     timelineAnchor(3, timelineEventId(QLatin1Char('b')))},
+                    {QStringLiteral("snapshot_required"), true},
+                    {QStringLiteral("snapshot_available"), true},
+                    {QStringLiteral("snapshot_capability"),
+                     QStringLiteral("timeline.snapshot.current")},
+                    {QStringLiteral("snapshot_method"), QStringLiteral("timeline/snapshot")},
+                    {QStringLiteral("event_history_complete"), false},
+                    {QStringLiteral("replay_from_floor_allowed"), false},
+                };
+                if (testCase == QStringLiteral("timeline-sync-retention-gap-drift")) {
+                    data.insert(QStringLiteral("session_id"), QStringLiteral("session-2"));
+                } else if (testCase
+                           == QStringLiteral("timeline-sync-retention-gap-unavailable")) {
+                    data.insert(QStringLiteral("snapshot_available"), false);
+                }
+                timelineResponse.insert(QStringLiteral("error"), QJsonObject{
+                    {QStringLiteral("code"), -32148},
+                    {QStringLiteral("message"),
+                     QStringLiteral("requested Timeline history is no longer retained")},
+                    {QStringLiteral("data"), data},
                 });
             } else {
                 timelineResponse.insert(
@@ -1568,6 +1609,70 @@ bool runTimelineSyncErrorCleanupCase()
     return true;
 }
 
+bool runTimelineRetentionGapContractCase(const QString &testCase,
+                                         bool expectAcceptedGap,
+                                         bool expectedSnapshotAvailable = true)
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create retention-gap directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool disconnected = false;
+    int gapCount = 0;
+    QString gapRequestId;
+    QJsonObject gapData;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::timelineRetentionGap,
+                         [&gapCount, &gapRequestId, &gapData](
+                             const QString &requestId, const QJsonObject &data) {
+            ++gapCount;
+            gapRequestId = requestId;
+            gapData = data;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "retention-gap handshake timed out")) {
+            return false;
+        }
+        const QString requestId = client.syncTimeline(QStringLiteral("session-1"), 0);
+        if (requestId.isEmpty()) return false;
+        if (expectAcceptedGap) {
+            if (!expect(waitUntil([&]() { return gapCount == 1; })
+                            && gapRequestId == requestId
+                            && gapData.value(QStringLiteral("session_id")).toString()
+                                == QStringLiteral("session-1")
+                            && gapData.value(QStringLiteral("snapshot_available")).toBool()
+                                == expectedSnapshotAvailable
+                            && client.isReady() && !disconnected,
+                        "valid retention-gap response was not request-bound and signalled")) {
+                return false;
+            }
+            client.stop();
+            waitUntil([&]() {
+                return logContainsMethod(logPath, QStringLiteral("shutdown"));
+            });
+        } else if (!expect(waitUntil([&]() { return disconnected; })
+                               && gapCount == 0 && !client.isReady(),
+                           "request-drifted retention-gap response was not rejected")) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool runTimelineSyncDisconnectCleanupCase()
 {
     QTemporaryDir directory;
@@ -1947,6 +2052,14 @@ int main(int argc, char *argv[])
     ok = runTimelineSyncContractCase() && ok;
     ok = runTimelineSnapshotContractCase() && ok;
     ok = runTimelineSyncErrorCleanupCase() && ok;
+    ok = runTimelineRetentionGapContractCase(
+             QStringLiteral("timeline-sync-retention-gap"), true) && ok;
+    ok = runTimelineRetentionGapContractCase(
+             QStringLiteral("timeline-sync-retention-gap-drift"), false) && ok;
+    ok = runTimelineRetentionGapContractCase(
+             QStringLiteral("timeline-sync-retention-gap-unnegotiated"), false) && ok;
+    ok = runTimelineRetentionGapContractCase(
+             QStringLiteral("timeline-sync-retention-gap-unavailable"), true, false) && ok;
     ok = runTimelineSyncDisconnectCleanupCase() && ok;
     ok = runValidTimelineNotificationCase() && ok;
     ok = runLargeGenericTimelineNotificationCase() && ok;

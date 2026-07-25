@@ -211,10 +211,12 @@ Protocol properties:
   durable and independent of the internal Workbench projection-event sequence.
   Schema v16 adds a per-Session durable retention floor and one validated
   checkpoint projection so startup can restore Sequencer lifecycle state from a
-  compacted prefix plus the retained Journal tail. This checkpoint is internal
-  recovery authority, not the user-visible current-Session snapshot required for
-  retention-gap recovery; AAP must not expose it as Item content or claim that it
-  completes reconnect.
+  compacted prefix plus the retained Journal tail. Schema v17 separately stores the
+  sanitized visible Item and active-Turn state at that exact floor. Runtime reduces
+  the retained tail through one fixed head, and Qt stages every page privately before
+  atomically replacing one Session. The v16 checkpoint remains internal lifecycle
+  authority and is never exposed as Item content. This retention-gap path still does
+  not claim complete subscription, heartbeat, acknowledgement, or reconnect.
 - Bounded outbound queues, overload errors, cancellation, heartbeat, and
   backpressure.
 - Idempotency keys for turn start, approval responses, writes, and background job
@@ -324,27 +326,29 @@ missing rebuildable Session projection cannot silently erase replay authority.
 Startup may replay a complete cursor/checkpoint/tail while that projection is
 temporarily missing, but it enforces exact Session ownership immediately after
 projection recovery and before the Store becomes writable.
-Automatic production pruning remains disabled until a versioned current-Session
-snapshot, structured retention-gap response, and client recovery flow exist.
+Automatic production pruning remains disabled until a later reviewed stage enables
+it, even though the versioned current-Session snapshot, structured retention-gap
+response, and client recovery flow now exist.
 The structured gap response is `timeline-retention-gap/0.1` on JSON-RPC `-32148`.
 It publishes only requested anchors, the validated floor/head, and fixed recovery
 metadata. It requires `timeline.snapshot.current` through `timeline/snapshot`, marks
-that route unavailable until the snapshot stage lands, declares retained event
-history incomplete, and forbids replay directly from the floor. Retained anchors
+that route available only when the current connection negotiated the capability,
+declares retained event history incomplete, and forbids replay directly from the
+floor. Retained anchors
 with substituted Event IDs remain drift failures. The v16 Sequencer checkpoint is
 never serialized into this response.
 
-The public current-Session snapshot requires a separate durable visible-state
+The public current-Session snapshot uses a separate durable visible-state
 projection rather than `session/read`: projected Items omit live `started`/`delta`
 updates, do not bind one Public Timeline head, and the v16 checkpoint intentionally
-omits Item content. The next schema stage therefore adds one durable floor-visible-
-state snapshot at the exact retention-floor anchor. Advancing retention must commit
+omits Item content. Schema v17 adds one durable floor-visible-state snapshot at the
+exact retention-floor anchor. Advancing retention commits
 that sanitized visible state, the content-free Sequencer checkpoint, floor movement,
 and exact prefix deletion in one SQLite transaction. Runtime materializes a public
 snapshot by replaying the retained tail strictly after that floor through one fixed
 Public Timeline head; events appended after that head do not enter the snapshot.
 
-The future stable capability is exactly `timeline.snapshot.current` and its only
+The stable capability is exactly `timeline.snapshot.current` and its only
 method is `timeline/snapshot`. The first request supplies a Session, null snapshot
 identity, null watermark, null item cursor, and a 1-200 Item limit. Runtime captures
 the current Journal head once and returns `timeline-session-snapshot-page/0.1`.
@@ -376,10 +380,16 @@ anything visible. Only a complete identity-valid snapshot atomically replaces th
 one Session's Timeline and lifecycle cursor; Qt then drains queued events after the
 watermark through the ordinary event validator. Failure preserves the previous
 projection and frozen state while unrelated Sessions continue. The strict Rust types,
-stable Schema, identities, and cross-page fixture now implement this wire contract,
-but the Runtime method remains unadvertised until Store materialization and Qt atomic
-replacement land. Automatic pruning remains disabled, and OpenSpec task `3.5` stays
-unchecked.
+stable Schema, schema-v17 Store materialization, Runtime fixed-head pages, and Qt
+cross-page replacement implement this contract end to end. The gap response reports
+availability per connection negotiation. Qt discards delayed notifications at or
+below the watermark and validates only later events; because a snapshot has no
+timestamp, the first valid post-watermark event establishes the new client baseline.
+A disconnect drops incomplete page staging but preserves confirmed UI, bounded queued
+live events, their accounting, and recovery intent so capture restarts after a fresh
+handshake. Automatic pruning remains disabled, and
+OpenSpec task `3.5` stays unchecked until subscription, heartbeat, complete reconnect,
+acknowledgement, and Windows recovery evidence land.
 
 Credentials remain in OS secure storage. The database contains credential IDs or
 short-lived token references, never API keys or long-lived Aegisy JWT values.

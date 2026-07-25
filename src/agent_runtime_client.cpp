@@ -387,6 +387,69 @@ bool isBoundedTimelineIdentity(const QJsonValue &value)
     });
 }
 
+bool isValidTimelineWindow(const QJsonObject &after, const QJsonObject &watermark)
+{
+    if (!isValidTimelineAnchor(after) || !isValidTimelineAnchor(watermark)) return false;
+    const double afterSequence = after.value(QStringLiteral("sequence")).toDouble();
+    const double watermarkSequence = watermark.value(QStringLiteral("sequence")).toDouble();
+    return watermarkSequence > afterSequence
+        || (watermarkSequence == afterSequence
+            && watermark.value(QStringLiteral("event_id"))
+                == after.value(QStringLiteral("event_id")));
+}
+
+bool isValidTimelineRetentionGapData(const QJsonObject &data,
+                                     const QJsonObject &request)
+{
+    if (!hasExactKeys(data, {
+            QStringLiteral("schema_version"), QStringLiteral("reason"),
+            QStringLiteral("session_id"), QStringLiteral("requested_after"),
+            QStringLiteral("requested_watermark"), QStringLiteral("retained_floor"),
+            QStringLiteral("head"), QStringLiteral("snapshot_required"),
+            QStringLiteral("snapshot_available"), QStringLiteral("snapshot_capability"),
+            QStringLiteral("snapshot_method"), QStringLiteral("event_history_complete"),
+            QStringLiteral("replay_from_floor_allowed"),
+        })
+        || data.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("timeline-retention-gap/0.1")
+        || data.value(QStringLiteral("reason")).toString()
+            != QStringLiteral("requested-anchor-not-retained")
+        || !isBoundedTimelineIdentity(data.value(QStringLiteral("session_id")))
+        || data.value(QStringLiteral("session_id"))
+            != request.value(QStringLiteral("session_id"))
+        || !data.value(QStringLiteral("requested_after")).isObject()
+        || data.value(QStringLiteral("requested_after"))
+            != request.value(QStringLiteral("after"))
+        || data.value(QStringLiteral("requested_watermark"))
+            != request.value(QStringLiteral("watermark"))
+        || !data.value(QStringLiteral("retained_floor")).isObject()
+        || !data.value(QStringLiteral("head")).isObject()
+        || !data.value(QStringLiteral("snapshot_required")).isBool()
+        || !data.value(QStringLiteral("snapshot_required")).toBool()
+        || !data.value(QStringLiteral("snapshot_available")).isBool()
+        || data.value(QStringLiteral("snapshot_capability")).toString()
+            != QStringLiteral("timeline.snapshot.current")
+        || data.value(QStringLiteral("snapshot_method")).toString()
+            != QStringLiteral("timeline/snapshot")
+        || !data.value(QStringLiteral("event_history_complete")).isBool()
+        || data.value(QStringLiteral("event_history_complete")).toBool()
+        || !data.value(QStringLiteral("replay_from_floor_allowed")).isBool()
+        || data.value(QStringLiteral("replay_from_floor_allowed")).toBool()) {
+        return false;
+    }
+    const QJsonObject requestedAfter = data.value(QStringLiteral("requested_after")).toObject();
+    const QJsonValue requestedWatermark = data.value(QStringLiteral("requested_watermark"));
+    const QJsonObject retainedFloor = data.value(QStringLiteral("retained_floor")).toObject();
+    const QJsonObject head = data.value(QStringLiteral("head")).toObject();
+    return isValidTimelineAnchor(requestedAfter)
+        && (requestedWatermark.isNull()
+            || (requestedWatermark.isObject()
+                && isValidTimelineWindow(requestedAfter, requestedWatermark.toObject())))
+        && isValidTimelineWindow(retainedFloor, head)
+        && requestedAfter.value(QStringLiteral("sequence")).toDouble()
+            < retainedFloor.value(QStringLiteral("sequence")).toDouble();
+}
+
 bool isValidTimelineSnapshotIdentity(const QString &identity)
 {
     static const QRegularExpression pattern(
@@ -1652,6 +1715,7 @@ void AgentRuntimeClient::start()
     m_stopping = false;
     m_stdoutBuffer.clear();
     m_pendingMethods.clear();
+    m_pendingTimelineSyncRequests.clear();
     emit connectionStateChanged(false, QStringLiteral("正在连接本地运行时…"));
     QProcessEnvironment environment = sanitizedSidecarEnvironment(
         QProcessEnvironment::systemEnvironment());
@@ -2174,13 +2238,16 @@ QString AgentRuntimeClient::syncTimeline(const QString &sessionId,
         emit requestFailed({}, method, QStringLiteral("Timeline 同步游标无效"), -32602);
         return {};
     }
-    return sendRequest(method, {
+    const QJsonObject params{
         {QStringLiteral("session_id"), sessionId},
         {QStringLiteral("after"), after},
         {QStringLiteral("watermark"), watermark.isEmpty()
              ? QJsonValue(QJsonValue::Null) : QJsonValue(watermark)},
         {QStringLiteral("limit"), qBound(1, limit, 200)},
-    });
+    };
+    const QString requestId = sendRequest(method, params);
+    if (!requestId.isEmpty()) m_pendingTimelineSyncRequests.insert(requestId, params);
+    return requestId;
 }
 
 QString AgentRuntimeClient::timelineSnapshot(const QString &sessionId,
@@ -3030,10 +3097,29 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
             return;
         }
         const QJsonObject error = message.value(QStringLiteral("error")).toObject();
+        const int errorCode = error.value(QStringLiteral("code")).toInt(-1);
+        if (pendingMethod == QStringLiteral("timeline/sync") && errorCode == -32148) {
+            const QJsonValue dataValue = error.value(QStringLiteral("data"));
+            const QJsonObject request = m_pendingTimelineSyncRequests.value(id);
+            if (!dataValue.isObject()
+                || request.isEmpty()
+                || !isValidTimelineRetentionGapData(dataValue.toObject(), request)
+                || dataValue.toObject().value(QStringLiteral("snapshot_available")).toBool()
+                    != m_negotiatedStableCapabilities.contains(
+                        QStringLiteral("timeline.snapshot.current"))) {
+                rejectProtocolMessage(QStringLiteral("timeline-retention-gap"));
+                return;
+            }
+            m_pendingMethods.remove(id);
+            m_pendingTimelineSyncRequests.remove(id);
+            emit timelineRetentionGap(id, dataValue.toObject());
+            return;
+        }
         m_pendingMethods.remove(id);
+        m_pendingTimelineSyncRequests.remove(id);
         emit requestFailed(id, pendingMethod,
                            error.value(QStringLiteral("message")).toString(),
-                           error.value(QStringLiteral("code")).toInt(-1));
+                           errorCode);
         return;
     }
     const QJsonValue resultValue = message.value(QStringLiteral("result"));
@@ -3043,6 +3129,7 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         return;
     }
     m_pendingMethods.remove(id);
+    m_pendingTimelineSyncRequests.remove(id);
     const QJsonObject result = resultValue.toObject();
     if (pendingMethod == QStringLiteral("project/list")) {
         emit projectsListed(id, result);
@@ -3339,6 +3426,7 @@ void AgentRuntimeClient::failPending(const QString &message)
 {
     const auto pending = m_pendingMethods;
     m_pendingMethods.clear();
+    m_pendingTimelineSyncRequests.clear();
     for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
         emit requestFailed(it.key(), it.value(), message, -1);
     }

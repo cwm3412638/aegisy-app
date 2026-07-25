@@ -226,12 +226,13 @@ client SHALL NOT discard its confirmed projection, clear bounded queued live eve
 or resume at the floor merely because the gap response was structurally valid.
 Other Sessions SHALL continue independently.
 
-The future current-Session snapshot capability SHALL be exactly
+The current-Session snapshot capability SHALL be exactly
 `timeline.snapshot.current` and SHALL expose only `timeline/snapshot`. Runtime SHALL
 advertise it only when the durable floor-visible-state projection, retained Public
-Timeline tail, and snapshot materialization path are healthy. Until that complete
-path exists, the capability and method SHALL remain unavailable and a retention-gap
-response SHALL continue to report `snapshot_available:false`.
+Timeline tail, and snapshot materialization path are healthy. A retention-gap
+response SHALL set `snapshot_available` to true exactly when the current connection
+negotiated that capability, and to false otherwise. A client that receives false
+SHALL keep the Session frozen and SHALL NOT call the snapshot method.
 
 The `timeline/snapshot` request SHALL contain exactly `session_id`, nullable
 `snapshot_identity`, nullable `watermark`, nullable `after`, and `limit`. `limit`
@@ -309,17 +310,25 @@ ordinals, every Item identity, cursor chain, and complete ordered identity befor
 changing visible state. Only the final complete page SHALL atomically replace that
 one Session's Timeline, active-Turn/Item lifecycle state, and confirmed cursor at the
 fixed watermark. Qt SHALL then drain only queued live events after that watermark
-through the ordinary event validator. A malformed, missing, expired, over-bound, or
+through the ordinary event validator and SHALL discard delayed notifications at or
+below the watermark. Snapshot state carries no timestamp baseline; the first valid
+post-watermark live event SHALL establish the new client timestamp baseline while
+Runtime continues to guarantee non-decreasing event timestamps. A malformed,
+missing, expired, over-bound, or
 identity-drifted page SHALL leave the previous projection visible and the Session
 frozen; it SHALL NOT partially append snapshot Items or affect another Session.
+Transport loss SHALL discard private staging and release its bounded accounting while
+preserving the confirmed projection and snapshot-recovery intent. After a fresh
+handshake negotiates the capability again, Qt SHALL restart from a null first-page
+request rather than continuing an abandoned cursor.
 
-The fixed-watermark slice does not satisfy the complete reconnect requirement by
-itself. The schema v16 floor/checkpoint is internal retention and startup authority,
-not a current-Session snapshot or public recovery response. Automatic production
-pruning SHALL remain unreachable until snapshot replacement and structured
-retention-gap recovery exist. Live subscription, heartbeat, reconnect orchestration,
-and explicit acknowledgement SHALL also remain required before this requirement is
-considered complete.
+The fixed-watermark snapshot slice does not satisfy the complete reconnect
+requirement by itself. The schema v16 floor/checkpoint remains internal retention and
+startup authority; schema v17 separately persists the public floor-visible state.
+Automatic production pruning SHALL remain unreachable until a later reviewed stage
+explicitly enables it. Live subscription, heartbeat, reconnect orchestration,
+explicit acknowledgement, and Windows recovery evidence SHALL also remain required
+before this requirement is considered complete.
 
 #### Scenario: Prepared event persistence fails
 - **WHEN** Runtime prepares and serializes an event but its Journal or combined projection transaction fails
@@ -365,6 +374,14 @@ considered complete.
 - **WHEN** a valid `timeline/sync` request names an after anchor strictly before the durable retention floor
 - **THEN** Runtime SHALL return `-32148` with exact content-free floor/head and snapshot-recovery metadata, and the client SHALL keep only that Session frozen without replaying from the floor
 
+#### Scenario: Snapshot-capable client reaches a retention gap
+- **WHEN** the current connection negotiated `timeline.snapshot.current` and a valid sync request is strictly before the retained floor
+- **THEN** Runtime SHALL report `snapshot_available:true` and Qt SHALL begin a null first-page snapshot while keeping its confirmed projection visible
+
+#### Scenario: Older client reaches a retention gap
+- **WHEN** the current connection did not negotiate `timeline.snapshot.current` and a valid sync request is strictly before the retained floor
+- **THEN** Runtime SHALL report `snapshot_available:false` and the client SHALL keep the Session frozen without calling `timeline/snapshot`
+
 #### Scenario: Retained replay identity is forged
 - **WHEN** an after or fixed-watermark sequence is still retained but its Event ID is substituted
 - **THEN** Runtime SHALL return the ordinary anchor/watermark drift failure without `timeline-retention-gap/0.1` data
@@ -397,11 +414,10 @@ considered complete.
 - **WHEN** the event sequence predates retained replay data
 - **THEN** the runtime SHALL return structured `-32148`; only a separately negotiated identity-complete `timeline/snapshot` result MAY let the client atomically replace that Session at a fixed watermark before continuing live delivery
 
-The schema v16 retention foundation and implemented structured gap response do not
-yet satisfy snapshot recovery. Until the versioned floor-visible-state projection,
-snapshot method, complete identities, paging, and Qt replacement land, Runtime fails
-closed without returning a partial tail or fabricating a snapshot, and the affected
-Session remains frozen.
+The schema-v17 floor-visible projection, fixed-head Runtime paging, and Qt atomic
+replacement satisfy retention-gap snapshot recovery for a negotiated connection.
+They do not supply live subscription, heartbeat, acknowledgement, or the complete
+reconnect state machine required to finish this requirement.
 
 #### Scenario: Snapshot pages stay fixed while a Turn continues
 - **WHEN** Runtime captures a snapshot watermark during a running Turn and later Item deltas or a terminal event append while Qt pages
@@ -422,6 +438,10 @@ Session remains frozen.
 #### Scenario: Final snapshot page replaces one Session atomically
 - **WHEN** Qt validates all pages, exact totals, ordered Item identities, active running Turn, and the complete snapshot identity at the fixed watermark
 - **THEN** Qt SHALL replace only that Session's visible Timeline and lifecycle cursor once, then SHALL drain queued post-watermark events through normal validation
+
+#### Scenario: Transport disconnects during snapshot paging
+- **WHEN** transport is lost after one or more valid incomplete snapshot pages
+- **THEN** Qt SHALL discard private staging, release its pending bounds, preserve the prior confirmed UI and recovery-required state, and restart from a null first page only after a fresh handshake negotiates the capability
 
 ### Requirement: Mutating protocol requests are idempotent
 The protocol SHALL require or accept client-generated idempotency keys for turn
