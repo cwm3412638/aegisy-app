@@ -11,6 +11,7 @@ pub const RUNTIME_PROTOCOL_MAXIMUM: &str = PROTOCOL_VERSION;
 pub const MAX_AAP_FRAME_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_INITIALIZE_CAPABILITIES: usize = 128;
 pub const MAX_INITIALIZE_CAPABILITY_BYTES: usize = 128;
+pub const MAX_RUNTIME_HEARTBEAT_NONCE_BYTES: usize = 128;
 pub const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 pub const MAX_TIMELINE_IDENTIFIER_BYTES: usize = 128;
 pub const MAX_TIMELINE_KIND_BYTES: usize = 64;
@@ -384,6 +385,162 @@ pub mod stable {
             pub adapter: String,
             pub status: String,
             pub version: String,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct RuntimeHeartbeatParams {
+            pub schema_version: String,
+            pub nonce: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RuntimeHeartbeatParamsWire {
+            schema_version: String,
+            nonce: String,
+        }
+
+        impl RuntimeHeartbeatParams {
+            pub fn validate(&self) -> Result<(), &'static str> {
+                if self.schema_version != "runtime-heartbeat-request/0.1" {
+                    return Err("runtime heartbeat request schema version is invalid");
+                }
+                if !valid_ascii_graphical(&self.nonce, MAX_RUNTIME_HEARTBEAT_NONCE_BYTES) {
+                    return Err("runtime heartbeat nonce is invalid");
+                }
+                Ok(())
+            }
+        }
+
+        impl TryFrom<RuntimeHeartbeatParamsWire> for RuntimeHeartbeatParams {
+            type Error = &'static str;
+
+            fn try_from(value: RuntimeHeartbeatParamsWire) -> Result<Self, Self::Error> {
+                let params = Self {
+                    schema_version: value.schema_version,
+                    nonce: value.nonce,
+                };
+                params.validate()?;
+                Ok(params)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for RuntimeHeartbeatParams {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                RuntimeHeartbeatParamsWire::deserialize(deserializer)?
+                    .try_into()
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl Serialize for RuntimeHeartbeatParams {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                self.validate().map_err(serde::ser::Error::custom)?;
+                #[derive(Serialize)]
+                struct ParamsRef<'a> {
+                    schema_version: &'a str,
+                    nonce: &'a str,
+                }
+                ParamsRef {
+                    schema_version: &self.schema_version,
+                    nonce: &self.nonce,
+                }
+                .serialize(serializer)
+            }
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct RuntimeHeartbeatResult {
+            pub schema_version: String,
+            pub nonce: String,
+            pub state: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RuntimeHeartbeatResultWire {
+            schema_version: String,
+            nonce: String,
+            state: String,
+        }
+
+        impl RuntimeHeartbeatResult {
+            pub fn validate(&self) -> Result<(), &'static str> {
+                if self.schema_version != "runtime-heartbeat/0.1" {
+                    return Err("runtime heartbeat result schema version is invalid");
+                }
+                if !valid_ascii_graphical(&self.nonce, MAX_RUNTIME_HEARTBEAT_NONCE_BYTES) {
+                    return Err("runtime heartbeat nonce is invalid");
+                }
+                if self.state != "alive" {
+                    return Err("runtime heartbeat state is invalid");
+                }
+                Ok(())
+            }
+
+            pub fn validate_for_request(
+                &self,
+                request: &RuntimeHeartbeatParams,
+            ) -> Result<(), &'static str> {
+                self.validate()?;
+                request.validate()?;
+                if self.nonce != request.nonce {
+                    return Err("runtime heartbeat nonce does not match the request");
+                }
+                Ok(())
+            }
+        }
+
+        impl TryFrom<RuntimeHeartbeatResultWire> for RuntimeHeartbeatResult {
+            type Error = &'static str;
+
+            fn try_from(value: RuntimeHeartbeatResultWire) -> Result<Self, Self::Error> {
+                let result = Self {
+                    schema_version: value.schema_version,
+                    nonce: value.nonce,
+                    state: value.state,
+                };
+                result.validate()?;
+                Ok(result)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for RuntimeHeartbeatResult {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                RuntimeHeartbeatResultWire::deserialize(deserializer)?
+                    .try_into()
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl Serialize for RuntimeHeartbeatResult {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                self.validate().map_err(serde::ser::Error::custom)?;
+                #[derive(Serialize)]
+                struct ResultRef<'a> {
+                    schema_version: &'a str,
+                    nonce: &'a str,
+                    state: &'a str,
+                }
+                ResultRef {
+                    schema_version: &self.schema_version,
+                    nonce: &self.nonce,
+                    state: &self.state,
+                }
+                .serialize(serializer)
+            }
         }
 
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2658,10 +2815,10 @@ mod tests {
     use super::stable::v0_1::{
         timeline_event_id, timeline_snapshot_identity, timeline_snapshot_item_canonical_bytes,
         timeline_snapshot_item_identity, timeline_snapshot_page_identity, EventEnvelope,
-        InitializeParams, ItemUpdate, TimelineAnchor, TimelineItem, TimelineRetentionGapData,
-        TimelineSessionSnapshotPage, TimelineSnapshotActiveTurn, TimelineSnapshotCursor,
-        TimelineSnapshotItem, TimelineSnapshotParams, TimelineSyncPage, TimelineSyncParams,
-        TurnState,
+        InitializeParams, ItemUpdate, RuntimeHeartbeatParams, RuntimeHeartbeatResult,
+        TimelineAnchor, TimelineItem, TimelineRetentionGapData, TimelineSessionSnapshotPage,
+        TimelineSnapshotActiveTurn, TimelineSnapshotCursor, TimelineSnapshotItem,
+        TimelineSnapshotParams, TimelineSyncPage, TimelineSyncParams, TurnState,
     };
     use super::{
         MAX_INITIALIZE_CAPABILITIES, MAX_INITIALIZE_CAPABILITY_BYTES, MAX_SAFE_JSON_INTEGER,
@@ -2708,6 +2865,71 @@ mod tests {
         assert!(params.capabilities.experimental.is_empty());
         assert_eq!(params.limits.max_frame_bytes, 4 * 1024 * 1024);
         assert_eq!(serde_json::to_value(params).unwrap(), base_params());
+    }
+
+    #[test]
+    fn runtime_heartbeat_contract_is_exact_bounded_and_request_bound() {
+        let request_value = json!({
+            "schema_version": "runtime-heartbeat-request/0.1",
+            "nonce": "heartbeat-client-1"
+        });
+        let request: RuntimeHeartbeatParams =
+            serde_json::from_value(request_value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), request_value);
+
+        let result_value = json!({
+            "schema_version": "runtime-heartbeat/0.1",
+            "nonce": "heartbeat-client-1",
+            "state": "alive"
+        });
+        let result: RuntimeHeartbeatResult = serde_json::from_value(result_value.clone()).unwrap();
+        result.validate_for_request(&request).unwrap();
+        assert_eq!(serde_json::to_value(&result).unwrap(), result_value);
+
+        for invalid in [
+            json!({"schema_version": "runtime-heartbeat-request/0.2", "nonce": "nonce"}),
+            json!({"schema_version": "runtime-heartbeat-request/0.1", "nonce": ""}),
+            json!({"schema_version": "runtime-heartbeat-request/0.1", "nonce": "line\nbreak"}),
+            json!({
+                "schema_version": "runtime-heartbeat-request/0.1",
+                "nonce": "x".repeat(129)
+            }),
+            json!({
+                "schema_version": "runtime-heartbeat-request/0.1",
+                "nonce": "nonce",
+                "permission": "read-only"
+            }),
+        ] {
+            assert!(serde_json::from_value::<RuntimeHeartbeatParams>(invalid).is_err());
+        }
+
+        for invalid in [
+            json!({"schema_version": "runtime-heartbeat/0.2", "nonce": "nonce", "state": "alive"}),
+            json!({"schema_version": "runtime-heartbeat/0.1", "nonce": "nonce", "state": "ready"}),
+            json!({
+                "schema_version": "runtime-heartbeat/0.1",
+                "nonce": "nonce",
+                "state": "alive",
+                "timestamp_ms": 1
+            }),
+        ] {
+            assert!(serde_json::from_value::<RuntimeHeartbeatResult>(invalid).is_err());
+        }
+
+        let mismatched: RuntimeHeartbeatResult = serde_json::from_value(json!({
+            "schema_version": "runtime-heartbeat/0.1",
+            "nonce": "heartbeat-client-2",
+            "state": "alive"
+        }))
+        .unwrap();
+        assert!(mismatched.validate_for_request(&request).is_err());
+
+        let invalid_constructed = RuntimeHeartbeatResult {
+            schema_version: "runtime-heartbeat/0.1".into(),
+            nonce: "nonce".into(),
+            state: "ready".into(),
+        };
+        assert!(serde_json::to_value(invalid_constructed).is_err());
     }
 
     #[test]

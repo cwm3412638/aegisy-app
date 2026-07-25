@@ -326,8 +326,8 @@ The fixed-watermark snapshot slice does not satisfy the complete reconnect
 requirement by itself. The schema v16 floor/checkpoint remains internal retention and
 startup authority; schema v17 separately persists the public floor-visible state.
 Automatic production pruning SHALL remain unreachable until a later reviewed stage
-explicitly enables it. Live subscription, heartbeat, reconnect orchestration,
-explicit acknowledgement, and Windows recovery evidence SHALL also remain required
+explicitly enables it. Live subscription, reconnect orchestration, explicit
+acknowledgement, and Windows recovery evidence SHALL also remain required
 before this requirement is considered complete.
 
 #### Scenario: Prepared event persistence fails
@@ -416,8 +416,8 @@ before this requirement is considered complete.
 
 The schema-v17 floor-visible projection, fixed-head Runtime paging, and Qt atomic
 replacement satisfy retention-gap snapshot recovery for a negotiated connection.
-They do not supply live subscription, heartbeat, acknowledgement, or the complete
-reconnect state machine required to finish this requirement.
+They do not supply live subscription, acknowledgement, or the complete reconnect
+state machine required to finish this requirement.
 
 #### Scenario: Snapshot pages stay fixed while a Turn continues
 - **WHEN** Runtime captures a snapshot watermark during a running Turn and later Item deltas or a terminal event append while Qt pages
@@ -486,6 +486,14 @@ retry guidance.
 #### Scenario: Runtime heartbeat expires
 - **WHEN** the client misses the configured heartbeat window
 - **THEN** it SHALL mark connection state unknown, stop sending new mutations, and attempt bounded reconnection before offering runtime restart
+
+#### Scenario: Heartbeat remains reachable during a long request
+- **WHEN** a Turn occupies the ordinary Runtime dispatcher or its bounded request queue is saturated
+- **THEN** an explicitly negotiated nonce-bound heartbeat SHALL still receive one complete response through the independent control path without reading Store or Provider state
+
+#### Scenario: Heartbeat expiry does not fabricate terminal state
+- **WHEN** the heartbeat deadline expires while the sidecar process and initialized control connection still exist
+- **THEN** the client SHALL preserve confirmed Timeline and active-Turn state, reject new ordinary business requests, keep out-of-band Stop and cleanup controls available, and SHALL NOT claim that the Turn or terminal process ended
 
 ### Requirement: Runtime adapters are compatibility tested
 Each shipped adapter SHALL declare supported runtime versions, feature mappings,

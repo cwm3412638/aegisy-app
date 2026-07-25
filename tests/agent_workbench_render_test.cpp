@@ -5141,6 +5141,32 @@ int main(int argc, char *argv[])
                 "running turn did not expose a stable stop action")) {
         return 1;
     }
+    QLabel *heartbeatRuntimeStatus = workbench.findChild<QLabel *>(
+        QStringLiteral("agentRuntimeStatus"));
+    runtimeClient->runtimeLivenessChanged(
+        false, QStringLiteral("运行时心跳超时，连接状态未知"));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
+                    && !AgentWorkbenchWidgetTestAccess::turnCancelling(workbench)
+                    && sendButton->text() == QStringLiteral("停止")
+                    && sendButton->isEnabled()
+                    && heartbeatRuntimeStatus
+                    && heartbeatRuntimeStatus->text()
+                        == QStringLiteral("◇ 运行时状态未知"),
+                "heartbeat Unknown cleared the active Turn or disabled out-of-band Stop")) {
+        return 1;
+    }
+    runtimeClient->runtimeLivenessChanged(true, QStringLiteral("运行时响应正常"));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::turnRunning(workbench)
+                    && sendButton->text() == QStringLiteral("停止")
+                    && sendButton->isEnabled()
+                    && heartbeatRuntimeStatus
+                    && heartbeatRuntimeStatus->text()
+                        == QStringLiteral("● 运行时就绪"),
+                "heartbeat recovery did not preserve the active Turn and restore status")) {
+        return 1;
+    }
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("turn.cancellation-acknowledged"), cancelSessionId,
         cancelTurnId));

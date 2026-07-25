@@ -216,9 +216,21 @@ Protocol properties:
   the retained tail through one fixed head, and Qt stages every page privately before
   atomically replacing one Session. The v16 checkpoint remains internal lifecycle
   authority and is never exposed as Item content. This retention-gap path still does
-  not claim complete subscription, heartbeat, acknowledgement, or reconnect.
+  not claim complete subscription, acknowledgement, or reconnect.
 - Bounded outbound queues, overload errors, cancellation, heartbeat, and
-  backpressure.
+  backpressure. The first heartbeat slice negotiates
+  `runtime.heartbeat.out-of-band` and uses the existing independent stdio control
+  reader, so a long Turn or saturated 32-request ordinary queue cannot delay the
+  response. Every five seconds Qt sends one exact, nonce-bound
+  `runtime-heartbeat-request/0.1`; a 15-second expiry marks only connection liveness
+  Unknown. It fails ordinary pending work and blocks new business operations without
+  killing the sidecar, clearing confirmed Timeline state, or inventing a Turn
+  terminal. Cancellation, steering, terminal stop, shutdown, and heartbeat remain
+  available through the initialized control connection. The heartbeat carries no
+  timestamp, PID, Store/Provider state, permission, or execution authority and never
+  touches SQLite. A late or prior-process-generation response is inert. Bounded
+  process reconnect, live subscription, acknowledgement, and the complete reconnect
+  state machine remain later `3.5` slices.
 - Idempotency keys for turn start, approval responses, writes, and background job
   submission.
 - Server-initiated requests for approval, structured user input, credential
@@ -404,7 +416,7 @@ timestamp, the first valid post-watermark event establishes the new client basel
 A disconnect drops incomplete page staging but preserves confirmed UI, bounded queued
 live events, their accounting, and recovery intent so capture restarts after a fresh
 handshake. Automatic pruning remains disabled, and
-OpenSpec task `3.5` stays unchecked until subscription, heartbeat, complete reconnect,
+OpenSpec task `3.5` stays unchecked until subscription, complete reconnect,
 acknowledgement, and Windows recovery evidence land.
 
 Credentials remain in OS secure storage. The database contains credential IDs or

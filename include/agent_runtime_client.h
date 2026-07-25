@@ -18,10 +18,14 @@ class AgentRuntimeClient : public QObject
     Q_OBJECT
 
 public:
-    explicit AgentRuntimeClient(QObject *parent = nullptr);
+    explicit AgentRuntimeClient(QObject *parent = nullptr,
+                                int heartbeatIntervalMs = 5000,
+                                int heartbeatDeadlineMs = 15000);
     ~AgentRuntimeClient() override;
 
     bool isReady() const;
+    bool isHeartbeatHealthy() const;
+    bool isControlAvailable() const;
     bool isRecoveryMode() const;
     QString runtimePath() const;
 
@@ -242,6 +246,7 @@ public:
 
 signals:
     void connectionStateChanged(bool ready, const QString &detail);
+    void runtimeLivenessChanged(bool healthy, const QString &detail);
     void runtimeInitialized(const QJsonObject &result);
     void runtimeHealthRead(const QJsonObject &health);
     void runtimeDegradationsRead(const QString &requestId, const QJsonObject &result);
@@ -366,18 +371,36 @@ private:
     void rejectProtocolMessage(const QString &reasonCode);
     void clearNegotiationState();
     void failPending(const QString &message);
+    void failOrdinaryPending(const QString &message);
+    void sendHeartbeat();
+    void handleHeartbeatTimeout();
+    void retireResponseId(const QString &requestId);
+    void removePendingRequest(const QString &requestId);
 
     QProcess *m_process = nullptr;
     QTimer *m_startupTimer = nullptr;
+    QTimer *m_heartbeatIntervalTimer = nullptr;
+    QTimer *m_heartbeatDeadlineTimer = nullptr;
     QByteArray m_stdoutBuffer;
     QHash<QString, QString> m_pendingMethods;
+    QHash<QString, quint64> m_pendingGenerations;
     QHash<QString, QJsonObject> m_pendingTimelineSyncRequests;
+    QSet<QString> m_retiredResponseIds;
+    QStringList m_retiredResponseOrder;
     quint64 m_nextRequestId = 0;
     quint64 m_nextTurnKey = 0;
+    quint64 m_processGeneration = 0;
+    quint64 m_initializeGeneration = 0;
+    quint64 m_heartbeatGeneration = 0;
+    quint64 m_nextHeartbeatNonce = 0;
     QString m_initializeRequestId;
+    QString m_heartbeatRequestId;
+    QString m_heartbeatNonce;
     QSet<QString> m_negotiatedStableCapabilities;
     int m_negotiatedMaximumFrameBytes = 0;
     bool m_ready = false;
+    bool m_heartbeatNegotiated = false;
+    bool m_heartbeatHealthy = false;
     bool m_recoveryMode = false;
     bool m_handshakeComplete = false;
     bool m_stopping = false;

@@ -1,0 +1,2 @@
+{"jsonrpc":"2.0","id":"heartbeat-1","method":"runtime/heartbeat","params":{"schema_version":"runtime-heartbeat-request/0.1","nonce":"client-heartbeat-1"}}
+{"jsonrpc":"2.0","id":"heartbeat-1","result":{"schema_version":"runtime-heartbeat/0.1","nonce":"client-heartbeat-1","state":"alive"}}

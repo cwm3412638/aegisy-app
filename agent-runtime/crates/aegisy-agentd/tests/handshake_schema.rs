@@ -1,7 +1,8 @@
 use aegisy_aap::stable::v0_1::{
-    timeline_event_id, EventEnvelope, InitializeParams, InitializeResult, ItemUpdate, TimelineItem,
-    TimelineRetentionGapData, TimelineSessionSnapshotPage, TimelineSnapshotParams,
-    TimelineSyncPage, TimelineSyncParams, TurnState,
+    timeline_event_id, EventEnvelope, InitializeParams, InitializeResult, ItemUpdate,
+    RuntimeHeartbeatParams, RuntimeHeartbeatResult, TimelineItem, TimelineRetentionGapData,
+    TimelineSessionSnapshotPage, TimelineSnapshotParams, TimelineSyncPage, TimelineSyncParams,
+    TurnState,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -251,6 +252,10 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
         "initializedNotification",
         "initializeIncompatibleData",
         "initializeIncompatibleErrorResponse",
+        "runtimeHeartbeatParams",
+        "runtimeHeartbeatResult",
+        "runtimeHeartbeatRequest",
+        "runtimeHeartbeatSuccessResponse",
         "safePositiveInteger",
         "safeNonNegativeInteger",
         "boundedGraphicalId",
@@ -289,6 +294,10 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
         "initializedNotification",
         "initializeIncompatibleData",
         "initializeIncompatibleErrorResponse",
+        "runtimeHeartbeatParams",
+        "runtimeHeartbeatResult",
+        "runtimeHeartbeatRequest",
+        "runtimeHeartbeatSuccessResponse",
         "timelineItem",
         "timelineItemUpdate",
         "timelineEvent",
@@ -458,6 +467,60 @@ fn compatible_handshake_fixture_matches_types_intersection_limits_and_security()
 }
 
 #[test]
+fn runtime_heartbeat_fixture_is_an_exact_content_free_nonce_round_trip() {
+    let messages = fixture_messages("aap-runtime-heartbeat.jsonl");
+    assert_eq!(messages.len(), 2);
+    messages.iter().for_each(|message| {
+        assert!(strict_envelope_valid(message));
+        assert_content_free(message);
+    });
+    assert!(schema_definition_valid(
+        "runtimeHeartbeatRequest",
+        &messages[0]
+    ));
+    assert!(schema_definition_valid(
+        "runtimeHeartbeatSuccessResponse",
+        &messages[1]
+    ));
+
+    let request: RuntimeHeartbeatParams =
+        serde_json::from_value(messages[0]["params"].clone()).unwrap();
+    let result: RuntimeHeartbeatResult =
+        serde_json::from_value(messages[1]["result"].clone()).unwrap();
+    result.validate_for_request(&request).unwrap();
+    assert_eq!(
+        serde_json::to_value(&request).unwrap(),
+        messages[0]["params"]
+    );
+    assert_eq!(
+        serde_json::to_value(&result).unwrap(),
+        messages[1]["result"]
+    );
+
+    let mut extra_request = messages[0].clone();
+    extra_request["params"]["permission"] = json!("read-only");
+    assert!(!strict_envelope_valid(&extra_request));
+
+    let mut notification = messages[0].clone();
+    notification.as_object_mut().unwrap().remove("id");
+    assert!(!strict_envelope_valid(&notification));
+
+    let mut extra_result = messages[1].clone();
+    extra_result["result"]["timestamp_ms"] = json!(1);
+    assert!(!schema_definition_valid(
+        "runtimeHeartbeatSuccessResponse",
+        &extra_result
+    ));
+
+    let mut wrong_state = messages[1].clone();
+    wrong_state["result"]["state"] = json!("ready");
+    assert!(!schema_definition_valid(
+        "runtimeHeartbeatSuccessResponse",
+        &wrong_state
+    ));
+}
+
+#[test]
 fn incompatible_fixture_carries_bounded_upgrade_direction_without_session_data() {
     let messages = fixture_messages("aap-initialize-incompatible.jsonl");
     assert_eq!(messages.len(), 2);
@@ -549,7 +612,7 @@ fn strict_handshake_contract_rejects_legacy_empty_experimental_and_envelope_drif
 
     let mut ordinary_notification = json!({
         "jsonrpc": "2.0",
-        "method": "runtime/heartbeat",
+        "method": "runtime/ordinary-notification",
         "params": {}
     });
     assert!(strict_envelope_valid(&ordinary_notification));

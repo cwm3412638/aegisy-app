@@ -3962,7 +3962,7 @@ fn stdio_trace_budget_exhaustion_fails_durably_before_command_terminal_persisten
 }
 
 #[test]
-fn stdio_control_steers_and_cancels_a_turn_while_normal_dispatch_is_blocked() {
+fn stdio_control_heartbeats_steers_and_cancels_while_normal_dispatch_is_blocked() {
     let codex = fake_codex();
     let data_root = codex.parent().expect("fixture directory").join("workbench");
     fs::create_dir_all(&data_root).unwrap();
@@ -4002,6 +4002,11 @@ fn stdio_control_steers_and_cancels_a_turn_while_normal_dispatch_is_blocked() {
         .unwrap()
         .iter()
         .any(|capability| capability == "turn.steer.same-turn"));
+    assert!(initialized["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "runtime.heartbeat.out-of-band"));
     assert!(initialized["result"]["capabilities"]["stable"]
         .as_array()
         .unwrap()
@@ -4079,6 +4084,30 @@ fn stdio_control_steers_and_cancels_a_turn_while_normal_dispatch_is_blocked() {
             .as_str()
             .unwrap()
             .contains("queue")
+    );
+    send(
+        &mut stdin,
+        &request(
+            "heartbeat-saturated",
+            "runtime/heartbeat",
+            json!({
+                "schema_version": "runtime-heartbeat-request/0.1",
+                "nonce": "saturated-turn-nonce"
+            }),
+        ),
+    );
+    let heartbeat = receive_until(&receiver, |message| message["id"] == "heartbeat-saturated");
+    assert_eq!(
+        heartbeat,
+        json!({
+            "jsonrpc": "2.0",
+            "id": "heartbeat-saturated",
+            "result": {
+                "schema_version": "runtime-heartbeat/0.1",
+                "nonce": "saturated-turn-nonce",
+                "state": "alive"
+            }
+        })
     );
     send(
         &mut stdin,

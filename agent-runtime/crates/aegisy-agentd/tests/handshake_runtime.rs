@@ -466,6 +466,145 @@ fn out_of_band_requests_obey_handshake_capabilities_and_the_fixed_frame_limit() 
 }
 
 #[test]
+fn heartbeat_is_strict_negotiated_and_reachable_only_on_the_ready_control_path() {
+    let heartbeat = request(
+        "heartbeat-1",
+        "runtime/heartbeat",
+        json!({
+            "schema_version": "runtime-heartbeat-request/0.1",
+            "nonce": "client-nonce-1"
+        }),
+    );
+
+    let mut runtime = Runtime::default();
+    let control = runtime.control();
+    assert_eq!(
+        control.handle_out_of_band_line(&heartbeat).unwrap()[0]["error"]["code"],
+        -32002
+    );
+
+    ready(&mut runtime, &["runtime.preview", "permission.read-only"]);
+    assert_eq!(
+        control.handle_out_of_band_line(&heartbeat).unwrap()[0]["error"]["code"],
+        -32006
+    );
+
+    let mut runtime = Runtime::unavailable("fixture unavailable");
+    let initialized = ready(
+        &mut runtime,
+        &["runtime.unavailable", "runtime.heartbeat.out-of-band"],
+    );
+    assert!(initialized["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "runtime.heartbeat.out-of-band"));
+    assert!(!initialized["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "permission.read-only"));
+    let control = runtime.control();
+    let response = control.handle_out_of_band_line(&heartbeat).unwrap();
+    assert_eq!(
+        response[0],
+        json!({
+            "jsonrpc": "2.0",
+            "id": "heartbeat-1",
+            "result": {
+                "schema_version": "runtime-heartbeat/0.1",
+                "nonce": "client-nonce-1",
+                "state": "alive"
+            }
+        })
+    );
+    assert_eq!(
+        control.handle_out_of_band_line(&heartbeat).unwrap()[0]["error"]["code"],
+        -32001
+    );
+
+    let normal_path = runtime.handle_line(&request(
+        "heartbeat-normal-path",
+        "runtime/heartbeat",
+        json!({
+            "schema_version": "runtime-heartbeat-request/0.1",
+            "nonce": "normal-path"
+        }),
+    ));
+    assert_eq!(normal_path[0]["error"]["code"], -32601);
+
+    for (id, params) in [
+        (
+            "wrong-schema",
+            json!({"schema_version": "runtime-heartbeat-request/0.2", "nonce": "nonce"}),
+        ),
+        (
+            "empty-nonce",
+            json!({"schema_version": "runtime-heartbeat-request/0.1", "nonce": ""}),
+        ),
+        (
+            "long-nonce",
+            json!({
+                "schema_version": "runtime-heartbeat-request/0.1",
+                "nonce": "x".repeat(129)
+            }),
+        ),
+        (
+            "extra-field",
+            json!({
+                "schema_version": "runtime-heartbeat-request/0.1",
+                "nonce": "nonce",
+                "store": "must-not-be-read"
+            }),
+        ),
+    ] {
+        let response = control
+            .handle_out_of_band_line(&request(id, "runtime/heartbeat", params))
+            .unwrap();
+        assert_eq!(response[0]["error"]["code"], -32602, "{response:?}");
+    }
+
+    let boundary = control
+        .handle_out_of_band_line(&request(
+            "boundary-nonce",
+            "runtime/heartbeat",
+            json!({
+                "schema_version": "runtime-heartbeat-request/0.1",
+                "nonce": "x".repeat(128)
+            }),
+        ))
+        .unwrap();
+    assert_eq!(boundary[0]["result"]["nonce"], "x".repeat(128));
+
+    assert_eq!(
+        control
+            .handle_out_of_band_line(&notification(
+                "runtime/heartbeat",
+                json!({
+                    "schema_version": "runtime-heartbeat-request/0.1",
+                    "nonce": "notification"
+                }),
+            ))
+            .unwrap()[0]["error"]["code"],
+        -32600
+    );
+    let null_id = json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "method": "runtime/heartbeat",
+        "params": {
+            "schema_version": "runtime-heartbeat-request/0.1",
+            "nonce": "null-id"
+        }
+    })
+    .to_string();
+    assert_eq!(
+        control.handle_out_of_band_line(&null_id).unwrap()[0]["error"]["code"],
+        -32600
+    );
+}
+
+#[test]
 fn oversized_library_frames_are_rejected_without_parsing_or_echoing_the_body() {
     let secret = "oversized-private-body-sentinel";
     let oversized = json!({

@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <functional>
 #include <iostream>
+#include <iterator>
 
 namespace {
 
@@ -110,6 +111,17 @@ QJsonObject validInitializeResult()
         }},
         {QStringLiteral("transport_security"), testTransportSecurity()},
     };
+}
+
+QString testTerminalPlatformCapability()
+{
+#if defined(Q_OS_MACOS)
+    return QStringLiteral("terminal.pty.macos.user-initiated");
+#elif defined(Q_OS_WIN)
+    return QStringLiteral("terminal.conpty.windows.user-initiated");
+#else
+    return QStringLiteral("terminal.pty.unsupported");
+#endif
 }
 
 QString timelineEventId(QLatin1Char fill)
@@ -455,7 +467,25 @@ int runFakeRuntime(const QString &testCase)
         capabilities.insert(QStringLiteral("stable"), stable);
         result.insert(QStringLiteral("capabilities"), capabilities);
     };
-    if (testCase == QStringLiteral("valid-list-only")) {
+    if (testCase.startsWith(QStringLiteral("heartbeat-"))) {
+        result.insert(QStringLiteral("backend"), QJsonObject{
+            {QStringLiteral("adapter"), QStringLiteral("codex-app-server")},
+            {QStringLiteral("version"), QStringLiteral("codex-cli 0.144.5")},
+            {QStringLiteral("status"), QStringLiteral("ready")},
+        });
+        setStableCapabilities(QJsonArray{
+            QStringLiteral("runtime.codex-app-server"),
+            QStringLiteral("runtime.health"),
+            QStringLiteral("runtime.degradations"),
+            QStringLiteral("runtime.heartbeat.out-of-band"),
+            QStringLiteral("permission.read-only"),
+            QStringLiteral("session.list"),
+            QStringLiteral("turn.cancel.interrupt"),
+            QStringLiteral("terminal.lifecycle.named"),
+            QStringLiteral("terminal.stop.out-of-band"),
+            testTerminalPlatformCapability(),
+        });
+    } else if (testCase == QStringLiteral("valid-list-only")) {
         QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
                                       .value(QStringLiteral("stable")).toArray();
         capabilities.append(QStringLiteral("session.list"));
@@ -673,12 +703,60 @@ int runFakeRuntime(const QString &testCase)
     bool hasCombinedFirstId = false;
     int timelineSyncRequests = 0;
     int timelineSnapshotRequests = 0;
+    QJsonObject delayedHeartbeat;
     while (std::getline(std::cin, rawLine)) {
         const QByteArray line = QByteArray::fromStdString(rawLine);
         appendLogLine(&log, line);
         const QJsonDocument document = QJsonDocument::fromJson(line);
         if (!document.isObject()) continue;
         const QJsonObject message = document.object();
+        const QString method = message.value(QStringLiteral("method")).toString();
+        if (method == QStringLiteral("runtime/heartbeat")
+            && testCase.startsWith(QStringLiteral("heartbeat-"))) {
+            delayedHeartbeat = message;
+            if (testCase == QStringLiteral("heartbeat-normal")) {
+                const QJsonObject params = message.value(QStringLiteral("params")).toObject();
+                const QJsonObject heartbeatResponse{
+                    {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                    {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+                    {QStringLiteral("result"), QJsonObject{
+                        {QStringLiteral("schema_version"),
+                         QStringLiteral("runtime-heartbeat/0.1")},
+                        {QStringLiteral("nonce"), params.value(QStringLiteral("nonce"))},
+                        {QStringLiteral("state"), QStringLiteral("alive")},
+                    }},
+                };
+                std::cout
+                    << QJsonDocument(heartbeatResponse).toJson(QJsonDocument::Compact)
+                           .constData()
+                    << std::endl;
+            }
+            continue;
+        }
+        if (method == QStringLiteral("session/list")
+            && testCase.startsWith(QStringLiteral("heartbeat-"))) {
+            continue;
+        }
+        if (method == QStringLiteral("terminal/stop-user")
+            && testCase == QStringLiteral("heartbeat-late")
+            && !delayedHeartbeat.isEmpty()) {
+            const QJsonObject params = delayedHeartbeat.value(
+                QStringLiteral("params")).toObject();
+            const QJsonObject lateResponse{
+                {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                {QStringLiteral("id"), delayedHeartbeat.value(QStringLiteral("id"))},
+                {QStringLiteral("result"), QJsonObject{
+                    {QStringLiteral("schema_version"),
+                     QStringLiteral("runtime-heartbeat/0.1")},
+                    {QStringLiteral("nonce"), params.value(QStringLiteral("nonce"))},
+                    {QStringLiteral("state"), QStringLiteral("alive")},
+                }},
+            };
+            std::cout << QJsonDocument(lateResponse).toJson(QJsonDocument::Compact)
+                             .constData()
+                      << std::endl;
+            delayedHeartbeat = {};
+        }
         if (message.value(QStringLiteral("method")).toString()
                 == QStringLiteral("initialized")
             && testCase.startsWith(QStringLiteral("notification-"))) {
@@ -988,6 +1066,17 @@ bool logContainsMethod(const QString &path, const QString &method)
     });
 }
 
+QList<QJsonObject> logMessagesForMethod(const QString &path, const QString &method)
+{
+    QList<QJsonObject> matching;
+    const QList<QJsonObject> messages = readLogMessages(path);
+    std::copy_if(messages.cbegin(), messages.cend(), std::back_inserter(matching),
+                 [&method](const QJsonObject &message) {
+        return message.value(QStringLiteral("method")).toString() == method;
+    });
+    return matching;
+}
+
 bool runHandshakeCase(const QString &testCase, bool expectAccepted,
                       bool expectReady = true, bool expectRecovery = false,
                       const QString &expectedFailureCode = QString())
@@ -1116,6 +1205,239 @@ bool runHandshakeCase(const QString &testCase, bool expectAccepted,
     }
     return expect(messages.size() == 1,
                   "invalid response produced initialized or business traffic");
+}
+
+bool runHeartbeatNormalCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create heartbeat normal directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("heartbeat-normal"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool livenessUnknown = false;
+    {
+        AgentRuntimeClient client(nullptr, 20, 80);
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::runtimeLivenessChanged,
+                         [&livenessUnknown](bool healthy, const QString &) {
+            if (!healthy) livenessUnknown = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() {
+                return initialized
+                    && !logMessagesForMethod(logPath,
+                            QStringLiteral("runtime/heartbeat")).isEmpty();
+            }), "normal heartbeat was not requested")) {
+            return false;
+        }
+        if (!expect(client.isReady() && client.isHeartbeatHealthy()
+                        && client.isControlAvailable(),
+                    "normal heartbeat did not preserve operational state")) {
+            return false;
+        }
+        waitUntil([]() { return false; }, 140);
+        if (!expect(!livenessUnknown && client.isReady(),
+                    "healthy heartbeat entered Unknown state")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return !client.isControlAvailable(); });
+    }
+
+    const QList<QJsonObject> heartbeats = logMessagesForMethod(
+        logPath, QStringLiteral("runtime/heartbeat"));
+    if (!expect(heartbeats.size() >= 2,
+                "heartbeat interval did not issue repeated single-flight probes")) {
+        return false;
+    }
+    QSet<QString> nonces;
+    for (const QJsonObject &heartbeat : heartbeats) {
+        const QJsonObject params = heartbeat.value(QStringLiteral("params")).toObject();
+        const QString nonce = params.value(QStringLiteral("nonce")).toString();
+        if (!expect(params.size() == 2
+                        && params.value(QStringLiteral("schema_version")).toString()
+                            == QStringLiteral("runtime-heartbeat-request/0.1")
+                        && !nonce.isEmpty() && nonce.toUtf8().size() <= 64
+                        && !nonces.contains(nonce),
+                    "heartbeat request contract or nonce uniqueness was invalid")) {
+            return false;
+        }
+        nonces.insert(nonce);
+    }
+    return true;
+}
+
+bool runHeartbeatTimeoutCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create heartbeat timeout directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("heartbeat-timeout"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool unknown = false;
+    bool disconnectedAfterInitialize = false;
+    bool ordinaryFailed = false;
+    bool cancellationRequested = false;
+    bool terminalStopped = false;
+    {
+        AgentRuntimeClient client(nullptr, 20, 80);
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::runtimeLivenessChanged,
+                         [&unknown](bool healthy, const QString &) {
+            if (!healthy) unknown = true;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnectedAfterInitialize](
+                             bool ready, const QString &) {
+            if (initialized && !ready) disconnectedAfterInitialize = true;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                         [&ordinaryFailed](const QString &, const QString &method,
+                                           const QString &, int) {
+            if (method == QStringLiteral("session/list")) ordinaryFailed = true;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::terminalStopped,
+                         [&terminalStopped](const QString &, const QJsonObject &) {
+            terminalStopped = true;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::turnCancellationRequested,
+                         [&cancellationRequested](const QString &, const QJsonObject &) {
+            cancellationRequested = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "heartbeat timeout handshake did not complete")) {
+            return false;
+        }
+        const QString pending = client.listSessions();
+        if (!expect(!pending.isEmpty(), "ordinary request was not pending before timeout")) {
+            return false;
+        }
+        if (!expect(waitUntil([&]() { return unknown && ordinaryFailed; }),
+                    "heartbeat timeout did not enter Unknown and clear ordinary pending")) {
+            return false;
+        }
+        if (!expect(!client.isReady() && !client.isHeartbeatHealthy()
+                        && client.isControlAvailable()
+                        && !disconnectedAfterInitialize,
+                    "heartbeat timeout changed connection or control availability")) {
+            return false;
+        }
+        const int sentSessionLists = logMessagesForMethod(
+            logPath, QStringLiteral("session/list")).size();
+        if (!expect(client.listSessions().isEmpty()
+                        && logMessagesForMethod(logPath,
+                               QStringLiteral("session/list")).size() == sentSessionLists,
+                    "ordinary request escaped while liveness was Unknown")) {
+            return false;
+        }
+        if (!expect(!client.cancelTurn(QStringLiteral("session-1"),
+                                       QStringLiteral("turn-1")).isEmpty()
+                        && waitUntil([&]() { return cancellationRequested; }),
+                    "turn cancellation was unavailable while liveness was Unknown")) {
+            return false;
+        }
+        if (!expect(!client.stopUserTerminal(QStringLiteral("session-1"),
+                                             QStringLiteral("terminal-1")).isEmpty()
+                        && waitUntil([&]() { return terminalStopped; }),
+                    "terminal stop control was unavailable while liveness was Unknown")) {
+            return false;
+        }
+        if (!expect(!disconnectedAfterInitialize && !client.isReady()
+                        && client.isControlAvailable(),
+                    "control response incorrectly restored or disconnected liveness")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return !client.isControlAvailable(); });
+    }
+    return true;
+}
+
+bool runHeartbeatLateAndRehandshakeCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create heartbeat rehandshake directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("heartbeat-late"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    int initializedCount = 0;
+    bool unknown = false;
+    bool healthyAfterUnknown = false;
+    bool terminalStopped = false;
+    AgentRuntimeClient client(nullptr, 20, 80);
+    QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                     [&initializedCount](const QJsonObject &) { ++initializedCount; });
+    QObject::connect(&client, &AgentRuntimeClient::runtimeLivenessChanged,
+                     [&unknown, &healthyAfterUnknown](bool healthy, const QString &) {
+        if (!healthy) unknown = true;
+        else if (unknown) healthyAfterUnknown = true;
+    });
+    QObject::connect(&client, &AgentRuntimeClient::terminalStopped,
+                     [&terminalStopped](const QString &, const QJsonObject &) {
+        terminalStopped = true;
+    });
+    client.start();
+    if (!expect(waitUntil([&]() { return initializedCount == 1 && unknown; }),
+                "late heartbeat case did not reach Unknown")) {
+        return false;
+    }
+    if (!expect(!client.stopUserTerminal(QStringLiteral("session-1"),
+                                         QStringLiteral("terminal-1")).isEmpty()
+                    && waitUntil([&]() { return terminalStopped; }),
+                "late heartbeat control response was not processed")) {
+        return false;
+    }
+    if (!expect(!healthyAfterUnknown && !client.isReady()
+                    && client.isControlAvailable(),
+                "late heartbeat response restored liveness")) {
+        return false;
+    }
+
+    client.stop();
+    if (!expect(waitUntil([&]() { return !client.isControlAvailable(); }),
+                "Unknown runtime did not complete shutdown cleanup")) {
+        return false;
+    }
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("heartbeat-normal"));
+    client.start();
+    if (!expect(waitUntil([&]() {
+            return initializedCount == 2 && client.isReady()
+                && logMessagesForMethod(logPath,
+                       QStringLiteral("runtime/heartbeat")).size() >= 2;
+        }), "fresh handshake did not restore heartbeat liveness")) {
+        return false;
+    }
+    const QList<QJsonObject> heartbeats = logMessagesForMethod(
+        logPath, QStringLiteral("runtime/heartbeat"));
+    const QString firstNonce = heartbeats.first().value(QStringLiteral("params"))
+        .toObject().value(QStringLiteral("nonce")).toString();
+    const QString lastNonce = heartbeats.last().value(QStringLiteral("params"))
+        .toObject().value(QStringLiteral("nonce")).toString();
+    if (!expect(!firstNonce.isEmpty() && !lastNonce.isEmpty()
+                    && firstNonce != lastNonce,
+                "fresh QProcess generation reused the stale heartbeat nonce")) {
+        return false;
+    }
+    client.stop();
+    waitUntil([&]() { return !client.isControlAvailable(); });
+    return true;
 }
 
 bool runOrdinaryEnvelopeCase(const QString &testCase)
@@ -2142,6 +2464,9 @@ int main(int argc, char *argv[])
     ok = runHandshakeCase(QStringLiteral("upgrade-runtime-error"), false, true, false,
                           QStringLiteral("upgrade-runtime")) && ok;
     ok = runHandshakeCase(QStringLiteral("malformed-upgrade-error"), false) && ok;
+    ok = runHeartbeatNormalCase() && ok;
+    ok = runHeartbeatTimeoutCase() && ok;
+    ok = runHeartbeatLateAndRehandshakeCase() && ok;
     ok = runCapabilityGateCase() && ok;
     ok = runTimelineSyncContractCase() && ok;
     ok = runTimelineSnapshotContractCase() && ok;

@@ -126,6 +126,29 @@ AAP 0.1 ordered Timeline event evidence (`3.4`):
 
 Public Timeline fixed-watermark replay slice (`3.5`, partial):
 
+- The connection-liveness slice defines exact AAP
+  `runtime-heartbeat-request/0.1` and `runtime-heartbeat/0.1` contracts behind
+  `runtime.heartbeat.out-of-band`. The only request data is a non-empty bounded ASCII
+  graphical nonce; the exact response echoes it with `state=alive`. Stable Schema,
+  Rust type, handshake, and fixture tests reject notifications, extra fields,
+  invalid schema/state/nonce, missing negotiation, duplicate IDs, and ordinary-path
+  dispatch. The result contains no time, PID, Store/Provider state, permission, or
+  execution authority.
+- A real stdio saturation fixture blocks a Turn, fills the ordinary 32-request queue,
+  and proves heartbeat still returns through the control reader while every stdout
+  producer shares the complete-frame writer mutex. Qt fake-runtime coverage proves
+  healthy repeated single-flight probes, 5-second/15-second production timing,
+  Unknown without `connectionStateChanged(false)`, ordinary pending failure and new
+  request denial, continued terminal Stop, inert late/old-generation replies, and
+  liveness restoration only after a fresh handshake. The Workbench render fixture
+  proves Unknown preserves the active Turn and its Stop action while changing the
+  status surface. The Windows packaging workflow runs the same Qt Runtime environment
+  test before installer construction.
+- This slice does not implement bounded sidecar reconnection, live Timeline
+  subscription, explicit acknowledgement, or the race-free subscribe/sync/activate
+  reconnect flow. Heartbeat Unknown does not kill a possibly live Turn, and automatic
+  Timeline pruning remains disabled. Keep task `3.5` unchecked.
+
 - Workbench schema v15 adds a dedicated `public_timeline_events` journal and one
   `public_timeline_cursors` source/cursor row per Session. Session insertion registers
   the empty cursor idempotently; event insertion and cursor advancement use the same
@@ -269,8 +292,8 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
   append only to the Journal. The schema v16 floor/checkpoint remains internal
   retention and restart authority, while schema v17 plus fixed-head paging and Qt
   atomic replacement now provide structured retention-gap snapshot recovery. Live
-  subscription, heartbeat, complete reconnect orchestration, explicit
-  acknowledgement, automatic pruning enablement, and Windows recovery/runtime
+  subscription, complete reconnect orchestration, explicit acknowledgement,
+  automatic pruning enablement, and Windows recovery/runtime
   evidence remain absent. Keep `3.5` unchecked.
 
 Model catalog foundation evidence:
@@ -832,8 +855,8 @@ Current editor evidence:
   The later fixed-watermark and schema v16 retention-foundation slices above now add
   durable public replay, bounded per-Session gap catch-up, and internal
   checkpoint-plus-tail restart authority, but current snapshot/structured
-  retention-gap recovery, subscription, heartbeat, complete reconnect,
-  acknowledgement, and Windows recovery/runtime evidence remain incomplete. Full
+  retention-gap recovery, subscription, complete reconnect, acknowledgement, and
+  Windows recovery/runtime evidence remain incomplete. Full
   vendor capability negotiation and the remaining desktop/dependent feature gates
   are also incomplete, so `3.5` and `7.9` remain unchecked.
 - Large command-output tests cover a Unicode-safe 64 KiB head/192 KiB tail,

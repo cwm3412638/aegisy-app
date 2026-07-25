@@ -10,6 +10,7 @@ on:
       - cmake/**
       - include/**
       - src/**
+      - tests/agent_runtime_environment_test.cpp
       - assets/**
       - installer.iss
       - package-windows.bat
@@ -110,6 +111,25 @@ jobs:
                   throw "Cannot locate Qt6Config.cmake; install-qt-action may have failed."
               }
           }
+
+      - name: Verify Windows Qt agent runtime
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+              -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON `
+              "-DQt6_DIR=$env:QT_CMAKE_DIR" `
+              "-DOPENSSL_ROOT_DIR=$env:OPENSSL_ROOT_DIR"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cmake --build build --config Release `
+              --target AegisyAgentRuntimeEnvironmentTest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          ctest --test-dir build -C Release `
+              --tests-regex '^agent_runtime_environment$' `
+              --no-tests=error `
+              --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install Inno Setup
         shell: pwsh

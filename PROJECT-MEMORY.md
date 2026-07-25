@@ -52,6 +52,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   transport instead of being dropped. The current stdio transport is local but not
   authenticated, encrypted, or peer-verified; authenticated socket/pipe transport
   remains under OpenSpec `4.2` through `4.4`.
+  Negotiated `runtime.heartbeat.out-of-band` now proves only local Runtime connection
+  liveness through the independent stdio control reader. Qt sends one nonce-bound
+  heartbeat every five seconds with a 15-second deadline. Expiry enters a separate
+  Unknown state: ordinary pending work fails and new business requests are blocked,
+  while the process, initialized control connection, confirmed Timeline, active Turn,
+  and cancellation/steering/terminal-stop/shutdown controls remain available. Late or
+  prior-process-generation responses are inert. Heartbeat reads no Store or Provider
+  state, carries no timestamp/PID/permission, and grants no execution authority.
 - Durable Workbench data: the Qt host passes `AEGISY_WORKBENCH_DATA_ROOT` to the
   sidecar, defaulting to the platform `AppDataLocation/workbench` directory. An
   explicit environment value remains a developer/test override; a standalone
@@ -196,8 +204,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   interrupted terminals reject those open streams; repeatable `updated` snapshots may
   remain at terminal, and a revision-one atomic `truncated` marker is valid. Durable
   public journaling, fixed-watermark catch-up, and structured retention-gap snapshot
-  recovery are now partially implemented under `3.5`; subscription, heartbeat,
-  complete reconnect orchestration, and acknowledgement remain open. Agent/Codex
+  recovery are now partially implemented under `3.5`; subscription, complete
+  reconnect orchestration, and acknowledgement remain open. Agent/Codex
   remains read-only.
 - OpenSpec task `3.5` now has an end-to-end fixed-watermark catch-up slice. Workbench
   schema v16 stores exact validated `timeline-event/0.1` envelopes behind one
@@ -245,8 +253,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   v17 supplies that separate floor-visible state in the checkpoint/floor/prune
   transaction; Runtime materializes a fixed-head page set and Qt replaces one Session
   only after complete private validation. Automatic pruning remains disabled.
-  Live subscription, heartbeat, complete reconnect orchestration, explicit
-  acknowledgement, and Windows recovery evidence remain open. Keep `3.5` unchecked.
+  The out-of-band heartbeat slice adds the exact content-free
+  `runtime-heartbeat-request/0.1` / `runtime-heartbeat/0.1` nonce round trip,
+  independent queue-saturation reachability, Qt single-flight 5-second/15-second
+  liveness gating, generation-bound late-response rejection, and the Windows
+  packaging workflow's Qt Runtime environment-test gate. Live subscription,
+  bounded reconnect orchestration, explicit acknowledgement, and complete Windows
+  reconnect evidence remain open. Keep `3.5` unchecked.
 - The Timeline snapshot recovery slice is implemented end to end. AAP types and the
   stable Schema define the
   exact null-only `timeline/snapshot` request, fixed floor/watermark, strict
@@ -2761,6 +2774,25 @@ Implemented visual baseline:
 
 ## Verification Snapshot (2026-07-26)
 
+- The out-of-band Runtime heartbeat stage passes 28 AAP tests, 728
+  `aegisy-agentd` library tests with one ignored live fixture, 7 daemon-main, 10
+  context-threshold, 14 handshake Runtime, 18 Schema, 67 protocol, and 23
+  stdio/Codex tests: 895 passed, zero failed, and one ignored in the final complete
+  workspace run. Strict workspace Clippy, Rust formatting, the complete desktop
+  build, all 16 desktop CTests, strict OpenSpec validation, and `git diff --check`
+  pass. The Runtime test proves heartbeat remains responsive during a blocked Turn
+  and saturated ordinary queue; Qt proves healthy single-flight probes, Unknown
+  without disconnect, ordinary-request failure, retained cancellation/terminal-stop
+  controls, inert late responses, and fresh-handshake recovery. The Workbench render
+  test preserves the active Turn and Stop action while showing Unknown. The Windows
+  packaging workflow now builds and runs `agent_runtime_environment` before
+  packaging. Initial parallel verification saw three non-reproducing stdio fixture
+  timing failures (one missing temporary instance file, one early fixture disconnect,
+  and one missing Session field); each focused rerun, the complete stdio/protocol
+  reruns, and the final original full gates passed. Bounded reconnect, live
+  subscription, explicit acknowledgement, and complete Windows reconnect evidence
+  remain open; automatic pruning remains disabled.
+
 - The durable Codex file-change Proposal Timeline reference and Qt Changes recovery
   stage passes 27 AAP tests, 728
   `aegisy-agentd` library tests with one ignored live fixture, 6 daemon-main, 10
@@ -2828,8 +2860,8 @@ Implemented visual baseline:
   checkpoint restore only internal lifecycle authority; schema v17 supplies the
   separate public visible-state snapshot. The strict content-free `-32148`
   retention-gap response and fixed-head snapshot recovery are implemented end to
-  end. Automatic pruning remains disabled. Subscription, heartbeat, complete
-  reconnect orchestration, explicit acknowledgement, and Windows recovery evidence
+  end. Automatic pruning remains disabled. Subscription, complete reconnect
+  orchestration, explicit acknowledgement, and Windows recovery evidence
   remain absent.
 
 - The AAP initialization-negotiation stage completes OpenSpec `3.3`. Rust and Qt
@@ -2861,7 +2893,7 @@ Implemented visual baseline:
   10 threshold, 13 handshake Runtime, 12 Schema, 63 protocol, 23 stdio/Codex, all
   16 desktop CTests, strict Clippy, formatting, strict OpenSpec validation, and
   `git diff --check`. The partial fixed-watermark replay/gap slice is now recorded
-  above; subscription/heartbeat/complete reconnect/ack behavior remains `3.5`.
+  above; subscription/complete reconnect/ack behavior remains `3.5`.
 
 - The Codex degradation/provider hardening stage passes 630 `aegisy-agentd`
   library tests with one ignored live fixture, 63 protocol tests, and 21 stdio/Codex
@@ -2871,8 +2903,8 @@ Implemented visual baseline:
   running. Duplicate, decreasing, and gapped events remain inert. Rust formatting,
   `git diff --check`, the focused Qt degradation/Timeline run, and the ordinary Qt
   render run pass. Fixed-watermark replay and per-Session gap catch-up are now
-  partial `3.5` foundations; subscription, heartbeat, complete reconnect,
-  acknowledgement, Windows evidence, complete vendor capability negotiation, and
+  partial `3.5` foundations; subscription, complete reconnect, acknowledgement,
+  Windows evidence, complete vendor capability negotiation, and
   remaining runtime-only desktop surfaces are still absent, so OpenSpec `3.5` and
   `7.9` remain unchecked.
 
@@ -2960,12 +2992,11 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Continue OpenSpec `3.5` with subscription, heartbeat, complete reconnect
-   orchestration, explicit acknowledgement, and Windows recovery evidence. The
-   structured retention-gap response, schema-v17 visible-state persistence, Runtime
-   fixed-head paging, negotiated capability, and Qt atomic single-Session replacement
-   are implemented. Keep automatic pruning disabled until the remaining recovery
-   path and cross-platform gates are verified.
+1. Continue OpenSpec `3.5` with bounded Runtime process reconnect, then the
+   subscribe/sync/activate race boundary, explicit acknowledgement, and Windows
+   recovery evidence. Fixed-watermark replay, structured retention-gap snapshot
+   recovery, and out-of-band heartbeat are implemented. Keep automatic pruning
+   disabled until the remaining recovery path and cross-platform gates are verified.
 2. Validate the hardened TLS installer on a clean Windows x64 VM.
 3. Reproduce and correlate any remaining streaming disconnect with redacted logs.
 4. Continue consolidating widget-local QSS and replace remaining Qt stock icons;

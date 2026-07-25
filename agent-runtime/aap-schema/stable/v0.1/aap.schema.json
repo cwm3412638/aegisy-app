@@ -103,6 +103,19 @@
     {
       "if": {
         "required": ["method"],
+        "properties": { "method": { "const": "runtime/heartbeat" } }
+      },
+      "then": {
+        "required": ["id", "params"],
+        "properties": {
+          "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+          "params": { "$ref": "#/$defs/runtimeHeartbeatParams" }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["method"],
         "properties": { "method": { "const": "event" } }
       },
       "then": {
@@ -165,6 +178,46 @@
           "maxLength": 2048
         },
         "data": {}
+      }
+    },
+    "runtimeHeartbeatParams": {
+      "type": "object",
+      "required": ["schema_version", "nonce"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "runtime-heartbeat-request/0.1" },
+        "nonce": { "$ref": "#/$defs/boundedGraphicalId" }
+      }
+    },
+    "runtimeHeartbeatResult": {
+      "type": "object",
+      "required": ["schema_version", "nonce", "state"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "runtime-heartbeat/0.1" },
+        "nonce": { "$ref": "#/$defs/boundedGraphicalId" },
+        "state": { "const": "alive" }
+      }
+    },
+    "runtimeHeartbeatRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "method": { "const": "runtime/heartbeat" },
+        "params": { "$ref": "#/$defs/runtimeHeartbeatParams" }
+      }
+    },
+    "runtimeHeartbeatSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "result": { "$ref": "#/$defs/runtimeHeartbeatResult" }
       }
     },
     "protocolVersion": {

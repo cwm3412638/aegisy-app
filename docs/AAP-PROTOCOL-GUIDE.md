@@ -38,8 +38,27 @@ client capabilities are omitted. A ready or read-only-recovery backend also
 requires its exact backend marker and `permission.read-only`. Every business
 method is independently mapped to required capabilities: Qt does not send a
 method whose requirements were not negotiated, and the runtime repeats the gate,
-including for out-of-band cancellation, steering, and terminal stop. A successful
-initialize response or degradation report is never a substitute for this gate.
+including for out-of-band heartbeat, cancellation, steering, and terminal stop. A
+successful initialize response or degradation report is never a substitute for this
+gate.
+
+`runtime.heartbeat.out-of-band` is the connection-liveness capability. After the
+exact `initialized` notification and only when this capability was negotiated, the
+stdio reader answers `runtime/heartbeat` before the bounded ordinary request queue.
+The request and result are closed, content-free nonce contracts:
+
+```jsonl
+{"jsonrpc":"2.0","id":"heartbeat-1","method":"runtime/heartbeat","params":{"schema_version":"runtime-heartbeat-request/0.1","nonce":"client-heartbeat-1"}}
+{"jsonrpc":"2.0","id":"heartbeat-1","result":{"schema_version":"runtime-heartbeat/0.1","nonce":"client-heartbeat-1","state":"alive"}}
+```
+
+The nonce is a non-empty 1-128 byte ASCII graphical string and must be returned
+unchanged. The result deliberately contains no timestamp, PID, Store state, Provider
+state, permission, or execution authority. It proves only that this initialized
+connection's Runtime control reader can return a complete frame. Heartbeat does not
+read or write the Workbench Store and remains reachable while a long Turn blocks the
+ordinary dispatcher or its 32-request queue is full. All stdout producers serialize
+one complete newline-delimited JSON frame through the shared writer mutex.
 
 Protocol versions are compared as numeric `major.minor` pairs, not strings. A
 non-overlapping range fails before project or session state is loaded and returns
@@ -224,8 +243,8 @@ connection restarts capture from a null first-page request. Snapshot pages carry
 timestamp baseline; the first valid post-watermark live event establishes the new Qt
 baseline while Runtime remains responsible for non-decreasing event time. Automatic
 pruning remains disabled, and OpenSpec task `3.5` remains unchecked until
-subscription, heartbeat, complete reconnect orchestration, acknowledgement, and
-Windows recovery evidence are complete.
+subscription, complete reconnect orchestration, acknowledgement, and Windows
+recovery evidence are complete.
 
 Every anchor is the exact pair `{sequence,event_id}`. Sequence zero is represented
 only as `{0,null}`. Every positive sequence requires the exact 77-byte lowercase
@@ -284,9 +303,9 @@ six-event synthetic Timeline and is not covered by the atomic producer boundary
 above. Adapter and persistence compensation paths can also durably finish a Turn
 Trace before appending the public terminal/Error event in a later transaction; those
 fallbacks remain outside the atomic producer boundary. Snapshot, structured
-retention-gap recovery, live subscription, heartbeat, complete reconnect
-orchestration, explicit acknowledgement, and Windows recovery evidence also remain
-later parts of OpenSpec `3.5`; keep that task incomplete.
+retention-gap recovery, live subscription, complete reconnect orchestration,
+explicit acknowledgement, and Windows recovery evidence also remain later parts of
+OpenSpec `3.5`; keep that task incomplete.
 
 ## Structured Errors And Cancellation
 

@@ -2139,6 +2139,36 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         if (!ready && !detail.contains(QStringLiteral("正在连接"))) addNotice(detail, true);
         updateRecoveryUi();
     });
+    connect(m_runtime, &AgentRuntimeClient::runtimeLivenessChanged,
+            this, [this](bool healthy, const QString &detail) {
+        // A missed heartbeat is not a process exit and does not establish a Turn
+        // terminal state. Preserve confirmed UI and keep only out-of-band cleanup
+        // controls available until the same connection proves liveness again.
+        if (!healthy && m_runtime->isControlAvailable()) {
+            m_runtimeStatus->setText(QStringLiteral("◇ 运行时状态未知"));
+            m_runtimeStatus->setToolTip(detail);
+            m_runtimeStatus->setStyleSheet(
+                QStringLiteral("color:#b54708; font-size:11px; font-weight:600;"));
+            if (m_terminalPollTimer) m_terminalPollTimer->stop();
+#ifdef AEGISY_HAS_MONACO
+            if (m_terminalBridge) m_terminalBridge->setInputEnabled(false);
+#endif
+            addNotice(detail, true);
+        } else if (healthy && m_runtime->isReady()) {
+            m_runtimeStatus->setText(m_runtimeRecoveryMode
+                ? QStringLiteral("◇ 只读恢复")
+                : QStringLiteral("● 运行时就绪"));
+            m_runtimeStatus->setToolTip(detail);
+            m_runtimeStatus->setStyleSheet(m_runtimeRecoveryMode
+                ? QStringLiteral("color:#b54708; font-size:11px; font-weight:600;")
+                : QStringLiteral("color:#067647; font-size:11px; font-weight:600;"));
+            if (m_terminalRunning && m_terminalPollTimer) m_terminalPollTimer->start();
+        }
+        updateTurnAction();
+        updateEditorActions();
+        updateTerminalControls();
+        updateRecoveryUi();
+    });
     connect(m_runtime, &AgentRuntimeClient::requestFailed,
             this, [this](const QString &requestId, const QString &method,
                          const QString &, int code) {
@@ -6798,6 +6828,8 @@ void AgentWorkbenchWidget::updateTerminalControls()
 {
     const bool protocolReady = m_runtime && m_runtime->isReady() && !m_runtimeRecoveryMode
         && !m_projectId.isEmpty();
+    const bool controlReady = m_runtime && m_runtime->isControlAvailable()
+        && !m_runtimeRecoveryMode && !m_projectId.isEmpty();
     const bool ready = protocolReady
         && (m_workSessionId.isEmpty()
             || (!m_archivedSessionIds.contains(m_workSessionId)
@@ -6807,7 +6839,7 @@ void AgentWorkbenchWidget::updateTerminalControls()
     if (m_terminalNewButton) m_terminalNewButton->setEnabled(ready);
     if (m_terminalStopButton) {
         m_terminalStopButton->setEnabled(
-            protocolReady && selected && m_terminalRunning && !m_terminalStopping);
+            controlReady && selected && m_terminalRunning && !m_terminalStopping);
     }
     if (m_terminalRestartButton) m_terminalRestartButton->setEnabled(ready && selected);
     if (m_terminalRemoveButton) {
@@ -11014,7 +11046,7 @@ void AgentWorkbenchWidget::startPendingTurnIfReady()
 void AgentWorkbenchWidget::cancelActiveTurn()
 {
     if (!m_turnRunning || m_turnCancelling || m_activeTurnSessionId.isEmpty()
-            || m_activeTurnId.isEmpty() || !m_runtime->isReady()) {
+            || m_activeTurnId.isEmpty() || !m_runtime->isControlAvailable()) {
         return;
     }
     m_turnCancelRequestId = m_runtime->cancelTurn(m_activeTurnSessionId, m_activeTurnId);
@@ -11038,7 +11070,7 @@ void AgentWorkbenchWidget::updateTurnAction()
         m_sendButton->setToolTip(m_turnCancelling
             ? QStringLiteral("已请求停止，正在等待运行时确认终态")
             : QStringLiteral("停止当前任务"));
-        m_sendButton->setEnabled(m_runtime->isReady() && !m_turnCancelling);
+        m_sendButton->setEnabled(m_runtime->isControlAvailable() && !m_turnCancelling);
         return;
     }
     if (m_runtimeDegradationState != RuntimeDegradationState::Valid) {

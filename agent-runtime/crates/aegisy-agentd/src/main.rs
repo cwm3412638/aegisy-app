@@ -286,6 +286,54 @@ mod tests {
     }
 
     #[test]
+    fn outbound_writer_serializes_complete_frames_across_concurrent_producers() {
+        const PRODUCERS: usize = 8;
+        const MESSAGES_PER_PRODUCER: usize = 64;
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let producers = (0..PRODUCERS)
+            .map(|producer| {
+                let output = output.clone();
+                std::thread::spawn(move || {
+                    for sequence in 0..MESSAGES_PER_PRODUCER {
+                        assert!(write_message(
+                            &output,
+                            &serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": format!("producer-{producer}-{sequence}"),
+                                "result": {
+                                    "schema_version": "runtime-heartbeat/0.1",
+                                    "nonce": format!("nonce-{producer}-{sequence}"),
+                                    "state": "alive"
+                                }
+                            })
+                        ));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for producer in producers {
+            producer.join().unwrap();
+        }
+
+        let bytes = output.lock().unwrap().clone();
+        let frames = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), PRODUCERS * MESSAGES_PER_PRODUCER);
+        let ids = frames
+            .iter()
+            .map(|frame| frame["id"].as_str().unwrap())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), frames.len());
+        assert!(frames.iter().all(|frame| {
+            frame["result"]["schema_version"] == "runtime-heartbeat/0.1"
+                && frame["result"]["state"] == "alive"
+        }));
+    }
+
+    #[test]
     fn outbound_writer_fails_closed_on_oversized_notifications() {
         let output = Arc::new(Mutex::new(Vec::new()));
         let oversized = serde_json::json!({

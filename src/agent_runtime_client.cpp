@@ -27,6 +27,7 @@ constexpr int kMaximumRequestIdBytes = 128;
 constexpr int kMaximumCapabilities = 128;
 constexpr int kMaximumCapabilityBytes = 128;
 constexpr int kMaximumErrorMessageBytes = 2048;
+constexpr int kMaximumRetiredResponseIds = 1024;
 constexpr int kMaximumTimelineIdentityBytes = 128;
 constexpr double kMaximumSafeJsonInteger = 9007199254740991.0;
 constexpr int kMaximumTimelineDataDepth = 16;
@@ -213,6 +214,7 @@ const QStringList &declaredCapabilities()
         QStringLiteral("runtime.codex-app-server"),
         QStringLiteral("runtime.degradations"),
         QStringLiteral("runtime.health"),
+        QStringLiteral("runtime.heartbeat.out-of-band"),
         QStringLiteral("runtime.preview"),
         QStringLiteral("runtime.projection-recovery.status"),
         QStringLiteral("runtime.recovery.diagnostic-export"),
@@ -1147,6 +1149,7 @@ bool validateInitializeResult(const QJsonObject &result,
                 QStringLiteral("runtime.unavailable"),
                 QStringLiteral("runtime.restart"),
                 QStringLiteral("runtime.health"),
+                QStringLiteral("runtime.heartbeat.out-of-band"),
                 QStringLiteral("runtime.degradations"),
             };
             QSet<QString> unexpected = negotiated;
@@ -1162,6 +1165,7 @@ bool validateInitializeResult(const QJsonObject &result,
         const QSet<QString> allowed = {
             QStringLiteral("runtime.recovery.read-only"),
             QStringLiteral("runtime.health"),
+            QStringLiteral("runtime.heartbeat.out-of-band"),
             QStringLiteral("runtime.degradations"),
             QStringLiteral("model.catalog.read-only"),
             QStringLiteral("model.catalog.refresh.status.read-only"),
@@ -1265,6 +1269,8 @@ QStringList requiredCapabilitiesForMethod(const QString &method,
 {
     static const QHash<QString, QString> capabilities = {
         {QStringLiteral("runtime/health"), QStringLiteral("runtime.health")},
+        {QStringLiteral("runtime/heartbeat"),
+         QStringLiteral("runtime.heartbeat.out-of-band")},
         {QStringLiteral("runtime/degradations"), QStringLiteral("runtime.degradations")},
         {QStringLiteral("model/catalog"), QStringLiteral("model.catalog.read-only")},
         {QStringLiteral("model/catalog-cache"), QStringLiteral("model.catalog.cache.read-only")},
@@ -1316,6 +1322,7 @@ QStringList requiredCapabilitiesForMethod(const QString &method,
         {QStringLiteral("session/compaction/checkpoint/revise"), QStringLiteral("session.compaction.checkpoint-review")},
         {QStringLiteral("runtime/recovery/status"), QStringLiteral("runtime.recovery.status")},
         {QStringLiteral("turn/cancel"), QStringLiteral("turn.cancel.interrupt")},
+        {QStringLiteral("turn/steer"), QStringLiteral("turn.steer.same-turn")},
         {QStringLiteral("turn/context/inspect"), QStringLiteral("turn.context.inspect")},
         {QStringLiteral("workspace/pinned-context/list"), QStringLiteral("workspace.pinned-context.store")},
         {QStringLiteral("workspace/pinned-context/save"), QStringLiteral("workspace.pinned-context.manage")},
@@ -1412,6 +1419,29 @@ QStringList requiredCapabilitiesForMethod(const QString &method,
     return required;
 }
 
+bool isLivenessControlMethod(const QString &method)
+{
+    return method == QStringLiteral("initialize")
+        || method == QStringLiteral("shutdown")
+        || method == QStringLiteral("runtime/heartbeat")
+        || method == QStringLiteral("turn/cancel")
+        || method == QStringLiteral("turn/steer")
+        || method == QStringLiteral("terminal/stop-user");
+}
+
+bool isValidHeartbeatResult(const QJsonObject &result, const QString &nonce)
+{
+    return hasExactKeys(result, {
+            QStringLiteral("schema_version"), QStringLiteral("nonce"),
+            QStringLiteral("state"),
+        })
+        && result.value(QStringLiteral("schema_version")).toString()
+            == QStringLiteral("runtime-heartbeat/0.1")
+        && result.value(QStringLiteral("nonce")).toString() == nonce
+        && result.value(QStringLiteral("state")).toString()
+            == QStringLiteral("alive");
+}
+
 bool sensitiveSidecarEnvironmentName(const QString &name)
 {
     const QString upper = name.toUpper();
@@ -1453,18 +1483,30 @@ bool sensitiveSidecarEnvironmentName(const QString &name)
 }
 }
 
-AgentRuntimeClient::AgentRuntimeClient(QObject *parent)
+AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
+                                       int heartbeatIntervalMs,
+                                       int heartbeatDeadlineMs)
     : QObject(parent)
     , m_process(new QProcess(this))
     , m_startupTimer(new QTimer(this))
+    , m_heartbeatIntervalTimer(new QTimer(this))
+    , m_heartbeatDeadlineTimer(new QTimer(this))
 {
     m_startupTimer->setSingleShot(true);
+    m_heartbeatIntervalTimer->setInterval(qMax(1, heartbeatIntervalMs));
+    m_heartbeatDeadlineTimer->setInterval(
+        qMax(m_heartbeatIntervalTimer->interval(), heartbeatDeadlineMs));
+    m_heartbeatDeadlineTimer->setSingleShot(true);
     connect(m_startupTimer, &QTimer::timeout, this, [this]() {
         if (!m_ready && m_process->state() != QProcess::NotRunning) {
             emit connectionStateChanged(false, QStringLiteral("运行时握手超时"));
             m_process->kill();
         }
     });
+    connect(m_heartbeatIntervalTimer, &QTimer::timeout,
+            this, &AgentRuntimeClient::sendHeartbeat);
+    connect(m_heartbeatDeadlineTimer, &QTimer::timeout,
+            this, &AgentRuntimeClient::handleHeartbeatTimeout);
     connect(m_process, &QProcess::readyReadStandardOutput,
             this, &AgentRuntimeClient::processStdout);
     connect(m_process, &QProcess::readyReadStandardError, this, [this]() {
@@ -1877,7 +1919,18 @@ QString AgentRuntimeClient::workspaceEditProposalArtifactPageIdentity(
 
 bool AgentRuntimeClient::isReady() const
 {
-    return m_ready;
+    return m_ready && isHeartbeatHealthy();
+}
+
+bool AgentRuntimeClient::isHeartbeatHealthy() const
+{
+    return !m_heartbeatNegotiated || m_heartbeatHealthy;
+}
+
+bool AgentRuntimeClient::isControlAvailable() const
+{
+    return m_handshakeComplete
+        && m_process->state() != QProcess::NotRunning;
 }
 
 bool AgentRuntimeClient::isRecoveryMode() const
@@ -1913,9 +1966,11 @@ void AgentRuntimeClient::start()
     }
 
     clearNegotiationState();
+    if (++m_processGeneration == 0) ++m_processGeneration;
     m_stopping = false;
     m_stdoutBuffer.clear();
     m_pendingMethods.clear();
+    m_pendingGenerations.clear();
     m_pendingTimelineSyncRequests.clear();
     emit connectionStateChanged(false, QStringLiteral("正在连接本地运行时…"));
     QProcessEnvironment environment = sanitizedSidecarEnvironment(
@@ -1958,13 +2013,14 @@ void AgentRuntimeClient::start()
         {QStringLiteral("transport_security"), stdioTransportSecurity()},
     };
     m_initializeRequestId = sendRequest(QStringLiteral("initialize"), params);
+    m_initializeGeneration = m_processGeneration;
 }
 
 void AgentRuntimeClient::stop()
 {
     if (m_process->state() == QProcess::NotRunning) return;
     m_stopping = true;
-    if (m_ready) sendRequest(QStringLiteral("shutdown"));
+    if (isControlAvailable()) sendRequest(QStringLiteral("shutdown"));
     else m_process->terminate();
 }
 
@@ -3107,6 +3163,11 @@ QString AgentRuntimeClient::sendRequest(const QString &method, const QJsonObject
         emit requestFailed({}, method, QStringLiteral("本地运行时握手尚未完成"), -32003);
         return {};
     }
+    if (m_heartbeatNegotiated && !m_heartbeatHealthy
+        && !isLivenessControlMethod(method)) {
+        emit requestFailed({}, method, QStringLiteral("本地运行时响应状态未知"), -1);
+        return {};
+    }
     if (method != QStringLiteral("initialize")) {
         const QStringList required = requiredCapabilitiesForMethod(method, params);
         for (const QString &capability : required) {
@@ -3135,6 +3196,7 @@ QString AgentRuntimeClient::sendRequest(const QString &method, const QJsonObject
         return {};
     }
     m_pendingMethods.insert(id, method);
+    m_pendingGenerations.insert(id, m_processGeneration);
     return id;
 }
 
@@ -3215,12 +3277,21 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         return;
     }
 
+    const QJsonValue responseId = message.value(QStringLiteral("id"));
+    if (isCanonicalRequestId(responseId)
+        && m_retiredResponseIds.contains(responseId.toString())) {
+        return;
+    }
+
     if (!m_handshakeComplete && !m_initializeRequestId.isEmpty()) {
         const QJsonValue idValue = message.value(QStringLiteral("id"));
         const bool hasResult = message.contains(QStringLiteral("result"));
         const bool hasError = message.contains(QStringLiteral("error"));
         if (!isCanonicalRequestId(idValue)
-            || idValue.toString() != m_initializeRequestId) {
+            || idValue.toString() != m_initializeRequestId
+            || m_initializeGeneration != m_processGeneration
+            || m_pendingGenerations.value(m_initializeRequestId)
+                != m_processGeneration) {
             rejectInitializeResponse(QStringLiteral("response-id"));
             return;
         }
@@ -3261,8 +3332,9 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
             rejectInitializeResponse(reasonCode);
             return;
         }
-        m_pendingMethods.remove(m_initializeRequestId);
+        removePendingRequest(m_initializeRequestId);
         m_initializeRequestId.clear();
+        m_initializeGeneration = 0;
         m_negotiatedStableCapabilities = stableCapabilities;
         m_negotiatedMaximumFrameBytes = maximumFrameBytes;
         acceptInitializeResponse(result);
@@ -3317,7 +3389,8 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
     }
     const QString id = idValue.toString();
     const QString pendingMethod = m_pendingMethods.value(id);
-    if (pendingMethod.isEmpty()) {
+    if (pendingMethod.isEmpty()
+        || m_pendingGenerations.value(id) != m_processGeneration) {
         rejectProtocolMessage(QStringLiteral("response-correlation"));
         return;
     }
@@ -3328,6 +3401,13 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         }
         const QJsonObject error = message.value(QStringLiteral("error")).toObject();
         const int errorCode = error.value(QStringLiteral("code")).toInt(-1);
+        if (pendingMethod == QStringLiteral("runtime/heartbeat")) {
+            emit requestFailed(id, pendingMethod,
+                               error.value(QStringLiteral("message")).toString(),
+                               errorCode);
+            handleHeartbeatTimeout();
+            return;
+        }
         if (pendingMethod == QStringLiteral("timeline/sync") && errorCode == -32148) {
             const QJsonValue dataValue = error.value(QStringLiteral("data"));
             const QJsonObject request = m_pendingTimelineSyncRequests.value(id);
@@ -3340,13 +3420,11 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
                 rejectProtocolMessage(QStringLiteral("timeline-retention-gap"));
                 return;
             }
-            m_pendingMethods.remove(id);
-            m_pendingTimelineSyncRequests.remove(id);
+            removePendingRequest(id);
             emit timelineRetentionGap(id, dataValue.toObject());
             return;
         }
-        m_pendingMethods.remove(id);
-        m_pendingTimelineSyncRequests.remove(id);
+        removePendingRequest(id);
         emit requestFailed(id, pendingMethod,
                            error.value(QStringLiteral("message")).toString(),
                            errorCode);
@@ -3358,9 +3436,27 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         rejectProtocolMessage(QStringLiteral("result-type"));
         return;
     }
-    m_pendingMethods.remove(id);
-    m_pendingTimelineSyncRequests.remove(id);
     const QJsonObject result = resultValue.toObject();
+    if (pendingMethod == QStringLiteral("runtime/heartbeat")) {
+        if (id != m_heartbeatRequestId
+            || m_heartbeatGeneration != m_processGeneration
+            || !isValidHeartbeatResult(result, m_heartbeatNonce)) {
+            rejectProtocolMessage(QStringLiteral("heartbeat-response"));
+            return;
+        }
+        removePendingRequest(id);
+        m_heartbeatDeadlineTimer->stop();
+        m_heartbeatRequestId.clear();
+        m_heartbeatNonce.clear();
+        m_heartbeatGeneration = 0;
+        const bool changed = !m_heartbeatHealthy;
+        m_heartbeatHealthy = true;
+        if (changed) {
+            emit runtimeLivenessChanged(true, QStringLiteral("运行时响应正常"));
+        }
+        return;
+    }
+    removePendingRequest(id);
     if (pendingMethod == QStringLiteral("project/list")) {
         emit projectsListed(id, result);
     } else if (pendingMethod == QStringLiteral("project/navigation")) {
@@ -3582,6 +3678,9 @@ void AgentRuntimeClient::acceptInitializeResponse(const QJsonObject &result)
     const QString backendStatus = backend.value(QStringLiteral("status")).toString();
     m_recoveryMode = backendStatus == QStringLiteral("read-only-recovery");
     m_ready = backendStatus == QStringLiteral("ready") || m_recoveryMode;
+    m_heartbeatNegotiated = m_negotiatedStableCapabilities.contains(
+        QStringLiteral("runtime.heartbeat.out-of-band"));
+    m_heartbeatHealthy = m_heartbeatNegotiated;
 
     if (!sendNotification(QStringLiteral("initialized"))) {
         rejectProtocolMessage(QStringLiteral("initialized-write"));
@@ -3596,6 +3695,11 @@ void AgentRuntimeClient::acceptInitializeResponse(const QJsonObject &result)
                  .value(QStringLiteral("selected")).toString());
     emit runtimeInitialized(result);
     emit connectionStateChanged(m_ready, detail);
+    if (m_heartbeatNegotiated) {
+        emit runtimeLivenessChanged(true, QStringLiteral("运行时响应正常"));
+        sendHeartbeat();
+        if (m_heartbeatHealthy) m_heartbeatIntervalTimer->start();
+    }
 
     if (containsCapability(m_negotiatedStableCapabilities, "runtime.health")) runtimeHealth();
     if (containsCapability(m_negotiatedStableCapabilities, "runtime.degradations")) {
@@ -3630,7 +3734,7 @@ void AgentRuntimeClient::rejectInitializeResponse(const QString &reasonCode)
 {
     m_startupTimer->stop();
     const QString requestId = m_initializeRequestId;
-    if (!requestId.isEmpty()) m_pendingMethods.remove(requestId);
+    if (!requestId.isEmpty()) removePendingRequest(requestId);
     clearNegotiationState();
     const QString detail = QStringLiteral("运行时握手响应无效（%1）").arg(reasonCode);
     emit requestFailed(requestId, QStringLiteral("initialize"), detail, -32003);
@@ -3650,20 +3754,117 @@ void AgentRuntimeClient::rejectProtocolMessage(const QString &reasonCode)
 
 void AgentRuntimeClient::clearNegotiationState()
 {
+    const bool livenessWasKnown = m_heartbeatNegotiated && m_heartbeatHealthy;
+    m_heartbeatIntervalTimer->stop();
+    m_heartbeatDeadlineTimer->stop();
+    if (!m_heartbeatRequestId.isEmpty()) {
+        retireResponseId(m_heartbeatRequestId);
+        removePendingRequest(m_heartbeatRequestId);
+    }
     m_ready = false;
+    m_heartbeatNegotiated = false;
+    m_heartbeatHealthy = false;
     m_recoveryMode = false;
     m_handshakeComplete = false;
     m_initializeRequestId.clear();
+    m_initializeGeneration = 0;
+    m_heartbeatRequestId.clear();
+    m_heartbeatNonce.clear();
+    m_heartbeatGeneration = 0;
     m_negotiatedStableCapabilities.clear();
     m_negotiatedMaximumFrameBytes = 0;
+    if (livenessWasKnown) {
+        emit runtimeLivenessChanged(false, QStringLiteral("运行时连接不可用"));
+    }
 }
 
 void AgentRuntimeClient::failPending(const QString &message)
 {
     const auto pending = m_pendingMethods;
     m_pendingMethods.clear();
+    m_pendingGenerations.clear();
     m_pendingTimelineSyncRequests.clear();
     for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
+        retireResponseId(it.key());
         emit requestFailed(it.key(), it.value(), message, -1);
     }
+}
+
+void AgentRuntimeClient::failOrdinaryPending(const QString &message)
+{
+    const auto pending = m_pendingMethods;
+    for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
+        if (isLivenessControlMethod(it.value())) continue;
+        retireResponseId(it.key());
+        removePendingRequest(it.key());
+        emit requestFailed(it.key(), it.value(), message, -1);
+    }
+}
+
+void AgentRuntimeClient::sendHeartbeat()
+{
+    if (!m_heartbeatNegotiated || !m_heartbeatHealthy
+        || !m_handshakeComplete
+        || m_process->state() == QProcess::NotRunning
+        || !m_heartbeatRequestId.isEmpty()) {
+        return;
+    }
+    if (++m_nextHeartbeatNonce == 0) ++m_nextHeartbeatNonce;
+    const QString nonce = QStringLiteral("%1-%2")
+        .arg(m_processGeneration)
+        .arg(m_nextHeartbeatNonce);
+    const QString requestId = sendRequest(QStringLiteral("runtime/heartbeat"), {
+        {QStringLiteral("schema_version"),
+         QStringLiteral("runtime-heartbeat-request/0.1")},
+        {QStringLiteral("nonce"), nonce},
+    });
+    if (requestId.isEmpty()) {
+        m_heartbeatIntervalTimer->stop();
+        m_heartbeatHealthy = false;
+        const QString detail = QStringLiteral("运行时响应状态未知（心跳写入失败）");
+        failOrdinaryPending(detail);
+        emit runtimeLivenessChanged(false, detail);
+        return;
+    }
+    m_heartbeatRequestId = requestId;
+    m_heartbeatNonce = nonce;
+    m_heartbeatGeneration = m_processGeneration;
+    m_heartbeatDeadlineTimer->start();
+}
+
+void AgentRuntimeClient::handleHeartbeatTimeout()
+{
+    if (!m_heartbeatNegotiated || !m_handshakeComplete
+        || m_heartbeatRequestId.isEmpty()) {
+        return;
+    }
+    retireResponseId(m_heartbeatRequestId);
+    removePendingRequest(m_heartbeatRequestId);
+    m_heartbeatRequestId.clear();
+    m_heartbeatNonce.clear();
+    m_heartbeatGeneration = 0;
+    m_heartbeatIntervalTimer->stop();
+    m_heartbeatDeadlineTimer->stop();
+    const bool changed = m_heartbeatHealthy;
+    m_heartbeatHealthy = false;
+    const QString detail = QStringLiteral("运行时响应状态未知（心跳超时）");
+    failOrdinaryPending(detail);
+    if (changed) emit runtimeLivenessChanged(false, detail);
+}
+
+void AgentRuntimeClient::retireResponseId(const QString &requestId)
+{
+    if (requestId.isEmpty() || m_retiredResponseIds.contains(requestId)) return;
+    m_retiredResponseIds.insert(requestId);
+    m_retiredResponseOrder.append(requestId);
+    while (m_retiredResponseOrder.size() > kMaximumRetiredResponseIds) {
+        m_retiredResponseIds.remove(m_retiredResponseOrder.takeFirst());
+    }
+}
+
+void AgentRuntimeClient::removePendingRequest(const QString &requestId)
+{
+    m_pendingMethods.remove(requestId);
+    m_pendingGenerations.remove(requestId);
+    m_pendingTimelineSyncRequests.remove(requestId);
 }

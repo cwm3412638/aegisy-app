@@ -85,11 +85,12 @@ use aegisy_aap::stable::v0_1::{
     timeline_snapshot_identity, timeline_snapshot_item_canonical_bytes,
     timeline_snapshot_item_identity, timeline_snapshot_page_identity, BackendDescriptor,
     EventEnvelope, Identity, InitializeParams, InitializeResult, ItemUpdate,
-    NegotiatedCapabilities, NegotiatedProtocol, Platform, Project, ProtocolLimits, Session,
-    SessionMode, TimelineAnchor, TimelineItem, TimelineRetentionGapData,
-    TimelineSessionSnapshotPage, TimelineSnapshotActiveTurn, TimelineSnapshotCursor,
-    TimelineSnapshotItem, TimelineSnapshotParams, TimelineSyncPage as AapTimelineSyncPage,
-    TimelineSyncParams, TransportSecurity,
+    NegotiatedCapabilities, NegotiatedProtocol, Platform, Project, ProtocolLimits,
+    RuntimeHeartbeatParams, RuntimeHeartbeatResult, Session, SessionMode, TimelineAnchor,
+    TimelineItem, TimelineRetentionGapData, TimelineSessionSnapshotPage,
+    TimelineSnapshotActiveTurn, TimelineSnapshotCursor, TimelineSnapshotItem,
+    TimelineSnapshotParams, TimelineSyncPage as AapTimelineSyncPage, TimelineSyncParams,
+    TransportSecurity,
 };
 use aegisy_aap::{
     Notification, Request, Response, JSONRPC_VERSION, MAX_AAP_FRAME_BYTES, PROTOCOL_VERSION,
@@ -218,6 +219,7 @@ pub const STABLE_CAPABILITY_REGISTRY: &[&str] = &[
     "runtime.codex-app-server",
     "runtime.degradations",
     "runtime.health",
+    "runtime.heartbeat.out-of-band",
     "runtime.preview",
     "runtime.projection-recovery.status",
     "runtime.recovery.diagnostic-export",
@@ -1122,13 +1124,48 @@ impl RuntimeControl {
         }
     }
 
+    fn heartbeat_claimed(&self, request: Request) -> Vec<Value> {
+        if !self.lock().protocol_ready {
+            return vec![serde_json::to_value(Response::error(
+                request.id.unwrap_or(Value::Null),
+                -32002,
+                "initialize handshake required",
+            ))
+            .expect("heartbeat readiness response serialization")];
+        }
+        let params: RuntimeHeartbeatParams = match serde_json::from_value(request.params) {
+            Ok(params) => params,
+            Err(_) => {
+                return vec![serde_json::to_value(Response::error(
+                    request.id.unwrap_or(Value::Null),
+                    -32602,
+                    "runtime heartbeat params are invalid",
+                ))
+                .expect("heartbeat parameter response serialization")]
+            }
+        };
+        let result = RuntimeHeartbeatResult {
+            schema_version: "runtime-heartbeat/0.1".into(),
+            nonce: params.nonce,
+            state: "alive".into(),
+        };
+        vec![serde_json::to_value(Response::success(
+            request.id.unwrap_or(Value::Null),
+            serde_json::to_value(result).expect("heartbeat result serialization"),
+        ))
+        .expect("heartbeat response serialization")]
+    }
+
     pub fn handle_out_of_band_line(&self, line: &str) -> Option<Vec<Value>> {
         if let Some(response) = self.reject_oversized_line(line) {
             return Some(response);
         }
         let envelope: Value = serde_json::from_str(line).ok()?;
         let method = envelope.get("method").and_then(Value::as_str)?;
-        if !matches!(method, "turn/cancel" | "turn/steer" | "terminal/stop-user") {
+        if !matches!(
+            method,
+            "runtime/heartbeat" | "turn/cancel" | "turn/steer" | "terminal/stop-user"
+        ) {
             return None;
         }
         let Some(id) = envelope
@@ -1136,6 +1173,14 @@ impl RuntimeControl {
             .and_then(|object| object.get("id"))
             .cloned()
         else {
+            if method == "runtime/heartbeat" {
+                return Some(vec![serde_json::to_value(Response::error(
+                    Value::Null,
+                    -32600,
+                    "runtime heartbeat must be a request",
+                ))
+                .expect("heartbeat notification response serialization")]);
+            }
             return Some(Vec::new());
         };
         if !valid_request_id(&id) || !envelope.get("params").is_some_and(Value::is_object) {
@@ -1166,6 +1211,7 @@ impl RuntimeControl {
             .expect("cancel protocol response serialization")]);
         }
         let required = match request.method.as_str() {
+            "runtime/heartbeat" => vec!["runtime.heartbeat.out-of-band"],
             "turn/cancel" => vec!["turn.cancel.interrupt"],
             "turn/steer" => vec!["turn.steer.same-turn"],
             "terminal/stop-user" => vec![
@@ -1208,6 +1254,7 @@ impl RuntimeControl {
             return Some(vec![duplicate]);
         }
         Some(match request.method.as_str() {
+            "runtime/heartbeat" => self.heartbeat_claimed(request),
             "turn/cancel" => self.cancel_claimed(request),
             "turn/steer" => self.steer_claimed(request),
             "terminal/stop-user" => self.terminal_stop_claimed(request),
@@ -5594,6 +5641,7 @@ impl Runtime {
                 ],
             ),
         };
+        capabilities.push("runtime.heartbeat.out-of-band".into());
         if local_workbench_available {
             capabilities.extend([
                 "project.open".into(),
