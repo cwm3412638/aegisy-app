@@ -890,6 +890,34 @@ Current editor evidence:
   and proves disk contents remain unchanged. The protocol fixture also proves the
   unimplemented apply method returns method-not-found. Task 15.2 is complete while
   public/Agent mutation remains gated behind later permission/approval milestones.
+- Codex file-change Proposal coverage validates the pinned `add` full-content,
+  `delete` full-preimage, `update` headerless-diff, and pure-rename semantics;
+  treats `patchUpdated` only as volatile parsed-so-far preview and uses canonical
+  `item/started` as Proposal authority across relative/absolute path, partial add,
+  update/delete diff-shape, and pure-rename differences; requires exact canonical
+  Started/completed equality plus required monotonic lifecycle timestamps; enforces
+  the shared 256 pending/Started Item and 16 MiB retained-state limits;
+  rejects root escape, duplicates, malformed/stale bases, NUL/size/format drift,
+  completed-write status, and lifecycle/request mismatches; and preserves BOM plus
+  LF/CRLF without touching disk. Workbench schema v18 fixtures prove immutable
+  Proposal identity, domain-separated nested identities, exact artifact coverage,
+  false mutation/approval/apply authority, same-edit idempotency/conflict, atomic
+  Proposal/Blob-reference/event rollback, restart read, tamper rejection, and
+  WAL-consistent v17 migration backup. Failure injection after SQLite commit proves
+  committed Proposal/Blob references are never compensated away, while Proposal or
+  referenced-Blob corruption quarantines only the owning Session and leaves healthy
+  Sessions readable. The real stdio approval fixture opens a Work
+  project, receives `patchUpdated`, Started, approval, resolved, and declined
+  completion in order, proves Proposal persistence before the adapter can continue
+  its decline path, reopens the Proposal after shutdown, and verifies the proposed
+  file was never created. The fixture additionally binds the exact
+  `codex-app-server` / `codex-cli 0.144.5` Runtime, provider/backend thread, and
+  `read-only` permission. The complete Rust workspace passes 710 `aegisy-agentd`
+  library tests with one ignored live fixture, 6 daemon-main, 10 threshold, 13
+  handshake Runtime, 17 Schema, 66 protocol, and 23 stdio/Codex tests. Strict workspace Clippy,
+  formatting, all 16 desktop CTests, strict OpenSpec validation, and
+  `git diff --check` pass. Public Proposal read/Qt restart recovery and all Approval/
+  Apply/checkpoint authority remain absent.
 - Workspace-edit apply tests cover same-directory staged create/update content,
   immediate optimistic base/target rechecks, no-clobber hard-link backups, all four
   operation kinds, reverse rollback after partial and complete multi-file commit,

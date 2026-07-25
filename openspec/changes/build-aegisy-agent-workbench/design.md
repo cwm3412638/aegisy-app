@@ -427,6 +427,16 @@ it is no longer model context.
 - Agent patches are previewed as unified and side-by-side diffs. User edits made
   after proposal trigger a rebase/re-read requirement; stale patches are not
   applied silently.
+- A read-only provider file-change request becomes an immutable local Proposal
+  before the adapter sends its fixed policy denial. The Proposal binds the exact
+  Session, durable Turn, provider thread/item, project/root/filesystem identity,
+  normalized operations, overlap baseline, preview summary, and content-addressed
+  artifacts. Proposal, artifact references, and the metadata-only Session event
+  commit atomically; all mutation, user-approval, and apply authority fields remain
+  false. A caller fault after commit cannot compensate away committed Proposal or
+  Blob references, while Proposal/Blob corruption quarantines only its owning
+  Session. Provider `completed` is treated as a potential unauthorized write until
+  the later approval/checkpoint/apply pipeline exists.
 - A file watcher invalidates context and UI state. Agent and user changes carry
   origin metadata.
 - Diagnostics come from build/test output first, then language servers. The UI

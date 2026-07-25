@@ -154,7 +154,29 @@
   - Same-turn steering now uses an identity-scoped out-of-band `turn/steer` request with an eight-entry queue, 64 KiB input bound, pinned `expectedTurnId` provider mapping, and separate queued/acknowledged/failed states. Steering remains read-only and its user Item is bounded and redaction-gated.
   - Usage, plan, and unified-diff updates now append unique bounded durable Items when storage is configured, with at most 32 updates per kind per turn and one truncation marker after the cap. Restart replay covers all three kinds. Complete provider error/reconnect fixtures and final Qt/provider lifecycle evidence remain.
 - [ ] 7.5 Map message, reasoning summary, command, file-change, tool, review, image, and artifact item lifecycles
+  - Partial file-change mapping now follows the pinned Codex `0.144.5` lifecycle
+    `patchUpdated* -> item/started -> requestApproval -> decline -> serverRequest/resolved -> item/completed(declined)`.
+    The adapter treats `patchUpdated` only as volatile parsed-so-far preview state;
+    it may be absent, partial, use relative paths, or use a different diff shape and
+    contributes no Proposal authority. `item/started` is the canonical Proposal
+    authority, while `item/completed` must repeat that exact canonical change set.
+    Started/completed timestamps are required and monotonic, pending plus Started
+    items share a 256-item limit, and retained file-change state is capped at 16 MiB
+    per Turn. Approval and resolution remain bound to the exact thread/turn/item,
+    and a Provider `completed` file change is a potential read-only boundary violation.
+    Add/update/delete/pure-rename conversion preserves raw UTF-8 BOM and LF/CRLF,
+    binds raw base hashes, rejects stale/escaping/duplicate/oversized changes, and
+    never writes the workspace. Message/reasoning/review/image and complete Tool
+    families remain incomplete.
 - [ ] 7.6 Map command, file, permission, MCP elicitation, and user-input server requests to AAP approvals/questions
+  - Partial file-request boundary: before the fixed Runtime-policy `decline` is
+    written, the exact Codex file change is compiled into an immutable
+    `workspace-edit-proposal/0.1` and committed with its content/diff Blob
+    references plus a metadata-only Session event. Store or Proposal failure returns
+    false to the adapter, sends no decline, and fails the Turn closed. The Proposal
+    records no user decision and fixes mutation, approval, and apply authority to
+    false. Genuine user approval/questions, durable decision consumption, MCP
+    elicitation, and all write authority remain absent.
 - [ ] 7.7 Map background terminals, filesystem read/write/watch, fuzzy search, Skills, hooks, plugins, and MCP capability state
 - [ ] 7.8 Configure Aegisy custom provider and short-lived token flow without writing the desktop login token into Codex config
 - [ ] 7.9 Implement adapter degradation flags for experimental or missing Codex methods
@@ -443,6 +465,20 @@
   - A session-scoped in-memory preview store now accepts validated `WorkspaceEdit` proposals and their referenced UTF-8 content, rereads existing base files through the authoritative workspace policy, compares raw-byte SHA-256 identities, and renders time-bounded unified line diffs with pinned `similar` 3.1.1. Create/update/delete/rename receive per-file previews, base-match state, additions/deletions, warnings, and content-addressed diff references; the response also includes a bounded aggregate diff and totals.
   - Sensitive, Git-ignored, stale, unavailable, existing-target, and symlink-traversing paths produce explicit blocking warnings. Sensitive or ignored existing files are never read to make a preview. Proposed content is limited to 512 KiB per file and 4 MiB per edit; file diffs are limited to 512 KiB, aggregate diffs to 2 MiB, inline file/aggregate text to 32/64 KiB, pages to 64 KiB, and the store to 32 previews/16 MiB with deterministic oldest eviction. Source and inline truncation are distinct metadata.
   - AAP exposes only `workspace/edit/preview` and session/project/edit-scoped `workspace/edit/artifact/read`; exact Work-session project ID, canonical root, and root identity must match before the edit is deserialized or any base is read. Qt replaces the Changes placeholder with a file review table, aggregate/per-file plain-text diff, `+/-` totals, blocking-warning state, selectable context excerpts, and paged continuation. Rust unit/protocol and Qt render fixtures cover all operation kinds, long Unicode content, stale/sensitive/ignored/symlink cases, hash/content mismatch, root/session denial, paging, visible warnings, and unchanged disk state. `workspace/edit/apply` remains absent and Agent/Codex remains read-only.
+  - Codex file-change approval requests now reuse the same preview compiler and
+    persist an immutable Proposal before Runtime sends its fixed read-only decline.
+    Workbench schema v18 stores the Proposal, normalized operations, overlap
+    baseline, preview summary, provider/thread/item lifecycle binding, and exact
+    artifact descriptors in rows protected from update and delete, except that the
+    reviewed Session-retention purge may remove the complete owned Proposal graph.
+    Blob references plus a content-free Session event are transactionally linked.
+    Admission and restart revalidate
+    the Work Session, active Turn at write time, project/root/filesystem identity,
+    exact `codex-app-server` / `codex-cli 0.144.5` Runtime binding, provider/backend
+    thread, `read-only` permission, domain-separated identities, artifacts, and false
+    authority fields. A real stdio fixture proves restart readability and that
+    the proposed file is never created. Public Proposal read, durable Changes
+    restoration, genuine approval, and Apply remain the next slice.
 - [x] 15.3 Implement atomic apply with optimistic hash checks, stale-patch rejection, rollback journal, and final hashes
   - The sidecar library now has an internal, non-AAP apply transaction for validated `WorkspaceEdit` values. It revalidates the canonical root and path policy, validates every referenced content hash, reads and bounds every UTF-8 base, rejects stale bases or newly occupied targets before mutation, stages create/update content with `create_new` in the destination directory, flushes staged bytes, and preserves update permissions. Same-directory hard links provide no-clobber target creation and no-clobber rollback backups instead of relying on Unix replacement-style rename semantics.
   - Every operation receives an immediate optimistic recheck before commit. The undo journal is registered before destructive removal, runs in reverse order on commit/sync/final-verification failure, and only removes a target when its SHA-256 still matches content installed by this transaction. A later external rewrite is preserved, rollback is reported incomplete, authoritative per-path states are returned, and any retained hidden backup/stage is named as a recovery artifact. Success requires directory sync where supported and exact final SHA-256 verification for create/update/rename, with deletion absence verified explicitly.
@@ -704,6 +740,13 @@
     The checked-in generated Codex `0.144.5` schema does not define these three
     `ServerRequest` shapes; current evidence is the same-version App Server protocol
     source plus deterministic real-stdio fixtures, not generated-schema validation.
+  - A Codex file-change denial now also produces an immutable, domain-separated
+    `workspace-edit-proposal/0.1` before the denial is flushed. This is durable
+    Change input evidence, not a `turn-trace/0.6` Applied Change, user Approval, or
+    execution result. Proposal persistence binds the provider thread/item and active
+    durable Turn while fixing mutation/approval/apply authority false; complete
+    Change trace production still requires reviewed approval, apply, final hashes,
+    checkpoint, and recovery evidence.
   - Current Codex Runtime produces `0.6` traces for completed, failed, and
     interrupted Turns. Provider-terminal persistence has one idempotent terminal-write
     retry; structured adapter failures use a separate single-write fail-closed path.

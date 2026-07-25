@@ -10,6 +10,7 @@ pub mod child_task_state;
 pub mod child_worktree_gate;
 pub(crate) mod codex_adapter;
 mod codex_capability_matrix;
+mod codex_file_change;
 mod command_action;
 mod command_artifact;
 mod command_diagnostics;
@@ -77,6 +78,7 @@ pub mod workspace_edit;
 pub mod workspace_edit_apply;
 pub mod workspace_edit_overlap;
 mod workspace_edit_preview;
+pub mod workspace_edit_proposal;
 pub mod workspace_edit_restore;
 
 use aegisy_aap::stable::v0_1::{
@@ -155,6 +157,7 @@ use workbench_store::{
     StoredSessionLineage, StoredSessionMode, StoredSessionRuntimeBindingCreate,
     StoredSessionWorkspaceBinding, StoredSessionWorkspaceBindingCreate, StoredTurnCreate,
     WorkbenchRecoveryDiagnostic, WorkbenchStore, WorkbenchStoreOpen,
+    WorkspaceEditProposalArtifactWrite,
 };
 use workspace::{
     collect_search_candidates, list_directory, path_metadata, read_text_file, search_workspace,
@@ -162,6 +165,9 @@ use workspace::{
 };
 use workspace_edit::{ContentHash, WorkspaceEdit, WorkspaceEditOperation};
 use workspace_edit_preview::{ContentInput, PreviewArtifactSnapshot, WorkspaceEditPreviewStore};
+use workspace_edit_proposal::{
+    WorkspaceEditProposal, WorkspaceEditProposalArtifact, WorkspaceEditProposalArtifactKind,
+};
 
 const DURABLE_COMMAND_ARTIFACT_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const DURABLE_PREVIEW_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
@@ -11542,6 +11548,7 @@ impl Runtime {
                 &cancellation,
                 &steering,
                 |event| {
+                    (|| {
                     if persistence_error.is_some() || sequencing_error.is_some() {
                         cancellation.request();
                         return;
@@ -12000,6 +12007,252 @@ impl Runtime {
                                     state.items.push(diagnostic_item.clone());
                                 }
                                 emit(message);
+                            }
+                        }
+                        CodexEvent::FileChangeProposalRequested {
+                            request: proposal_request,
+                        } => {
+                            if proposal_request.provider_thread_id != codex_thread_id
+                                || started_turn_id.as_deref()
+                                    != Some(proposal_request.provider_turn_id.as_str())
+                            {
+                                persistence_error = Some(
+                                    "Codex file change proposal does not match the active Runtime binding"
+                                        .to_owned(),
+                                );
+                                cancellation.request();
+                                return;
+                            }
+                            let Some(project_id) = project_id.as_ref() else {
+                                persistence_error = Some(
+                                    "Codex file change proposal requires a Work project"
+                                        .to_owned(),
+                                );
+                                cancellation.request();
+                                return;
+                            };
+                            let (bound_project_id, root) =
+                                match self.workspace_edit_session_binding(&params.session_id) {
+                                    Ok(binding) => binding,
+                                    Err(_) => {
+                                        persistence_error = Some(
+                                            "Codex file change proposal workspace binding is unavailable"
+                                                .to_owned(),
+                                        );
+                                        cancellation.request();
+                                        return;
+                                    }
+                                };
+                            if bound_project_id != *project_id {
+                                persistence_error = Some(
+                                    "Codex file change proposal project binding drifted"
+                                        .to_owned(),
+                                );
+                                cancellation.request();
+                                return;
+                            }
+                            let edit_id = match codex_file_change::provider_file_change_edit_id(
+                                &params.session_id,
+                                &proposal_request.provider_turn_id,
+                                &proposal_request.provider_item_id,
+                                &proposal_request.changes,
+                            ) {
+                                Ok(edit_id) => edit_id,
+                                Err(_) => {
+                                    persistence_error = Some(
+                                        "Codex file change proposal identity is invalid"
+                                            .to_owned(),
+                                    );
+                                    cancellation.request();
+                                    return;
+                                }
+                            };
+                            let compiled = match codex_file_change::compile_codex_file_change(
+                                &edit_id,
+                                project_id,
+                                &root,
+                                &proposal_request.changes,
+                            ) {
+                                Ok(compiled) => compiled,
+                                Err(_) => {
+                                    persistence_error = Some(
+                                        "Codex file change proposal cannot be compiled against the current workspace"
+                                            .to_owned(),
+                                    );
+                                    cancellation.request();
+                                    return;
+                                }
+                            };
+                            let edit = compiled.edit;
+                            let ignored = ignored_paths(&root, &workspace_edit_paths(&edit));
+                            let preview = match self.workspace_edit_previews.preview(
+                                &params.session_id,
+                                edit.clone(),
+                                compiled.contents,
+                                &ignored,
+                            ) {
+                                Ok(preview) => preview,
+                                Err(_) => {
+                                    persistence_error = Some(
+                                        "Codex file change proposal preview is unavailable"
+                                            .to_owned(),
+                                    );
+                                    cancellation.request();
+                                    return;
+                                }
+                            };
+                            let artifacts = match self.workspace_edit_previews.snapshots(
+                                &params.session_id,
+                                &edit_id,
+                                project_id,
+                            ) {
+                                Ok(artifacts) => artifacts,
+                                Err(_) => {
+                                    self.workspace_edit_previews
+                                        .remove(&params.session_id, &edit_id);
+                                    persistence_error = Some(
+                                        "Codex file change proposal artifacts are unavailable"
+                                            .to_owned(),
+                                    );
+                                    cancellation.request();
+                                    return;
+                                }
+                            };
+                            let workspace_binding = self
+                                .session_workspace_bindings
+                                .get(&params.session_id)
+                                .cloned()
+                                .or_else(|| {
+                                    self.workbench_store.as_ref().and_then(|store| {
+                                        store
+                                            .load_session_workspace_binding(&params.session_id)
+                                            .ok()
+                                    })
+                                });
+                            let Some(workspace_binding) = workspace_binding else {
+                                self.workspace_edit_previews
+                                    .remove(&params.session_id, &edit_id);
+                                persistence_error = Some(
+                                    "Codex file change proposal workspace authority is unavailable"
+                                        .to_owned(),
+                                );
+                                cancellation.request();
+                                return;
+                            };
+                            if workspace_binding.project_id != *project_id
+                                || workspace_binding.root_id != "root-1"
+                                || Path::new(&root)
+                                    != self
+                                        .projects
+                                        .get(project_id)
+                                        .map(|project| Path::new(&project.root))
+                                        .unwrap_or_else(|| Path::new(""))
+                            {
+                                self.workspace_edit_previews
+                                    .remove(&params.session_id, &edit_id);
+                                persistence_error = Some(
+                                    "Codex file change proposal workspace authority drifted"
+                                        .to_owned(),
+                                );
+                                cancellation.request();
+                                return;
+                            }
+                            let proposal_artifacts = artifacts
+                                .iter()
+                                .map(|artifact| {
+                                    let kind = if artifact
+                                        .reference
+                                        .starts_with("workspace-edit-diff:")
+                                    {
+                                        WorkspaceEditProposalArtifactKind::Diff
+                                    } else {
+                                        WorkspaceEditProposalArtifactKind::ProposedContent
+                                    };
+                                    WorkspaceEditProposalArtifact::from_snapshot(kind, artifact)
+                                })
+                                .collect::<Result<Vec<_>, _>>();
+                            let proposal_artifacts = match proposal_artifacts {
+                                Ok(artifacts) => artifacts,
+                                Err(_) => {
+                                    self.workspace_edit_previews
+                                        .remove(&params.session_id, &edit_id);
+                                    persistence_error = Some(
+                                        "Codex file change proposal artifact identity is invalid"
+                                            .to_owned(),
+                                    );
+                                    cancellation.request();
+                                    return;
+                                }
+                            };
+                            let proposal = match WorkspaceEditProposal::from_preview(
+                                &params.session_id,
+                                &proposal_request.provider_turn_id,
+                                trace_backend_info.provider.clone(),
+                                &proposal_request.provider_thread_id,
+                                &proposal_request.provider_item_id,
+                                proposal_request.approval_started_at_ms,
+                                &workspace_binding.root_id,
+                                &workspace_binding.root_identity,
+                                &edit,
+                                &preview,
+                                proposal_artifacts,
+                                proposal_request.approval_started_at_ms,
+                            ) {
+                                Ok(proposal) => proposal,
+                                Err(_) => {
+                                    self.workspace_edit_previews
+                                        .remove(&params.session_id, &edit_id);
+                                    persistence_error = Some(
+                                        "Codex file change proposal cannot be normalized"
+                                            .to_owned(),
+                                    );
+                                    cancellation.request();
+                                    return;
+                                }
+                            };
+                            let retain_until_ms = match proposal_request
+                                .approval_started_at_ms
+                                .checked_add(DURABLE_PREVIEW_RETENTION_MS)
+                            {
+                                Some(retain_until_ms) => retain_until_ms,
+                                None => {
+                                    self.workspace_edit_previews
+                                        .remove(&params.session_id, &edit_id);
+                                    persistence_error = Some(
+                                        "Codex file change proposal retention is out of range"
+                                            .to_owned(),
+                                    );
+                                    cancellation.request();
+                                    return;
+                                }
+                            };
+                            let artifact_writes = artifacts
+                                .into_iter()
+                                .map(|artifact| WorkspaceEditProposalArtifactWrite {
+                                    reference: artifact.reference,
+                                    content: artifact.bytes,
+                                    retain_until_ms,
+                                })
+                                .collect();
+                            let Some(store) = self.workbench_store.as_mut() else {
+                                self.workspace_edit_previews
+                                    .remove(&params.session_id, &edit_id);
+                                persistence_error = Some(
+                                    "Codex file change proposal durable storage is unavailable"
+                                        .to_owned(),
+                                );
+                                cancellation.request();
+                                return;
+                            };
+                            if let Err(_cause) =
+                                store.record_workspace_edit_proposal(proposal, artifact_writes)
+                            {
+                                self.workspace_edit_previews
+                                    .remove(&params.session_id, &edit_id);
+                                persistence_error = Some(
+                                    "Codex file change proposal could not be persisted".to_owned(),
+                                );
+                                cancellation.request();
                             }
                         }
                         CodexEvent::TokenUsage { turn_id, mut usage } => {
@@ -12587,6 +12840,8 @@ impl Runtime {
                             emit(timeline_message);
                         }
                     }
+                    })();
+                    persistence_error.is_none() && sequencing_error.is_none()
                 },
                 |request: CodexRuntimeDenialRequest, write_denial| {
                     let mut trace_guard = turn_trace_accumulator

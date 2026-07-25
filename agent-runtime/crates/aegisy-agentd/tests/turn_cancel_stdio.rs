@@ -773,10 +773,17 @@ while IFS= read -r line; do
       ;;
     *'"id":"runtime-denial-request-id-sentinel","result":{"decision":"decline"}'*)
       printf '%s' "command" > "$decision_file"
-      printf '{"id":"runtime-denial-file-request-sentinel","method":"item/fileChange/requestApproval","params":{"threadId":"thread-approval","turnId":"turn-approval","itemId":"runtime-denial-file-item-sentinel","startedAtMs":11,"reason":"runtime-denial-file-reason-sentinel","grantRoot":"/runtime-denial-grant-root-sentinel"}}\n'
+      printf '{"method":"item/fileChange/patchUpdated","params":{"threadId":"thread-approval","turnId":"turn-approval","itemId":"runtime-denial-file-item-sentinel","changes":[{"path":"proposal.txt","kind":{"type":"add"},"diff":"proposed\\n"}]}}\n'
+      file_started_at_ms=$(($(date +%s) * 1000))
+      printf '{"method":"item/started","params":{"threadId":"thread-approval","turnId":"turn-approval","startedAtMs":%s,"item":{"type":"fileChange","id":"runtime-denial-file-item-sentinel","status":"inProgress","changes":[{"path":"proposal.txt","kind":{"type":"add"},"diff":"proposed\\n"}]}}}\n' "$file_started_at_ms"
+      approval_started_at_ms=$((file_started_at_ms + 1))
+      printf '{"id":"runtime-denial-file-request-sentinel","method":"item/fileChange/requestApproval","params":{"threadId":"thread-approval","turnId":"turn-approval","itemId":"runtime-denial-file-item-sentinel","startedAtMs":%s,"reason":"runtime-denial-file-reason-sentinel","grantRoot":"/runtime-denial-grant-root-sentinel"}}\n' "$approval_started_at_ms"
       ;;
     *'"id":"runtime-denial-file-request-sentinel","result":{"decision":"decline"}'*)
       printf '%s' ",file" >> "$decision_file"
+      printf '{"method":"serverRequest/resolved","params":{"threadId":"thread-approval","requestId":"runtime-denial-file-request-sentinel"}}\n'
+      file_completed_at_ms=$((approval_started_at_ms + 1))
+      printf '{"method":"item/completed","params":{"threadId":"thread-approval","turnId":"turn-approval","completedAtMs":%s,"item":{"type":"fileChange","id":"runtime-denial-file-item-sentinel","status":"declined","changes":[{"path":"proposal.txt","kind":{"type":"add"},"diff":"proposed\\n"}]}}}\n' "$file_completed_at_ms"
       printf '{"id":101,"method":"item/permissions/requestApproval","params":{"threadId":"thread-approval","turnId":"turn-approval","itemId":"runtime-denial-permissions-item-sentinel","startedAtMs":12,"cwd":"/runtime-denial-cwd-sentinel","permissions":{"write":["/runtime-denial-permission-path-sentinel"]},"environmentId":"runtime-denial-environment-sentinel","reason":"runtime-denial-permissions-reason-sentinel"}}\n'
       ;;
     *'"id":101,"result":{"permissions":{},"scope":"turn"}'*)
@@ -2045,7 +2052,9 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
     let codex = approval_denial_codex();
     let decision = codex.with_extension("sh.decision");
     let data_root = codex.parent().unwrap().join("approval-workbench");
+    let project_root = codex.parent().unwrap().join("approval-project");
     fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_aegisy-agentd"))
         .env("AEGISY_CODEX_PATH", &codex)
         .env("AEGISY_WORKBENCH_DATA_ROOT", &data_root)
@@ -2083,9 +2092,22 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
     send(
         &mut stdin,
         &request(
+            "approval-project",
+            "project/open",
+            json!({ "root": project_root }),
+        ),
+    );
+    let project = receive_until(&receiver, |message| message["id"] == "approval-project");
+    let project_id = project["result"]["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send(
+        &mut stdin,
+        &request(
             "approval-session",
             "session/start",
-            json!({ "mode": "chat" }),
+            json!({ "mode": "work", "project_id": project_id }),
         ),
     );
     let session = receive_until(&receiver, |message| message["id"] == "approval-session");
@@ -2130,6 +2152,52 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
     reader.join().unwrap();
 
     let store = WorkbenchStore::open(&data_root).unwrap();
+    let proposal_event = store
+        .read_session_events(&session_id, 0, 200)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.event_kind == "workspace-edit.proposal-recorded")
+        .expect("file approval must persist an immutable Proposal before decline");
+    let proposal_id = proposal_event.payload["proposal_id"]
+        .as_str()
+        .expect("proposal event must identify its immutable Proposal");
+    let stored_proposal = store
+        .read_workspace_edit_proposal(proposal_id)
+        .expect("immutable Proposal must be readable after sidecar shutdown");
+    assert_eq!(stored_proposal.proposal.session_id, session_id);
+    assert_eq!(stored_proposal.proposal.turn_id, "turn-approval");
+    assert_eq!(
+        stored_proposal.proposal.provider.as_deref(),
+        Some("fixture")
+    );
+    assert_eq!(
+        stored_proposal.proposal.provider_thread_id,
+        "thread-approval"
+    );
+    assert_eq!(
+        stored_proposal.proposal.provider_item_id,
+        "runtime-denial-file-item-sentinel"
+    );
+    assert_eq!(stored_proposal.proposal.project_id, project_id);
+    assert_eq!(stored_proposal.proposal.root_id, "root-1");
+    assert_eq!(
+        stored_proposal.proposal.created_at_ms,
+        stored_proposal.proposal.approval_started_at_ms
+    );
+    assert!(!stored_proposal.proposal.file_mutation_authority);
+    assert!(!stored_proposal.proposal.approval_recorded);
+    assert!(!stored_proposal.proposal.apply_available);
+    assert_eq!(stored_proposal.proposal.operations.len(), 1);
+    assert!(!project_root.join("proposal.txt").exists());
+    let runtime_binding = store.load_session_runtime_binding(&session_id).unwrap();
+    assert_eq!(runtime_binding.adapter, "codex-app-server");
+    assert_eq!(runtime_binding.adapter_version, "codex-cli 0.144.5");
+    assert_eq!(
+        runtime_binding.backend_session_id.as_deref(),
+        Some("thread-approval")
+    );
+    assert_eq!(runtime_binding.provider.as_deref(), Some("fixture"));
+    assert_eq!(runtime_binding.permission_profile, "read-only");
     let trace = store
         .read_turn_trace(&session_id, "turn-approval")
         .unwrap()
@@ -2255,6 +2323,9 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
         }
         let bytes = fs::read(&path).unwrap();
         for sentinel in request_sentinels {
+            if sentinel == "runtime-denial-file-item-sentinel" {
+                continue;
+            }
             assert!(
                 !bytes
                     .windows(sentinel.len())

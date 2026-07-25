@@ -44,6 +44,22 @@ content hashes before they are applied.
 - **WHEN** normalization resolves a write outside granted roots or through a denied symlink
 - **THEN** the runtime SHALL reject the patch before any file is modified
 
+#### Scenario: Read-only provider proposes a file change
+- **WHEN** a bound provider file-change item requests approval while Agent mutation remains read-only
+- **THEN** the runtime SHALL validate and persist one immutable, session/turn/project/root-bound Proposal and its referenced preview artifacts before sending the fixed policy denial, SHALL record no user approval or apply authority, and SHALL leave every workspace path unchanged
+
+#### Scenario: Proposal persistence fails before policy denial
+- **WHEN** Proposal normalization, artifact storage, binding validation, or the atomic Store transaction fails
+- **THEN** the runtime SHALL NOT acknowledge or deny the provider request as durably handled, SHALL fail the Turn closed, and SHALL leave no partial Proposal, artifact reference, event, or workspace mutation
+
+#### Scenario: Caller fails after Proposal commit
+- **WHEN** the Proposal, its Blob references, and metadata-only Session event have committed but the caller subsequently fails
+- **THEN** the runtime SHALL preserve the committed Proposal graph and SHALL NOT compensate away its Blob references
+
+#### Scenario: One Proposal graph is corrupt
+- **WHEN** startup or read validation detects a corrupt Proposal row or referenced Blob
+- **THEN** the runtime SHALL quarantine the owning Session without making unrelated healthy Sessions unreadable
+
 #### Scenario: Multi-file patch partially fails
 - **WHEN** atomic application cannot complete for every file
 - **THEN** the runtime SHALL restore the pre-application checkpoint or report each authoritative file state without presenting the patch as complete

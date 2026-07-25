@@ -114,6 +114,25 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   task `7.10`.
 - Current Agent security boundary: Agent/Codex is read-only. User-initiated editor
   saves are separately allowed only inside the canonical opened project root.
+- Codex file-change Proposal foundation: pinned `0.144.5` fileChange events now
+  follow the strict volatile-patch/Started/approval/decline/resolved/declined
+  lifecycle. `patchUpdated` is only volatile parsed-so-far preview and supplies no
+  Proposal authority; canonical `item/started` may legitimately differ in path and
+  diff shape, while `item/completed` must exactly repeat Started. Required lifecycle
+  timestamps are monotonic, pending plus Started Items share a 256-Item limit, and
+  retained file-change state is capped at 16 MiB per Turn. The Runtime compiles
+  add/update/delete/pure-rename data into the shared `WorkspaceEdit` preview without
+  writing the project. Workbench schema v18 commits
+  one immutable `workspace-edit-proposal/0.1`, exact content/diff Blob references,
+  and a metadata-only Session event in one SQLite transaction before the adapter may
+  send its fixed read-only decline. Proposal admission binds Session, durable Turn,
+  project/root/filesystem, read-only Runtime backend thread, provider item/time,
+  normalized operations, overlap baseline, preview, and domain-separated identities;
+  mutation, user approval, and apply authority are fixed false. Store failure sends
+  no decline and fails the Turn closed; a post-commit caller fault never removes
+  committed Blob references, and Proposal/Blob corruption quarantines only the owning
+  Session. Public Proposal read, Qt Changes restart
+  recovery, genuine approval, checkpoint/apply, and rollback authority remain absent.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies
   sensitive paths and symlinks, honors ignore rules, preserves UTF-8/BOM and
   LF/CRLF, uses revision checks, and performs atomic user saves.
@@ -1213,6 +1232,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   warnings, and paged content references. With durable storage configured, proposed
   content and complete diffs persist as one batch and remain session/project/edit-
   scoped and page-readable after restart. No AAP or UI apply operation exists.
+- Codex fileChange now reaches the same preview compiler and persists an immutable
+  Proposal before Runtime denial. A real stdio fixture proves the Proposal survives
+  sidecar shutdown/reopen and that the proposed project path remains absent. The
+  current UI still cannot read or restore that Proposal automatically.
 - A sidecar-library-only workspace-edit transaction now stages content in destination
   directories, performs optimistic base/target rechecks, uses no-clobber hard-link
   backups, rolls partial commits back in reverse order, preserves later external
@@ -2715,6 +2738,19 @@ Implemented visual baseline:
 
 ## Verification Snapshot (2026-07-25)
 
+- The immutable Codex file-change Proposal stage passes 710 `aegisy-agentd` library
+  tests with one ignored live fixture, 6 daemon-main, 10 context-threshold, 13
+  handshake Runtime, 17 Schema, 66 protocol, and 23 stdio/Codex tests. Strict workspace
+  Clippy, formatting, all 16 desktop CTests, strict OpenSpec validation, and
+  `git diff --check` pass. Schema v18 migration/backup,
+  immutable Proposal/artifact/event persistence, nested domain-separated identities,
+  retry/conflict/rollback/tamper/restart behavior, Runtime/provider/root binding, and
+  the real read-only decline lifecycle are covered. The stdio fixture verifies exact
+  `codex-app-server` / `codex-cli 0.144.5`, provider/backend thread,
+  `read-only` permission, Session/Turn/root/time bindings, all three authority flags
+  false, restart read, and unchanged workspace. Public Proposal AAP/Qt read and all
+  Apply authority remain open.
+
 - The Timeline Snapshot recovery stage passes 27 AAP type tests, the full
   `aegisy-agentd --lib` suite (`690` passed and one ignored live fixture), 13
   handshake Runtime tests, 17 Schema tests, the focused Qt Snapshot render run,
@@ -2885,52 +2921,56 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Continue OpenSpec `3.5` with subscription, heartbeat, complete reconnect
+1. Complete the user-visible Codex edit review slice: add bounded Proposal file
+   summaries, read-only latest/exact Proposal AAP, Proposal-bound artifact paging,
+   one durable Change Timeline reference, and Qt Changes auto-open/restart recovery.
+   Keep Apply and user Approval unavailable in this slice.
+2. Continue OpenSpec `3.5` with subscription, heartbeat, complete reconnect
    orchestration, explicit acknowledgement, and Windows recovery evidence. The
    structured retention-gap response, schema-v17 visible-state persistence, Runtime
    fixed-head paging, negotiated capability, and Qt atomic single-Session replacement
    are implemented. Keep automatic pruning disabled until the remaining recovery
    path and cross-platform gates are verified.
-2. Validate the hardened TLS installer on a clean Windows x64 VM.
-3. Reproduce and correlate any remaining streaming disconnect with redacted logs.
-4. Continue consolidating widget-local QSS and replace remaining Qt stock icons;
+3. Validate the hardened TLS installer on a clean Windows x64 VM.
+4. Reproduce and correlate any remaining streaming disconnect with redacted logs.
+5. Continue consolidating widget-local QSS and replace remaining Qt stock icons;
    the Codex health/restart toolbar state is now covered by the render suite.
    Keep the context-inspection and model-state fixtures in the complete desktop
    render gate as local and CI resource usage changes.
-5. Run the Windows packaging workflow or a clean Windows VM to validate ConPTY,
+6. Run the Windows packaging workflow or a clean Windows VM to validate ConPTY,
    Unicode, resize, Ctrl+C, exit status, and Job Object process-tree cleanup, then
    close `14.2` without exposing Agent execution permissions.
-6. Finish `14.5` with a pinned live command fixture and child-process observation
+7. Finish `14.5` with a pinned live command fixture and child-process observation
    evidence, without exposing native Agent execution before sandbox,
    permission, approval, and recovery gates exist.
-7. Finish `14.7` by adding gated foreground/daemon producers only after permission,
+8. Finish `14.7` by adding gated foreground/daemon producers only after permission,
    sandbox, and approval controls, then prove their process-tree cancellation on
    macOS and Windows and validate user-terminal stop on a real Windows runner.
-8. Continue task `16.7` with the production permission/approval authority and durable
+9. Continue task `16.7` with the production permission/approval authority and durable
    consumption ledger, typed session events, and reviewed Qt conflict/recovery flow.
    Keep the internal executor unreachable from AAP/Qt until those gates are complete;
    add sandboxed hook output and secure signing as separate reviewed policies.
-9. Continue task `7.3` only after `6.10` supplies a durable compaction checkpoint
+10. Continue task `7.3` only after `6.10` supplies a durable compaction checkpoint
    and preservation review; provider delete/compact must remain unavailable until
    their scoped review, compensation, and recovery contracts are complete.
-10. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
+11. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
    permission policy and the production approval ledger. A trust acknowledgement must
    never become an implicit write, command, Hook, or network grant.
-11. Continue `21.9` by adding reviewed platform permission/delivery settings only
+12. Continue `21.9` by adding reviewed platform permission/delivery settings only
    after scheduler and approval gates are complete. Continue `21.8` with durable
    decision production/consumption and reviewed recovery transitions only after the
    permission, sandbox, budget, and release gates pass. Keep automatic lease
    acquisition/renewal, process adoption, retry, approval, recovery mutation, and
    dispatch unavailable until those gates pass.
-12. Continue `20.1` in dependency order with genuine-user Approval only after the
+13. Continue `20.1` in dependency order with genuine-user Approval only after the
     production approval authority and consumption ledger exist, then add complete
     Change/Test production and reviewed AAP/Qt, audit/export, and retention surfaces.
     Do not record prompts/provider bodies or treat Runtime denial, Provider
     `declined`, or `approvalPolicy=never` as user approval.
-13. Continue with the next unchecked database/event, durable project/session, typed
+14. Continue with the next unchecked database/event, durable project/session, typed
     timeline, permission/approval, structured patch/checkpoint, terminal, and Git
     milestones in dependency order.
-14. Replace the offline model-catalog projection with an authenticated,
+15. Replace the offline model-catalog projection with an authenticated,
    signature-validated cache; connect durable global/project profiles to the
    catalog matcher; then expose a real picker and immutable model-change event
    only after token, routing, and cross-platform evidence gates pass. The

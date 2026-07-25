@@ -1,3 +1,4 @@
+use crate::codex_file_change::{validate_codex_file_changes, CodexFileUpdateChange};
 use crate::command_output::CommandOutputCapture;
 use crate::output_redaction::{redact_complete, OutputRedactor};
 use crate::provider_error::{from_codex_error_info, ProviderError};
@@ -38,6 +39,8 @@ const PINNED_CODEX_VERSION: &str = "codex-cli 0.144.5";
 const MAX_SERVER_REQUEST_ID_BYTES: usize = 128;
 const MAX_SERVER_REQUEST_ITEM_ID_BYTES: usize = 4 * 1024;
 const MAX_UNKNOWN_NOTIFICATION_METHODS: usize = 16;
+const MAX_FILE_CHANGE_ITEMS_PER_TURN: usize = 256;
+const MAX_FILE_CHANGE_RETAINED_BYTES_PER_TURN: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BackendInfo {
@@ -302,6 +305,9 @@ pub enum CodexEvent {
         command: Box<CommandItem>,
         lifecycle: String,
     },
+    FileChangeProposalRequested {
+        request: CodexFileChangeProposalRequest,
+    },
     TokenUsage {
         turn_id: String,
         usage: Value,
@@ -381,6 +387,165 @@ pub(crate) struct CodexTurnRequest<'a> {
 pub(crate) struct CodexRuntimeDenialRequest {
     pub request_kind: RuntimeDenialRequestKind,
     pub provider_request_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodexFileChangeProposalRequest {
+    pub provider_thread_id: String,
+    pub provider_turn_id: String,
+    pub provider_item_id: String,
+    pub approval_started_at_ms: u64,
+    pub changes: Vec<CodexFileUpdateChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexFileChangeItemState {
+    changes: Vec<CodexFileUpdateChange>,
+    started_at_ms: u64,
+    approval_request_id: Option<Value>,
+    approval_started_at_ms: Option<u64>,
+    request_resolved: bool,
+    completed: bool,
+}
+
+#[derive(Debug, Default)]
+struct CodexFileChangeTurnState {
+    pending_patches: HashMap<String, Vec<CodexFileUpdateChange>>,
+    items: HashMap<String, CodexFileChangeItemState>,
+    retained_bytes: usize,
+}
+
+impl CodexFileChangeTurnState {
+    fn observe_patch_updated(
+        &mut self,
+        item_id: &str,
+        changes: Vec<CodexFileUpdateChange>,
+    ) -> Result<(), String> {
+        if self.items.contains_key(item_id) {
+            return Err(file_change_protocol_error(
+                "patch update arrived after item start",
+            ));
+        }
+        if changes.is_empty() {
+            if let Some(previous) = self.pending_patches.remove(item_id) {
+                self.retained_bytes = self
+                    .retained_bytes
+                    .checked_sub(file_change_retained_bytes(&previous)?)
+                    .ok_or_else(|| {
+                        file_change_protocol_error("patch byte accounting is inconsistent")
+                    })?;
+            }
+            return Ok(());
+        }
+        if !self.pending_patches.contains_key(item_id)
+            && self.pending_patches.len().saturating_add(self.items.len())
+                >= MAX_FILE_CHANGE_ITEMS_PER_TURN
+        {
+            return Err(file_change_protocol_error(
+                "too many patch-updated items are open",
+            ));
+        }
+        let previous_bytes = self
+            .pending_patches
+            .get(item_id)
+            .map(|changes| file_change_retained_bytes(changes))
+            .transpose()?
+            .unwrap_or_default();
+        let next_bytes = file_change_retained_bytes(&changes)?;
+        self.retained_bytes =
+            checked_file_change_retained_total(self.retained_bytes, previous_bytes, next_bytes)?;
+        self.pending_patches.insert(item_id.to_owned(), changes);
+        Ok(())
+    }
+
+    fn start_item(
+        &mut self,
+        item_id: &str,
+        changes: Vec<CodexFileUpdateChange>,
+        started_at_ms: u64,
+    ) -> Result<(), String> {
+        let pending_item = self.pending_patches.contains_key(item_id);
+        if self.items.contains_key(item_id)
+            || (!pending_item
+                && self.items.len().saturating_add(self.pending_patches.len())
+                    >= MAX_FILE_CHANGE_ITEMS_PER_TURN)
+        {
+            return Err(file_change_protocol_error(
+                "file change item started more than once or exceeded the limit",
+            ));
+        }
+        let pending_bytes = self
+            .pending_patches
+            .get(item_id)
+            .map(|changes| file_change_retained_bytes(changes))
+            .transpose()?
+            .unwrap_or_default();
+        let started_bytes = file_change_retained_bytes(&changes)?;
+        let retained_bytes =
+            checked_file_change_retained_total(self.retained_bytes, pending_bytes, started_bytes)?;
+
+        // patchUpdated is volatile progress in Codex 0.144.5. item/started is the
+        // authoritative, normalized change set for proposal compilation.
+        self.pending_patches.remove(item_id);
+        self.items.insert(
+            item_id.to_owned(),
+            CodexFileChangeItemState {
+                changes,
+                started_at_ms,
+                approval_request_id: None,
+                approval_started_at_ms: None,
+                request_resolved: false,
+                completed: false,
+            },
+        );
+        self.retained_bytes = retained_bytes;
+        Ok(())
+    }
+
+    fn complete_item(
+        &mut self,
+        item_id: &str,
+        completed_changes: Vec<CodexFileUpdateChange>,
+        status: Option<&str>,
+        completed_at_ms: u64,
+    ) -> Result<(), String> {
+        let state = self.items.get_mut(item_id).ok_or_else(|| {
+            file_change_protocol_error("completed item has no started file change")
+        })?;
+        if state.completed || state.changes != completed_changes {
+            return Err(file_change_protocol_error(
+                "completed item is duplicated or changed identity",
+            ));
+        }
+        if completed_at_ms < state.started_at_ms {
+            return Err(file_change_protocol_error(
+                "file change completion timestamp precedes its start",
+            ));
+        }
+        match status {
+            Some("declined")
+                if state.approval_request_id.is_some()
+                    && state.approval_started_at_ms.is_some()
+                    && state.request_resolved => {}
+            Some("failed") if state.approval_request_id.is_none() => {}
+            Some("completed") => {
+                return Err(file_change_protocol_error(
+                    "provider reported a completed write in read-only mode",
+                ));
+            }
+            _ => {
+                return Err(file_change_protocol_error(
+                    "file change terminal status is inconsistent",
+                ));
+            }
+        }
+        state.completed = true;
+        Ok(())
+    }
+
+    fn has_open_items(&self) -> bool {
+        !self.pending_patches.is_empty() || self.items.values().any(|item| !item.completed)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -770,7 +935,7 @@ impl CodexAdapter {
         mut deny_runtime_request: D,
     ) -> Result<(), CodexTurnFailure>
     where
-        F: FnMut(CodexEvent),
+        F: FnMut(CodexEvent) -> bool,
         D: FnMut(
             CodexRuntimeDenialRequest,
             &mut dyn FnMut() -> Result<(), String>,
@@ -790,6 +955,7 @@ impl CodexAdapter {
 
         let mut agent_messages = HashMap::<String, AgentMessageItem>::new();
         let mut commands = HashMap::<String, CommandItem>::new();
+        let mut file_changes = CodexFileChangeTurnState::default();
         let deadline = Instant::now() + TURN_TIMEOUT;
         let mut interrupt_sent = false;
         let mut interrupt_request_id = None;
@@ -822,13 +988,79 @@ impl CodexAdapter {
                 continue;
             };
             if let Some(request_kind) = runtime_denial_request_kind(&message) {
-                self.handle_turn_runtime_denial_request(
-                    &message,
-                    request.thread_id,
-                    &turn_id,
-                    request_kind,
-                    &mut deny_runtime_request,
-                )?;
+                if request_kind == RuntimeDenialRequestKind::FileChange {
+                    let mut accepted = None;
+                    self.handle_turn_runtime_denial_request(
+                        &message,
+                        request.thread_id,
+                        &turn_id,
+                        request_kind,
+                        &mut |id, params| {
+                            let item_id =
+                                params
+                                    .get("itemId")
+                                    .and_then(Value::as_str)
+                                    .ok_or_else(|| {
+                                        "Codex file change approval item identity is missing"
+                                            .to_owned()
+                                    })?;
+                            let started_at_ms = params
+                                .get("startedAtMs")
+                                .and_then(Value::as_i64)
+                                .and_then(|value| u64::try_from(value).ok())
+                                .ok_or_else(|| {
+                                    "Codex file change approval timestamp is invalid".to_owned()
+                                })?;
+                            let state = file_changes.items.get(item_id).ok_or_else(|| {
+                                "Codex file change approval has no started item".to_owned()
+                            })?;
+                            if state.completed || state.approval_request_id.is_some() {
+                                return Err(
+                                    "Codex file change approval was requested more than once"
+                                        .to_owned(),
+                                );
+                            }
+                            let proposal_request = CodexFileChangeProposalRequest {
+                                provider_thread_id: request.thread_id.to_owned(),
+                                provider_turn_id: turn_id.clone(),
+                                provider_item_id: item_id.to_owned(),
+                                approval_started_at_ms: started_at_ms,
+                                changes: state.changes.clone(),
+                            };
+                            if !emit(CodexEvent::FileChangeProposalRequested {
+                                request: proposal_request,
+                            }) {
+                                return Err(
+                                    "Codex file change proposal could not be persisted".to_owned()
+                                );
+                            }
+                            accepted = Some((item_id.to_owned(), id.clone(), started_at_ms));
+                            Ok(())
+                        },
+                        &mut deny_runtime_request,
+                    )?;
+                    let Some((item_id, request_id, started_at_ms)) = accepted else {
+                        return Err(CodexTurnFailure::Reusable(
+                            "Codex file change approval persistence did not complete".to_owned(),
+                        ));
+                    };
+                    let state = file_changes.items.get_mut(&item_id).ok_or_else(|| {
+                        CodexTurnFailure::Reusable(
+                            "Codex file change approval lost its started item".to_owned(),
+                        )
+                    })?;
+                    state.approval_request_id = Some(request_id);
+                    state.approval_started_at_ms = Some(started_at_ms);
+                } else {
+                    self.handle_turn_runtime_denial_request(
+                        &message,
+                        request.thread_id,
+                        &turn_id,
+                        request_kind,
+                        &mut |_, _| Ok(()),
+                        &mut deny_runtime_request,
+                    )?;
+                }
                 continue;
             }
             if self.handle_server_request(&message)? {
@@ -889,6 +1121,40 @@ impl CodexAdapter {
             if params.get("threadId").and_then(Value::as_str) != Some(request.thread_id) {
                 continue;
             }
+            if method == "item/fileChange/patchUpdated" {
+                if params.get("turnId").and_then(Value::as_str) != Some(turn_id.as_str()) {
+                    return Err(file_change_protocol_error(
+                        "patch update does not match the active turn",
+                    )
+                    .into());
+                }
+                let item_id = required_file_change_item_id_value(params.get("itemId"))?;
+                let changes = parse_file_update_changes(params.get("changes"), true)?;
+                file_changes.observe_patch_updated(item_id, changes)?;
+                continue;
+            }
+            if method == "serverRequest/resolved" {
+                let Some(request_id) = params.get("requestId") else {
+                    return Err(file_change_protocol_error(
+                        "resolved server request identity is missing",
+                    )
+                    .into());
+                };
+                if let Some(state) = file_changes
+                    .items
+                    .values_mut()
+                    .find(|state| state.approval_request_id.as_ref() == Some(request_id))
+                {
+                    if state.request_resolved {
+                        return Err(file_change_protocol_error(
+                            "approval request resolved more than once",
+                        )
+                        .into());
+                    }
+                    state.request_resolved = true;
+                }
+                continue;
+            }
             if matches!(
                 method,
                 "item/started" | "item/commandExecution/outputDelta" | "item/completed"
@@ -907,6 +1173,31 @@ impl CodexAdapter {
                 let item = params
                     .get("item")
                     .ok_or_else(|| agent_message_protocol_error("started item is missing"))?;
+                if item.get("type").and_then(Value::as_str) == Some("fileChange") {
+                    if params.get("turnId").and_then(Value::as_str) != Some(turn_id.as_str()) {
+                        return Err(file_change_protocol_error(
+                            "started item does not match the active turn",
+                        )
+                        .into());
+                    }
+                    if params.get("completedAtMs").is_some() {
+                        return Err(file_change_protocol_error(
+                            "started notification carries a completion timestamp",
+                        )
+                        .into());
+                    }
+                    let started_at_ms = required_file_change_timestamp(&params, "startedAtMs")?;
+                    let item_id = required_file_change_item_id(item)?;
+                    if item.get("status").and_then(Value::as_str) != Some("inProgress") {
+                        return Err(file_change_protocol_error(
+                            "started item status is not in progress",
+                        )
+                        .into());
+                    }
+                    let changes = parse_file_update_changes(item.get("changes"), false)?;
+                    file_changes.start_item(item_id, changes, started_at_ms)?;
+                    continue;
+                }
                 if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
                     let item_id = required_agent_message_item_id(item)?;
                     if agent_messages.contains_key(item_id) {
@@ -964,6 +1255,26 @@ impl CodexAdapter {
                 }
                 "item/completed" => {
                     let item = params.get("item").cloned().unwrap_or(Value::Null);
+                    if item.get("type").and_then(Value::as_str) == Some("fileChange") {
+                        if params.get("turnId").and_then(Value::as_str) != Some(turn_id.as_str()) {
+                            return Err(file_change_protocol_error(
+                                "completed item does not match the active turn",
+                            )
+                            .into());
+                        }
+                        let item_id = required_file_change_item_id(&item)?;
+                        let completed_changes =
+                            parse_file_update_changes(item.get("changes"), false)?;
+                        let completed_at_ms =
+                            required_file_change_timestamp(&params, "completedAtMs")?;
+                        file_changes.complete_item(
+                            item_id,
+                            completed_changes,
+                            item.get("status").and_then(Value::as_str),
+                            completed_at_ms,
+                        )?;
+                        continue;
+                    }
                     if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
                         continue;
                     }
@@ -997,6 +1308,7 @@ impl CodexAdapter {
                         || commands
                             .values()
                             .any(|command| !command.status.is_terminal())
+                        || file_changes.has_open_items()
                     {
                         return Err(agent_message_protocol_error(
                             "turn reached a terminal state with an open item",
@@ -1149,15 +1461,17 @@ impl CodexAdapter {
         Ok(true)
     }
 
-    fn handle_turn_runtime_denial_request<D>(
+    fn handle_turn_runtime_denial_request<B, D>(
         &mut self,
         message: &Value,
         active_thread_id: &str,
         active_turn_id: &str,
         request_kind: RuntimeDenialRequestKind,
+        before_denial: &mut B,
         deny_runtime_request: &mut D,
     ) -> Result<(), CodexTurnFailure>
     where
+        B: FnMut(&Value, &serde_json::Map<String, Value>) -> Result<(), String>,
         D: FnMut(
             CodexRuntimeDenialRequest,
             &mut dyn FnMut() -> Result<(), String>,
@@ -1213,6 +1527,11 @@ impl CodexAdapter {
                 return Err(CodexTurnFailure::Reusable(error));
             }
         };
+        if let Err(error) = before_denial(&id, params) {
+            self.write_message(&runtime_denial_preflight_error(id))
+                .map_err(CodexTurnFailure::RestartRequired)?;
+            return Err(CodexTurnFailure::Reusable(error));
+        }
         let result = match request_kind {
             RuntimeDenialRequestKind::CommandExecution | RuntimeDenialRequestKind::FileChange => {
                 json!({ "decision": "decline" })
@@ -1254,6 +1573,120 @@ impl CodexAdapter {
 
 fn required_agent_message_item_id(item: &Value) -> Result<&str, String> {
     required_agent_message_item_id_value(item.get("id"))
+}
+
+fn required_file_change_item_id(item: &Value) -> Result<&str, String> {
+    required_file_change_item_id_value(item.get("id"))
+}
+
+fn required_file_change_item_id_value(value: Option<&Value>) -> Result<&str, String> {
+    let item_id = value
+        .and_then(Value::as_str)
+        .ok_or_else(|| file_change_protocol_error("item identity is missing"))?;
+    if !valid_provider_identifier(item_id) {
+        return Err(file_change_protocol_error("item identity is invalid"));
+    }
+    Ok(item_id)
+}
+
+fn parse_file_update_changes(
+    value: Option<&Value>,
+    allow_empty: bool,
+) -> Result<Vec<CodexFileUpdateChange>, String> {
+    let changes = value
+        .cloned()
+        .ok_or_else(|| file_change_protocol_error("changes are missing"))?;
+    validate_file_update_change_wire(&changes)?;
+    let changes: Vec<CodexFileUpdateChange> = serde_json::from_value(changes)
+        .map_err(|_| file_change_protocol_error("changes do not match the pinned schema"))?;
+    if allow_empty && changes.is_empty() {
+        return Ok(changes);
+    }
+    validate_codex_file_changes(&changes)
+        .map_err(|error| file_change_protocol_error(&error.message))?;
+    Ok(changes)
+}
+
+fn validate_file_update_change_wire(value: &Value) -> Result<(), String> {
+    let changes = value
+        .as_array()
+        .ok_or_else(|| file_change_protocol_error("changes are not an array"))?;
+    for change in changes {
+        let change = change
+            .as_object()
+            .filter(|object| {
+                object.len() == 3
+                    && object.contains_key("path")
+                    && object.contains_key("kind")
+                    && object.contains_key("diff")
+            })
+            .ok_or_else(|| {
+                file_change_protocol_error("change fields do not match the pinned schema")
+            })?;
+        let kind = change
+            .get("kind")
+            .and_then(Value::as_object)
+            .ok_or_else(|| file_change_protocol_error("change kind is invalid"))?;
+        let kind_name = kind.get("type").and_then(Value::as_str);
+        let valid = match kind_name {
+            Some("add" | "delete") => kind.len() == 1,
+            Some("update") => {
+                (kind.len() == 1 || (kind.len() == 2 && kind.contains_key("move_path")))
+                    && kind
+                        .get("move_path")
+                        .is_none_or(|value| value.is_null() || value.is_string())
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(file_change_protocol_error(
+                "change kind fields do not match the pinned schema",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn file_change_retained_bytes(changes: &[CodexFileUpdateChange]) -> Result<usize, String> {
+    changes.iter().try_fold(0_usize, |total, change| {
+        let move_path_bytes = match &change.kind {
+            crate::codex_file_change::CodexPatchChangeKind::Update { move_path } => {
+                move_path.as_deref().map_or(0, str::len)
+            }
+            _ => 0,
+        };
+        total
+            .checked_add(change.path.len())
+            .and_then(|bytes| bytes.checked_add(change.diff.len()))
+            .and_then(|bytes| bytes.checked_add(move_path_bytes))
+            .ok_or_else(|| file_change_protocol_error("file change byte accounting overflowed"))
+    })
+}
+
+fn checked_file_change_retained_total(
+    retained_bytes: usize,
+    replaced_bytes: usize,
+    next_bytes: usize,
+) -> Result<usize, String> {
+    retained_bytes
+        .checked_sub(replaced_bytes)
+        .and_then(|bytes| bytes.checked_add(next_bytes))
+        .filter(|bytes| *bytes <= MAX_FILE_CHANGE_RETAINED_BYTES_PER_TURN)
+        .ok_or_else(|| {
+            file_change_protocol_error("single-turn retained file change budget is exceeded")
+        })
+}
+
+fn required_file_change_timestamp(params: &Value, field: &str) -> Result<u64, String> {
+    params
+        .get(field)
+        .and_then(Value::as_i64)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| file_change_protocol_error("lifecycle timestamp is invalid"))
+}
+
+fn file_change_protocol_error(reason: &str) -> String {
+    format!("Codex file change lifecycle protocol error: {reason}")
 }
 
 fn required_agent_message_item_id_value(value: Option<&Value>) -> Result<&str, String> {
@@ -2156,6 +2589,243 @@ fn turn_terminal_event(params: &Value, turn_id: &str) -> Result<CodexEvent, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn file_change(
+        path: &str,
+        kind: crate::codex_file_change::CodexPatchChangeKind,
+        diff: impl Into<String>,
+    ) -> CodexFileUpdateChange {
+        CodexFileUpdateChange {
+            path: path.to_owned(),
+            diff: diff.into(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn pinned_file_change_shapes_parse_without_relabeling_diff_semantics() {
+        let changes = json!([
+            {
+                "path": "/workspace/added.txt",
+                "kind": { "type": "add" },
+                "diff": "new content\n"
+            },
+            {
+                "path": "/workspace/updated.txt",
+                "kind": { "type": "update", "move_path": null },
+                "diff": "@@ -1 +1 @@\n-old\n+new\n"
+            },
+            {
+                "path": "/workspace/deleted.txt",
+                "kind": { "type": "delete" },
+                "diff": "old content\n"
+            }
+        ]);
+        let parsed = parse_file_update_changes(Some(&changes), false).unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].diff, "new content\n");
+        assert!(matches!(
+            &parsed[0].kind,
+            crate::codex_file_change::CodexPatchChangeKind::Add
+        ));
+        assert!(matches!(
+            &parsed[1].kind,
+            crate::codex_file_change::CodexPatchChangeKind::Update { move_path: None }
+        ));
+        assert!(matches!(
+            &parsed[2].kind,
+            crate::codex_file_change::CodexPatchChangeKind::Delete
+        ));
+    }
+
+    #[test]
+    fn patch_updates_may_be_empty_but_final_file_changes_may_not() {
+        let empty = json!([]);
+        assert!(parse_file_update_changes(Some(&empty), true)
+            .unwrap()
+            .is_empty());
+        assert!(parse_file_update_changes(Some(&empty), false).is_err());
+        let unknown = json!([{
+            "path": "file.txt",
+            "kind": { "type": "add", "unexpected": true },
+            "diff": "content\n"
+        }]);
+        assert!(parse_file_update_changes(Some(&unknown), false).is_err());
+    }
+
+    #[test]
+    fn volatile_patch_formats_do_not_override_authoritative_started_changes() {
+        use crate::codex_file_change::CodexPatchChangeKind;
+
+        let mut state = CodexFileChangeTurnState::default();
+        let cases = [
+            (
+                "update-item",
+                file_change(
+                    "/workspace/update.txt",
+                    CodexPatchChangeKind::Update { move_path: None },
+                    "@@\n-old\n+new\n",
+                ),
+                file_change(
+                    "/workspace/update.txt",
+                    CodexPatchChangeKind::Update { move_path: None },
+                    "--- a/update.txt\n+++ b/update.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                ),
+            ),
+            (
+                "delete-item",
+                file_change("/workspace/delete.txt", CodexPatchChangeKind::Delete, ""),
+                file_change(
+                    "/workspace/delete.txt",
+                    CodexPatchChangeKind::Delete,
+                    "old content\n",
+                ),
+            ),
+            (
+                "partial-add-item",
+                file_change("/workspace/add.txt", CodexPatchChangeKind::Add, "partial"),
+                file_change(
+                    "/workspace/add.txt",
+                    CodexPatchChangeKind::Add,
+                    "partial\ncomplete\n",
+                ),
+            ),
+            (
+                "relative-add-item",
+                file_change("relative.txt", CodexPatchChangeKind::Add, "content\n"),
+                file_change(
+                    "/workspace/relative.txt",
+                    CodexPatchChangeKind::Add,
+                    "content\n",
+                ),
+            ),
+            (
+                "rename-item",
+                file_change(
+                    "old.txt",
+                    CodexPatchChangeKind::Update {
+                        move_path: Some("new.txt".into()),
+                    },
+                    "",
+                ),
+                file_change(
+                    "/workspace/old.txt",
+                    CodexPatchChangeKind::Update {
+                        move_path: Some("/workspace/new.txt".into()),
+                    },
+                    "\n\nMoved to: /workspace/new.txt",
+                ),
+            ),
+        ];
+
+        for (item_id, patch_updated, started) in cases {
+            state
+                .observe_patch_updated(item_id, vec![patch_updated])
+                .unwrap();
+            state
+                .start_item(item_id, vec![started.clone()], 10)
+                .unwrap();
+            assert_eq!(state.items.get(item_id).unwrap().changes, vec![started]);
+            assert!(!state.pending_patches.contains_key(item_id));
+        }
+    }
+
+    #[test]
+    fn volatile_patch_progress_cannot_cross_item_lifecycles() {
+        use crate::codex_file_change::CodexPatchChangeKind;
+
+        let mut state = CodexFileChangeTurnState::default();
+        state
+            .observe_patch_updated(
+                "item-a",
+                vec![file_change("a.txt", CodexPatchChangeKind::Add, "a")],
+            )
+            .unwrap();
+        state
+            .start_item(
+                "item-b",
+                vec![file_change("b.txt", CodexPatchChangeKind::Add, "b")],
+                10,
+            )
+            .unwrap();
+
+        assert!(state.pending_patches.contains_key("item-a"));
+        assert!(state.items.contains_key("item-b"));
+        assert!(state
+            .observe_patch_updated(
+                "item-b",
+                vec![file_change("b.txt", CodexPatchChangeKind::Add, "changed")],
+            )
+            .is_err());
+        assert!(state.has_open_items());
+    }
+
+    #[test]
+    fn single_turn_file_change_budget_fails_before_retaining_started_item() {
+        use crate::codex_file_change::CodexPatchChangeKind;
+
+        let mut state = CodexFileChangeTurnState::default();
+        let one_mebibyte = "x".repeat(1024 * 1024);
+        for index in 0..15 {
+            state
+                .start_item(
+                    &format!("item-{index}"),
+                    vec![file_change(
+                        &format!("file-{index}.txt"),
+                        CodexPatchChangeKind::Add,
+                        one_mebibyte.clone(),
+                    )],
+                    10,
+                )
+                .unwrap();
+        }
+        let retained_before = state.retained_bytes;
+        let error = state
+            .start_item(
+                "item-over-budget",
+                vec![file_change(
+                    "over-budget.txt",
+                    CodexPatchChangeKind::Add,
+                    one_mebibyte,
+                )],
+                10,
+            )
+            .unwrap_err();
+
+        assert!(error.contains("single-turn retained file change budget is exceeded"));
+        assert_eq!(state.retained_bytes, retained_before);
+        assert!(!state.items.contains_key("item-over-budget"));
+    }
+
+    #[test]
+    fn file_change_lifecycle_timestamps_are_required_and_monotonic() {
+        use crate::codex_file_change::CodexPatchChangeKind;
+
+        assert_eq!(
+            required_file_change_timestamp(&json!({"startedAtMs": 10}), "startedAtMs").unwrap(),
+            10
+        );
+        for invalid in [
+            json!({}),
+            json!({"startedAtMs": null}),
+            json!({"startedAtMs": "10"}),
+            json!({"startedAtMs": -1}),
+            json!({"startedAtMs": 1.5}),
+        ] {
+            assert!(required_file_change_timestamp(&invalid, "startedAtMs").is_err());
+        }
+
+        let mut state = CodexFileChangeTurnState::default();
+        let change = file_change("file.txt", CodexPatchChangeKind::Add, "content\n");
+        state.start_item("item", vec![change.clone()], 20).unwrap();
+        assert!(state
+            .complete_item("item", vec![change.clone()], Some("failed"), 19)
+            .is_err());
+        assert!(!state.items.get("item").unwrap().completed);
+        state
+            .complete_item("item", vec![change], Some("failed"), 20)
+            .unwrap();
+    }
 
     #[test]
     fn agent_message_limit_counts_unicode_characters_not_utf8_bytes() {

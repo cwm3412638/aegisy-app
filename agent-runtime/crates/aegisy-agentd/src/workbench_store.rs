@@ -58,6 +58,10 @@ use crate::usage_authority::{
 pub use crate::workbench_migration::WorkbenchRecoveryDiagnostic;
 use crate::workbench_migration::{create_pre_upgrade_backup, inspect_recovery};
 use crate::workspace_edit::ContentHash;
+use crate::workspace_edit_proposal::{
+    WorkspaceEditProposal, WorkspaceEditProposalArtifactKind,
+    EVENT_SCHEMA_VERSION as WORKSPACE_EDIT_PROPOSAL_EVENT_SCHEMA_VERSION,
+};
 use aegisy_aap::stable::v0_1::{EventEnvelope, TimelineItem, TurnState};
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
@@ -71,7 +75,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = crate::turn_trace::MAX_DURABLE_EVENT_BYTES;
@@ -95,6 +99,8 @@ const MAX_ACTIVE_MODEL_PROFILES: usize = 256;
 const MAX_MODEL_PROFILE_PROJECTIONS: usize = 1_025;
 const MAX_MODEL_PROFILE_EVENTS: usize = 10_000;
 const MAX_MODEL_PROFILE_JSON_BYTES: usize = 64 * 1024;
+const MAX_WORKSPACE_EDIT_PROPOSALS: usize = 10_000;
+const MAX_WORKSPACE_EDIT_PROPOSAL_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MODEL_PROFILE_EVENT_STREAM_PREFIX: &str = "model-profile-stream-";
 const MAX_BACKGROUND_NOTIFICATION_PAGE: usize = 100;
 const MAX_BACKGROUND_NOTIFICATION_JSON_BYTES: usize = 32 * 1024;
@@ -158,6 +164,18 @@ const REQUIRED_MODEL_PROFILE_INDEXES: [&str; 3] = [
     "model_profiles_project_idx",
     "model_profiles_state_updated_idx",
     "model_profiles_active_profile_id_idx",
+];
+const REQUIRED_WORKSPACE_EDIT_PROPOSAL_TABLES: [&str; 2] = [
+    "workspace_edit_proposals",
+    "workspace_edit_proposal_artifacts",
+];
+const REQUIRED_WORKSPACE_EDIT_PROPOSAL_INDEXES: [&str; 2] = [
+    "workspace_edit_proposals_session_created_idx",
+    "workspace_edit_proposal_artifacts_reference_idx",
+];
+const REQUIRED_WORKSPACE_EDIT_PROPOSAL_TRIGGERS: [&str; 2] = [
+    "workspace_edit_proposals_immutable_update",
+    "workspace_edit_proposal_artifacts_immutable_update",
 ];
 const REQUIRED_PUBLIC_TIMELINE_TABLES: [&str; 5] = [
     "public_timeline_events",
@@ -596,6 +614,72 @@ const MODEL_PROFILE_SCHEMA_SQL: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS model_profiles_active_profile_id_idx
         ON model_profiles(profile_id) WHERE state = 'active';
 ";
+const WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS workspace_edit_proposals (
+        proposal_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        provider_thread_id TEXT NOT NULL,
+        provider_item_id TEXT NOT NULL,
+        approval_started_at_ms INTEGER NOT NULL CHECK(approval_started_at_ms > 0),
+        project_id TEXT NOT NULL,
+        root_id TEXT NOT NULL,
+        filesystem_root_identity TEXT NOT NULL,
+        workspace_edit_root_identity TEXT NOT NULL,
+        edit_id TEXT NOT NULL,
+        canonical_edit_identity TEXT NOT NULL,
+        preview_identity TEXT NOT NULL,
+        proposal_json TEXT NOT NULL,
+        proposal_sha256 TEXT NOT NULL CHECK(length(proposal_sha256) = 64),
+        proposal_bytes INTEGER NOT NULL CHECK(proposal_bytes > 0),
+        operation_count INTEGER NOT NULL CHECK(operation_count BETWEEN 1 AND 256),
+        artifact_count INTEGER NOT NULL CHECK(artifact_count BETWEEN 1 AND 513),
+        file_count INTEGER NOT NULL CHECK(file_count BETWEEN 1 AND 256),
+        additions INTEGER NOT NULL CHECK(additions >= 0),
+        deletions INTEGER NOT NULL CHECK(deletions >= 0),
+        warning_count INTEGER NOT NULL CHECK(warning_count >= 0),
+        applicable INTEGER NOT NULL CHECK(applicable IN (0,1)),
+        event_sequence INTEGER NOT NULL CHECK(event_sequence >= 1),
+        created_at_ms INTEGER NOT NULL CHECK(created_at_ms > 0),
+        file_mutation_authority INTEGER NOT NULL CHECK(file_mutation_authority = 0),
+        approval_recorded INTEGER NOT NULL CHECK(approval_recorded = 0),
+        apply_available INTEGER NOT NULL CHECK(apply_available = 0),
+        UNIQUE(session_id, edit_id),
+        UNIQUE(provider_thread_id, provider_item_id),
+        UNIQUE(session_id, event_sequence),
+        CHECK(created_at_ms >= approval_started_at_ms),
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+        FOREIGN KEY(turn_id) REFERENCES turns(turn_id) ON DELETE CASCADE,
+        FOREIGN KEY(project_id, root_id) REFERENCES project_roots(project_id, root_id),
+        FOREIGN KEY(session_id, event_sequence)
+            REFERENCES events(session_id, sequence) ON DELETE CASCADE
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS workspace_edit_proposal_artifacts (
+        proposal_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+        artifact_kind TEXT NOT NULL CHECK(artifact_kind IN ('proposed-content','diff')),
+        content_reference TEXT NOT NULL,
+        reference_id TEXT NOT NULL UNIQUE,
+        blob_sha256 TEXT NOT NULL CHECK(length(blob_sha256) = 64),
+        bytes INTEGER NOT NULL CHECK(bytes >= 0),
+        media_type TEXT NOT NULL,
+        PRIMARY KEY(proposal_id, ordinal),
+        UNIQUE(proposal_id, artifact_kind, content_reference),
+        FOREIGN KEY(proposal_id) REFERENCES workspace_edit_proposals(proposal_id)
+            ON DELETE CASCADE,
+        FOREIGN KEY(reference_id) REFERENCES durable_blob_references(reference_id)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS workspace_edit_proposals_session_created_idx
+        ON workspace_edit_proposals(session_id, created_at_ms DESC, proposal_id ASC);
+    CREATE INDEX IF NOT EXISTS workspace_edit_proposal_artifacts_reference_idx
+        ON workspace_edit_proposal_artifacts(reference_id, proposal_id);
+    CREATE TRIGGER IF NOT EXISTS workspace_edit_proposals_immutable_update
+        BEFORE UPDATE ON workspace_edit_proposals
+        BEGIN SELECT RAISE(ABORT, 'workspace edit proposal is immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS workspace_edit_proposal_artifacts_immutable_update
+        BEFORE UPDATE ON workspace_edit_proposal_artifacts
+        BEGIN SELECT RAISE(ABORT, 'workspace edit proposal artifact is immutable'); END;
+";
 
 #[derive(Debug)]
 pub struct WorkbenchStore {
@@ -608,6 +692,8 @@ pub struct WorkbenchStore {
     startup_recovery: Box<StartupProjectionRecoveryReport>,
     #[cfg(test)]
     database_available_bytes_override: Option<u64>,
+    #[cfg(test)]
+    workspace_edit_proposal_post_commit_error: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1365,6 +1451,21 @@ pub struct DurableBlobRead {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredWorkspaceEditProposal {
+    pub proposal: WorkspaceEditProposal,
+    pub proposal_hash: ContentHash,
+    pub event_sequence: u64,
+    pub artifact_reference_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceEditProposalArtifactWrite {
+    pub reference: String,
+    pub content: Vec<u8>,
+    pub retain_until_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DurableBlobConsistency {
     pub schema_version: String,
     pub consistent: bool,
@@ -1542,6 +1643,8 @@ impl WorkbenchStore {
             startup_recovery: Box::new(empty_startup_projection_recovery_report()),
             #[cfg(test)]
             database_available_bytes_override: None,
+            #[cfg(test)]
+            workspace_edit_proposal_post_commit_error: false,
         };
         store
             .configure()
@@ -1954,6 +2057,282 @@ impl WorkbenchStore {
             }
         }
         result
+    }
+
+    pub fn record_workspace_edit_proposal(
+        &mut self,
+        proposal: WorkspaceEditProposal,
+        artifact_writes: Vec<WorkspaceEditProposalArtifactWrite>,
+    ) -> Result<StoredWorkspaceEditProposal, WorkbenchStoreError> {
+        self.ensure_session_writable(&proposal.session_id)?;
+        let (proposal_json, proposal_hash) = prepare_workspace_edit_proposal(&proposal)?;
+        let requests = workspace_edit_proposal_blob_requests(&proposal, artifact_writes)?;
+        let prepared = requests
+            .iter()
+            .map(prepare_durable_blob)
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_workspace_edit_proposal_binding(&self.connection, &proposal, true)?;
+
+        if let Some(existing_id) = workspace_edit_proposal_id_for_edit(
+            &self.connection,
+            &proposal.session_id,
+            &proposal.edit_id,
+        )? {
+            if existing_id != proposal.proposal_id {
+                return Err(coded_error(
+                    "workspace-edit-proposal-conflict",
+                    "workspace edit proposal conflicts with an immutable edit identity",
+                ));
+            }
+            let existing = load_workspace_edit_proposal(self, &existing_id)?;
+            if existing.proposal != proposal || existing.proposal_hash != proposal_hash {
+                return Err(coded_error(
+                    "workspace-edit-proposal-conflict",
+                    "workspace edit proposal identity already has different data",
+                ));
+            }
+            validate_workspace_edit_proposal_retry_content(&proposal, &requests, &existing)?;
+            return Ok(existing);
+        }
+
+        let proposal_count = query_global_count(
+            &self.connection,
+            "SELECT COUNT(*) FROM workspace_edit_proposals",
+            "cannot count workspace edit proposals",
+        )?;
+        if proposal_count >= MAX_WORKSPACE_EDIT_PROPOSALS as u64 {
+            return Err(error("workspace edit proposal admission limit exceeded"));
+        }
+
+        let mut unique_content = BTreeMap::<String, usize>::new();
+        for (index, prepared_blob) in prepared.iter().enumerate() {
+            unique_content
+                .entry(prepared_blob.content_hash.sha256.clone())
+                .or_insert(index);
+        }
+        let (object_count, retained_bytes): (i64, i64) = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM durable_blobs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| error("cannot inspect proposal artifact capacity"))?;
+        let mut admitted_objects = to_u64(object_count, "durable blob object count")?;
+        let mut admitted_bytes = to_u64(retained_bytes, "durable blob retained bytes")?;
+        for (sha256, index) in &unique_content {
+            let existing: Option<(i64, String)> = self
+                .connection
+                .query_row(
+                    "SELECT bytes, storage_key FROM durable_blobs WHERE sha256 = ?1",
+                    [sha256],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|_| error("cannot inspect proposal artifact identity"))?;
+            if let Some((bytes, storage_key)) = existing {
+                if to_u64(bytes, "durable blob byte count")? != prepared[*index].content_hash.bytes
+                    || storage_key != prepared[*index].storage_key
+                {
+                    return Err(error("proposal artifact Blob identity conflicts"));
+                }
+            } else {
+                admitted_objects = admitted_objects.saturating_add(1);
+                admitted_bytes = admitted_bytes.saturating_add(prepared[*index].content_hash.bytes);
+            }
+        }
+        if admitted_objects > MAX_BLOB_OBJECTS || admitted_bytes > MAX_STORE_BYTES {
+            return Err(error("proposal artifact Blob admission limit exceeded"));
+        }
+
+        let mut created = Vec::new();
+        for index in unique_content.values().copied() {
+            match self.blob_files.put(
+                &prepared[index].content_hash.sha256,
+                &requests[index].content,
+                None,
+            ) {
+                Ok(write) if write.created => created.push((
+                    prepared[index].content_hash.sha256.clone(),
+                    prepared[index].content_hash.bytes,
+                )),
+                Ok(_) => {}
+                Err(cause) => {
+                    for (sha256, bytes) in created {
+                        self.blob_files.remove_created(&sha256, bytes);
+                    }
+                    return Err(blob_file_error(cause));
+                }
+            }
+        }
+
+        let mut committed = false;
+        let inject_post_commit_error = {
+            #[cfg(test)]
+            {
+                self.workspace_edit_proposal_post_commit_error
+            }
+            #[cfg(not(test))]
+            {
+                false
+            }
+        };
+        let result = (|| {
+            let transaction =
+                self.begin_database_write("cannot start workspace edit proposal transaction")?;
+            validate_workspace_edit_proposal_binding(&transaction, &proposal, true)?;
+            if workspace_edit_proposal_id_for_edit(
+                &transaction,
+                &proposal.session_id,
+                &proposal.edit_id,
+            )?
+            .is_some()
+            {
+                return Err(coded_error(
+                    "workspace-edit-proposal-conflict",
+                    "workspace edit proposal changed before commit",
+                ));
+            }
+            let stored_blobs = requests
+                .iter()
+                .zip(&prepared)
+                .map(|(request, prepared)| persist_durable_blob_tx(&transaction, request, prepared))
+                .collect::<Result<Vec<_>, _>>()?;
+            let event_id = derived_event_id(
+                "workspace-edit-proposal-recorded",
+                proposal.proposal_id.as_bytes(),
+            );
+            let event = append_event_tx(
+                &transaction,
+                EventInput {
+                    session_id: &proposal.session_id,
+                    event_id: &event_id,
+                    timestamp_ms: proposal.created_at_ms,
+                    correlation_id: &proposal.turn_id,
+                    event_kind: "workspace-edit.proposal-recorded",
+                    project_id: Some(&proposal.project_id),
+                    operation_id: &workspace_edit_proposal_operation_id(&proposal.proposal_id),
+                    generation: 0,
+                    payload: workspace_edit_proposal_event_payload(&proposal),
+                },
+            )?;
+            transaction
+                .execute(
+                    "INSERT INTO workspace_edit_proposals (
+                        proposal_id, session_id, turn_id, provider_thread_id,
+                        provider_item_id, approval_started_at_ms, project_id, root_id,
+                        filesystem_root_identity, workspace_edit_root_identity,
+                        edit_id, canonical_edit_identity, preview_identity,
+                        proposal_json, proposal_sha256, proposal_bytes,
+                        operation_count, artifact_count, file_count,
+                        additions, deletions, warning_count, applicable,
+                        event_sequence, created_at_ms, file_mutation_authority,
+                        approval_recorded, apply_available
+                     ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                        ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+                        ?21, ?22, ?23, ?24, ?25, 0, 0, 0
+                     )",
+                    params![
+                        proposal.proposal_id,
+                        proposal.session_id,
+                        proposal.turn_id,
+                        proposal.provider_thread_id,
+                        proposal.provider_item_id,
+                        to_i64(
+                            proposal.approval_started_at_ms,
+                            "proposal approval start time"
+                        )?,
+                        proposal.project_id,
+                        proposal.root_id,
+                        proposal.filesystem_root_identity,
+                        proposal.workspace_edit_root_identity,
+                        proposal.edit_id,
+                        proposal.canonical_edit_identity,
+                        proposal.preview.identity,
+                        proposal_json,
+                        proposal_hash.sha256,
+                        to_i64(proposal_hash.bytes, "workspace edit proposal byte count")?,
+                        to_i64(proposal.operations.len() as u64, "proposal operation count")?,
+                        to_i64(proposal.artifacts.len() as u64, "proposal artifact count")?,
+                        to_i64(proposal.preview.file_count, "proposal file count")?,
+                        to_i64(proposal.preview.additions, "proposal additions")?,
+                        to_i64(proposal.preview.deletions, "proposal deletions")?,
+                        to_i64(proposal.preview.warning_count, "proposal warning count")?,
+                        i64::from(proposal.preview.applicable),
+                        to_i64(event.sequence, "proposal event sequence")?,
+                        to_i64(proposal.created_at_ms, "proposal creation time")?,
+                    ],
+                )
+                .map_err(|_| error("cannot insert immutable workspace edit proposal"))?;
+            for (ordinal, (artifact, stored_blob)) in
+                proposal.artifacts.iter().zip(&stored_blobs).enumerate()
+            {
+                transaction
+                    .execute(
+                        "INSERT INTO workspace_edit_proposal_artifacts (
+                            proposal_id, ordinal, artifact_kind, content_reference,
+                            reference_id, blob_sha256, bytes, media_type
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            proposal.proposal_id,
+                            to_i64(ordinal as u64, "proposal artifact ordinal")?,
+                            workspace_edit_proposal_artifact_kind(artifact.kind),
+                            artifact.reference,
+                            stored_blob.reference_id,
+                            artifact.sha256,
+                            to_i64(artifact.bytes, "proposal artifact byte count")?,
+                            artifact.media_type,
+                        ],
+                    )
+                    .map_err(|_| error("cannot bind workspace edit proposal artifact"))?;
+            }
+            let stored = StoredWorkspaceEditProposal {
+                proposal: proposal.clone(),
+                proposal_hash: proposal_hash.clone(),
+                event_sequence: event.sequence,
+                artifact_reference_ids: stored_blobs
+                    .iter()
+                    .map(|blob| blob.reference_id.clone())
+                    .collect(),
+            };
+            transaction
+                .commit()
+                .map_err(|_| error("cannot commit workspace edit proposal transaction"))?;
+            committed = true;
+            if inject_post_commit_error {
+                return Err(coded_error(
+                    "workspace-edit-proposal-post-commit-fixture",
+                    "workspace edit proposal post-commit fixture failed",
+                ));
+            }
+            Ok(stored)
+        })();
+        if result.is_err() && !committed {
+            for (sha256, bytes) in created {
+                self.blob_files.remove_created(&sha256, bytes);
+            }
+        }
+        result
+    }
+
+    pub fn read_workspace_edit_proposal(
+        &self,
+        proposal_id: &str,
+    ) -> Result<StoredWorkspaceEditProposal, WorkbenchStoreError> {
+        validate_event_identifier(proposal_id, "workspace edit proposal ID")?;
+        let session_id = self
+            .connection
+            .query_row(
+                "SELECT session_id FROM workspace_edit_proposals WHERE proposal_id = ?1",
+                [proposal_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot locate workspace edit proposal session"))?
+            .ok_or_else(|| error("workspace edit proposal does not exist"))?;
+        self.ensure_session_readable(&session_id)?;
+        load_workspace_edit_proposal(self, proposal_id)
     }
 
     #[cfg(test)]
@@ -7929,6 +8308,30 @@ impl WorkbenchStore {
                     )
                 })?);
         }
+        let proposal_count = query_global_count(
+            &self.connection,
+            "SELECT COUNT(*) FROM workspace_edit_proposals",
+            "cannot count workspace edit proposals during startup recovery",
+        )?;
+        if proposal_count > MAX_WORKSPACE_EDIT_PROPOSALS as u64 {
+            return Err(coded_error(
+                "startup-recovery-limit-exceeded",
+                "workspace edit proposal startup recovery limit exceeded",
+            ));
+        }
+        for session_id in &session_ids {
+            if self.quarantined_sessions.contains(session_id) {
+                continue;
+            }
+            if verify_workspace_edit_proposals_for_session(self, session_id).is_err() {
+                self.quarantined_sessions.insert(session_id.clone());
+                if self.startup_rebuilt_sessions.remove(session_id) {
+                    rebuilt_sessions = rebuilt_sessions.saturating_sub(1);
+                } else {
+                    healthy_sessions = healthy_sessions.saturating_sub(1);
+                }
+            }
+        }
         let quarantined_projects = self.quarantined_projects.len() as u64;
         let quarantined_sessions = self.quarantined_sessions.len() as u64;
         Ok(StartupProjectionRecoveryReport {
@@ -11196,6 +11599,22 @@ impl WorkbenchStore {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
+        if version == 17 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start workspace edit proposal migration"))?;
+            transaction
+                .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply workspace edit proposal migration"))?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit workspace edit proposal migration"));
+        }
         if version == 16 {
             let transaction = self
                 .connection
@@ -11203,6 +11622,9 @@ impl WorkbenchStore {
                 .map_err(|_| error("cannot start public timeline snapshot migration"))?;
             public_timeline_journal::migrate_v16_to_v17(&transaction)
                 .map_err(public_timeline_error)?;
+            transaction
+                .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply workspace edit proposal migration"))?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -11218,6 +11640,9 @@ impl WorkbenchStore {
                 .map_err(|_| error("cannot start public timeline retention migration"))?;
             public_timeline_journal::migrate_v15_to_v16(&transaction)
                 .map_err(public_timeline_error)?;
+            transaction
+                .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply workspace edit proposal migration"))?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -11232,6 +11657,9 @@ impl WorkbenchStore {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|_| error("cannot start public timeline journal migration"))?;
             public_timeline_journal::apply_schema(&transaction).map_err(public_timeline_error)?;
+            transaction
+                .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply workspace edit proposal migration"))?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -11249,6 +11677,9 @@ impl WorkbenchStore {
                 .execute_batch(MODEL_PROFILE_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply model profile schema migration"))?;
             public_timeline_journal::apply_schema(&transaction).map_err(public_timeline_error)?;
+            transaction
+                .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply workspace edit proposal migration"))?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -16814,7 +17245,10 @@ fn apply_session_search_indexes(connection: &Connection) -> Result<(), Workbench
     connection
         .execute_batch(MODEL_PROFILE_SCHEMA_SQL)
         .map_err(|_| error("cannot apply model profile schema migration"))?;
-    public_timeline_journal::apply_schema(connection).map_err(public_timeline_error)
+    public_timeline_journal::apply_schema(connection).map_err(public_timeline_error)?;
+    connection
+        .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
+        .map_err(|_| error("cannot apply workspace edit proposal migration"))
 }
 
 fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreError> {
@@ -16832,6 +17266,7 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         .chain(REQUIRED_BACKGROUND_LEASE_TABLES)
         .chain(REQUIRED_BACKGROUND_NOTIFICATION_TABLES)
         .chain(REQUIRED_MODEL_PROFILE_TABLES)
+        .chain(REQUIRED_WORKSPACE_EDIT_PROPOSAL_TABLES)
         .chain(REQUIRED_PUBLIC_TIMELINE_TABLES)
     {
         let exists: Option<String> = connection
@@ -16918,6 +17353,54 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             "created_at_ms",
         ],
     )?;
+    verify_required_table_columns(
+        connection,
+        "workspace_edit_proposals",
+        &[
+            "proposal_id",
+            "session_id",
+            "turn_id",
+            "provider_thread_id",
+            "provider_item_id",
+            "approval_started_at_ms",
+            "project_id",
+            "root_id",
+            "filesystem_root_identity",
+            "workspace_edit_root_identity",
+            "edit_id",
+            "canonical_edit_identity",
+            "preview_identity",
+            "proposal_json",
+            "proposal_sha256",
+            "proposal_bytes",
+            "operation_count",
+            "artifact_count",
+            "file_count",
+            "additions",
+            "deletions",
+            "warning_count",
+            "applicable",
+            "event_sequence",
+            "created_at_ms",
+            "file_mutation_authority",
+            "approval_recorded",
+            "apply_available",
+        ],
+    )?;
+    verify_required_table_columns(
+        connection,
+        "workspace_edit_proposal_artifacts",
+        &[
+            "proposal_id",
+            "ordinal",
+            "artifact_kind",
+            "content_reference",
+            "reference_id",
+            "blob_sha256",
+            "bytes",
+            "media_type",
+        ],
+    )?;
     for table in REQUIRED_PUBLIC_TIMELINE_TABLES {
         verify_required_session_delete_restriction(connection, table)?;
     }
@@ -16981,6 +17464,34 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             return Err(error(
                 "workbench database background notification indexes are incomplete",
             ));
+        }
+    }
+    for index in REQUIRED_WORKSPACE_EDIT_PROPOSAL_INDEXES {
+        let exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot verify workspace edit proposal indexes"))?;
+        if exists.as_deref() != Some(index) {
+            return Err(error("workspace edit proposal indexes are incomplete"));
+        }
+    }
+    for trigger in REQUIRED_WORKSPACE_EDIT_PROPOSAL_TRIGGERS {
+        let exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'trigger' AND name = ?1",
+                [trigger],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot verify workspace edit proposal triggers"))?;
+        if exists.as_deref() != Some(trigger) {
+            return Err(error("workspace edit proposal triggers are incomplete"));
         }
     }
     for index in REQUIRED_MODEL_PROFILE_INDEXES {
@@ -17810,6 +18321,606 @@ pub fn durable_blob_reference_id(
         project_id.unwrap_or_default()
     );
     format!("blobref-{}", sha256_hex(binding.as_bytes()))
+}
+
+fn prepare_workspace_edit_proposal(
+    proposal: &WorkspaceEditProposal,
+) -> Result<(String, ContentHash), WorkbenchStoreError> {
+    proposal.validate().map_err(|cause| error(cause.message))?;
+    let value = serde_json::to_value(proposal)
+        .map_err(|_| error("workspace edit proposal is not serializable"))?;
+    validate_persisted_payload(&value, "workspace edit proposal")?;
+    let json = serde_json::to_string(proposal)
+        .map_err(|_| error("workspace edit proposal is not serializable"))?;
+    if json.len() > MAX_WORKSPACE_EDIT_PROPOSAL_JSON_BYTES {
+        return Err(error("workspace edit proposal exceeds persistence limit"));
+    }
+    let hash = ContentHash::for_bytes(json.as_bytes());
+    Ok((json, hash))
+}
+
+fn workspace_edit_proposal_blob_requests(
+    proposal: &WorkspaceEditProposal,
+    writes: Vec<WorkspaceEditProposalArtifactWrite>,
+) -> Result<Vec<DurableBlobWrite>, WorkbenchStoreError> {
+    if writes.len() != proposal.artifacts.len() {
+        return Err(error(
+            "workspace edit proposal artifact batch is incomplete",
+        ));
+    }
+    let mut writes = writes
+        .into_iter()
+        .map(|write| (write.reference.clone(), write))
+        .collect::<BTreeMap<_, _>>();
+    if writes.len() != proposal.artifacts.len() {
+        return Err(error(
+            "workspace edit proposal artifact batch contains duplicates",
+        ));
+    }
+    let mut requests = Vec::with_capacity(proposal.artifacts.len());
+    for artifact in &proposal.artifacts {
+        let write = writes
+            .remove(&artifact.reference)
+            .ok_or_else(|| error("workspace edit proposal artifact content is missing"))?;
+        let content_hash = ContentHash::for_bytes(&write.content);
+        if content_hash.sha256 != artifact.sha256 || content_hash.bytes != artifact.bytes {
+            return Err(error(
+                "workspace edit proposal artifact content does not match its descriptor",
+            ));
+        }
+        let artifact_kind = workspace_edit_proposal_artifact_kind(artifact.kind);
+        requests.push(DurableBlobWrite {
+            reference_id: durable_blob_reference_id(
+                Some(&proposal.session_id),
+                Some(&proposal.project_id),
+                "edit",
+                &proposal.edit_id,
+                &artifact.reference,
+            ),
+            content_reference: artifact.reference.clone(),
+            session_id: Some(proposal.session_id.clone()),
+            project_id: Some(proposal.project_id.clone()),
+            kind: DurableBlobKind::WorkspaceEdit,
+            media_type: artifact.media_type.clone(),
+            owner_kind: "edit".into(),
+            owner_id: proposal.edit_id.clone(),
+            metadata: json!({
+                "schema_version": "workspace-edit-proposal-artifact/0.1",
+                "proposal_id": proposal.proposal_id,
+                "edit_id": proposal.edit_id,
+                "artifact_kind": artifact_kind,
+                "retention": "workspace-edit-proposal"
+            }),
+            content: write.content,
+            created_at_ms: proposal.created_at_ms,
+            retain_until_ms: write.retain_until_ms,
+        });
+    }
+    if !writes.is_empty() {
+        return Err(error(
+            "workspace edit proposal artifact batch contains an unknown reference",
+        ));
+    }
+    Ok(requests)
+}
+
+fn workspace_edit_proposal_artifact_kind(kind: WorkspaceEditProposalArtifactKind) -> &'static str {
+    match kind {
+        WorkspaceEditProposalArtifactKind::ProposedContent => "proposed-content",
+        WorkspaceEditProposalArtifactKind::Diff => "diff",
+    }
+}
+
+fn parse_workspace_edit_proposal_artifact_kind(
+    value: &str,
+) -> Result<WorkspaceEditProposalArtifactKind, WorkbenchStoreError> {
+    match value {
+        "proposed-content" => Ok(WorkspaceEditProposalArtifactKind::ProposedContent),
+        "diff" => Ok(WorkspaceEditProposalArtifactKind::Diff),
+        _ => Err(error("workspace edit proposal artifact kind is invalid")),
+    }
+}
+
+fn validate_workspace_edit_proposal_binding(
+    connection: &Connection,
+    proposal: &WorkspaceEditProposal,
+    require_active_lifecycle: bool,
+) -> Result<(), WorkbenchStoreError> {
+    let binding = connection
+        .query_row(
+            "SELECT session.project_id, session.mode, session.status,
+                    turn_record.session_id, turn_record.state,
+                    root.root_identity, root.canonical_root,
+                    workspace.root_id, workspace.root_identity, workspace.project_id,
+                    runtime.adapter, runtime.adapter_version, runtime.provider,
+                    runtime.backend_session_id, runtime.permission_profile
+             FROM sessions AS session
+             JOIN turns AS turn_record ON turn_record.turn_id = ?2
+             JOIN project_roots AS root
+               ON root.project_id = ?3 AND root.root_id = ?4
+             LEFT JOIN session_workspace_bindings AS workspace
+               ON workspace.session_id = session.session_id
+             LEFT JOIN session_runtime_bindings AS runtime
+               ON runtime.session_id = session.session_id
+             WHERE session.session_id = ?1",
+            params![
+                proposal.session_id,
+                proposal.turn_id,
+                proposal.project_id,
+                proposal.root_id,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(14)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot validate workspace edit proposal binding"))?
+        .ok_or_else(|| error("workspace edit proposal binding does not exist"))?;
+    let (
+        session_project_id,
+        session_mode,
+        session_status,
+        turn_session_id,
+        turn_state,
+        filesystem_root_identity,
+        canonical_root,
+        workspace_root_id,
+        workspace_root_identity,
+        workspace_project_id,
+        runtime_adapter,
+        runtime_adapter_version,
+        runtime_provider,
+        runtime_backend_session_id,
+        runtime_permission_profile,
+    ) = binding;
+    let expected_workspace_root_identity = format!(
+        "workspace-root:sha256:{:x}",
+        Sha256::digest(canonical_root.as_bytes())
+    );
+    if session_project_id.as_deref() != Some(proposal.project_id.as_str())
+        || session_mode != "work"
+        || turn_session_id != proposal.session_id
+        || (require_active_lifecycle && session_status != "active")
+        || (require_active_lifecycle && !matches!(turn_state.as_str(), "started" | "running"))
+        || (!require_active_lifecycle
+            && !matches!(
+                turn_state.as_str(),
+                "started" | "running" | "completed" | "failed" | "interrupted" | "cancelled"
+            ))
+        || filesystem_root_identity != proposal.filesystem_root_identity
+        || expected_workspace_root_identity != proposal.workspace_edit_root_identity
+        || workspace_root_id.as_deref() != Some(proposal.root_id.as_str())
+        || workspace_root_identity.as_deref() != Some(proposal.filesystem_root_identity.as_str())
+        || workspace_project_id.as_deref() != Some(proposal.project_id.as_str())
+    {
+        return Err(error(
+            "workspace edit proposal is not bound to the active Work session root",
+        ));
+    }
+    if runtime_adapter.as_deref() != Some(CODEX_TURN_TRACE_ADAPTER_IDENTITY) {
+        return Err(coded_error(
+            "workspace-edit-proposal-runtime-adapter-mismatch",
+            "workspace edit proposal does not match the durable Codex adapter",
+        ));
+    }
+    if runtime_adapter_version.as_deref() != Some(CODEX_DURABLE_ADAPTER_VERSION) {
+        return Err(coded_error(
+            "workspace-edit-proposal-runtime-version-mismatch",
+            "workspace edit proposal does not match the durable Codex adapter version",
+        ));
+    }
+    if runtime_provider != proposal.provider {
+        return Err(coded_error(
+            "workspace-edit-proposal-provider-mismatch",
+            "workspace edit proposal does not match the durable Provider binding",
+        ));
+    }
+    if runtime_backend_session_id.as_deref() != Some(proposal.provider_thread_id.as_str()) {
+        return Err(coded_error(
+            "workspace-edit-proposal-provider-thread-mismatch",
+            "workspace edit proposal does not match the durable Provider thread",
+        ));
+    }
+    if runtime_permission_profile.as_deref() != Some("read-only") {
+        return Err(coded_error(
+            "workspace-edit-proposal-runtime-permission-mismatch",
+            "workspace edit proposal is outside the durable read-only Runtime boundary",
+        ));
+    }
+    Ok(())
+}
+
+fn workspace_edit_proposal_id_for_edit(
+    connection: &Connection,
+    session_id: &str,
+    edit_id: &str,
+) -> Result<Option<String>, WorkbenchStoreError> {
+    connection
+        .query_row(
+            "SELECT proposal_id FROM workspace_edit_proposals
+             WHERE session_id = ?1 AND edit_id = ?2",
+            params![session_id, edit_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| error("cannot inspect immutable workspace edit proposal"))
+}
+
+fn workspace_edit_proposal_event_payload(proposal: &WorkspaceEditProposal) -> Value {
+    json!({
+        "schema_version": WORKSPACE_EDIT_PROPOSAL_EVENT_SCHEMA_VERSION,
+        "proposal_id": proposal.proposal_id,
+        "session_id": proposal.session_id,
+        "turn_id": proposal.turn_id,
+        "provider_identity": proposal.provider_identity(),
+        "provider_thread_identity": proposal.provider_thread_identity(),
+        "provider_item_identity": proposal.provider_item_identity(),
+        "approval_started_at_ms": proposal.approval_started_at_ms,
+        "project_id": proposal.project_id,
+        "root_id": proposal.root_id,
+        "filesystem_root_identity": proposal.filesystem_root_identity,
+        "edit_id": proposal.edit_id,
+        "canonical_edit_identity": proposal.canonical_edit_identity,
+        "preview_identity": proposal.preview.identity,
+        "operation_count": proposal.operations.len(),
+        "artifact_count": proposal.artifacts.len(),
+        "file_count": proposal.preview.file_count,
+        "additions": proposal.preview.additions,
+        "deletions": proposal.preview.deletions,
+        "warning_count": proposal.preview.warning_count,
+        "applicable": proposal.preview.applicable,
+        "created_at_ms": proposal.created_at_ms,
+        "file_mutation_authority": false,
+        "approval_recorded": false,
+        "apply_available": false
+    })
+}
+
+fn workspace_edit_proposal_operation_id(proposal_id: &str) -> String {
+    derived_event_id("workspace-edit-proposal-operation", proposal_id.as_bytes())
+}
+
+fn validate_workspace_edit_proposal_event(
+    event: &WorkbenchEvent,
+    proposal: &WorkspaceEditProposal,
+) -> Result<(), WorkbenchStoreError> {
+    let expected_payload = workspace_edit_proposal_event_payload(proposal);
+    let expected_event_id = derived_event_id(
+        "workspace-edit-proposal-recorded",
+        proposal.proposal_id.as_bytes(),
+    );
+    if event.event_id != expected_event_id
+        || event.timestamp_ms != proposal.created_at_ms
+        || event.correlation_id != proposal.turn_id
+        || event.event_kind != "workspace-edit.proposal-recorded"
+        || event.project_id.as_deref() != Some(proposal.project_id.as_str())
+        || event.operation_id != workspace_edit_proposal_operation_id(&proposal.proposal_id)
+        || event.generation != 0
+        || event.payload != expected_payload
+    {
+        return Err(error("workspace edit proposal event binding is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_workspace_edit_proposal_retry_content(
+    proposal: &WorkspaceEditProposal,
+    requests: &[DurableBlobWrite],
+    existing: &StoredWorkspaceEditProposal,
+) -> Result<(), WorkbenchStoreError> {
+    let expected_reference_ids = requests
+        .iter()
+        .map(|request| request.reference_id.clone())
+        .collect::<Vec<_>>();
+    if existing.proposal != *proposal
+        || existing.artifact_reference_ids != expected_reference_ids
+        || requests.len() != proposal.artifacts.len()
+    {
+        return Err(coded_error(
+            "workspace-edit-proposal-conflict",
+            "workspace edit proposal retry does not match immutable data",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct WorkspaceEditProposalRow {
+    proposal_json: String,
+    proposal_sha256: String,
+    proposal_bytes: i64,
+    session_id: String,
+    turn_id: String,
+    provider_thread_id: String,
+    provider_item_id: String,
+    approval_started_at_ms: i64,
+    project_id: String,
+    root_id: String,
+    filesystem_root_identity: String,
+    workspace_edit_root_identity: String,
+    edit_id: String,
+    canonical_edit_identity: String,
+    preview_identity: String,
+    operation_count: i64,
+    artifact_count: i64,
+    file_count: i64,
+    additions: i64,
+    deletions: i64,
+    warning_count: i64,
+    applicable: i64,
+    event_sequence: i64,
+    created_at_ms: i64,
+    file_mutation_authority: i64,
+    approval_recorded: i64,
+    apply_available: i64,
+}
+
+fn load_workspace_edit_proposal(
+    store: &WorkbenchStore,
+    proposal_id: &str,
+) -> Result<StoredWorkspaceEditProposal, WorkbenchStoreError> {
+    let row = store
+        .connection
+        .query_row(
+            "SELECT proposal_json, proposal_sha256, proposal_bytes,
+                    session_id, turn_id, provider_thread_id, provider_item_id,
+                    approval_started_at_ms, project_id, root_id,
+                    filesystem_root_identity, workspace_edit_root_identity,
+                    edit_id, canonical_edit_identity, preview_identity,
+                    operation_count, artifact_count, file_count,
+                    additions, deletions, warning_count, applicable,
+                    event_sequence, created_at_ms, file_mutation_authority,
+                    approval_recorded, apply_available
+             FROM workspace_edit_proposals WHERE proposal_id = ?1",
+            [proposal_id],
+            |row| {
+                Ok(WorkspaceEditProposalRow {
+                    proposal_json: row.get(0)?,
+                    proposal_sha256: row.get(1)?,
+                    proposal_bytes: row.get(2)?,
+                    session_id: row.get(3)?,
+                    turn_id: row.get(4)?,
+                    provider_thread_id: row.get(5)?,
+                    provider_item_id: row.get(6)?,
+                    approval_started_at_ms: row.get(7)?,
+                    project_id: row.get(8)?,
+                    root_id: row.get(9)?,
+                    filesystem_root_identity: row.get(10)?,
+                    workspace_edit_root_identity: row.get(11)?,
+                    edit_id: row.get(12)?,
+                    canonical_edit_identity: row.get(13)?,
+                    preview_identity: row.get(14)?,
+                    operation_count: row.get(15)?,
+                    artifact_count: row.get(16)?,
+                    file_count: row.get(17)?,
+                    additions: row.get(18)?,
+                    deletions: row.get(19)?,
+                    warning_count: row.get(20)?,
+                    applicable: row.get(21)?,
+                    event_sequence: row.get(22)?,
+                    created_at_ms: row.get(23)?,
+                    file_mutation_authority: row.get(24)?,
+                    approval_recorded: row.get(25)?,
+                    apply_available: row.get(26)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot load workspace edit proposal"))?
+        .ok_or_else(|| error("workspace edit proposal does not exist"))?;
+    if row.proposal_json.len() > MAX_WORKSPACE_EDIT_PROPOSAL_JSON_BYTES {
+        return Err(error(
+            "workspace edit proposal JSON exceeds persistence limit",
+        ));
+    }
+    let proposal_hash = ContentHash {
+        sha256: row.proposal_sha256,
+        bytes: to_u64(row.proposal_bytes, "workspace edit proposal byte count")?,
+    };
+    if ContentHash::for_bytes(row.proposal_json.as_bytes()) != proposal_hash {
+        return Err(error("workspace edit proposal JSON integrity check failed"));
+    }
+    let proposal: WorkspaceEditProposal = serde_json::from_str(&row.proposal_json)
+        .map_err(|_| error("workspace edit proposal JSON is invalid"))?;
+    let canonical_json = serde_json::to_string(&proposal)
+        .map_err(|_| error("workspace edit proposal JSON is not canonical"))?;
+    if canonical_json != row.proposal_json
+        || proposal.proposal_id != proposal_id
+        || proposal.session_id != row.session_id
+        || proposal.turn_id != row.turn_id
+        || proposal.provider_thread_id != row.provider_thread_id
+        || proposal.provider_item_id != row.provider_item_id
+        || proposal.approval_started_at_ms
+            != to_u64(row.approval_started_at_ms, "proposal approval start time")?
+        || proposal.project_id != row.project_id
+        || proposal.root_id != row.root_id
+        || proposal.filesystem_root_identity != row.filesystem_root_identity
+        || proposal.workspace_edit_root_identity != row.workspace_edit_root_identity
+        || proposal.edit_id != row.edit_id
+        || proposal.canonical_edit_identity != row.canonical_edit_identity
+        || proposal.preview.identity != row.preview_identity
+        || proposal.operations.len() as u64
+            != to_u64(row.operation_count, "proposal operation count")?
+        || proposal.artifacts.len() as u64 != to_u64(row.artifact_count, "proposal artifact count")?
+        || proposal.preview.file_count != to_u64(row.file_count, "proposal file count")?
+        || proposal.preview.additions != to_u64(row.additions, "proposal additions")?
+        || proposal.preview.deletions != to_u64(row.deletions, "proposal deletions")?
+        || proposal.preview.warning_count != to_u64(row.warning_count, "proposal warning count")?
+        || i64::from(proposal.preview.applicable) != row.applicable
+        || proposal.created_at_ms != to_u64(row.created_at_ms, "proposal creation time")?
+        || row.file_mutation_authority != 0
+        || row.approval_recorded != 0
+        || row.apply_available != 0
+    {
+        return Err(error(
+            "workspace edit proposal redundant metadata is invalid",
+        ));
+    }
+    validate_workspace_edit_proposal_binding(&store.connection, &proposal, false)?;
+    let event_sequence = to_u64(row.event_sequence, "proposal event sequence")?;
+    let events =
+        store.read_session_events(&proposal.session_id, event_sequence.saturating_sub(1), 1)?;
+    let event = events
+        .first()
+        .filter(|event| event.sequence == event_sequence)
+        .ok_or_else(|| error("workspace edit proposal event is missing"))?;
+    validate_workspace_edit_proposal_event(event, &proposal)?;
+
+    let mut statement = store
+        .connection
+        .prepare(
+            "SELECT ordinal, artifact_kind, content_reference, reference_id,
+                    blob_sha256, bytes, media_type
+             FROM workspace_edit_proposal_artifacts
+             WHERE proposal_id = ?1 ORDER BY ordinal ASC",
+        )
+        .map_err(|_| error("cannot prepare workspace edit proposal artifacts"))?;
+    let rows = statement
+        .query_map([proposal_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(|_| error("cannot read workspace edit proposal artifacts"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("workspace edit proposal artifact row is invalid"))?;
+    if rows.len() != proposal.artifacts.len() {
+        return Err(error(
+            "workspace edit proposal artifact rows are incomplete",
+        ));
+    }
+    let mut artifact_reference_ids = Vec::with_capacity(rows.len());
+    for (index, row) in rows.into_iter().enumerate() {
+        let (ordinal, kind, content_reference, reference_id, sha256, bytes, media_type) = row;
+        let descriptor = &proposal.artifacts[index];
+        if to_u64(ordinal, "proposal artifact ordinal")? != index as u64
+            || parse_workspace_edit_proposal_artifact_kind(&kind)? != descriptor.kind
+            || content_reference != descriptor.reference
+            || sha256 != descriptor.sha256
+            || to_u64(bytes, "proposal artifact byte count")? != descriptor.bytes
+            || media_type != descriptor.media_type
+        {
+            return Err(error("workspace edit proposal artifact binding is invalid"));
+        }
+        let reference = load_durable_blob_reference(&store.connection, &reference_id)?;
+        let expected_metadata = json!({
+            "schema_version": "workspace-edit-proposal-artifact/0.1",
+            "proposal_id": proposal.proposal_id,
+            "edit_id": proposal.edit_id,
+            "artifact_kind": workspace_edit_proposal_artifact_kind(descriptor.kind),
+            "retention": "workspace-edit-proposal"
+        });
+        if reference.content_reference != descriptor.reference
+            || reference.content_hash.sha256 != descriptor.sha256
+            || reference.content_hash.bytes != descriptor.bytes
+            || reference.session_id.as_deref() != Some(proposal.session_id.as_str())
+            || reference.project_id.as_deref() != Some(proposal.project_id.as_str())
+            || reference.kind != DurableBlobKind::WorkspaceEdit
+            || reference.media_type != descriptor.media_type
+            || reference.owner_kind != "edit"
+            || reference.owner_id != proposal.edit_id
+            || reference.metadata != expected_metadata
+            || reference.state != "active"
+        {
+            return Err(error("workspace edit proposal Blob reference is invalid"));
+        }
+        let content = store
+            .blob_files
+            .read(&reference.content_hash.sha256, reference.content_hash.bytes)
+            .map_err(blob_file_error)?;
+        if ContentHash::for_bytes(&content) != reference.content_hash {
+            return Err(error("workspace edit proposal Blob content is invalid"));
+        }
+        artifact_reference_ids.push(reference_id);
+    }
+    Ok(StoredWorkspaceEditProposal {
+        proposal,
+        proposal_hash,
+        event_sequence,
+        artifact_reference_ids,
+    })
+}
+
+fn verify_workspace_edit_proposals_for_session(
+    store: &WorkbenchStore,
+    session_id: &str,
+) -> Result<(), WorkbenchStoreError> {
+    validate_identifier(session_id, "workspace edit proposal session ID")?;
+    let count = query_count(
+        &store.connection,
+        "SELECT COUNT(*) FROM workspace_edit_proposals WHERE session_id = ?1",
+        session_id,
+        "cannot count workspace edit proposals",
+    )?;
+    if count > MAX_WORKSPACE_EDIT_PROPOSALS as u64 {
+        return Err(error("workspace edit proposal session exceeds its bound"));
+    }
+    let mut statement = store
+        .connection
+        .prepare(
+            "SELECT proposal_id FROM workspace_edit_proposals
+             WHERE session_id = ?1 ORDER BY proposal_id ASC LIMIT ?2",
+        )
+        .map_err(|_| error("cannot prepare workspace edit proposal verification"))?;
+    let proposal_ids = statement
+        .query_map(
+            params![session_id, MAX_WORKSPACE_EDIT_PROPOSALS as i64 + 1],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|_| error("cannot scan workspace edit proposals"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("workspace edit proposal identity is invalid"))?;
+    drop(statement);
+    let mut expected = BTreeSet::new();
+    for proposal_id in proposal_ids {
+        let stored = load_workspace_edit_proposal(store, &proposal_id)?;
+        expected.insert(workspace_edit_proposal_operation_id(
+            &stored.proposal.proposal_id,
+        ));
+    }
+    let mut statement = store
+        .connection
+        .prepare(
+            "SELECT operation_id FROM events
+             WHERE session_id = ?1
+               AND event_kind = 'workspace-edit.proposal-recorded'
+             ORDER BY operation_id ASC LIMIT ?2",
+        )
+        .map_err(|_| error("cannot prepare workspace edit proposal event verification"))?;
+    let event_proposals = statement
+        .query_map(
+            params![session_id, MAX_WORKSPACE_EDIT_PROPOSALS as i64 + 1],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|_| error("cannot scan workspace edit proposal events"))?
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|_| error("workspace edit proposal event identity is invalid"))?;
+    if event_proposals != expected {
+        return Err(error("workspace edit proposal event ownership is invalid"));
+    }
+    Ok(())
 }
 
 fn prepare_durable_blob(
@@ -19043,6 +20154,11 @@ mod tests {
     use crate::workbench_migration::{
         create_pre_upgrade_backup_with_available_bytes, migration_backup_manifests,
     };
+    use crate::workspace_edit::{ProposedContent, WorkspaceEdit, WorkspaceEditOperation};
+    use crate::workspace_edit_preview::{ContentInput, WorkspaceEditPreviewStore};
+    use crate::workspace_edit_proposal::{
+        WorkspaceEditProposalArtifact, WorkspaceEditProposalArtifactKind,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
 
@@ -19073,6 +20189,530 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.parent);
         }
+    }
+
+    fn workspace_edit_proposal_fixture(
+        store: &mut WorkbenchStore,
+        root: &Root,
+        provider_item_id: &str,
+    ) -> (
+        WorkspaceEditProposal,
+        Vec<WorkspaceEditProposalArtifactWrite>,
+    ) {
+        let project_root = root.parent.join("proposal-project");
+        fs::create_dir_all(&project_root).unwrap();
+        fs::write(project_root.join("old.txt"), b"old\n").unwrap();
+        let project_root = project_root.canonicalize().unwrap();
+        let filesystem_root_identity =
+            "root:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        if store.load_project("proposal-project").is_err() {
+            store
+                .create_project(StoredProjectCreate {
+                    project_id: "proposal-project".into(),
+                    root_id: "root-1".into(),
+                    canonical_root: project_root.to_string_lossy().into_owned(),
+                    root_identity: filesystem_root_identity.into(),
+                    display_name: "Proposal project".into(),
+                    root_access: "read".into(),
+                    created_at_ms: 1,
+                })
+                .unwrap();
+            store
+                .create_session_with_bindings(
+                    StoredSessionCreate {
+                        session_id: "proposal-session".into(),
+                        project_id: Some("proposal-project".into()),
+                        mode: StoredSessionMode::Work,
+                        title: "Proposal session".into(),
+                        parent_session_id: None,
+                        lineage_kind: StoredSessionLineage::New,
+                        environment_identity: None,
+                        created_at_ms: 2,
+                    },
+                    Some(StoredSessionRuntimeBindingCreate {
+                        session_id: "proposal-session".into(),
+                        adapter: "codex-app-server".into(),
+                        adapter_version: "codex-cli 0.144.5".into(),
+                        backend_session_id: Some("provider-thread-1".into()),
+                        provider: Some("openai".into()),
+                        model: None,
+                        permission_profile: "read-only".into(),
+                        created_at_ms: 2,
+                    }),
+                    Some(StoredSessionWorkspaceBindingCreate {
+                        session_id: "proposal-session".into(),
+                        project_id: "proposal-project".into(),
+                        root_id: "root-1".into(),
+                        root_identity: filesystem_root_identity.into(),
+                        workspace_kind: "project-root".into(),
+                        git_state: "not-repository".into(),
+                        repository_root_identity: None,
+                        worktree_root_identity: None,
+                        branch: None,
+                        branch_sha256: None,
+                        branch_redacted: false,
+                        head_oid: None,
+                        detached: false,
+                        unborn: false,
+                        dedicated_worktree: false,
+                        captured_at_ms: 2,
+                    }),
+                )
+                .unwrap();
+            store
+                .create_turn(StoredTurnCreate {
+                    turn_id: "proposal-turn".into(),
+                    session_id: "proposal-session".into(),
+                    idempotency_key: Some("proposal-turn-key".into()),
+                    input_hash: ContentHash::for_bytes(b"proposal fixture"),
+                    created_at_ms: 3,
+                })
+                .unwrap();
+        }
+        let proposed = ProposedContent::for_bytes(b"new\n");
+        let edit = WorkspaceEdit::define(
+            "proposal-edit",
+            "proposal-project",
+            &project_root,
+            vec![WorkspaceEditOperation::Update {
+                path: "old.txt".into(),
+                base: ContentHash::for_bytes(b"old\n"),
+                content: proposed.clone(),
+            }],
+        )
+        .unwrap();
+        let mut previews = WorkspaceEditPreviewStore::default();
+        let preview = previews
+            .preview(
+                "proposal-session",
+                edit.clone(),
+                vec![ContentInput {
+                    reference: proposed.reference,
+                    content: "new\n".into(),
+                }],
+                &std::collections::HashSet::new(),
+            )
+            .unwrap();
+        let snapshots = previews
+            .snapshots("proposal-session", "proposal-edit", "proposal-project")
+            .unwrap();
+        let artifacts = snapshots
+            .iter()
+            .map(|snapshot| {
+                let kind = if snapshot.reference.starts_with("workspace-edit-diff:") {
+                    WorkspaceEditProposalArtifactKind::Diff
+                } else {
+                    WorkspaceEditProposalArtifactKind::ProposedContent
+                };
+                WorkspaceEditProposalArtifact::from_snapshot(kind, snapshot).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let proposal = WorkspaceEditProposal::from_preview(
+            "proposal-session",
+            "proposal-turn",
+            Some("openai".into()),
+            "provider-thread-1",
+            provider_item_id,
+            10,
+            "root-1",
+            filesystem_root_identity,
+            &edit,
+            &preview,
+            artifacts,
+            10,
+        )
+        .unwrap();
+        let writes = snapshots
+            .into_iter()
+            .map(|snapshot| WorkspaceEditProposalArtifactWrite {
+                reference: snapshot.reference,
+                content: snapshot.bytes,
+                retain_until_ms: 10 + MIN_BLOB_RETENTION_MS,
+            })
+            .collect();
+        (proposal, writes)
+    }
+
+    #[test]
+    fn immutable_workspace_edit_proposal_is_atomic_idempotent_and_restart_safe() {
+        let root = Root::new("workspace-edit-proposal");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes) =
+            workspace_edit_proposal_fixture(&mut store, &root, "provider-item-1");
+        let stored = store
+            .record_workspace_edit_proposal(proposal.clone(), writes.clone())
+            .unwrap();
+        assert_eq!(stored.proposal, proposal);
+        assert_eq!(
+            store
+                .record_workspace_edit_proposal(proposal.clone(), writes)
+                .unwrap(),
+            stored
+        );
+        let events = store
+            .read_session_events("proposal-session", 0, MAX_EVENT_PAGE)
+            .unwrap();
+        let event = events
+            .iter()
+            .find(|event| event.event_kind == "workspace-edit.proposal-recorded")
+            .unwrap();
+        let payload = serde_json::to_string(&event.payload).unwrap();
+        assert!(!payload.contains("provider-thread-1"));
+        assert!(!payload.contains("provider-item-1"));
+        assert!(!payload.contains("openai"));
+        assert!(!payload.contains("old.txt"));
+        assert!(!payload.contains("workspace-edit-content:sha256:"));
+        assert!(!payload.contains("workspace-edit-diff:sha256:"));
+        assert_eq!(event.payload["file_mutation_authority"], false);
+        assert_eq!(event.payload["approval_recorded"], false);
+        assert_eq!(event.payload["apply_available"], false);
+
+        drop(store);
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert_eq!(
+            reopened
+                .read_workspace_edit_proposal(&proposal.proposal_id)
+                .unwrap(),
+            stored
+        );
+    }
+
+    #[test]
+    fn workspace_edit_proposal_conflict_and_transaction_failure_leave_no_rows() {
+        let root = Root::new("workspace-edit-proposal-conflict");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes) =
+            workspace_edit_proposal_fixture(&mut store, &root, "provider-item-1");
+        store
+            .record_workspace_edit_proposal(proposal.clone(), writes)
+            .unwrap();
+        let (conflict, conflict_writes) =
+            workspace_edit_proposal_fixture(&mut store, &root, "provider-item-2");
+        let conflict_error = store
+            .record_workspace_edit_proposal(conflict, conflict_writes)
+            .unwrap_err();
+        assert_eq!(conflict_error.code, "workspace-edit-proposal-conflict");
+
+        let rollback_root = Root::new("workspace-edit-proposal-rollback");
+        let mut rollback_store = WorkbenchStore::open(&rollback_root.path).unwrap();
+        let (rollback_proposal, rollback_writes) = workspace_edit_proposal_fixture(
+            &mut rollback_store,
+            &rollback_root,
+            "provider-item-rollback",
+        );
+        rollback_store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER proposal_insert_failure
+                 BEFORE INSERT ON workspace_edit_proposals
+                 BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
+            )
+            .unwrap();
+        assert!(rollback_store
+            .record_workspace_edit_proposal(rollback_proposal, rollback_writes)
+            .is_err());
+        let counts: (i64, i64, i64) = rollback_store
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM workspace_edit_proposals),
+                    (SELECT COUNT(*) FROM workspace_edit_proposal_artifacts),
+                    (SELECT COUNT(*) FROM events
+                     WHERE event_kind = 'workspace-edit.proposal-recorded')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0));
+        let blob_references: i64 = rollback_store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM durable_blob_references
+                 WHERE metadata_json LIKE '%workspace-edit-proposal-artifact%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blob_references, 0);
+    }
+
+    #[test]
+    fn workspace_edit_proposal_post_commit_error_preserves_committed_blob_references() {
+        let root = Root::new("workspace-edit-proposal-post-commit");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes) =
+            workspace_edit_proposal_fixture(&mut store, &root, "provider-item-post-commit");
+        store.workspace_edit_proposal_post_commit_error = true;
+        assert_eq!(
+            store
+                .record_workspace_edit_proposal(proposal.clone(), writes.clone())
+                .unwrap_err()
+                .code,
+            "workspace-edit-proposal-post-commit-fixture"
+        );
+        store.workspace_edit_proposal_post_commit_error = false;
+
+        let stored = store
+            .read_workspace_edit_proposal(&proposal.proposal_id)
+            .unwrap();
+        assert_eq!(stored.proposal, proposal);
+        assert_eq!(stored.artifact_reference_ids.len(), writes.len());
+        for artifact in &stored.proposal.artifacts {
+            let read = store
+                .read_durable_blob_for_session_read_only(
+                    &stored.proposal.session_id,
+                    &artifact.reference,
+                    stored.proposal.created_at_ms,
+                )
+                .unwrap();
+            assert_eq!(read.reference.content_hash.sha256, artifact.sha256);
+            assert_eq!(read.reference.content_hash.bytes, artifact.bytes);
+        }
+        assert_eq!(
+            store
+                .record_workspace_edit_proposal(proposal, writes)
+                .unwrap(),
+            stored
+        );
+    }
+
+    #[test]
+    fn workspace_edit_proposal_tampering_quarantines_only_its_session() {
+        let root = Root::new("workspace-edit-proposal-tamper");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes) =
+            workspace_edit_proposal_fixture(&mut store, &root, "provider-item-tamper");
+        store
+            .record_workspace_edit_proposal(proposal.clone(), writes)
+            .unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "proposal-healthy-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Healthy session".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 20,
+            })
+            .unwrap();
+        store
+            .connection
+            .execute_batch("DROP TRIGGER workspace_edit_proposals_immutable_update;")
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE workspace_edit_proposals
+                 SET proposal_json = replace(proposal_json, 'old.txt', 'new.txt')
+                 WHERE proposal_id = ?1",
+                [&proposal.proposal_id],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER workspace_edit_proposals_immutable_update
+                 BEFORE UPDATE ON workspace_edit_proposals
+                 BEGIN SELECT RAISE(ABORT, 'workspace edit proposal is immutable'); END;",
+            )
+            .unwrap();
+        assert!(store
+            .read_workspace_edit_proposal(&proposal.proposal_id)
+            .is_err());
+        drop(store);
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert!(reopened.session_requires_recovery("proposal-session"));
+        assert!(!reopened.session_requires_recovery("proposal-healthy-session"));
+        assert_eq!(reopened.quarantined_session_count(), 1);
+        assert!(reopened
+            .read_workspace_edit_proposal(&proposal.proposal_id)
+            .is_err());
+        reopened
+            .update_session_title("proposal-healthy-session", "Still healthy", 21)
+            .unwrap();
+    }
+
+    #[test]
+    fn workspace_edit_proposal_blob_corruption_quarantines_only_its_session() {
+        let root = Root::new("workspace-edit-proposal-blob-corruption");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        let (proposal, writes) =
+            workspace_edit_proposal_fixture(&mut store, &root, "provider-item-corrupt-blob");
+        let stored = store
+            .record_workspace_edit_proposal(proposal.clone(), writes)
+            .unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "proposal-blob-healthy-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Healthy blob peer".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 20,
+            })
+            .unwrap();
+        let reference = load_durable_blob_reference(
+            &store.connection,
+            stored.artifact_reference_ids.first().unwrap(),
+        )
+        .unwrap();
+        let object = root
+            .path
+            .join("durable-blobs-v1")
+            .join(DurableBlobFileStore::storage_key(&reference.content_hash.sha256).unwrap());
+        fs::write(object, b"corrupt proposal artifact").unwrap();
+        drop(store);
+
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        assert!(reopened.session_requires_recovery("proposal-session"));
+        assert!(!reopened.session_requires_recovery("proposal-blob-healthy-session"));
+        assert_eq!(reopened.quarantined_session_count(), 1);
+        assert!(reopened
+            .read_workspace_edit_proposal(&proposal.proposal_id)
+            .is_err());
+        reopened
+            .update_session_title(
+                "proposal-blob-healthy-session",
+                "Healthy after peer corruption",
+                21,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn workspace_edit_proposal_requires_pinned_codex_runtime_binding() {
+        for (field, value, expected_code) in [
+            (
+                "adapter",
+                "preview",
+                "workspace-edit-proposal-runtime-adapter-mismatch",
+            ),
+            (
+                "adapter_version",
+                "codex-cli 0.999.0",
+                "workspace-edit-proposal-runtime-version-mismatch",
+            ),
+            (
+                "provider",
+                "provider-replaced",
+                "workspace-edit-proposal-provider-mismatch",
+            ),
+            (
+                "backend_session_id",
+                "provider-thread-replaced",
+                "workspace-edit-proposal-provider-thread-mismatch",
+            ),
+        ] {
+            let root = Root::new(&format!("workspace-edit-proposal-binding-{field}"));
+            let mut store = WorkbenchStore::open(&root.path).unwrap();
+            let (proposal, writes) = workspace_edit_proposal_fixture(
+                &mut store,
+                &root,
+                &format!("provider-item-{field}"),
+            );
+            store
+                .connection
+                .execute(
+                    &format!(
+                        "UPDATE session_runtime_bindings SET {field} = ?1 WHERE session_id = ?2"
+                    ),
+                    params![value, "proposal-session"],
+                )
+                .unwrap();
+            assert_eq!(
+                store
+                    .record_workspace_edit_proposal(proposal, writes)
+                    .unwrap_err()
+                    .code,
+                expected_code
+            );
+            let proposal_rows: i64 = store
+                .connection
+                .query_row("SELECT COUNT(*) FROM workspace_edit_proposals", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(proposal_rows, 0);
+
+            let read_root = Root::new(&format!("workspace-edit-proposal-read-binding-{field}"));
+            let mut read_store = WorkbenchStore::open(&read_root.path).unwrap();
+            let (read_proposal, read_writes) = workspace_edit_proposal_fixture(
+                &mut read_store,
+                &read_root,
+                &format!("provider-item-read-{field}"),
+            );
+            read_store
+                .record_workspace_edit_proposal(read_proposal.clone(), read_writes)
+                .unwrap();
+            read_store
+                .connection
+                .execute(
+                    &format!(
+                        "UPDATE session_runtime_bindings SET {field} = ?1 WHERE session_id = ?2"
+                    ),
+                    params![value, "proposal-session"],
+                )
+                .unwrap();
+            assert_eq!(
+                read_store
+                    .read_workspace_edit_proposal(&read_proposal.proposal_id)
+                    .unwrap_err()
+                    .code,
+                expected_code
+            );
+            drop(read_store);
+            let reopened = WorkbenchStore::open(&read_root.path).unwrap();
+            assert!(reopened.session_requires_recovery("proposal-session"));
+            assert!(reopened
+                .read_workspace_edit_proposal(&read_proposal.proposal_id)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn upgrades_schema_v17_to_immutable_workspace_edit_proposals_after_backup() {
+        let root = Root::new("workspace-edit-proposal-migration");
+        let store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .connection
+            .execute_batch(
+                "DROP TABLE workspace_edit_proposal_artifacts;
+                 DROP TABLE workspace_edit_proposals;",
+            )
+            .unwrap();
+        store
+            .connection
+            .pragma_update(None, "user_version", 17_i64)
+            .unwrap();
+        drop(store);
+
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        let version: i64 = reopened
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        for table in REQUIRED_WORKSPACE_EDIT_PROPOSAL_TABLES {
+            let exists: bool = reopened
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                     )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists);
+        }
+        let backups = migration_backup_manifests(&root.path).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].source_schema_version, 17);
+        assert_eq!(backups[0].target_schema_version, SCHEMA_VERSION as u64);
     }
 
     fn background_job_identity(prefix: &str, byte: char) -> String {
@@ -25602,7 +27242,9 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "DROP TABLE items;
+                "DROP TABLE workspace_edit_proposal_artifacts;
+                 DROP TABLE workspace_edit_proposals;
+                 DROP TABLE items;
                  DROP TABLE turns;
                  DROP TABLE sessions;
                  DROP TABLE project_roots;
