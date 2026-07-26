@@ -193,7 +193,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 44 of 235 checkbox tasks are complete and 191 remain
+- OpenSpec task baseline: 47 of 235 checkbox tasks are complete and 188 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
 - OpenSpec task `3.3` is complete. The stable Schema, Rust Runtime/stdio daemon, Qt
@@ -3111,6 +3111,53 @@ Implemented visual baseline:
   macOS/Windows release evidence gates. It links the normative AAP wire guide and
   Codex upgrade procedure and does not claim unavailable Windows evidence.
 
+## Troubleshooting Runbook (2026-07-26)
+
+- OpenSpec `23.7` is complete. `docs/Aegisy-TROUBLESHOOTING-RUNBOOK.md` gives
+  bounded first-response and recovery procedures for sidecar/handshake, Store
+  migration/reconciliation, Codex version/crash-loop, streaming decode errors,
+  Windows `TLS initialization failed`, terminal/Git/sandbox, and renderer
+  failures. It forbids secret/raw-provider logging and explicitly keeps clean
+  Windows installer/TLS/ConPTY evidence outside macOS claims.
+
+## Privacy And Diagnostic Export Documentation (2026-07-26)
+
+- OpenSpec `23.8` is complete as a documentation slice. The internal
+  `docs/AEGISY-PRIVACY-AND-DIAGNOSTIC-EXPORT.md` contract enumerates exact
+  `local.*` and `cloud.*` categories, default inclusion states, per-Session/
+  Item/range content opt-in, streaming redaction order, preview hash and
+  removal controls, deterministic `aegisy-diagnostic-bundle/0.1` packaging,
+  retention, and support correlation IDs.
+- The default bundle is metadata-only and local-first. Credentials, prompts,
+  source/diff/path/terminal content, provider bodies, hidden reasoning, raw
+  frames, SQLite/WAL files, and automatic cloud upload remain excluded. The
+  document does not claim that an AAP/Qt exporter or cloud support upload exists;
+  future implementation must re-read and re-redact sources and fail closed on
+  stale preview, source loss, overflow, or uncertain classification.
+
+## File-Write Acknowledgement And Artifact Integrity Foundations (2026-07-26)
+
+- OpenSpec `3.6` remains unchecked, but the internal
+  `file-write-acknowledgement/0.1` contract now covers a future metadata-only
+  file-write producer. Operation identity binds Session/project/root,
+  idempotency key, request fingerprint, and Workspace Edit identity. Accepted,
+  committed, failed, and reconciliation-required revisions are contiguous and
+  monotonic; terminal observations require an opaque hash; uncertain state
+  cannot be resolved by the producer; and mutation/execution authority are
+  fixed false. It is not connected to AAP, Store, Qt, filesystem writes,
+  approvals, Git, or jobs. Five focused tests and the `aegisy-agentd` library
+  target (763 passed, one ignored live fixture) plus strict Clippy and format
+  checks pass.
+- OpenSpec `22.5` has a partial Qt foundation. The local
+  `aegisy-artifact-manifest/0.1` verifier checks a present sidecar/adapter
+  manifest before launch, including fixed identities, versions, bounded sizes,
+  canonical in-tree files, symlink/path escape, unknown-field rejection, and
+  streaming SHA-256. A failure suppresses launch and automatic reconnect;
+  developer builds may omit the manifest. `artifact_manifest_verification` and
+  `agent_runtime_environment` pass. Formal manifest generation, Rust adapter
+  verification, updater compatibility, signed packaging, and Windows evidence
+  remain open.
+
 ## Live Timeline Subscription And Ownership Recovery (2026-07-26)
 
 - Stable AAP Schema, Rust types, Runtime dispatch, and Qt now negotiate
@@ -3172,46 +3219,52 @@ Implemented visual baseline:
    retention-gap snapshot recovery, out-of-band heartbeat, bounded reconnect, and
    live subscribe/sync-or-snapshot/activate are implemented. Keep automatic pruning
    disabled until the remaining mutation-producer and cross-platform gates are verified.
-2. Validate the hardened TLS installer on a clean Windows x64 VM.
-3. Reproduce and correlate any remaining streaming disconnect with redacted logs.
-4. Continue consolidating widget-local QSS and replace remaining Qt stock icons;
+2. Complete the reviewed acknowledgement producers for approval, Git, and jobs
+   after permission/approval/recovery gates; the file-write contract remains
+   internal until its AAP/Store/Qt authority path is designed.
+3. Finish OpenSpec `22.5` by generating the trusted manifest in signed packaging,
+   binding Rust adapter launch and updater compatibility to the same artifact
+   set, then validate it on a clean Windows runner.
+4. Validate the hardened TLS installer on a clean Windows x64 VM.
+5. Reproduce and correlate any remaining streaming disconnect with redacted logs.
+6. Continue consolidating widget-local QSS and replace remaining Qt stock icons;
    the Codex health/restart toolbar state is now covered by the render suite.
    Keep the context-inspection and model-state fixtures in the complete desktop
    render gate as local and CI resource usage changes.
-5. Run the Windows packaging workflow or a clean Windows VM to validate ConPTY,
+7. Run the Windows packaging workflow or a clean Windows VM to validate ConPTY,
    Unicode, resize, Ctrl+C, exit status, and Job Object process-tree cleanup, then
    close `14.2` without exposing Agent execution permissions.
-6. Finish `14.5` with a pinned live command fixture and child-process observation
+8. Finish `14.5` with a pinned live command fixture and child-process observation
    evidence, without exposing native Agent execution before sandbox,
    permission, approval, and recovery gates exist.
-7. Finish `14.7` by adding gated foreground/daemon producers only after permission,
+9. Finish `14.7` by adding gated foreground/daemon producers only after permission,
    sandbox, and approval controls, then prove their process-tree cancellation on
    macOS and Windows and validate user-terminal stop on a real Windows runner.
-8. Continue task `16.7` with the production permission/approval authority and durable
+10. Continue task `16.7` with the production permission/approval authority and durable
    consumption ledger, typed session events, and reviewed Qt conflict/recovery flow.
    Keep the internal executor unreachable from AAP/Qt until those gates are complete;
    add sandboxed hook output and secure signing as separate reviewed policies.
-9. Continue task `7.3` only after `6.10` supplies a durable compaction checkpoint
+11. Continue task `7.3` only after `6.10` supplies a durable compaction checkpoint
    and preservation review; provider delete/compact must remain unavailable until
    their scoped review, compensation, and recovery contracts are complete.
-10. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
+12. Continue task `6.2`/`6.3` by intersecting acknowledged project trust with managed
    permission policy and the production approval ledger. A trust acknowledgement must
    never become an implicit write, command, Hook, or network grant.
-11. Continue `21.9` by adding reviewed platform permission/delivery settings only
+13. Continue `21.9` by adding reviewed platform permission/delivery settings only
    after scheduler and approval gates are complete. Continue `21.8` with durable
    decision production/consumption and reviewed recovery transitions only after the
    permission, sandbox, budget, and release gates pass. Keep automatic lease
    acquisition/renewal, process adoption, retry, approval, recovery mutation, and
    dispatch unavailable until those gates pass.
-12. Continue `20.1` in dependency order with genuine-user Approval only after the
+14. Continue `20.1` in dependency order with genuine-user Approval only after the
     production approval authority and consumption ledger exist, then add complete
     Change/Test production and reviewed AAP/Qt, audit/export, and retention surfaces.
     Do not record prompts/provider bodies or treat Runtime denial, Provider
     `declined`, or `approvalPolicy=never` as user approval.
-13. Continue with the next unchecked database/event, durable project/session, typed
+15. Continue with the next unchecked database/event, durable project/session, typed
     timeline, permission/approval, structured patch/checkpoint, terminal, and Git
     milestones in dependency order.
-14. Replace the offline model-catalog projection with an authenticated,
+16. Replace the offline model-catalog projection with an authenticated,
    signature-validated cache; connect durable global/project profiles to the
    catalog matcher; then expose a real picker and immutable model-change event
    only after token, routing, and cross-platform evidence gates pass. The

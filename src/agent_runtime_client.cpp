@@ -1,4 +1,5 @@
 #include "agent_runtime_client.h"
+#include "artifact_manifest.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -2896,6 +2897,24 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
         }
         emit connectionStateChanged(false, detail);
         return false;
+    }
+
+    // Packaged bundles place a content-addressed manifest beside the sidecar.
+    // Developer builds may omit it, but a present manifest is always required
+    // to verify before any sidecar process is started.
+    const QString manifestPath = QFileInfo(m_runtimePath).absolutePath()
+        + QStringLiteral("/aegisy-agentd.manifest.json");
+    if (QFileInfo::exists(manifestPath)) {
+        const ArtifactManifest::VerificationResult verification =
+            ArtifactManifest::verifyFile(manifestPath, m_runtimePath);
+        if (!verification.ok) {
+            const QString detail = QStringLiteral("运行时完整性校验失败：%1")
+                .arg(verification.reason);
+            m_autoReconnectSuppressed = true;
+            if (reconnectAttempt) setReconnectState(ReconnectState::Exhausted, 0, detail);
+            emit connectionStateChanged(false, detail);
+            return false;
+        }
     }
 
     clearNegotiationState();

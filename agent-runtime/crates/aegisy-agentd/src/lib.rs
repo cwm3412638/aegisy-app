@@ -20,6 +20,7 @@ pub mod context_threshold;
 mod diagnostic_store;
 mod durable_blob;
 mod event_sequencer;
+pub mod file_write_ack;
 pub mod git_branch_transaction;
 pub mod git_checkpoint;
 pub mod git_commit_transaction;

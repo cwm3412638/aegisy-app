@@ -2051,3 +2051,68 @@ Known limitations:
   repository; `openspec validate build-aegisy-agent-workbench --strict` and
   `git diff --check` pass. No protocol or authority behavior is changed by this
   documentation task.
+
+## 23.7 Troubleshooting Runbook
+
+- `docs/Aegisy-TROUBLESHOOTING-RUNBOOK.md` records bounded diagnosis and safe
+  recovery for sidecar startup, Workbench Store/reconciliation, adapter pin and
+  crash loop, streaming response decode errors, Windows TLS initialization,
+  terminal/Git/sandbox, and renderer restart failures.
+- It preserves the existing security boundary: no secrets/raw provider bodies,
+  no inferred process or mutation outcome, no TLS verification bypass, and no
+  macOS claim for Windows packaging/runtime evidence.
+- Verification: referenced docs and commands were reviewed against the current
+  repository; `openspec validate build-aegisy-agent-workbench --strict` and
+  `git diff --check` pass. This task changes documentation only.
+
+## 23.8 Privacy And Diagnostic Export Documentation
+
+- `docs/AEGISY-PRIVACY-AND-DIAGNOSTIC-EXPORT.md` is the internal privacy and
+  support-export contract. It enumerates exact `local.*` and `cloud.*` data
+  categories, default inclusion states, content opt-in scope, exclusion reasons,
+  bounded redaction reports, deterministic `aegisy-diagnostic-bundle/0.1`
+  envelope requirements, preview hash, removal controls, retention behavior,
+  and support correlation-ID handling.
+- The document explicitly excludes secure-storage credentials, prompts, source
+  code, diffs, raw paths, terminal output, provider bodies, hidden reasoning,
+  raw protocol frames, SQLite/WAL files, and automatic cloud upload by default.
+  Redaction occurs before counting, hashing, previewing, serializing, or writing;
+  stale previews, source loss, size overflow, and uncertain classification fail
+  closed. It preserves local history and the current
+  `file_mutation_authority=false`, `approval_recorded=false`, and
+  `apply_available=false` boundary.
+- Verification: the new document, all referenced existing docs, and the task
+  entry were reviewed for internal consistency. This is a documentation-only
+  slice; it does not claim that AAP/Qt diagnostic export or cloud upload has
+  shipped. `openspec validate build-aegisy-agent-workbench --strict` and
+  `git diff --check` are the required repository gates.
+
+## 3.6 File-Write Idempotency Foundation
+
+- `agent-runtime/crates/aegisy-agentd/src/file_write_ack.rs` adds the internal,
+  metadata-only `file-write-acknowledgement/0.1` contract. It binds the exact
+  Session/project/root, idempotency key, request fingerprint, and Workspace Edit
+  identity into a domain-separated operation identity; it rejects unknown fields,
+  invalid identities, unsafe bounds, skipped revisions, backward timestamps,
+  terminal evidence without an observation hash, and any authority flag. A
+  `reconciliation-required` state cannot be turned into success by the producer.
+- Focused coverage: five contract tests pass, including idempotent accepted
+  replay, edit-identity conflict, lifecycle/revision drift, bounds, unknown
+  fields, and fixed-false authority. The complete `aegisy-agentd` library test
+  target passes 763 tests with one ignored live fixture; package Clippy with
+  warnings denied and Rust formatting pass. This remains a contract foundation:
+  no AAP/Qt/Workbench Store producer or filesystem mutation exists.
+
+## 22.5 Artifact Manifest Verification Foundation
+
+- `include/artifact_manifest.h` and `src/artifact_manifest.cpp` define the
+  bounded `aegisy-artifact-manifest/0.1` local verifier. Qt checks a present
+  manifest before sidecar launch, validates exact runtime/adapter identities,
+  versions, relative paths, canonical in-tree files, symlink/path escape,
+  bounded manifest/artifact sizes, and streaming SHA-256 hashes. A failure
+  suppresses launch and automatic reconnect; a missing manifest remains allowed
+  only for developer-build compatibility.
+- `artifact_manifest_verification` and `agent_runtime_environment` CTests pass.
+  Formal manifest generation, Rust adapter-side verification, updater
+  compatibility integration, signed package evidence, and Windows execution are
+  not implemented; task `22.5` remains unchecked.

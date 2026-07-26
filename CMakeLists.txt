@@ -67,6 +67,7 @@ set(SOURCES
     src/mcp_config_dialog.cpp
     src/help_dialog.cpp
     src/agent_runtime_client.cpp
+    src/artifact_manifest.cpp
     src/agent_workbench_widget.cpp
     resources.qrc
 )
@@ -111,6 +112,7 @@ set(HEADERS
     include/mcp_config_dialog.h
     include/help_dialog.h
     include/agent_runtime_client.h
+    include/artifact_manifest.h
     include/agent_workbench_widget.h
 )
 
@@ -551,9 +553,11 @@ if(BUILD_TESTING)
         tests/agent_workbench_render_test.cpp
         src/agent_workbench_widget.cpp
         src/agent_runtime_client.cpp
+        src/artifact_manifest.cpp
         src/app_theme.cpp
         include/agent_workbench_widget.h
         include/agent_runtime_client.h
+        include/artifact_manifest.h
         include/app_theme.h
         resources.qrc
     )
@@ -582,7 +586,9 @@ if(BUILD_TESTING)
     add_executable(AegisyAgentRuntimeEnvironmentTest
         tests/agent_runtime_environment_test.cpp
         src/agent_runtime_client.cpp
+        src/artifact_manifest.cpp
         include/agent_runtime_client.h
+        include/artifact_manifest.h
     )
     target_compile_definitions(AegisyAgentRuntimeEnvironmentTest PRIVATE
         AEGISY_APP_VERSION="${PROJECT_VERSION}"
@@ -598,16 +604,33 @@ if(BUILD_TESTING)
     add_test(NAME agent_runtime_environment
         COMMAND AegisyAgentRuntimeEnvironmentTest)
 
+    add_executable(AegisyArtifactManifestTest
+        tests/artifact_manifest_test.cpp
+        src/artifact_manifest.cpp
+        include/artifact_manifest.h
+    )
+    target_include_directories(AegisyArtifactManifestTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyArtifactManifestTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyArtifactManifestTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME artifact_manifest_verification
+        COMMAND AegisyArtifactManifestTest)
+
     if(AEGISY_MONACO_ENABLED)
         add_executable(AegisyMonacoEditorRenderTest
             tests/monaco_editor_render_test.cpp
             src/agent_workbench_widget.cpp
             src/agent_runtime_client.cpp
+            src/artifact_manifest.cpp
             src/monaco_editor_bridge.cpp
             src/terminal_web_bridge.cpp
             src/app_theme.cpp
             include/agent_workbench_widget.h
             include/agent_runtime_client.h
+            include/artifact_manifest.h
             include/monaco_editor_bridge.h
             include/terminal_web_bridge.h
             include/app_theme.h
