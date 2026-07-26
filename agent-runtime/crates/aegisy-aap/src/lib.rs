@@ -289,6 +289,378 @@ where
     Ok(capabilities)
 }
 
+/// Metadata-only acknowledgement contract for future mutation-shaped methods.
+///
+/// This contract deliberately does not grant mutation, approval, or execution
+/// authority. It only lets a caller correlate a response with the exact
+/// request/idempotency binding and process generation so a late response cannot
+/// be mistaken for a response from a newer operation.
+pub mod mutation_ack {
+    use super::{deserialize_positive_safe_json_integer, valid_ascii_graphical};
+    use serde::{Deserialize, Serialize};
+
+    pub const SCHEMA_VERSION: &str = "mutation-acknowledgement/0.1";
+    pub const MAX_ID_BYTES: usize = 128;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct MutationRequest {
+        pub schema_version: String,
+        pub request_id: String,
+        pub idempotency_key: String,
+        pub session_id: String,
+        pub generation: u64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct MutationRequestWire {
+        schema_version: String,
+        request_id: String,
+        idempotency_key: String,
+        session_id: String,
+        #[serde(deserialize_with = "deserialize_positive_safe_json_integer")]
+        generation: u64,
+    }
+
+    impl MutationRequest {
+        pub fn new(
+            request_id: impl Into<String>,
+            idempotency_key: impl Into<String>,
+            session_id: impl Into<String>,
+            generation: u64,
+        ) -> Result<Self, &'static str> {
+            let request = Self {
+                schema_version: SCHEMA_VERSION.into(),
+                request_id: request_id.into(),
+                idempotency_key: idempotency_key.into(),
+                session_id: session_id.into(),
+                generation,
+            };
+            request.validate()?;
+            Ok(request)
+        }
+
+        pub fn validate(&self) -> Result<(), &'static str> {
+            if self.schema_version != SCHEMA_VERSION {
+                return Err("mutation request schema version is invalid");
+            }
+            for (value, label) in [
+                (&self.request_id, "request id"),
+                (&self.idempotency_key, "idempotency key"),
+                (&self.session_id, "session id"),
+            ] {
+                if !valid_ascii_graphical(value, MAX_ID_BYTES) {
+                    return Err(match label {
+                        "request id" => "mutation request id is invalid",
+                        "idempotency key" => "mutation idempotency key is invalid",
+                        _ => "mutation session id is invalid",
+                    });
+                }
+            }
+            if self.generation == 0 || self.generation > super::MAX_SAFE_JSON_INTEGER {
+                return Err("mutation request generation is outside the safe integer range");
+            }
+            Ok(())
+        }
+    }
+
+    impl TryFrom<MutationRequestWire> for MutationRequest {
+        type Error = &'static str;
+
+        fn try_from(value: MutationRequestWire) -> Result<Self, Self::Error> {
+            let request = Self {
+                schema_version: value.schema_version,
+                request_id: value.request_id,
+                idempotency_key: value.idempotency_key,
+                session_id: value.session_id,
+                generation: value.generation,
+            };
+            request.validate()?;
+            Ok(request)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for MutationRequest {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            MutationRequestWire::deserialize(deserializer)?
+                .try_into()
+                .map_err(serde::de::Error::custom)
+        }
+    }
+
+    impl Serialize for MutationRequest {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            self.validate().map_err(serde::ser::Error::custom)?;
+            #[derive(Serialize)]
+            struct RequestRef<'a> {
+                schema_version: &'a str,
+                request_id: &'a str,
+                idempotency_key: &'a str,
+                session_id: &'a str,
+                generation: u64,
+            }
+            RequestRef {
+                schema_version: &self.schema_version,
+                request_id: &self.request_id,
+                idempotency_key: &self.idempotency_key,
+                session_id: &self.session_id,
+                generation: self.generation,
+            }
+            .serialize(serializer)
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "lowercase")]
+    pub enum State {
+        Accepted,
+        Acknowledged,
+        Terminal,
+    }
+
+    impl State {
+        fn rank(self) -> u8 {
+            match self {
+                Self::Accepted => 0,
+                Self::Acknowledged => 1,
+                Self::Terminal => 2,
+            }
+        }
+
+        pub fn is_terminal(self) -> bool {
+            self == Self::Terminal
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Acknowledgement {
+        pub schema_version: String,
+        pub request_id: String,
+        pub idempotency_key: String,
+        pub session_id: String,
+        pub generation: u64,
+        pub state: State,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct AcknowledgementWire {
+        schema_version: String,
+        request_id: String,
+        idempotency_key: String,
+        session_id: String,
+        #[serde(deserialize_with = "deserialize_positive_safe_json_integer")]
+        generation: u64,
+        state: State,
+    }
+
+    impl Acknowledgement {
+        pub fn from_request(request: &MutationRequest, state: State) -> Self {
+            Self {
+                schema_version: SCHEMA_VERSION.into(),
+                request_id: request.request_id.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                session_id: request.session_id.clone(),
+                generation: request.generation,
+                state,
+            }
+        }
+
+        pub fn validate(&self) -> Result<(), &'static str> {
+            if self.schema_version != SCHEMA_VERSION {
+                return Err("mutation acknowledgement schema version is invalid");
+            }
+            MutationRequest {
+                schema_version: SCHEMA_VERSION.into(),
+                request_id: self.request_id.clone(),
+                idempotency_key: self.idempotency_key.clone(),
+                session_id: self.session_id.clone(),
+                generation: self.generation,
+            }
+            .validate()
+        }
+
+        pub fn matches_request(&self, request: &MutationRequest) -> bool {
+            self.validate().is_ok()
+                && request.validate().is_ok()
+                && self.request_id == request.request_id
+                && self.idempotency_key == request.idempotency_key
+                && self.session_id == request.session_id
+                && self.generation == request.generation
+        }
+
+        /// Checks a state update without treating a repeated response as a
+        /// second mutation. Repeated states are valid idempotent replays.
+        pub fn can_follow(&self, previous: Option<&Self>) -> Result<(), &'static str> {
+            self.validate()?;
+            let Some(previous) = previous else {
+                return (self.state == State::Accepted)
+                    .then_some(())
+                    .ok_or("mutation acknowledgement must begin at accepted");
+            };
+            previous.validate()?;
+            if self.request_id != previous.request_id
+                || self.idempotency_key != previous.idempotency_key
+                || self.session_id != previous.session_id
+                || self.generation != previous.generation
+            {
+                return Err("mutation acknowledgement binding changed");
+            }
+            if self.state.rank() < previous.state.rank() {
+                return Err("mutation acknowledgement state moved backwards");
+            }
+            Ok(())
+        }
+    }
+
+    impl TryFrom<AcknowledgementWire> for Acknowledgement {
+        type Error = &'static str;
+
+        fn try_from(value: AcknowledgementWire) -> Result<Self, Self::Error> {
+            let acknowledgement = Self {
+                schema_version: value.schema_version,
+                request_id: value.request_id,
+                idempotency_key: value.idempotency_key,
+                session_id: value.session_id,
+                generation: value.generation,
+                state: value.state,
+            };
+            acknowledgement.validate()?;
+            Ok(acknowledgement)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Acknowledgement {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            AcknowledgementWire::deserialize(deserializer)?
+                .try_into()
+                .map_err(serde::de::Error::custom)
+        }
+    }
+
+    impl Serialize for Acknowledgement {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            self.validate().map_err(serde::ser::Error::custom)?;
+            #[derive(Serialize)]
+            struct AcknowledgementRef<'a> {
+                schema_version: &'a str,
+                request_id: &'a str,
+                idempotency_key: &'a str,
+                session_id: &'a str,
+                generation: u64,
+                state: State,
+            }
+            AcknowledgementRef {
+                schema_version: &self.schema_version,
+                request_id: &self.request_id,
+                idempotency_key: &self.idempotency_key,
+                session_id: &self.session_id,
+                generation: self.generation,
+                state: self.state,
+            }
+            .serialize(serializer)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+
+        fn request() -> MutationRequest {
+            MutationRequest::new("rpc-1", "retry-key-1", "session-1", 7).unwrap()
+        }
+
+        #[test]
+        fn request_and_acknowledgement_round_trip_with_strict_metadata() {
+            let request = request();
+            let encoded = serde_json::to_value(&request).unwrap();
+            assert_eq!(
+                encoded,
+                json!({
+                    "schema_version": SCHEMA_VERSION,
+                    "request_id": "rpc-1",
+                    "idempotency_key": "retry-key-1",
+                    "session_id": "session-1",
+                    "generation": 7,
+                })
+            );
+            let acknowledgement = Acknowledgement::from_request(&request, State::Accepted);
+            let decoded: Acknowledgement =
+                serde_json::from_value(serde_json::to_value(&acknowledgement).unwrap()).unwrap();
+            assert_eq!(decoded, acknowledgement);
+            assert!(decoded.matches_request(&request));
+        }
+
+        #[test]
+        fn state_progression_is_monotonic_and_repeated_states_are_idempotent() {
+            let request = request();
+            let accepted = Acknowledgement::from_request(&request, State::Accepted);
+            let repeated = Acknowledgement::from_request(&request, State::Accepted);
+            let acknowledged = Acknowledgement::from_request(&request, State::Acknowledged);
+            let terminal = Acknowledgement::from_request(&request, State::Terminal);
+            assert!(accepted.can_follow(None).is_ok());
+            assert!(repeated.can_follow(Some(&accepted)).is_ok());
+            assert!(acknowledged.can_follow(Some(&accepted)).is_ok());
+            assert!(terminal.can_follow(Some(&acknowledged)).is_ok());
+            assert!(accepted.can_follow(Some(&acknowledged)).is_err());
+            assert!(State::Terminal.is_terminal());
+        }
+
+        #[test]
+        fn mismatched_binding_is_a_late_response_and_is_rejected() {
+            let request = request();
+            let mut late = Acknowledgement::from_request(&request, State::Acknowledged);
+            late.generation += 1;
+            assert!(!late.matches_request(&request));
+
+            let mut different_key = Acknowledgement::from_request(&request, State::Acknowledged);
+            different_key.idempotency_key = "retry-key-2".into();
+            assert!(!different_key.matches_request(&request));
+            assert!(different_key
+                .can_follow(Some(&Acknowledgement::from_request(
+                    &request,
+                    State::Accepted,
+                )))
+                .is_err());
+        }
+
+        #[test]
+        fn malformed_metadata_and_unknown_fields_fail_closed() {
+            assert!(serde_json::from_value::<MutationRequest>(json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": "rpc-1",
+                "idempotency_key": "retry-key-1",
+                "session_id": "session-1",
+                "generation": 0,
+            }))
+            .is_err());
+            assert!(serde_json::from_value::<Acknowledgement>(json!({
+                "schema_version": SCHEMA_VERSION,
+                "request_id": "rpc-1",
+                "idempotency_key": "retry-key-1",
+                "session_id": "session-1",
+                "generation": 1,
+                "state": "accepted",
+                "mutation_authority": true,
+            }))
+            .is_err());
+        }
+    }
+}
+
 pub mod stable {
     pub mod v0_1 {
         use super::super::*;

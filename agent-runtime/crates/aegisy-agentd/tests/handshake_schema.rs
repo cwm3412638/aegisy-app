@@ -1,3 +1,4 @@
+use aegisy_aap::mutation_ack::{Acknowledgement, MutationRequest, State};
 use aegisy_aap::stable::v0_1::{
     timeline_event_id, EventEnvelope, InitializeParams, InitializeResult, ItemUpdate,
     RuntimeHeartbeatParams, RuntimeHeartbeatResult, TimelineItem, TimelineRetentionGapData,
@@ -1428,4 +1429,52 @@ fn timeline_sync_schema_and_types_reject_invalid_anchors_pages_and_drift() {
         "timelineSyncSuccessResponse",
         &oversized_page
     ));
+}
+
+#[test]
+fn mutation_acknowledgement_metadata_schema_is_strict_and_generation_bound() {
+    let request = json!({
+        "schema_version": "mutation-acknowledgement/0.1",
+        "request_id": "rpc-1",
+        "idempotency_key": "retry-key-1",
+        "session_id": "session-1",
+        "generation": 7,
+    });
+    let acknowledgement = json!({
+        "schema_version": "mutation-acknowledgement/0.1",
+        "request_id": "rpc-1",
+        "idempotency_key": "retry-key-1",
+        "session_id": "session-1",
+        "generation": 7,
+        "state": "accepted",
+    });
+    assert!(schema_definition_valid("mutationRequest", &request));
+    assert!(schema_definition_valid(
+        "mutationAcknowledgement",
+        &acknowledgement
+    ));
+    let request: MutationRequest = serde_json::from_value(request).unwrap();
+    let acknowledgement: Acknowledgement = serde_json::from_value(acknowledgement).unwrap();
+    assert!(acknowledgement.matches_request(&request));
+    assert!(acknowledgement.can_follow(None).is_ok());
+
+    for (field, value) in [
+        ("generation", json!(0)),
+        ("state", json!("completed")),
+        ("legacy", json!(true)),
+    ] {
+        let mut invalid = serde_json::to_value(&acknowledgement).unwrap();
+        invalid[field] = value;
+        assert!(!schema_definition_valid(
+            "mutationAcknowledgement",
+            &invalid
+        ));
+        assert!(serde_json::from_value::<Acknowledgement>(invalid).is_err());
+    }
+
+    let later = Acknowledgement::from_request(&request, State::Acknowledged);
+    assert!(later.can_follow(Some(&acknowledgement)).is_ok());
+    let mut stale = later.clone();
+    stale.generation += 1;
+    assert!(!stale.matches_request(&request));
 }

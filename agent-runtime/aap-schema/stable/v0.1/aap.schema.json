@@ -220,6 +220,49 @@
         "result": { "$ref": "#/$defs/runtimeHeartbeatResult" }
       }
     },
+    "mutationAcknowledgementState": {
+      "enum": ["accepted", "acknowledged", "terminal"]
+    },
+    "mutationRequest": {
+      "$comment": "Metadata-only binding for a future mutation-shaped request. It grants no mutation or approval authority.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "idempotency_key",
+        "session_id",
+        "generation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "mutation-acknowledgement/0.1" },
+        "request_id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "idempotency_key": { "$ref": "#/$defs/boundedGraphicalId" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "generation": { "$ref": "#/$defs/safePositiveInteger" }
+      }
+    },
+    "mutationAcknowledgement": {
+      "$comment": "The state is an ingress/durability observation only: accepted, acknowledged, or terminal. It does not assert mutation success or grant authority.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "idempotency_key",
+        "session_id",
+        "generation",
+        "state"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "mutation-acknowledgement/0.1" },
+        "request_id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "idempotency_key": { "$ref": "#/$defs/boundedGraphicalId" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "generation": { "$ref": "#/$defs/safePositiveInteger" },
+        "state": { "$ref": "#/$defs/mutationAcknowledgementState" }
+      }
+    },
     "protocolVersion": {
       "type": "string",
       "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$",

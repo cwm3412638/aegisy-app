@@ -3028,6 +3028,27 @@ Implemented visual baseline:
   remains disabled. The detailed plan is in
   `openspec/changes/build-aegisy-agent-workbench/`.
 
+## Mutation Acknowledgement Contract Foundation (2026-07-26)
+
+- The stable AAP types now include a metadata-only
+  `mutation-acknowledgement/0.1` contract. `MutationRequest` binds bounded ASCII
+  `request_id`, `idempotency_key`, `session_id`, and a positive safe-integer
+  `generation`; `Acknowledgement` repeats the exact binding and exposes only the
+  monotonic `accepted -> acknowledged -> terminal` state. Repeated states are
+  idempotent, backwards transitions and binding drift fail closed, and stale
+  generation responses cannot match the request.
+- The contract is schema/type/test evidence only. It is not registered as an AAP
+  method or capability, has no durable acknowledgement ledger, does not infer
+  mutation success, and grants no mutation, approval, or execution authority.
+  Existing Agent/Codex and shipped UI remain read-only. OpenSpec `3.5`/`3.6` stay
+  unchecked until concrete mutation-shaped producers, durable consumption, and
+  reviewed Qt/recovery integration exist.
+- Verification passes the complete Rust workspace: 32 AAP type, 729
+  `aegisy-agentd` library tests with one ignored live fixture, 7 daemon-main, 10
+  context-threshold, 14 handshake Runtime, 19 handshake Schema, 67 protocol, and
+  23 stdio/Codex tests. Strict Clippy, Rust formatting, strict OpenSpec validation,
+  and `git diff --check` pass.
+
 ## Next Product Priorities
 
 1. Continue OpenSpec `3.5` with bounded Runtime process reconnect, then the

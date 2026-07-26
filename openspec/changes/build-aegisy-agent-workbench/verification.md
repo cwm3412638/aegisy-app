@@ -181,6 +181,25 @@ Bounded reconnect barrier and OOB handshake ordering slice (`3.5`, partial):
   inert duplicate late initialize responses, exact heartbeat deadline request/process
   generation matching, and process-generation-bound reconnect stability timers.
 
+Metadata-only acknowledgement contract foundation (`3.5`/`3.6`, partial):
+
+- Stable AAP schema and Rust types define `mutation-acknowledgement/0.1` request
+  and acknowledgement objects with bounded graphical IDs, positive safe-integer
+  generation, exact Session/idempotency/request binding, and only
+  `accepted`/`acknowledged`/`terminal` states.
+- Serialization is strict and denies unknown fields; same-state retries are valid,
+  backward transitions and binding/generation drift are rejected, and the contract
+  explicitly grants no mutation, approval, or execution authority. It is not
+  registered as an AAP method/capability and has no Runtime/Qt producer or durable
+  ledger.
+- The complete Rust workspace passes 32 AAP type, 729 `aegisy-agentd` library
+  tests with one ignored live fixture, 7 daemon-main, 10 context-threshold, 14
+  handshake Runtime, 19 handshake Schema, 67 protocol, and 23 stdio/Codex tests.
+  Strict Clippy, Rust formatting, strict OpenSpec validation, and
+  `git diff --check` pass. This does not complete explicit acknowledgement,
+  idempotency, or any mutation task; concrete producers, durable consumption,
+  reconciliation, and Windows evidence remain required.
+
 - Workbench schema v15 adds a dedicated `public_timeline_events` journal and one
   `public_timeline_cursors` source/cursor row per Session. Session insertion registers
   the empty cursor idempotently; event insertion and cursor advancement use the same

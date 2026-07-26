@@ -259,6 +259,16 @@ late callbacks cannot change readiness or recovery state.
 
 - Idempotency keys for turn start, approval responses, writes, and background job
   submission.
+
+Before any mutation-shaped producer is exposed, its acknowledgement evidence uses
+the metadata-only `mutation-acknowledgement/0.1` contract. The request and every
+response bind exact request ID, idempotency key, Session, and process generation;
+states may advance only from `accepted` to `acknowledged` to `terminal`, with
+same-state retries idempotent. This contract is not itself a mutation method,
+ledger, approval, or execution authority. A concrete producer must add durable
+ack consumption, recovery/reconciliation, and reviewed Qt behavior before it is
+advertised.
+
 - Server-initiated requests for approval, structured user input, credential
   refresh, and extension elicitation.
 - Stable core namespace plus experimental namespaced methods. Unknown events are
