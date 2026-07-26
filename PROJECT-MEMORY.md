@@ -2794,6 +2794,11 @@ Implemented visual baseline:
   some styles and display scales. Widget-local QSS must not hide the shared arrow.
 - Do not layer Qt-Material, QDarkStyleSheet, or Fluent QSS over the current 400+
   local style rules. Continue consolidating local QSS into semantic components.
+- The main three-pane Workbench splitter now persists only its bounded Qt layout
+  state in device-local `QSettings` and restores the fixed rail/conversation/
+  workspace defaults when the setting is absent, malformed, or over 4 KiB. No
+  project path, Session content, permission, or Runtime authority is stored in
+  this layout key. Editor tabs and split state remain separately project-scoped.
 
 ## Verification Snapshot (2026-07-26)
 

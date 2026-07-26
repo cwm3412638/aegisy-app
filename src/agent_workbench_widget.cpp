@@ -46,13 +46,13 @@
 #include <QPixmap>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QSplitter>
 #include <QScrollBar>
 #include <QSaveFile>
 #include <QSettings>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSizePolicy>
-#include <QSplitter>
 #include <QStyle>
 #ifdef AEGISY_HAS_MONACO
 #include <QStackedWidget>
@@ -4657,6 +4657,7 @@ AgentWorkbenchWidget::~AgentWorkbenchWidget()
 {
     storeActiveEditorState();
     saveEditorViewState();
+    saveWorkbenchLayout();
 #ifdef AEGISY_HAS_MONACO
     delete m_terminalPage;
     m_terminalPage = nullptr;
@@ -4881,18 +4882,22 @@ void AgentWorkbenchWidget::buildUi()
     m_emergencyPolicyBanner->setVisible(m_emergencyDisabled);
     root->addWidget(m_emergencyPolicyBanner);
 
-    auto *splitter = new QSplitter(Qt::Horizontal, this);
-    splitter->setChildrenCollapsible(false);
-    splitter->setHandleWidth(1);
-    splitter->setStyleSheet(QStringLiteral("QSplitter::handle { background:#e4e7ec; }"));
-    splitter->addWidget(buildProductRail());
-    splitter->addWidget(buildAgentSurface());
-    splitter->addWidget(buildWorkCanvas());
-    splitter->setStretchFactor(0, 0);
-    splitter->setStretchFactor(1, 0);
-    splitter->setStretchFactor(2, 1);
-    splitter->setSizes({188, 390, 520});
-    root->addWidget(splitter, 1);
+    m_workbenchSplitter = new QSplitter(Qt::Horizontal, this);
+    m_workbenchSplitter->setObjectName(QStringLiteral("agentWorkbenchSplitter"));
+    m_workbenchSplitter->setChildrenCollapsible(false);
+    m_workbenchSplitter->setHandleWidth(1);
+    m_workbenchSplitter->setStyleSheet(QStringLiteral("QSplitter::handle { background:#e4e7ec; }"));
+    m_workbenchSplitter->addWidget(buildProductRail());
+    m_workbenchSplitter->addWidget(buildAgentSurface());
+    m_workbenchSplitter->addWidget(buildWorkCanvas());
+    m_workbenchSplitter->setStretchFactor(0, 0);
+    m_workbenchSplitter->setStretchFactor(1, 0);
+    m_workbenchSplitter->setStretchFactor(2, 1);
+    m_workbenchSplitter->setSizes({188, 390, 520});
+    connect(m_workbenchSplitter, &QSplitter::splitterMoved, this,
+            [this](int, int) { saveWorkbenchLayout(); });
+    root->addWidget(m_workbenchSplitter, 1);
+    loadWorkbenchLayout();
 
     auto *sendShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
     connect(sendShortcut, &QShortcut::activated, this, &AgentWorkbenchWidget::submitPrompt);
@@ -8544,6 +8549,25 @@ QString AgentWorkbenchWidget::editorSettingsKey() const
     const QByteArray digest = QCryptographicHash::hash(
         QFileInfo(m_projectRoot).canonicalFilePath().toUtf8(), QCryptographicHash::Sha256).toHex();
     return QStringLiteral("agent_workbench/editor/%1").arg(QString::fromLatin1(digest.left(20)));
+}
+
+void AgentWorkbenchWidget::loadWorkbenchLayout()
+{
+    if (!m_workbenchSplitter) return;
+    QSettings settings;
+    const QByteArray state = settings.value(QStringLiteral("agent_workbench/layout/splitter_state"))
+        .toByteArray();
+    if (state.isEmpty() || state.size() > 4096) return;
+    m_workbenchSplitter->restoreState(state);
+}
+
+void AgentWorkbenchWidget::saveWorkbenchLayout()
+{
+    if (!m_workbenchSplitter) return;
+    const QByteArray state = m_workbenchSplitter->saveState();
+    if (state.isEmpty() || state.size() > 4096) return;
+    QSettings settings;
+    settings.setValue(QStringLiteral("agent_workbench/layout/splitter_state"), state);
 }
 
 void AgentWorkbenchWidget::loadEditorViewState()

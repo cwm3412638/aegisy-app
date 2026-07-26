@@ -32,6 +32,7 @@ class QLabel;
 class QListWidget;
 class QPushButton;
 class QScrollArea;
+class QSplitter;
 class QTabBar;
 class QTabWidget;
 class QTableWidget;
@@ -410,6 +411,8 @@ private:
                             const QString &message);
     void updateRuntimeCapabilityUi();
     void requestModelCapabilityCheck();
+    void loadWorkbenchLayout();
+    void saveWorkbenchLayout();
 
     AgentRuntimeClient *m_runtime = nullptr;
     QButtonGroup *m_modeGroup = nullptr;
@@ -417,6 +420,7 @@ private:
     QLabel *m_emergencyPolicyBanner = nullptr;
     QLabel *m_runtimeCapabilityStatus = nullptr;
     QPushButton *m_runtimeRestartButton = nullptr;
+    QSplitter *m_workbenchSplitter = nullptr;
     bool m_modelProfileReadOnlyAvailable = false;
     bool m_modelProfileSnapshotValid = false;
     int m_modelProfileCount = 0;
