@@ -193,7 +193,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 48 of 235 checkbox tasks are complete and 187 remain
+- OpenSpec task baseline: 49 of 235 checkbox tasks are complete and 186 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
 - OpenSpec task `3.3` is complete. The stable Schema, Rust Runtime/stdio daemon, Qt
@@ -3110,6 +3110,18 @@ Implemented visual baseline:
   workflow, adapter upgrade/rollback rules, local verification commands, and
   macOS/Windows release evidence gates. It links the normative AAP wire guide and
   Codex upgrade procedure and does not claim unavailable Windows evidence.
+
+## Third-Party Component Inventory (2026-07-26)
+
+- OpenSpec `1.4` is complete. `docs/THIRD-PARTY-COMPONENT-INVENTORY.md`
+  records repository pins, bundled/external/planned status, licenses, authorities,
+  and release obligations for Codex/AAP/ACP, Monaco/xterm, Tree-sitter grammars,
+  language servers, terminal/crypto/storage dependencies, the unselected sandbox
+  boundary, updater frameworks, Lucide, Qt, and OpenSSL.
+- This is engineering inventory, not legal or redistribution approval. OpenSpec
+  `1.5` still owns legal review and `22.4` still requires a complete bundle-matched
+  NOTICE/license set in signed macOS and Windows packages. A developer-installed
+  binary cannot silently replace a repository pin or become package evidence.
 
 ## Troubleshooting Runbook (2026-07-26)
 

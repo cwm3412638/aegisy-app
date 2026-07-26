@@ -2149,3 +2149,20 @@ Known limitations:
   not invoke the generator. Rust adapter-side verification, updater compatibility
   integration, signed package evidence, and Windows execution are not implemented;
   task `22.5` remains unchecked.
+# 1.4 Third-Party Component And License Inventory
+
+- `docs/THIRD-PARTY-COMPONENT-INVENTORY.md` inventories the exact repository
+  versions and status of Codex, AAP/ACP, Monaco, xterm.js/FitAddon, esbuild,
+  Tree-sitter and all selected grammars, external language servers, PTY/process,
+  cryptography/storage, updater, icon, Qt, OpenSSL, and future sandbox components.
+- Version evidence comes from the Codex source pin and npm package metadata,
+  `workbench-web/package-lock.json`, `agent-runtime/Cargo.lock` plus Cargo package
+  metadata, the pinned Sparkle/WinSparkle CMake files, and the checked-in Lucide
+  license. The document separates bundled, external, and not-yet-selected
+  components and records their release obligations without treating the inventory
+  as legal approval.
+- OpenSpec `1.5` still owns legal review, while `22.4` owns complete signed-package
+  NOTICE/license inclusion. A developer installation, successful build, or upstream
+  license identifier is not accepted as proof that the shipped bundle is complete.
+  `openspec validate build-aegisy-agent-workbench --strict` and
+  `git diff --check` are the repository gates for this documentation stage.

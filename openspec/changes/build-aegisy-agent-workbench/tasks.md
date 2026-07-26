@@ -3,7 +3,9 @@
 - [ ] 1.1 Approve the Chat versus Work behavioral contract and mutation guarantees with product and security owners
 - [ ] 1.2 Select the public product name and define original Aegisy terminology for project, session, turn, task, runtime, and workspace
 - [ ] 1.3 Convert the seven unresolved architecture questions in `design.md` into owned ADRs with due gates
-- [ ] 1.4 Create a third-party component and license inventory for Codex, ACP, Monaco, xterm.js, tree-sitter, language servers, and sandbox dependencies
+- [x] 1.4 Create a third-party component and license inventory for Codex, ACP, Monaco, xterm.js, tree-sitter, language servers, and sandbox dependencies
+  - `docs/THIRD-PARTY-COMPONENT-INVENTORY.md` records exact repository pins, integration status (`Bundled`, `External`, or `Planned`), license identifiers, source-of-truth files, and release obligations for Codex/AAP/ACP, Monaco/xterm/FitAddon/esbuild, every pinned Tree-sitter grammar, external language-server families, terminal/crypto/storage dependencies, the unselected OS-sandbox boundary, Sparkle/WinSparkle, Lucide, Qt, and OpenSSL.
+  - The inventory explicitly separates an installed developer binary from a signed product artifact, forbids claiming ACP or an Aegisy OS sandbox before a dependency is selected, and requires a complete bundle-matched NOTICE/license set. Legal approval and redistribution review remain separate under `1.5`; signed bundle inclusion remains under `22.4`.
 - [ ] 1.5 Complete legal review for process-level Codex integration, Apache-2.0/MIT notices, Claude public examples, and product branding boundaries
 - [ ] 1.6 Define measurable Milestone 0 budgets for installer growth, startup, idle memory, editor latency, terminal throughput, indexing CPU, and crash recovery
 - [ ] 1.7 Define supported macOS/Windows versions, CPU architectures, filesystem assumptions, shell families, Git versions, and display-scale matrix
