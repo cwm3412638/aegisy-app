@@ -34,17 +34,17 @@ The Aegisy Agent Runtime uses the following third-party components:
   process-tree ownership:
   https://github.com/microsoft/windows-rs
 
-- Tree-sitter Rust bindings, version 0.26.11:
+- Tree-sitter Rust bindings, version 0.26.11 (MIT):
   https://github.com/tree-sitter/tree-sitter
-- Tree-sitter C++ grammar, version 0.23.4:
+- Tree-sitter C++ grammar, version 0.23.4 (MIT):
   https://github.com/tree-sitter/tree-sitter-cpp
-- Tree-sitter JavaScript grammar, version 0.25.0:
+- Tree-sitter JavaScript grammar, version 0.25.0 (MIT):
   https://github.com/tree-sitter/tree-sitter-javascript
-- Tree-sitter Python grammar, version 0.25.0:
+- Tree-sitter Python grammar, version 0.25.0 (MIT):
   https://github.com/tree-sitter/tree-sitter-python
-- Tree-sitter Rust grammar, version 0.24.2:
+- Tree-sitter Rust grammar, version 0.24.2 (MIT):
   https://github.com/tree-sitter/tree-sitter-rust
-- Tree-sitter TypeScript and TSX grammars, version 0.23.2:
+- Tree-sitter TypeScript and TSX grammars, version 0.23.2 (MIT):
   https://github.com/tree-sitter/tree-sitter-typescript
 
 Copyright notices and full license texts are retained in the corresponding Cargo

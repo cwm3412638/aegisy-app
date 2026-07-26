@@ -2166,3 +2166,22 @@ Known limitations:
   license identifier is not accepted as proof that the shipped bundle is complete.
   `openspec validate build-aegisy-agent-workbench --strict` and
   `git diff --check` are the repository gates for this documentation stage.
+
+## 1.6 Milestone 0 Performance Budgets
+
+- `docs/AEGISY-MILESTONE-0-PERFORMANCE-BUDGETS.md` predeclares reference
+  macOS/Windows machine classes, signed Release builds, 20 measured runs, median/
+  p95/maximum/failure reporting, cold/warm definitions, monotonic clocks, complete
+  process-tree resource accounting, and one bounded repository/Timeline/editor/
+  terminal fixture.
+- Absolute p95 thresholds cover installer and installed growth, legacy and Workbench
+  startup/readiness, idle/active memory, editor open/input/save, PTY echo/throughput,
+  initial/incremental indexing CPU and time, and renderer/sidecar/full-app recovery.
+  Correctness gates separately forbid legacy blocking, orphan processes, state loss/
+  fabrication, weakened security, unsafe indexing, and content-bearing evidence.
+- This task defines budgets only. OpenSpec `2.7` remains unchecked until signed
+  packages are measured on both reference platforms. Missing metrics fail rather
+  than defaulting to zero, and a p95 miss blocks the UI technology ADR unless a
+  product/security owner records a time-bounded non-correctness exception.
+  `openspec validate build-aegisy-agent-workbench --strict` and
+  `git diff --check` are the repository gates for this documentation stage.

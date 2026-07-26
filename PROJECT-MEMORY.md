@@ -193,7 +193,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 49 of 235 checkbox tasks are complete and 186 remain
+- OpenSpec task baseline: 50 of 235 checkbox tasks are complete and 185 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
 - OpenSpec task `3.3` is complete. The stable Schema, Rust Runtime/stdio daemon, Qt
@@ -3122,6 +3122,18 @@ Implemented visual baseline:
   `1.5` still owns legal review and `22.4` still requires a complete bundle-matched
   NOTICE/license set in signed macOS and Windows packages. A developer-installed
   binary cannot silently replace a repository pin or become package evidence.
+
+## Milestone 0 Performance Budgets (2026-07-26)
+
+- OpenSpec `1.6` is complete. `docs/AEGISY-MILESTONE-0-PERFORMANCE-BUDGETS.md`
+  predeclares clean macOS/Windows reference classes, signed Release measurement,
+  20-run p95 reporting, standard repository/Timeline/editor/terminal fixtures, and
+  absolute installer, startup, memory, editor, terminal, indexing, and crash-
+  recovery budgets with non-waivable correctness gates.
+- This does not prove the product meets those budgets. OpenSpec `2.7` remains open
+  until signed packages are measured on both reference platforms; missing metrics,
+  state loss/fabrication, orphan processes, weakened security, unsafe indexing, or
+  legacy-client blocking are failures rather than acceptable performance tradeoffs.
 
 ## Troubleshooting Runbook (2026-07-26)
 
