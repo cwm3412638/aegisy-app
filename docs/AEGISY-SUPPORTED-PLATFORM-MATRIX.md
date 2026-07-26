@@ -79,10 +79,13 @@ background execution authority.
 - The current macOS development evidence uses Apple Git `2.50.1` (`Apple Git-155`).
 - Windows evidence must record the exact Git for Windows version from the clean
   runner. CI-provided Git alone does not prove the installed application contract.
-- Runtime discovery must resolve an absolute executable outside the project, parse
-  a bounded machine-readable version, and fail closed below the minimum or when the
-  version cannot be classified. Until that enforcement exists, Git product support
-  remains provisional even when individual read-only fixtures pass.
+- Runtime discovery resolves an absolute executable outside the project, performs
+  a bounded `git --version` preflight, and fails closed with the Git-unavailable
+  contract below `2.31.0` or when the version cannot be classified. Product Git
+  queries and transactions use this gate; `.gitignore` checks use a separate
+  non-authoritative compatibility runner so an older Git cannot cause ignored
+  files to enter search or context. This is implementation evidence, not signed
+  clean-machine release evidence.
 - Release testing covers the minimum version and the current pinned release version.
   A major/minor upgrade requires the read-only query, checkpoint, worktree, staging,
   commit, workflow, cancellation, and recovery suites before promotion.

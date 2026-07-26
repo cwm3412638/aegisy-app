@@ -3,12 +3,22 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 const STATUS_SCHEMA_VERSION: &str = "git-status/0.2";
+const MINIMUM_GIT_VERSION: GitVersion = GitVersion {
+    major: 2,
+    minor: 31,
+    patch: 0,
+};
 const MAX_GIT_STATUS_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_GIT_STATUS_ENTRIES: usize = 5_000;
 const MAX_IGNORE_INPUT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_GIT_VERSION_BYTES: u64 = 256;
+const GIT_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitStatusError {
@@ -78,6 +88,13 @@ pub(crate) struct GitOutput {
     pub stdout: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct GitVersion {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
 pub(crate) struct GitCommitEnvironment<'a> {
     pub author_name: &'a str,
     pub author_email: &'a str,
@@ -124,7 +141,7 @@ pub fn ignored_paths(root: &Path, paths: &[String]) -> HashSet<String> {
     if paths.len() > MAX_GIT_STATUS_ENTRIES || input_bytes > MAX_IGNORE_INPUT_BYTES {
         return HashSet::new();
     }
-    let Ok(runner) = GitRunner::new(root) else {
+    let Ok(runner) = GitRunner::new_for_ignore(root) else {
         return HashSet::new();
     };
     let mut input = Vec::with_capacity(input_bytes);
@@ -242,6 +259,12 @@ pub fn status(root: &Path) -> Result<GitStatusSnapshot, GitStatusError> {
 
 impl GitRunner {
     pub(crate) fn new(root: &Path) -> Result<Self, GitStatusError> {
+        let runner = Self::new_for_ignore(root)?;
+        verify_git_version(&runner.executable, &runner.root)?;
+        Ok(runner)
+    }
+
+    fn new_for_ignore(root: &Path) -> Result<Self, GitStatusError> {
         let root = root
             .canonicalize()
             .map_err(|_| error("Git project root is unavailable"))?;
@@ -776,6 +799,169 @@ fn resolve_git_executable(root: &Path) -> Result<PathBuf, GitStatusError> {
     })
 }
 
+fn verify_git_version(executable: &Path, root: &Path) -> Result<(), GitStatusError> {
+    let mut command = Command::new(executable);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env_clear()
+        .env("PATH", minimal_git_path(executable)?)
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", null_device());
+    for name in ["SystemRoot", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR"] {
+        if let Some(value) = safe_environment_path(name, root) {
+            command.env(name, value);
+        }
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|_| git_unavailable("cannot inspect Git version"))?;
+    let (exit, stdout) = read_git_version_output(&mut child)?;
+    if stdout.len() as u64 > MAX_GIT_VERSION_BYTES {
+        return Err(git_unavailable("Git version output exceeded its limit"));
+    }
+    if !exit.success() {
+        return Err(git_unavailable("Git version check failed"));
+    }
+    let version = parse_git_version(&stdout)
+        .ok_or_else(|| git_unavailable("Git returned an unsupported version format"))?;
+    if !is_supported_git_version(version) {
+        return Err(git_unavailable("Git 2.31.0 or newer is required"));
+    }
+    Ok(())
+}
+
+fn read_git_version_output(child: &mut Child) -> Result<(ExitStatus, Vec<u8>), GitStatusError> {
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(git_unavailable("Git version output is unavailable"));
+        }
+    };
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout
+            .take(MAX_GIT_VERSION_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = sender.send(result);
+    });
+    let deadline = Instant::now() + GIT_VERSION_TIMEOUT;
+    let mut output: Option<Vec<u8>> = None;
+    let exit = loop {
+        if output.is_none() {
+            if let Ok(result) = receiver.try_recv() {
+                match result {
+                    Ok(bytes) => {
+                        if bytes.len() as u64 > MAX_GIT_VERSION_BYTES {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            let _ = reader.join();
+                            return Err(git_unavailable("Git version output exceeded its limit"));
+                        }
+                        output = Some(bytes);
+                    }
+                    Err(_) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = reader.join();
+                        return Err(git_unavailable("cannot read Git version"));
+                    }
+                }
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(git_unavailable("Git version check timed out"));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(git_unavailable("cannot wait for Git version"));
+            }
+        }
+    };
+    let stdout = match output {
+        Some(bytes) => {
+            let _ = reader.join();
+            bytes
+        }
+        None => {
+            let result = receiver
+                .recv_timeout(Duration::from_secs(1))
+                .map_err(|_| git_unavailable("cannot read Git version"))
+                .and_then(|result| result.map_err(|_| git_unavailable("cannot read Git version")));
+            let _ = reader.join();
+            result?
+        }
+    };
+    Ok((exit, stdout))
+}
+
+fn is_supported_git_version(version: GitVersion) -> bool {
+    version >= MINIMUM_GIT_VERSION
+}
+
+fn parse_git_version(bytes: &[u8]) -> Option<GitVersion> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    let text = text.strip_suffix('\r').unwrap_or(text);
+    let version_text = text.strip_prefix("git version ")?;
+    let mut fields = version_text.split_ascii_whitespace();
+    let version_token = fields.next()?;
+    let extra_fields = fields.collect::<Vec<_>>();
+    if !extra_fields.is_empty()
+        && !(extra_fields.len() == 2
+            && extra_fields[0] == "(Apple"
+            && extra_fields[1].starts_with("Git-")
+            && extra_fields[1].ends_with(')')
+            && is_canonical_version_component(
+                &extra_fields[1]["Git-".len()..extra_fields[1].len() - 1],
+            ))
+    {
+        return None;
+    }
+    let parts = version_token.split('.').collect::<Vec<_>>();
+    if parts.len() != 3
+        && !(parts.len() == 5 && parts[3] == "windows" && is_canonical_version_component(parts[4]))
+    {
+        return None;
+    }
+    Some(GitVersion {
+        major: parse_version_component(parts[0])?,
+        minor: parse_version_component(parts[1])?,
+        patch: parse_version_component(parts[2])?,
+    })
+}
+
+fn parse_version_component(value: &str) -> Option<u32> {
+    if !is_canonical_version_component(value) {
+        return None;
+    }
+    value.parse().ok()
+}
+
+fn is_canonical_version_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+}
+
 fn minimal_git_path(executable: &Path) -> Result<std::ffi::OsString, GitStatusError> {
     let mut paths = Vec::new();
     if let Some(parent) = executable.parent() {
@@ -818,6 +1004,13 @@ fn error(message: impl Into<String>) -> GitStatusError {
     }
 }
 
+fn git_unavailable(message: impl Into<String>) -> GitStatusError {
+    GitStatusError {
+        code: -32041,
+        message: message.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,6 +1043,64 @@ mod tests {
         git(root, &["init", "-q"], true);
         git(root, &["config", "user.name", "Aegisy Test"], true);
         git(root, &["config", "user.email", "test@aegisy.local"], true);
+    }
+
+    #[test]
+    fn parses_supported_git_versions_and_rejects_ambiguous_formats() {
+        assert_eq!(
+            parse_git_version(b"git version 2.31.0\n"),
+            Some(MINIMUM_GIT_VERSION)
+        );
+        assert_eq!(
+            parse_git_version(b"git version 2.50.1 (Apple Git-155)\n"),
+            Some(GitVersion {
+                major: 2,
+                minor: 50,
+                patch: 1,
+            })
+        );
+        assert_eq!(
+            parse_git_version(b"git version 2.50.1.windows.1\r\n"),
+            Some(GitVersion {
+                major: 2,
+                minor: 50,
+                patch: 1,
+            })
+        );
+        for invalid in [
+            b"git version 2.31\n".as_slice(),
+            b"git version 02.31.0\n".as_slice(),
+            b"git version 2.31.0.rc1\n".as_slice(),
+            b"git version 2.31.0.windows.x\n".as_slice(),
+            b"git version 2.31.0 garbage\n".as_slice(),
+            b"git version 2.31.0\x00extra\n".as_slice(),
+            b"version 2.31.0\n".as_slice(),
+        ] {
+            assert_eq!(parse_git_version(invalid), None, "input: {invalid:?}");
+        }
+        assert!(!is_supported_git_version(GitVersion {
+            major: 2,
+            minor: 30,
+            patch: 9,
+        }));
+        assert!(is_supported_git_version(MINIMUM_GIT_VERSION));
+        assert!(is_supported_git_version(GitVersion {
+            major: 3,
+            minor: 0,
+            patch: 0,
+        }));
+    }
+
+    #[test]
+    fn accepts_the_installed_git_only_after_version_preflight() {
+        let root = root("version-preflight");
+        let runner = GitRunner::new(&root).unwrap();
+        let output = runner
+            .run(&["--version"], None, MAX_GIT_VERSION_BYTES)
+            .unwrap();
+        assert!(output.success);
+        assert!(parse_git_version(&output.stdout).is_some());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

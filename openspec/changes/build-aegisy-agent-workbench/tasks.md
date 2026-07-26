@@ -26,11 +26,12 @@
     technical target without promoting either beyond its signed clean-machine
     evidence.
   - The matrix defines local APFS/NTFS assumptions, unsupported network/cloud/
-    removable/WSL filesystems, shell discovery and exclusions, a provisional Git
-    `2.31.0` floor that still requires runtime enforcement, macOS 1x/2x and Windows
-    100/125/150/200% display/IME/accessibility coverage, and exact promotion owners
-    and gates. Missing Windows, Intel macOS, ARM64 Windows, long-path, or signed
-    package evidence remains explicit rather than inherited from Qt or compilation.
+    removable/WSL filesystems, shell discovery and exclusions, a Git `2.31.0`
+    floor now enforced by the Runtime's bounded version preflight, macOS 1x/2x
+    and Windows 100/125/150/200% display/IME/accessibility coverage, and exact
+    promotion owners and gates. Missing Windows, Intel macOS, ARM64 Windows,
+    long-path, or signed package evidence remains explicit rather than inherited
+    from Qt or compilation.
 - [x] 1.8 Add a workbench feature-flag policy covering internal, preview, beta, stable, remote, and emergency-disable states
   - `docs/AEGISY-WORKBENCH-FEATURE-CHANNEL-POLICY.md` models maturity channel,
     execution surface, and emergency revocation as independent axes. Effective

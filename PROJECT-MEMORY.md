@@ -2325,6 +2325,11 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
   cleared minimal environment, fixed `C` locale, prompts/optional locks/fsmonitor/
   hooks/global/system config disabled, and bounded input/output. The current Qt
   file tree continues to consume compatible `path/status` decorations.
+- Product Git construction now performs a bounded `git --version` preflight and
+  fails closed with `-32041` below `2.31.0`, for malformed/oversized output, or for
+  a failed check. `ignored_paths` intentionally uses a private compatibility
+  runner without this product gate so an old Git cannot make ignored files appear
+  in search or context; that exception grants no Git product capability.
 - No structured branch, index, commit, worktree, merge, or remote mutation method
   exists yet. Do not infer task `16.3+` write capabilities from query visibility.
 - AAP `workspace/git/overview`, `workspace/git/log`, `workspace/git/commit`, and
@@ -3372,8 +3377,9 @@ Implemented visual baseline:
   manifest lacks `longPathAware`, and clean installer/TLS/ConPTY/Git/IME/scaling/
   accessibility/update evidence remains absent. macOS Intel, Windows ARM64, Linux,
   remote, network/cloud/removable filesystems, WSL/Git Bash/MSYS/Cygwin, and other
-  unverified combinations are unsupported. The external Git contract has a declared
-  `2.31.0` minimum but no Runtime version enforcement yet.
+  unverified combinations are unsupported. The external Git contract has a
+  `2.31.0` minimum enforced by `GitRunner::new` with the stable Git-unavailable
+  result `-32041`; Windows clean-runner and signed-release evidence remains absent.
 - OpenSpec `1.8` is complete as a feature/channel policy definition.
   `docs/AEGISY-WORKBENCH-FEATURE-CHANNEL-POLICY.md` treats internal/preview/beta/
   stable maturity, local versus future remote surface, and emergency revocation as
@@ -3386,6 +3392,26 @@ Implemented visual baseline:
   anti-deletion anchor, Runtime verification of signed policy identity, Qt/Rust
   allowlist parity automation, and signed macOS/Windows evidence remain under
   `22.6`, `22.9`, and `22.10` and are not implied by policy completion.
+
+## Git Runtime Version Gate (2026-07-26)
+
+- `GitRunner::new` now resolves an absolute Git executable outside the canonical
+  project root and performs a bounded 256-byte `git --version` preflight with a
+  five-second wait deadline before
+  any product Git status, query, staging, branch, commit, worktree, or workflow
+  operation. The parser accepts the documented plain Git, Apple Git, and Git for
+  Windows forms and rejects malformed, failed, oversized, or below-`2.31.0`
+  versions with the stable Git-unavailable code `-32041`; timeout and read-error
+  paths kill and reap the child before returning.
+- `.gitignore` evaluation deliberately uses a private compatibility constructor
+  without the product version gate. This keeps ignored files excluded when a
+  legacy Git is installed and never grants that Git product-operation authority.
+  All other callers use the gated constructor; the focused `git_status::tests`
+  suite passes 7/7, including the minimum-version boundary and current-install
+  preflight.
+- This is Runtime implementation evidence only. Windows clean-runner Git,
+  signed-package, long-path, and full cross-platform release evidence remain
+  open, and the OpenSpec baseline remains 53/235 completed tasks.
 
 ## Next Product Priorities
 
@@ -3447,8 +3473,9 @@ Implemented visual baseline:
    current Qt profile count is metadata-only and is not a picker.
 17. Before any public platform claim, deliberately select and pin the macOS Qt/
     deployment target, add Windows installer `MinVersion` and application
-    `longPathAware` policy with clean-host tests, enforce Git `2.31.0` before
-    advertising Git capabilities, and execute the complete signed platform matrix.
+    `longPathAware` policy with clean-host tests, and execute the complete signed
+    platform matrix. Runtime enforcement of the Git `2.31.0` floor is complete,
+    but it does not replace the clean Windows and signed-package evidence gate.
 18. Implement the repository-owned feature registry and channel delivery only after
     its signed-artifact upper bound and fail-closed intersection are testable. Finish
     emergency production publication, secure high-water anchoring, Runtime binding

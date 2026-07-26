@@ -48,6 +48,18 @@
   is one of the registered values, count exactly nine Open Question ADR links, run
   `openspec validate build-aegisy-agent-workbench --strict`, and run
   `git diff --check`.
+- Git product-version enforcement evidence: `GitRunner::new` resolves the absolute
+  executable outside the project, runs a 256-byte-capped `git --version` check with
+  a sanitized environment and a five-second bounded wait, accepts the documented
+  Git/Linux, Apple Git, and Git for Windows formats, and returns the stable
+  Git-unavailable code below `2.31.0`
+  or for malformed/failed/oversized output, including cleanup after timeout or
+  read failure. The `.gitignore` compatibility path is
+  intentionally isolated from this product gate. The `git_status::tests` focused
+  run passes 7/7, including the `2.30.9` rejection, `2.31.0` boundary acceptance,
+  Apple/Git-for-Windows parsing, installed-Git preflight, and repository status
+  regressions. This does not replace clean Windows runner or signed-package
+  evidence required for release support.
 
 ## Milestone Evidence
 
