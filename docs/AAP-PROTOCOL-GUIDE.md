@@ -242,9 +242,51 @@ but retains the confirmed projection and recovery intent, so a fresh negotiated
 connection restarts capture from a null first-page request. Snapshot pages carry no
 timestamp baseline; the first valid post-watermark live event establishes the new Qt
 baseline while Runtime remains responsible for non-decreasing event time. Automatic
-pruning remains disabled, and OpenSpec task `3.5` remains unchecked until
-subscription, complete reconnect orchestration, acknowledgement, and Windows
-recovery evidence are complete.
+pruning remains disabled, and OpenSpec task `3.5` remains unchecked until explicit
+acknowledgement and complete Windows reconnect/runtime evidence are complete.
+
+### Fixed-Watermark Timeline Subscription
+
+`timeline.subscription.fixed-watermark` binds catch-up and live delivery to one
+process generation and one never-reused subscription ID. Runtime advertises it only
+with a healthy writable Workbench Store. A client first subscribes from its last
+confirmed anchor, completes the selected Sync or Snapshot route, and activates the
+exact proof. Subscribe cannot become active inline.
+
+```jsonl
+{"jsonrpc":"2.0","id":"subscribe-1","method":"timeline/subscribe","params":{"schema_version":"timeline-subscribe-request/0.1","connection_generation":1,"session_id":"session-1","subscription_id":"subscription-1","cursor":{"sequence":0,"event_id":null},"watermark":null}}
+{"jsonrpc":"2.0","id":"subscribe-1","result":{"schema_version":"timeline-subscribe-result/0.1","connection_generation":1,"session_id":"session-1","subscription_id":"subscription-1","state":"sync-required","cursor":{"sequence":0,"event_id":null},"watermark":{"sequence":0,"event_id":null},"next_method":"timeline/subscription-sync"}}
+{"jsonrpc":"2.0","id":"subscription-sync-1","method":"timeline/subscription-sync","params":{"schema_version":"timeline-subscription-sync-request/0.1","connection_generation":1,"session_id":"session-1","subscription_id":"subscription-1","request":{"session_id":"session-1","after":{"sequence":0,"event_id":null},"watermark":{"sequence":0,"event_id":null},"limit":200}}}
+{"jsonrpc":"2.0","id":"subscription-sync-1","result":{"schema_version":"timeline-sync-page/0.1","session_id":"session-1","after":{"sequence":0,"event_id":null},"watermark":{"sequence":0,"event_id":null},"events":[],"next_after":null,"complete":true}}
+{"jsonrpc":"2.0","id":"activate-1","method":"timeline/subscription-activate","params":{"schema_version":"timeline-subscription-activate-request/0.1","connection_generation":1,"session_id":"session-1","subscription_id":"subscription-1","source":"sync","cursor":{"sequence":0,"event_id":null},"watermark":{"sequence":0,"event_id":null},"snapshot_identity":null}}
+{"jsonrpc":"2.0","id":"activate-1","result":{"schema_version":"timeline-subscription-active/0.1","connection_generation":1,"session_id":"session-1","subscription_id":"subscription-1","state":"active","cursor":{"sequence":0,"event_id":null},"watermark":{"sequence":0,"event_id":null}}}
+```
+
+Runtime captures one durable floor, head, and head timestamp when registering the
+attempt. Retained Sync/Snapshot recovery units and every event strictly after that
+head share the connection-wide 10,000-unit/64 MiB limit until activation. Completion,
+activation, accepted failure, retirement, and disconnect release exact accounting
+once. Activation consumes both the complete typed recovery proof and a private
+registry token, emits the active response first, then drains buffered events in
+sequence as `timeline/subscription-event`. A cross-Session or cross-generation page
+or activation request is rejected without retiring the true owner. Once the
+capability is negotiated, Runtime never falls back to an unbound bare `event`.
+`turn/start` therefore fails with `-32152` unless the Session owns a current
+subscription attempt; the Qt workbench waits for Active before enabling Send.
+
+Request-stage failures use `-32151` and exact
+`timeline-subscription-failure/0.1` data. Live failures use the corresponding
+notification. Every accepted failure is terminal and cleanup-required, while a
+malformed or differently bound failure cannot retire another attempt. Qt retains the
+last confirmed projection and any queued prompt, retries a retryable failure with a
+fresh subscription ID at most three times, and keeps stale-generation traffic inert.
+If heartbeat expires while any subscription request is pending, ownership is
+ambiguous; because AAP has no unsubscribe shortcut, Qt abandons that connection and
+starts one bounded fresh process generation instead of retrying on it. Qt performs
+the same replacement for a locally invalid subscription result, Active wrapper or
+cursor drift, unsafe continuation, `session-attempt-exists`, or
+`subscription-id-reused`. Confirmed state and queued input remain frozen, reconnect
+is not falsely completed, and old-generation traffic remains inert.
 
 Every anchor is the exact pair `{sequence,event_id}`. Sequence zero is represented
 only as `{0,null}`. Every positive sequence requires the exact 77-byte lowercase
@@ -298,14 +340,16 @@ normal validation. Anchor drift, malformed pages, request failure, capability lo
 or queue/batch overflow preserves the last confirmed projection and freezes the
 affected Session.
 
-The Preview backend still persists its Turn/Item projections before journaling its
-six-event synthetic Timeline and is not covered by the atomic producer boundary
-above. Adapter and persistence compensation paths can also durably finish a Turn
-Trace before appending the public terminal/Error event in a later transaction; those
-fallbacks remain outside the atomic producer boundary. Snapshot, structured
-retention-gap recovery, live subscription, complete reconnect orchestration,
-explicit acknowledgement, and Windows recovery evidence also remain later parts of
-OpenSpec `3.5`; keep that task incomplete.
+The Preview backend stages its synthetic six-event lifecycle through a cloned
+Sequencer and commits the Turn, sanitized user/agent Items, internal events, terminal
+state, and all six Public Journal events in one SQLite transaction before advancing
+in-memory state. Adapter, transport, protocol, and persistence compensation likewise
+commit the exact Error Item, Turn Trace, terminal projection, internal trace/terminal
+events, and public terminal event in one transaction before notification; an existing
+Trace cannot receive a later Journal repair. Snapshot, structured retention-gap
+recovery, live subscription, and bounded reconnect orchestration are implemented.
+Explicit acknowledgement and complete Windows reconnect/runtime evidence remain
+later parts of OpenSpec `3.5`; keep that task incomplete.
 
 ## Structured Errors And Cancellation
 

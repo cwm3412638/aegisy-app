@@ -215,8 +215,9 @@ Protocol properties:
   sanitized visible Item and active-Turn state at that exact floor. Runtime reduces
   the retained tail through one fixed head, and Qt stages every page privately before
   atomically replacing one Session. The v16 checkpoint remains internal lifecycle
-  authority and is never exposed as Item content. This retention-gap path still does
-  not claim complete subscription, acknowledgement, or reconnect.
+  authority and is never exposed as Item content. This retention-gap path now feeds
+  the negotiated subscription state machine; acknowledgement and complete
+  cross-platform reconnect evidence remain separate.
 - Bounded outbound queues, overload errors, cancellation, heartbeat, and
   backpressure. The first heartbeat slice negotiates
   `runtime.heartbeat.out-of-band` and uses the existing independent stdio control
@@ -229,8 +230,8 @@ Protocol properties:
   available through the initialized control connection. The heartbeat carries no
   timestamp, PID, Store/Provider state, permission, or execution authority and never
   touches SQLite. A late or prior-process-generation response is inert. Bounded
-  process reconnect, live subscription, acknowledgement, and the complete reconnect
-  state machine remain later `3.5` slices.
+  process reconnect and live subscription are implemented below; acknowledgement and
+  complete Windows reconnect/runtime evidence remain later `3.5` gates.
 
 The bounded reconnect barrier is deliberately request-scoped. A reconnect attempt
 records a distinct barrier request ID for each `session/read`, terminal
@@ -241,8 +242,8 @@ requires exact Session/terminal/generation bindings and retains old output as
 unverified when proof is unavailable; Proposal drift, empty, or invalid responses
 cannot replace a previously validated cache. The degradation response must match
 the exact request ID created for that handshake, so a late response from an older
-connection is inert. This bounded barrier is a recovery prerequisite, not a
-subscription or acknowledgement protocol.
+connection is inert. The live subscription state machine composes with this bounded
+barrier; it does not provide mutation acknowledgement.
 
 The independent Runtime control reader also has a handshake ordering barrier. Before
 the exact `initialized` notification is consumed, heartbeat, cancellation,
@@ -257,32 +258,59 @@ and process generations, and stability timers require the process generation tha
 completed recovery. Stop, negotiation loss, or suppression clears those tokens so
 late callbacks cannot change readiness or recovery state.
 
-The first Timeline subscription contract is intentionally non-routable. Stable
-schema definitions and Rust types describe subscribe, activate, live-event, and
-terminal-failure data, but the stable root does not register those methods and the
-Runtime advertises no subscription capability. Subscribe can select only
-`sync-required` with a non-null fixed watermark or `snapshot-required` with a null
-watermark; it cannot return `active`. A private non-serializable recovery proof is
-the typed structural bridge to activation. It proves only that its caller supplied a
-self-consistent complete chain; it is not connection authority. The Sync proof
-validates a 10,000-Event/64 MiB-bounded, contiguous page chain from the subscribed
-cursor through the exact fixed watermark and requires the final page to be complete.
-The Snapshot proof validates a bounded page chain,
-fixed Session/header/identity metadata, ordered complete Items, and the complete
-snapshot identity before binding its watermark and identity to activation. Terminal
-failure correlation fixes the exact stage and a domain-separated identity of the
-complete subscribe/Sync/Snapshot/activate request, or the exact active cursor for a
-live failure; every failure requires cleanup. Syntactic activation data alone is
-never recovery evidence.
+Timeline subscription is now a negotiated live state machine. Stable Schema, Rust,
+and Qt register `timeline/subscribe`, `timeline/subscription-sync`,
+`timeline/subscription-snapshot`, and `timeline/subscription-activate` behind
+`timeline.subscription.fixed-watermark`. Subscribe selects only `sync-required`
+with a non-null fixed watermark or `snapshot-required` with a null watermark; it
+cannot become active inline. Runtime creates one connection-generation registry,
+never reuses a subscription ID in that generation, permits one attempt per Session,
+and captures one durable floor/head/timestamp before returning the route. Every
+recovery page is validated against the exact attempt. Retained Sync/Snapshot recovery
+units and events after the fixed head share one connection-wide 10,000-unit/64 MiB
+budget; events at or before the fixed head are already represented by recovery and
+are not republished.
 
-This contract is not the live state machine. The implementation stage must bind
-every Sync/Snapshot request to one connection-owned subscription attempt, reject ID
-reuse, atomically register the attempt while capturing the fixed head, buffer every
-later event, atomically activate and drain that buffer, retire every pending request
-and failure path, consume a connection-owned registry token in addition to the
-structural recovery proof, and make old-generation traffic inert in Runtime and Qt. Until
-those barriers and fixtures exist, event-before-activate remains invalid, no method
-is advertised, and OpenSpec `3.5` stays unchecked.
+A private non-serializable recovery proof remains the typed structural bridge to
+activation. The Sync proof validates a bounded contiguous page chain from the
+subscribed cursor through the exact fixed watermark. The Snapshot proof validates a
+bounded fixed-header page chain, ordered complete Items, and the domain-separated
+snapshot identity. Runtime additionally consumes the private connection-owned
+registry token, changes the attempt to active, returns the exact active result, and
+then drains the buffered events as subscription-bound notifications. Terminal
+failure correlation fixes the exact stage and request identity, or the exact active
+cursor for a live failure; every accepted failure retires its attempt. Completion,
+activation, accepted failure, retirement, and disconnect release exact connection
+accounting once. A cross-Session or cross-generation Sync, Snapshot, or Activate
+request is rejected without retiring the true owner's attempt. Disconnect retires
+the complete registry, contexts, Session bindings, retained units, events, and bytes.
+Qt stages recovery privately, publishes only after the exact activation response,
+keeps old-generation and pre-activation traffic inert, and preserves an active
+attempt across an ordinary `session/read`; a genuine active sequence gap still
+starts recovery.
+
+Because negotiated Runtime suppresses unbound bare events, an event-producing Turn
+must not be admitted without connection ownership. `turn/start` returns `-32152`
+unless its Session owns a current attempt; events created while that attempt is still
+recovering remain in the bounded Runtime buffer, while the Qt product keeps Send
+disabled until Active. A typed retryable failure preserves the confirmed projection
+and queued prompt, allocates a fresh subscription ID, and retries at most three times
+with 0/250/1000 ms delays. Exhaustion remains frozen instead of guessing recovery.
+
+If heartbeat expires while one of the four subscription requests is pending, the
+client cannot know whether Runtime consumed it. AAP intentionally has no unsubscribe
+shortcut, so Qt seals and terminates that connection, retires every pending request,
+and starts one bounded fresh process generation through the normal reconnect barrier.
+Qt uses the same generation replacement when a subscribe/Sync/Snapshot/activate
+result cannot be validated locally, an Active wrapper or cursor drifts, continuation
+is unsafe, or Runtime reports `session-attempt-exists` or
+`subscription-id-reused`. It preserves confirmed state and queued input, does not
+falsely complete reconnect, and never retries those ownership conflicts on the same
+connection. Old-generation traffic remains inert.
+Heartbeat Unknown without such a pending request keeps the existing same-process
+probe behavior. OpenSpec `3.5` remains unchecked for explicit acknowledgement and
+complete Windows reconnect/runtime evidence, and automatic Timeline pruning remains
+disabled.
 
 - Idempotency keys for turn start, approval responses, writes, and background job
   submission.
@@ -478,9 +506,9 @@ below the watermark and validates only later events; because a snapshot has no
 timestamp, the first valid post-watermark event establishes the new client baseline.
 A disconnect drops incomplete page staging but preserves confirmed UI, bounded queued
 live events, their accounting, and recovery intent so capture restarts after a fresh
-handshake. Automatic pruning remains disabled, and
-OpenSpec task `3.5` stays unchecked until subscription, complete reconnect,
-acknowledgement, and Windows recovery evidence land.
+handshake. Automatic pruning remains disabled. The later subscription/reconnect
+design below supersedes those historical gaps; OpenSpec task `3.5` stays unchecked
+until durable explicit acknowledgement and complete Windows recovery evidence land.
 
 Credentials remain in OS secure storage. The database contains credential IDs or
 short-lived token references, never API keys or long-lived Aegisy JWT values.

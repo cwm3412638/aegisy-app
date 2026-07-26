@@ -120,9 +120,10 @@ AAP 0.1 ordered Timeline event evidence (`3.4`):
   daemon-main, 10 context-threshold, 13 handshake Runtime, 12 handshake Schema,
   63 protocol, and 23 stdio/Codex tests); strict workspace Clippy; all 16 desktop
   CTests; strict OpenSpec validation; and `git diff --check`.
-- This stage does not claim durable public Timeline journaling, snapshot/replay,
-  subscription, heartbeat, reconnect catch-up, or gap recovery. Those remain under
-  `3.5`; the current Agent/Codex permission boundary remains read-only.
+- This historical `3.4` stage did not claim durable public Timeline journaling,
+  snapshot/replay, subscription, heartbeat, reconnect catch-up, or gap recovery.
+  The later `3.5` sections and current project memory supersede that status; the
+  current Agent/Codex permission boundary remains read-only.
 
 Public Timeline fixed-watermark replay slice (`3.5`, partial):
 
@@ -144,10 +145,12 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
   proves Unknown preserves the active Turn and its Stop action while changing the
   status surface. The Windows packaging workflow runs the same Qt Runtime environment
   test before installer construction.
-- This slice does not implement bounded sidecar reconnection, live Timeline
-  subscription, explicit acknowledgement, or the race-free subscribe/sync/activate
-  reconnect flow. Heartbeat Unknown does not kill a possibly live Turn, and automatic
-  Timeline pruning remains disabled. Keep task `3.5` unchecked.
+- At this historical heartbeat-only gate, the slice did not implement bounded
+  sidecar reconnection, live Timeline subscription, explicit acknowledgement, or the
+  race-free subscribe/sync/activate reconnect flow. The later bounded-reconnect and
+  live-subscription sections supersede those first two gaps. Heartbeat Unknown does
+  not kill a possibly live Turn, automatic Timeline pruning remains disabled, and
+  explicit acknowledgement plus Windows evidence remain open.
 
 Bounded reconnect barrier and OOB handshake ordering slice (`3.5`, partial):
 
@@ -173,15 +176,16 @@ Bounded reconnect barrier and OOB handshake ordering slice (`3.5`, partial):
   daemon-main, 10 context-threshold, 14 handshake Runtime, 18 handshake Schema,
   67 protocol, and 23 stdio/Codex tests. Strict Clippy, formatting, successful
   `cmake --build build -j4`, strict OpenSpec validation, and `git diff --check` pass.
-- This slice still does not implement live subscription, explicit acknowledgement,
-  or the race-free subscribe/sync/activate state machine. Windows reconnect/runtime
-  execution evidence is also absent, and automatic pruning remains disabled. Keep
-  task `3.5` unchecked.
+- At this historical bounded-reconnect gate, the slice did not yet implement live
+  subscription, explicit acknowledgement, or the race-free subscribe/sync/activate
+  state machine. The later live-subscription section supersedes that protocol gap.
+  Windows reconnect/runtime execution evidence and explicit acknowledgement remain
+  absent, and automatic pruning remains disabled. Keep task `3.5` unchecked.
 - Generation-bound regression coverage also proves initialize response retirement,
   inert duplicate late initialize responses, exact heartbeat deadline request/process
   generation matching, and process-generation-bound reconnect stability timers.
 
-Non-routable Timeline subscription contract foundation (`3.5`, partial):
+Historical non-routable Timeline subscription contract foundation (`3.5`, partial):
 
 - Stable Schema `$defs` and Rust types define strict subscribe, activate, live-event,
   and failure objects while deliberately leaving the top-level AAP method schema,
@@ -200,18 +204,48 @@ Non-routable Timeline subscription contract foundation (`3.5`, partial):
   a domain-separated identity of the complete typed request or exact active state.
   Snapshot identity, continuation cursor, and page limit drift therefore cannot
   reuse a late failure. Every accepted failure remains terminal and requires cleanup.
-- This slice does not yet bind ordinary `timeline/sync` or `timeline/snapshot` page
+- This historical slice did not bind ordinary `timeline/sync` or `timeline/snapshot` page
   requests to a connection-owned subscription attempt, implement Runtime atomic
   registration/head capture or activation/buffer drain, register a wire method,
   handle event-before-activate in Qt, provide explicit acknowledgement, or supply
-  Windows reconnect/runtime evidence. Automatic pruning remains disabled and task
-  `3.5` stays unchecked.
+  Windows reconnect/runtime evidence. The live subscription stage below supersedes
+  the Runtime/Qt gaps without supplying acknowledgement or Windows evidence.
+  Automatic pruning remains disabled and task `3.5` stays unchecked.
 - Verification passes the complete Rust workspace: 37 AAP type, 729
   `aegisy-agentd` library tests with one ignored live fixture, 7 daemon-main, 10
   context-threshold, 14 handshake Runtime, 20 handshake Schema, 67 protocol, and 23
   stdio/Codex tests (907 passed, zero failed, one ignored). Strict workspace Clippy,
   Rust formatting, JSON Schema parsing, strict OpenSpec validation, and
   `git diff --check` pass.
+
+Live Timeline subscription and ownership recovery (`3.5`, partial):
+
+- Stable Schema, Rust, and Qt negotiate `timeline.subscription.fixed-watermark` and
+  route subscribe, subscription-bound Sync/Snapshot, activation, live events, and
+  typed terminal failures. Runtime advertises the capability only with a healthy
+  writable Store, binds every attempt to one connection generation and Session,
+  captures a fixed durable head, and never reuses an ID in that generation. Retained
+  Sync/Snapshot recovery units and buffered live events share one connection-wide
+  10,000-unit/64 MiB budget with exact single release on every terminal path. A
+  cross-Session or cross-generation request is rejected without retiring the true
+  owner. Activation consumes the exact private registry token before draining events.
+- Negotiated `turn/start` requires the Session to own a valid attempt. Qt enables a
+  new Turn only after the exact activation response, rejects stale generation/
+  request/Session traffic, preserves confirmed state and queued input across typed
+  failure, and retries eligible typed failures with fresh IDs at `0/250/1000 ms`.
+  Heartbeat ambiguity, locally invalid subscription state, Active wrapper/cursor
+  drift, unsafe continuation, and occupied/reused subscribe identities replace the
+  Runtime generation; they cannot falsely complete reconnect or retry on the same
+  ownership-ambiguous connection.
+- The complete gates pass: 38 AAP type, 753 `aegisy-agentd` library tests with one
+  ignored live fixture, 7 daemon-main, 10 context-threshold, 21 handshake Runtime,
+  22 handshake Schema, 67 protocol, and 23 stdio/Codex tests (941 passed, zero
+  failed, one ignored); strict workspace Clippy and formatting; desktop build and
+  all 16 CTests; JSON Schema parsing; strict OpenSpec validation; and
+  `git diff --check`.
+- This does not provide durable explicit mutation acknowledgement or complete
+  Windows reconnect/runtime evidence. Agent/Codex remains read-only, automatic
+  Timeline pruning remains disabled, and task `3.5` stays unchecked.
 
 Metadata-only acknowledgement contract foundation (`3.5`/`3.6`, partial):
 
@@ -374,10 +408,11 @@ Metadata-only acknowledgement contract foundation (`3.5`/`3.6`, partial):
   Some streaming/control-only events correctly have no durable Item projection and
   append only to the Journal. The schema v16 floor/checkpoint remains internal
   retention and restart authority, while schema v17 plus fixed-head paging and Qt
-  atomic replacement now provide structured retention-gap snapshot recovery. Live
-  subscription, complete reconnect orchestration, explicit acknowledgement,
-  automatic pruning enablement, and Windows recovery/runtime
-  evidence remain absent. Keep `3.5` unchecked.
+  atomic replacement now provide structured retention-gap snapshot recovery. At this
+  historical fixed-watermark producer gate, live subscription and complete reconnect
+  orchestration were absent; the later live-subscription section supersedes those two
+  gaps. Explicit acknowledgement, automatic pruning enablement, and Windows recovery/
+  runtime evidence remain absent. Keep `3.5` unchecked.
 
 Model catalog foundation evidence:
 
@@ -935,11 +970,11 @@ Current editor evidence:
   switching is disabled while the single active Turn is running. The full Rust
   stage passes 630 library tests (one ignored), 63 protocol tests, and 21 stdio
   tests; both the focused degradation/Timeline run and ordinary Qt render run pass.
-  The later fixed-watermark and schema v16 retention-foundation slices above now add
-  durable public replay, bounded per-Session gap catch-up, and internal
-  checkpoint-plus-tail restart authority, but current snapshot/structured
-  retention-gap recovery, subscription, complete reconnect, acknowledgement, and
-  Windows recovery/runtime evidence remain incomplete. Full
+  The later fixed-watermark, snapshot, bounded-reconnect, and live-subscription
+  sections above now add durable public replay, bounded per-Session gap catch-up,
+  internal checkpoint-plus-tail restart authority, structured retention-gap recovery,
+  and live delivery. Explicit acknowledgement and Windows recovery/runtime evidence
+  remain incomplete. Full
   vendor capability negotiation and the remaining desktop/dependent feature gates
   are also incomplete, so `3.5` and `7.9` remain unchecked.
 - Large command-output tests cover a Unicode-safe 64 KiB head/192 KiB tail,

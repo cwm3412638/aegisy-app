@@ -62,11 +62,14 @@ public:
                                             quint64 totalCanonicalBytes,
                                             const QStringList &orderedItemIdentities);
     static QString timelineSnapshotPageIdentity(const QJsonObject &page);
+    static QString timelineSubscriptionRequestIdentity(const QString &stage,
+                                                       const QJsonObject &request);
     static QString workspaceEditProposalPreviewIdentity(const QJsonObject &proposal);
     static QString workspaceEditProposalArtifactPageIdentity(const QJsonObject &page);
 
     void start();
     void stop();
+    void abandonTimelineSubscriptionConnection(const QString &detail);
     bool completeReconnectRecovery(quint64 generation, bool success,
                                    const QString &detail = QString());
     QString runtimeHealth();
@@ -142,6 +145,33 @@ public:
                              const QJsonObject &watermark = QJsonObject(),
                              const QJsonObject &after = QJsonObject(),
                              int limit = 100);
+    QString subscribeTimeline(const QString &sessionId, quint64 connectionGeneration,
+                              quint64 cursorSequence,
+                              const QString &cursorEventId = QString(),
+                              const QJsonObject &watermark = QJsonObject(),
+                              QString *subscriptionId = nullptr);
+    QString syncTimelineSubscription(quint64 connectionGeneration,
+                                     const QString &sessionId,
+                                     const QString &subscriptionId,
+                                     quint64 afterSequence,
+                                     const QString &afterEventId,
+                                     const QJsonObject &watermark,
+                                     int limit = 100);
+    QString snapshotTimelineSubscription(quint64 connectionGeneration,
+                                         const QString &sessionId,
+                                         const QString &subscriptionId,
+                                         const QJsonObject &subscriptionCursor,
+                                         const QString &snapshotIdentity = QString(),
+                                         const QJsonObject &watermark = QJsonObject(),
+                                         const QJsonObject &after = QJsonObject(),
+                                         int limit = 100);
+    QString activateTimelineSubscription(quint64 connectionGeneration,
+                                         const QString &sessionId,
+                                         const QString &subscriptionId,
+                                         const QString &source,
+                                         const QJsonObject &cursor,
+                                         const QJsonObject &watermark,
+                                         const QString &snapshotIdentity = QString());
     QString backgroundNotifications(const QString &sessionId,
                                     const QJsonObject &cursor = QJsonObject(),
                                     int limit = 100);
@@ -317,6 +347,15 @@ signals:
     void sessionRead(const QString &requestId, const QJsonObject &snapshot);
     void timelineSynced(const QString &requestId, const QJsonObject &page);
     void timelineSnapshotReceived(const QString &requestId, const QJsonObject &page);
+    void timelineSubscribed(const QString &requestId, const QJsonObject &result);
+    void timelineSubscriptionSynced(const QString &requestId, const QJsonObject &page);
+    void timelineSubscriptionSnapshotReceived(const QString &requestId,
+                                              const QJsonObject &page);
+    void timelineSubscriptionActivated(const QString &requestId,
+                                       const QJsonObject &result);
+    void timelineSubscriptionEvent(const QJsonObject &event);
+    void timelineSubscriptionFailed(const QString &requestId,
+                                    const QJsonObject &failure);
     void backgroundNotificationsRead(const QString &requestId, const QJsonObject &result);
     void backgroundRecoveryRead(const QString &requestId, const QJsonObject &result);
     void projectionRecoveryStatusRead(const QJsonObject &status);
@@ -397,6 +436,7 @@ private:
     void clearNegotiationState();
     void failPending(const QString &message);
     void failOrdinaryPending(const QString &message);
+    void abandonAmbiguousTimelineSubscriptionConnection(const QString &detail);
     void sendHeartbeat(bool recoveryProbe = false);
     void handleHeartbeatTimeout();
     void scheduleHeartbeatRecoveryProbe();
@@ -420,10 +460,12 @@ private:
     QHash<QString, QString> m_pendingMethods;
     QHash<QString, quint64> m_pendingGenerations;
     QHash<QString, QJsonObject> m_pendingTimelineSyncRequests;
+    QHash<QString, QJsonObject> m_pendingTimelineSubscriptionRequests;
     QSet<QString> m_retiredResponseIds;
     QStringList m_retiredResponseOrder;
     quint64 m_nextRequestId = 0;
     quint64 m_nextTurnKey = 0;
+    quint64 m_nextTimelineSubscriptionId = 0;
     quint64 m_processGeneration = 0;
     quint64 m_initializeGeneration = 0;
     quint64 m_startupGeneration = 0;

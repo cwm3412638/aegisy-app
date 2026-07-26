@@ -86,7 +86,7 @@ turn states after process or application failure.
 
 #### Scenario: UI reconnects to a running runtime
 - **WHEN** the client reconnects with its last confirmed sequence/Event-ID anchor
-- **THEN** the runtime SHALL catch up to one fixed watermark without duplicate effects, or return a negotiated retention-gap snapshot that the client validates completely before atomically replacing only that Session; live subscription, acknowledgement, and complete reconnect orchestration remain separately required
+- **THEN** the runtime SHALL catch up to one fixed watermark without duplicate effects, or return a negotiated retention-gap snapshot that the client validates completely before atomically replacing only that Session, then activate its generation-bound live subscription; explicit acknowledgement and complete Windows reconnect/runtime evidence remain separately required
 
 #### Scenario: Runtime died during a mutation
 - **WHEN** no terminal event exists for an in-progress command or file change

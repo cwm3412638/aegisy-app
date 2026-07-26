@@ -151,6 +151,115 @@
           "params": { "$ref": "#/$defs/timelineSnapshotParams" }
         }
       }
+    },
+    {
+      "if": {
+        "required": ["method"],
+        "properties": { "method": { "const": "timeline/subscribe" } }
+      },
+      "then": {
+        "required": ["id", "params"],
+        "properties": {
+          "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+          "params": { "$ref": "#/$defs/timelineSubscribeParams" }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["method"],
+        "properties": { "method": { "const": "timeline/subscription-sync" } }
+      },
+      "then": {
+        "required": ["id", "params"],
+        "properties": {
+          "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+          "params": { "$ref": "#/$defs/timelineSubscriptionSyncParams" }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["method"],
+        "properties": { "method": { "const": "timeline/subscription-snapshot" } }
+      },
+      "then": {
+        "required": ["id", "params"],
+        "properties": {
+          "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+          "params": { "$ref": "#/$defs/timelineSubscriptionSnapshotParams" }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["method"],
+        "properties": { "method": { "const": "timeline/subscription-activate" } }
+      },
+      "then": {
+        "required": ["id", "params"],
+        "properties": {
+          "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+          "params": { "$ref": "#/$defs/timelineActivateParams" }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["method"],
+        "properties": { "method": { "const": "timeline/subscription-event" } }
+      },
+      "then": {
+        "required": ["params"],
+        "not": { "required": ["id"] },
+        "properties": {
+          "params": { "$ref": "#/$defs/timelineSubscriptionEvent" }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["method"],
+        "properties": { "method": { "const": "timeline/subscription-failure" } }
+      },
+      "then": {
+        "required": ["params"],
+        "not": { "required": ["id"] },
+        "properties": {
+          "params": { "$ref": "#/$defs/timelineSubscriptionLiveFailure" }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "required": ["data"],
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": ["schema_version"],
+                "properties": {
+                  "schema_version": {
+                    "const": "timeline-subscription-failure/0.1"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+          "error": {
+            "properties": {
+              "data": { "$ref": "#/$defs/timelineSubscriptionRequestFailure" }
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -937,7 +1046,7 @@
       "pattern": "^timeline-subscription-request:sha256:[0-9a-f]{64}$"
     },
     "timelineSubscribeParams": {
-      "$comment": "Contract-only reconnect barrier. Runtime 0.1 does not advertise or dispatch this method. The generation, Session, subscription, cursor, and optional fixed watermark must remain exact through every later state.",
+      "$comment": "Stable wire contract for the reconnect barrier. Runtime must still negotiate and enforce a separate subscription capability before dispatch. The generation, Session, subscription, cursor, and optional fixed watermark must remain exact through every later state.",
       "type": "object",
       "required": [
         "schema_version",
@@ -989,21 +1098,26 @@
             { "type": "null" }
           ]
         },
-        "next_method": { "enum": ["timeline/sync", "timeline/snapshot"] }
+        "next_method": {
+          "enum": [
+            "timeline/subscription-sync",
+            "timeline/subscription-snapshot"
+          ]
+        }
       },
       "oneOf": [
         {
           "properties": {
             "state": { "const": "sync-required" },
             "watermark": { "$ref": "#/$defs/timelineAnchor" },
-            "next_method": { "const": "timeline/sync" }
+            "next_method": { "const": "timeline/subscription-sync" }
           }
         },
         {
           "properties": {
             "state": { "const": "snapshot-required" },
             "watermark": { "type": "null" },
-            "next_method": { "const": "timeline/snapshot" }
+            "next_method": { "const": "timeline/subscription-snapshot" }
           }
         }
       ]
@@ -1053,7 +1167,7 @@
       ]
     },
     "timelineActivateResult": {
-      "$comment": "This result is a contract shape only. No Runtime handler or negotiated capability currently creates it.",
+      "$comment": "Stable wire result shape. Registering this schema does not advertise a Runtime capability or create connection authority.",
       "type": "object",
       "required": [
         "schema_version",
@@ -1161,6 +1275,196 @@
           }
         }
       ]
+    },
+    "timelineSubscriptionRequestFailure": {
+      "$comment": "Request-stage subscription failures travel only in JSON-RPC error.data. Typed peers additionally verify the domain-separated request identity against the exact request.",
+      "allOf": [
+        { "$ref": "#/$defs/timelineSubscriptionFailure" },
+        {
+          "properties": {
+            "stage": { "enum": ["subscribe", "sync", "snapshot", "activate"] },
+            "request_identity": {
+              "$ref": "#/$defs/timelineSubscriptionRequestIdentity"
+            }
+          }
+        }
+      ]
+    },
+    "timelineSubscriptionLiveFailure": {
+      "$comment": "Only a terminal asynchronous failure of an active subscription may use the live failure notification route.",
+      "allOf": [
+        { "$ref": "#/$defs/timelineSubscriptionFailure" },
+        {
+          "properties": {
+            "stage": { "const": "live" },
+            "request_identity": { "type": "null" }
+          }
+        }
+      ]
+    },
+    "timelineSubscriptionSyncParams": {
+      "$comment": "Stable subscription paging wrapper. It preserves the complete legacy timelineSyncParams request while binding it to one connection generation, Session, and subscription. Typed peers require the nested Session and fixed watermark to match the subscription and compute a domain-separated identity over this complete object.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "connection_generation",
+        "session_id",
+        "subscription_id",
+        "request"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "timeline-subscription-sync-request/0.1" },
+        "connection_generation": { "$ref": "#/$defs/safePositiveInteger" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "subscription_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "request": {
+          "$ref": "#/$defs/timelineSyncParams",
+          "properties": {
+            "watermark": { "$ref": "#/$defs/timelineAnchor" }
+          }
+        }
+      }
+    },
+    "timelineSubscriptionSnapshotParams": {
+      "$comment": "Stable subscription paging wrapper. It preserves the complete legacy timelineSnapshotParams request while binding it to one connection generation, Session, and subscription. Typed peers require the nested Session and recovery route to match the subscription and compute a domain-separated identity over this complete object.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "connection_generation",
+        "session_id",
+        "subscription_id",
+        "request"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "timeline-subscription-snapshot-request/0.1" },
+        "connection_generation": { "$ref": "#/$defs/safePositiveInteger" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "subscription_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "request": { "$ref": "#/$defs/timelineSnapshotParams" }
+      }
+    },
+    "timelineSubscribeRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "method": { "const": "timeline/subscribe" },
+        "params": { "$ref": "#/$defs/timelineSubscribeParams" }
+      }
+    },
+    "timelineSubscribeSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "result": { "$ref": "#/$defs/timelineSubscribeResult" }
+      }
+    },
+    "timelineSubscriptionSyncRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "method": { "const": "timeline/subscription-sync" },
+        "params": { "$ref": "#/$defs/timelineSubscriptionSyncParams" }
+      }
+    },
+    "timelineSubscriptionSyncSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "result": { "$ref": "#/$defs/timelineSyncPage" }
+      }
+    },
+    "timelineSubscriptionSnapshotRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "method": { "const": "timeline/subscription-snapshot" },
+        "params": { "$ref": "#/$defs/timelineSubscriptionSnapshotParams" }
+      }
+    },
+    "timelineSubscriptionSnapshotSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "result": { "$ref": "#/$defs/timelineSessionSnapshotPage" }
+      }
+    },
+    "timelineSubscriptionActivateRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "method": { "const": "timeline/subscription-activate" },
+        "params": { "$ref": "#/$defs/timelineActivateParams" }
+      }
+    },
+    "timelineSubscriptionActivateSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "result": { "$ref": "#/$defs/timelineActivateResult" }
+      }
+    },
+    "timelineSubscriptionEventNotification": {
+      "type": "object",
+      "required": ["jsonrpc", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "timeline/subscription-event" },
+        "params": { "$ref": "#/$defs/timelineSubscriptionEvent" }
+      }
+    },
+    "timelineSubscriptionFailureNotification": {
+      "type": "object",
+      "required": ["jsonrpc", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "timeline/subscription-failure" },
+        "params": { "$ref": "#/$defs/timelineSubscriptionLiveFailure" }
+      }
+    },
+    "timelineSubscriptionRequestErrorResponse": {
+      "$comment": "Subscribe, subscription-sync, subscription-snapshot, and subscription-activate failures use the ordinary JSON-RPC error envelope with exact terminal failure metadata in error.data. Live failures use only the notification route.",
+      "type": "object",
+      "required": ["jsonrpc", "id", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "error": {
+          "$ref": "#/$defs/jsonRpcError",
+          "required": ["code", "message", "data"],
+          "properties": {
+            "data": { "$ref": "#/$defs/timelineSubscriptionRequestFailure" }
+          }
+        }
+      }
     },
     "timelineSyncParams": {
       "type": "object",

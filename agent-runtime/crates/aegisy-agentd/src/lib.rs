@@ -64,6 +64,7 @@ mod terminal;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[path = "terminal_unsupported.rs"]
 mod terminal;
+pub mod timeline_subscription;
 mod tokenizer;
 mod tool_trace_authority;
 mod turn_context;
@@ -86,11 +87,14 @@ use aegisy_aap::stable::v0_1::{
     timeline_snapshot_item_identity, timeline_snapshot_page_identity, BackendDescriptor,
     EventEnvelope, Identity, InitializeParams, InitializeResult, ItemUpdate,
     NegotiatedCapabilities, NegotiatedProtocol, Platform, Project, ProtocolLimits,
-    RuntimeHeartbeatParams, RuntimeHeartbeatResult, Session, SessionMode, TimelineAnchor,
-    TimelineItem, TimelineRetentionGapData, TimelineSessionSnapshotPage,
-    TimelineSnapshotActiveTurn, TimelineSnapshotCursor, TimelineSnapshotItem,
-    TimelineSnapshotParams, TimelineSyncPage as AapTimelineSyncPage, TimelineSyncParams,
-    TransportSecurity,
+    RuntimeHeartbeatParams, RuntimeHeartbeatResult, Session, SessionMode, TimelineActivateParams,
+    TimelineActivateResult, TimelineAnchor, TimelineItem, TimelineRetentionGapData,
+    TimelineSessionSnapshotPage, TimelineSnapshotActiveTurn, TimelineSnapshotCursor,
+    TimelineSnapshotItem, TimelineSnapshotParams, TimelineSubscribeParams, TimelineSubscribeResult,
+    TimelineSubscriptionFailure, TimelineSubscriptionFailureStage,
+    TimelineSubscriptionSnapshotParams, TimelineSubscriptionState, TimelineSubscriptionSyncParams,
+    TimelineSyncPage as AapTimelineSyncPage, TimelineSyncParams, TransportSecurity,
+    TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA,
 };
 use aegisy_aap::{
     Notification, Request, Response, JSONRPC_VERSION, MAX_AAP_FRAME_BYTES, PROTOCOL_VERSION,
@@ -256,6 +260,7 @@ pub const STABLE_CAPABILITY_REGISTRY: &[&str] = &[
     "timeline.replay.fixed-watermark",
     "timeline.snapshot.current",
     "timeline.streaming",
+    "timeline.subscription.fixed-watermark",
     "turn.cancel.interrupt",
     "turn.context.inspect",
     "turn.context.manifest",
@@ -408,6 +413,40 @@ fn runtime_platform() -> Platform {
     }
 }
 
+struct RuntimeTimelineSubscriptionContext {
+    subscribe_result: TimelineSubscribeResult,
+    fixed_floor: public_timeline_journal::TimelineAnchor,
+    fixed_head: public_timeline_journal::TimelineAnchor,
+    activation_token: Option<timeline_subscription::TimelineSubscriptionActivationToken>,
+    active_result: Option<TimelineActivateResult>,
+}
+
+#[derive(Default)]
+struct RuntimeTimelineSubscriptionState {
+    registry: Option<timeline_subscription::TimelineSubscriptionRegistry>,
+    contexts: HashMap<String, RuntimeTimelineSubscriptionContext>,
+    sessions: HashMap<String, String>,
+}
+
+impl RuntimeTimelineSubscriptionState {
+    fn retire(&mut self, subscription_id: &str) {
+        if let Some(context) = self.contexts.remove(subscription_id) {
+            self.sessions.remove(&context.subscribe_result.session_id);
+        }
+        if let Some(registry) = self.registry.as_mut() {
+            let _ = registry.retire(subscription_id);
+        }
+    }
+
+    fn disconnect(&mut self) {
+        if let Some(registry) = self.registry.take() {
+            let _ = registry.disconnect();
+        }
+        self.contexts.clear();
+        self.sessions.clear();
+    }
+}
+
 pub struct Runtime {
     initialized: bool,
     client_ready: bool,
@@ -442,6 +481,8 @@ pub struct Runtime {
     pinned_context_store: Option<pinned_context_store::PinnedContextStore>,
     model_profile_store: Option<model_profile_store::ModelProfileStore>,
     model_catalog_cache: Option<model_catalog_cache::ModelCatalogCacheStore>,
+    timeline_subscriptions: Arc<Mutex<RuntimeTimelineSubscriptionState>>,
+    timeline_transport_failed: Arc<AtomicBool>,
     backend: Backend,
 }
 
@@ -882,6 +923,12 @@ impl RuntimeControl {
             .active_turn
             .as_ref()
             .is_some_and(|active| active.session_id == session_id)
+    }
+
+    fn request_active_turn_cancellation(&self) {
+        if let Some(active) = self.lock().active_turn.as_ref() {
+            active.cancellation.request();
+        }
     }
 
     fn protected_session_ids(&self) -> BTreeSet<String> {
@@ -1635,6 +1682,168 @@ fn timeline_notification(envelope: &EventEnvelope) -> Result<Value, String> {
         params: envelope.clone(),
     })
     .map_err(|_| "cannot serialize Timeline notification".to_owned())
+}
+
+fn timeline_subscription_failure_reason(
+    error: timeline_subscription::TimelineSubscriptionRegistryError,
+) -> &'static str {
+    use timeline_subscription::TimelineSubscriptionRegistryError as Error;
+    match error {
+        Error::InvalidConnectionGeneration | Error::ConnectionGenerationMismatch => {
+            "connection-generation-invalid"
+        }
+        Error::InvalidSubscribeRequest => "subscribe-request-invalid",
+        Error::InvalidFixedHead | Error::FixedHeadDrift => "fixed-head-drift",
+        Error::SubscriptionIdAlreadyUsed => "subscription-id-reused",
+        Error::SubscriptionIdCapacityExceeded => "subscription-id-limit",
+        Error::SessionAlreadyHasAttempt => "session-attempt-exists",
+        Error::UnknownSubscription | Error::SubscriptionAlreadyRetired => "subscription-not-active",
+        Error::AttemptFailed => "subscription-attempt-failed",
+        Error::RecoveryRouteMismatch => "recovery-route-mismatch",
+        Error::RecoveryAlreadyComplete => "recovery-already-complete",
+        Error::InvalidRecoveryRequest => "recovery-request-invalid",
+        Error::InvalidRecoveryPage => "recovery-page-invalid",
+        Error::RecoveryLimitExceeded => "recovery-limit-exceeded",
+        Error::InvalidRecoveryProof => "recovery-proof-invalid",
+        Error::ActivationTokenMismatch => "activation-token-mismatch",
+        Error::InvalidActivationRequest => "activation-request-invalid",
+        Error::InvalidEvent => "live-event-invalid",
+        Error::EventSessionMismatch => "live-session-mismatch",
+        Error::EventGap => "live-event-gap",
+        Error::EventDuplicateOrReverse => "live-event-order-invalid",
+        Error::EventTimestampReverse => "live-timestamp-reversed",
+        Error::PendingEventCountExceeded => "pending-event-count-limit",
+        Error::PendingEventBytesExceeded => "pending-event-byte-limit",
+    }
+}
+
+fn route_runtime_timeline_message<F>(
+    message: Value,
+    subscription_enabled: bool,
+    subscriptions: &Arc<Mutex<RuntimeTimelineSubscriptionState>>,
+    transport_failed: &Arc<AtomicBool>,
+    control: &RuntimeControl,
+    emit: &mut F,
+) where
+    F: FnMut(Value),
+{
+    if !subscription_enabled || message.get("method").and_then(Value::as_str) != Some("event") {
+        emit(message);
+        return;
+    }
+
+    let event: EventEnvelope = match message
+        .get("params")
+        .cloned()
+        .and_then(|params| serde_json::from_value::<EventEnvelope>(params).ok())
+    {
+        Some(event) if event.validate().is_ok() => event,
+        _ => {
+            subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .disconnect();
+            transport_failed.store(true, Ordering::Release);
+            control.request_active_turn_cancellation();
+            return;
+        }
+    };
+
+    let mut routed = None;
+    let mut fatal = false;
+    {
+        let mut state = subscriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let subscription_id = state.sessions.get(&event.session_id).cloned();
+        let active = subscription_id.as_ref().and_then(|subscription_id| {
+            state
+                .contexts
+                .get(subscription_id)
+                .and_then(|context| context.active_result.clone())
+        });
+        let publication = state
+            .registry
+            .as_mut()
+            .map(|registry| registry.publish_event(event));
+        match publication {
+            None
+            | Some(Ok(timeline_subscription::TimelineEventPublication::Disposition(
+                timeline_subscription::TimelineEventDisposition::NoAttempt
+                | timeline_subscription::TimelineEventDisposition::IgnoredAtOrBeforeFixedHead
+                | timeline_subscription::TimelineEventDisposition::Buffered,
+            ))) => {}
+            Some(Ok(timeline_subscription::TimelineEventPublication::Live(event))) => {
+                routed = serde_json::to_value(Notification {
+                    jsonrpc: JSONRPC_VERSION,
+                    method: "timeline/subscription-event",
+                    params: *event,
+                })
+                .ok();
+                fatal = routed.is_none();
+                if fatal {
+                    if let Some(subscription_id) = subscription_id.as_deref() {
+                        state.retire(subscription_id);
+                    }
+                }
+            }
+            Some(Err(error)) => {
+                let failure = subscription_id.as_ref().zip(active.as_ref()).and_then(
+                    |(subscription_id, active)| {
+                        let status = state.registry.as_ref()?.status(subscription_id).ok()?;
+                        let failure = TimelineSubscriptionFailure {
+                            schema_version: TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA.into(),
+                            connection_generation: active.connection_generation,
+                            session_id: active.session_id.clone(),
+                            subscription_id: active.subscription_id.clone(),
+                            state: TimelineSubscriptionState::Failed,
+                            stage: TimelineSubscriptionFailureStage::Live,
+                            cursor: status.current_cursor,
+                            watermark: Some(active.watermark.clone()),
+                            request_identity: None,
+                            reason: timeline_subscription_failure_reason(error).into(),
+                            retryable: true,
+                            cleanup_required: true,
+                        };
+                        failure
+                            .validate_for_live(
+                                active,
+                                &failure.cursor,
+                                active.connection_generation,
+                            )
+                            .ok()?;
+                        Some(failure)
+                    },
+                );
+                if let Some(subscription_id) = subscription_id.as_deref() {
+                    state.retire(subscription_id);
+                }
+                if let Some(failure) = failure {
+                    routed = serde_json::to_value(Notification {
+                        jsonrpc: JSONRPC_VERSION,
+                        method: "timeline/subscription-failure",
+                        params: failure,
+                    })
+                    .ok();
+                    fatal = routed.is_none();
+                } else {
+                    fatal = true;
+                }
+            }
+        }
+    }
+
+    if let Some(message) = routed {
+        emit(message);
+    }
+    if fatal {
+        subscriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .disconnect();
+        transport_failed.store(true, Ordering::Release);
+        control.request_active_turn_cancellation();
+    }
 }
 
 fn timeline_item_from_stored(stored: &StoredItem) -> Result<TimelineItem, String> {
@@ -4409,6 +4618,10 @@ impl Runtime {
             pinned_context_store,
             model_profile_store,
             model_catalog_cache,
+            timeline_subscriptions: Arc::new(Mutex::new(
+                RuntimeTimelineSubscriptionState::default(),
+            )),
+            timeline_transport_failed: Arc::new(AtomicBool::new(false)),
             backend,
         }
     }
@@ -4423,7 +4636,7 @@ impl Runtime {
         self.control.clone()
     }
 
-    pub fn handle_line_stream<F>(&mut self, line: &str, mut emit: F)
+    pub fn handle_line_stream<F>(&mut self, line: &str, mut emit_raw: F)
     where
         F: FnMut(Value),
     {
@@ -4431,6 +4644,22 @@ impl Runtime {
             self.negotiated_max_frame_bytes
         } else {
             MAX_AAP_FRAME_BYTES
+        };
+        let subscription_enabled = self
+            .negotiated_capabilities
+            .contains("timeline.subscription.fixed-watermark");
+        let timeline_subscriptions = Arc::clone(&self.timeline_subscriptions);
+        let timeline_transport_failed = Arc::clone(&self.timeline_transport_failed);
+        let runtime_control = self.control.clone();
+        let mut emit = |message| {
+            route_runtime_timeline_message(
+                message,
+                subscription_enabled,
+                &timeline_subscriptions,
+                &timeline_transport_failed,
+                &runtime_control,
+                &mut emit_raw,
+            );
         };
         if u64::try_from(line.len()).unwrap_or(u64::MAX) > frame_limit {
             emit(oversized_frame_response());
@@ -4530,6 +4759,10 @@ impl Runtime {
                 request.method.as_str(),
                 "session/read"
                     | "timeline/sync"
+                    | "timeline/subscribe"
+                    | "timeline/subscription-sync"
+                    | "timeline/subscription-snapshot"
+                    | "timeline/subscription-activate"
                     | "session/background-notifications"
                     | "session/background-recovery"
                     | "session/recovery/status"
@@ -4624,6 +4857,10 @@ impl Runtime {
             && !matches!(
                 request.method.as_str(),
                 "session/read"
+                    | "timeline/subscribe"
+                    | "timeline/subscription-sync"
+                    | "timeline/subscription-snapshot"
+                    | "timeline/subscription-activate"
                     | "session/background-notifications"
                     | "session/background-recovery"
                     | "session/recovery/status"
@@ -4661,6 +4898,10 @@ impl Runtime {
             request.method.as_str(),
             "session/read"
                 | "timeline/sync"
+                | "timeline/subscribe"
+                | "timeline/subscription-sync"
+                | "timeline/subscription-snapshot"
+                | "timeline/subscription-activate"
                 | "session/background-notifications"
                 | "session/background-recovery"
                 | "session/deletion/status"
@@ -4707,6 +4948,31 @@ impl Runtime {
         {
             self.emit_all(
                 self.error_for(&request, -32120, "workbench is in read-only recovery mode"),
+                &mut emit,
+            );
+            return;
+        }
+        if request.method == "turn/start"
+            && self.initialized
+            && self.client_ready
+            && self
+                .negotiated_capabilities
+                .contains("timeline.subscription.fixed-watermark")
+            && request
+                .params
+                .get("session_id")
+                .and_then(Value::as_str)
+                .is_some_and(|session_id| {
+                    self.sessions.contains_key(session_id)
+                        && !self.has_timeline_subscription_attempt(session_id)
+                })
+        {
+            self.emit_all(
+                self.error_for(
+                    &request,
+                    -32152,
+                    "Timeline subscription attempt is required before starting a turn",
+                ),
                 &mut emit,
             );
             return;
@@ -4797,6 +5063,10 @@ impl Runtime {
             "session/read" => self.session_read(request),
             "timeline/sync" => self.timeline_sync(request),
             "timeline/snapshot" => self.timeline_snapshot(request),
+            "timeline/subscribe" => self.timeline_subscribe(request),
+            "timeline/subscription-sync" => self.timeline_subscription_sync(request),
+            "timeline/subscription-snapshot" => self.timeline_subscription_snapshot(request),
+            "timeline/subscription-activate" => self.timeline_subscription_activate(request),
             "session/title" => self.session_title(request),
             "session/unarchive" => self.session_unarchive(request),
             "session/provider-list" => self.provider_thread_list(request),
@@ -4865,11 +5135,26 @@ impl Runtime {
     }
 
     pub fn should_shutdown(&self) -> bool {
-        self.shutdown
+        self.shutdown || self.timeline_transport_failed.load(Ordering::Acquire)
     }
 
     fn is_recovery_mode(&self) -> bool {
         matches!(&self.backend, Backend::Recovery(_))
+    }
+
+    fn has_timeline_subscription_attempt(&self, session_id: &str) -> bool {
+        let state = self
+            .timeline_subscriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(subscription_id) = state.sessions.get(session_id) else {
+            return false;
+        };
+        state.contexts.contains_key(subscription_id)
+            && state
+                .registry
+                .as_ref()
+                .is_some_and(|registry| registry.status(subscription_id).is_ok())
     }
 
     fn required_capabilities(request: &Request) -> Vec<&'static str> {
@@ -4921,6 +5206,10 @@ impl Runtime {
             "session/read" => "session.history.paginated",
             "timeline/sync" => "timeline.replay.fixed-watermark",
             "timeline/snapshot" => "timeline.snapshot.current",
+            "timeline/subscribe"
+            | "timeline/subscription-sync"
+            | "timeline/subscription-snapshot"
+            | "timeline/subscription-activate" => "timeline.subscription.fixed-watermark",
             "session/provider-list" | "session/provider-read" => {
                 "session.provider.lifecycle.list-read"
             }
@@ -5722,6 +6011,7 @@ impl Runtime {
                     "background-job.recovery.inspect".into(),
                     "timeline.replay.fixed-watermark".into(),
                     "timeline.snapshot.current".into(),
+                    "timeline.subscription.fixed-watermark".into(),
                     "workspace.image.import-user".into(),
                     "workspace.image.preview".into(),
                     "workspace.edit.proposal.read-only".into(),
@@ -16976,9 +17266,671 @@ impl Runtime {
         terminals.records.clear();
         self.command_artifacts.clear();
         self.workspace_edit_previews.clear();
+        self.timeline_subscriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .disconnect();
         self.control.set_protocol_ready(false);
         self.shutdown = true;
         self.success_for(&request, Value::Null)
+    }
+
+    fn timeline_subscription_failure_response(
+        &self,
+        request: &Request,
+        failure: TimelineSubscriptionFailure,
+    ) -> Vec<Value> {
+        if failure.validate().is_err() {
+            return self.error_for(request, -32151, "Timeline subscription failed validation");
+        }
+        let data = match serde_json::to_value(failure) {
+            Ok(data) => data,
+            Err(_) => {
+                return self.error_for(
+                    request,
+                    -32151,
+                    "Timeline subscription failure serialization failed",
+                )
+            }
+        };
+        match &request.id {
+            Some(id) => vec![serde_json::to_value(Response::error_with_data(
+                id.clone(),
+                -32151,
+                "Timeline subscription failed",
+                Some(data),
+            ))
+            .expect("timeline subscription failure response serialization")],
+            None => Vec::new(),
+        }
+    }
+
+    fn retire_timeline_subscription(&self, subscription_id: &str) {
+        self.timeline_subscriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retire(subscription_id);
+    }
+
+    fn timeline_subscription_sync_failure(
+        &self,
+        request: &Request,
+        params: &TimelineSubscriptionSyncParams,
+        subscription: Option<&TimelineSubscribeResult>,
+        reason: impl Into<String>,
+        retryable: bool,
+    ) -> Vec<Value> {
+        let failure = TimelineSubscriptionFailure {
+            schema_version: TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA.into(),
+            connection_generation: params.connection_generation,
+            session_id: params.session_id.clone(),
+            subscription_id: params.subscription_id.clone(),
+            state: TimelineSubscriptionState::Failed,
+            stage: TimelineSubscriptionFailureStage::Sync,
+            cursor: params.request.after.clone(),
+            watermark: params.request.watermark.clone(),
+            request_identity: params.request_identity().ok(),
+            reason: reason.into(),
+            retryable,
+            cleanup_required: true,
+        };
+        if let Some(subscription) = subscription {
+            debug_assert!(failure
+                .validate_for_subscription_sync(subscription, params)
+                .is_ok());
+        }
+        self.timeline_subscription_failure_response(request, failure)
+    }
+
+    fn timeline_subscription_snapshot_failure(
+        &self,
+        request: &Request,
+        params: &TimelineSubscriptionSnapshotParams,
+        subscription: Option<&TimelineSubscribeResult>,
+        cursor: TimelineAnchor,
+        reason: impl Into<String>,
+        retryable: bool,
+    ) -> Vec<Value> {
+        let failure = TimelineSubscriptionFailure {
+            schema_version: TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA.into(),
+            connection_generation: params.connection_generation,
+            session_id: params.session_id.clone(),
+            subscription_id: params.subscription_id.clone(),
+            state: TimelineSubscriptionState::Failed,
+            stage: TimelineSubscriptionFailureStage::Snapshot,
+            cursor,
+            watermark: params.request.watermark.clone(),
+            request_identity: params.request_identity().ok(),
+            reason: reason.into(),
+            retryable,
+            cleanup_required: true,
+        };
+        if let Some(subscription) = subscription {
+            debug_assert!(failure
+                .validate_for_subscription_snapshot(subscription, params)
+                .is_ok());
+        }
+        self.timeline_subscription_failure_response(request, failure)
+    }
+
+    fn timeline_subscription_activation_failure(
+        &self,
+        request: &Request,
+        params: &TimelineActivateParams,
+        reason: impl Into<String>,
+        retryable: bool,
+    ) -> Vec<Value> {
+        self.timeline_subscription_failure_response(
+            request,
+            TimelineSubscriptionFailure {
+                schema_version: TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA.into(),
+                connection_generation: params.connection_generation,
+                session_id: params.session_id.clone(),
+                subscription_id: params.subscription_id.clone(),
+                state: TimelineSubscriptionState::Failed,
+                stage: TimelineSubscriptionFailureStage::Activate,
+                cursor: params.cursor.clone(),
+                watermark: Some(params.watermark.clone()),
+                request_identity: params.request_identity().ok(),
+                reason: reason.into(),
+                retryable,
+                cleanup_required: true,
+            },
+        )
+    }
+
+    fn timeline_subscribe(&self, request: Request) -> Vec<Value> {
+        let params: TimelineSubscribeParams = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        if let Err(error) = params.validate() {
+            return self.error_for(&request, -32602, error);
+        }
+        let request_identity = match params.request_identity() {
+            Ok(identity) => identity,
+            Err(error) => return self.error_for(&request, -32602, error),
+        };
+        let Some(store) = self.workbench_store.as_ref() else {
+            let failure = TimelineSubscriptionFailure {
+                schema_version: TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA.into(),
+                connection_generation: params.connection_generation,
+                session_id: params.session_id.clone(),
+                subscription_id: params.subscription_id.clone(),
+                state: TimelineSubscriptionState::Failed,
+                stage: TimelineSubscriptionFailureStage::Subscribe,
+                cursor: params.cursor.clone(),
+                watermark: params.watermark.clone(),
+                request_identity: Some(request_identity),
+                reason: "durable-state-unavailable".into(),
+                retryable: true,
+                cleanup_required: true,
+            };
+            debug_assert!(failure.validate_for_subscribe(&params).is_ok());
+            return self.timeline_subscription_failure_response(&request, failure);
+        };
+        let retention = match store.public_timeline_retention_state(&params.session_id) {
+            Ok(retention) => retention,
+            Err(_) => {
+                let failure = TimelineSubscriptionFailure {
+                    schema_version: TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA.into(),
+                    connection_generation: params.connection_generation,
+                    session_id: params.session_id.clone(),
+                    subscription_id: params.subscription_id.clone(),
+                    state: TimelineSubscriptionState::Failed,
+                    stage: TimelineSubscriptionFailureStage::Subscribe,
+                    cursor: params.cursor.clone(),
+                    watermark: params.watermark.clone(),
+                    request_identity: Some(request_identity.clone()),
+                    reason: "durable-state-unavailable".into(),
+                    retryable: true,
+                    cleanup_required: true,
+                };
+                debug_assert!(failure.validate_for_subscribe(&params).is_ok());
+                return self.timeline_subscription_failure_response(&request, failure);
+            }
+        };
+        let fixed_floor = retention.floor;
+        let fixed_head = retention.head;
+        let route = if params.cursor.sequence < fixed_floor.sequence {
+            timeline_subscription::TimelineSubscriptionRoute::Snapshot
+        } else {
+            timeline_subscription::TimelineSubscriptionRoute::Sync
+        };
+        let aap_head = TimelineAnchor {
+            sequence: fixed_head.sequence,
+            event_id: fixed_head.event_id.clone(),
+        };
+
+        let registration = {
+            let mut state = self
+                .timeline_subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.registry.is_none() {
+                state.registry = timeline_subscription::TimelineSubscriptionRegistry::new(
+                    params.connection_generation,
+                )
+                .ok();
+            }
+            let result = state
+                .registry
+                .as_mut()
+                .ok_or(timeline_subscription::TimelineSubscriptionRegistryError::InvalidConnectionGeneration)
+                .and_then(|registry| {
+                    registry.register(&params, aap_head, fixed_head.timestamp_ms, route)
+                });
+            if let Ok(result) = &result {
+                state
+                    .sessions
+                    .insert(params.session_id.clone(), params.subscription_id.clone());
+                state.contexts.insert(
+                    params.subscription_id.clone(),
+                    RuntimeTimelineSubscriptionContext {
+                        subscribe_result: result.clone(),
+                        fixed_floor,
+                        fixed_head,
+                        activation_token: None,
+                        active_result: None,
+                    },
+                );
+            }
+            result
+        };
+        match registration {
+            Ok(result) => match serde_json::to_value(result) {
+                Ok(result) => self.success_for(&request, result),
+                Err(_) => {
+                    self.retire_timeline_subscription(&params.subscription_id);
+                    let failure = TimelineSubscriptionFailure {
+                        schema_version: TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA.into(),
+                        connection_generation: params.connection_generation,
+                        session_id: params.session_id.clone(),
+                        subscription_id: params.subscription_id.clone(),
+                        state: TimelineSubscriptionState::Failed,
+                        stage: TimelineSubscriptionFailureStage::Subscribe,
+                        cursor: params.cursor.clone(),
+                        watermark: params.watermark.clone(),
+                        request_identity: Some(request_identity.clone()),
+                        reason: "response-serialization-failed".into(),
+                        retryable: true,
+                        cleanup_required: true,
+                    };
+                    debug_assert!(failure.validate_for_subscribe(&params).is_ok());
+                    self.timeline_subscription_failure_response(&request, failure)
+                }
+            },
+            Err(error) => {
+                let failure = TimelineSubscriptionFailure {
+                    schema_version: TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA.into(),
+                    connection_generation: params.connection_generation,
+                    session_id: params.session_id.clone(),
+                    subscription_id: params.subscription_id.clone(),
+                    state: TimelineSubscriptionState::Failed,
+                    stage: TimelineSubscriptionFailureStage::Subscribe,
+                    cursor: params.cursor.clone(),
+                    watermark: params.watermark.clone(),
+                    request_identity: Some(request_identity),
+                    reason: timeline_subscription_failure_reason(error).into(),
+                    retryable: matches!(
+                        error,
+                        timeline_subscription::TimelineSubscriptionRegistryError::SessionAlreadyHasAttempt
+                    ),
+                    cleanup_required: true,
+                };
+                debug_assert!(failure.validate_for_subscribe(&params).is_ok());
+                self.timeline_subscription_failure_response(&request, failure)
+            }
+        }
+    }
+
+    fn timeline_subscription_sync(&self, request: Request) -> Vec<Value> {
+        let params: TimelineSubscriptionSyncParams =
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => params,
+                Err(error) => {
+                    return self.error_for(&request, -32602, format!("invalid params: {error}"))
+                }
+            };
+        let subscription = {
+            let state = self
+                .timeline_subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state
+                .contexts
+                .get(&params.subscription_id)
+                .map(|context| context.subscribe_result.clone())
+        };
+        let Some(subscription) = subscription else {
+            return self.timeline_subscription_sync_failure(
+                &request,
+                &params,
+                None,
+                "subscription-not-active",
+                true,
+            );
+        };
+        let binding_matches = params.connection_generation == subscription.connection_generation
+            && params.session_id == subscription.session_id
+            && params.subscription_id == subscription.subscription_id;
+        if !binding_matches {
+            return self.timeline_subscription_sync_failure(
+                &request,
+                &params,
+                None,
+                "subscription-context-drift",
+                false,
+            );
+        }
+        if params.validate_for_subscription(&subscription).is_err() {
+            self.retire_timeline_subscription(&params.subscription_id);
+            return self.timeline_subscription_sync_failure(
+                &request,
+                &params,
+                None,
+                "subscription-context-drift",
+                false,
+            );
+        }
+        let internal = Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(Value::String("subscription-sync-internal".into())),
+            method: "timeline/sync".into(),
+            params: match serde_json::to_value(&params.request) {
+                Ok(params) => params,
+                Err(_) => {
+                    self.retire_timeline_subscription(&params.subscription_id);
+                    return self.timeline_subscription_sync_failure(
+                        &request,
+                        &params,
+                        Some(&subscription),
+                        "request-serialization-failed",
+                        true,
+                    );
+                }
+            },
+        };
+        let page = self
+            .timeline_sync(internal)
+            .into_iter()
+            .next()
+            .and_then(|response| response.get("result").cloned())
+            .and_then(|result| serde_json::from_value::<AapTimelineSyncPage>(result).ok());
+        let Some(page) = page else {
+            self.retire_timeline_subscription(&params.subscription_id);
+            return self.timeline_subscription_sync_failure(
+                &request,
+                &params,
+                Some(&subscription),
+                "sync-page-unavailable",
+                true,
+            );
+        };
+        let result = {
+            let mut state = self
+                .timeline_subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let accepted = state
+                .registry
+                .as_mut()
+                .ok_or(
+                    timeline_subscription::TimelineSubscriptionRegistryError::UnknownSubscription,
+                )
+                .and_then(|registry| {
+                    registry.accept_sync_page(&params.subscription_id, &params, page.clone())
+                });
+            match accepted {
+                Ok(Some(token)) => state
+                    .contexts
+                    .get_mut(&params.subscription_id)
+                    .ok_or(timeline_subscription::TimelineSubscriptionRegistryError::UnknownSubscription)
+                    .map(|context| context.activation_token = Some(token)),
+                Ok(None) => Ok(()),
+                Err(error) => Err(error),
+            }
+        };
+        if let Err(error) = result {
+            self.retire_timeline_subscription(&params.subscription_id);
+            return self.timeline_subscription_sync_failure(
+                &request,
+                &params,
+                Some(&subscription),
+                timeline_subscription_failure_reason(error),
+                false,
+            );
+        }
+        match serde_json::to_value(page) {
+            Ok(result) => self.success_for(&request, result),
+            Err(_) => {
+                self.retire_timeline_subscription(&params.subscription_id);
+                self.timeline_subscription_sync_failure(
+                    &request,
+                    &params,
+                    Some(&subscription),
+                    "response-serialization-failed",
+                    true,
+                )
+            }
+        }
+    }
+
+    fn timeline_subscription_snapshot(&self, request: Request) -> Vec<Value> {
+        let params: TimelineSubscriptionSnapshotParams =
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => params,
+                Err(error) => {
+                    return self.error_for(&request, -32602, format!("invalid params: {error}"))
+                }
+            };
+        let fixed = {
+            let state = self
+                .timeline_subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.contexts.get(&params.subscription_id).map(|context| {
+                (
+                    context.subscribe_result.clone(),
+                    context.fixed_floor.clone(),
+                    context.fixed_head.clone(),
+                )
+            })
+        };
+        let Some((subscription, fixed_floor, fixed_head)) = fixed else {
+            return self.timeline_subscription_snapshot_failure(
+                &request,
+                &params,
+                None,
+                TimelineAnchor {
+                    sequence: 0,
+                    event_id: None,
+                },
+                "subscription-not-active",
+                true,
+            );
+        };
+        let binding_matches = params.connection_generation == subscription.connection_generation
+            && params.session_id == subscription.session_id
+            && params.subscription_id == subscription.subscription_id;
+        if !binding_matches {
+            return self.timeline_subscription_snapshot_failure(
+                &request,
+                &params,
+                None,
+                TimelineAnchor {
+                    sequence: 0,
+                    event_id: None,
+                },
+                "subscription-context-drift",
+                false,
+            );
+        }
+        if params.validate_for_subscription(&subscription).is_err() {
+            self.retire_timeline_subscription(&params.subscription_id);
+            return self.timeline_subscription_snapshot_failure(
+                &request,
+                &params,
+                None,
+                TimelineAnchor {
+                    sequence: 0,
+                    event_id: None,
+                },
+                "subscription-context-drift",
+                false,
+            );
+        }
+        let page = match self
+            .build_timeline_snapshot_page(&params.request, Some((&fixed_floor, &fixed_head)))
+        {
+            Ok(page) => page,
+            Err(_) => {
+                self.retire_timeline_subscription(&params.subscription_id);
+                return self.timeline_subscription_snapshot_failure(
+                    &request,
+                    &params,
+                    Some(&subscription),
+                    subscription.cursor.clone(),
+                    "snapshot-page-unavailable",
+                    true,
+                );
+            }
+        };
+        let result = {
+            let mut state = self
+                .timeline_subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let accepted = state
+                .registry
+                .as_mut()
+                .ok_or(
+                    timeline_subscription::TimelineSubscriptionRegistryError::UnknownSubscription,
+                )
+                .and_then(|registry| {
+                    registry.accept_snapshot_page(&params.subscription_id, &params, page.clone())
+                });
+            match accepted {
+                Ok(Some(token)) => state
+                    .contexts
+                    .get_mut(&params.subscription_id)
+                    .ok_or(timeline_subscription::TimelineSubscriptionRegistryError::UnknownSubscription)
+                    .map(|context| context.activation_token = Some(token)),
+                Ok(None) => Ok(()),
+                Err(error) => Err(error),
+            }
+        };
+        if let Err(error) = result {
+            self.retire_timeline_subscription(&params.subscription_id);
+            return self.timeline_subscription_snapshot_failure(
+                &request,
+                &params,
+                Some(&subscription),
+                subscription.cursor.clone(),
+                timeline_subscription_failure_reason(error),
+                false,
+            );
+        }
+        match serde_json::to_value(page) {
+            Ok(result) => self.success_for(&request, result),
+            Err(_) => {
+                self.retire_timeline_subscription(&params.subscription_id);
+                self.timeline_subscription_snapshot_failure(
+                    &request,
+                    &params,
+                    Some(&subscription),
+                    subscription.cursor.clone(),
+                    "response-serialization-failed",
+                    true,
+                )
+            }
+        }
+    }
+
+    fn timeline_subscription_activate(&self, request: Request) -> Vec<Value> {
+        let params: TimelineActivateParams = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        let subscription = self
+            .timeline_subscriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contexts
+            .get(&params.subscription_id)
+            .map(|context| context.subscribe_result.clone());
+        let Some(subscription) = subscription else {
+            return self.timeline_subscription_activation_failure(
+                &request,
+                &params,
+                "subscription-not-active",
+                true,
+            );
+        };
+        let binding_matches = params.connection_generation == subscription.connection_generation
+            && params.session_id == subscription.session_id
+            && params.subscription_id == subscription.subscription_id;
+        if !binding_matches {
+            return self.timeline_subscription_activation_failure(
+                &request,
+                &params,
+                "subscription-context-drift",
+                false,
+            );
+        }
+        let activation = {
+            let mut state = self
+                .timeline_subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let token = state
+                .contexts
+                .get_mut(&params.subscription_id)
+                .and_then(|context| context.activation_token.take());
+            match (state.registry.as_mut(), token) {
+                (Some(registry), Some(token)) => registry.activate(token, &params),
+                _ => Err(
+                    timeline_subscription::TimelineSubscriptionRegistryError::ActivationTokenMismatch,
+                ),
+            }
+        };
+        let activation = match activation {
+            Ok(activation) => activation,
+            Err(error) => {
+                self.retire_timeline_subscription(&params.subscription_id);
+                return self.timeline_subscription_activation_failure(
+                    &request,
+                    &params,
+                    timeline_subscription_failure_reason(error),
+                    false,
+                );
+            }
+        };
+        let active_result = activation.result.clone();
+        let serialized = (|| {
+            let result = serde_json::to_value(&activation.result).map_err(|_| ())?;
+            let mut messages = self.success_for(&request, result);
+            for event in activation.drain {
+                messages.push(
+                    serde_json::to_value(Notification {
+                        jsonrpc: JSONRPC_VERSION,
+                        method: "timeline/subscription-event",
+                        params: event,
+                    })
+                    .map_err(|_| ())?,
+                );
+            }
+            Ok::<_, ()>(messages)
+        })();
+        let messages = match serialized {
+            Ok(messages) => messages,
+            Err(()) => {
+                self.timeline_subscriptions
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .disconnect();
+                self.timeline_transport_failed
+                    .store(true, Ordering::Release);
+                self.control.request_active_turn_cancellation();
+                return self.timeline_subscription_activation_failure(
+                    &request,
+                    &params,
+                    "response-serialization-failed",
+                    true,
+                );
+            }
+        };
+        let activated = {
+            let mut state = self
+                .timeline_subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state
+                .contexts
+                .get_mut(&params.subscription_id)
+                .map(|context| context.active_result = Some(active_result))
+                .is_some()
+        };
+        if !activated {
+            self.timeline_subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .disconnect();
+            self.timeline_transport_failed
+                .store(true, Ordering::Release);
+            self.control.request_active_turn_cancellation();
+            return self.timeline_subscription_activation_failure(
+                &request,
+                &params,
+                "subscription-context-drift",
+                true,
+            );
+        }
+        messages
     }
 
     fn timeline_sync(&self, request: Request) -> Vec<Value> {
@@ -17121,47 +18073,53 @@ impl Runtime {
         }
     }
 
-    fn timeline_snapshot(&self, request: Request) -> Vec<Value> {
-        let params: TimelineSnapshotParams = match serde_json::from_value(request.params.clone()) {
-            Ok(params) => params,
-            Err(error) => {
-                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+    fn build_timeline_snapshot_page(
+        &self,
+        params: &TimelineSnapshotParams,
+        fixed: Option<(
+            &public_timeline_journal::TimelineAnchor,
+            &public_timeline_journal::TimelineAnchor,
+        )>,
+    ) -> Result<TimelineSessionSnapshotPage, String> {
+        params.validate().map_err(str::to_owned)?;
+        let store = self
+            .workbench_store
+            .as_ref()
+            .ok_or_else(|| "durable Timeline snapshot is unavailable".to_owned())?;
+        let retention = store
+            .public_timeline_retention_state(&params.session_id)
+            .map_err(|error| {
+                format!("durable Timeline retention state failed: {}", error.message)
+            })?;
+        let (fixed_floor, fixed_head) = match fixed {
+            Some((fixed_floor, fixed_head)) => {
+                if retention.floor != *fixed_floor
+                    || retention.head.sequence < fixed_head.sequence
+                    || (retention.head.sequence == fixed_head.sequence
+                        && retention.head != *fixed_head)
+                {
+                    return Err("Timeline subscription fixed snapshot drifted".into());
+                }
+                (fixed_floor.clone(), fixed_head.clone())
             }
+            None => (retention.floor, retention.head),
         };
-        if let Err(error) = params.validate() {
-            return self.error_for(&request, -32602, error);
-        }
-        let Some(store) = self.workbench_store.as_ref() else {
-            return self.error_for(&request, -32120, "durable Timeline snapshot is unavailable");
-        };
-        let snapshot = match store.materialize_public_timeline_visible_snapshot(&params.session_id)
+        let snapshot = store
+            .materialize_public_timeline_visible_snapshot_through(&params.session_id, &fixed_head)
+            .map_err(|error| format!("durable Timeline snapshot failed: {}", error.message))?;
+        if snapshot.anchor.sequence != fixed_head.sequence
+            || snapshot.anchor.event_id != fixed_head.event_id
+            || snapshot.anchor.timestamp_ms != fixed_head.timestamp_ms
         {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return self.error_for(
-                    &request,
-                    -32147,
-                    format!("durable Timeline snapshot failed: {}", error.message),
-                )
-            }
-        };
-        let retention = match store.public_timeline_retention_state(&params.session_id) {
-            Ok(state) => state,
-            Err(error) => {
-                return self.error_for(
-                    &request,
-                    -32147,
-                    format!("durable Timeline retention state failed: {}", error.message),
-                )
-            }
-        };
+            return Err("Timeline snapshot fixed head drifted".into());
+        }
         let floor = TimelineAnchor {
-            sequence: retention.floor.sequence,
-            event_id: retention.floor.event_id,
+            sequence: fixed_floor.sequence,
+            event_id: fixed_floor.event_id,
         };
         let watermark = TimelineAnchor {
-            sequence: retention.head.sequence,
-            event_id: retention.head.event_id,
+            sequence: fixed_head.sequence,
+            event_id: fixed_head.event_id,
         };
         let mut items = Vec::with_capacity(snapshot.items.len());
         for (index, visible) in snapshot.items.iter().enumerate() {
@@ -17171,16 +18129,11 @@ impl Runtime {
                 .find(|turn| turn.turn_id == visible.turn_id)
             {
                 Some(turn) => turn,
-                None => {
-                    return self.error_for(
-                        &request,
-                        -32147,
-                        "Timeline snapshot Turn binding failed",
-                    )
-                }
+                None => return Err("Timeline snapshot Turn binding failed".into()),
             };
             let mut item = TimelineSnapshotItem {
-                ordinal: u64::try_from(index + 1).unwrap_or(u64::MAX),
+                ordinal: u64::try_from(index + 1)
+                    .map_err(|_| "Timeline snapshot Item ordinal overflowed".to_owned())?,
                 item_identity: String::new(),
                 turn_id: visible.turn_id.clone(),
                 correlation_id: visible.turn_id.clone(),
@@ -17199,28 +18152,25 @@ impl Runtime {
                     content_mode: "snapshot-replacement".into(),
                 },
             };
-            item.item_identity = match timeline_snapshot_item_identity(&params.session_id, &item) {
-                Ok(identity) => identity,
-                Err(error) => return self.error_for(&request, -32147, error),
-            };
+            item.item_identity = timeline_snapshot_item_identity(&params.session_id, &item)
+                .map_err(str::to_owned)?;
             items.push(item);
         }
-        let total_canonical_bytes = match items.iter().try_fold(0_u64, |total, item| {
+        let total_canonical_bytes = items.iter().try_fold(0_u64, |total, item| {
             timeline_snapshot_item_canonical_bytes(&params.session_id, item).and_then(|bytes| {
                 total
                     .checked_add(bytes)
                     .ok_or("Timeline snapshot byte total overflowed")
             })
-        }) {
-            Ok(total) => total,
-            Err(error) => return self.error_for(&request, -32147, error),
-        };
-        let active_turn = snapshot.running_turn_id.as_ref().and_then(|turn_id| {
-            snapshot
-                .turns
-                .iter()
-                .find(|turn| &turn.turn_id == turn_id)
-                .map(|turn| TimelineSnapshotActiveTurn {
+        })?;
+        let active_turn = match snapshot.running_turn_id.as_ref() {
+            Some(turn_id) => {
+                let turn = snapshot
+                    .turns
+                    .iter()
+                    .find(|turn| &turn.turn_id == turn_id)
+                    .ok_or_else(|| "Timeline snapshot active Turn binding failed".to_owned())?;
+                Some(TimelineSnapshotActiveTurn {
                     turn_id: turn.turn_id.clone(),
                     correlation_id: turn.turn_id.clone(),
                     state: turn.state,
@@ -17239,12 +18189,14 @@ impl Runtime {
                         .map(|open| open.item_id.clone())
                         .collect(),
                 })
-        });
+            }
+            None => None,
+        };
         let ordered_item_identities = items
             .iter()
             .map(|item| item.item_identity.clone())
             .collect::<Vec<_>>();
-        let snapshot_identity = match timeline_snapshot_identity(
+        let snapshot_identity = timeline_snapshot_identity(
             &params.session_id,
             &floor,
             &watermark,
@@ -17252,10 +18204,8 @@ impl Runtime {
             items.len() as u64,
             total_canonical_bytes,
             &ordered_item_identities,
-        ) {
-            Ok(identity) => identity,
-            Err(error) => return self.error_for(&request, -32147, error),
-        };
+        )
+        .map_err(str::to_owned)?;
         if params
             .snapshot_identity
             .as_deref()
@@ -17265,7 +18215,7 @@ impl Runtime {
                 .as_ref()
                 .is_some_and(|requested| requested != &watermark)
         {
-            return self.error_for(&request, -32147, "Timeline snapshot continuation drifted");
+            return Err("Timeline snapshot continuation drifted".into());
         }
         let start = match params.after.as_ref() {
             None => 0,
@@ -17275,7 +18225,7 @@ impl Runtime {
                     || items[index].item.id != cursor.item_id
                     || items[index].item_identity != cursor.item_identity
                 {
-                    return self.error_for(&request, -32147, "Timeline snapshot cursor drifted");
+                    return Err("Timeline snapshot cursor drifted".into());
                 }
                 index + 1
             }
@@ -17307,13 +18257,22 @@ impl Runtime {
             complete,
             page_identity: String::new(),
         };
-        page.page_identity = match timeline_snapshot_page_identity(&page) {
-            Ok(identity) => identity,
+        page.page_identity = timeline_snapshot_page_identity(&page).map_err(str::to_owned)?;
+        page.validate_for_request(params).map_err(str::to_owned)?;
+        Ok(page)
+    }
+
+    fn timeline_snapshot(&self, request: Request) -> Vec<Value> {
+        let params: TimelineSnapshotParams = match serde_json::from_value(request.params.clone()) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        let page = match self.build_timeline_snapshot_page(&params, None) {
+            Ok(page) => page,
             Err(error) => return self.error_for(&request, -32147, error),
         };
-        if let Err(error) = page.validate_for_request(&params) {
-            return self.error_for(&request, -32147, error);
-        }
         match serde_json::to_value(page) {
             Ok(result) => self.success_for(&request, result),
             Err(_) => self.error_for(&request, -32147, "Timeline snapshot serialization failed"),
@@ -17689,6 +18648,280 @@ fn valid_prefixed_lower_sha256(value: &str, prefix: &str) -> bool {
 #[cfg(test)]
 mod timeline_event_runtime_tests {
     use super::*;
+
+    #[test]
+    fn negotiated_subscription_suppresses_bare_event_without_an_attempt() {
+        let mut runtime = Runtime::unavailable("test backend");
+        let message = runtime
+            .event(
+                "subscription-session",
+                Some("subscription-turn"),
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        let subscriptions = Arc::new(Mutex::new(RuntimeTimelineSubscriptionState::default()));
+        let transport_failed = Arc::new(AtomicBool::new(false));
+        let control = runtime.control();
+        let mut emitted = Vec::new();
+
+        route_runtime_timeline_message(
+            message.clone(),
+            true,
+            &subscriptions,
+            &transport_failed,
+            &control,
+            &mut |message| emitted.push(message),
+        );
+
+        assert!(emitted.is_empty());
+        assert!(!transport_failed.load(Ordering::Acquire));
+        assert_eq!(
+            subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contexts
+                .len(),
+            0
+        );
+
+        route_runtime_timeline_message(
+            message.clone(),
+            false,
+            &subscriptions,
+            &transport_failed,
+            &control,
+            &mut |message| emitted.push(message),
+        );
+        assert_eq!(emitted, vec![message]);
+    }
+
+    #[test]
+    fn negotiated_subscription_rejects_turn_without_owned_attempt() {
+        let root = std::env::temp_dir().join(format!(
+            "aegisy-timeline-subscription-turn-guard-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let data_root = root.join("data");
+        let project_root = root.join("project");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&data_root).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        let request = |id: &str, method: &str, params: Value| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params
+            })
+            .to_string()
+        };
+
+        let mut runtime = Runtime::with_store(&data_root).unwrap();
+        runtime.handle_line(&request(
+            "initialize-turn-guard",
+            "initialize",
+            test_initialize_params("subscription-turn-guard"),
+        ));
+        runtime
+            .handle_line(&json!({"jsonrpc":"2.0","method":"initialized","params":{}}).to_string());
+        let opened = runtime.handle_line(&request(
+            "open-turn-guard",
+            "project/open",
+            json!({"root": project_root}),
+        ));
+        let project_id = opened[0]["result"]["project"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let started = runtime.handle_line(&request(
+            "session-turn-guard",
+            "session/start",
+            json!({"mode": "work", "project_id": project_id}),
+        ));
+        let session_id = started[0]["result"]["session"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let before = runtime
+            .workbench_store
+            .as_ref()
+            .unwrap()
+            .public_timeline_retention_state(&session_id)
+            .unwrap();
+
+        let rejected = runtime.handle_line(&request(
+            "turn-without-subscription",
+            "turn/start",
+            json!({
+                "session_id": session_id,
+                "input": "must not start",
+                "idempotency_key": "turn-without-subscription"
+            }),
+        ));
+
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0]["error"]["code"], -32152);
+        assert_eq!(
+            rejected[0]["error"]["message"],
+            "Timeline subscription attempt is required before starting a turn"
+        );
+        let after = runtime
+            .workbench_store
+            .as_ref()
+            .unwrap()
+            .public_timeline_retention_state(&session_id)
+            .unwrap();
+        assert_eq!(after, before);
+        assert!(runtime
+            .workbench_store
+            .as_ref()
+            .unwrap()
+            .read_session_items(&session_id, 0, 10)
+            .unwrap()
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unknown_subscription_sync_returns_typed_failure_data() {
+        let runtime = Runtime::unavailable("test backend");
+        let request: Request = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": "unknown-subscription-sync",
+            "method": "timeline/subscription-sync",
+            "params": {
+                "schema_version": "timeline-subscription-sync-request/0.1",
+                "connection_generation": 7,
+                "session_id": "subscription-session",
+                "subscription_id": "subscription-unknown",
+                "request": {
+                    "session_id": "subscription-session",
+                    "after": { "sequence": 0, "event_id": null },
+                    "watermark": {
+                        "sequence": 1,
+                        "event_id": "event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    },
+                    "limit": 200
+                }
+            }
+        }))
+        .unwrap();
+        let response = runtime.timeline_subscription_sync(request);
+
+        assert_eq!(response[0]["error"]["code"], -32151);
+        assert_eq!(response[0]["error"]["data"]["stage"], "sync");
+        assert_eq!(
+            response[0]["error"]["data"]["reason"],
+            "subscription-not-active"
+        );
+        assert_eq!(
+            response[0]["error"]["data"]["subscription_id"],
+            "subscription-unknown"
+        );
+        assert!(response[0]["error"]["data"]["request_identity"]
+            .as_str()
+            .unwrap()
+            .starts_with("timeline-subscription-request:sha256:"));
+        assert_eq!(response[0]["error"]["data"]["cleanup_required"], true);
+    }
+
+    #[test]
+    fn subscription_snapshot_helper_keeps_the_captured_head_after_append() {
+        let root = std::env::temp_dir().join(format!(
+            "aegisy-timeline-subscription-fixed-snapshot-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut runtime = Runtime::unavailable("test backend");
+        runtime.workbench_store = Some(WorkbenchStore::open(&root).unwrap());
+        runtime
+            .workbench_store
+            .as_mut()
+            .unwrap()
+            .create_session(StoredSessionCreate {
+                session_id: "fixed-snapshot-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Fixed snapshot".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        runtime
+            .event(
+                "fixed-snapshot-session",
+                Some("fixed-snapshot-turn"),
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        runtime
+            .event(
+                "fixed-snapshot-session",
+                Some("fixed-snapshot-turn"),
+                "item.completed",
+                Some(TimelineItem {
+                    id: "fixed-snapshot-item".into(),
+                    kind: "message".into(),
+                    role: "agent".into(),
+                    state: "completed".into(),
+                    content: "safe".into(),
+                    data: None,
+                }),
+            )
+            .unwrap();
+        let fixed = runtime
+            .workbench_store
+            .as_ref()
+            .unwrap()
+            .public_timeline_retention_state("fixed-snapshot-session")
+            .unwrap();
+        runtime
+            .event(
+                "fixed-snapshot-session",
+                Some("fixed-snapshot-turn"),
+                "turn.completed",
+                None,
+            )
+            .unwrap();
+        let current = runtime
+            .workbench_store
+            .as_ref()
+            .unwrap()
+            .public_timeline_retention_state("fixed-snapshot-session")
+            .unwrap();
+        assert_eq!(fixed.head.sequence, 2);
+        assert_eq!(current.head.sequence, 3);
+
+        let params: TimelineSnapshotParams = serde_json::from_value(json!({
+            "session_id": "fixed-snapshot-session",
+            "snapshot_identity": null,
+            "watermark": null,
+            "after": null,
+            "limit": 200
+        }))
+        .unwrap();
+        let page = runtime
+            .build_timeline_snapshot_page(&params, Some((&fixed.floor, &fixed.head)))
+            .unwrap();
+
+        assert_eq!(page.watermark.sequence, 2);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].item.id, "fixed-snapshot-item");
+        assert_eq!(
+            page.active_turn.as_ref().map(|turn| turn.state),
+            Some(aegisy_aap::stable::v0_1::TurnState::Running)
+        );
+        assert!(page.complete);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn timeline_snapshot_materializes_fixed_head_pages_without_advertising_capability() {
@@ -20451,11 +21684,12 @@ mod durable_runtime_tests {
     }
 
     fn ready(runtime: &mut Runtime) -> Value {
-        let initialize = runtime.handle_line(&request(
-            "initialize",
-            "initialize",
-            test_initialize_params("durable-test"),
-        ));
+        let mut params = test_initialize_params("durable-test");
+        params["capabilities"]["stable"]
+            .as_array_mut()
+            .expect("test capabilities")
+            .retain(|capability| capability != "timeline.subscription.fixed-watermark");
+        let initialize = runtime.handle_line(&request("initialize", "initialize", params));
         assert!(initialize[0].get("result").is_some());
         assert!(runtime
             .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)

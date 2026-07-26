@@ -491,7 +491,7 @@ int runFakeRuntime(const QString &testCase)
             {QStringLiteral("version"), QStringLiteral("codex-cli 0.144.5")},
             {QStringLiteral("status"), QStringLiteral("ready")},
         });
-        setStableCapabilities(QJsonArray{
+        QJsonArray stableCapabilities{
             QStringLiteral("runtime.codex-app-server"),
             QStringLiteral("runtime.health"),
             QStringLiteral("runtime.degradations"),
@@ -502,7 +502,12 @@ int runFakeRuntime(const QString &testCase)
             QStringLiteral("terminal.lifecycle.named"),
             QStringLiteral("terminal.stop.out-of-band"),
             testTerminalPlatformCapability(),
-        });
+        };
+        if (testCase.startsWith(QStringLiteral("heartbeat-subscription-"))) {
+            stableCapabilities.append(
+                QStringLiteral("timeline.subscription.fixed-watermark"));
+        }
+        setStableCapabilities(stableCapabilities);
     } else if (testCase == QStringLiteral("valid-list-only")) {
         QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
                                       .value(QStringLiteral("stable")).toArray();
@@ -732,7 +737,10 @@ int runFakeRuntime(const QString &testCase)
         if (method == QStringLiteral("runtime/heartbeat")
             && testCase.startsWith(QStringLiteral("heartbeat-"))) {
             if (firstDelayedHeartbeat.isEmpty()) firstDelayedHeartbeat = message;
-            if (testCase == QStringLiteral("heartbeat-normal")) {
+            if (testCase == QStringLiteral("heartbeat-normal")
+                || (testCase.startsWith(
+                        QStringLiteral("heartbeat-subscription-"))
+                    && invocation > 1)) {
                 const QJsonObject params = message.value(QStringLiteral("params")).toObject();
                 const QJsonObject heartbeatResponse{
                     {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
@@ -750,6 +758,21 @@ int runFakeRuntime(const QString &testCase)
                     << std::endl;
             }
             continue;
+        }
+        if (testCase.startsWith(QStringLiteral("heartbeat-subscription-"))
+            && invocation == 1) {
+            const QString stage = testCase.mid(
+                QStringLiteral("heartbeat-subscription-").size());
+            const QHash<QString, QString> pendingMethods{
+                {QStringLiteral("subscribe"), QStringLiteral("timeline/subscribe")},
+                {QStringLiteral("sync"),
+                 QStringLiteral("timeline/subscription-sync")},
+                {QStringLiteral("snapshot"),
+                 QStringLiteral("timeline/subscription-snapshot")},
+                {QStringLiteral("activate"),
+                 QStringLiteral("timeline/subscription-activate")},
+            };
+            if (method == pendingMethods.value(stage)) continue;
         }
         if (method == QStringLiteral("session/list")
             && testCase.startsWith(QStringLiteral("heartbeat-"))) {
@@ -1510,6 +1533,126 @@ bool runHeartbeatLateAndRehandshakeCase()
     return true;
 }
 
+bool runHeartbeatSubscriptionOwnershipCase(const QString &stage,
+                                           const QString &method)
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "could not create heartbeat subscription ownership directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE",
+            QStringLiteral("heartbeat-subscription-%1").arg(stage).toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool requestFailed = false;
+    bool connectionAbandoned = false;
+    bool livenessUnknown = false;
+    int reconnectHandshakes = 0;
+    QString pendingRequestId;
+    AgentRuntimeClient client(nullptr, 20, 100, {0, 10, 20});
+    QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                     [&initialized](const QJsonObject &) { initialized = true; });
+    QObject::connect(&client, &AgentRuntimeClient::runtimeLivenessChanged,
+                     [&livenessUnknown](bool healthy, const QString &) {
+        if (!healthy) livenessUnknown = true;
+    });
+    QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                     [&initialized, &connectionAbandoned](bool ready, const QString &) {
+        if (initialized && !ready) connectionAbandoned = true;
+    });
+    QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                     [&pendingRequestId, &requestFailed, &method](
+                         const QString &requestId, const QString &failedMethod,
+                         const QString &, int) {
+        if (!pendingRequestId.isEmpty() && requestId == pendingRequestId
+            && failedMethod == method) {
+            requestFailed = true;
+        }
+    });
+    QObject::connect(&client, &AgentRuntimeClient::reconnectHandshakeReady,
+                     [&client, &reconnectHandshakes](quint64 generation,
+                                                     const QJsonObject &) {
+        ++reconnectHandshakes;
+        client.completeReconnectRecovery(
+            generation, true, QStringLiteral("subscription ownership recovered"));
+    });
+
+    client.start();
+    if (!expect(waitUntil([&]() { return initialized; }),
+                "heartbeat subscription ownership handshake did not complete")) {
+        return false;
+    }
+    const quint64 firstGeneration = client.processGeneration();
+    const QJsonObject zeroAnchor{
+        {QStringLiteral("sequence"), 0},
+        {QStringLiteral("event_id"), QJsonValue(QJsonValue::Null)},
+    };
+    const QJsonObject oneAnchor{
+        {QStringLiteral("sequence"), 1},
+        {QStringLiteral("event_id"),
+         QStringLiteral("event:sha256:") + QString(64, QLatin1Char('a'))},
+    };
+    if (stage == QStringLiteral("subscribe")) {
+        pendingRequestId = client.subscribeTimeline(
+            QStringLiteral("session-1"), firstGeneration, 0);
+    } else if (stage == QStringLiteral("sync")) {
+        pendingRequestId = client.syncTimelineSubscription(
+            firstGeneration, QStringLiteral("session-1"),
+            QStringLiteral("subscription-1"), 0, QString(), oneAnchor, 100);
+    } else if (stage == QStringLiteral("snapshot")) {
+        pendingRequestId = client.snapshotTimelineSubscription(
+            firstGeneration, QStringLiteral("session-1"),
+            QStringLiteral("subscription-1"), zeroAnchor);
+    } else if (stage == QStringLiteral("activate")) {
+        pendingRequestId = client.activateTimelineSubscription(
+            firstGeneration, QStringLiteral("session-1"),
+            QStringLiteral("subscription-1"), QStringLiteral("sync"),
+            zeroAnchor, zeroAnchor);
+    }
+    if (!expect(!pendingRequestId.isEmpty()
+                    && waitUntil([&]() {
+                        return logContainsMethod(logPath, method);
+                    }),
+                "Timeline subscription ownership request was not pending")) {
+        return false;
+    }
+    const bool recovered = waitUntil([&]() {
+            return requestFailed && connectionAbandoned && livenessUnknown
+                && reconnectHandshakes == 1 && client.isReady()
+                && client.processGeneration() > firstGeneration;
+        }, 5000);
+    if (!recovered) {
+        std::fprintf(stderr,
+                     "subscription ownership stage=%s failed=%d abandoned=%d unknown=%d handshakes=%d ready=%d generation=%llu first=%llu reconnect=%d\n",
+                     stage.toUtf8().constData(), requestFailed, connectionAbandoned,
+                     livenessUnknown, reconnectHandshakes, client.isReady(),
+                     static_cast<unsigned long long>(client.processGeneration()),
+                     static_cast<unsigned long long>(firstGeneration),
+                     client.reconnectAttempt());
+    }
+    if (!expect(recovered,
+                "ambiguous Timeline subscription ownership did not recover on a new generation")) {
+        return false;
+    }
+
+    const QList<QJsonObject> initializes = logMessagesForMethod(
+        logPath, QStringLiteral("initialize"));
+    const QList<QJsonObject> stageRequests = logMessagesForMethod(logPath, method);
+    const bool valid = expect(initializes.size() == 2,
+                              "subscription ownership recovery did not use exactly one fresh process")
+        && expect(stageRequests.size() == 1,
+                  "subscription ownership request was retried on the ambiguous connection")
+        && expect(client.reconnectAttempt() == 1,
+                  "subscription ownership recovery escaped the bounded reconnect counter");
+    client.stop();
+    waitUntil([&]() { return !client.isControlAvailable(); });
+    return valid;
+}
+
 bool runBoundedProcessReconnectCase()
 {
     QTemporaryDir directory;
@@ -1562,6 +1705,63 @@ bool runBoundedProcessReconnectCase()
         logPath, QStringLiteral("initialize"));
     return expect(initializes.size() == 2,
                   "successful process reconnect did not use exactly one new generation");
+}
+
+bool runControlledTimelineSubscriptionAbandonCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "could not create controlled subscription abandon directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("heartbeat-normal"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    int reconnectHandshakes = 0;
+    int disconnectedSignals = 0;
+    AgentRuntimeClient client(nullptr, 5000, 15000, {0, 10, 20});
+    QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                     [&initialized](const QJsonObject &) { initialized = true; });
+    QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                     [&initialized, &disconnectedSignals](bool ready, const QString &) {
+        if (initialized && !ready) ++disconnectedSignals;
+    });
+    QObject::connect(&client, &AgentRuntimeClient::reconnectHandshakeReady,
+                     [&client, &reconnectHandshakes](quint64 generation,
+                                                     const QJsonObject &) {
+        ++reconnectHandshakes;
+        client.completeReconnectRecovery(
+            generation, true, QStringLiteral("controlled subscription recovery"));
+    });
+
+    client.start();
+    if (!expect(waitUntil([&]() { return initialized && client.isReady(); }),
+                "controlled subscription abandon handshake did not complete")) {
+        return false;
+    }
+    const quint64 firstGeneration = client.processGeneration();
+    client.abandonTimelineSubscriptionConnection(
+        QStringLiteral("test requested subscription generation replacement"));
+    client.abandonTimelineSubscriptionConnection(
+        QStringLiteral("duplicate replacement request must be inert"));
+    const bool recovered = waitUntil([&]() {
+        return reconnectHandshakes == 1 && disconnectedSignals >= 1
+            && client.isReady() && client.processGeneration() > firstGeneration;
+    }, 5000);
+    const QList<QJsonObject> initializes = logMessagesForMethod(
+        logPath, QStringLiteral("initialize"));
+    const bool valid = expect(recovered,
+                              "controlled subscription abandon did not start a fresh generation")
+        && expect(initializes.size() == 2,
+                  "controlled subscription abandon launched more than one replacement generation")
+        && expect(client.reconnectAttempt() == 1,
+                  "controlled subscription abandon escaped the bounded reconnect counter");
+    client.stop();
+    waitUntil([&]() { return !client.isControlAvailable(); });
+    return valid;
 }
 
 bool runProcessReconnectExhaustionCase()
@@ -2637,6 +2837,18 @@ int main(int argc, char *argv[])
     ok = runHeartbeatNormalCase() && ok;
     ok = runHeartbeatTimeoutCase() && ok;
     ok = runHeartbeatLateAndRehandshakeCase() && ok;
+    ok = runHeartbeatSubscriptionOwnershipCase(
+             QStringLiteral("subscribe"), QStringLiteral("timeline/subscribe")) && ok;
+    ok = runHeartbeatSubscriptionOwnershipCase(
+             QStringLiteral("sync"),
+             QStringLiteral("timeline/subscription-sync")) && ok;
+    ok = runHeartbeatSubscriptionOwnershipCase(
+             QStringLiteral("snapshot"),
+             QStringLiteral("timeline/subscription-snapshot")) && ok;
+    ok = runHeartbeatSubscriptionOwnershipCase(
+             QStringLiteral("activate"),
+             QStringLiteral("timeline/subscription-activate")) && ok;
+    ok = runControlledTimelineSubscriptionAbandonCase() && ok;
     ok = runBoundedProcessReconnectCase() && ok;
     ok = runProcessReconnectExhaustionCase() && ok;
     ok = runCapabilityGateCase() && ok;

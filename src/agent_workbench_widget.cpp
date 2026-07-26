@@ -1640,6 +1640,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_unknownTimelineEventOverflowCount = 0;
         m_timelineSyncAvailable = false;
         m_timelineSnapshotAvailable = false;
+        m_timelineSubscriptionAvailable = false;
         const QJsonObject backend = result.value(QStringLiteral("backend")).toObject();
         m_runtimeRecoveryMode = backend.value(QStringLiteral("status")).toString()
             == QStringLiteral("read-only-recovery");
@@ -1691,6 +1692,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 m_timelineSyncAvailable = true;
             } else if (name == QStringLiteral("timeline.snapshot.current")) {
                 m_timelineSnapshotAvailable = true;
+            } else if (name == QStringLiteral("timeline.subscription.fixed-watermark")) {
+                m_timelineSubscriptionAvailable = true;
             } else if (name == QStringLiteral("workspace.edit.proposal.read-only")) {
                 m_workspaceEditProposalAvailable = true;
             }
@@ -2221,6 +2224,38 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     connect(m_runtime, &AgentRuntimeClient::requestFailed,
             this, [this](const QString &requestId, const QString &method,
                          const QString &, int code) {
+        const bool subscriptionRecoveryFailure =
+            method == QStringLiteral("timeline/subscribe")
+            || method == QStringLiteral("timeline/subscription-sync")
+            || method == QStringLiteral("timeline/subscription-snapshot")
+            || method == QStringLiteral("timeline/subscription-activate");
+        if (subscriptionRecoveryFailure) {
+            if (requestId.isEmpty()) return;
+            for (auto state = m_timelineSessions.begin();
+                 state != m_timelineSessions.end(); ++state) {
+                const bool requestMatches =
+                    (method == QStringLiteral("timeline/subscribe")
+                     && state->subscribeRequestId == requestId)
+                    || (method == QStringLiteral("timeline/subscription-sync")
+                        && state->syncRequestId == requestId)
+                    || (method == QStringLiteral("timeline/subscription-snapshot")
+                        && state->snapshotRequestId == requestId)
+                    || (method == QStringLiteral("timeline/subscription-activate")
+                        && state->activationRequestId == requestId);
+                if (!requestMatches) continue;
+                const QString sessionId = state.key();
+                recoverTimelineSubscriptionOnNewConnection(
+                    sessionId, QStringLiteral(
+                        "Timeline 订阅请求失败且当前连接上的 attempt 所有权未知"));
+                if (sessionId == currentTimelineSessionId()) {
+                    addNotice(QStringLiteral(
+                        "Timeline 订阅恢复失败（错误码 %1），输入已保留并等待新连接恢复。")
+                        .arg(code), true);
+                }
+                return;
+            }
+            return;
+        }
         if (method == QStringLiteral("timeline/sync")) {
             if (requestId.isEmpty()) return;
             for (auto state = m_timelineSessions.begin();
@@ -3174,11 +3209,16 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         }
         updateContextStrip();
         updateRecoveryUi();
-        if (!appendingHistory) beginTimelineSync(id);
+        const auto timelineState = m_timelineSessions.constFind(id);
+        const bool timelineAlreadyActive = timelineState != m_timelineSessions.cend()
+            && timelineState->recovery == TimelineRecoveryState::Active;
+        if (!appendingHistory && !timelineAlreadyActive) beginTimelineSync(id);
         if (reconnectSessionRead) {
             m_runtimeReconnectSessionReadId.clear();
             auto state = m_timelineSessions.find(id);
-            if (state == m_timelineSessions.end() || state->syncRequestId.isEmpty()) {
+            if (state == m_timelineSessions.end()
+                    || (state->syncRequestId.isEmpty()
+                        && state->subscribeRequestId.isEmpty())) {
                 freezeTimelineSession(id, false, false);
                 m_runtimeReconnectTimelinePending.remove(id);
             }
@@ -3199,6 +3239,18 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             this, &AgentWorkbenchWidget::handleTimelineSyncPage);
     connect(m_runtime, &AgentRuntimeClient::timelineSnapshotReceived,
             this, &AgentWorkbenchWidget::handleTimelineSnapshotPage);
+    connect(m_runtime, &AgentRuntimeClient::timelineSubscribed,
+            this, &AgentWorkbenchWidget::handleTimelineSubscribed);
+    connect(m_runtime, &AgentRuntimeClient::timelineSubscriptionSynced,
+            this, &AgentWorkbenchWidget::handleTimelineSyncPage);
+    connect(m_runtime, &AgentRuntimeClient::timelineSubscriptionSnapshotReceived,
+            this, &AgentWorkbenchWidget::handleTimelineSnapshotPage);
+    connect(m_runtime, &AgentRuntimeClient::timelineSubscriptionActivated,
+            this, &AgentWorkbenchWidget::handleTimelineSubscriptionActivated);
+    connect(m_runtime, &AgentRuntimeClient::timelineSubscriptionEvent,
+            this, &AgentWorkbenchWidget::handleTimelineSubscriptionEvent);
+    connect(m_runtime, &AgentRuntimeClient::timelineSubscriptionFailed,
+            this, &AgentWorkbenchWidget::handleTimelineSubscriptionFailure);
     m_timelinePresenter = [this](const QJsonObject &event, const QJsonObject &item,
                                  bool recognizedEvent) {
         const QString sessionId = event.value(QStringLiteral("session_id")).toString();
@@ -3333,7 +3385,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         }
     };
     connect(m_runtime, &AgentRuntimeClient::timelineEvent,
-            this, &AgentWorkbenchWidget::handleLiveTimelineEvent);
+            this, [this](const QJsonObject &event) {
+        handleLiveTimelineEvent(event, false);
+    });
     connect(m_runtime, &AgentRuntimeClient::turnCancellationRequested,
             this, [this](const QString &requestId, const QJsonObject &result) {
         if (requestId != m_turnCancelRequestId
@@ -4133,7 +4187,11 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         // Timeline catch-up has its own fail-closed handler. It must not consume a
         // prompt which is merely waiting for the confirmed Session projection.
         if (method == QStringLiteral("timeline/sync")
-                || method == QStringLiteral("timeline/snapshot")) return;
+                || method == QStringLiteral("timeline/snapshot")
+                || method == QStringLiteral("timeline/subscribe")
+                || method == QStringLiteral("timeline/subscription-sync")
+                || method == QStringLiteral("timeline/subscription-snapshot")
+                || method == QStringLiteral("timeline/subscription-activate")) return;
         m_pendingPrompt.clear();
         m_pendingContext = {};
         m_pendingPinnedContextSetIdentity.clear();
@@ -11335,7 +11393,10 @@ void AgentWorkbenchWidget::updateTurnAction()
     if (currentTimelineSessionFrozen()) {
         const auto state = m_timelineSessions.constFind(sessionId);
         const bool syncing = state != m_timelineSessions.cend()
-            && state->recovery == TimelineRecoveryState::Syncing;
+            && (state->recovery == TimelineRecoveryState::RecoveringSync
+                || state->recovery == TimelineRecoveryState::RecoveringSnapshot
+                || state->recovery == TimelineRecoveryState::Subscribing
+                || state->recovery == TimelineRecoveryState::AwaitingActivation);
         m_sendButton->setText(syncing ? QStringLiteral("时间线同步中")
                                       : QStringLiteral("时间线已冻结"));
         m_sendButton->setIcon(QIcon(QStringLiteral(":/icons/lucide/rotate-ccw.svg")));
@@ -12604,7 +12665,7 @@ bool AgentWorkbenchWidget::currentTimelineSessionFrozen() const
     const auto state = m_timelineSessions.constFind(currentTimelineSessionId());
     return state != m_timelineSessions.cend()
         && state->recovery != TimelineRecoveryState::Untracked
-        && state->recovery != TimelineRecoveryState::Live;
+        && state->recovery != TimelineRecoveryState::Active;
 }
 
 void AgentWorkbenchWidget::releaseTimelinePendingAccounting(
@@ -12639,6 +12700,36 @@ void AgentWorkbenchWidget::clearTimelinePending(TimelineSessionState &state)
     state.snapshotTotalCanonicalBytes = 0;
     state.queuedLiveEvents.clear();
     state.queuedLiveBytes = 0;
+}
+
+void AgentWorkbenchWidget::clearTimelineSubscriptionAuthority(
+    TimelineSessionState &state)
+{
+    state.subscriptionGeneration = 0;
+    state.subscriptionId.clear();
+    state.subscribeRequestId.clear();
+    state.activationRequestId.clear();
+    state.activationSource.clear();
+    state.subscriptionCursor = {};
+    state.subscriptionWatermark = {};
+}
+
+void AgentWorkbenchWidget::recoverTimelineSubscriptionOnNewConnection(
+    const QString &sessionId, const QString &detail)
+{
+    auto state = m_timelineSessions.find(sessionId);
+    if (state == m_timelineSessions.end()) return;
+    const bool ownsCurrentConnectionAttempt = m_runtime
+        && state->subscriptionGeneration != 0
+        && state->subscriptionGeneration == m_runtime->processGeneration()
+        && !state->subscriptionId.isEmpty();
+    freezeTimelineSession(sessionId, false, true);
+    if (!ownsCurrentConnectionAttempt) return;
+    if (m_timelineSubscriptionConnectionAbandoner) {
+        m_timelineSubscriptionConnectionAbandoner(detail);
+    } else {
+        m_runtime->abandonTimelineSubscriptionConnection(detail);
+    }
 }
 
 void AgentWorkbenchWidget::freezeTimelineForSnapshotRecovery(
@@ -12695,6 +12786,7 @@ void AgentWorkbenchWidget::freezeTimelineSession(const QString &sessionId,
     state->syncProjection = {};
     state->syncProjectionValid = false;
     clearTimelinePending(*state);
+    clearTimelineSubscriptionAuthority(*state);
     state->retryOnReconnect = retryOnReconnect;
     if (sessionId == currentTimelineSessionId()) updateTurnAction();
 }
@@ -12703,8 +12795,30 @@ void AgentWorkbenchWidget::suspendTimelinesForDisconnect()
 {
     m_timelineSyncAvailable = false;
     m_timelineSnapshotAvailable = false;
+    m_timelineSubscriptionAvailable = false;
     for (auto state = m_timelineSessions.begin();
          state != m_timelineSessions.end(); ++state) {
+        const bool hadSubscriptionAuthority = state->subscriptionGeneration != 0
+            || !state->subscriptionId.isEmpty()
+            || !state->subscribeRequestId.isEmpty()
+            || !state->activationRequestId.isEmpty();
+        if (hadSubscriptionAuthority) {
+            const bool wasRecoverable = state->recovery != TimelineRecoveryState::Untracked
+                && state->recovery != TimelineRecoveryState::Unrecoverable;
+            state->syncRequestId.clear();
+            state->snapshotRequestId.clear();
+            state->snapshotRecoveryRequired = false;
+            state->watermark = {};
+            state->syncProjection = {};
+            state->syncProjectionValid = false;
+            clearTimelinePending(*state);
+            clearTimelineSubscriptionAuthority(*state);
+            if (wasRecoverable) {
+                state->recovery = TimelineRecoveryState::Frozen;
+                state->retryOnReconnect = true;
+            }
+            continue;
+        }
         if (state->snapshotRecoveryRequired) {
             const QString sessionId = state.key();
             freezeTimelineForSnapshotRecovery(sessionId, true);
@@ -12712,8 +12826,12 @@ void AgentWorkbenchWidget::suspendTimelinesForDisconnect()
             if (state == m_timelineSessions.end()) break;
             continue;
         }
-        const bool wasRecoverable = state->recovery == TimelineRecoveryState::Live
-            || state->recovery == TimelineRecoveryState::Syncing;
+        const bool wasRecoverable = state->recovery == TimelineRecoveryState::Active
+            || state->recovery == TimelineRecoveryState::RecoveringSync
+            || state->recovery == TimelineRecoveryState::RecoveringSnapshot
+            || state->recovery == TimelineRecoveryState::Subscribing
+            || state->recovery == TimelineRecoveryState::AwaitingActivation
+            || state->recovery == TimelineRecoveryState::Failed;
         state->syncRequestId.clear();
         state->snapshotRequestId.clear();
         state->watermark = {};
@@ -12769,8 +12887,11 @@ void AgentWorkbenchWidget::recoverRuntimeBackedStateAfterHandshake()
             const auto state = m_timelineSessions.constFind(sessionId);
             if (state == m_timelineSessions.cend() || !state->retryOnReconnect) continue;
             if (sessionId == visibleSessionId) visibleRecoveryScheduled = true;
-            if (state->snapshotRecoveryRequired) beginTimelineSnapshot(sessionId);
-            else beginTimelineSync(sessionId);
+            if (state->snapshotRecoveryRequired && !m_timelineSubscriptionAvailable) {
+                beginTimelineSnapshot(sessionId);
+            } else {
+                beginTimelineSync(sessionId);
+            }
         }
         if (shouldReadUntracked && !visibleSessionId.isEmpty()
                 && !visibleRecoveryScheduled && m_sessionReadRequestId.isEmpty()) {
@@ -12805,6 +12926,7 @@ void AgentWorkbenchWidget::beginRuntimeReconnectRecovery(
 
     m_timelineSyncAvailable = false;
     m_timelineSnapshotAvailable = false;
+    m_timelineSubscriptionAvailable = false;
     m_workspaceEditProposalAvailable = false;
     const QJsonArray capabilities = result.value(QStringLiteral("capabilities"))
         .toObject().value(QStringLiteral("stable")).toArray();
@@ -12814,6 +12936,9 @@ void AgentWorkbenchWidget::beginRuntimeReconnectRecovery(
             m_timelineSyncAvailable = true;
         } else if (capability == QStringLiteral("timeline.snapshot.current")) {
             m_timelineSnapshotAvailable = true;
+        } else if (capability
+                == QStringLiteral("timeline.subscription.fixed-watermark")) {
+            m_timelineSubscriptionAvailable = true;
         } else if (capability
                 == QStringLiteral("workspace.edit.proposal.read-only")) {
             m_workspaceEditProposalAvailable = true;
@@ -12859,7 +12984,7 @@ void AgentWorkbenchWidget::beginRuntimeReconnectRecovery(
             if (visibleReadStarted) continue;
         }
         beginTimelineSync(sessionId);
-        if (state->syncRequestId.isEmpty()) {
+        if (state->syncRequestId.isEmpty() && state->subscribeRequestId.isEmpty()) {
             freezeTimelineSession(sessionId, false, false);
             m_runtimeReconnectTimelinePending.remove(sessionId);
         }
@@ -12981,6 +13106,119 @@ void AgentWorkbenchWidget::publishTimelineProjection(
     }
 }
 
+void AgentWorkbenchWidget::commitTimelineSyncRecovery(const QString &sessionId)
+{
+    auto state = m_timelineSessions.find(sessionId);
+    if (state == m_timelineSessions.end() || !state->syncProjectionValid) return;
+    releaseTimelinePendingAccounting(*state);
+    QList<TimelineStagedEvent> replayEvents = std::move(state->stagedSyncEvents);
+    QList<QJsonObject> queuedEvents = std::move(state->queuedLiveEvents);
+    state->projection = std::move(state->syncProjection);
+    state->syncProjection = {};
+    state->syncProjectionValid = false;
+    state->stagedSyncEvents.clear();
+    state->stagedSyncBytes = 0;
+    state->queuedLiveEvents.clear();
+    state->queuedLiveBytes = 0;
+    state->watermark = {};
+    state->recovery = TimelineRecoveryState::Active;
+    state->retryOnReconnect = false;
+    m_timelineTrackedEventCount += replayEvents.size();
+    publishTimelineProjection(sessionId, state->projection);
+    for (const TimelineStagedEvent &staged : replayEvents) {
+        applyTimelineEventPresentation(staged.event, staged.item, staged.recognized);
+    }
+    restoreActiveTurnFromTimeline();
+    if (sessionId == currentTimelineSessionId()) {
+        updateTurnAction();
+        startPendingTurnIfReady();
+    }
+    for (const QJsonObject &event : queuedEvents) handleLiveTimelineEvent(event);
+}
+
+void AgentWorkbenchWidget::commitTimelineSnapshotRecovery(const QString &sessionId)
+{
+    auto state = m_timelineSessions.find(sessionId);
+    if (state == m_timelineSessions.end() || !state->syncProjectionValid) return;
+    const quint64 watermarkSequence = state->syncProjection.sequence;
+    releaseTimelinePendingAccounting(*state);
+    QList<QJsonObject> committedItems = std::move(state->stagedSnapshotItems);
+    QList<QJsonObject> queuedEvents = std::move(state->queuedLiveEvents);
+    state->projection = std::move(state->syncProjection);
+    state->syncProjection = {};
+    state->syncProjectionValid = false;
+    state->stagedSyncEvents.clear();
+    state->stagedSyncBytes = 0;
+    state->watermark = {};
+    state->stagedSnapshotBytes = 0;
+    state->queuedLiveEvents.clear();
+    state->queuedLiveBytes = 0;
+    state->snapshotIdentity.clear();
+    state->snapshotFloor = {};
+    state->snapshotWatermark = {};
+    state->snapshotAfter = {};
+    state->snapshotActiveTurn = {};
+    state->snapshotTotalItems = 0;
+    state->snapshotExpectedCanonicalBytes = 0;
+    state->snapshotTotalCanonicalBytes = 0;
+    state->snapshotRecoveryRequired = false;
+    state->recovery = TimelineRecoveryState::Active;
+    state->retryOnReconnect = false;
+    publishTimelineProjection(sessionId, state->projection);
+    if (sessionId == currentTimelineSessionId()) {
+        while (m_timelineLayout && m_timelineLayout->count() > 2) {
+            QLayoutItem *layoutItem = m_timelineLayout->takeAt(1);
+            if (layoutItem->widget()) layoutItem->widget()->deleteLater();
+            delete layoutItem;
+        }
+        m_itemLabels.clear();
+        m_itemArtifactButtons.clear();
+        m_itemProposalButtons.clear();
+        m_itemProposalStatusLabels.clear();
+        m_itemKinds = state->projection.itemKinds;
+        m_itemRoles = state->projection.itemRoles;
+        m_itemStates = state->projection.itemStates;
+        m_itemRevisions = state->projection.itemRevisions;
+        m_emptyTimeline->show();
+        for (const QJsonObject &snapshotItem : committedItems) {
+            const QJsonObject item = snapshotItem.value(QStringLiteral("item")).toObject();
+            addTimelineItem(item, false, timelineItemKey(
+                sessionId, snapshotItem.value(QStringLiteral("turn_id")).toString(),
+                item.value(QStringLiteral("id")).toString()));
+        }
+    }
+    if (m_activeTurnSessionId == sessionId) {
+        const QString activeKey = timelineTurnKey(sessionId, m_activeTurnId);
+        if (m_activeTurnId.isEmpty()
+                || state->projection.turnStates.value(activeKey)
+                    != QStringLiteral("running")) {
+            m_turnRunning = false;
+            m_turnCancelling = false;
+            m_activeTurnSessionId.clear();
+            m_activeTurnId.clear();
+            m_turnCancelRequestId.clear();
+        }
+    }
+    restoreActiveTurnFromTimeline();
+    if (sessionId == currentTimelineSessionId()) {
+        updateTurnAction();
+        startPendingTurnIfReady();
+    }
+    for (const QJsonObject &event : queuedEvents) {
+        quint64 sequence = 0;
+        QString eventId;
+        const QJsonObject anchor{
+            {QStringLiteral("sequence"), event.value(QStringLiteral("sequence"))},
+            {QStringLiteral("event_id"), event.value(QStringLiteral("event_id"))},
+        };
+        if (readTimelineAnchor(anchor, &sequence, &eventId)
+                && sequence <= watermarkSequence) {
+            continue;
+        }
+        handleLiveTimelineEvent(event);
+    }
+}
+
 void AgentWorkbenchWidget::applyTimelineEventPresentation(
     const QJsonObject &event, const QJsonObject &item, bool recognizedEvent)
 {
@@ -13038,14 +13276,20 @@ void AgentWorkbenchWidget::beginTimelineSync(const QString &sessionId)
     TimelineSessionState *state = ensureTimelineSession(sessionId);
     if (!state) return;
     if (state->recovery == TimelineRecoveryState::Unrecoverable
-            || !state->syncRequestId.isEmpty()) {
+            || !state->syncRequestId.isEmpty()
+            || !state->subscribeRequestId.isEmpty()
+            || !state->activationRequestId.isEmpty()) {
+        return;
+    }
+    if (m_timelineSubscriptionAvailable) {
+        beginTimelineSubscription(sessionId);
         return;
     }
     if (!m_runtime || !runtimeRecoveryRequestsAllowed() || !m_timelineSyncAvailable) {
         freezeTimelineSession(sessionId, false, true);
         return;
     }
-    state->recovery = TimelineRecoveryState::Syncing;
+    state->recovery = TimelineRecoveryState::RecoveringSync;
     state->retryOnReconnect = false;
     state->requestedAfterSequence = state->projection.sequence;
     state->requestedAfterEventId = state->projection.eventId;
@@ -13064,6 +13308,47 @@ void AgentWorkbenchWidget::beginTimelineSync(const QString &sessionId)
         {}, kTimelineSyncPageLimit);
     if (state->syncRequestId.isEmpty()) {
         freezeTimelineSession(sessionId, false, true);
+    } else if (sessionId == currentTimelineSessionId()) {
+        updateTurnAction();
+    }
+}
+
+void AgentWorkbenchWidget::beginTimelineSubscription(const QString &sessionId)
+{
+    TimelineSessionState *state = ensureTimelineSession(sessionId);
+    if (!state || state->recovery == TimelineRecoveryState::Unrecoverable
+            || !state->subscribeRequestId.isEmpty()
+            || !state->syncRequestId.isEmpty()
+            || !state->snapshotRequestId.isEmpty()
+            || !state->activationRequestId.isEmpty()) {
+        return;
+    }
+    if (!m_runtime || !runtimeRecoveryRequestsAllowed()
+            || !m_timelineSubscriptionAvailable) {
+        freezeTimelineSession(sessionId, false, true);
+        return;
+    }
+    clearTimelinePending(*state);
+    clearTimelineSubscriptionAuthority(*state);
+    state->snapshotRecoveryRequired = false;
+    state->requestedAfterSequence = state->projection.sequence;
+    state->requestedAfterEventId = state->projection.eventId;
+    state->syncProjection = state->projection;
+    state->syncProjectionValid = true;
+    state->recovery = TimelineRecoveryState::Subscribing;
+    state->retryOnReconnect = false;
+    state->subscriptionGeneration = m_runtime->processGeneration();
+    state->subscriptionCursor = {
+        {QStringLiteral("sequence"), static_cast<double>(state->projection.sequence)},
+        {QStringLiteral("event_id"), state->projection.sequence == 0
+             ? QJsonValue(QJsonValue::Null) : QJsonValue(state->projection.eventId)},
+    };
+    state->subscribeRequestId = m_runtime->subscribeTimeline(
+        sessionId, state->subscriptionGeneration, state->projection.sequence,
+        state->projection.eventId, {}, &state->subscriptionId);
+    if (state->subscribeRequestId.isEmpty() || state->subscriptionId.isEmpty()) {
+        recoverTimelineSubscriptionOnNewConnection(
+            sessionId, QStringLiteral("Timeline 订阅请求无法在当前连接上安全发送"));
     } else if (sessionId == currentTimelineSessionId()) {
         updateTurnAction();
     }
@@ -13110,7 +13395,7 @@ void AgentWorkbenchWidget::beginTimelineSnapshot(const QString &sessionId)
     state->snapshotExpectedCanonicalBytes = 0;
     state->snapshotTotalCanonicalBytes = 0;
     state->snapshotRecoveryRequired = true;
-    state->recovery = TimelineRecoveryState::Syncing;
+    state->recovery = TimelineRecoveryState::RecoveringSnapshot;
     state->retryOnReconnect = false;
     state->snapshotRequestId = m_timelineSnapshotRequester
         ? m_timelineSnapshotRequester(sessionId, {}, {}, {}, kTimelineSnapshotPageLimit)
@@ -13122,7 +13407,341 @@ void AgentWorkbenchWidget::beginTimelineSnapshot(const QString &sessionId)
     }
 }
 
-void AgentWorkbenchWidget::handleLiveTimelineEvent(const QJsonObject &event)
+void AgentWorkbenchWidget::handleTimelineSubscribed(
+    const QString &requestId, const QJsonObject &result)
+{
+    auto stateIt = std::find_if(
+        m_timelineSessions.begin(), m_timelineSessions.end(),
+        [&requestId](const TimelineSessionState &state) {
+            return !requestId.isEmpty() && state.subscribeRequestId == requestId;
+        });
+    if (stateIt == m_timelineSessions.end()) return;
+    const QString sessionId = stateIt.key();
+    const quint64 generation = static_cast<quint64>(
+        result.value(QStringLiteral("connection_generation")).toDouble());
+    if (!m_runtime || generation == 0
+            || generation != m_runtime->processGeneration()) {
+        return;
+    }
+    if (stateIt->subscriptionGeneration != generation) return;
+    const QSet<QString> keys{
+        QStringLiteral("schema_version"), QStringLiteral("connection_generation"),
+        QStringLiteral("session_id"), QStringLiteral("subscription_id"),
+        QStringLiteral("state"), QStringLiteral("cursor"),
+        QStringLiteral("watermark"), QStringLiteral("next_method"),
+    };
+    const QString recovery = result.value(QStringLiteral("state")).toString();
+    const QString nextMethod = result.value(QStringLiteral("next_method")).toString();
+    quint64 cursorSequence = 0;
+    QString cursorEventId;
+    const bool syncRequired = recovery == QStringLiteral("sync-required")
+        && nextMethod == QStringLiteral("timeline/subscription-sync")
+        && result.value(QStringLiteral("watermark")).isObject();
+    const bool snapshotRequired = recovery == QStringLiteral("snapshot-required")
+        && nextMethod == QStringLiteral("timeline/subscription-snapshot")
+        && result.value(QStringLiteral("watermark")).isNull();
+    const bool valid = hasExactJsonKeys(result, keys)
+        && result.value(QStringLiteral("schema_version")).toString()
+            == QStringLiteral("timeline-subscribe-result/0.1")
+        && isPositiveSafeJsonInteger(
+            result.value(QStringLiteral("connection_generation")))
+        && generation == stateIt->subscriptionGeneration
+        && result.value(QStringLiteral("session_id")).toString() == sessionId
+        && result.value(QStringLiteral("subscription_id")).toString()
+            == stateIt->subscriptionId
+        && result.value(QStringLiteral("cursor")) == stateIt->subscriptionCursor
+        && readTimelineAnchor(result.value(QStringLiteral("cursor")),
+                              &cursorSequence, &cursorEventId)
+        && (syncRequired || snapshotRequired);
+    if (!valid) {
+        recoverTimelineSubscriptionOnNewConnection(
+            sessionId, QStringLiteral("Timeline 订阅响应未通过本地语义校验"));
+        return;
+    }
+
+    stateIt->subscribeRequestId.clear();
+    stateIt->subscriptionCursor = result.value(QStringLiteral("cursor")).toObject();
+    stateIt->retryOnReconnect = false;
+    if (syncRequired) {
+        stateIt->subscriptionWatermark =
+            result.value(QStringLiteral("watermark")).toObject();
+        stateIt->watermark = stateIt->subscriptionWatermark;
+        stateIt->requestedAfterSequence = cursorSequence;
+        stateIt->requestedAfterEventId = cursorEventId;
+        stateIt->syncProjection = stateIt->projection;
+        stateIt->syncProjectionValid = true;
+        stateIt->recovery = TimelineRecoveryState::RecoveringSync;
+        stateIt->activationSource = QStringLiteral("sync");
+        stateIt->syncRequestId = m_runtime->syncTimelineSubscription(
+            generation, sessionId, stateIt->subscriptionId, cursorSequence,
+            cursorEventId, stateIt->subscriptionWatermark, kTimelineSyncPageLimit);
+        if (stateIt->syncRequestId.isEmpty()) {
+            recoverTimelineSubscriptionOnNewConnection(
+                sessionId, QStringLiteral("Timeline 订阅同步请求无法安全续发"));
+        }
+    } else {
+        stateIt->subscriptionWatermark = {};
+        stateIt->snapshotRecoveryRequired = true;
+        stateIt->recovery = TimelineRecoveryState::RecoveringSnapshot;
+        stateIt->activationSource = QStringLiteral("snapshot");
+        stateIt->snapshotRequestId = m_runtime->snapshotTimelineSubscription(
+            generation, sessionId, stateIt->subscriptionId,
+            stateIt->subscriptionCursor, {}, {}, {}, kTimelineSnapshotPageLimit);
+        if (stateIt->snapshotRequestId.isEmpty()) {
+            recoverTimelineSubscriptionOnNewConnection(
+                sessionId, QStringLiteral("Timeline 订阅快照请求无法安全续发"));
+        }
+    }
+    if (sessionId == currentTimelineSessionId()) updateTurnAction();
+}
+
+void AgentWorkbenchWidget::handleTimelineSubscriptionEvent(const QJsonObject &wrapper)
+{
+    const quint64 generation = static_cast<quint64>(
+        wrapper.value(QStringLiteral("connection_generation")).toDouble());
+    if (!m_runtime || generation == 0
+            || generation != m_runtime->processGeneration()) {
+        return;
+    }
+    const QSet<QString> keys{
+        QStringLiteral("schema_version"), QStringLiteral("connection_generation"),
+        QStringLiteral("session_id"), QStringLiteral("subscription_id"),
+        QStringLiteral("state"), QStringLiteral("cursor"),
+        QStringLiteral("watermark"), QStringLiteral("event"),
+    };
+    const QString sessionId = wrapper.value(QStringLiteral("session_id")).toString();
+    auto state = m_timelineSessions.find(sessionId);
+    if (state == m_timelineSessions.end()) return;
+    if (state->subscriptionGeneration == 0
+            || state->subscriptionGeneration != generation) {
+        return;
+    }
+    if (!hasExactJsonKeys(wrapper, keys)
+            || wrapper.value(QStringLiteral("schema_version")).toString()
+                != QStringLiteral("timeline-subscription-event/0.1")
+            || !isPositiveSafeJsonInteger(
+                wrapper.value(QStringLiteral("connection_generation")))
+            || wrapper.value(QStringLiteral("state")).toString()
+                != QStringLiteral("active")
+            || generation != state->subscriptionGeneration
+            || wrapper.value(QStringLiteral("subscription_id")).toString()
+                != state->subscriptionId
+            || wrapper.value(QStringLiteral("watermark"))
+                != state->subscriptionWatermark
+            || !wrapper.value(QStringLiteral("event")).isObject()) {
+        recoverTimelineSubscriptionOnNewConnection(
+            sessionId, QStringLiteral("Timeline Active 事件 wrapper 未通过本地语义校验"));
+        return;
+    }
+    const QJsonObject expectedCursor = state->subscriptionCursor;
+    const QJsonObject event = wrapper.value(QStringLiteral("event")).toObject();
+    quint64 cursorSequence = 0;
+    quint64 eventSequence = 0;
+    QString cursorEventId;
+    QString eventId;
+    const QJsonObject eventAnchor{
+        {QStringLiteral("sequence"), event.value(QStringLiteral("sequence"))},
+        {QStringLiteral("event_id"), event.value(QStringLiteral("event_id"))},
+    };
+    const bool bindingValid = wrapper.value(QStringLiteral("cursor")) == expectedCursor
+        && event.value(QStringLiteral("session_id")).toString() == sessionId
+        && readTimelineAnchor(wrapper.value(QStringLiteral("cursor")),
+                              &cursorSequence, &cursorEventId)
+        && readTimelineAnchor(eventAnchor, &eventSequence, &eventId)
+        && eventSequence == cursorSequence + 1;
+    if (!bindingValid) {
+        recoverTimelineSubscriptionOnNewConnection(
+            sessionId, QStringLiteral("Timeline Active 事件游标绑定不一致"));
+        return;
+    }
+    if (state->recovery == TimelineRecoveryState::AwaitingActivation) {
+        recoverTimelineSubscriptionOnNewConnection(
+            sessionId, QStringLiteral("Timeline 在激活完成前收到 Active 事件"));
+        return;
+    }
+    if (state->recovery != TimelineRecoveryState::Active
+            || state->projection.sequence != cursorSequence
+            || state->projection.eventId != cursorEventId) {
+        recoverTimelineSubscriptionOnNewConnection(
+            sessionId, QStringLiteral("Timeline Active 事件与确认投影游标不一致"));
+        return;
+    }
+    handleLiveTimelineEvent(event, true);
+    state = m_timelineSessions.find(sessionId);
+    if (state != m_timelineSessions.end()
+            && state->recovery == TimelineRecoveryState::Active
+            && state->projection.sequence == eventSequence
+            && state->projection.eventId == eventId) {
+        state->subscriptionCursor = eventAnchor;
+    }
+}
+
+void AgentWorkbenchWidget::handleTimelineSubscriptionFailure(
+    const QString &requestId, const QJsonObject &failure)
+{
+    const quint64 generation = static_cast<quint64>(
+        failure.value(QStringLiteral("connection_generation")).toDouble());
+    if (!m_runtime || generation == 0
+            || generation != m_runtime->processGeneration()) {
+        return;
+    }
+    const QString sessionId = failure.value(QStringLiteral("session_id")).toString();
+    auto state = m_timelineSessions.find(sessionId);
+    if (state == m_timelineSessions.end()
+            || generation != state->subscriptionGeneration
+            || failure.value(QStringLiteral("subscription_id")).toString()
+                != state->subscriptionId) {
+        return;
+    }
+    const QString stage = failure.value(QStringLiteral("stage")).toString();
+    const QSet<QString> keys{
+        QStringLiteral("schema_version"), QStringLiteral("connection_generation"),
+        QStringLiteral("session_id"), QStringLiteral("subscription_id"),
+        QStringLiteral("state"), QStringLiteral("stage"),
+        QStringLiteral("cursor"), QStringLiteral("watermark"),
+        QStringLiteral("request_identity"), QStringLiteral("reason"),
+        QStringLiteral("retryable"), QStringLiteral("cleanup_required"),
+    };
+    if (!hasExactJsonKeys(failure, keys)
+            || failure.value(QStringLiteral("schema_version")).toString()
+                != QStringLiteral("timeline-subscription-failure/0.1")
+            || !isPositiveSafeJsonInteger(
+                failure.value(QStringLiteral("connection_generation")))
+            || failure.value(QStringLiteral("state")).toString()
+                != QStringLiteral("failed")
+            || failure.value(QStringLiteral("cleanup_required")) != QJsonValue(true)) {
+        return;
+    }
+    const bool requestMatches =
+        (!requestId.isEmpty() && stage == QStringLiteral("subscribe")
+            && requestId == state->subscribeRequestId)
+        || (!requestId.isEmpty() && stage == QStringLiteral("sync")
+            && requestId == state->syncRequestId)
+        || (!requestId.isEmpty() && stage == QStringLiteral("snapshot")
+            && requestId == state->snapshotRequestId)
+        || (stage == QStringLiteral("activate")
+            && !requestId.isEmpty() && requestId == state->activationRequestId)
+        || (stage == QStringLiteral("live") && requestId.isEmpty()
+            && state->recovery == TimelineRecoveryState::Active
+            && failure.value(QStringLiteral("cursor")) == state->subscriptionCursor
+            && failure.value(QStringLiteral("watermark"))
+                == state->subscriptionWatermark);
+    if (!requestMatches) return;
+    const QString reason = failure.value(QStringLiteral("reason")).toString();
+    if (stage == QStringLiteral("subscribe")
+            && (reason == QStringLiteral("session-attempt-exists")
+                || reason == QStringLiteral("subscription-id-reused"))) {
+        recoverTimelineSubscriptionOnNewConnection(
+            sessionId, QStringLiteral(
+                "Timeline 订阅身份在当前连接上已有所有权，必须换代恢复"));
+        return;
+    }
+    const bool retryable = failure.value(QStringLiteral("retryable")).toBool(false);
+    const quint64 failedGeneration = state->subscriptionGeneration;
+    state->syncRequestId.clear();
+    state->snapshotRequestId.clear();
+    state->snapshotRecoveryRequired = false;
+    state->syncProjection = {};
+    state->syncProjectionValid = false;
+    clearTimelinePending(*state);
+    clearTimelineSubscriptionAuthority(*state);
+    state->recovery = TimelineRecoveryState::Failed;
+    state->retryOnReconnect = retryable && (!m_runtime || !m_runtime->isReady());
+    if (retryable && m_runtime && m_runtime->isReady()
+            && m_timelineSubscriptionAvailable
+            && state->subscriptionRetryCount < 3) {
+        const int attempt = ++state->subscriptionRetryCount;
+        const int delayMs = attempt == 1 ? 0 : (attempt == 2 ? 250 : 1000);
+        QTimer::singleShot(delayMs, this,
+                           [this, sessionId, failedGeneration, attempt]() {
+            auto retryState = m_timelineSessions.find(sessionId);
+            if (retryState == m_timelineSessions.end()
+                    || retryState->recovery != TimelineRecoveryState::Failed
+                    || retryState->subscriptionRetryCount != attempt
+                    || !m_runtime || !m_runtime->isReady()
+                    || m_runtime->processGeneration() != failedGeneration
+                    || !m_timelineSubscriptionAvailable) {
+                return;
+            }
+            beginTimelineSubscription(sessionId);
+        });
+    } else if (retryable) {
+        state->retryOnReconnect = true;
+    }
+    if (sessionId == currentTimelineSessionId()) updateTurnAction();
+}
+
+void AgentWorkbenchWidget::handleTimelineSubscriptionActivated(
+    const QString &requestId, const QJsonObject &result)
+{
+    auto state = std::find_if(
+        m_timelineSessions.begin(), m_timelineSessions.end(),
+        [&requestId](const TimelineSessionState &candidate) {
+            return !requestId.isEmpty() && candidate.activationRequestId == requestId;
+        });
+    if (state == m_timelineSessions.end()) return;
+    const QString sessionId = state.key();
+    const quint64 generation = static_cast<quint64>(
+        result.value(QStringLiteral("connection_generation")).toDouble());
+    if (!m_runtime || generation == 0
+            || generation != m_runtime->processGeneration()) {
+        return;
+    }
+    if (state->subscriptionGeneration != generation) return;
+    const QSet<QString> keys{
+        QStringLiteral("schema_version"), QStringLiteral("connection_generation"),
+        QStringLiteral("session_id"), QStringLiteral("subscription_id"),
+        QStringLiteral("state"), QStringLiteral("cursor"),
+        QStringLiteral("watermark"),
+    };
+    const bool valid = hasExactJsonKeys(result, keys)
+        && result.value(QStringLiteral("schema_version")).toString()
+            == QStringLiteral("timeline-subscription-active/0.1")
+        && isPositiveSafeJsonInteger(
+            result.value(QStringLiteral("connection_generation")))
+        && result.value(QStringLiteral("state")).toString() == QStringLiteral("active")
+        && state->recovery == TimelineRecoveryState::AwaitingActivation
+        && generation == state->subscriptionGeneration
+        && result.value(QStringLiteral("session_id")).toString() == sessionId
+        && result.value(QStringLiteral("subscription_id")).toString()
+            == state->subscriptionId
+        && result.value(QStringLiteral("cursor")) == state->subscriptionCursor
+        && result.value(QStringLiteral("watermark")) == state->subscriptionWatermark
+        && result.value(QStringLiteral("cursor")) == result.value(QStringLiteral("watermark"));
+    if (!valid) {
+        recoverTimelineSubscriptionOnNewConnection(
+            sessionId, QStringLiteral("Timeline 激活响应未通过本地语义校验"));
+        return;
+    }
+    const QString source = state->activationSource;
+    state->activationRequestId.clear();
+    if (source == QStringLiteral("sync")) {
+        commitTimelineSyncRecovery(sessionId);
+    } else if (source == QStringLiteral("snapshot")) {
+        commitTimelineSnapshotRecovery(sessionId);
+    } else {
+        recoverTimelineSubscriptionOnNewConnection(
+            sessionId, QStringLiteral("Timeline 激活来源与恢复投影不一致"));
+        return;
+    }
+    state = m_timelineSessions.find(sessionId);
+    if (state == m_timelineSessions.end()
+            || state->recovery != TimelineRecoveryState::Active
+            || state->subscriptionGeneration != generation) {
+        return;
+    }
+    state->activationSource.clear();
+    state->subscriptionRetryCount = 0;
+    state->subscriptionCursor = {
+        {QStringLiteral("sequence"), static_cast<double>(state->projection.sequence)},
+        {QStringLiteral("event_id"), state->projection.sequence == 0
+             ? QJsonValue(QJsonValue::Null) : QJsonValue(state->projection.eventId)},
+    };
+    finishRuntimeReconnectTimeline(sessionId);
+}
+
+void AgentWorkbenchWidget::handleLiveTimelineEvent(const QJsonObject &event,
+                                                   bool subscriptionOwned)
 {
     const QString sessionId = event.value(QStringLiteral("session_id")).toString();
     quint64 sequence = 0;
@@ -13140,7 +13759,12 @@ void AgentWorkbenchWidget::handleLiveTimelineEvent(const QJsonObject &event)
     TimelineSessionState &state = *statePointer;
     if (sequence <= state.projection.sequence) {
         if (state.projection.eventIds.value(sequence) == eventId) return;
-        freezeTimelineSession(sessionId, false);
+        if (subscriptionOwned) {
+            recoverTimelineSubscriptionOnNewConnection(
+                sessionId, QStringLiteral("Timeline Active 事件与已确认事件身份冲突"));
+        } else {
+            freezeTimelineSession(sessionId, false);
+        }
         return;
     }
     if (state.recovery == TimelineRecoveryState::Frozen
@@ -13148,18 +13772,29 @@ void AgentWorkbenchWidget::handleLiveTimelineEvent(const QJsonObject &event)
         return;
     }
 
-    const auto queueLiveEvent = [this, &state, &event, &sessionId]() {
+    const auto queueLiveEvent = [this, &state, &event, &sessionId,
+                                 subscriptionOwned]() {
         const qsizetype bytes = QJsonDocument(event).toJson(QJsonDocument::Compact).size();
         if (bytes <= 0 || bytes > kMaxTimelineQueuedLiveBytes
                 || state.queuedLiveEvents.size() >= kMaxTimelineQueuedLiveEvents
                 || state.queuedLiveBytes > kMaxTimelineQueuedLiveBytes - bytes) {
-            freezeTimelineSession(sessionId, false);
+            if (subscriptionOwned) {
+                recoverTimelineSubscriptionOnNewConnection(
+                    sessionId, QStringLiteral("Timeline Active 事件暂存容量校验失败"));
+            } else {
+                freezeTimelineSession(sessionId, false);
+            }
             return false;
         }
         if (m_timelinePendingEventCount >= kMaxTimelinePendingEvents
                 || bytes > kMaxTimelinePendingBytes
                 || m_timelinePendingBytes > kMaxTimelinePendingBytes - bytes) {
-            freezeTimelineSession(sessionId, false);
+            if (subscriptionOwned) {
+                recoverTimelineSubscriptionOnNewConnection(
+                    sessionId, QStringLiteral("Timeline Active 事件全局容量校验失败"));
+            } else {
+                freezeTimelineSession(sessionId, false);
+            }
             return false;
         }
         state.queuedLiveEvents.append(event);
@@ -13169,7 +13804,10 @@ void AgentWorkbenchWidget::handleLiveTimelineEvent(const QJsonObject &event)
         return true;
     };
 
-    if (state.recovery == TimelineRecoveryState::Syncing) {
+    if (state.recovery == TimelineRecoveryState::RecoveringSync
+            || state.recovery == TimelineRecoveryState::RecoveringSnapshot
+            || state.recovery == TimelineRecoveryState::Subscribing
+            || state.recovery == TimelineRecoveryState::AwaitingActivation) {
         queueLiveEvent();
         return;
     }
@@ -13178,7 +13816,12 @@ void AgentWorkbenchWidget::handleLiveTimelineEvent(const QJsonObject &event)
         return;
     }
     if (m_timelineTrackedEventCount >= kMaxTimelineTrackedEvents) {
-        freezeTimelineSession(sessionId, true);
+        if (subscriptionOwned) {
+            recoverTimelineSubscriptionOnNewConnection(
+                sessionId, QStringLiteral("Timeline Active 事件超出本地跟踪容量"));
+        } else {
+            freezeTimelineSession(sessionId, true);
+        }
         return;
     }
 
@@ -13186,11 +13829,16 @@ void AgentWorkbenchWidget::handleLiveTimelineEvent(const QJsonObject &event)
     QJsonObject item;
     bool recognizedEvent = false;
     if (!validateTimelineEvent(event, &candidate, &item, &recognizedEvent)) {
-        freezeTimelineSession(sessionId, true);
+        if (subscriptionOwned) {
+            recoverTimelineSubscriptionOnNewConnection(
+                sessionId, QStringLiteral("Timeline Active 事件未通过本地语义校验"));
+        } else {
+            freezeTimelineSession(sessionId, true);
+        }
         return;
     }
     state.projection = std::move(candidate);
-    state.recovery = TimelineRecoveryState::Live;
+    state.recovery = TimelineRecoveryState::Active;
     state.retryOnReconnect = false;
     ++m_timelineTrackedEventCount;
     publishTimelineProjection(sessionId, state.projection);
@@ -13207,6 +13855,12 @@ void AgentWorkbenchWidget::handleTimelineSyncPage(const QString &requestId,
         });
     if (stateIt == m_timelineSessions.end()) return;
     const QString sessionId = stateIt.key();
+    const bool subscriptionOwned = stateIt->subscriptionGeneration != 0;
+    if (subscriptionOwned
+            && (!m_runtime || stateIt->subscriptionGeneration
+                != m_runtime->processGeneration())) {
+        return;
+    }
     const QSet<QString> pageKeys{
         QStringLiteral("schema_version"), QStringLiteral("session_id"),
         QStringLiteral("after"), QStringLiteral("watermark"),
@@ -13294,8 +13948,13 @@ void AgentWorkbenchWidget::handleTimelineSyncPage(const QString &requestId,
             && nextSequence < watermarkSequence;
     }
     if (!valid) {
-        freezeTimelineSession(sessionId, false);
-        finishRuntimeReconnectTimeline(sessionId);
+        if (subscriptionOwned) {
+            recoverTimelineSubscriptionOnNewConnection(
+                sessionId, QStringLiteral("Timeline 订阅同步页未通过本地语义校验"));
+        } else {
+            freezeTimelineSession(sessionId, false);
+            finishRuntimeReconnectTimeline(sessionId);
+        }
         return;
     }
 
@@ -13310,42 +13969,56 @@ void AgentWorkbenchWidget::handleTimelineSyncPage(const QString &requestId,
     stateIt->syncRequestId.clear();
 
     if (complete) {
-        releaseTimelinePendingAccounting(*stateIt);
-        QList<TimelineStagedEvent> replayEvents = std::move(stateIt->stagedSyncEvents);
-        QList<QJsonObject> queuedEvents = std::move(stateIt->queuedLiveEvents);
-        stateIt->projection = std::move(stateIt->syncProjection);
-        stateIt->syncProjection = {};
-        stateIt->syncProjectionValid = false;
-        stateIt->stagedSyncEvents.clear();
-        stateIt->stagedSyncBytes = 0;
-        stateIt->queuedLiveEvents.clear();
-        stateIt->queuedLiveBytes = 0;
-        stateIt->watermark = {};
-        stateIt->recovery = TimelineRecoveryState::Live;
-        stateIt->retryOnReconnect = false;
-        m_timelineTrackedEventCount += replayEvents.size();
-        publishTimelineProjection(sessionId, stateIt->projection);
-        for (const TimelineStagedEvent &staged : replayEvents) {
-            applyTimelineEventPresentation(staged.event, staged.item, staged.recognized);
+        if (stateIt->subscriptionGeneration != 0) {
+            if (!m_runtime
+                    || stateIt->subscriptionGeneration
+                        != m_runtime->processGeneration()
+                    || stateIt->watermark != stateIt->subscriptionWatermark) {
+                recoverTimelineSubscriptionOnNewConnection(
+                    sessionId, QStringLiteral("Timeline 订阅同步水位绑定不一致"));
+                return;
+            }
+            stateIt->subscriptionCursor = stateIt->watermark;
+            stateIt->recovery = TimelineRecoveryState::AwaitingActivation;
+            stateIt->activationSource = QStringLiteral("sync");
+            stateIt->activationRequestId = m_timelineSubscriptionActivationRequester
+                ? m_timelineSubscriptionActivationRequester(
+                    stateIt->subscriptionGeneration, sessionId,
+                    stateIt->subscriptionId, stateIt->activationSource,
+                    stateIt->subscriptionCursor, stateIt->subscriptionWatermark, {})
+                : m_runtime->activateTimelineSubscription(
+                    stateIt->subscriptionGeneration, sessionId,
+                    stateIt->subscriptionId, stateIt->activationSource,
+                    stateIt->subscriptionCursor, stateIt->subscriptionWatermark);
+            if (stateIt->activationRequestId.isEmpty()) {
+                recoverTimelineSubscriptionOnNewConnection(
+                    sessionId, QStringLiteral("Timeline 订阅激活请求无法安全发送"));
+            }
+            if (sessionId == currentTimelineSessionId()) updateTurnAction();
+            return;
         }
-        restoreActiveTurnFromTimeline();
+        commitTimelineSyncRecovery(sessionId);
         finishRuntimeReconnectTimeline(sessionId);
-        if (sessionId == currentTimelineSessionId()) {
-            updateTurnAction();
-            startPendingTurnIfReady();
-        }
-        for (const QJsonObject &event : queuedEvents) handleLiveTimelineEvent(event);
         return;
     }
 
     stateIt->requestedAfterSequence = nextSequence;
     stateIt->requestedAfterEventId = nextEventId;
-    stateIt->syncRequestId = m_runtime->syncTimeline(
-        sessionId, nextSequence, nextEventId, stateIt->watermark,
-        kTimelineSyncPageLimit);
+    stateIt->syncRequestId = stateIt->subscriptionGeneration != 0
+        ? m_runtime->syncTimelineSubscription(
+            stateIt->subscriptionGeneration, sessionId, stateIt->subscriptionId,
+            nextSequence, nextEventId, stateIt->watermark, kTimelineSyncPageLimit)
+        : m_runtime->syncTimeline(
+            sessionId, nextSequence, nextEventId, stateIt->watermark,
+            kTimelineSyncPageLimit);
     if (stateIt->syncRequestId.isEmpty()) {
-        freezeTimelineSession(sessionId, false);
-        finishRuntimeReconnectTimeline(sessionId);
+        if (subscriptionOwned) {
+            recoverTimelineSubscriptionOnNewConnection(
+                sessionId, QStringLiteral("Timeline 订阅同步分页请求无法安全续发"));
+        } else {
+            freezeTimelineSession(sessionId, false);
+            finishRuntimeReconnectTimeline(sessionId);
+        }
     }
 }
 
@@ -13359,6 +14032,12 @@ void AgentWorkbenchWidget::handleTimelineSnapshotPage(
         });
     if (stateIt == m_timelineSessions.end()) return;
     const QString sessionId = stateIt.key();
+    const bool subscriptionOwned = stateIt->subscriptionGeneration != 0;
+    if (subscriptionOwned
+            && (!m_runtime || stateIt->subscriptionGeneration
+                != m_runtime->processGeneration())) {
+        return;
+    }
     const qsizetype encodedBytes = QJsonDocument(page).toJson(QJsonDocument::Compact).size();
     const QSet<QString> pageKeys{
         QStringLiteral("schema_version"), QStringLiteral("session_id"),
@@ -13622,7 +14301,15 @@ void AgentWorkbenchWidget::handleTimelineSnapshotPage(
     } else {
         valid = false;
     }
-    if (!valid) { freezeTimelineForSnapshotRecovery(sessionId, true); return; }
+    if (!valid) {
+        if (subscriptionOwned) {
+            recoverTimelineSubscriptionOnNewConnection(
+                sessionId, QStringLiteral("Timeline 订阅快照页未通过本地语义校验"));
+        } else {
+            freezeTimelineForSnapshotRecovery(sessionId, true);
+        }
+        return;
+    }
 
     stateIt = m_timelineSessions.find(sessionId);
     if (stateIt == m_timelineSessions.end() || stateIt->snapshotRequestId != requestId) return;
@@ -13640,15 +14327,28 @@ void AgentWorkbenchWidget::handleTimelineSnapshotPage(
     m_timelinePendingBytes += encodedBytes;
     stateIt->snapshotRequestId.clear();
     if (!complete) {
-        stateIt->snapshotRequestId = m_timelineSnapshotRequester
-            ? m_timelineSnapshotRequester(
-                sessionId, stateIt->snapshotIdentity, stateIt->snapshotWatermark,
-                stateIt->snapshotAfter, kTimelineSnapshotPageLimit)
-            : m_runtime->timelineSnapshot(
-                sessionId, stateIt->snapshotIdentity, stateIt->snapshotWatermark,
-                stateIt->snapshotAfter, kTimelineSnapshotPageLimit);
+        if (stateIt->subscriptionGeneration != 0) {
+            stateIt->snapshotRequestId = m_runtime->snapshotTimelineSubscription(
+                stateIt->subscriptionGeneration, sessionId, stateIt->subscriptionId,
+                stateIt->subscriptionCursor, stateIt->snapshotIdentity,
+                stateIt->snapshotWatermark, stateIt->snapshotAfter,
+                kTimelineSnapshotPageLimit);
+        } else {
+            stateIt->snapshotRequestId = m_timelineSnapshotRequester
+                ? m_timelineSnapshotRequester(
+                    sessionId, stateIt->snapshotIdentity, stateIt->snapshotWatermark,
+                    stateIt->snapshotAfter, kTimelineSnapshotPageLimit)
+                : m_runtime->timelineSnapshot(
+                    sessionId, stateIt->snapshotIdentity, stateIt->snapshotWatermark,
+                    stateIt->snapshotAfter, kTimelineSnapshotPageLimit);
+        }
         if (stateIt->snapshotRequestId.isEmpty()) {
-            freezeTimelineForSnapshotRecovery(sessionId, true);
+            if (subscriptionOwned) {
+                recoverTimelineSubscriptionOnNewConnection(
+                    sessionId, QStringLiteral("Timeline 订阅快照分页请求无法安全续发"));
+            } else {
+                freezeTimelineForSnapshotRecovery(sessionId, true);
+            }
         }
         return;
     }
@@ -13677,80 +14377,36 @@ void AgentWorkbenchWidget::handleTimelineSnapshotPage(
         candidate.turnStates.insert(timelineTurnKey(sessionId, turnId),
             snapshotItem.value(QStringLiteral("turn_state")).toString());
     }
-    releaseTimelinePendingAccounting(*stateIt);
-    QList<QJsonObject> committedItems = std::move(stateIt->stagedSnapshotItems);
-    QList<QJsonObject> queuedEvents = std::move(stateIt->queuedLiveEvents);
-    stateIt->projection = std::move(candidate);
-    stateIt->syncProjection = {};
-    stateIt->syncProjectionValid = false;
-    stateIt->stagedSyncEvents.clear();
-    stateIt->stagedSyncBytes = 0;
-    stateIt->watermark = {};
-    stateIt->stagedSnapshotBytes = 0;
-    stateIt->queuedLiveEvents.clear();
-    stateIt->queuedLiveBytes = 0;
-    stateIt->snapshotIdentity.clear();
-    stateIt->snapshotFloor = {};
-    stateIt->snapshotWatermark = {};
-    stateIt->snapshotAfter = {};
-    stateIt->snapshotActiveTurn = {};
-    stateIt->snapshotTotalItems = 0;
-    stateIt->snapshotExpectedCanonicalBytes = 0;
-    stateIt->snapshotTotalCanonicalBytes = 0;
-    stateIt->snapshotRecoveryRequired = false;
-    stateIt->recovery = TimelineRecoveryState::Live;
-    stateIt->retryOnReconnect = false;
-    publishTimelineProjection(sessionId, stateIt->projection);
-    if (sessionId == currentTimelineSessionId()) {
-        while (m_timelineLayout && m_timelineLayout->count() > 2) {
-            QLayoutItem *layoutItem = m_timelineLayout->takeAt(1);
-            if (layoutItem->widget()) layoutItem->widget()->deleteLater();
-            delete layoutItem;
+    stateIt->syncProjection = std::move(candidate);
+    stateIt->syncProjectionValid = true;
+    if (stateIt->subscriptionGeneration != 0) {
+        if (!m_runtime
+                || stateIt->subscriptionGeneration != m_runtime->processGeneration()) {
+            return;
         }
-        m_itemLabels.clear();
-        m_itemArtifactButtons.clear();
-        m_itemProposalButtons.clear();
-        m_itemProposalStatusLabels.clear();
-        m_itemKinds = stateIt->projection.itemKinds;
-        m_itemRoles = stateIt->projection.itemRoles;
-        m_itemStates = stateIt->projection.itemStates;
-        m_itemRevisions = stateIt->projection.itemRevisions;
-        m_emptyTimeline->show();
-        for (const QJsonObject &snapshotItem : committedItems) {
-            const QJsonObject item = snapshotItem.value(QStringLiteral("item")).toObject();
-            addTimelineItem(item, false, timelineItemKey(
-                sessionId, snapshotItem.value(QStringLiteral("turn_id")).toString(),
-                item.value(QStringLiteral("id")).toString()));
+        stateIt->subscriptionCursor = stateIt->snapshotWatermark;
+        stateIt->subscriptionWatermark = stateIt->snapshotWatermark;
+        stateIt->recovery = TimelineRecoveryState::AwaitingActivation;
+        stateIt->activationSource = QStringLiteral("snapshot");
+        stateIt->activationRequestId = m_timelineSubscriptionActivationRequester
+            ? m_timelineSubscriptionActivationRequester(
+                stateIt->subscriptionGeneration, sessionId,
+                stateIt->subscriptionId, stateIt->activationSource,
+                stateIt->subscriptionCursor, stateIt->subscriptionWatermark,
+                stateIt->snapshotIdentity)
+            : m_runtime->activateTimelineSubscription(
+                stateIt->subscriptionGeneration, sessionId, stateIt->subscriptionId,
+                stateIt->activationSource, stateIt->subscriptionCursor,
+                stateIt->subscriptionWatermark, stateIt->snapshotIdentity);
+        if (stateIt->activationRequestId.isEmpty()) {
+            recoverTimelineSubscriptionOnNewConnection(
+                sessionId, QStringLiteral("Timeline 订阅快照激活请求无法安全发送"));
         }
+        if (sessionId == currentTimelineSessionId()) updateTurnAction();
+        return;
     }
-    if (m_activeTurnSessionId == sessionId) {
-        const QString activeKey = timelineTurnKey(sessionId, m_activeTurnId);
-        if (m_activeTurnId.isEmpty()
-                || stateIt->projection.turnStates.value(activeKey)
-                    != QStringLiteral("running")) {
-            m_turnRunning = false;
-            m_turnCancelling = false;
-            m_activeTurnSessionId.clear();
-            m_activeTurnId.clear();
-            m_turnCancelRequestId.clear();
-        }
-    }
-    restoreActiveTurnFromTimeline();
-    if (sessionId == currentTimelineSessionId()) {
-        updateTurnAction();
-        startPendingTurnIfReady();
-    }
-    for (const QJsonObject &event : queuedEvents) {
-        quint64 sequence = 0;
-        QString eventId;
-        const QJsonObject anchor{
-            {QStringLiteral("sequence"), event.value(QStringLiteral("sequence"))},
-            {QStringLiteral("event_id"), event.value(QStringLiteral("event_id"))},
-        };
-        if (readTimelineAnchor(anchor, &sequence, &eventId)
-                && sequence <= watermarkSequence) continue;
-        handleLiveTimelineEvent(event);
-    }
+    commitTimelineSnapshotRecovery(sessionId);
+    finishRuntimeReconnectTimeline(sessionId);
 }
 
 bool AgentWorkbenchWidget::validateTimelineItem(

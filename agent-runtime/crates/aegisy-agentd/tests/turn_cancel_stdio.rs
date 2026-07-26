@@ -30,11 +30,19 @@ fn request(id: &str, method: &str, params: Value) -> Value {
 }
 
 fn initialize_params(client_name: &str) -> Value {
+    // These stdio lifecycle fixtures intentionally exercise the legacy bare-event
+    // route. Subscription negotiation has dedicated subscribe/recovery/activate
+    // integration coverage.
+    let stable_capabilities = STABLE_CAPABILITY_REGISTRY
+        .iter()
+        .copied()
+        .filter(|capability| *capability != "timeline.subscription.fixed-watermark")
+        .collect::<Vec<_>>();
     json!({
         "protocol": {"minimum": "0.1", "maximum": "0.1", "preferred": "0.1"},
         "client": {"name": client_name, "version": "1"},
         "platform": {"os": "macos", "architecture": "arm64"},
-        "capabilities": {"stable": STABLE_CAPABILITY_REGISTRY, "experimental": []},
+        "capabilities": {"stable": stable_capabilities, "experimental": []},
         "limits": {"max_frame_bytes": MAX_AAP_FRAME_BYTES},
         "transport_security": {
             "transport": "stdio",

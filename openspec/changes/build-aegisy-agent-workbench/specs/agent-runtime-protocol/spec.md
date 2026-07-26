@@ -210,33 +210,54 @@ client SHALL drain queued live events through the ordinary validator. A malforme
 page, anchor drift, request failure, missing capability, or queue/batch overflow
 SHALL preserve the confirmed projection and leave that Session frozen.
 
-The non-routable subscription contract foundation SHALL represent subscribe as
-exactly one of `sync-required` with a non-null fixed watermark or
-`snapshot-required` with a null watermark; subscribe SHALL NOT return active or
-failed inline. A syntactically valid activation SHALL NOT be treated as recovery
-evidence. Typed activation validation SHALL additionally consume a private,
-non-serializable structural proof derived from the complete contiguous Sync page
-chain through the subscribed fixed watermark under the 10,000-Event/64 MiB recovery
-bound, or from the complete fixed-header Snapshot page chain whose ordered Items and
-domain-separated snapshot identity have all been validated. This proof SHALL NOT be
-treated as connection authority: the live Runtime SHALL additionally consume the
-matching connection-owned registry token. The activation source, Session, connection
-generation, subscription, cursor, watermark, and optional Snapshot identity SHALL
-exactly equal that proof. Subscribe, Sync, Snapshot, activate, and live failures
-SHALL be terminal and cleanup-required. Request-stage failures SHALL carry a
-domain-separated identity of the complete exact request, including Snapshot identity,
-continuation cursor, and page limit; live failure SHALL bind the exact active cursor.
+Negotiated `timeline.subscription.fixed-watermark` SHALL expose
+`timeline/subscribe`, `timeline/subscription-sync`,
+`timeline/subscription-snapshot`, and `timeline/subscription-activate`, plus the
+subscription-bound live-event and terminal-failure notifications. Runtime SHALL
+advertise the capability only when the durable writable Timeline Store is healthy.
+Subscribe SHALL return exactly one of `sync-required` with a non-null fixed
+watermark or `snapshot-required` with a null watermark; it SHALL NOT return active
+inline.
 
-These definitions SHALL remain outside the top-level stable method routing schema
-until a negotiated Runtime implementation exists. The later live implementation
-SHALL bind every recovery page request to one connection-owned subscription attempt,
-forbid subscription-ID reuse within that connection generation, atomically register
-the attempt while capturing its fixed head, buffer every event after that head,
-consume its private registry token, atomically activate and drain the buffer, and
-retire all pending state on every
-failure or disconnect. A live event received before the exact activation response,
-from another generation, or from another subscription SHALL be inert and SHALL NOT
-change the confirmed client projection.
+Runtime SHALL bind every recovery page request to one connection-generation-owned
+attempt, forbid subscription-ID reuse for the lifetime of that connection, permit at
+most one attempt per Session, and capture the durable floor, head, and head timestamp
+used by the attempt. Retained Sync/Snapshot recovery units and events after that fixed
+head SHALL share one 10,000-unit/64 MiB aggregate connection bound; an event at or
+before the fixed head SHALL NOT be republished. Completion, activation, accepted
+failure, retirement, and disconnect SHALL release exact accounting once. The first
+post-watermark event timestamp, and every later timestamp, SHALL be no earlier than
+the durable fixed-head timestamp.
+
+A syntactically valid activation SHALL NOT be treated as recovery evidence. Typed
+activation SHALL consume both a private non-serializable structural proof derived
+from the complete contiguous Sync page chain or complete fixed-header Snapshot page
+chain and the matching private connection-owned registry token. The activation
+source, Session, connection generation, subscription, cursor, watermark, and optional
+Snapshot identity SHALL exactly equal that proof and token. Runtime SHALL emit the
+exact active response before draining buffered events in sequence as
+`timeline/subscription-event` notifications. Subscribe, Sync, Snapshot, activate,
+and live failures SHALL be terminal and cleanup-required. Request-stage failures
+SHALL carry a domain-separated identity of the complete exact request, including
+Snapshot identity, continuation cursor, and page limit; live failure SHALL bind the
+exact active cursor. Every accepted failure SHALL retire only its bound attempt, and
+disconnect SHALL retire the complete registry and buffered state. A Sync, Snapshot,
+or Activate request bound to another Session or connection generation SHALL be
+rejected without consuming the true owner's recovery proof/token or retiring that
+owner's attempt.
+
+After subscription negotiation, Runtime SHALL NOT fall back to an unbound bare
+`event` notification. A live event received before the exact activation response,
+from another generation, from another subscription, or for another Session SHALL be
+inert and SHALL NOT change the confirmed client projection. An ordinary successful
+`session/read` SHALL NOT replace an already active subscription; an actual sequence
+gap on that active subscription SHALL still freeze the Session and begin recovery.
+`turn/start` SHALL fail with `-32152` before mutation unless its Session owns a
+current connection-bound subscription attempt. Events produced while that attempt is
+recovering SHALL remain bounded and buffered; the Qt product SHALL still wait for
+Active before enabling Send. A retryable typed failure SHALL preserve the confirmed
+projection and queued prompt, allocate a fresh subscription ID, and retry no more
+than three times using bounded 0/250/1000 ms delays.
 
 #### Scenario: Activation has only well-formed but unverified recovery metadata
 - **WHEN** activation carries a valid-looking cursor, watermark, or Snapshot identity without the complete matching recovery proof
@@ -245,6 +266,26 @@ change the confirmed client projection.
 #### Scenario: Subscription failure changes stage or binding
 - **WHEN** a terminal failure changes its stage, connection generation, Session, subscription, cursor, or fixed watermark
 - **THEN** it SHALL NOT retire or advance the matching attempt and the malformed traffic SHALL fail closed
+
+#### Scenario: Heartbeat expires with ambiguous subscription ownership
+- **WHEN** the heartbeat deadline expires while subscribe, subscription-sync, subscription-snapshot, or activate remains pending
+- **THEN** the client SHALL retire the pending request, abandon the current connection, and start one bounded fresh process generation instead of retrying on the ownership-ambiguous connection
+
+#### Scenario: Client cannot verify subscription state locally
+- **WHEN** a subscribe, subscription-sync, subscription-snapshot, or activate result is invalid, an Active wrapper/cursor drifts, continuation is unsafe, or Runtime reports `session-attempt-exists` or `subscription-id-reused`
+- **THEN** the client SHALL freeze confirmed state, preserve queued input, abandon the current connection, and start one bounded fresh Runtime generation without completing reconnect or retrying that ownership conflict on the same connection
+
+#### Scenario: Active Session is read normally
+- **WHEN** `session/read` succeeds for a Session whose subscription is already active
+- **THEN** the client SHALL preserve the active generation, subscription identity, cursor, and live state without starting another subscription attempt
+
+#### Scenario: Turn has no subscription ownership
+- **WHEN** a negotiated client starts a Turn for a Session with no current subscription attempt
+- **THEN** Runtime SHALL return `-32152` before creating the Turn or advancing the durable Timeline
+
+#### Scenario: Retryable subscription stage fails
+- **WHEN** a correctly bound subscription failure is retryable and the connection remains healthy
+- **THEN** Qt SHALL preserve the confirmed projection and queued prompt and MAY retry only with a fresh subscription ID under the bounded three-attempt schedule
 
 When the requested `after` anchor is strictly older than the validated durable
 retention floor, Runtime SHALL return JSON-RPC error `-32148` with exact
@@ -362,9 +403,9 @@ The fixed-watermark snapshot slice does not satisfy the complete reconnect
 requirement by itself. The schema v16 floor/checkpoint remains internal retention and
 startup authority; schema v17 separately persists the public floor-visible state.
 Automatic production pruning SHALL remain unreachable until a later reviewed stage
-explicitly enables it. Live subscription, reconnect orchestration, explicit
-acknowledgement, and Windows recovery evidence SHALL also remain required
-before this requirement is considered complete.
+explicitly enables it. The later negotiated live-subscription and reconnect scenarios
+satisfy those portions; explicit acknowledgement and complete Windows recovery
+evidence SHALL remain required before this requirement is considered complete.
 
 #### Scenario: Prepared event persistence fails
 - **WHEN** Runtime prepares and serializes an event but its Journal or combined projection transaction fails
@@ -450,10 +491,10 @@ before this requirement is considered complete.
 - **WHEN** the event sequence predates retained replay data
 - **THEN** the runtime SHALL return structured `-32148`; only a separately negotiated identity-complete `timeline/snapshot` result MAY let the client atomically replace that Session at a fixed watermark before continuing live delivery
 
-The schema-v17 floor-visible projection, fixed-head Runtime paging, and Qt atomic
-replacement satisfy retention-gap snapshot recovery for a negotiated connection.
-They do not supply live subscription, acknowledgement, or the complete reconnect
-state machine required to finish this requirement.
+The schema-v17 floor-visible projection, fixed-head Runtime paging, Qt atomic
+replacement, and negotiated fixed-watermark subscription form the current recovery
+chain. Explicit mutation acknowledgement and complete Windows reconnect/runtime
+evidence remain required to finish this requirement.
 
 #### Scenario: Snapshot pages stay fixed while a Turn continues
 - **WHEN** Runtime captures a snapshot watermark during a running Turn and later Item deltas or a terminal event append while Qt pages

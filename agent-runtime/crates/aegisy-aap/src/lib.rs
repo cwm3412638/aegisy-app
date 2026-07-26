@@ -211,7 +211,15 @@ fn timeline_subscription_request_identity<T: Serialize>(
     stage: &str,
     request: &T,
 ) -> Result<String, &'static str> {
-    if !matches!(stage, "subscribe" | "sync" | "snapshot" | "activate") {
+    if !matches!(
+        stage,
+        "subscribe"
+            | "sync"
+            | "snapshot"
+            | "activate"
+            | "subscription-sync"
+            | "subscription-snapshot"
+    ) {
         return Err("timeline subscription request identity stage is invalid");
     }
     let encoded = serde_json::to_vec(request)
@@ -1652,6 +1660,10 @@ pub mod stable {
         pub const TIMELINE_ACTIVATE_RESULT_SCHEMA: &str = "timeline-subscription-active/0.1";
         pub const TIMELINE_SUBSCRIPTION_EVENT_SCHEMA: &str = "timeline-subscription-event/0.1";
         pub const TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA: &str = "timeline-subscription-failure/0.1";
+        pub const TIMELINE_SUBSCRIPTION_SYNC_REQUEST_SCHEMA: &str =
+            "timeline-subscription-sync-request/0.1";
+        pub const TIMELINE_SUBSCRIPTION_SNAPSHOT_REQUEST_SCHEMA: &str =
+            "timeline-subscription-snapshot-request/0.1";
 
         fn validate_subscription_binding(
             connection_generation: u64,
@@ -1842,9 +1854,11 @@ pub mod stable {
                 }
                 match self.state {
                     TimelineSubscriptionState::SyncRequired
-                        if self.next_method == "timeline/sync" && self.watermark.is_some() => {}
+                        if self.next_method == "timeline/subscription-sync"
+                            && self.watermark.is_some() => {}
                     TimelineSubscriptionState::SnapshotRequired
-                        if self.next_method == "timeline/snapshot" && self.watermark.is_none() => {}
+                        if self.next_method == "timeline/subscription-snapshot"
+                            && self.watermark.is_none() => {}
                     TimelineSubscriptionState::SyncRequired
                     | TimelineSubscriptionState::SnapshotRequired => {
                         return Err("timeline subscribe result recovery route is invalid");
@@ -2731,6 +2745,128 @@ pub mod stable {
         }
 
         #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct TimelineSubscriptionSyncParams {
+            pub schema_version: String,
+            pub connection_generation: u64,
+            pub session_id: String,
+            pub subscription_id: String,
+            pub request: TimelineSyncParams,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TimelineSubscriptionSyncParamsWire {
+            schema_version: String,
+            #[serde(deserialize_with = "deserialize_positive_safe_json_integer")]
+            connection_generation: u64,
+            session_id: String,
+            subscription_id: String,
+            request: TimelineSyncParams,
+        }
+
+        impl TimelineSubscriptionSyncParams {
+            pub fn validate(&self) -> Result<(), &'static str> {
+                if self.schema_version != TIMELINE_SUBSCRIPTION_SYNC_REQUEST_SCHEMA {
+                    return Err("timeline subscription sync request schema version is invalid");
+                }
+                validate_subscription_binding(
+                    self.connection_generation,
+                    &self.session_id,
+                    &self.subscription_id,
+                )?;
+                self.request.validate()?;
+                if self.request.session_id != self.session_id {
+                    return Err("timeline subscription sync request session binding is invalid");
+                }
+                if self.request.watermark.is_none() {
+                    return Err("timeline subscription sync request requires a fixed watermark");
+                }
+                Ok(())
+            }
+
+            pub fn validate_for_subscription(
+                &self,
+                subscription: &TimelineSubscribeResult,
+            ) -> Result<(), &'static str> {
+                self.validate()?;
+                subscription.validate()?;
+                if subscription.state != TimelineSubscriptionState::SyncRequired
+                    || self.connection_generation != subscription.connection_generation
+                    || self.session_id != subscription.session_id
+                    || self.subscription_id != subscription.subscription_id
+                    || self.request.watermark != subscription.watermark
+                {
+                    return Err(
+                        "timeline subscription sync request does not match its subscription",
+                    );
+                }
+                validate_timeline_window(&subscription.cursor, &self.request.after)?;
+                Ok(())
+            }
+
+            pub fn is_current_generation(&self, connection_generation: u64) -> bool {
+                self.validate().is_ok() && self.connection_generation == connection_generation
+            }
+
+            pub fn request_identity(&self) -> Result<String, &'static str> {
+                self.validate()?;
+                timeline_subscription_request_identity("subscription-sync", self)
+            }
+        }
+
+        impl TryFrom<TimelineSubscriptionSyncParamsWire> for TimelineSubscriptionSyncParams {
+            type Error = &'static str;
+
+            fn try_from(value: TimelineSubscriptionSyncParamsWire) -> Result<Self, Self::Error> {
+                let params = Self {
+                    schema_version: value.schema_version,
+                    connection_generation: value.connection_generation,
+                    session_id: value.session_id,
+                    subscription_id: value.subscription_id,
+                    request: value.request,
+                };
+                params.validate()?;
+                Ok(params)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for TimelineSubscriptionSyncParams {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                TimelineSubscriptionSyncParamsWire::deserialize(deserializer)?
+                    .try_into()
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl Serialize for TimelineSubscriptionSyncParams {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                self.validate().map_err(serde::ser::Error::custom)?;
+                #[derive(Serialize)]
+                struct ParamsRef<'a> {
+                    schema_version: &'a str,
+                    connection_generation: u64,
+                    session_id: &'a str,
+                    subscription_id: &'a str,
+                    request: &'a TimelineSyncParams,
+                }
+                ParamsRef {
+                    schema_version: &self.schema_version,
+                    connection_generation: self.connection_generation,
+                    session_id: &self.session_id,
+                    subscription_id: &self.subscription_id,
+                    request: &self.request,
+                }
+                .serialize(serializer)
+            }
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct TimelineRetentionGapData {
             pub schema_version: String,
             pub reason: String,
@@ -3315,6 +3451,182 @@ pub mod stable {
                     limit: self.limit,
                 }
                 .serialize(serializer)
+            }
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct TimelineSubscriptionSnapshotParams {
+            pub schema_version: String,
+            pub connection_generation: u64,
+            pub session_id: String,
+            pub subscription_id: String,
+            pub request: TimelineSnapshotParams,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TimelineSubscriptionSnapshotParamsWire {
+            schema_version: String,
+            #[serde(deserialize_with = "deserialize_positive_safe_json_integer")]
+            connection_generation: u64,
+            session_id: String,
+            subscription_id: String,
+            request: TimelineSnapshotParams,
+        }
+
+        impl TimelineSubscriptionSnapshotParams {
+            pub fn validate(&self) -> Result<(), &'static str> {
+                if self.schema_version != TIMELINE_SUBSCRIPTION_SNAPSHOT_REQUEST_SCHEMA {
+                    return Err("timeline subscription snapshot request schema version is invalid");
+                }
+                validate_subscription_binding(
+                    self.connection_generation,
+                    &self.session_id,
+                    &self.subscription_id,
+                )?;
+                self.request.validate()?;
+                if self.request.session_id != self.session_id {
+                    return Err(
+                        "timeline subscription snapshot request session binding is invalid",
+                    );
+                }
+                Ok(())
+            }
+
+            pub fn validate_for_subscription(
+                &self,
+                subscription: &TimelineSubscribeResult,
+            ) -> Result<(), &'static str> {
+                self.validate()?;
+                subscription.validate()?;
+                if subscription.state != TimelineSubscriptionState::SnapshotRequired
+                    || self.connection_generation != subscription.connection_generation
+                    || self.session_id != subscription.session_id
+                    || self.subscription_id != subscription.subscription_id
+                {
+                    return Err(
+                        "timeline subscription snapshot request does not match its subscription",
+                    );
+                }
+                if let Some(watermark) = &self.request.watermark {
+                    validate_timeline_window(&subscription.cursor, watermark)?;
+                }
+                Ok(())
+            }
+
+            pub fn is_current_generation(&self, connection_generation: u64) -> bool {
+                self.validate().is_ok() && self.connection_generation == connection_generation
+            }
+
+            pub fn request_identity(&self) -> Result<String, &'static str> {
+                self.validate()?;
+                timeline_subscription_request_identity("subscription-snapshot", self)
+            }
+        }
+
+        impl TryFrom<TimelineSubscriptionSnapshotParamsWire> for TimelineSubscriptionSnapshotParams {
+            type Error = &'static str;
+
+            fn try_from(
+                value: TimelineSubscriptionSnapshotParamsWire,
+            ) -> Result<Self, Self::Error> {
+                let params = Self {
+                    schema_version: value.schema_version,
+                    connection_generation: value.connection_generation,
+                    session_id: value.session_id,
+                    subscription_id: value.subscription_id,
+                    request: value.request,
+                };
+                params.validate()?;
+                Ok(params)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for TimelineSubscriptionSnapshotParams {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                TimelineSubscriptionSnapshotParamsWire::deserialize(deserializer)?
+                    .try_into()
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl Serialize for TimelineSubscriptionSnapshotParams {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                self.validate().map_err(serde::ser::Error::custom)?;
+                #[derive(Serialize)]
+                struct ParamsRef<'a> {
+                    schema_version: &'a str,
+                    connection_generation: u64,
+                    session_id: &'a str,
+                    subscription_id: &'a str,
+                    request: &'a TimelineSnapshotParams,
+                }
+                ParamsRef {
+                    schema_version: &self.schema_version,
+                    connection_generation: self.connection_generation,
+                    session_id: &self.session_id,
+                    subscription_id: &self.subscription_id,
+                    request: &self.request,
+                }
+                .serialize(serializer)
+            }
+        }
+
+        impl TimelineSubscriptionFailure {
+            pub fn validate_for_subscription_sync(
+                &self,
+                subscription: &TimelineSubscribeResult,
+                request: &TimelineSubscriptionSyncParams,
+            ) -> Result<(), &'static str> {
+                self.validate()?;
+                request.validate_for_subscription(subscription)?;
+                let request_identity = request.request_identity()?;
+                if self.stage != TimelineSubscriptionFailureStage::Sync
+                    || !self.matches_binding(
+                        request.connection_generation,
+                        &request.session_id,
+                        &request.subscription_id,
+                    )
+                    || self.cursor != request.request.after
+                    || self.watermark != request.request.watermark
+                    || self.request_identity.as_deref() != Some(request_identity.as_str())
+                {
+                    return Err(
+                        "timeline sync failure does not match its subscription-bound request",
+                    );
+                }
+                Ok(())
+            }
+
+            pub fn validate_for_subscription_snapshot(
+                &self,
+                subscription: &TimelineSubscribeResult,
+                request: &TimelineSubscriptionSnapshotParams,
+            ) -> Result<(), &'static str> {
+                self.validate()?;
+                request.validate_for_subscription(subscription)?;
+                let request_identity = request.request_identity()?;
+                if self.stage != TimelineSubscriptionFailureStage::Snapshot
+                    || !self.matches_binding(
+                        request.connection_generation,
+                        &request.session_id,
+                        &request.subscription_id,
+                    )
+                    || self.cursor != subscription.cursor
+                    || self.watermark != request.request.watermark
+                    || self.request_identity.as_deref() != Some(request_identity.as_str())
+                {
+                    return Err(
+                        "timeline snapshot failure does not match its subscription-bound request",
+                    );
+                }
+                Ok(())
             }
         }
 
@@ -4396,10 +4708,12 @@ mod tests {
         TimelineSnapshotCursor, TimelineSnapshotItem, TimelineSnapshotParams,
         TimelineSubscribeParams, TimelineSubscribeResult, TimelineSubscriptionEvent,
         TimelineSubscriptionFailure, TimelineSubscriptionFailureStage,
-        TimelineSubscriptionRecoveryProof, TimelineSyncPage, TimelineSyncParams, TurnState,
+        TimelineSubscriptionRecoveryProof, TimelineSubscriptionSnapshotParams,
+        TimelineSubscriptionSyncParams, TimelineSyncPage, TimelineSyncParams, TurnState,
         TIMELINE_ACTIVATE_REQUEST_SCHEMA, TIMELINE_ACTIVATE_RESULT_SCHEMA,
         TIMELINE_SUBSCRIBE_REQUEST_SCHEMA, TIMELINE_SUBSCRIBE_RESULT_SCHEMA,
         TIMELINE_SUBSCRIPTION_EVENT_SCHEMA, TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA,
+        TIMELINE_SUBSCRIPTION_SNAPSHOT_REQUEST_SCHEMA, TIMELINE_SUBSCRIPTION_SYNC_REQUEST_SCHEMA,
     };
     use super::{
         MAX_INITIALIZE_CAPABILITIES, MAX_INITIALIZE_CAPABILITY_BYTES, MAX_SAFE_JSON_INTEGER,
@@ -4979,7 +5293,7 @@ mod tests {
             "state": "sync-required",
             "cursor": {"sequence": 0, "event_id": null},
             "watermark": anchor_for(&watermark_event),
-            "next_method": "timeline/sync"
+            "next_method": "timeline/subscription-sync"
         }))
         .unwrap();
         result.validate_for_request(&request).unwrap();
@@ -5046,7 +5360,7 @@ mod tests {
             "state": "snapshot-required",
             "cursor": {"sequence": 0, "event_id": null},
             "watermark": null,
-            "next_method": "timeline/snapshot"
+            "next_method": "timeline/subscription-snapshot"
         }))
         .unwrap();
         result.validate_for_request(&request).unwrap();
@@ -5184,7 +5498,7 @@ mod tests {
             "state": "sync-required",
             "cursor": {"sequence": 0, "event_id": null},
             "watermark": null,
-            "next_method": "timeline/sync"
+            "next_method": "timeline/subscription-sync"
         }))
         .unwrap();
         inline_active["state"] = json!("active");
@@ -5198,7 +5512,7 @@ mod tests {
             "state": "sync-required",
             "cursor": {"sequence": 0, "event_id": null},
             "watermark": null,
-            "next_method": "timeline/sync"
+            "next_method": "timeline/subscription-sync"
         });
         assert!(serde_json::from_value::<TimelineSubscribeResult>(missing_watermark).is_err());
 
@@ -5215,7 +5529,7 @@ mod tests {
             "state": "sync-required",
             "cursor": {"sequence": 0, "event_id": null},
             "watermark": serde_json::to_value(&watermark).unwrap(),
-            "next_method": "timeline/sync"
+            "next_method": "timeline/subscription-sync"
         }))
         .unwrap();
         let sync_request = TimelineSyncParams {
@@ -5240,7 +5554,7 @@ mod tests {
             "state": "snapshot-required",
             "cursor": {"sequence": 0, "event_id": null},
             "watermark": null,
-            "next_method": "timeline/snapshot"
+            "next_method": "timeline/subscription-snapshot"
         }))
         .unwrap();
         let snapshot_request = TimelineSnapshotParams {
@@ -5296,6 +5610,221 @@ mod tests {
             .unwrap();
         assert!(live_failure
             .validate_for_live(&active, &watermark, 8)
+            .is_err());
+    }
+
+    #[test]
+    fn timeline_subscription_paging_binds_complete_legacy_requests_and_identities() {
+        let watermark_event = sync_event(1);
+        let watermark = TimelineAnchor {
+            sequence: watermark_event.sequence,
+            event_id: Some(watermark_event.event_id),
+        };
+        let sync_subscription: TimelineSubscribeResult = serde_json::from_value(json!({
+            "schema_version": TIMELINE_SUBSCRIBE_RESULT_SCHEMA,
+            "connection_generation": 7,
+            "session_id": "session-1",
+            "subscription_id": "subscription-1",
+            "state": "sync-required",
+            "cursor": {"sequence": 0, "event_id": null},
+            "watermark": serde_json::to_value(&watermark).unwrap(),
+            "next_method": "timeline/subscription-sync"
+        }))
+        .unwrap();
+        let legacy_sync = TimelineSyncParams {
+            session_id: "session-1".into(),
+            after: TimelineAnchor::initial(),
+            watermark: Some(watermark.clone()),
+            limit: 200,
+        };
+        let sync: TimelineSubscriptionSyncParams = serde_json::from_value(json!({
+            "schema_version": TIMELINE_SUBSCRIPTION_SYNC_REQUEST_SCHEMA,
+            "connection_generation": 7,
+            "session_id": "session-1",
+            "subscription_id": "subscription-1",
+            "request": serde_json::to_value(&legacy_sync).unwrap()
+        }))
+        .unwrap();
+        sync.validate_for_subscription(&sync_subscription).unwrap();
+        assert!(sync.is_current_generation(7));
+        assert!(!sync.is_current_generation(8));
+        assert_eq!(
+            serde_json::to_value(&sync).unwrap()["request"],
+            serde_json::to_value(&legacy_sync).unwrap()
+        );
+        assert_ne!(
+            sync.request_identity().unwrap(),
+            legacy_sync.request_identity().unwrap()
+        );
+
+        let mut later_generation = sync.clone();
+        later_generation.connection_generation = 8;
+        assert!(later_generation.validate().is_ok());
+        assert!(later_generation
+            .validate_for_subscription(&sync_subscription)
+            .is_err());
+        assert_ne!(
+            later_generation.request_identity().unwrap(),
+            sync.request_identity().unwrap()
+        );
+        let mut other_subscription = sync.clone();
+        other_subscription.subscription_id = "subscription-2".into();
+        assert!(other_subscription.validate().is_ok());
+        assert!(other_subscription
+            .validate_for_subscription(&sync_subscription)
+            .is_err());
+        assert_ne!(
+            other_subscription.request_identity().unwrap(),
+            sync.request_identity().unwrap()
+        );
+        let mut other_session = sync.clone();
+        other_session.session_id = "session-2".into();
+        other_session.request.session_id = "session-2".into();
+        assert!(other_session.validate().is_ok());
+        assert!(other_session
+            .validate_for_subscription(&sync_subscription)
+            .is_err());
+        assert_ne!(
+            other_session.request_identity().unwrap(),
+            sync.request_identity().unwrap()
+        );
+        let mut later_page = sync.clone();
+        later_page.request.after = watermark.clone();
+        later_page.request.limit = 1;
+        later_page
+            .validate_for_subscription(&sync_subscription)
+            .unwrap();
+        assert_ne!(
+            later_page.request_identity().unwrap(),
+            sync.request_identity().unwrap()
+        );
+
+        for invalid in [
+            json!({
+                "schema_version": TIMELINE_SUBSCRIPTION_SYNC_REQUEST_SCHEMA,
+                "connection_generation": 7,
+                "session_id": "session-2",
+                "subscription_id": "subscription-1",
+                "request": serde_json::to_value(&legacy_sync).unwrap()
+            }),
+            json!({
+                "schema_version": TIMELINE_SUBSCRIPTION_SYNC_REQUEST_SCHEMA,
+                "connection_generation": 7,
+                "session_id": "session-1",
+                "subscription_id": "subscription-1",
+                "request": {
+                    "session_id": "session-1",
+                    "after": {"sequence": 0, "event_id": null},
+                    "watermark": null,
+                    "limit": 200
+                }
+            }),
+        ] {
+            assert!(serde_json::from_value::<TimelineSubscriptionSyncParams>(invalid).is_err());
+        }
+
+        let mut sync_failure: TimelineSubscriptionFailure = serde_json::from_value(json!({
+            "schema_version": TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA,
+            "connection_generation": 7,
+            "session_id": "session-1",
+            "subscription_id": "subscription-1",
+            "state": "failed",
+            "stage": "sync",
+            "cursor": {"sequence": 0, "event_id": null},
+            "watermark": serde_json::to_value(&watermark).unwrap(),
+            "request_identity": sync.request_identity().unwrap(),
+            "reason": "connection-retired",
+            "retryable": true,
+            "cleanup_required": true
+        }))
+        .unwrap();
+        sync_failure
+            .validate_for_subscription_sync(&sync_subscription, &sync)
+            .unwrap();
+        sync_failure.request_identity = Some(legacy_sync.request_identity().unwrap());
+        assert!(sync_failure
+            .validate_for_subscription_sync(&sync_subscription, &sync)
+            .is_err());
+
+        let snapshot_subscription: TimelineSubscribeResult = serde_json::from_value(json!({
+            "schema_version": TIMELINE_SUBSCRIBE_RESULT_SCHEMA,
+            "connection_generation": 7,
+            "session_id": "session-1",
+            "subscription_id": "subscription-1",
+            "state": "snapshot-required",
+            "cursor": {"sequence": 0, "event_id": null},
+            "watermark": null,
+            "next_method": "timeline/subscription-snapshot"
+        }))
+        .unwrap();
+        let legacy_snapshot = TimelineSnapshotParams {
+            session_id: "session-1".into(),
+            snapshot_identity: None,
+            watermark: None,
+            after: None,
+            limit: 200,
+        };
+        let snapshot: TimelineSubscriptionSnapshotParams = serde_json::from_value(json!({
+            "schema_version": TIMELINE_SUBSCRIPTION_SNAPSHOT_REQUEST_SCHEMA,
+            "connection_generation": 7,
+            "session_id": "session-1",
+            "subscription_id": "subscription-1",
+            "request": serde_json::to_value(&legacy_snapshot).unwrap()
+        }))
+        .unwrap();
+        snapshot
+            .validate_for_subscription(&snapshot_subscription)
+            .unwrap();
+        assert!(snapshot.is_current_generation(7));
+        assert_eq!(
+            serde_json::to_value(&snapshot).unwrap()["request"],
+            serde_json::to_value(&legacy_snapshot).unwrap()
+        );
+        assert_ne!(
+            snapshot.request_identity().unwrap(),
+            legacy_snapshot.request_identity().unwrap()
+        );
+
+        let mut continuation = snapshot.clone();
+        continuation.request.snapshot_identity = Some(format!(
+            "timeline-session-snapshot:sha256:{}",
+            "a".repeat(64)
+        ));
+        continuation.request.watermark = Some(watermark.clone());
+        continuation.request.after = Some(TimelineSnapshotCursor {
+            ordinal: 1,
+            item_id: "item-1".into(),
+            item_identity: format!("timeline-session-snapshot-item:sha256:{}", "b".repeat(64)),
+        });
+        continuation.request.limit = 1;
+        continuation
+            .validate_for_subscription(&snapshot_subscription)
+            .unwrap();
+        assert_ne!(
+            continuation.request_identity().unwrap(),
+            snapshot.request_identity().unwrap()
+        );
+
+        let snapshot_failure: TimelineSubscriptionFailure = serde_json::from_value(json!({
+            "schema_version": TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA,
+            "connection_generation": 7,
+            "session_id": "session-1",
+            "subscription_id": "subscription-1",
+            "state": "failed",
+            "stage": "snapshot",
+            "cursor": {"sequence": 0, "event_id": null},
+            "watermark": serde_json::to_value(&watermark).unwrap(),
+            "request_identity": continuation.request_identity().unwrap(),
+            "reason": "connection-retired",
+            "retryable": true,
+            "cleanup_required": true
+        }))
+        .unwrap();
+        snapshot_failure
+            .validate_for_subscription_snapshot(&snapshot_subscription, &continuation)
+            .unwrap();
+        assert!(snapshot_failure
+            .validate_for_subscription_snapshot(&snapshot_subscription, &snapshot)
             .is_err());
     }
 

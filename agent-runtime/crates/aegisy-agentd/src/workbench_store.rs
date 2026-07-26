@@ -27,8 +27,8 @@ use crate::operation_reconciliation::{
     reconcile as reconcile_operation, EventState, ReconciliationInput, ReconciliationResult,
 };
 use crate::public_timeline_journal::{
-    self, JournalError as PublicTimelineJournalError, TimelinePruneResult, TimelineRetentionState,
-    TimelineSyncPage, TimelineWatermark,
+    self, JournalError as PublicTimelineJournalError, TimelineAnchor, TimelinePruneResult,
+    TimelineRetentionState, TimelineSyncPage, TimelineWatermark,
 };
 use crate::public_timeline_projection::VisibleStateFloorSnapshot;
 use crate::session_compaction::{activate_review, CompactionCheckpointReview};
@@ -11866,6 +11866,21 @@ impl WorkbenchStore {
         self.ensure_session_readable(session_id)?;
         public_timeline_journal::materialize_visible_snapshot(&self.connection, session_id)
             .map_err(public_timeline_error)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn materialize_public_timeline_visible_snapshot_through(
+        &self,
+        session_id: &str,
+        through: &TimelineAnchor,
+    ) -> Result<VisibleStateFloorSnapshot, WorkbenchStoreError> {
+        self.ensure_session_readable(session_id)?;
+        public_timeline_journal::materialize_visible_snapshot_through(
+            &self.connection,
+            session_id,
+            through,
+        )
+        .map_err(public_timeline_error)
     }
 
     pub(crate) fn sync_public_timeline_from_anchor(
@@ -27575,6 +27590,11 @@ mod tests {
             Some(third.event_id.as_str())
         );
         assert_eq!(page.next_after_sequence, Some(2));
+        let fixed_snapshot_head = TimelineAnchor {
+            sequence: third.sequence,
+            event_id: Some(third.event_id.clone()),
+            timestamp_ms: third.timestamp_ms,
+        };
         drop(store);
 
         let mut reopened = WorkbenchStore::open(&root.path).unwrap();
@@ -27582,6 +27602,25 @@ mod tests {
             .sequence(13, "timeline-session", "turn-two", "turn.started", None)
             .unwrap();
         reopened.append_public_timeline_event(&continued).unwrap();
+        let fixed_snapshot = reopened
+            .materialize_public_timeline_visible_snapshot_through(
+                "timeline-session",
+                &fixed_snapshot_head,
+            )
+            .unwrap();
+        assert_eq!(fixed_snapshot.anchor.sequence, third.sequence);
+        assert_eq!(fixed_snapshot.anchor.event_id, fixed_snapshot_head.event_id);
+        assert_eq!(fixed_snapshot.anchor.timestamp_ms, third.timestamp_ms);
+        assert_eq!(fixed_snapshot.items.len(), 1);
+        assert!(fixed_snapshot.running_turn_id.is_none());
+        let current_snapshot = reopened
+            .materialize_public_timeline_visible_snapshot("timeline-session")
+            .unwrap();
+        assert_eq!(current_snapshot.anchor.sequence, continued.sequence);
+        assert_eq!(
+            current_snapshot.running_turn_id.as_deref(),
+            Some("turn-two")
+        );
         let stable = reopened
             .sync_public_timeline("timeline-session", 2, Some(page.watermark.clone()), 2)
             .unwrap();

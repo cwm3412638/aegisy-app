@@ -57,8 +57,12 @@ protected:
 private:
     enum class TimelineRecoveryState {
         Untracked,
-        Live,
-        Syncing,
+        Subscribing,
+        RecoveringSync,
+        RecoveringSnapshot,
+        AwaitingActivation,
+        Active,
+        Failed,
         Frozen,
         Unrecoverable,
     };
@@ -84,6 +88,13 @@ private:
         TimelineProjection projection;
         TimelineProjection syncProjection;
         bool syncProjectionValid = false;
+        quint64 subscriptionGeneration = 0;
+        QString subscriptionId;
+        QString subscribeRequestId;
+        QString activationRequestId;
+        QString activationSource;
+        QJsonObject subscriptionCursor;
+        QJsonObject subscriptionWatermark;
         QString syncRequestId;
         QString snapshotRequestId;
         bool snapshotRecoveryRequired = false;
@@ -104,6 +115,7 @@ private:
         qsizetype stagedSyncBytes = 0;
         QList<QJsonObject> queuedLiveEvents;
         qsizetype queuedLiveBytes = 0;
+        int subscriptionRetryCount = 0;
         bool retryOnReconnect = false;
     };
 
@@ -205,11 +217,19 @@ private:
                                TimelineProjection *projection,
                                QJsonObject *validatedItem = nullptr,
                                bool *recognizedEvent = nullptr) const;
-    void handleLiveTimelineEvent(const QJsonObject &event);
+    void handleLiveTimelineEvent(const QJsonObject &event,
+                                 bool subscriptionOwned = false);
     void handleTimelineSyncPage(const QString &requestId, const QJsonObject &page);
     void handleTimelineSnapshotPage(const QString &requestId, const QJsonObject &page);
+    void handleTimelineSubscribed(const QString &requestId, const QJsonObject &result);
+    void handleTimelineSubscriptionEvent(const QJsonObject &event);
+    void handleTimelineSubscriptionFailure(const QString &requestId,
+                                           const QJsonObject &failure);
+    void handleTimelineSubscriptionActivated(const QString &requestId,
+                                             const QJsonObject &result);
     TimelineSessionState *ensureTimelineSession(const QString &sessionId);
     void beginTimelineSync(const QString &sessionId);
+    void beginTimelineSubscription(const QString &sessionId);
     void beginTimelineSnapshot(const QString &sessionId);
     void suspendTimelinesForDisconnect();
     void markRuntimeBackedStateUnverified();
@@ -223,6 +243,11 @@ private:
     bool runtimeRecoveryRequestsAllowed() const;
     void releaseTimelinePendingAccounting(const TimelineSessionState &state);
     void clearTimelinePending(TimelineSessionState &state);
+    void clearTimelineSubscriptionAuthority(TimelineSessionState &state);
+    void recoverTimelineSubscriptionOnNewConnection(const QString &sessionId,
+                                                    const QString &detail);
+    void commitTimelineSyncRecovery(const QString &sessionId);
+    void commitTimelineSnapshotRecovery(const QString &sessionId);
     void freezeTimelineForSnapshotRecovery(const QString &sessionId,
                                            bool retryOnReconnect);
     void freezeTimelineSession(const QString &sessionId, bool unrecoverable,
@@ -497,8 +522,13 @@ private:
     bool m_timelineTrackingExhausted = false;
     bool m_timelineSyncAvailable = false;
     bool m_timelineSnapshotAvailable = false;
+    bool m_timelineSubscriptionAvailable = false;
     std::function<QString(const QString &, const QString &, const QJsonObject &,
                           const QJsonObject &, int)> m_timelineSnapshotRequester;
+    std::function<QString(quint64, const QString &, const QString &, const QString &,
+                          const QJsonObject &, const QJsonObject &, const QString &)>
+        m_timelineSubscriptionActivationRequester;
+    std::function<void(const QString &)> m_timelineSubscriptionConnectionAbandoner;
     std::function<void(const QJsonObject &, const QJsonObject &, bool)> m_timelinePresenter;
     QHash<QString, QString> m_commandArtifactRequests;
     QHash<QString, QTreeWidgetItem *> m_treeItems;

@@ -203,10 +203,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   failure retains accepted `started`/`delta` partial Items, while completed and
   interrupted terminals reject those open streams; repeatable `updated` snapshots may
   remain at terminal, and a revision-one atomic `truncated` marker is valid. Durable
-  public journaling, fixed-watermark catch-up, and structured retention-gap snapshot
-  recovery are now partially implemented under `3.5`; subscription, complete
-  reconnect orchestration, and acknowledgement remain open. Agent/Codex
-  remains read-only.
+  public journaling, fixed-watermark catch-up, structured retention-gap snapshot
+  recovery, live subscription, and bounded reconnect are implemented under `3.5`;
+  explicit acknowledgement and complete Windows reconnect/runtime evidence remain
+  open. Agent/Codex remains read-only.
 - OpenSpec task `3.5` now has an end-to-end fixed-watermark catch-up slice. Workbench
   schema v16 stores exact validated `timeline-event/0.1` envelopes behind one
   compare-and-swap cursor per Session, restores Sequencer state page by page, and
@@ -257,9 +257,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   `runtime-heartbeat-request/0.1` / `runtime-heartbeat/0.1` nonce round trip,
   independent queue-saturation reachability, Qt single-flight 5-second/15-second
   liveness gating, generation-bound late-response rejection, and the Windows
-  packaging workflow's Qt Runtime environment-test gate. Live subscription,
-  bounded reconnect orchestration, explicit acknowledgement, and complete Windows
-  reconnect evidence remain open. Keep `3.5` unchecked.
+  packaging workflow's Qt Runtime environment-test gate. Live subscription and
+  bounded reconnect orchestration are now implemented. Explicit acknowledgement and
+  complete Windows reconnect/runtime evidence remain open. Keep `3.5` unchecked.
 - The Timeline snapshot recovery slice is implemented end to end. AAP types and the
   stable Schema define the
   exact null-only `timeline/snapshot` request, fixed floor/watermark, strict
@@ -1569,8 +1569,8 @@ $HOME/.cargo/bin/cargo clippy --workspace --all-targets \
 git diff --check
 ```
 
-Current verified baseline: the last complete desktop run remains 16 tests; the
-current AAP `3.3` Rust run has 8 AAP type tests, 630 passed sidecar unit tests plus
+Historical AAP `3.3` verified baseline: the complete desktop run was 16 tests; that
+Rust run had 8 AAP type tests, 630 passed sidecar unit tests plus
 one explicitly ignored live Codex fixture, 6 daemon-main tests, 13 handshake Runtime
 tests, 5 Draft 2020-12 handshake Schema tests, 63 Rust protocol tests, ten
 context-threshold contract tests, 22 macOS sidecar stdio/Codex contract tests, and
@@ -2774,7 +2774,7 @@ Implemented visual baseline:
 
 ## Verification Snapshot (2026-07-26)
 
-- The non-routable Timeline subscription contract foundation passes the complete
+- The earlier contract-only Timeline subscription foundation passed the complete
   Rust workspace: 37 AAP type, 729 `aegisy-agentd` library tests with one ignored
   live fixture, 7 daemon-main, 10 context-threshold, 14 handshake Runtime, 20
   handshake Schema, 67 protocol, and 23 stdio/Codex tests (907 passed, zero failed,
@@ -2782,9 +2782,9 @@ Implemented visual baseline:
   validation, and `git diff --check` pass. The types require a private complete
   Sync/Snapshot structural recovery proof before activation and an exact complete
   request identity or active-state binding for terminal failures. The proof is not
-  connection authority; future Runtime activation must also consume the exact
-  connection-owned registry token. No method, capability, Runtime/Qt path, mutation authority,
-  or automatic pruning was added; keep OpenSpec `3.5` unchecked.
+  connection authority. The live state machine recorded below supersedes that stage
+  and now also consumes the exact connection-owned registry token. The historical
+  count is retained only as prior gate evidence.
 
 - The out-of-band Runtime heartbeat stage passes 28 AAP tests, 729
   `aegisy-agentd` library tests with one ignored live fixture, 7 daemon-main, 10
@@ -2872,8 +2872,9 @@ Implemented visual baseline:
   checkpoint restore only internal lifecycle authority; schema v17 supplies the
   separate public visible-state snapshot. The strict content-free `-32148`
   retention-gap response and fixed-head snapshot recovery are implemented end to
-  end. Automatic pruning remains disabled. Subscription, complete reconnect
-  orchestration, explicit acknowledgement, and Windows recovery evidence
+  end. Automatic pruning remains disabled. Subscription and complete reconnect
+  orchestration were absent at that historical stage and are superseded by the live
+  subscription stage below; explicit acknowledgement and Windows recovery evidence
   remain absent.
 
 - The AAP initialization-negotiation stage completes OpenSpec `3.3`. Rust and Qt
@@ -2905,7 +2906,8 @@ Implemented visual baseline:
   10 threshold, 13 handshake Runtime, 12 Schema, 63 protocol, 23 stdio/Codex, all
   16 desktop CTests, strict Clippy, formatting, strict OpenSpec validation, and
   `git diff --check`. The partial fixed-watermark replay/gap slice is now recorded
-  above; subscription/complete reconnect/ack behavior remains `3.5`.
+  above. Live subscription and bounded reconnect are now recorded below; explicit
+  acknowledgement and Windows evidence remain under `3.5`.
 
 - The Codex degradation/provider hardening stage passes 630 `aegisy-agentd`
   library tests with one ignored live fixture, 63 protocol tests, and 21 stdio/Codex
@@ -2915,14 +2917,14 @@ Implemented visual baseline:
   running. Duplicate, decreasing, and gapped events remain inert. Rust formatting,
   `git diff --check`, the focused Qt degradation/Timeline run, and the ordinary Qt
   render run pass. Fixed-watermark replay and per-Session gap catch-up are now
-  partial `3.5` foundations; subscription, complete reconnect, acknowledgement,
-  Windows evidence, complete vendor capability negotiation, and
+  partial `3.5` foundations. Live subscription and bounded reconnect are now
+  implemented; acknowledgement, Windows evidence, complete vendor capability negotiation, and
   remaining runtime-only desktop surfaces are still absent, so OpenSpec `3.5` and
   `7.9` remain unchecked.
 
 - The current Rust workspace passes formatting, full workspace tests, and strict
-  workspace Clippy with the exact current counts recorded in the first snapshot
-  bullet above.
+  workspace Clippy with the exact current counts recorded in the
+  `Live Timeline Subscription And Ownership Recovery` section below.
 - The previously verified bundled application Node runtime passes both local gateway
   integration suites and JavaScript syntax checks. The current Homebrew OpenSpec CLI
   passes `openspec validate build-aegisy-agent-workbench --strict`; the earlier
@@ -3034,10 +3036,10 @@ Implemented visual baseline:
   Schema 18, protocol 67, and stdio/Codex 23 all passed. Strict Clippy, Rust
   formatting, `cmake --build build -j4`, and `git diff --check` passed. Strict
   OpenSpec validation passes after the documentation update.
-- OpenSpec `3.5` remains intentionally unchecked. Live subscription, explicit
-  acknowledgement, race-free subscribe/sync/activate orchestration, and complete
-  Windows reconnect/runtime evidence are still missing. Automatic Timeline pruning
-  remains disabled. The detailed plan is in
+- OpenSpec `3.5` remains intentionally unchecked. Live subscription and race-free
+  subscribe/sync/activate orchestration are implemented by the stage below; explicit
+  acknowledgement and complete Windows reconnect/runtime evidence are still missing.
+  Automatic Timeline pruning remains disabled. The detailed plan is in
   `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Mutation Acknowledgement Contract Foundation (2026-07-26)
@@ -3061,47 +3063,65 @@ Implemented visual baseline:
   23 stdio/Codex tests. Strict Clippy, Rust formatting, strict OpenSpec validation,
   and `git diff --check` pass.
 
-## Timeline Subscription Contract Foundation (2026-07-26)
+## Live Timeline Subscription And Ownership Recovery (2026-07-26)
 
-- Stable AAP `$defs` and Rust types now define strict metadata for Timeline
-  subscribe, recovery activation, active live events, and terminal failures. This
-  foundation is deliberately non-routable: no top-level method schema, negotiated
-  capability, Runtime handler, Qt request path, or execution authority was added.
-- Subscribe can return only `sync-required` with one non-null fixed watermark or
-  `snapshot-required` with a null watermark; it cannot become active inline. A
-  private, non-serializable `TimelineSubscriptionRecoveryProof` is the typed
-  structural bridge to activation, not connection authority. Sync proof construction
-  validates one complete contiguous fixed-watermark page chain under a
-  10,000-Event/64 MiB bound. Snapshot proof construction validates the complete
-  fixed-header page chain, ordered Items, totals, active/open Turn state, and the
-  domain-separated Snapshot identity. Well-formed but unverified activation data
-  cannot produce this proof.
-- Terminal failure validation is stage-specific for subscribe, sync, snapshot,
-  activate, and live state and binds the exact connection generation, Session,
-  subscription, cursor, watermark, and a domain-separated identity of the complete
-  typed request or exact active state. Snapshot identity, continuation cursor, and
-  page-limit drift cannot reuse a late failure. Every accepted failure requires cleanup.
-- The complete Rust workspace passes 37 AAP type tests, 729 `aegisy-agentd` library
-  tests with one ignored live fixture, 7 daemon-main, 10 context-threshold, 14
-  handshake Runtime, 20 handshake Schema, 67 protocol, and 23 stdio/Codex tests:
-  907 passed, zero failed, and one ignored. Strict workspace Clippy, Rust formatting,
-  JSON Schema parsing, strict OpenSpec validation, and `git diff --check` pass.
-- OpenSpec `3.5` remains unchecked. The next stage must bind every Sync/Snapshot page
-  request to a connection-owned attempt, forbid subscription-ID reuse, atomically
-  register and capture the fixed head, buffer later events, consume the exact
-  connection-owned registry token, atomically activate and drain that buffer, retire
-  all state on every failure/disconnect, and implement the
-  matching Qt generation state machine. Explicit acknowledgement and complete
-  Windows reconnect/runtime evidence also remain absent. Automatic Timeline pruning
-  remains disabled, and Agent/Codex remains read-only.
+- Stable AAP Schema, Rust types, Runtime dispatch, and Qt now negotiate
+  `timeline.subscription.fixed-watermark` and register `timeline/subscribe`,
+  `timeline/subscription-sync`, `timeline/subscription-snapshot`, and
+  `timeline/subscription-activate`, plus subscription-bound live-event and terminal-
+  failure notifications. Runtime advertises the capability only with a healthy
+  writable Workbench Store; recovery mode does not advertise it.
+- Runtime owns one connection-generation registry. Subscription IDs are never reused
+  in that generation, each Session has at most one attempt, and registration captures
+  one durable floor/head/head timestamp. Every Sync/Snapshot page is bound to that
+  attempt. Retained Sync/Snapshot recovery units and events after the fixed head share
+  one connection-wide 10,000-unit/64 MiB aggregate bound; completion, activation,
+  accepted failure, retirement, and disconnect release their exact ownership once. The first and later
+  post-watermark timestamps cannot move before the durable fixed-head timestamp.
+  Activation consumes both the complete structural recovery proof and its private
+  registry token, returns the exact active result, and then drains buffered events in
+  sequence. A cross-Session or cross-generation Sync/Snapshot/Activate request is
+  rejected without retiring the real owner; every accepted bound failure retires only
+  its bound attempt. Disconnect drops the complete registry, contexts, IDs, recovery
+  material, events, and bytes.
+- Negotiated Runtime suppresses unbound bare `event` notifications. `turn/start`
+  therefore fails with `-32152` unless the Session owns a current subscription
+  attempt, preventing a nominally successful request from silently losing Timeline
+  output. Qt remains stricter for product UX and enables Send only after the exact
+  activation response. It privately stages Sync/Snapshot state, preserves confirmed
+  projection and queued input on failure, makes stale generation/request/Session and
+  pre-activation traffic inert, and does not replace an Active attempt after ordinary
+  `session/read`. A genuine Active sequence gap still starts recovery.
+- Retryable typed failures use a fresh subscription ID with bounded Qt backoff of
+  0/250/1000 ms and stop after three attempts. A heartbeat deadline while subscribe,
+  subscription-sync, subscription-snapshot, or activate is pending creates ambiguous
+  server ownership. Because AAP has no unsubscribe shortcut, Qt seals and terminates
+  the old connection, retires all pending request IDs, and starts exactly one bounded
+  fresh process generation through the existing reconnect barrier. With no pending
+  subscription request, Heartbeat Unknown retains the same-process probe behavior.
+  Any locally invalid subscribe/Sync/Snapshot/activate result, active wrapper/cursor
+  drift, or unsafe continuation also freezes confirmed state, preserves queued input,
+  and replaces the Runtime generation instead of completing a false reconnect.
+  Occupied `session-attempt-exists` and reused `subscription-id-reused` identities
+  likewise require a fresh generation; they are not retried on the connection whose
+  ownership cannot be proven. Old-generation traffic remains inert.
+- The final complete gates pass: 38 AAP type, 753 `aegisy-agentd` library tests
+  with one ignored live fixture, 7 daemon-main, 10 context-threshold, 21 handshake/
+  subscription Runtime, 22 handshake Schema, 67 protocol, and 23 stdio/Codex tests
+  (941 passed, zero failed, one ignored). Strict workspace Clippy, Rust formatting,
+  `cmake --build build -j4`, all 16 desktop CTests, JSON Schema parsing, strict
+  OpenSpec validation, and `git diff --check` pass.
+- OpenSpec `3.5` remains unchecked. Explicit mutation acknowledgement and complete
+  Windows reconnect/runtime evidence remain absent. Automatic Timeline pruning stays
+  disabled, and Agent/Codex remains read-only.
 
 ## Next Product Priorities
 
-1. Continue OpenSpec `3.5` with bounded Runtime process reconnect, then the
-   subscribe/sync/activate race boundary, explicit acknowledgement, and Windows
-   recovery evidence. Fixed-watermark replay, structured retention-gap snapshot
-   recovery, and out-of-band heartbeat are implemented. Keep automatic pruning
-   disabled until the remaining recovery path and cross-platform gates are verified.
+1. Continue OpenSpec `3.5` with durable explicit acknowledgement, then obtain the
+   complete Windows reconnect/runtime evidence. Fixed-watermark replay, structured
+   retention-gap snapshot recovery, out-of-band heartbeat, bounded reconnect, and
+   live subscribe/sync-or-snapshot/activate are implemented. Keep automatic pruning
+   disabled until the remaining acknowledgement and cross-platform gates are verified.
 2. Validate the hardened TLS installer on a clean Windows x64 VM.
 3. Reproduce and correlate any remaining streaming disconnect with redacted logs.
 4. Continue consolidating widget-local QSS and replace remaining Qt stock icons;

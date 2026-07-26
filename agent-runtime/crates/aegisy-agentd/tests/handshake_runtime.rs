@@ -1,6 +1,17 @@
 use aegisy_aap::MAX_AAP_FRAME_BYTES;
 use aegisy_agentd::{Runtime, STABLE_CAPABILITY_REGISTRY};
 use serde_json::{json, Value};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const TIMELINE_SUBSCRIPTION_CAPABILITY: &str = "timeline.subscription.fixed-watermark";
+const TIMELINE_SUBSCRIPTION_REQUEST_ROUTES: [(&str, &str); 4] = [
+    ("subscribe", "timeline/subscribe"),
+    ("subscription-sync", "timeline/subscription-sync"),
+    ("subscription-snapshot", "timeline/subscription-snapshot"),
+    ("subscription-activate", "timeline/subscription-activate"),
+];
 
 fn request(id: &str, method: &str, params: Value) -> String {
     json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
@@ -57,6 +68,126 @@ fn terminal_platform_capability() -> &'static str {
     {
         "terminal.pty.unsupported"
     }
+}
+
+fn timeline_subscription_test_root(label: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("aegisy-handshake-{label}-{unique}"))
+}
+
+fn ready_timeline_subscription_runtime(root: &Path) -> Runtime {
+    fs::create_dir_all(root).unwrap();
+    let mut runtime = Runtime::with_store(root).unwrap();
+    let initialized = ready(
+        &mut runtime,
+        &[
+            "runtime.preview",
+            "permission.read-only",
+            "session.chat",
+            "timeline.streaming",
+            TIMELINE_SUBSCRIPTION_CAPABILITY,
+            "timeline.replay.fixed-watermark",
+            "timeline.snapshot.current",
+        ],
+    );
+    assert!(initialized["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == TIMELINE_SUBSCRIPTION_CAPABILITY));
+    runtime
+}
+
+fn start_chat_session(runtime: &mut Runtime, request_id: &str) -> String {
+    let messages = runtime.handle_line(&request(
+        request_id,
+        "session/start",
+        json!({"mode": "chat"}),
+    ));
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    messages[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn start_preview_turn(runtime: &mut Runtime, request_id: &str, session_id: &str) -> Vec<Value> {
+    runtime.handle_line(&request(
+        request_id,
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": request_id,
+            "idempotency_key": request_id
+        }),
+    ))
+}
+
+fn subscribe(
+    runtime: &mut Runtime,
+    request_id: &str,
+    session_id: &str,
+    subscription_id: &str,
+    connection_generation: u64,
+) -> Value {
+    let messages = runtime.handle_line(&request(
+        request_id,
+        "timeline/subscribe",
+        json!({
+            "schema_version": "timeline-subscribe-request/0.1",
+            "connection_generation": connection_generation,
+            "session_id": session_id,
+            "subscription_id": subscription_id,
+            "cursor": {"sequence": 0, "event_id": null},
+            "watermark": null
+        }),
+    ));
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].get("result").is_some(), "{messages:?}");
+    messages[0]["result"].clone()
+}
+
+fn subscription_sync(runtime: &mut Runtime, request_id: &str, subscription: &Value) -> Vec<Value> {
+    runtime.handle_line(&request(
+        request_id,
+        "timeline/subscription-sync",
+        json!({
+            "schema_version": "timeline-subscription-sync-request/0.1",
+            "connection_generation": subscription["connection_generation"],
+            "session_id": subscription["session_id"],
+            "subscription_id": subscription["subscription_id"],
+            "request": {
+                "session_id": subscription["session_id"],
+                "after": subscription["cursor"],
+                "watermark": subscription["watermark"],
+                "limit": 200
+            }
+        }),
+    ))
+}
+
+fn activate_subscription(
+    runtime: &mut Runtime,
+    request_id: &str,
+    subscription: &Value,
+) -> Vec<Value> {
+    runtime.handle_line(&request(
+        request_id,
+        "timeline/subscription-activate",
+        json!({
+            "schema_version": "timeline-subscription-activate-request/0.1",
+            "connection_generation": subscription["connection_generation"],
+            "session_id": subscription["session_id"],
+            "subscription_id": subscription["subscription_id"],
+            "source": "sync",
+            "cursor": subscription["watermark"],
+            "watermark": subscription["watermark"],
+            "snapshot_identity": null
+        }),
+    ))
 }
 
 #[test]
@@ -681,21 +812,577 @@ fn terminal_stop_requires_lifecycle_platform_and_out_of_band_capabilities() {
 fn stable_capability_registry_remains_within_initialize_bounds() {
     assert!(!STABLE_CAPABILITY_REGISTRY.is_empty());
     assert!(STABLE_CAPABILITY_REGISTRY.len() <= 128);
-    assert!(!STABLE_CAPABILITY_REGISTRY
-        .iter()
-        .any(|capability| capability.starts_with("timeline.subscription")));
+    assert_eq!(
+        STABLE_CAPABILITY_REGISTRY
+            .iter()
+            .filter(|capability| **capability == TIMELINE_SUBSCRIPTION_CAPABILITY)
+            .count(),
+        1
+    );
+}
 
-    let mut runtime = Runtime::default();
-    ready(&mut runtime, &["runtime.preview", "permission.read-only"]);
+#[test]
+fn timeline_subscription_routes_require_the_negotiated_capability() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "aegisy-handshake-timeline-subscription-gate-{unique}"
+    ));
+    fs::create_dir_all(&root).unwrap();
+
+    let mut runtime = Runtime::with_store(&root).unwrap();
+    let initialized = ready(
+        &mut runtime,
+        &[
+            "runtime.preview",
+            "permission.read-only",
+            "timeline.replay.fixed-watermark",
+            "timeline.snapshot.current",
+        ],
+    );
+    let capabilities = initialized["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap();
+    assert!(!capabilities
+        .iter()
+        .any(|capability| capability == TIMELINE_SUBSCRIPTION_CAPABILITY));
+
+    for (id, method) in TIMELINE_SUBSCRIPTION_REQUEST_ROUTES {
+        let response = runtime.handle_line(&request(id, method, json!({})));
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0]["error"]["code"], -32006, "{response:?}");
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn healthy_store_advertises_subscription_routes_and_preserves_legacy_recovery_routes() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "aegisy-handshake-timeline-subscription-healthy-{unique}"
+    ));
+    fs::create_dir_all(&root).unwrap();
+
+    let mut runtime = Runtime::with_store(&root).unwrap();
+    let initialized = ready(
+        &mut runtime,
+        &[
+            "runtime.preview",
+            "permission.read-only",
+            TIMELINE_SUBSCRIPTION_CAPABILITY,
+            "timeline.replay.fixed-watermark",
+            "timeline.snapshot.current",
+        ],
+    );
+    let capabilities = initialized["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap();
+    for capability in [
+        TIMELINE_SUBSCRIPTION_CAPABILITY,
+        "timeline.replay.fixed-watermark",
+        "timeline.snapshot.current",
+    ] {
+        assert!(
+            capabilities.iter().any(|candidate| candidate == capability),
+            "missing negotiated capability {capability}: {initialized}"
+        );
+    }
+
+    for (id, method) in TIMELINE_SUBSCRIPTION_REQUEST_ROUTES {
+        let response = runtime.handle_line(&request(id, method, json!({})));
+        assert_eq!(response.len(), 1);
+        assert_ne!(response[0]["error"]["code"], -32006, "{response:?}");
+        assert_ne!(response[0]["error"]["code"], -32601, "{response:?}");
+    }
     for (id, method) in [
-        ("subscription-not-routable", "timeline/subscribe"),
-        ("activation-not-routable", "timeline/activate"),
-        ("failure-not-routable", "timeline/subscription-failure"),
+        ("legacy-sync", "timeline/sync"),
+        ("legacy-snapshot", "timeline/snapshot"),
     ] {
         let response = runtime.handle_line(&request(id, method, json!({})));
         assert_eq!(response.len(), 1);
-        assert_eq!(response[0]["error"]["code"], -32601);
+        assert_ne!(response[0]["error"]["code"], -32006, "{response:?}");
+        assert_ne!(response[0]["error"]["code"], -32601, "{response:?}");
     }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn store_recovery_mode_never_advertises_timeline_subscription() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "aegisy-handshake-timeline-subscription-recovery-{unique}"
+    ));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("aegisy-workbench.sqlite3"),
+        b"not-a-sqlite-database",
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::with_store(&root).unwrap();
+    let initialized = ready(
+        &mut runtime,
+        &[
+            "runtime.recovery.read-only",
+            "permission.read-only",
+            TIMELINE_SUBSCRIPTION_CAPABILITY,
+            "timeline.replay.fixed-watermark",
+            "timeline.snapshot.current",
+        ],
+    );
+    assert_eq!(
+        initialized["result"]["backend"]["status"],
+        "read-only-recovery"
+    );
+    let capabilities = initialized["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap();
+    assert!(!capabilities
+        .iter()
+        .any(|capability| capability == TIMELINE_SUBSCRIPTION_CAPABILITY));
+
+    for (id, method) in TIMELINE_SUBSCRIPTION_REQUEST_ROUTES {
+        let response = runtime.handle_line(&request(id, method, json!({})));
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0]["error"]["code"], -32006, "{response:?}");
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn timeline_subscription_sync_keeps_its_fixed_head_and_activates_before_drain() {
+    let root = timeline_subscription_test_root("timeline-subscription-fixed-head");
+    let mut runtime = ready_timeline_subscription_runtime(&root);
+    let session_id = start_chat_session(&mut runtime, "session-fixed-head");
+
+    let subscription = subscribe(
+        &mut runtime,
+        "subscribe-fixed-head",
+        &session_id,
+        "subscription-fixed-head",
+        1,
+    );
+    assert_eq!(subscription["state"], "sync-required");
+    assert_eq!(subscription["next_method"], "timeline/subscription-sync");
+    assert_eq!(subscription["watermark"]["sequence"], 0);
+    let fixed_head = subscription["watermark"].clone();
+
+    let buffered_turn = start_preview_turn(&mut runtime, "turn-buffered", &session_id);
+    assert_eq!(buffered_turn.len(), 1, "{buffered_turn:?}");
+    assert!(buffered_turn
+        .iter()
+        .all(|message| message["method"] != "event"));
+
+    let sync = subscription_sync(&mut runtime, "sync-fixed-head", &subscription);
+    assert_eq!(sync.len(), 1, "{sync:?}");
+    assert_eq!(sync[0]["result"]["watermark"], fixed_head);
+    assert!(sync[0]["result"]["events"].as_array().unwrap().is_empty());
+    assert_eq!(sync[0]["result"]["complete"], true);
+    assert!(sync[0]["result"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|event| event["sequence"].as_u64().unwrap() == 0));
+
+    let activation = activate_subscription(&mut runtime, "activate-fixed-head", &subscription);
+    assert_eq!(activation.len(), 7, "{activation:?}");
+    assert_eq!(activation[0]["id"], "activate-fixed-head");
+    assert_eq!(activation[0]["result"]["state"], "active");
+    assert_eq!(activation[0]["result"]["cursor"], fixed_head);
+    for (index, message) in activation[1..].iter().enumerate() {
+        assert_eq!(message["method"], "timeline/subscription-event");
+        assert_eq!(
+            message["params"]["schema_version"],
+            "timeline-subscription-event/0.1"
+        );
+        assert_eq!(message["params"]["session_id"], session_id);
+        assert_eq!(
+            message["params"]["subscription_id"],
+            "subscription-fixed-head"
+        );
+        assert_eq!(message["params"]["event"]["sequence"], 1 + index as u64);
+    }
+    assert!(activation
+        .iter()
+        .all(|message| message["method"] != "event"));
+
+    let live_turn = start_preview_turn(&mut runtime, "turn-live", &session_id);
+    assert_eq!(live_turn.len(), 7, "{live_turn:?}");
+    assert!(live_turn[1..]
+        .iter()
+        .all(|message| message["method"] == "timeline/subscription-event"));
+    assert!(live_turn.iter().all(|message| message["method"] != "event"));
+
+    drop(runtime);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn timeline_subscription_buffers_and_drains_each_session_in_isolation() {
+    let root = timeline_subscription_test_root("timeline-subscription-isolation");
+    let mut runtime = ready_timeline_subscription_runtime(&root);
+    let session_a = start_chat_session(&mut runtime, "session-a");
+    let session_b = start_chat_session(&mut runtime, "session-b");
+
+    let subscription_a = subscribe(&mut runtime, "subscribe-a", &session_a, "subscription-a", 9);
+    assert_eq!(subscription_a["watermark"]["sequence"], 0);
+    let subscription_b = subscribe(&mut runtime, "subscribe-b", &session_b, "subscription-b", 9);
+
+    assert_eq!(
+        start_preview_turn(&mut runtime, "turn-a-buffered", &session_a).len(),
+        1
+    );
+    assert_eq!(
+        subscription_sync(&mut runtime, "sync-a", &subscription_a).len(),
+        1
+    );
+    assert_eq!(
+        subscription_sync(&mut runtime, "sync-b", &subscription_b).len(),
+        1
+    );
+
+    let activation_b = activate_subscription(&mut runtime, "activate-b", &subscription_b);
+    assert_eq!(activation_b.len(), 1, "{activation_b:?}");
+    assert_eq!(activation_b[0]["result"]["session_id"], session_b);
+
+    let activation_a = activate_subscription(&mut runtime, "activate-a", &subscription_a);
+    assert_eq!(activation_a.len(), 7, "{activation_a:?}");
+    assert!(activation_a[1..].iter().all(|message| {
+        message["method"] == "timeline/subscription-event"
+            && message["params"]["session_id"] == session_a
+            && message["params"]["subscription_id"] == "subscription-a"
+    }));
+    assert!(activation_a[1..]
+        .iter()
+        .all(|message| message["params"]["session_id"] != session_b));
+
+    let live_b = start_preview_turn(&mut runtime, "turn-b-live", &session_b);
+    assert_eq!(live_b.len(), 7, "{live_b:?}");
+    assert!(live_b[1..].iter().all(|message| {
+        message["method"] == "timeline/subscription-event"
+            && message["params"]["session_id"] == session_b
+            && message["params"]["subscription_id"] == "subscription-b"
+    }));
+    assert!(live_b[1..]
+        .iter()
+        .all(|message| message["params"]["session_id"] != session_a));
+
+    drop(runtime);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn timeline_subscription_rejects_cross_bound_requests_without_retiring_the_owner() {
+    let root = timeline_subscription_test_root("timeline-subscription-failure-cleanup");
+    let mut runtime = ready_timeline_subscription_runtime(&root);
+    let session_a = start_chat_session(&mut runtime, "failure-session-a");
+    let session_b = start_chat_session(&mut runtime, "failure-session-b");
+    let session_c = start_chat_session(&mut runtime, "failure-session-c");
+    let subscription = subscribe(
+        &mut runtime,
+        "failure-subscribe-a",
+        &session_a,
+        "failure-subscription",
+        17,
+    );
+    assert_eq!(subscription["watermark"]["sequence"], 0);
+    assert_eq!(
+        start_preview_turn(&mut runtime, "failure-turn-a", &session_a).len(),
+        1
+    );
+
+    let stale = runtime.handle_line(&request(
+        "stale-generation",
+        "timeline/subscribe",
+        json!({
+            "schema_version": "timeline-subscribe-request/0.1",
+            "connection_generation": 18,
+            "session_id": session_b,
+            "subscription_id": "stale-subscription",
+            "cursor": {"sequence": 0, "event_id": null},
+            "watermark": null
+        }),
+    ));
+    assert_eq!(stale[0]["error"]["code"], -32151);
+    assert_eq!(stale[0]["error"]["data"]["stage"], "subscribe");
+    assert_eq!(
+        stale[0]["error"]["data"]["reason"],
+        "connection-generation-invalid"
+    );
+    assert_eq!(stale[0]["error"]["data"]["connection_generation"], 18);
+    assert_eq!(stale[0]["error"]["data"]["session_id"], session_b);
+    assert_eq!(
+        stale[0]["error"]["data"]["subscription_id"],
+        "stale-subscription"
+    );
+    assert_eq!(stale[0]["error"]["data"]["cleanup_required"], true);
+    assert!(stale[0]["error"]["data"]["request_identity"]
+        .as_str()
+        .is_some_and(|identity| identity.starts_with("timeline-subscription-request:sha256:")));
+
+    let forged_binding = runtime.handle_line(&request(
+        "forged-binding",
+        "timeline/subscription-sync",
+        json!({
+            "schema_version": "timeline-subscription-sync-request/0.1",
+            "connection_generation": 17,
+            "session_id": session_b,
+            "subscription_id": "failure-subscription",
+            "request": {
+                "session_id": session_b,
+                "after": subscription["cursor"],
+                "watermark": subscription["watermark"],
+                "limit": 200
+            }
+        }),
+    ));
+    assert_eq!(forged_binding[0]["error"]["code"], -32151);
+    assert_eq!(forged_binding[0]["error"]["data"]["stage"], "sync");
+    assert_eq!(
+        forged_binding[0]["error"]["data"]["reason"],
+        "subscription-context-drift"
+    );
+    assert_eq!(forged_binding[0]["error"]["data"]["session_id"], session_b);
+    assert_eq!(
+        forged_binding[0]["error"]["data"]["subscription_id"],
+        "failure-subscription"
+    );
+    assert_eq!(forged_binding[0]["error"]["data"]["cleanup_required"], true);
+    assert_eq!(
+        forged_binding[0]["error"]["data"]["cursor"],
+        subscription["cursor"]
+    );
+    assert_eq!(
+        forged_binding[0]["error"]["data"]["watermark"],
+        subscription["watermark"]
+    );
+    assert_eq!(forged_binding[0]["error"]["data"]["retryable"], false);
+    assert!(forged_binding[0]["error"]["data"]["request_identity"]
+        .as_str()
+        .is_some_and(|identity| identity.starts_with("timeline-subscription-request:sha256:")));
+
+    let forged_snapshot = runtime.handle_line(&request(
+        "forged-snapshot-binding",
+        "timeline/subscription-snapshot",
+        json!({
+            "schema_version": "timeline-subscription-snapshot-request/0.1",
+            "connection_generation": 17,
+            "session_id": session_b,
+            "subscription_id": "failure-subscription",
+            "request": {
+                "session_id": session_b,
+                "snapshot_identity": null,
+                "watermark": null,
+                "after": null,
+                "limit": 200
+            }
+        }),
+    ));
+    assert_eq!(forged_snapshot[0]["error"]["code"], -32151);
+    assert_eq!(
+        forged_snapshot[0]["error"]["data"]["reason"],
+        "subscription-context-drift"
+    );
+    assert_eq!(forged_snapshot[0]["error"]["data"]["session_id"], session_b);
+
+    let stale_activation = runtime.handle_line(&request(
+        "stale-activation-generation",
+        "timeline/subscription-activate",
+        json!({
+            "schema_version": "timeline-subscription-activate-request/0.1",
+            "connection_generation": 18,
+            "session_id": session_a,
+            "subscription_id": "failure-subscription",
+            "source": "sync",
+            "cursor": subscription["watermark"],
+            "watermark": subscription["watermark"],
+            "snapshot_identity": null
+        }),
+    ));
+    assert_eq!(stale_activation[0]["error"]["code"], -32151);
+    assert_eq!(
+        stale_activation[0]["error"]["data"]["reason"],
+        "subscription-context-drift"
+    );
+    assert_eq!(
+        stale_activation[0]["error"]["data"]["connection_generation"],
+        18
+    );
+
+    let owner_sync = subscription_sync(&mut runtime, "owner-sync-after-forgery", &subscription);
+    assert_eq!(owner_sync.len(), 1, "{owner_sync:?}");
+    assert_eq!(owner_sync[0]["result"]["complete"], true);
+    let owner_activation =
+        activate_subscription(&mut runtime, "owner-activate-after-forgery", &subscription);
+    assert_eq!(owner_activation.len(), 7, "{owner_activation:?}");
+    assert_eq!(owner_activation[0]["result"]["session_id"], session_a);
+    assert!(owner_activation[1..].iter().all(|message| {
+        message["method"] == "timeline/subscription-event"
+            && message["params"]["session_id"] == session_a
+            && message["params"]["subscription_id"] == "failure-subscription"
+    }));
+
+    let reused = runtime.handle_line(&request(
+        "reuse-forged-id",
+        "timeline/subscribe",
+        json!({
+            "schema_version": "timeline-subscribe-request/0.1",
+            "connection_generation": 17,
+            "session_id": session_a,
+            "subscription_id": "failure-subscription",
+            "cursor": {"sequence": 0, "event_id": null},
+            "watermark": null
+        }),
+    ));
+    assert_eq!(reused[0]["error"]["code"], -32151);
+    assert_eq!(
+        reused[0]["error"]["data"]["reason"],
+        "subscription-id-reused"
+    );
+
+    let bootstrap_b = subscribe(
+        &mut runtime,
+        "bootstrap-subscribe-b",
+        &session_b,
+        "bootstrap-subscription-b",
+        17,
+    );
+    assert_eq!(
+        start_preview_turn(&mut runtime, "bootstrap-turn-b", &session_b).len(),
+        1
+    );
+    let bound_route_mismatch = runtime.handle_line(&request(
+        "bound-route-mismatch-b",
+        "timeline/subscription-snapshot",
+        json!({
+            "schema_version": "timeline-subscription-snapshot-request/0.1",
+            "connection_generation": 17,
+            "session_id": session_b,
+            "subscription_id": bootstrap_b["subscription_id"],
+            "request": {
+                "session_id": session_b,
+                "snapshot_identity": null,
+                "watermark": null,
+                "after": null,
+                "limit": 200
+            }
+        }),
+    ));
+    assert_eq!(bound_route_mismatch[0]["error"]["code"], -32151);
+    assert_eq!(
+        bound_route_mismatch[0]["error"]["data"]["reason"],
+        "subscription-context-drift"
+    );
+
+    let replacement = subscribe(
+        &mut runtime,
+        "replacement-subscribe",
+        &session_b,
+        "replacement-subscription",
+        17,
+    );
+
+    let failed_sync = runtime.handle_line(&request(
+        "failed-sync",
+        "timeline/subscription-sync",
+        json!({
+            "schema_version": "timeline-subscription-sync-request/0.1",
+            "connection_generation": 17,
+            "session_id": session_b,
+            "subscription_id": "replacement-subscription",
+            "request": {
+                "session_id": session_b,
+                "after": {
+                    "sequence": 1,
+                    "event_id": "event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "watermark": replacement["watermark"],
+                "limit": 200
+            }
+        }),
+    ));
+    assert_eq!(failed_sync[0]["error"]["code"], -32151);
+    let failure = &failed_sync[0]["error"]["data"];
+    assert_eq!(
+        failure["schema_version"],
+        "timeline-subscription-failure/0.1"
+    );
+    assert_eq!(failure["connection_generation"], 17);
+    assert_eq!(failure["session_id"], session_b);
+    assert_eq!(failure["subscription_id"], "replacement-subscription");
+    assert_eq!(failure["state"], "failed");
+    assert_eq!(failure["stage"], "sync");
+    assert_eq!(failure["cursor"]["sequence"], 1);
+    assert_eq!(failure["watermark"], replacement["watermark"]);
+    assert_eq!(failure["reason"], "sync-page-unavailable");
+    assert_eq!(failure["retryable"], true);
+    assert_eq!(failure["cleanup_required"], true);
+    assert!(failure["request_identity"]
+        .as_str()
+        .is_some_and(|identity| identity.starts_with("timeline-subscription-request:sha256:")));
+
+    let post_failure = subscribe(
+        &mut runtime,
+        "post-failure-subscribe",
+        &session_b,
+        "post-failure-subscription",
+        17,
+    );
+    assert_eq!(post_failure["state"], "sync-required");
+    let session_c_subscription = subscribe(
+        &mut runtime,
+        "current-generation-subscribe",
+        &session_c,
+        "current-generation-subscription",
+        17,
+    );
+    assert_eq!(session_c_subscription["session_id"], session_c);
+
+    drop(runtime);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn timeline_subscription_disconnect_drops_connection_owned_id_history() {
+    let root = timeline_subscription_test_root("timeline-subscription-disconnect");
+    let session_id = {
+        let mut runtime = ready_timeline_subscription_runtime(&root);
+        let session_id = start_chat_session(&mut runtime, "disconnect-session");
+        let subscription = subscribe(
+            &mut runtime,
+            "disconnect-subscribe",
+            &session_id,
+            "connection-local-subscription",
+            31,
+        );
+        assert_eq!(subscription["state"], "sync-required");
+        session_id
+    };
+
+    let mut reconnected = ready_timeline_subscription_runtime(&root);
+    let subscription = subscribe(
+        &mut reconnected,
+        "reconnect-subscribe",
+        &session_id,
+        "connection-local-subscription",
+        32,
+    );
+    assert_eq!(subscription["connection_generation"], 32);
+    assert_eq!(subscription["session_id"], session_id);
+
+    drop(reconnected);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

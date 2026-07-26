@@ -1234,10 +1234,71 @@ pub(crate) fn materialize_visible_snapshot(
     connection: &Connection,
     session_id: &str,
 ) -> Result<VisibleStateFloorSnapshot, JournalError> {
+    let through = read_retention_state(connection, session_id)?.head;
+    materialize_visible_snapshot_through(connection, session_id, &through)
+}
+
+pub(crate) fn materialize_visible_snapshot_through(
+    connection: &Connection,
+    session_id: &str,
+    through: &TimelineAnchor,
+) -> Result<VisibleStateFloorSnapshot, JournalError> {
+    let through_shape_valid =
+        (through.sequence == 0 && through.event_id.is_none() && through.timestamp_ms == 0)
+            || (through.sequence > 0
+                && through.timestamp_ms > 0
+                && through.timestamp_ms <= aegisy_aap::MAX_SAFE_JSON_INTEGER
+                && through.event_id.as_deref().is_some_and(valid_event_id));
+    if session_id.is_empty() || session_id.len() > 128 || !through_shape_valid {
+        return Err(JournalError::new(
+            "timeline-visible-snapshot-through-invalid",
+        ));
+    }
     let cursor = read_cursor(connection, session_id)?;
     validate_cursor_anchor(connection, session_id, &cursor)?;
     let floor = cursor.floor();
     let head = cursor.head();
+    if through.sequence < floor.sequence {
+        return Err(JournalError::new(
+            "timeline-visible-snapshot-through-before-floor",
+        ));
+    }
+    if through.sequence > head.sequence {
+        return Err(JournalError::new(
+            "timeline-visible-snapshot-through-after-head",
+        ));
+    }
+    let durable_through = if through.sequence == floor.sequence {
+        floor.clone()
+    } else if through.sequence == head.sequence {
+        head
+    } else {
+        connection
+            .query_row(
+                "SELECT event_id, timestamp_ms FROM public_timeline_events
+                 WHERE session_id = ?1 AND sequence = ?2",
+                params![
+                    session_id,
+                    i64::try_from(through.sequence).map_err(|_| JournalError::new(
+                        "timeline-visible-snapshot-through-invalid"
+                    ))?
+                ],
+                |row| {
+                    Ok(TimelineAnchor {
+                        sequence: through.sequence,
+                        event_id: Some(row.get::<_, String>(0)?),
+                        timestamp_ms: u64::try_from(row.get::<_, i64>(1)?)
+                            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, 0))?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|_| JournalError::new("timeline-visible-snapshot-through-read-failed"))?
+            .ok_or_else(|| JournalError::new("timeline-visible-snapshot-through-anchor-missing"))?
+    };
+    if &durable_through != through {
+        return Err(JournalError::new("timeline-visible-snapshot-through-drift"));
+    }
     let floor_snapshot = read_visible_snapshot(connection, session_id)?;
     if floor_snapshot.as_ref().is_some_and(|snapshot| {
         !timeline_anchor_matches_projection(
@@ -1258,8 +1319,8 @@ pub(crate) fn materialize_visible_snapshot(
     .map_err(|_| JournalError::new("timeline-visible-snapshot-invalid"))?;
     let mut after = floor.sequence;
     let watermark = TimelineWatermark {
-        sequence: head.sequence,
-        event_id: head.event_id.clone(),
+        sequence: through.sequence,
+        event_id: through.event_id.clone(),
     };
     while after < watermark.sequence {
         let page = sync_page(
@@ -1288,9 +1349,9 @@ pub(crate) fn materialize_visible_snapshot(
     let snapshot = projection
         .floor_snapshot()
         .map_err(|_| JournalError::new("timeline-visible-snapshot-invalid"))?;
-    if snapshot.anchor.sequence != head.sequence
-        || snapshot.anchor.event_id.as_deref() != head.event_id.as_deref()
-        || snapshot.anchor.timestamp_ms != head.timestamp_ms
+    if snapshot.anchor.sequence != through.sequence
+        || snapshot.anchor.event_id.as_deref() != through.event_id.as_deref()
+        || snapshot.anchor.timestamp_ms != through.timestamp_ms
     {
         return Err(JournalError::new("timeline-visible-snapshot-head-mismatch"));
     }
@@ -2180,6 +2241,48 @@ mod tests {
         }
     }
 
+    fn envelope_with_revision(
+        sequence: u64,
+        timestamp_ms: u64,
+        turn_id: &str,
+        turn_state: TurnState,
+        name: &str,
+        item: TimelineItem,
+        revision: u64,
+    ) -> EventEnvelope {
+        let item = Some(item);
+        let item_update = Some(ItemUpdate {
+            revision,
+            content_mode: "snapshot-replacement".into(),
+        });
+        let event_id = timeline_event_id(
+            "timeline-event/0.1",
+            sequence,
+            timestamp_ms,
+            turn_id,
+            "session",
+            turn_id,
+            turn_state,
+            name,
+            &item,
+            &item_update,
+        )
+        .unwrap();
+        EventEnvelope {
+            schema_version: "timeline-event/0.1".into(),
+            event_id,
+            sequence,
+            timestamp_ms,
+            correlation_id: turn_id.into(),
+            session_id: "session".into(),
+            turn_id: turn_id.into(),
+            turn_state,
+            event: name.into(),
+            item,
+            item_update,
+        }
+    }
+
     fn completed_item_event(
         sequence: u64,
         timestamp_ms: u64,
@@ -2674,6 +2777,219 @@ mod tests {
                 .unwrap_err()
                 .code,
             "timeline-visible-snapshot-integrity-failed"
+        );
+        assert_eq!(
+            materialize_visible_snapshot_through(
+                &connection,
+                "session",
+                &TimelineAnchor {
+                    sequence: 3,
+                    event_id: Some(events[2].event_id.clone()),
+                    timestamp_ms: 12,
+                },
+            )
+            .unwrap_err()
+            .code,
+            "timeline-visible-snapshot-integrity-failed"
+        );
+    }
+
+    #[test]
+    fn fixed_visible_snapshot_replays_only_through_verified_anchor() {
+        let mut connection = test_connection();
+        let completed_item = TimelineItem {
+            id: "completed-item".into(),
+            kind: "message".into(),
+            role: "agent".into(),
+            state: "completed".into(),
+            content: "completed".into(),
+            data: None,
+        };
+        let open_item = TimelineItem {
+            id: "open-item".into(),
+            kind: "message".into(),
+            role: "agent".into(),
+            state: "started".into(),
+            content: "partial".into(),
+            data: None,
+        };
+        let events = [
+            envelope(1, 10, "turn-one", TurnState::Running, "turn.started", None),
+            envelope_with_revision(
+                2,
+                11,
+                "turn-one",
+                TurnState::Running,
+                "item.completed",
+                completed_item,
+                1,
+            ),
+            envelope(
+                3,
+                12,
+                "turn-one",
+                TurnState::Completed,
+                "turn.completed",
+                None,
+            ),
+            envelope(4, 13, "turn-two", TurnState::Running, "turn.started", None),
+            envelope_with_revision(
+                5,
+                14,
+                "turn-two",
+                TurnState::Running,
+                "item.started",
+                open_item.clone(),
+                1,
+            ),
+        ];
+        for candidate in &events {
+            append(&mut connection, candidate).unwrap();
+        }
+        prune(
+            &mut connection,
+            &TimelineWatermark {
+                sequence: 3,
+                event_id: Some(events[2].event_id.clone()),
+            },
+            20,
+        )
+        .unwrap();
+        let through = TimelineAnchor {
+            sequence: 5,
+            event_id: Some(events[4].event_id.clone()),
+            timestamp_ms: 14,
+        };
+
+        let completed_open_item = TimelineItem {
+            state: "completed".into(),
+            content: "complete".into(),
+            ..open_item
+        };
+        let later = [
+            envelope_with_revision(
+                6,
+                15,
+                "turn-two",
+                TurnState::Running,
+                "item.completed",
+                completed_open_item,
+                2,
+            ),
+            envelope(
+                7,
+                16,
+                "turn-two",
+                TurnState::Completed,
+                "turn.completed",
+                None,
+            ),
+        ];
+        for candidate in &later {
+            append(&mut connection, candidate).unwrap();
+        }
+
+        let fixed = materialize_visible_snapshot_through(&connection, "session", &through)
+            .expect("fixed-head snapshot");
+        assert_eq!(fixed.anchor.sequence, 5);
+        assert_eq!(fixed.anchor.event_id, through.event_id);
+        assert_eq!(fixed.anchor.timestamp_ms, 14);
+        assert_eq!(fixed.running_turn_id.as_deref(), Some("turn-two"));
+        assert_eq!(fixed.open_items.len(), 1);
+        assert_eq!(fixed.open_items[0].item_id, "open-item");
+        assert_eq!(fixed.items.len(), 2);
+        assert_eq!(fixed.items[1].item.state, "started");
+        assert_eq!(fixed.items[1].revision, 1);
+
+        let current = materialize_visible_snapshot(&connection, "session").unwrap();
+        assert_eq!(current.anchor.sequence, 7);
+        assert!(current.running_turn_id.is_none());
+        assert!(current.open_items.is_empty());
+        assert_eq!(current.items[1].item.state, "completed");
+        assert_eq!(current.items[1].revision, 2);
+
+        let floor = read_retention_state(&connection, "session").unwrap().floor;
+        let floor_snapshot =
+            materialize_visible_snapshot_through(&connection, "session", &floor).unwrap();
+        assert_eq!(floor_snapshot.anchor.sequence, 3);
+        assert_eq!(floor_snapshot.items.len(), 1);
+        assert!(floor_snapshot.running_turn_id.is_none());
+
+        let retained_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM public_timeline_events WHERE session_id = 'session'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        for (candidate, expected) in [
+            (
+                TimelineAnchor {
+                    sequence: 2,
+                    event_id: Some(events[1].event_id.clone()),
+                    timestamp_ms: 11,
+                },
+                "timeline-visible-snapshot-through-before-floor",
+            ),
+            (
+                TimelineAnchor {
+                    sequence: 8,
+                    event_id: Some(format!("event:sha256:{}", "0".repeat(64))),
+                    timestamp_ms: 17,
+                },
+                "timeline-visible-snapshot-through-after-head",
+            ),
+            (
+                TimelineAnchor {
+                    sequence: 5,
+                    event_id: Some(format!("event:sha256:{}", "0".repeat(64))),
+                    timestamp_ms: 14,
+                },
+                "timeline-visible-snapshot-through-drift",
+            ),
+            (
+                TimelineAnchor {
+                    timestamp_ms: 15,
+                    ..through.clone()
+                },
+                "timeline-visible-snapshot-through-drift",
+            ),
+        ] {
+            assert_eq!(
+                materialize_visible_snapshot_through(&connection, "session", &candidate)
+                    .unwrap_err()
+                    .code,
+                expected
+            );
+        }
+        assert_eq!(
+            read_retention_state(&connection, "session").unwrap().floor,
+            floor
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM public_timeline_events WHERE session_id = 'session'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            retained_count
+        );
+
+        connection
+            .execute(
+                "UPDATE public_timeline_events
+                 SET envelope_sha256 = lower(hex(zeroblob(32)))
+                 WHERE session_id = 'session' AND sequence = 5",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            materialize_visible_snapshot_through(&connection, "session", &through)
+                .unwrap_err()
+                .code,
+            "timeline-sync-integrity-failed"
         );
     }
 

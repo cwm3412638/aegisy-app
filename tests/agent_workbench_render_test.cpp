@@ -405,7 +405,12 @@ public:
         widget.m_timelineTrackingExhausted = false;
         widget.m_timelineSyncAvailable = false;
         widget.m_timelineSnapshotAvailable = false;
+        widget.m_timelineSubscriptionAvailable = false;
         widget.m_timelineSnapshotRequester = {};
+        widget.m_timelineSubscriptionActivationRequester = {};
+        widget.m_timelineSubscriptionConnectionAbandoner = {};
+        widget.m_runtimeReconnectRecoveryGeneration = 0;
+        widget.m_runtimeReconnectTimelinePending.clear();
         widget.m_unknownTimelineEventCounts.clear();
         widget.m_unknownTimelineEventOverflowCount = 0;
         widget.updateTurnAction();
@@ -416,7 +421,7 @@ public:
                                     const QString &requestId)
     {
         auto &state = widget.m_timelineSessions[sessionId];
-        state.recovery = AgentWorkbenchWidget::TimelineRecoveryState::Syncing;
+        state.recovery = AgentWorkbenchWidget::TimelineRecoveryState::RecoveringSync;
         state.syncRequestId = requestId;
         state.requestedAfterSequence = state.projection.sequence;
         state.requestedAfterEventId = state.projection.eventId;
@@ -436,10 +441,17 @@ public:
         switch (state->recovery) {
         case AgentWorkbenchWidget::TimelineRecoveryState::Untracked:
             return QStringLiteral("untracked");
-        case AgentWorkbenchWidget::TimelineRecoveryState::Live:
+        case AgentWorkbenchWidget::TimelineRecoveryState::Active:
             return QStringLiteral("live");
-        case AgentWorkbenchWidget::TimelineRecoveryState::Syncing:
+        case AgentWorkbenchWidget::TimelineRecoveryState::RecoveringSync:
+        case AgentWorkbenchWidget::TimelineRecoveryState::RecoveringSnapshot:
             return QStringLiteral("syncing");
+        case AgentWorkbenchWidget::TimelineRecoveryState::Subscribing:
+            return QStringLiteral("subscribing");
+        case AgentWorkbenchWidget::TimelineRecoveryState::AwaitingActivation:
+            return QStringLiteral("awaiting-activation");
+        case AgentWorkbenchWidget::TimelineRecoveryState::Failed:
+            return QStringLiteral("failed");
         case AgentWorkbenchWidget::TimelineRecoveryState::Frozen:
             return QStringLiteral("frozen");
         case AgentWorkbenchWidget::TimelineRecoveryState::Unrecoverable:
@@ -511,6 +523,12 @@ public:
         widget.m_timelineSnapshotAvailable = available;
     }
 
+    static void setTimelineSubscriptionAvailable(AgentWorkbenchWidget &widget,
+                                                 bool available)
+    {
+        widget.m_timelineSubscriptionAvailable = available;
+    }
+
     static void beginTimelineSnapshot(AgentWorkbenchWidget &widget,
                                       const QString &sessionId)
     {
@@ -522,7 +540,7 @@ public:
                                         const QString &requestId)
     {
         auto &state = widget.m_timelineSessions[sessionId];
-        state.recovery = AgentWorkbenchWidget::TimelineRecoveryState::Syncing;
+        state.recovery = AgentWorkbenchWidget::TimelineRecoveryState::RecoveringSnapshot;
         state.snapshotRequestId = requestId;
         state.snapshotRecoveryRequired = true;
         state.snapshotIdentity.clear();
@@ -563,6 +581,127 @@ public:
                                                  const QString &sessionId)
     {
         return widget.m_timelineSessions.value(sessionId).snapshotRecoveryRequired;
+    }
+
+    static void prepareTimelineSubscriptionSync(
+        AgentWorkbenchWidget &widget, const QString &sessionId, quint64 generation,
+        const QString &subscriptionId, const QString &requestId,
+        const QJsonObject &watermark)
+    {
+        auto &state = widget.m_timelineSessions[sessionId];
+        state.recovery = AgentWorkbenchWidget::TimelineRecoveryState::RecoveringSync;
+        state.subscriptionGeneration = generation;
+        state.subscriptionId = subscriptionId;
+        state.subscriptionCursor = {
+            {QStringLiteral("sequence"), static_cast<double>(state.projection.sequence)},
+            {QStringLiteral("event_id"), state.projection.sequence == 0
+                 ? QJsonValue(QJsonValue::Null) : QJsonValue(state.projection.eventId)},
+        };
+        state.subscriptionWatermark = watermark;
+        state.syncRequestId = requestId;
+        state.requestedAfterSequence = state.projection.sequence;
+        state.requestedAfterEventId = state.projection.eventId;
+        state.watermark = watermark;
+        state.syncProjection = state.projection;
+        state.syncProjectionValid = true;
+        state.activationSource = QStringLiteral("sync");
+    }
+
+    static void prepareTimelineSubscriptionSubscribe(
+        AgentWorkbenchWidget &widget, const QString &sessionId, quint64 generation,
+        const QString &subscriptionId, const QString &requestId)
+    {
+        auto &state = widget.m_timelineSessions[sessionId];
+        state.recovery = AgentWorkbenchWidget::TimelineRecoveryState::Subscribing;
+        state.subscriptionGeneration = generation;
+        state.subscriptionId = subscriptionId;
+        state.subscriptionCursor = {
+            {QStringLiteral("sequence"), static_cast<double>(state.projection.sequence)},
+            {QStringLiteral("event_id"), state.projection.sequence == 0
+                 ? QJsonValue(QJsonValue::Null) : QJsonValue(state.projection.eventId)},
+        };
+        state.subscribeRequestId = requestId;
+    }
+
+    static void prepareTimelineSubscriptionSnapshot(
+        AgentWorkbenchWidget &widget, const QString &sessionId, quint64 generation,
+        const QString &subscriptionId, const QString &requestId)
+    {
+        auto &state = widget.m_timelineSessions[sessionId];
+        state.recovery = AgentWorkbenchWidget::TimelineRecoveryState::RecoveringSnapshot;
+        state.subscriptionGeneration = generation;
+        state.subscriptionId = subscriptionId;
+        state.subscriptionCursor = {
+            {QStringLiteral("sequence"), static_cast<double>(state.projection.sequence)},
+            {QStringLiteral("event_id"), state.projection.sequence == 0
+                 ? QJsonValue(QJsonValue::Null) : QJsonValue(state.projection.eventId)},
+        };
+        state.snapshotRequestId = requestId;
+        state.snapshotRecoveryRequired = true;
+        state.activationSource = QStringLiteral("snapshot");
+    }
+
+    static void setTimelineSubscriptionActivationRequester(
+        AgentWorkbenchWidget &widget, const QString &requestId)
+    {
+        widget.m_timelineSubscriptionActivationRequester =
+            [requestId](quint64, const QString &, const QString &, const QString &,
+                        const QJsonObject &, const QJsonObject &, const QString &) {
+                return requestId;
+            };
+    }
+
+    static void setTimelineSubscriptionConnectionAbandoner(
+        AgentWorkbenchWidget &widget, std::function<void(const QString &)> abandoner)
+    {
+        widget.m_timelineSubscriptionConnectionAbandoner = std::move(abandoner);
+    }
+
+    static void setTimelineReconnectBarrier(AgentWorkbenchWidget &widget,
+                                            quint64 generation,
+                                            const QString &sessionId)
+    {
+        widget.m_runtimeReconnectRecoveryGeneration = generation;
+        widget.m_runtimeReconnectTimelinePending.insert(sessionId);
+    }
+
+    static bool timelineReconnectBarrierContains(
+        const AgentWorkbenchWidget &widget, quint64 generation,
+        const QString &sessionId)
+    {
+        return widget.m_runtimeReconnectRecoveryGeneration == generation
+            && widget.m_runtimeReconnectTimelinePending.contains(sessionId);
+    }
+
+    static bool timelineSubscriptionAuthorityCleared(
+        const AgentWorkbenchWidget &widget, const QString &sessionId)
+    {
+        const auto state = widget.m_timelineSessions.constFind(sessionId);
+        return state != widget.m_timelineSessions.cend()
+            && state->subscriptionGeneration == 0
+            && state->subscriptionId.isEmpty()
+            && state->subscribeRequestId.isEmpty()
+            && state->activationRequestId.isEmpty()
+            && state->subscriptionCursor.isEmpty()
+            && state->subscriptionWatermark.isEmpty();
+    }
+
+    static QJsonObject timelineSubscriptionCursor(
+        const AgentWorkbenchWidget &widget, const QString &sessionId)
+    {
+        return widget.m_timelineSessions.value(sessionId).subscriptionCursor;
+    }
+
+    static quint64 timelineSubscriptionGeneration(
+        const AgentWorkbenchWidget &widget, const QString &sessionId)
+    {
+        return widget.m_timelineSessions.value(sessionId).subscriptionGeneration;
+    }
+
+    static QString timelineSubscriptionId(
+        const AgentWorkbenchWidget &widget, const QString &sessionId)
+    {
+        return widget.m_timelineSessions.value(sessionId).subscriptionId;
     }
 
     static bool timelineAllowsNewTurn(const AgentWorkbenchWidget &widget)
@@ -918,6 +1057,40 @@ QJsonObject timelineAnchorForEvent(const QJsonObject &event)
     return {
         {QStringLiteral("sequence"), event.value(QStringLiteral("sequence"))},
         {QStringLiteral("event_id"), event.value(QStringLiteral("event_id"))},
+    };
+}
+
+QJsonObject timelineSubscriptionActiveResult(
+    quint64 generation, const QString &sessionId, const QString &subscriptionId,
+    const QJsonObject &cursor)
+{
+    return {
+        {QStringLiteral("schema_version"),
+         QStringLiteral("timeline-subscription-active/0.1")},
+        {QStringLiteral("connection_generation"), static_cast<double>(generation)},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("subscription_id"), subscriptionId},
+        {QStringLiteral("state"), QStringLiteral("active")},
+        {QStringLiteral("cursor"), cursor},
+        {QStringLiteral("watermark"), cursor},
+    };
+}
+
+QJsonObject timelineSubscriptionEventWrapper(
+    quint64 generation, const QString &sessionId, const QString &subscriptionId,
+    const QJsonObject &cursor, const QJsonObject &watermark,
+    const QJsonObject &event)
+{
+    return {
+        {QStringLiteral("schema_version"),
+         QStringLiteral("timeline-subscription-event/0.1")},
+        {QStringLiteral("connection_generation"), static_cast<double>(generation)},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("subscription_id"), subscriptionId},
+        {QStringLiteral("state"), QStringLiteral("active")},
+        {QStringLiteral("cursor"), cursor},
+        {QStringLiteral("watermark"), watermark},
+        {QStringLiteral("event"), event},
     };
 }
 
@@ -2246,6 +2419,8 @@ bool verifyTimelineGapRecovery(QApplication &application,
                     && !backgroundPageRequest.isEmpty()
                     && AgentWorkbenchWidgetTestAccess::queuedTimelineEvents(
                            workbench, sessionA) == 1
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionA) == QStringLiteral("syncing")
                     && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
                            workbench, sessionA) == 1
                     && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
@@ -2575,6 +2750,554 @@ bool verifyTimelineGapRecovery(QApplication &application,
     AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
     return expect(disconnectedStatePreserved,
                   "disconnect lost its confirmed projection, pending bounds, or reconnect retry");
+}
+
+bool verifyTimelineSubscriptionRecovery(QApplication &application,
+                                        AgentWorkbenchWidget &workbench,
+                                        AgentRuntimeClient *runtimeClient)
+{
+    if (!runtimeClient) return false;
+    const auto suppressRealConnectionAbandon = [&workbench]() {
+        AgentWorkbenchWidgetTestAccess::setTimelineSubscriptionConnectionAbandoner(
+            workbench, [](const QString &) {});
+    };
+    const quint64 generation = runtimeClient->processGeneration();
+    if (!expect(generation > 0, "subscription test has no Runtime generation")) {
+        return false;
+    }
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    suppressRealConnectionAbandon();
+    const QString sessionId = QStringLiteral("timeline-subscription-session");
+    const QString turnId = QStringLiteral("timeline-subscription-turn");
+    const QString subscriptionId = QStringLiteral("qt-subscription-test");
+    const QString syncRequestId = QStringLiteral("timeline-subscription-sync-test");
+    const QString activateRequestId = QStringLiteral("timeline-subscription-activate-test");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, sessionId);
+    const QJsonObject started = timelineEnvelope(
+        QStringLiteral("turn.started"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 1, 31'001);
+    const QJsonObject recovered = timelineEnvelope(
+        QStringLiteral("item.completed"), sessionId, turnId,
+        timelineMessage(QStringLiteral("subscription-recovered-item"),
+                        QStringLiteral("completed"), QStringLiteral("recovered")),
+        2, 31'002, 1);
+    const QJsonObject completed = timelineEnvelope(
+        QStringLiteral("turn.completed"), sessionId, turnId,
+        QJsonValue(QJsonValue::Null), 3, 31'003);
+    runtimeClient->timelineEvent(started);
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSubscriptionSync(
+        workbench, sessionId, generation, subscriptionId, syncRequestId,
+        timelineAnchorForEvent(recovered));
+    AgentWorkbenchWidgetTestAccess::setTimelineSubscriptionActivationRequester(
+        workbench, activateRequestId);
+    runtimeClient->timelineSubscriptionSynced(
+        syncRequestId,
+        timelineSyncPage(sessionId, timelineAnchorForEvent(started),
+                         timelineAnchorForEvent(recovered), QJsonArray{recovered}, true));
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                    workbench, sessionId) == 1
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionId)
+                        == QStringLiteral("awaiting-activation")
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("subscription-recovered-item")),
+                "subscription recovery published before activation")) {
+        return false;
+    }
+    runtimeClient->timelineSubscriptionEvent(timelineSubscriptionEventWrapper(
+        generation, sessionId, subscriptionId, timelineAnchorForEvent(recovered),
+        timelineAnchorForEvent(recovered), completed));
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                    workbench, sessionId) == 1
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionId) == QStringLiteral("frozen")
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionAuthorityCleared(
+                           workbench, sessionId)
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("subscription-recovered-item"))
+                    && AgentWorkbenchWidgetTestAccess::timelinePendingEventCount(workbench) == 0,
+                "pre-activation subscription event did not fail closed")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    suppressRealConnectionAbandon();
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, sessionId);
+    runtimeClient->timelineEvent(started);
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSubscriptionSync(
+        workbench, sessionId, generation, subscriptionId, syncRequestId,
+        timelineAnchorForEvent(recovered));
+    AgentWorkbenchWidgetTestAccess::setTimelineSubscriptionActivationRequester(
+        workbench, activateRequestId);
+    runtimeClient->timelineSubscriptionSynced(
+        syncRequestId,
+        timelineSyncPage(sessionId, timelineAnchorForEvent(started),
+                         timelineAnchorForEvent(recovered), QJsonArray{recovered}, true));
+    runtimeClient->timelineSubscriptionActivated(
+        activateRequestId,
+        timelineSubscriptionActiveResult(
+            generation + 1, sessionId, subscriptionId,
+            timelineAnchorForEvent(recovered)));
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                    workbench, sessionId) == 1
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionId)
+                        == QStringLiteral("awaiting-activation"),
+                "stale generation activated a Timeline subscription")) {
+        return false;
+    }
+
+    runtimeClient->timelineSubscriptionActivated(
+        activateRequestId,
+        timelineSubscriptionActiveResult(
+            generation, sessionId, subscriptionId,
+            timelineAnchorForEvent(recovered)));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                    workbench, sessionId) == 2
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionId) == QStringLiteral("live")
+                    && AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("subscription-recovered-item"))
+                    && AgentWorkbenchWidgetTestAccess::timelinePendingEventCount(workbench) == 0
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionCursor(
+                           workbench, sessionId) == timelineAnchorForEvent(recovered),
+                "activation did not atomically publish subscription recovery")) {
+        return false;
+    }
+    runtimeClient->timelineSubscriptionEvent(timelineSubscriptionEventWrapper(
+        generation, sessionId, subscriptionId, timelineAnchorForEvent(recovered),
+        timelineAnchorForEvent(recovered), completed));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                    workbench, sessionId) == 3
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionId) == QStringLiteral("live")
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionCursor(
+                           workbench, sessionId) == timelineAnchorForEvent(completed),
+                "activation-before-drain ordering did not publish the live event")) {
+        return false;
+    }
+
+    const quint64 activeGeneration =
+        AgentWorkbenchWidgetTestAccess::timelineSubscriptionGeneration(
+            workbench, sessionId);
+    const QString activeSubscriptionId =
+        AgentWorkbenchWidgetTestAccess::timelineSubscriptionId(workbench, sessionId);
+    const QJsonObject activeSubscriptionCursor =
+        AgentWorkbenchWidgetTestAccess::timelineSubscriptionCursor(
+            workbench, sessionId);
+    QJsonObject replayedSubscriptionItem = timelineMessage(
+        QStringLiteral("subscription-recovered-item"), QStringLiteral("completed"),
+        QStringLiteral("recovered"));
+    replayedSubscriptionItem.insert(QStringLiteral("sequence"), 1);
+    replayedSubscriptionItem.insert(QStringLiteral("turn_id"), turnId);
+    const QString activeSessionReadId =
+        QStringLiteral("active-subscription-session-read");
+    AgentWorkbenchWidgetTestAccess::prepareSessionRead(
+        workbench, activeSessionReadId, sessionId, false);
+    runtimeClient->sessionRead(
+        activeSessionReadId,
+        replaySnapshot(sessionId, QJsonArray{replayedSubscriptionItem}, 1, 1, 1));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                    workbench, sessionId) == QStringLiteral("live")
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionGeneration(
+                           workbench, sessionId) == activeGeneration
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionId(
+                           workbench, sessionId) == activeSubscriptionId
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionCursor(
+                           workbench, sessionId) == activeSubscriptionCursor
+                    && AgentWorkbenchWidgetTestAccess::timelineSyncRequestId(
+                           workbench, sessionId).isEmpty()
+                    && AgentWorkbenchWidgetTestAccess::queuedTimelineEvents(
+                           workbench, sessionId) == 0,
+                "ordinary session/read replaced an active Timeline subscription attempt")) {
+        return false;
+    }
+
+    const QJsonObject staleEvent = timelineEnvelope(
+        QStringLiteral("turn.started"), sessionId,
+        QStringLiteral("timeline-subscription-stale-turn"),
+        QJsonValue(QJsonValue::Null), 4, 31'004);
+    runtimeClient->timelineSubscriptionEvent(timelineSubscriptionEventWrapper(
+        generation + 1, sessionId, subscriptionId, timelineAnchorForEvent(completed),
+        timelineAnchorForEvent(recovered), staleEvent));
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                    workbench, sessionId) == 3
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionId) == QStringLiteral("live"),
+                "stale generation subscription event changed confirmed state")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::suspendTimelinesForDisconnect(workbench);
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                    workbench, sessionId) == 3
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, sessionId) == QStringLiteral("frozen")
+                    && AgentWorkbenchWidgetTestAccess::timelineRetriesOnReconnect(
+                           workbench, sessionId)
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionAuthorityCleared(
+                           workbench, sessionId)
+                    && AgentWorkbenchWidgetTestAccess::timelinePendingEventCount(workbench) == 0,
+                "disconnect discarded confirmed projection or retained subscription authority")) {
+        return false;
+    }
+
+    const QString ambiguousSession =
+        QStringLiteral("timeline-subscription-ambiguous-session");
+    const QString ambiguousRequest =
+        QStringLiteral("timeline-subscription-ambiguous-sync");
+    AgentWorkbenchWidgetTestAccess::setPendingPrompt(
+        workbench, QStringLiteral("prompt-waiting-for-subscription-recovery"));
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSubscriptionSync(
+        workbench, ambiguousSession, generation,
+        QStringLiteral("ambiguous-subscription"), ambiguousRequest,
+        timelineAnchorForEvent(completed));
+    runtimeClient->requestFailed(
+        ambiguousRequest, QStringLiteral("timeline/subscription-sync"),
+        QStringLiteral("connection ownership unknown"), -1);
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                    workbench, ambiguousSession) == QStringLiteral("frozen")
+                    && AgentWorkbenchWidgetTestAccess::timelineRetriesOnReconnect(
+                           workbench, ambiguousSession)
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionAuthorityCleared(
+                           workbench, ambiguousSession)
+                    && AgentWorkbenchWidgetTestAccess::pendingPrompt(workbench)
+                        == QStringLiteral("prompt-waiting-for-subscription-recovery"),
+                "ambiguous subscription ownership discarded the queued prompt or retained authority")) {
+        return false;
+    }
+    AgentWorkbenchWidgetTestAccess::setPendingPrompt(workbench, QString());
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    const QString failedSession = QStringLiteral("timeline-subscription-failed-session");
+    const QString unaffectedSession = QStringLiteral("timeline-subscription-unaffected-session");
+    const QJsonObject failedStarted = timelineEnvelope(
+        QStringLiteral("turn.started"), failedSession,
+        QStringLiteral("timeline-subscription-failed-turn"),
+        QJsonValue(QJsonValue::Null), 1, 31'101);
+    const QJsonObject unaffectedStarted = timelineEnvelope(
+        QStringLiteral("turn.started"), unaffectedSession,
+        QStringLiteral("timeline-subscription-unaffected-turn"),
+        QJsonValue(QJsonValue::Null), 1, 31'201);
+    runtimeClient->timelineEvent(failedStarted);
+    runtimeClient->timelineEvent(unaffectedStarted);
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSubscriptionSync(
+        workbench, failedSession, generation, QStringLiteral("failed-subscription"),
+        QStringLiteral("failed-subscription-request"),
+        timelineAnchorForEvent(failedStarted));
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSubscriptionSync(
+        workbench, unaffectedSession, generation, QStringLiteral("unaffected-subscription"),
+        QStringLiteral("unaffected-subscription-request"),
+        timelineAnchorForEvent(unaffectedStarted));
+    const QJsonObject boundFailure{
+            {QStringLiteral("schema_version"),
+             QStringLiteral("timeline-subscription-failure/0.1")},
+            {QStringLiteral("connection_generation"), static_cast<double>(generation)},
+            {QStringLiteral("session_id"), failedSession},
+            {QStringLiteral("subscription_id"), QStringLiteral("failed-subscription")},
+            {QStringLiteral("state"), QStringLiteral("failed")},
+            {QStringLiteral("stage"), QStringLiteral("sync")},
+            {QStringLiteral("cursor"), timelineAnchorForEvent(failedStarted)},
+            {QStringLiteral("watermark"), timelineAnchorForEvent(failedStarted)},
+            {QStringLiteral("request_identity"), QStringLiteral(
+                "timeline-subscription-request:sha256:") + QString(64, QLatin1Char('a'))},
+            {QStringLiteral("reason"), QStringLiteral("test.failure")},
+            {QStringLiteral("retryable"), true},
+            {QStringLiteral("cleanup_required"), true},
+        };
+    runtimeClient->timelineSubscriptionFailed(
+        QStringLiteral("wrong-subscription-request"), boundFailure);
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                    workbench, failedSession) == QStringLiteral("syncing")
+                    && !AgentWorkbenchWidgetTestAccess::timelineSubscriptionAuthorityCleared(
+                        workbench, failedSession),
+                "mismatched request ID terminated a Timeline subscription")) {
+        return false;
+    }
+    runtimeClient->timelineSubscriptionFailed(
+        QStringLiteral("failed-subscription-request"), boundFailure);
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                    workbench, failedSession) == QStringLiteral("failed")
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionAuthorityCleared(
+                           workbench, failedSession)
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, failedSession) == 1
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, unaffectedSession) == QStringLiteral("syncing")
+                    && !AgentWorkbenchWidgetTestAccess::timelineSubscriptionAuthorityCleared(
+                        workbench, unaffectedSession)
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, unaffectedSession) == 1,
+                "typed subscription failure was not isolated to its bound Session")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    const QString snapshotSession = QStringLiteral("timeline-subscription-snapshot-session");
+    const QString snapshotTurn = QStringLiteral("timeline-subscription-snapshot-turn");
+    const QString snapshotSubscription = QStringLiteral("qt-subscription-snapshot-test");
+    const QString snapshotRequest = QStringLiteral("timeline-subscription-snapshot-test");
+    const QString snapshotActivate = QStringLiteral("timeline-subscription-snapshot-activate");
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, snapshotSession);
+    const QJsonObject snapshotStarted = timelineEnvelope(
+        QStringLiteral("turn.started"), snapshotSession, snapshotTurn,
+        QJsonValue(QJsonValue::Null), 1, 32'001);
+    const QJsonObject snapshotItemEvent = timelineEnvelope(
+        QStringLiteral("item.completed"), snapshotSession, snapshotTurn,
+        timelineMessage(QStringLiteral("subscription-snapshot-item"),
+                        QStringLiteral("completed"), QStringLiteral("snapshot")),
+        2, 32'002, 1);
+    const QJsonObject snapshotCompleted = timelineEnvelope(
+        QStringLiteral("turn.completed"), snapshotSession, snapshotTurn,
+        QJsonValue(QJsonValue::Null), 3, 32'003);
+    runtimeClient->timelineEvent(snapshotStarted);
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSubscriptionSnapshot(
+        workbench, snapshotSession, generation, snapshotSubscription, snapshotRequest);
+    AgentWorkbenchWidgetTestAccess::setTimelineSubscriptionActivationRequester(
+        workbench, snapshotActivate);
+    const QJsonObject snapshotItem = timelineSnapshotItemPage(
+        snapshotSession, 1, snapshotTurn, QStringLiteral("completed"),
+        timelineAnchorForEvent(snapshotItemEvent), timelineAnchorForEvent(snapshotItemEvent),
+        snapshotItemEvent.value(QStringLiteral("item")).toObject());
+    runtimeClient->timelineSubscriptionSnapshotReceived(
+        snapshotRequest,
+        timelineSnapshotPage(snapshotSession, timelineAnchorForEvent(snapshotStarted),
+                             timelineAnchorForEvent(snapshotCompleted), {}, {snapshotItem},
+                             {snapshotItem}, {}, true));
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                    workbench, snapshotSession) == 1
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, snapshotSession)
+                        == QStringLiteral("awaiting-activation")
+                    && !AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("subscription-snapshot-item")),
+                "complete subscription snapshot published before activation")) {
+        return false;
+    }
+    runtimeClient->timelineSubscriptionActivated(
+        snapshotActivate,
+        timelineSubscriptionActiveResult(
+            generation, snapshotSession, snapshotSubscription,
+            timelineAnchorForEvent(snapshotCompleted)));
+    application.processEvents();
+    if (!expect(AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                    workbench, snapshotSession) == 3
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, snapshotSession) == QStringLiteral("live")
+                    && AgentWorkbenchWidgetTestAccess::hasTimelineItem(
+                        workbench, QStringLiteral("subscription-snapshot-item")),
+                "subscription snapshot did not publish after activation")) {
+        return false;
+    }
+
+    int abandonedConnections = 0;
+    QStringList abandonDetails;
+    const auto installAbandonRecorder = [&]() {
+        AgentWorkbenchWidgetTestAccess::setTimelineSubscriptionConnectionAbandoner(
+            workbench, [&abandonedConnections, &abandonDetails](const QString &detail) {
+                ++abandonedConnections;
+                abandonDetails.append(detail);
+            });
+    };
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    installAbandonRecorder();
+    const QString invalidSyncSession = QStringLiteral("invalid-subscription-sync-session");
+    const QString invalidSyncRequest = QStringLiteral("invalid-subscription-sync-request");
+    AgentWorkbenchWidgetTestAccess::setPendingPrompt(
+        workbench, QStringLiteral("queued-prompt-survives-invalid-sync"));
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSubscriptionSync(
+        workbench, invalidSyncSession, generation,
+        QStringLiteral("invalid-subscription-sync"), invalidSyncRequest,
+        timelineAnchorForEvent(completed));
+    AgentWorkbenchWidgetTestAccess::setTimelineReconnectBarrier(
+        workbench, generation, invalidSyncSession);
+    runtimeClient->timelineSubscriptionSynced(
+        invalidSyncRequest,
+        timelineSyncPage(QStringLiteral("different-session"), {}, {}, {}, true));
+    if (!expect(abandonedConnections == 1
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, invalidSyncSession) == QStringLiteral("frozen")
+                    && AgentWorkbenchWidgetTestAccess::timelineRetriesOnReconnect(
+                           workbench, invalidSyncSession)
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionAuthorityCleared(
+                           workbench, invalidSyncSession)
+                    && AgentWorkbenchWidgetTestAccess::pendingPrompt(workbench)
+                        == QStringLiteral("queued-prompt-survives-invalid-sync")
+                    && AgentWorkbenchWidgetTestAccess::timelineReconnectBarrierContains(
+                           workbench, generation, invalidSyncSession),
+                "invalid subscription sync page did not preserve prompt and reconnect barrier while abandoning the connection")) {
+        return false;
+    }
+    runtimeClient->timelineSubscriptionSynced(
+        invalidSyncRequest,
+        timelineSyncPage(invalidSyncSession, {}, {}, {}, true));
+    if (!expect(abandonedConnections == 1,
+                "retired subscription sync response triggered a second connection abandonment")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    installAbandonRecorder();
+    const QString invalidSnapshotSession =
+        QStringLiteral("invalid-subscription-snapshot-session");
+    const QString invalidSnapshotRequest =
+        QStringLiteral("invalid-subscription-snapshot-request");
+    AgentWorkbenchWidgetTestAccess::setPendingPrompt(
+        workbench, QStringLiteral("queued-prompt-survives-invalid-snapshot"));
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSubscriptionSnapshot(
+        workbench, invalidSnapshotSession, generation,
+        QStringLiteral("invalid-subscription-snapshot"), invalidSnapshotRequest);
+    AgentWorkbenchWidgetTestAccess::setTimelineReconnectBarrier(
+        workbench, generation, invalidSnapshotSession);
+    runtimeClient->timelineSubscriptionSnapshotReceived(invalidSnapshotRequest, {});
+    if (!expect(abandonedConnections == 2
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, invalidSnapshotSession) == QStringLiteral("frozen")
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionAuthorityCleared(
+                           workbench, invalidSnapshotSession)
+                    && AgentWorkbenchWidgetTestAccess::pendingPrompt(workbench)
+                        == QStringLiteral("queued-prompt-survives-invalid-snapshot")
+                    && AgentWorkbenchWidgetTestAccess::timelineReconnectBarrierContains(
+                           workbench, generation, invalidSnapshotSession),
+                "invalid subscription snapshot page completed the barrier or lost the queued prompt")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    installAbandonRecorder();
+    const QString invalidActivationSession =
+        QStringLiteral("invalid-subscription-activation-session");
+    const QString invalidActivationRequest =
+        QStringLiteral("invalid-subscription-activation-request");
+    const QString invalidActivationSubscription =
+        QStringLiteral("invalid-subscription-activation");
+    const QJsonObject activationStarted = timelineEnvelope(
+        QStringLiteral("turn.started"), invalidActivationSession,
+        QStringLiteral("invalid-activation-turn"), QJsonValue(QJsonValue::Null),
+        1, 33'001);
+    runtimeClient->timelineEvent(activationStarted);
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSubscriptionSync(
+        workbench, invalidActivationSession, generation,
+        invalidActivationSubscription, invalidSyncRequest,
+        timelineAnchorForEvent(activationStarted));
+    AgentWorkbenchWidgetTestAccess::setTimelineSubscriptionActivationRequester(
+        workbench, invalidActivationRequest);
+    runtimeClient->timelineSubscriptionSynced(
+        invalidSyncRequest,
+        timelineSyncPage(invalidActivationSession,
+                         timelineAnchorForEvent(activationStarted),
+                         timelineAnchorForEvent(activationStarted), {}, true));
+    QJsonObject invalidActivation = timelineSubscriptionActiveResult(
+        generation, invalidActivationSession, invalidActivationSubscription,
+        timelineAnchorForEvent(activationStarted));
+    invalidActivation.insert(QStringLiteral("cursor"), QJsonObject{
+        {QStringLiteral("sequence"), 0},
+        {QStringLiteral("event_id"), QJsonValue(QJsonValue::Null)},
+    });
+    runtimeClient->timelineSubscriptionActivated(
+        invalidActivationRequest, invalidActivation);
+    if (!expect(abandonedConnections == 3
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, invalidActivationSession) == QStringLiteral("frozen")
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionAuthorityCleared(
+                           workbench, invalidActivationSession),
+                "invalid subscription activation did not abandon its current generation")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    installAbandonRecorder();
+    AgentWorkbenchWidgetTestAccess::setCurrentChatSession(workbench, snapshotSession);
+    runtimeClient->timelineEvent(snapshotStarted);
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSubscriptionSnapshot(
+        workbench, snapshotSession, generation, snapshotSubscription, snapshotRequest);
+    AgentWorkbenchWidgetTestAccess::setTimelineSubscriptionActivationRequester(
+        workbench, snapshotActivate);
+    runtimeClient->timelineSubscriptionSnapshotReceived(
+        snapshotRequest,
+        timelineSnapshotPage(snapshotSession, timelineAnchorForEvent(snapshotStarted),
+                             timelineAnchorForEvent(snapshotCompleted), {}, {snapshotItem},
+                             {snapshotItem}, {}, true));
+    runtimeClient->timelineSubscriptionActivated(
+        snapshotActivate,
+        timelineSubscriptionActiveResult(
+            generation, snapshotSession, snapshotSubscription,
+            timelineAnchorForEvent(snapshotCompleted)));
+    const QJsonObject driftedLiveEvent = timelineEnvelope(
+        QStringLiteral("turn.started"), snapshotSession,
+        QStringLiteral("drifted-live-turn"), QJsonValue(QJsonValue::Null), 4, 33'101);
+    const QJsonObject driftedWrapper = timelineSubscriptionEventWrapper(
+        generation, snapshotSession, snapshotSubscription,
+        timelineAnchorForEvent(snapshotItemEvent),
+        timelineAnchorForEvent(snapshotCompleted), driftedLiveEvent);
+    runtimeClient->timelineSubscriptionEvent(driftedWrapper);
+    if (!expect(abandonedConnections == 4
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, snapshotSession) == 3
+                    && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, snapshotSession) == QStringLiteral("frozen")
+                    && AgentWorkbenchWidgetTestAccess::timelineSubscriptionAuthorityCleared(
+                           workbench, snapshotSession),
+                "active subscription cursor drift did not preserve the confirmed projection and start a new generation")) {
+        return false;
+    }
+    runtimeClient->timelineSubscriptionEvent(driftedWrapper);
+    runtimeClient->timelineSubscriptionActivated(
+        snapshotActivate,
+        timelineSubscriptionActiveResult(
+            generation, snapshotSession, snapshotSubscription,
+            timelineAnchorForEvent(snapshotCompleted)));
+    if (!expect(abandonedConnections == 4
+                    && abandonDetails.size() == 4
+                    && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
+                           workbench, snapshotSession) == 3,
+                "old-generation subscription messages were not inert after authority retirement")) {
+        return false;
+    }
+
+    AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
+    installAbandonRecorder();
+    const QString occupiedSession = QStringLiteral("occupied-subscription-session");
+    const QString occupiedSubscription = QStringLiteral("occupied-subscription");
+    const QString occupiedRequest = QStringLiteral("occupied-subscription-request");
+    AgentWorkbenchWidgetTestAccess::setPendingPrompt(
+        workbench, QStringLiteral("queued-prompt-survives-owned-attempt"));
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSubscriptionSubscribe(
+        workbench, occupiedSession, generation, occupiedSubscription, occupiedRequest);
+    runtimeClient->timelineSubscriptionFailed(occupiedRequest, QJsonObject{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("timeline-subscription-failure/0.1")},
+        {QStringLiteral("connection_generation"), static_cast<double>(generation)},
+        {QStringLiteral("session_id"), occupiedSession},
+        {QStringLiteral("subscription_id"), occupiedSubscription},
+        {QStringLiteral("state"), QStringLiteral("failed")},
+        {QStringLiteral("stage"), QStringLiteral("subscribe")},
+        {QStringLiteral("cursor"), QJsonObject{
+            {QStringLiteral("sequence"), 0},
+            {QStringLiteral("event_id"), QJsonValue(QJsonValue::Null)},
+        }},
+        {QStringLiteral("watermark"), QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("request_identity"), QStringLiteral(
+            "timeline-subscription-request:sha256:") + QString(64, QLatin1Char('b'))},
+        {QStringLiteral("reason"), QStringLiteral("session-attempt-exists")},
+        {QStringLiteral("retryable"), true},
+        {QStringLiteral("cleanup_required"), true},
+    });
+    return expect(abandonedConnections == 5
+                      && abandonDetails.size() == 5
+                      && AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                             workbench, occupiedSession) == QStringLiteral("frozen")
+                      && AgentWorkbenchWidgetTestAccess::timelineRetriesOnReconnect(
+                             workbench, occupiedSession)
+                      && AgentWorkbenchWidgetTestAccess::timelineSubscriptionAuthorityCleared(
+                             workbench, occupiedSession)
+                      && AgentWorkbenchWidgetTestAccess::pendingPrompt(workbench)
+                          == QStringLiteral("queued-prompt-survives-owned-attempt"),
+                  "occupied subscription attempt retried on the same connection");
 }
 
 bool verifyTimelineSnapshotRecovery(QApplication &application,
@@ -3913,6 +4636,11 @@ int main(int argc, char *argv[])
         return verifyTimelineSnapshotRecovery(application, workbench, runtimeClient)
             ? 0 : 1;
     }
+    if (qEnvironmentVariableIsSet("AEGISY_TIMELINE_SUBSCRIPTION_TEST_ONLY")) {
+        AgentRuntimeClient *runtimeClient = workbench.findChild<AgentRuntimeClient *>();
+        return verifyTimelineSubscriptionRecovery(application, workbench, runtimeClient)
+            ? 0 : 1;
+    }
     if (qEnvironmentVariableIsSet("AEGISY_RUNTIME_DEGRADATION_TEST_ONLY")) {
         AgentRuntimeClient *runtimeClient = workbench.findChild<AgentRuntimeClient *>();
         QLabel *runtimeCapability = workbench.findChild<QLabel *>(
@@ -3985,6 +4713,7 @@ int main(int argc, char *argv[])
                 && verifySessionScopedTimelineSequences(
                     application, workbench, runtimeClient)
                 && verifyTimelineGapRecovery(application, workbench, runtimeClient)
+                && verifyTimelineSubscriptionRecovery(application, workbench, runtimeClient)
                 && verifyTimelineSnapshotRecovery(application, workbench, runtimeClient)
                 && verifyRuntimeDegradationFailures(
                     application, workbench, runtimeClient, runtimeCapability)
@@ -5504,6 +6233,34 @@ int main(int argc, char *argv[])
     // sequence space. Start the real sidecar workflow with a clean client view.
     AgentWorkbenchWidgetTestAccess::resetTimelineValidation(workbench);
     AgentWorkbenchWidgetTestAccess::setTimelineSyncAvailable(workbench, true);
+    AgentWorkbenchWidgetTestAccess::setTimelineSubscriptionAvailable(workbench, true);
+    int realTimelineSubscribed = 0;
+    int realTimelineSynced = 0;
+    int realTimelineActivated = 0;
+    QStringList realTimelineFailures;
+    QObject::connect(runtime, &AgentRuntimeClient::timelineSubscribed,
+                     &workbench, [&realTimelineSubscribed](const QString &,
+                                                          const QJsonObject &) {
+        ++realTimelineSubscribed;
+    });
+    QObject::connect(runtime, &AgentRuntimeClient::timelineSubscriptionSynced,
+                     &workbench, [&realTimelineSynced](const QString &,
+                                                      const QJsonObject &) {
+        ++realTimelineSynced;
+    });
+    QObject::connect(runtime, &AgentRuntimeClient::timelineSubscriptionActivated,
+                     &workbench, [&realTimelineActivated](const QString &,
+                                                         const QJsonObject &) {
+        ++realTimelineActivated;
+    });
+    QObject::connect(runtime, &AgentRuntimeClient::timelineSubscriptionFailed,
+                     &workbench, [&realTimelineFailures](const QString &requestId,
+                                                        const QJsonObject &failure) {
+        realTimelineFailures.append(QStringLiteral("%1:%2:%3")
+            .arg(requestId,
+                 failure.value(QStringLiteral("stage")).toString(),
+                 failure.value(QStringLiteral("reason")).toString()));
+    });
     runtime->startSession(QStringLiteral("work"), openedProjectId);
     if (!expect(waitUntil(application, [&previewSessionId]() {
                     return !previewSessionId.isEmpty();
@@ -5511,11 +6268,18 @@ int main(int argc, char *argv[])
                 "workspace edit preview fixture did not create a Work session")) {
         return 1;
     }
-    if (!expect(waitUntil(application, [&workbench, &previewSessionId]() {
+    if (!expect(waitUntil(application, [&workbench, &previewSessionId,
+                                         &realTimelineSubscribed, &realTimelineSynced,
+                                         &realTimelineActivated,
+                                         &realTimelineFailures]() {
                     return AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
-                               workbench, previewSessionId) == QStringLiteral("live");
+                               workbench, previewSessionId) == QStringLiteral("live")
+                        && realTimelineSubscribed == 1
+                        && realTimelineSynced == 1
+                        && realTimelineActivated == 1
+                        && realTimelineFailures.isEmpty();
                 }),
-                "new Work session did not complete its initial Timeline sync")) {
+                "new Work session did not complete its initial Timeline subscription")) {
         return 1;
     }
     if (!expect(AgentWorkbenchWidgetTestAccess::activateMode(
@@ -6182,7 +6946,8 @@ int main(int argc, char *argv[])
         return 1;
     }
     work->click();
-    if (!expect(waitUntil(application, [executionContext, modelPicker, &fixtureBranch]() {
+    if (!expect(waitUntil(application, [executionContext, modelPicker, sendButton,
+                                         &fixtureBranch]() {
                     return executionContext->text().contains(
                                QStringLiteral("Runtime preview"))
                         && executionContext->text().contains(
@@ -6195,21 +6960,58 @@ int main(int argc, char *argv[])
                         && modelPicker->currentText()
                             == QStringLiteral("local / deterministic-echo")
                         && modelPicker->toolTip().contains(QStringLiteral("preview"))
-                        && modelPicker->toolTip().contains(QStringLiteral("read-only"));
+                        && modelPicker->toolTip().contains(QStringLiteral("read-only"))
+                        && sendButton->isEnabled();
                 }),
-                "active Work session did not project its persisted Runtime binding")) {
+                "active Work session did not finish Timeline recovery and project its persisted Runtime binding")) {
         return 1;
     }
     composer->setPlainText(QStringLiteral("检查选定上下文"));
+    QStringList turnRequestFailures;
+    int subscriptionEventsAfterSend = 0;
+    int bareEventsAfterSend = 0;
+    QObject::connect(runtime, &AgentRuntimeClient::requestFailed, &workbench,
+                     [&turnRequestFailures](const QString &, const QString &method,
+                                            const QString &, int code) {
+        if (method == QStringLiteral("turn/start")) {
+            turnRequestFailures.append(QStringLiteral("%1:%2").arg(method).arg(code));
+        }
+    });
+    QObject::connect(runtime, &AgentRuntimeClient::timelineSubscriptionEvent,
+                     &workbench, [&subscriptionEventsAfterSend](const QJsonObject &) {
+        ++subscriptionEventsAfterSend;
+    });
+    QObject::connect(runtime, &AgentRuntimeClient::timelineEvent,
+                     &workbench, [&bareEventsAfterSend](const QJsonObject &) {
+        ++bareEventsAfterSend;
+    });
     sendButton->click();
-    if (!expect(waitUntil(application, [&workbench, contextPanel, contextList]() {
+    const bool structuredContextRendered = waitUntil(
+        application, [&workbench, contextPanel, contextList]() {
                     const QList<QLabel *> labels = workbench.findChildren<QLabel *>();
                     return contextPanel->isHidden() && contextList->count() == 0
                         && std::any_of(labels.cbegin(), labels.cend(), [](QLabel *label) {
                             return label->text().contains(QStringLiteral("untrusted data"))
                                 && label->text().contains(QStringLiteral("original"));
                         });
-                }),
+                });
+    if (!structuredContextRendered) {
+        qCritical() << "structured context diagnostics"
+                    << "session" << previewSessionId
+                    << "recovery" << AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
+                           workbench, previewSessionId)
+                    << "contextHidden" << contextPanel->isHidden()
+                    << "contextCount" << contextList->count()
+                    << "send" << sendButton->text() << sendButton->isEnabled()
+                    << "turnFailures" << turnRequestFailures
+                    << "subscribed" << realTimelineSubscribed
+                    << "synced" << realTimelineSynced
+                    << "activated" << realTimelineActivated
+                    << "subscriptionFailures" << realTimelineFailures
+                    << "subscriptionEvents" << subscriptionEventsAfterSend
+                    << "bareEvents" << bareEventsAfterSend;
+    }
+    if (!expect(structuredContextRendered,
                 "structured context was not sent through AAP with authoritative file data")) {
         return 1;
     }

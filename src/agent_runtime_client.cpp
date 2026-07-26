@@ -254,6 +254,7 @@ const QStringList &declaredCapabilities()
         QStringLiteral("timeline.command.structured.read-only"),
         QStringLiteral("timeline.replay.fixed-watermark"),
         QStringLiteral("timeline.snapshot.current"),
+        QStringLiteral("timeline.subscription.fixed-watermark"),
         QStringLiteral("timeline.streaming"),
         QStringLiteral("turn.cancel.interrupt"),
         QStringLiteral("turn.context.inspect"),
@@ -651,6 +652,208 @@ QByteArray canonicalTimelineSnapshotCursor(const QJsonValue &value)
     return encoded;
 }
 
+QByteArray canonicalTimelineSyncRequest(const QJsonValue &value)
+{
+    if (!value.isObject()) return {};
+    const QJsonObject request = value.toObject();
+    if (!hasExactKeys(request, {
+            QStringLiteral("session_id"), QStringLiteral("after"),
+            QStringLiteral("watermark"), QStringLiteral("limit"),
+        })
+        || !isBoundedTimelineIdentity(request.value(QStringLiteral("session_id")))
+        || !isValidTimelineAnchor(request.value(QStringLiteral("after")).toObject())
+        || !isValidTimelineAnchor(request.value(QStringLiteral("watermark")).toObject())
+        || !isPositiveSafeJsonInteger(request.value(QStringLiteral("limit")))) {
+        return {};
+    }
+    QByteArray encoded = QByteArrayLiteral("{\"session_id\":");
+    encoded += compactJsonValue(request.value(QStringLiteral("session_id")));
+    encoded += QByteArrayLiteral(",\"after\":");
+    encoded += canonicalTimelineSnapshotAnchor(request.value(QStringLiteral("after")));
+    encoded += QByteArrayLiteral(",\"watermark\":");
+    encoded += canonicalTimelineSnapshotAnchor(request.value(QStringLiteral("watermark")));
+    encoded += QByteArrayLiteral(",\"limit\":");
+    encoded += compactJsonValue(request.value(QStringLiteral("limit")));
+    encoded += '}';
+    return encoded;
+}
+
+QByteArray canonicalTimelineSnapshotRequest(const QJsonValue &value)
+{
+    if (!value.isObject()) return {};
+    const QJsonObject request = value.toObject();
+    if (!hasExactKeys(request, {
+            QStringLiteral("session_id"), QStringLiteral("snapshot_identity"),
+            QStringLiteral("watermark"), QStringLiteral("after"),
+            QStringLiteral("limit"),
+        })
+        || !isBoundedTimelineIdentity(request.value(QStringLiteral("session_id")))
+        || !isPositiveSafeJsonInteger(request.value(QStringLiteral("limit")))) {
+        return {};
+    }
+    const QJsonValue snapshotIdentity = request.value(QStringLiteral("snapshot_identity"));
+    const QJsonValue watermark = request.value(QStringLiteral("watermark"));
+    const QJsonValue after = request.value(QStringLiteral("after"));
+    const bool firstPage = snapshotIdentity.isNull() && watermark.isNull() && after.isNull();
+    const bool continuation = snapshotIdentity.isString()
+        && isValidTimelineSnapshotIdentity(snapshotIdentity.toString())
+        && watermark.isObject() && isValidTimelineAnchor(watermark.toObject())
+        && after.isObject() && isValidTimelineSnapshotCursor(after.toObject());
+    if (!firstPage && !continuation) return {};
+
+    QByteArray encoded = QByteArrayLiteral("{\"session_id\":");
+    encoded += compactJsonValue(request.value(QStringLiteral("session_id")));
+    encoded += QByteArrayLiteral(",\"snapshot_identity\":");
+    encoded += compactJsonValue(snapshotIdentity);
+    encoded += QByteArrayLiteral(",\"watermark\":");
+    encoded += watermark.isNull()
+        ? QByteArrayLiteral("null") : canonicalTimelineSnapshotAnchor(watermark);
+    encoded += QByteArrayLiteral(",\"after\":");
+    encoded += after.isNull()
+        ? QByteArrayLiteral("null") : canonicalTimelineSnapshotCursor(after);
+    encoded += QByteArrayLiteral(",\"limit\":");
+    encoded += compactJsonValue(request.value(QStringLiteral("limit")));
+    encoded += '}';
+    return encoded;
+}
+
+QByteArray canonicalTimelineSubscriptionRequest(const QString &stage,
+                                                const QJsonObject &request)
+{
+    const bool bindingValid = isPositiveSafeJsonInteger(
+            request.value(QStringLiteral("connection_generation")))
+        && isBoundedTimelineIdentity(request.value(QStringLiteral("session_id")))
+        && isBoundedTimelineIdentity(request.value(QStringLiteral("subscription_id")));
+    if (!bindingValid) return {};
+    QByteArray encoded;
+    if (stage == QStringLiteral("subscribe")) {
+        if (!hasExactKeys(request, {
+                QStringLiteral("schema_version"),
+                QStringLiteral("connection_generation"),
+                QStringLiteral("session_id"), QStringLiteral("subscription_id"),
+                QStringLiteral("cursor"), QStringLiteral("watermark"),
+            })
+            || request.value(QStringLiteral("schema_version")).toString()
+                != QStringLiteral("timeline-subscribe-request/0.1")
+            || !isValidTimelineAnchor(request.value(QStringLiteral("cursor")).toObject())
+            || !(request.value(QStringLiteral("watermark")).isNull()
+                 || (request.value(QStringLiteral("watermark")).isObject()
+                     && isValidTimelineAnchor(
+                         request.value(QStringLiteral("watermark")).toObject())))) {
+            return {};
+        }
+        encoded = QByteArrayLiteral("{\"schema_version\":\"timeline-subscribe-request/0.1\",\"connection_generation\":");
+        encoded += compactJsonValue(request.value(QStringLiteral("connection_generation")));
+        encoded += QByteArrayLiteral(",\"session_id\":");
+        encoded += compactJsonValue(request.value(QStringLiteral("session_id")));
+        encoded += QByteArrayLiteral(",\"subscription_id\":");
+        encoded += compactJsonValue(request.value(QStringLiteral("subscription_id")));
+        encoded += QByteArrayLiteral(",\"cursor\":");
+        encoded += canonicalTimelineSnapshotAnchor(request.value(QStringLiteral("cursor")));
+        encoded += QByteArrayLiteral(",\"watermark\":");
+        encoded += request.value(QStringLiteral("watermark")).isNull()
+            ? QByteArrayLiteral("null")
+            : canonicalTimelineSnapshotAnchor(request.value(QStringLiteral("watermark")));
+        encoded += '}';
+    } else if (stage == QStringLiteral("subscription-sync")
+               || stage == QStringLiteral("subscription-snapshot")) {
+        const QString expectedSchema = stage == QStringLiteral("subscription-sync")
+            ? QStringLiteral("timeline-subscription-sync-request/0.1")
+            : QStringLiteral("timeline-subscription-snapshot-request/0.1");
+        if (!hasExactKeys(request, {
+                QStringLiteral("schema_version"),
+                QStringLiteral("connection_generation"),
+                QStringLiteral("session_id"), QStringLiteral("subscription_id"),
+                QStringLiteral("request"),
+            })
+            || request.value(QStringLiteral("schema_version")).toString() != expectedSchema) {
+            return {};
+        }
+        const QByteArray nested = stage == QStringLiteral("subscription-sync")
+            ? canonicalTimelineSyncRequest(request.value(QStringLiteral("request")))
+            : canonicalTimelineSnapshotRequest(request.value(QStringLiteral("request")));
+        if (nested.isEmpty()
+            || request.value(QStringLiteral("request")).toObject()
+                    .value(QStringLiteral("session_id"))
+                != request.value(QStringLiteral("session_id"))) {
+            return {};
+        }
+        encoded = QByteArrayLiteral("{\"schema_version\":");
+        encoded += compactJsonValue(QJsonValue(expectedSchema));
+        encoded += QByteArrayLiteral(",\"connection_generation\":");
+        encoded += compactJsonValue(request.value(QStringLiteral("connection_generation")));
+        encoded += QByteArrayLiteral(",\"session_id\":");
+        encoded += compactJsonValue(request.value(QStringLiteral("session_id")));
+        encoded += QByteArrayLiteral(",\"subscription_id\":");
+        encoded += compactJsonValue(request.value(QStringLiteral("subscription_id")));
+        encoded += QByteArrayLiteral(",\"request\":");
+        encoded += nested;
+        encoded += '}';
+    } else if (stage == QStringLiteral("activate")) {
+        if (!hasExactKeys(request, {
+                QStringLiteral("schema_version"),
+                QStringLiteral("connection_generation"),
+                QStringLiteral("session_id"), QStringLiteral("subscription_id"),
+                QStringLiteral("source"), QStringLiteral("cursor"),
+                QStringLiteral("watermark"), QStringLiteral("snapshot_identity"),
+            })
+            || request.value(QStringLiteral("schema_version")).toString()
+                != QStringLiteral("timeline-subscription-activate-request/0.1")
+            || !isValidTimelineAnchor(request.value(QStringLiteral("cursor")).toObject())
+            || request.value(QStringLiteral("cursor"))
+                != request.value(QStringLiteral("watermark"))) {
+            return {};
+        }
+        const QString source = request.value(QStringLiteral("source")).toString();
+        const QJsonValue snapshotIdentity = request.value(QStringLiteral("snapshot_identity"));
+        if (!((source == QStringLiteral("sync") && snapshotIdentity.isNull())
+              || (source == QStringLiteral("snapshot") && snapshotIdentity.isString()
+                  && isValidTimelineSnapshotIdentity(snapshotIdentity.toString())))) {
+            return {};
+        }
+        encoded = QByteArrayLiteral("{\"schema_version\":\"timeline-subscription-activate-request/0.1\",\"connection_generation\":");
+        encoded += compactJsonValue(request.value(QStringLiteral("connection_generation")));
+        encoded += QByteArrayLiteral(",\"session_id\":");
+        encoded += compactJsonValue(request.value(QStringLiteral("session_id")));
+        encoded += QByteArrayLiteral(",\"subscription_id\":");
+        encoded += compactJsonValue(request.value(QStringLiteral("subscription_id")));
+        encoded += QByteArrayLiteral(",\"source\":");
+        encoded += compactJsonValue(request.value(QStringLiteral("source")));
+        encoded += QByteArrayLiteral(",\"cursor\":");
+        encoded += canonicalTimelineSnapshotAnchor(request.value(QStringLiteral("cursor")));
+        encoded += QByteArrayLiteral(",\"watermark\":");
+        encoded += canonicalTimelineSnapshotAnchor(request.value(QStringLiteral("watermark")));
+        encoded += QByteArrayLiteral(",\"snapshot_identity\":");
+        encoded += compactJsonValue(snapshotIdentity);
+        encoded += '}';
+    } else {
+        return {};
+    }
+    return encoded;
+}
+
+QString domainSeparatedTimelineSubscriptionRequestIdentity(
+    const QString &stage, const QJsonObject &request)
+{
+    const QByteArray material = canonicalTimelineSubscriptionRequest(stage, request);
+    const QByteArray stageBytes = stage.toUtf8();
+    if (material.isEmpty() || stageBytes.isEmpty()) return {};
+    static constexpr char domain[] = "aegisy-timeline-subscription-request/0.1";
+    QByteArray input(domain, static_cast<int>(std::strlen(domain)) + 1);
+    const auto appendLength = [&input](quint64 value) {
+        for (int shift = 56; shift >= 0; shift -= 8) {
+            input.append(static_cast<char>((value >> shift) & 0xff));
+        }
+    };
+    appendLength(static_cast<quint64>(stageBytes.size()));
+    input += stageBytes;
+    appendLength(static_cast<quint64>(material.size()));
+    input += material;
+    return QStringLiteral("timeline-subscription-request:sha256:%1").arg(
+        QString::fromLatin1(QCryptographicHash::hash(
+            input, QCryptographicHash::Sha256).toHex()));
+}
+
 QByteArray canonicalTimelineSnapshotActiveTurn(const QJsonValue &value)
 {
     if (value.isNull()) return QByteArrayLiteral("null");
@@ -992,6 +1195,230 @@ bool validateCapabilityArray(const QJsonValue &value,
     return true;
 }
 
+bool isValidTimelineSubscribeResult(const QJsonObject &result,
+                                    const QJsonObject &request)
+{
+    if (!hasExactKeys(result, {
+            QStringLiteral("schema_version"),
+            QStringLiteral("connection_generation"),
+            QStringLiteral("session_id"), QStringLiteral("subscription_id"),
+            QStringLiteral("state"), QStringLiteral("cursor"),
+            QStringLiteral("watermark"), QStringLiteral("next_method"),
+        })
+        || result.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("timeline-subscribe-result/0.1")
+        || !isPositiveSafeJsonInteger(
+            result.value(QStringLiteral("connection_generation")))
+        || result.value(QStringLiteral("connection_generation"))
+            != request.value(QStringLiteral("connection_generation"))
+        || result.value(QStringLiteral("session_id"))
+            != request.value(QStringLiteral("session_id"))
+        || result.value(QStringLiteral("subscription_id"))
+            != request.value(QStringLiteral("subscription_id"))
+        || result.value(QStringLiteral("cursor"))
+            != request.value(QStringLiteral("cursor"))
+        || !isValidTimelineAnchor(result.value(QStringLiteral("cursor")).toObject())) {
+        return false;
+    }
+    const QJsonValue requestedWatermark = request.value(QStringLiteral("watermark"));
+    if (!requestedWatermark.isNull()
+        && result.value(QStringLiteral("watermark")) != requestedWatermark) {
+        return false;
+    }
+    const QString state = result.value(QStringLiteral("state")).toString();
+    const QJsonValue watermark = result.value(QStringLiteral("watermark"));
+    const QString nextMethod = result.value(QStringLiteral("next_method")).toString();
+    if (state == QStringLiteral("sync-required")) {
+        return watermark.isObject() && isValidTimelineAnchor(watermark.toObject())
+            && nextMethod == QStringLiteral("timeline/subscription-sync");
+    }
+    return state == QStringLiteral("snapshot-required") && watermark.isNull()
+        && nextMethod == QStringLiteral("timeline/subscription-snapshot");
+}
+
+bool isValidTimelineActivateResult(const QJsonObject &result,
+                                   const QJsonObject &request)
+{
+    return hasExactKeys(result, {
+            QStringLiteral("schema_version"),
+            QStringLiteral("connection_generation"),
+            QStringLiteral("session_id"), QStringLiteral("subscription_id"),
+            QStringLiteral("state"), QStringLiteral("cursor"),
+            QStringLiteral("watermark"),
+        })
+        && result.value(QStringLiteral("schema_version")).toString()
+            == QStringLiteral("timeline-subscription-active/0.1")
+        && result.value(QStringLiteral("connection_generation"))
+            == request.value(QStringLiteral("connection_generation"))
+        && result.value(QStringLiteral("session_id"))
+            == request.value(QStringLiteral("session_id"))
+        && result.value(QStringLiteral("subscription_id"))
+            == request.value(QStringLiteral("subscription_id"))
+        && result.value(QStringLiteral("state")).toString() == QStringLiteral("active")
+        && result.value(QStringLiteral("cursor"))
+            == request.value(QStringLiteral("cursor"))
+        && result.value(QStringLiteral("watermark"))
+            == request.value(QStringLiteral("watermark"))
+        && result.value(QStringLiteral("cursor"))
+            == result.value(QStringLiteral("watermark"))
+        && isValidTimelineAnchor(result.value(QStringLiteral("cursor")).toObject());
+}
+
+bool isValidTimelineSubscriptionEvent(const QJsonObject &wrapper)
+{
+    if (!hasExactKeys(wrapper, {
+            QStringLiteral("schema_version"),
+            QStringLiteral("connection_generation"),
+            QStringLiteral("session_id"), QStringLiteral("subscription_id"),
+            QStringLiteral("state"), QStringLiteral("cursor"),
+            QStringLiteral("watermark"), QStringLiteral("event"),
+        })
+        || wrapper.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("timeline-subscription-event/0.1")
+        || !isPositiveSafeJsonInteger(
+            wrapper.value(QStringLiteral("connection_generation")))
+        || !isBoundedTimelineIdentity(wrapper.value(QStringLiteral("session_id")))
+        || !isBoundedTimelineIdentity(wrapper.value(QStringLiteral("subscription_id")))
+        || wrapper.value(QStringLiteral("state")).toString() != QStringLiteral("active")
+        || !isValidTimelineAnchor(wrapper.value(QStringLiteral("cursor")).toObject())
+        || !isValidTimelineAnchor(wrapper.value(QStringLiteral("watermark")).toObject())
+        || !wrapper.value(QStringLiteral("event")).isObject()) {
+        return false;
+    }
+    const QJsonObject cursor = wrapper.value(QStringLiteral("cursor")).toObject();
+    const QJsonObject watermark = wrapper.value(QStringLiteral("watermark")).toObject();
+    const QJsonObject event = wrapper.value(QStringLiteral("event")).toObject();
+    const double cursorSequence = cursor.value(QStringLiteral("sequence")).toDouble();
+    return watermark.value(QStringLiteral("sequence")).toDouble() <= cursorSequence
+        && isValidTimelineEventEnvelope(event)
+        && event.value(QStringLiteral("session_id"))
+            == wrapper.value(QStringLiteral("session_id"))
+        && event.value(QStringLiteral("sequence")).toDouble() == cursorSequence + 1.0;
+}
+
+bool isValidTimelineSubscriptionFailure(const QJsonObject &failure)
+{
+    if (!hasExactKeys(failure, {
+            QStringLiteral("schema_version"),
+            QStringLiteral("connection_generation"),
+            QStringLiteral("session_id"), QStringLiteral("subscription_id"),
+            QStringLiteral("state"), QStringLiteral("stage"),
+            QStringLiteral("cursor"), QStringLiteral("watermark"),
+            QStringLiteral("request_identity"), QStringLiteral("reason"),
+            QStringLiteral("retryable"), QStringLiteral("cleanup_required"),
+        })
+        || failure.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("timeline-subscription-failure/0.1")
+        || !isPositiveSafeJsonInteger(
+            failure.value(QStringLiteral("connection_generation")))
+        || !isBoundedTimelineIdentity(failure.value(QStringLiteral("session_id")))
+        || !isBoundedTimelineIdentity(failure.value(QStringLiteral("subscription_id")))
+        || failure.value(QStringLiteral("state")).toString() != QStringLiteral("failed")
+        || !isValidTimelineAnchor(failure.value(QStringLiteral("cursor")).toObject())
+        || !(failure.value(QStringLiteral("watermark")).isNull()
+             || (failure.value(QStringLiteral("watermark")).isObject()
+                 && isValidTimelineAnchor(
+                    failure.value(QStringLiteral("watermark")).toObject())))
+        || !isValidTimelineName(failure.value(QStringLiteral("reason")), 64)
+        || !failure.value(QStringLiteral("retryable")).isBool()
+        || failure.value(QStringLiteral("cleanup_required")) != QJsonValue(true)) {
+        return false;
+    }
+    static const QSet<QString> requestStages{
+        QStringLiteral("subscribe"), QStringLiteral("sync"),
+        QStringLiteral("snapshot"), QStringLiteral("activate"),
+    };
+    const QString stage = failure.value(QStringLiteral("stage")).toString();
+    if (stage == QStringLiteral("live")) {
+        return failure.value(QStringLiteral("request_identity")).isNull();
+    }
+    static const QRegularExpression requestIdentityPattern(QStringLiteral(
+        "^timeline-subscription-request:sha256:[0-9a-f]{64}$"));
+    return requestStages.contains(stage)
+        && failure.value(QStringLiteral("request_identity")).isString()
+        && requestIdentityPattern.match(
+            failure.value(QStringLiteral("request_identity")).toString()).hasMatch();
+}
+
+QString timelineSubscriptionIdentityStageForMethod(const QString &method)
+{
+    if (method == QStringLiteral("timeline/subscribe")) {
+        return QStringLiteral("subscribe");
+    }
+    if (method == QStringLiteral("timeline/subscription-sync")) {
+        return QStringLiteral("subscription-sync");
+    }
+    if (method == QStringLiteral("timeline/subscription-snapshot")) {
+        return QStringLiteral("subscription-snapshot");
+    }
+    if (method == QStringLiteral("timeline/subscription-activate")) {
+        return QStringLiteral("activate");
+    }
+    return {};
+}
+
+QString timelineSubscriptionFailureStageForMethod(const QString &method)
+{
+    if (method == QStringLiteral("timeline/subscribe")) {
+        return QStringLiteral("subscribe");
+    }
+    if (method == QStringLiteral("timeline/subscription-sync")) {
+        return QStringLiteral("sync");
+    }
+    if (method == QStringLiteral("timeline/subscription-snapshot")) {
+        return QStringLiteral("snapshot");
+    }
+    if (method == QStringLiteral("timeline/subscription-activate")) {
+        return QStringLiteral("activate");
+    }
+    return {};
+}
+
+bool isValidTimelineSubscriptionFailureForRequest(
+    const QJsonObject &failure, const QString &method, const QJsonObject &metadata)
+{
+    const QJsonObject request = metadata.value(QStringLiteral("request")).toObject();
+    const QString identityStage = timelineSubscriptionIdentityStageForMethod(method);
+    const QString failureStage = timelineSubscriptionFailureStageForMethod(method);
+    if (!isValidTimelineSubscriptionFailure(failure)
+        || request.isEmpty() || identityStage.isEmpty() || failureStage.isEmpty()
+        || failure.value(QStringLiteral("connection_generation"))
+            != request.value(QStringLiteral("connection_generation"))
+        || failure.value(QStringLiteral("session_id"))
+            != request.value(QStringLiteral("session_id"))
+        || failure.value(QStringLiteral("subscription_id"))
+            != request.value(QStringLiteral("subscription_id"))
+        || failure.value(QStringLiteral("stage")).toString() != failureStage
+        || failure.value(QStringLiteral("request_identity")).toString()
+            != domainSeparatedTimelineSubscriptionRequestIdentity(identityStage, request)) {
+        return false;
+    }
+    if (method == QStringLiteral("timeline/subscribe")) {
+        return failure.value(QStringLiteral("cursor"))
+                == request.value(QStringLiteral("cursor"))
+            && failure.value(QStringLiteral("watermark"))
+                == request.value(QStringLiteral("watermark"));
+    }
+    if (method == QStringLiteral("timeline/subscription-sync")) {
+        const QJsonObject nested = request.value(QStringLiteral("request")).toObject();
+        return failure.value(QStringLiteral("cursor"))
+                == nested.value(QStringLiteral("after"))
+            && failure.value(QStringLiteral("watermark"))
+                == nested.value(QStringLiteral("watermark"));
+    }
+    if (method == QStringLiteral("timeline/subscription-snapshot")) {
+        const QJsonObject nested = request.value(QStringLiteral("request")).toObject();
+        return failure.value(QStringLiteral("cursor"))
+                == metadata.value(QStringLiteral("subscription_cursor"))
+            && failure.value(QStringLiteral("watermark"))
+                == nested.value(QStringLiteral("watermark"));
+    }
+    return failure.value(QStringLiteral("cursor"))
+            == request.value(QStringLiteral("cursor"))
+        && failure.value(QStringLiteral("watermark"))
+            == request.value(QStringLiteral("watermark"));
+}
+
 bool validateInitializeResult(const QJsonObject &result,
                               QSet<QString> *stableCapabilities,
                               int *maximumFrameBytes,
@@ -1314,6 +1741,14 @@ QStringList requiredCapabilitiesForMethod(const QString &method,
         {QStringLiteral("session/read"), QStringLiteral("session.history.paginated")},
         {QStringLiteral("timeline/sync"), QStringLiteral("timeline.replay.fixed-watermark")},
         {QStringLiteral("timeline/snapshot"), QStringLiteral("timeline.snapshot.current")},
+        {QStringLiteral("timeline/subscribe"),
+         QStringLiteral("timeline.subscription.fixed-watermark")},
+        {QStringLiteral("timeline/subscription-sync"),
+         QStringLiteral("timeline.subscription.fixed-watermark")},
+        {QStringLiteral("timeline/subscription-snapshot"),
+         QStringLiteral("timeline.subscription.fixed-watermark")},
+        {QStringLiteral("timeline/subscription-activate"),
+         QStringLiteral("timeline.subscription.fixed-watermark")},
         {QStringLiteral("session/background-notifications"), QStringLiteral("background-notification.outbox.read-only")},
         {QStringLiteral("session/background-recovery"), QStringLiteral("background-job.recovery.inspect")},
         {QStringLiteral("runtime/projection-recovery/status"), QStringLiteral("runtime.projection-recovery.status")},
@@ -1444,6 +1879,10 @@ bool isReconnectRecoveryMethod(const QString &method)
         QStringLiteral("terminal/read"),
         QStringLiteral("timeline/snapshot"),
         QStringLiteral("timeline/sync"),
+        QStringLiteral("timeline/subscribe"),
+        QStringLiteral("timeline/subscription-sync"),
+        QStringLiteral("timeline/subscription-snapshot"),
+        QStringLiteral("timeline/subscription-activate"),
         QStringLiteral("workspace/edit/proposal/latest"),
         QStringLiteral("workspace/edit/proposal/read"),
     };
@@ -1830,6 +2269,12 @@ QString AgentRuntimeClient::timelineSnapshotPageIdentity(const QJsonObject &page
         "timeline-session-snapshot-page:sha256:", material);
 }
 
+QString AgentRuntimeClient::timelineSubscriptionRequestIdentity(
+    const QString &stage, const QJsonObject &request)
+{
+    return domainSeparatedTimelineSubscriptionRequestIdentity(stage, request);
+}
+
 QString AgentRuntimeClient::workspaceEditProposalPreviewIdentity(
     const QJsonObject &proposal)
 {
@@ -2134,6 +2579,7 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
     m_pendingMethods.clear();
     m_pendingGenerations.clear();
     m_pendingTimelineSyncRequests.clear();
+    m_pendingTimelineSubscriptionRequests.clear();
     const QString connectingDetail = reconnectAttempt
         ? QStringLiteral("正在执行第 %1/%2 次运行时重连")
               .arg(m_reconnectAttempt)
@@ -2820,6 +3266,214 @@ QString AgentRuntimeClient::timelineSnapshot(const QString &sessionId,
              ? QJsonValue(after) : QJsonValue(QJsonValue::Null)},
         {QStringLiteral("limit"), limit},
     });
+}
+
+QString AgentRuntimeClient::subscribeTimeline(const QString &sessionId,
+                                              quint64 connectionGeneration,
+                                              quint64 cursorSequence,
+                                              const QString &cursorEventId,
+                                              const QJsonObject &watermark,
+                                              QString *subscriptionId)
+{
+    const QString method = QStringLiteral("timeline/subscribe");
+    if (subscriptionId) subscriptionId->clear();
+    const QJsonObject cursor{
+        {QStringLiteral("sequence"), static_cast<double>(cursorSequence)},
+        {QStringLiteral("event_id"), cursorSequence == 0
+             ? QJsonValue(QJsonValue::Null) : QJsonValue(cursorEventId)},
+    };
+    if (connectionGeneration == 0 || connectionGeneration != m_processGeneration
+        || connectionGeneration > static_cast<quint64>(kMaximumSafeJsonInteger)
+        || !isBoundedTimelineIdentity(sessionId)
+        || cursorSequence > static_cast<quint64>(kMaximumSafeJsonInteger)
+        || (cursorSequence == 0 ? !cursorEventId.isEmpty()
+                                : !isValidTimelineEventId(cursorEventId))
+        || (!watermark.isEmpty() && !isValidTimelineAnchor(watermark))) {
+        emit requestFailed({}, method, QStringLiteral("Timeline 订阅请求无效"), -32602);
+        return {};
+    }
+    if (++m_nextTimelineSubscriptionId == 0) ++m_nextTimelineSubscriptionId;
+    const QString createdSubscriptionId = QStringLiteral("qt-subscription-%1-%2")
+        .arg(connectionGeneration).arg(m_nextTimelineSubscriptionId);
+    const QJsonObject params{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("timeline-subscribe-request/0.1")},
+        {QStringLiteral("connection_generation"),
+         static_cast<double>(connectionGeneration)},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("subscription_id"), createdSubscriptionId},
+        {QStringLiteral("cursor"), cursor},
+        {QStringLiteral("watermark"), watermark.isEmpty()
+             ? QJsonValue(QJsonValue::Null) : QJsonValue(watermark)},
+    };
+    if (timelineSubscriptionRequestIdentity(QStringLiteral("subscribe"), params).isEmpty()) {
+        emit requestFailed({}, method, QStringLiteral("Timeline 订阅请求无效"), -32602);
+        return {};
+    }
+    const QString requestId = sendRequest(method, params);
+    if (requestId.isEmpty()) return {};
+    m_pendingTimelineSubscriptionRequests.insert(requestId, {
+        {QStringLiteral("request"), params},
+    });
+    if (subscriptionId) *subscriptionId = createdSubscriptionId;
+    return requestId;
+}
+
+QString AgentRuntimeClient::syncTimelineSubscription(
+    quint64 connectionGeneration, const QString &sessionId,
+    const QString &subscriptionId, quint64 afterSequence,
+    const QString &afterEventId, const QJsonObject &watermark, int limit)
+{
+    const QString method = QStringLiteral("timeline/subscription-sync");
+    const QJsonObject after{
+        {QStringLiteral("sequence"), static_cast<double>(afterSequence)},
+        {QStringLiteral("event_id"), afterSequence == 0
+             ? QJsonValue(QJsonValue::Null) : QJsonValue(afterEventId)},
+    };
+    if (connectionGeneration == 0 || connectionGeneration != m_processGeneration
+        || connectionGeneration > static_cast<quint64>(kMaximumSafeJsonInteger)
+        || !isBoundedTimelineIdentity(sessionId)
+        || !isBoundedTimelineIdentity(subscriptionId)
+        || afterSequence > static_cast<quint64>(kMaximumSafeJsonInteger)
+        || (afterSequence == 0 ? !afterEventId.isEmpty()
+                               : !isValidTimelineEventId(afterEventId))
+        || !isValidTimelineAnchor(watermark)
+        || watermark.value(QStringLiteral("sequence")).toDouble()
+            < static_cast<double>(afterSequence)
+        || limit < 1 || limit > 200) {
+        emit requestFailed({}, method, QStringLiteral("Timeline 订阅同步请求无效"), -32602);
+        return {};
+    }
+    const QJsonObject nested{
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("after"), after},
+        {QStringLiteral("watermark"), watermark},
+        {QStringLiteral("limit"), limit},
+    };
+    const QJsonObject params{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("timeline-subscription-sync-request/0.1")},
+        {QStringLiteral("connection_generation"),
+         static_cast<double>(connectionGeneration)},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("subscription_id"), subscriptionId},
+        {QStringLiteral("request"), nested},
+    };
+    if (timelineSubscriptionRequestIdentity(
+            QStringLiteral("subscription-sync"), params).isEmpty()) {
+        emit requestFailed({}, method, QStringLiteral("Timeline 订阅同步请求无效"), -32602);
+        return {};
+    }
+    const QString requestId = sendRequest(method, params);
+    if (!requestId.isEmpty()) {
+        m_pendingTimelineSubscriptionRequests.insert(requestId, {
+            {QStringLiteral("request"), params},
+        });
+    }
+    return requestId;
+}
+
+QString AgentRuntimeClient::snapshotTimelineSubscription(
+    quint64 connectionGeneration, const QString &sessionId,
+    const QString &subscriptionId, const QJsonObject &subscriptionCursor,
+    const QString &snapshotIdentity, const QJsonObject &watermark,
+    const QJsonObject &after, int limit)
+{
+    const QString method = QStringLiteral("timeline/subscription-snapshot");
+    const bool hasIdentity = !snapshotIdentity.isEmpty();
+    const bool hasWatermark = !watermark.isEmpty();
+    const bool hasAfter = !after.isEmpty();
+    const bool validInitial = !hasIdentity && !hasWatermark && !hasAfter;
+    const bool validContinuation = hasIdentity && hasWatermark && hasAfter
+        && isValidTimelineSnapshotIdentity(snapshotIdentity)
+        && isValidTimelineAnchor(watermark)
+        && isValidTimelineSnapshotCursor(after);
+    if (connectionGeneration == 0 || connectionGeneration != m_processGeneration
+        || connectionGeneration > static_cast<quint64>(kMaximumSafeJsonInteger)
+        || !isBoundedTimelineIdentity(sessionId)
+        || !isBoundedTimelineIdentity(subscriptionId)
+        || !isValidTimelineAnchor(subscriptionCursor)
+        || (!validInitial && !validContinuation) || limit < 1 || limit > 200) {
+        emit requestFailed({}, method, QStringLiteral("Timeline 订阅快照请求无效"), -32602);
+        return {};
+    }
+    const QJsonObject nested{
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("snapshot_identity"), hasIdentity
+             ? QJsonValue(snapshotIdentity) : QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("watermark"), hasWatermark
+             ? QJsonValue(watermark) : QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("after"), hasAfter
+             ? QJsonValue(after) : QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("limit"), limit},
+    };
+    const QJsonObject params{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("timeline-subscription-snapshot-request/0.1")},
+        {QStringLiteral("connection_generation"),
+         static_cast<double>(connectionGeneration)},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("subscription_id"), subscriptionId},
+        {QStringLiteral("request"), nested},
+    };
+    if (timelineSubscriptionRequestIdentity(
+            QStringLiteral("subscription-snapshot"), params).isEmpty()) {
+        emit requestFailed({}, method, QStringLiteral("Timeline 订阅快照请求无效"), -32602);
+        return {};
+    }
+    const QString requestId = sendRequest(method, params);
+    if (!requestId.isEmpty()) {
+        m_pendingTimelineSubscriptionRequests.insert(requestId, {
+            {QStringLiteral("request"), params},
+            {QStringLiteral("subscription_cursor"), subscriptionCursor},
+        });
+    }
+    return requestId;
+}
+
+QString AgentRuntimeClient::activateTimelineSubscription(
+    quint64 connectionGeneration, const QString &sessionId,
+    const QString &subscriptionId, const QString &source,
+    const QJsonObject &cursor, const QJsonObject &watermark,
+    const QString &snapshotIdentity)
+{
+    const QString method = QStringLiteral("timeline/subscription-activate");
+    const bool sourceValid = (source == QStringLiteral("sync")
+                              && snapshotIdentity.isEmpty())
+        || (source == QStringLiteral("snapshot")
+            && isValidTimelineSnapshotIdentity(snapshotIdentity));
+    if (connectionGeneration == 0 || connectionGeneration != m_processGeneration
+        || connectionGeneration > static_cast<quint64>(kMaximumSafeJsonInteger)
+        || !isBoundedTimelineIdentity(sessionId)
+        || !isBoundedTimelineIdentity(subscriptionId)
+        || !isValidTimelineAnchor(cursor) || cursor != watermark || !sourceValid) {
+        emit requestFailed({}, method, QStringLiteral("Timeline 订阅激活请求无效"), -32602);
+        return {};
+    }
+    const QJsonObject params{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("timeline-subscription-activate-request/0.1")},
+        {QStringLiteral("connection_generation"),
+         static_cast<double>(connectionGeneration)},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("subscription_id"), subscriptionId},
+        {QStringLiteral("source"), source},
+        {QStringLiteral("cursor"), cursor},
+        {QStringLiteral("watermark"), watermark},
+        {QStringLiteral("snapshot_identity"), snapshotIdentity.isEmpty()
+             ? QJsonValue(QJsonValue::Null) : QJsonValue(snapshotIdentity)},
+    };
+    if (timelineSubscriptionRequestIdentity(QStringLiteral("activate"), params).isEmpty()) {
+        emit requestFailed({}, method, QStringLiteral("Timeline 订阅激活请求无效"), -32602);
+        return {};
+    }
+    const QString requestId = sendRequest(method, params);
+    if (!requestId.isEmpty()) {
+        m_pendingTimelineSubscriptionRequests.insert(requestId, {
+            {QStringLiteral("request"), params},
+        });
+    }
+    return requestId;
 }
 
 QString AgentRuntimeClient::backgroundNotifications(const QString &sessionId,
@@ -3653,6 +4307,12 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         }
         const QString method = message.value(QStringLiteral("method")).toString();
         if (method == QStringLiteral("event")) {
+            if (m_negotiatedStableCapabilities.contains(
+                    QStringLiteral("timeline.subscription.fixed-watermark"))) {
+                emit diagnosticMessage(QStringLiteral(
+                    "忽略订阅模式下未绑定的 Timeline 通知"));
+                return;
+            }
             if (!m_negotiatedStableCapabilities.contains(
                     QStringLiteral("timeline.streaming"))) {
                 rejectProtocolMessage(QStringLiteral("notification-capability"));
@@ -3664,6 +4324,42 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
                 return;
             }
             emit timelineEvent(event);
+        } else if (method == QStringLiteral("timeline/subscription-event")) {
+            if (!m_negotiatedStableCapabilities.contains(
+                    QStringLiteral("timeline.subscription.fixed-watermark"))) {
+                rejectProtocolMessage(QStringLiteral("notification-capability"));
+                return;
+            }
+            const QJsonObject event = message.value(QStringLiteral("params")).toObject();
+            if (!isValidTimelineSubscriptionEvent(event)) {
+                rejectProtocolMessage(QStringLiteral("timeline-subscription-event"));
+                return;
+            }
+            if (static_cast<quint64>(event.value(
+                    QStringLiteral("connection_generation")).toDouble())
+                != m_processGeneration) {
+                return;
+            }
+            emit timelineSubscriptionEvent(event);
+        } else if (method == QStringLiteral("timeline/subscription-failure")) {
+            if (!m_negotiatedStableCapabilities.contains(
+                    QStringLiteral("timeline.subscription.fixed-watermark"))) {
+                rejectProtocolMessage(QStringLiteral("notification-capability"));
+                return;
+            }
+            const QJsonObject failure = message.value(QStringLiteral("params")).toObject();
+            if (!isValidTimelineSubscriptionFailure(failure)
+                || failure.value(QStringLiteral("stage")).toString()
+                    != QStringLiteral("live")) {
+                rejectProtocolMessage(QStringLiteral("timeline-subscription-failure"));
+                return;
+            }
+            if (static_cast<quint64>(failure.value(
+                    QStringLiteral("connection_generation")).toDouble())
+                != m_processGeneration) {
+                return;
+            }
+            emit timelineSubscriptionFailed({}, failure);
         } else {
             emit diagnosticMessage(QStringLiteral("忽略未支持的 AAP 通知"));
         }
@@ -3696,6 +4392,23 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         }
         const QJsonObject error = message.value(QStringLiteral("error")).toObject();
         const int errorCode = error.value(QStringLiteral("code")).toInt(-1);
+        const QString subscriptionIdentityStage =
+            timelineSubscriptionIdentityStageForMethod(pendingMethod);
+        if (!subscriptionIdentityStage.isEmpty()) {
+            const QJsonValue data = error.value(QStringLiteral("data"));
+            const QJsonObject metadata =
+                m_pendingTimelineSubscriptionRequests.value(id);
+            if (!data.isObject()
+                || !isValidTimelineSubscriptionFailureForRequest(
+                    data.toObject(), pendingMethod, metadata)) {
+                rejectProtocolMessage(QStringLiteral("timeline-subscription-failure"));
+                return;
+            }
+            const QJsonObject failure = data.toObject();
+            removePendingRequest(id);
+            emit timelineSubscriptionFailed(id, failure);
+            return;
+        }
         if (pendingMethod == QStringLiteral("runtime/heartbeat")) {
             emit requestFailed(id, pendingMethod,
                                error.value(QStringLiteral("message")).toString(),
@@ -3752,6 +4465,39 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         m_heartbeatIntervalTimer->start();
         if (changed) {
             emit runtimeLivenessChanged(true, QStringLiteral("运行时响应正常"));
+        }
+        return;
+    }
+    const QString subscriptionIdentityStage =
+        timelineSubscriptionIdentityStageForMethod(pendingMethod);
+    if (!subscriptionIdentityStage.isEmpty()) {
+        const QJsonObject metadata =
+            m_pendingTimelineSubscriptionRequests.value(id);
+        const QJsonObject request = metadata.value(QStringLiteral("request")).toObject();
+        if (request.isEmpty()) {
+            rejectProtocolMessage(QStringLiteral("timeline-subscription-response"));
+            return;
+        }
+        if (pendingMethod == QStringLiteral("timeline/subscribe")
+            && !isValidTimelineSubscribeResult(result, request)) {
+            rejectProtocolMessage(QStringLiteral("timeline-subscribe-result"));
+            return;
+        }
+        if (pendingMethod == QStringLiteral("timeline/subscription-activate")
+            && !isValidTimelineActivateResult(result, request)) {
+            rejectProtocolMessage(QStringLiteral("timeline-subscription-active"));
+            return;
+        }
+        removePendingRequest(id);
+        if (pendingMethod == QStringLiteral("timeline/subscribe")) {
+            emit timelineSubscribed(id, result);
+        } else if (pendingMethod == QStringLiteral("timeline/subscription-sync")) {
+            emit timelineSubscriptionSynced(id, result);
+        } else if (pendingMethod
+                   == QStringLiteral("timeline/subscription-snapshot")) {
+            emit timelineSubscriptionSnapshotReceived(id, result);
+        } else {
+            emit timelineSubscriptionActivated(id, result);
         }
         return;
     }
@@ -4114,6 +4860,7 @@ void AgentRuntimeClient::failPending(const QString &message)
     m_pendingMethods.clear();
     m_pendingGenerations.clear();
     m_pendingTimelineSyncRequests.clear();
+    m_pendingTimelineSubscriptionRequests.clear();
     for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
         retireResponseId(it.key());
         emit requestFailed(it.key(), it.value(), message, -1);
@@ -4129,6 +4876,80 @@ void AgentRuntimeClient::failOrdinaryPending(const QString &message)
         removePendingRequest(it.key());
         emit requestFailed(it.key(), it.value(), message, -1);
     }
+}
+
+void AgentRuntimeClient::abandonAmbiguousTimelineSubscriptionConnection(
+    const QString &detail)
+{
+    const quint64 generation = m_processGeneration;
+    const bool livenessChanged = m_heartbeatHealthy;
+    const bool canReconnect = !m_stopping && !m_autoReconnectSuppressed
+        && m_reconnectAttempt < maximumReconnectAttempts();
+
+    m_heartbeatHealthy = false;
+    m_discardProcessOutput = true;
+    if (canReconnect) {
+        m_reconnectTimer->stop();
+        m_reconnectStabilityTimer->stop();
+        m_reconnectStabilityGeneration = 0;
+        m_reconnectScheduledGeneration = 0;
+        m_reconnectCycleActive = true;
+        ++m_reconnectAttempt;
+        m_reconnectTerminationPending = true;
+        m_reconnectTerminationGeneration = generation;
+    } else {
+        suppressAutomaticReconnect();
+    }
+
+    // A request may have reached Runtime even though its response is no longer
+    // trustworthy. With no unsubscribe contract, only a new process generation
+    // can retire the connection-owned subscription attempt without guessing.
+    clearNegotiationState();
+    failPending(detail);
+    if (canReconnect) {
+        setReconnectState(ReconnectState::Restarting, 0,
+                          QStringLiteral("Timeline 订阅所有权未知，正在启动新的本地运行时代际"));
+    } else {
+        setReconnectState(ReconnectState::Exhausted, 0, detail);
+    }
+    if (livenessChanged) emit runtimeLivenessChanged(false, detail);
+    emit connectionStateChanged(false, detail);
+
+    if (m_process->state() == QProcess::NotRunning) {
+        if (canReconnect) {
+            m_reconnectTerminationPending = false;
+            m_reconnectTerminationGeneration = 0;
+            launchProcess(true);
+        }
+        return;
+    }
+
+    m_process->closeWriteChannel();
+    m_process->terminate();
+    QTimer::singleShot(kReconnectTerminationGraceMs, this,
+                       [this, generation, canReconnect]() {
+        if (generation != m_processGeneration
+            || m_process->state() == QProcess::NotRunning) {
+            return;
+        }
+        const bool terminationStillOwned = canReconnect
+            ? (m_reconnectTerminationPending
+               && m_reconnectTerminationGeneration == generation)
+            : m_autoReconnectSuppressed;
+        if (terminationStillOwned) m_process->kill();
+    });
+}
+
+void AgentRuntimeClient::abandonTimelineSubscriptionConnection(
+    const QString &detail)
+{
+    if (m_stopping || m_reconnectTerminationPending
+            || m_processTerminationPending || m_autoReconnectSuppressed) {
+        return;
+    }
+    abandonAmbiguousTimelineSubscriptionConnection(detail.isEmpty()
+        ? QStringLiteral("Timeline 订阅状态无法在当前连接上安全恢复")
+        : detail);
 }
 
 void AgentRuntimeClient::sendHeartbeat(bool recoveryProbe)
@@ -4183,6 +5004,14 @@ void AgentRuntimeClient::handleHeartbeatTimeout()
         || m_heartbeatDeadlineGeneration != m_processGeneration) {
         return;
     }
+    bool subscriptionOwnershipUnknown = false;
+    for (auto it = m_pendingMethods.cbegin(); it != m_pendingMethods.cend(); ++it) {
+        if (m_pendingGenerations.value(it.key()) == m_processGeneration
+            && !timelineSubscriptionIdentityStageForMethod(it.value()).isEmpty()) {
+            subscriptionOwnershipUnknown = true;
+            break;
+        }
+    }
     retireResponseId(m_heartbeatRequestId);
     removePendingRequest(m_heartbeatRequestId);
     m_heartbeatRequestId.clear();
@@ -4192,6 +5021,11 @@ void AgentRuntimeClient::handleHeartbeatTimeout()
     m_heartbeatDeadlineGeneration = 0;
     m_heartbeatIntervalTimer->stop();
     m_heartbeatDeadlineTimer->stop();
+    if (subscriptionOwnershipUnknown) {
+        abandonAmbiguousTimelineSubscriptionConnection(QStringLiteral(
+            "Timeline 订阅请求的连接所有权未知，已放弃当前运行时连接"));
+        return;
+    }
     const bool changed = m_heartbeatHealthy;
     m_heartbeatHealthy = false;
     const QString detail = QStringLiteral("运行时响应状态未知（心跳超时）");
@@ -4348,4 +5182,5 @@ void AgentRuntimeClient::removePendingRequest(const QString &requestId)
     m_pendingMethods.remove(requestId);
     m_pendingGenerations.remove(requestId);
     m_pendingTimelineSyncRequests.remove(requestId);
+    m_pendingTimelineSubscriptionRequests.remove(requestId);
 }
