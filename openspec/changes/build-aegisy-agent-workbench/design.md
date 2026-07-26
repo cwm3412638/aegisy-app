@@ -341,8 +341,12 @@ recovery boundaries before being advertised.
 
 - Server-initiated requests for approval, structured user input, credential
   refresh, and extension elicitation.
-- Stable core namespace plus experimental namespaced methods. Unknown events are
-  preserved for diagnostics and ignored safely by older clients.
+- Stable core namespace plus a separate experimental namespace. The checked-in
+  Schema package owns explicit namespace registries; stable versions are
+  additive-only and cannot reference experimental schemas. The experimental
+  registry is currently empty and wire-unavailable, so its presence does not
+  advertise a method or capability. Unknown events are preserved for diagnostics
+  and ignored safely by older clients.
 - Content size limits and references for large command output, diffs, images,
   artifacts, and files rather than unbounded JSON messages.
 

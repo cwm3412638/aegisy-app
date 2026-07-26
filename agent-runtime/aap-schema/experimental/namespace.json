@@ -1,0 +1,7 @@
+{
+  "schema_version": "aap-schema-namespace/0.1",
+  "namespace": "experimental",
+  "compatibility": "none",
+  "wire_available": false,
+  "versions": []
+}

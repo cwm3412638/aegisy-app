@@ -1,0 +1,14 @@
+{
+  "schema_version": "aap-schema-namespace/0.1",
+  "namespace": "stable",
+  "compatibility": "additive-only",
+  "wire_available": true,
+  "versions": [
+    {
+      "protocol_version": "0.1",
+      "directory": "v0.1",
+      "schema": "v0.1/aap.schema.json",
+      "schema_id": "https://aegisy.cc/schemas/aap/stable/v0.1/aap.schema.json"
+    }
+  ]
+}

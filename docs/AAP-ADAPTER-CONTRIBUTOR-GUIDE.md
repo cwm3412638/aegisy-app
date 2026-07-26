@@ -13,6 +13,13 @@ for changing the pinned provider adapter.
 
 ## Repository Map
 
+- `agent-runtime/aap-schema/package.json` and `README.md`: private package
+  manifest, namespace registry entry points, versioning rules, and promotion
+  policy. Package version, AAP wire version, and provider version are independent.
+- `agent-runtime/aap-schema/stable/namespace.json` and
+  `experimental/namespace.json`: package-local registries. Experimental is
+  deliberately empty and wire-unavailable until a reviewed protocol version
+  explicitly enables it.
 - `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`: checked-in stable JSON
   Schema and method/capability vocabulary.
 - `agent-runtime/aap-schema/fixtures/`: redacted JSONL protocol evidence and
@@ -31,19 +38,22 @@ for changing the pinned provider adapter.
 
 ## Schema Rules
 
-1. Stable changes are additive only within an existing version. A required-field,
+1. Every schema version must be registered through the package namespace whose
+   path contains it. Registry paths must remain inside the package, must match the
+   schema `$id`, and stable schemas must not reference experimental schemas.
+2. Stable changes are additive only within an existing version. A required-field,
    identity, enum, error-shape, authority, or ordering change requires a new
    schema version and a migration/replay decision.
-2. Experimental fields never appear in the stable declaration and never become
+3. Experimental fields never appear in the stable declaration and never become
    an implicit fallback. A capability must be declared by the client, negotiated
    by Runtime, mapped to a method, and checked again at dispatch.
-3. Every request/response/notification has an object `params` shape with strict
+4. Every request/response/notification has an object `params` shape with strict
    unknown-field rejection. IDs are bounded, non-null graphical strings for
    successful responses. Keep the 4 MiB frame limit exact in both directions.
-4. Content-free metadata must remain separate from authority. A status, health
+5. Content-free metadata must remain separate from authority. A status, health
    result, degradation report, model profile, Timeline anchor, or acknowledgement
    never grants permission to write, execute, approve, route, or dispatch.
-5. Durable identities use the domain-separated canonical byte rules already
+6. Durable identities use the domain-separated canonical byte rules already
    documented in the protocol guide. Never hash a transport wrapper, raw secret,
    or an unbounded provider body.
 
@@ -110,6 +120,11 @@ For a new or changed fixture:
    cargo test --workspace --manifest-path agent-runtime/Cargo.toml
    cargo clippy --workspace --all-targets \
      --manifest-path agent-runtime/Cargo.toml -- -D warnings
+   cargo test --manifest-path agent-runtime/Cargo.toml \
+     -p aegisy-agentd --test schema_package
+   jq empty agent-runtime/aap-schema/package.json \
+     agent-runtime/aap-schema/stable/namespace.json \
+     agent-runtime/aap-schema/experimental/namespace.json
    jq empty agent-runtime/aap-schema/stable/v0.1/aap.schema.json
    openspec validate build-aegisy-agent-workbench --strict
    git diff --check

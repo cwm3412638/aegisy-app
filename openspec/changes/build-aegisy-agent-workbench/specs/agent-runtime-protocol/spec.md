@@ -1,5 +1,24 @@
 ## ADDED Requirements
 
+### Requirement: AAP wire schemas are package-versioned by namespace
+The repository SHALL maintain AAP wire schemas in one dedicated package whose
+package version is independent from AAP wire versions and provider-adapter
+versions. Stable and experimental contracts SHALL have separate package-local
+registries with bounded relative paths, explicit compatibility and wire
+availability, and canonical Schema identities.
+
+#### Scenario: Stable wire schema is registered
+- **WHEN** a stable AAP wire version is added or validated
+- **THEN** its namespace registry SHALL bind a unique protocol version, matching version directory, ordinary package-local Schema file, and exact `$id`, and the Schema SHALL compile without referencing the experimental namespace
+
+#### Scenario: Experimental namespace has no enabled contract
+- **WHEN** the package is validated while no experimental AAP contract is approved
+- **THEN** the experimental registry SHALL remain explicitly empty and wire-unavailable and SHALL NOT advertise, negotiate, or authorize any experimental method or capability
+
+#### Scenario: Experimental contract is promoted
+- **WHEN** an experimental contract is proposed for stable use
+- **THEN** promotion SHALL require a reviewed new stable wire version with compatibility, authority, recovery, fixture, generated-type, Runtime, and Qt gates rather than reinterpreting an experimental URI as stable
+
 ### Requirement: Runtime connections negotiate versions and capabilities
 Every AAP connection SHALL complete an initialization handshake before project,
 session, turn, workspace, terminal, tool, runtime-control, or storage methods are

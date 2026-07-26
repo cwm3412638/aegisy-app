@@ -18,6 +18,27 @@
 - Model catalog/schema and scoped-token backend review.
 - Third-party license, attribution, and redistribution review.
 
+## AAP Schema Package (`3.1`)
+
+- `agent-runtime/aap-schema/package.json` identifies a private checked-in Schema
+  package and points to exactly one stable and one experimental namespace registry.
+  Package, wire-protocol, and provider-adapter versions remain independent.
+- The stable registry binds AAP `0.1`, directory `v0.1`, the ordinary package-local
+  Schema path, and its canonical HTTPS `$id`. The experimental registry is
+  deliberately empty, compatibility-free, and `wire_available:false`; it creates
+  no experimental negotiation or method authority.
+- `schema_package` validates exact package/registry shapes, package-contained
+  non-symlink paths, unique namespaces/versions/Schema IDs, directory/version/`$id`
+  agreement, stable Schema compilation, and the absence of stable references to
+  experimental. The focused gate passes 3/3; `handshake_schema` passes 23/23;
+  the complete Rust workspace passes 977 tests with one explicitly ignored live
+  Codex fixture; strict workspace Clippy and formatting checks pass. The complete
+  desktop build and CTest suite pass 20/20, strict OpenSpec validation passes, and
+  all package/namespace/stable Schema JSON documents pass `jq empty`.
+- Core Project/Session/Turn/etc. schemas and generated Rust/TypeScript/C++ types
+  remain required under `3.2` and `3.10`; completing the package structure does not
+  claim those artifacts.
+
 ## Product Baseline Decision Evidence (`1.3`, `1.7`, `1.8`)
 
 - `docs/adr/README.md` maps all nine current `design.md` Open Questions to one

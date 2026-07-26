@@ -65,7 +65,20 @@
 
 ## 3. Aegisy Agent Protocol Foundation
 
-- [ ] 3.1 Create a dedicated AAP schema package with stable and experimental namespaces
+- [x] 3.1 Create a dedicated AAP schema package with stable and experimental namespaces
+  - `agent-runtime/aap-schema/package.json` now defines the private checked-in
+    Schema package independently from AAP wire and provider-adapter versions.
+    Package-local stable and experimental registries bind namespace, compatibility,
+    wire availability, version directory, Schema path, and canonical `$id`.
+    Stable `0.1` is registered as additive-only; experimental is explicitly empty,
+    compatibility-free, and wire-unavailable, so reserving its namespace grants no
+    capability or method authority.
+  - The dedicated `schema_package` Rust gate rejects package-relative traversal,
+    missing or symlinked registry paths, duplicate namespace/version/Schema IDs,
+    version-directory or `$id` drift, invalid stable JSON Schema, and any stable
+    reference into experimental. Package rules and promotion requirements are
+    documented in the package README and contributor guide. Core domain schemas
+    and generated Rust/TypeScript/C++ types remain separate tasks `3.2` and `3.10`.
 - [ ] 3.2 Define Project, Session, Turn, Item, Runtime, Workspace, Approval, Error, Usage, Artifact, and Capability schemas
 - [x] 3.3 Define initialize/initialized handshake, version ranges, client identity, runtime identity, and capability negotiation
   - AAP `0.1` now uses a strict two-stage `initialize` request and exact `initialized` notification. Rust and Qt validate structured client/runtime version ranges, bounded identities, platform and stdio security facts, the stable capability intersection, an empty experimental namespace, exact read-only backend readiness, strict JSON-RPC envelopes, and the fixed 4 MiB bidirectional frame limit. Business methods fail closed until the notification is consumed and when their negotiated capability is absent; disconnects clear pending and negotiated state.

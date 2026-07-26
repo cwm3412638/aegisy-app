@@ -1,0 +1,26 @@
+{
+  "name": "@aegisy/aap-schema",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Versioned Aegisy Agent Protocol wire schemas and fixtures",
+  "license": "UNLICENSED",
+  "files": [
+    "README.md",
+    "stable",
+    "experimental",
+    "fixtures"
+  ],
+  "aegisy": {
+    "schema_version": "aap-schema-package/0.1",
+    "namespaces": [
+      {
+        "name": "stable",
+        "registry": "stable/namespace.json"
+      },
+      {
+        "name": "experimental",
+        "registry": "experimental/namespace.json"
+      }
+    ]
+  }
+}

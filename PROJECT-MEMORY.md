@@ -193,9 +193,21 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 53 of 235 checkbox tasks are complete and 182 remain
+- OpenSpec task baseline: 54 of 235 checkbox tasks are complete and 181 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
+- OpenSpec task `3.1` is complete. `agent-runtime/aap-schema` is now an explicit
+  private package with independent package/wire/provider versioning, one stable
+  registry, and one experimental registry. Stable AAP `0.1` is additive-only and
+  binds its version directory, ordinary package-local file, and canonical `$id`;
+  the experimental registry is empty and wire-unavailable. The package gate rejects
+  path escape/symlinks, duplicate identities, registry/Schema drift, invalid Schema,
+  and stable references to experimental. This structure grants no experimental
+  capability and does not complete core domain schemas or three-language generation
+  under `3.2` and `3.10`. The package gate passes 3/3, handshake Schema passes
+  23/23, and the complete Rust workspace passes 977 tests with one explicitly
+  ignored live Codex fixture plus strict Clippy and formatting. The complete
+  desktop build and CTest suite pass 20/20, and strict OpenSpec validation passes.
 - OpenSpec task `3.3` is complete. The stable Schema, Rust Runtime/stdio daemon, Qt
   client, lifecycle fixtures, internal guide, design, and delta spec now share the
   structured two-stage AAP `0.1` handshake, numeric range negotiation, deterministic
@@ -3422,7 +3434,7 @@ Implemented visual baseline:
   failed preflight cannot leave an owned Git child behind.
 - This is Runtime implementation evidence only. Windows clean-runner Git,
   signed-package, long-path, and full cross-platform release evidence remain
-  open, and the OpenSpec baseline remains 53/235 completed tasks.
+  open, and the OpenSpec baseline remains 54/235 completed tasks.
 
 ## Windows Packaging Policy Foundation (2026-07-26)
 
