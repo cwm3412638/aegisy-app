@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QList>
 #include <QObject>
 #include <QProcessEnvironment>
 #include <QSet>
@@ -18,15 +19,31 @@ class AgentRuntimeClient : public QObject
     Q_OBJECT
 
 public:
+    enum class ReconnectState {
+        Idle,
+        Waiting,
+        Restarting,
+        Exhausted,
+    };
+    Q_ENUM(ReconnectState)
+
     explicit AgentRuntimeClient(QObject *parent = nullptr,
                                 int heartbeatIntervalMs = 5000,
-                                int heartbeatDeadlineMs = 15000);
+                                int heartbeatDeadlineMs = 15000,
+                                QList<int> reconnectBackoffMs = {
+                                    0, 500, 2000,
+                                });
     ~AgentRuntimeClient() override;
 
     bool isReady() const;
     bool isHeartbeatHealthy() const;
     bool isControlAvailable() const;
+    bool isReconnectRecoveryAvailable() const;
     bool isRecoveryMode() const;
+    ReconnectState reconnectState() const;
+    int reconnectAttempt() const;
+    int maximumReconnectAttempts() const;
+    quint64 processGeneration() const;
     QString runtimePath() const;
 
     // The sidecar must not inherit credential-bearing desktop environment values.
@@ -50,6 +67,8 @@ public:
 
     void start();
     void stop();
+    bool completeReconnectRecovery(quint64 generation, bool success,
+                                   const QString &detail = QString());
     QString runtimeHealth();
     QString runtimeDegradations();
     QString modelCatalog();
@@ -247,8 +266,14 @@ public:
 signals:
     void connectionStateChanged(bool ready, const QString &detail);
     void runtimeLivenessChanged(bool healthy, const QString &detail);
+    void runtimeReconnectStateChanged(AgentRuntimeClient::ReconnectState state,
+                                      int attempt, int maximumAttempts,
+                                      int nextDelayMs, const QString &detail);
+    void reconnectHandshakeReady(quint64 generation, const QJsonObject &result);
+    void heartbeatRecoveryExhausted(int attempts, const QString &detail);
     void runtimeInitialized(const QJsonObject &result);
     void runtimeHealthRead(const QJsonObject &health);
+    void runtimeDegradationRequestCreated(const QString &requestId);
     void runtimeDegradationsRead(const QString &requestId, const QJsonObject &result);
     void modelCatalogRead(const QString &requestId, const QJsonObject &result);
     void modelCatalogCacheRead(const QString &requestId, const QJsonObject &result);
@@ -372,8 +397,16 @@ private:
     void clearNegotiationState();
     void failPending(const QString &message);
     void failOrdinaryPending(const QString &message);
-    void sendHeartbeat();
+    void sendHeartbeat(bool recoveryProbe = false);
     void handleHeartbeatTimeout();
+    void scheduleHeartbeatRecoveryProbe();
+    bool launchProcess(bool reconnectAttempt);
+    void handleRetryableProcessFailure(const QString &detail);
+    void scheduleReconnect(const QString &detail);
+    void beginReconnectAttempt();
+    void suppressAutomaticReconnect();
+    void setReconnectState(ReconnectState state, int nextDelayMs,
+                           const QString &detail);
     void retireResponseId(const QString &requestId);
     void removePendingRequest(const QString &requestId);
 
@@ -381,6 +414,8 @@ private:
     QTimer *m_startupTimer = nullptr;
     QTimer *m_heartbeatIntervalTimer = nullptr;
     QTimer *m_heartbeatDeadlineTimer = nullptr;
+    QTimer *m_reconnectTimer = nullptr;
+    QTimer *m_reconnectStabilityTimer = nullptr;
     QByteArray m_stdoutBuffer;
     QHash<QString, QString> m_pendingMethods;
     QHash<QString, quint64> m_pendingGenerations;
@@ -391,19 +426,36 @@ private:
     quint64 m_nextTurnKey = 0;
     quint64 m_processGeneration = 0;
     quint64 m_initializeGeneration = 0;
+    quint64 m_startupGeneration = 0;
     quint64 m_heartbeatGeneration = 0;
+    quint64 m_heartbeatDeadlineGeneration = 0;
+    quint64 m_reconnectScheduledGeneration = 0;
+    quint64 m_reconnectTerminationGeneration = 0;
+    quint64 m_reconnectStabilityGeneration = 0;
     quint64 m_nextHeartbeatNonce = 0;
     QString m_initializeRequestId;
     QString m_heartbeatRequestId;
+    QString m_heartbeatDeadlineRequestId;
     QString m_heartbeatNonce;
     QSet<QString> m_negotiatedStableCapabilities;
     int m_negotiatedMaximumFrameBytes = 0;
+    QList<int> m_reconnectBackoffMs;
+    int m_reconnectAttempt = 0;
+    int m_heartbeatRecoveryAttempt = 0;
+    ReconnectState m_reconnectState = ReconnectState::Idle;
     bool m_ready = false;
     bool m_heartbeatNegotiated = false;
     bool m_heartbeatHealthy = false;
     bool m_recoveryMode = false;
     bool m_handshakeComplete = false;
     bool m_stopping = false;
+    bool m_autoReconnectSuppressed = false;
+    bool m_reconnectCycleActive = false;
+    bool m_reconnectTerminationPending = false;
+    bool m_processTerminationPending = false;
+    bool m_reconnectRecoveryPending = false;
+    bool m_discardProcessOutput = false;
+    QJsonObject m_reconnectInitializeResult;
     QString m_runtimePath;
 };
 

@@ -129,6 +129,7 @@ fn main() {
         }),
     };
     let control = runtime.control();
+    let reader_control = control.clone();
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let reader_stdout = stdout.clone();
     let (request_sender, request_receiver) = mpsc::sync_channel(REQUEST_QUEUE_CAPACITY);
@@ -159,7 +160,7 @@ fn main() {
                     continue;
                 }
             };
-            if let Some(messages) = control.reject_oversized_line(&line) {
+            if let Some(messages) = reader_control.reject_oversized_line(&line) {
                 for message in messages {
                     if !write_message(&reader_stdout, &message) {
                         return;
@@ -167,7 +168,7 @@ fn main() {
                 }
                 continue;
             }
-            if let Some(messages) = control.handle_out_of_band_line(&line) {
+            if let Some(messages) = reader_control.handle_out_of_band_line(&line) {
                 for message in messages {
                     if !write_message(&reader_stdout, &message) {
                         return;
@@ -178,7 +179,7 @@ fn main() {
             match request_sender.try_send(line) {
                 Ok(()) => {}
                 Err(TrySendError::Full(line)) => {
-                    if let Some(overload) = control.overload_response(&line) {
+                    if let Some(overload) = reader_control.overload_response(&line) {
                         if !write_message(&reader_stdout, &overload) {
                             return;
                         }
@@ -191,11 +192,19 @@ fn main() {
 
     while let Ok(line) = request_receiver.recv() {
         let mut output_open = true;
-        runtime.handle_line_stream(&line, |message| {
-            if output_open {
-                output_open = write_message(&stdout, &message);
+        if let Some(messages) = control.handle_out_of_band_line(&line) {
+            for message in messages {
+                if output_open {
+                    output_open = write_message(&stdout, &message);
+                }
             }
-        });
+        } else {
+            runtime.handle_line_stream(&line, |message| {
+                if output_open {
+                    output_open = write_message(&stdout, &message);
+                }
+            });
+        }
         if !output_open {
             return;
         }

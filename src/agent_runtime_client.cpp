@@ -19,7 +19,7 @@
 #include <limits>
 
 namespace {
-constexpr int kStartupTimeoutMs = 5000;
+constexpr int kStartupTimeoutMs = 60000;
 constexpr int kMaximumFrameBytes = 4 * 1024 * 1024;
 constexpr int kMaximumIdentityBytes = 64;
 constexpr int kMaximumMethodBytes = 128;
@@ -28,6 +28,10 @@ constexpr int kMaximumCapabilities = 128;
 constexpr int kMaximumCapabilityBytes = 128;
 constexpr int kMaximumErrorMessageBytes = 2048;
 constexpr int kMaximumRetiredResponseIds = 1024;
+constexpr int kMaximumReconnectAttempts = 3;
+constexpr int kMaximumReconnectDelayMs = 30000;
+constexpr int kReconnectTerminationGraceMs = 250;
+constexpr int kReconnectStabilityWindowMs = 60000;
 constexpr int kMaximumTimelineIdentityBytes = 128;
 constexpr double kMaximumSafeJsonInteger = 9007199254740991.0;
 constexpr int kMaximumTimelineDataDepth = 16;
@@ -1429,6 +1433,23 @@ bool isLivenessControlMethod(const QString &method)
         || method == QStringLiteral("terminal/stop-user");
 }
 
+bool isReconnectRecoveryMethod(const QString &method)
+{
+    static const QSet<QString> methods{
+        QStringLiteral("runtime/heartbeat"),
+        QStringLiteral("session/read"),
+        QStringLiteral("shutdown"),
+        QStringLiteral("terminal/attach"),
+        QStringLiteral("terminal/list"),
+        QStringLiteral("terminal/read"),
+        QStringLiteral("timeline/snapshot"),
+        QStringLiteral("timeline/sync"),
+        QStringLiteral("workspace/edit/proposal/latest"),
+        QStringLiteral("workspace/edit/proposal/read"),
+    };
+    return methods.contains(method);
+}
+
 bool isValidHeartbeatResult(const QJsonObject &result, const QString &nonce)
 {
     return hasExactKeys(result, {
@@ -1485,45 +1506,121 @@ bool sensitiveSidecarEnvironmentName(const QString &name)
 
 AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
                                        int heartbeatIntervalMs,
-                                       int heartbeatDeadlineMs)
+                                       int heartbeatDeadlineMs,
+                                       QList<int> reconnectBackoffMs)
     : QObject(parent)
     , m_process(new QProcess(this))
     , m_startupTimer(new QTimer(this))
     , m_heartbeatIntervalTimer(new QTimer(this))
     , m_heartbeatDeadlineTimer(new QTimer(this))
+    , m_reconnectTimer(new QTimer(this))
+    , m_reconnectStabilityTimer(new QTimer(this))
 {
+    if (reconnectBackoffMs.isEmpty()) {
+        reconnectBackoffMs = {0, 500, 2000};
+    }
+    reconnectBackoffMs = reconnectBackoffMs.mid(0, kMaximumReconnectAttempts);
+    for (int &delayMs : reconnectBackoffMs) {
+        delayMs = qBound(0, delayMs, kMaximumReconnectDelayMs);
+    }
+    m_reconnectBackoffMs = reconnectBackoffMs;
     m_startupTimer->setSingleShot(true);
     m_heartbeatIntervalTimer->setInterval(qMax(1, heartbeatIntervalMs));
     m_heartbeatDeadlineTimer->setInterval(
         qMax(m_heartbeatIntervalTimer->interval(), heartbeatDeadlineMs));
     m_heartbeatDeadlineTimer->setSingleShot(true);
+    m_reconnectTimer->setSingleShot(true);
+    m_reconnectStabilityTimer->setSingleShot(true);
     connect(m_startupTimer, &QTimer::timeout, this, [this]() {
-        if (!m_ready && m_process->state() != QProcess::NotRunning) {
-            emit connectionStateChanged(false, QStringLiteral("运行时握手超时"));
-            m_process->kill();
+        if (!m_ready && m_startupGeneration == m_processGeneration
+            && m_process->state() != QProcess::NotRunning
+            && !m_stopping && !m_autoReconnectSuppressed) {
+            const QString detail = QStringLiteral("运行时握手超时，需显式停止后重试");
+            suppressAutomaticReconnect();
+            m_discardProcessOutput = true;
+            clearNegotiationState();
+            failPending(detail);
+            setReconnectState(ReconnectState::Exhausted, 0, detail);
+            emit connectionStateChanged(false, detail);
+            m_processTerminationPending = true;
+            const quint64 generation = m_processGeneration;
+            m_process->closeWriteChannel();
+            m_process->terminate();
+            QTimer::singleShot(kReconnectTerminationGraceMs, this,
+                               [this, generation]() {
+                if (generation == m_processGeneration
+                    && m_processTerminationPending
+                    && m_process->state() != QProcess::NotRunning) {
+                    m_process->kill();
+                }
+            });
         }
     });
-    connect(m_heartbeatIntervalTimer, &QTimer::timeout,
-            this, &AgentRuntimeClient::sendHeartbeat);
+    connect(m_heartbeatIntervalTimer, &QTimer::timeout, this, [this]() {
+        sendHeartbeat(false);
+    });
     connect(m_heartbeatDeadlineTimer, &QTimer::timeout,
             this, &AgentRuntimeClient::handleHeartbeatTimeout);
+    connect(m_reconnectTimer, &QTimer::timeout,
+            this, &AgentRuntimeClient::beginReconnectAttempt);
+    connect(m_reconnectStabilityTimer, &QTimer::timeout, this, [this]() {
+        if (m_reconnectStabilityGeneration != 0
+            && m_reconnectStabilityGeneration == m_processGeneration
+            && m_reconnectState == ReconnectState::Idle && isReady()
+            && m_reconnectAttempt > 0) {
+            m_reconnectStabilityGeneration = 0;
+            m_reconnectAttempt = 0;
+            setReconnectState(ReconnectState::Idle, 0,
+                              QStringLiteral("运行时连接已稳定"));
+        }
+    });
     connect(m_process, &QProcess::readyReadStandardOutput,
             this, &AgentRuntimeClient::processStdout);
     connect(m_process, &QProcess::readyReadStandardError, this, [this]() {
         const QString output = QString::fromUtf8(m_process->readAllStandardError()).trimmed();
         if (!output.isEmpty()) emit diagnosticMessage(output);
     });
-    connect(m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
-        clearNegotiationState();
+    connect(m_process, &QProcess::errorOccurred, this,
+            [this](QProcess::ProcessError error) {
+        if (m_stopping || m_autoReconnectSuppressed
+            || m_reconnectTerminationPending) {
+            return;
+        }
+        if (error == QProcess::Crashed) {
+            return;
+        }
         const QString detail = QStringLiteral("运行时启动失败：%1").arg(m_process->errorString());
+        if (m_process->state() == QProcess::NotRunning) {
+            handleRetryableProcessFailure(detail);
+            return;
+        }
+        suppressAutomaticReconnect();
+        clearNegotiationState();
         failPending(detail);
+        setReconnectState(ReconnectState::Exhausted, 0, detail);
         emit connectionStateChanged(false, detail);
     });
     connect(m_process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this](int exitCode, QProcess::ExitStatus status) {
         m_startupTimer->stop();
+        m_startupGeneration = 0;
         const bool expected = m_stopping;
-        m_stopping = false;
+        if (expected) m_stopping = false;
+        if (m_processTerminationPending) {
+            m_processTerminationPending = false;
+            clearNegotiationState();
+            return;
+        }
+        if (m_reconnectTerminationPending
+            && m_reconnectTerminationGeneration == m_processGeneration) {
+            m_reconnectTerminationPending = false;
+            m_reconnectTerminationGeneration = 0;
+            if (!expected && !m_autoReconnectSuppressed
+                && m_reconnectState == ReconnectState::Restarting) {
+                launchProcess(true);
+            }
+            return;
+        }
         clearNegotiationState();
         const QString detail = expected
             ? QStringLiteral("运行时已停止")
@@ -1532,6 +1629,16 @@ AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
                                                       : QStringLiteral("正常"))
                   .arg(exitCode);
         failPending(detail);
+        if (expected || m_autoReconnectSuppressed) {
+            if (m_reconnectState != ReconnectState::Exhausted) {
+                setReconnectState(ReconnectState::Idle, 0, detail);
+            }
+            emit connectionStateChanged(false, detail);
+            return;
+        }
+        if (m_reconnectState != ReconnectState::Waiting) {
+            scheduleReconnect(detail);
+        }
         emit connectionStateChanged(false, detail);
     });
 }
@@ -1919,7 +2026,7 @@ QString AgentRuntimeClient::workspaceEditProposalArtifactPageIdentity(
 
 bool AgentRuntimeClient::isReady() const
 {
-    return m_ready && isHeartbeatHealthy();
+    return m_ready && !m_reconnectRecoveryPending && isHeartbeatHealthy();
 }
 
 bool AgentRuntimeClient::isHeartbeatHealthy() const
@@ -1930,12 +2037,40 @@ bool AgentRuntimeClient::isHeartbeatHealthy() const
 bool AgentRuntimeClient::isControlAvailable() const
 {
     return m_handshakeComplete
+        && !m_reconnectRecoveryPending
+        && m_process->state() != QProcess::NotRunning;
+}
+
+bool AgentRuntimeClient::isReconnectRecoveryAvailable() const
+{
+    return m_reconnectRecoveryPending && m_handshakeComplete
+        && isHeartbeatHealthy()
         && m_process->state() != QProcess::NotRunning;
 }
 
 bool AgentRuntimeClient::isRecoveryMode() const
 {
     return m_recoveryMode;
+}
+
+AgentRuntimeClient::ReconnectState AgentRuntimeClient::reconnectState() const
+{
+    return m_reconnectState;
+}
+
+int AgentRuntimeClient::reconnectAttempt() const
+{
+    return m_reconnectAttempt;
+}
+
+int AgentRuntimeClient::maximumReconnectAttempts() const
+{
+    return m_reconnectBackoffMs.size();
+}
+
+quint64 AgentRuntimeClient::processGeneration() const
+{
+    return m_processGeneration;
 }
 
 QString AgentRuntimeClient::runtimePath() const
@@ -1957,22 +2092,54 @@ QProcessEnvironment AgentRuntimeClient::sanitizedSidecarEnvironment(
 
 void AgentRuntimeClient::start()
 {
-    if (m_process->state() != QProcess::NotRunning) return;
+    if (m_process->state() != QProcess::NotRunning
+        || m_reconnectState == ReconnectState::Waiting
+        || m_reconnectState == ReconnectState::Restarting) {
+        return;
+    }
+    m_reconnectTimer->stop();
+    m_reconnectStabilityTimer->stop();
+    m_reconnectStabilityGeneration = 0;
+    m_reconnectAttempt = 0;
+    m_reconnectCycleActive = false;
+    m_autoReconnectSuppressed = false;
+    m_stopping = false;
+    setReconnectState(ReconnectState::Idle, 0,
+                      QStringLiteral("正在连接本地运行时…"));
+    launchProcess(false);
+}
+
+bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
+{
+    if (m_stopping || m_autoReconnectSuppressed
+        || m_process->state() != QProcess::NotRunning) {
+        return false;
+    }
     m_runtimePath = locateRuntime();
     if (m_runtimePath.isEmpty()) {
-        emit connectionStateChanged(
-            false, QStringLiteral("未找到 aegisy-agentd，请先构建 agent-runtime"));
-        return;
+        const QString detail = QStringLiteral("未找到 aegisy-agentd，请先构建 agent-runtime");
+        m_autoReconnectSuppressed = true;
+        if (reconnectAttempt) {
+            setReconnectState(ReconnectState::Exhausted, 0, detail);
+        }
+        emit connectionStateChanged(false, detail);
+        return false;
     }
 
     clearNegotiationState();
+    m_processTerminationPending = false;
     if (++m_processGeneration == 0) ++m_processGeneration;
-    m_stopping = false;
+    m_discardProcessOutput = false;
     m_stdoutBuffer.clear();
     m_pendingMethods.clear();
     m_pendingGenerations.clear();
     m_pendingTimelineSyncRequests.clear();
-    emit connectionStateChanged(false, QStringLiteral("正在连接本地运行时…"));
+    const QString connectingDetail = reconnectAttempt
+        ? QStringLiteral("正在执行第 %1/%2 次运行时重连")
+              .arg(m_reconnectAttempt)
+              .arg(maximumReconnectAttempts())
+        : QStringLiteral("正在连接本地运行时…");
+    emit connectionStateChanged(false, connectingDetail);
     QProcessEnvironment environment = sanitizedSidecarEnvironment(
         QProcessEnvironment::systemEnvironment());
     if (environment.value(QStringLiteral("AEGISY_WORKBENCH_DATA_ROOT")).isEmpty()) {
@@ -1980,8 +2147,11 @@ void AgentRuntimeClient::start()
             QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
             .absoluteFilePath(QStringLiteral("workbench"));
         if (!QDir().mkpath(dataRoot)) {
-            emit connectionStateChanged(false, QStringLiteral("无法创建工作台数据目录"));
-            return;
+            const QString detail = QStringLiteral("无法创建工作台数据目录");
+            m_autoReconnectSuppressed = true;
+            setReconnectState(ReconnectState::Exhausted, 0, detail);
+            emit connectionStateChanged(false, detail);
+            return false;
         }
         environment.insert(QStringLiteral("AEGISY_WORKBENCH_DATA_ROOT"), dataRoot);
     }
@@ -1989,8 +2159,17 @@ void AgentRuntimeClient::start()
     m_process->setArguments({});
     m_process->setProcessEnvironment(environment);
     m_process->start();
-    if (!m_process->waitForStarted(1000)) return;
+    if (!m_process->waitForStarted(1000)) {
+        if (!m_stopping && !m_autoReconnectSuppressed
+            && m_reconnectState != ReconnectState::Waiting
+            && m_reconnectState != ReconnectState::Exhausted) {
+            handleRetryableProcessFailure(
+                QStringLiteral("运行时启动失败：%1").arg(m_process->errorString()));
+        }
+        return false;
+    }
     m_startupTimer->start(kStartupTimeoutMs);
+    m_startupGeneration = m_processGeneration;
 
     const QJsonObject params{
         {QStringLiteral("protocol"), QJsonObject{
@@ -2014,14 +2193,110 @@ void AgentRuntimeClient::start()
     };
     m_initializeRequestId = sendRequest(QStringLiteral("initialize"), params);
     m_initializeGeneration = m_processGeneration;
+    if (m_initializeRequestId.isEmpty()) {
+        handleRetryableProcessFailure(QStringLiteral("无法发送运行时握手请求"));
+        return false;
+    }
+    return true;
 }
 
 void AgentRuntimeClient::stop()
 {
-    if (m_process->state() == QProcess::NotRunning) return;
+    const bool hadReconnect = m_reconnectState != ReconnectState::Idle;
+    m_reconnectTimer->stop();
+    m_reconnectStabilityTimer->stop();
+    m_reconnectStabilityGeneration = 0;
+    m_autoReconnectSuppressed = true;
+    m_reconnectCycleActive = false;
+    m_reconnectScheduledGeneration = 0;
+    m_processTerminationPending = false;
     m_stopping = true;
-    if (isControlAvailable()) sendRequest(QStringLiteral("shutdown"));
-    else m_process->terminate();
+    setReconnectState(ReconnectState::Idle, 0, QStringLiteral("运行时停止中"));
+    if (m_process->state() == QProcess::NotRunning) {
+        m_stopping = false;
+        if (hadReconnect) {
+            emit connectionStateChanged(false, QStringLiteral("运行时已停止"));
+        }
+        return;
+    }
+    if (m_handshakeComplete
+        && m_process->state() != QProcess::NotRunning) {
+        if (sendRequest(QStringLiteral("shutdown")).isEmpty()) {
+            m_process->terminate();
+        }
+    } else {
+        m_process->terminate();
+    }
+}
+
+bool AgentRuntimeClient::completeReconnectRecovery(quint64 generation,
+                                                   bool success,
+                                                   const QString &detail)
+{
+    if (!m_reconnectRecoveryPending || generation == 0
+        || generation != m_processGeneration
+        || !m_handshakeComplete
+        || m_process->state() == QProcess::NotRunning) {
+        return false;
+    }
+
+    m_reconnectRecoveryPending = false;
+    if (!success) {
+        m_reconnectInitializeResult = {};
+        m_autoReconnectSuppressed = true;
+        const QString failureDetail = detail.isEmpty()
+            ? QStringLiteral("运行时重连后的工作区恢复未完成") : detail;
+        setReconnectState(ReconnectState::Exhausted, 0, failureDetail);
+        emit connectionStateChanged(false, failureDetail);
+        return true;
+    }
+
+    const QJsonObject result = m_reconnectInitializeResult;
+    m_reconnectInitializeResult = {};
+    m_reconnectCycleActive = false;
+    const QString readyDetail = detail.isEmpty()
+        ? QStringLiteral("运行时连接与工作区状态已恢复") : detail;
+    setReconnectState(ReconnectState::Idle, 0, readyDetail);
+    if (m_reconnectAttempt > 0) {
+        m_reconnectStabilityGeneration = m_processGeneration;
+        m_reconnectStabilityTimer->start(kReconnectStabilityWindowMs);
+    }
+    emit runtimeInitialized(result);
+    emit connectionStateChanged(m_ready && isHeartbeatHealthy(), readyDetail);
+    if (m_ready && isHeartbeatHealthy()) {
+        if (containsCapability(m_negotiatedStableCapabilities, "runtime.health")) {
+            runtimeHealth();
+        }
+        if (containsCapability(m_negotiatedStableCapabilities, "runtime.degradations")) {
+            runtimeDegradations();
+        }
+        if (containsCapability(m_negotiatedStableCapabilities,
+                               "model.catalog.read-only")) {
+            modelCatalog();
+        }
+        if (containsCapability(m_negotiatedStableCapabilities,
+                               "model.catalog.cache.read-only")) {
+            modelCatalogCache();
+        }
+        if (containsCapability(m_negotiatedStableCapabilities,
+                               "model.catalog.refresh.status.read-only")) {
+            modelCatalogRefreshStatus();
+        }
+        if (containsCapability(m_negotiatedStableCapabilities,
+                               "model.profile.read-only")) {
+            listModelProfiles();
+        }
+        if (m_recoveryMode
+            && containsCapability(m_negotiatedStableCapabilities,
+                                  "runtime.recovery.status")) {
+            runtimeRecoveryStatus();
+        } else if (!m_recoveryMode
+                   && containsCapability(m_negotiatedStableCapabilities,
+                                         "runtime.projection-recovery.status")) {
+            projectionRecoveryStatus();
+        }
+    }
+    return true;
 }
 
 QString AgentRuntimeClient::runtimeHealth()
@@ -2031,7 +2306,9 @@ QString AgentRuntimeClient::runtimeHealth()
 
 QString AgentRuntimeClient::runtimeDegradations()
 {
-    return sendRequest(QStringLiteral("runtime/degradations"));
+    const QString requestId = sendRequest(QStringLiteral("runtime/degradations"));
+    if (!requestId.isEmpty()) emit runtimeDegradationRequestCreated(requestId);
+    return requestId;
 }
 
 QString AgentRuntimeClient::modelCatalog()
@@ -3168,6 +3445,11 @@ QString AgentRuntimeClient::sendRequest(const QString &method, const QJsonObject
         emit requestFailed({}, method, QStringLiteral("本地运行时响应状态未知"), -1);
         return {};
     }
+    if (m_reconnectRecoveryPending && !isReconnectRecoveryMethod(method)) {
+        emit requestFailed({}, method,
+                           QStringLiteral("运行时重连恢复尚未完成"), -32003);
+        return {};
+    }
     if (method != QStringLiteral("initialize")) {
         const QStringList required = requiredCapabilitiesForMethod(method, params);
         for (const QString &capability : required) {
@@ -3187,12 +3469,19 @@ QString AgentRuntimeClient::sendRequest(const QString &method, const QJsonObject
         {QStringLiteral("params"), params},
     });
     if (writeError != 0) {
+        const QString failureDetail = writeError == -32005
+            ? QStringLiteral("请求超过 AAP 帧上限")
+            : QStringLiteral("无法写入本地运行时");
         emit requestFailed(
-            id, method,
-            writeError == -32005
-                ? QStringLiteral("请求超过 AAP 帧上限")
-                : QStringLiteral("无法写入本地运行时"),
-            writeError);
+            id, method, failureDetail, writeError);
+        if (writeError == -1) {
+            suppressAutomaticReconnect();
+            m_discardProcessOutput = true;
+            clearNegotiationState();
+            failPending(failureDetail);
+            setReconnectState(ReconnectState::Exhausted, 0, failureDetail);
+            emit connectionStateChanged(false, failureDetail);
+        }
         return {};
     }
     m_pendingMethods.insert(id, method);
@@ -3221,6 +3510,11 @@ int AgentRuntimeClient::writeMessage(const QJsonObject &message)
 
 void AgentRuntimeClient::processStdout()
 {
+    if (m_discardProcessOutput) {
+        m_process->readAllStandardOutput();
+        m_stdoutBuffer.clear();
+        return;
+    }
     m_stdoutBuffer.append(m_process->readAllStandardOutput());
     while (true) {
         const int maximumFrameBytes = m_handshakeComplete
@@ -3332,6 +3626,7 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
             rejectInitializeResponse(reasonCode);
             return;
         }
+        retireResponseId(m_initializeRequestId);
         removePendingRequest(m_initializeRequestId);
         m_initializeRequestId.clear();
         m_initializeGeneration = 0;
@@ -3447,10 +3742,14 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         removePendingRequest(id);
         m_heartbeatDeadlineTimer->stop();
         m_heartbeatRequestId.clear();
+        m_heartbeatDeadlineRequestId.clear();
         m_heartbeatNonce.clear();
         m_heartbeatGeneration = 0;
+        m_heartbeatDeadlineGeneration = 0;
         const bool changed = !m_heartbeatHealthy;
         m_heartbeatHealthy = true;
+        m_heartbeatRecoveryAttempt = 0;
+        m_heartbeatIntervalTimer->start();
         if (changed) {
             emit runtimeLivenessChanged(true, QStringLiteral("运行时响应正常"));
         }
@@ -3672,6 +3971,7 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
 void AgentRuntimeClient::acceptInitializeResponse(const QJsonObject &result)
 {
     m_startupTimer->stop();
+    m_startupGeneration = 0;
     m_handshakeComplete = true;
     const QJsonObject runtime = result.value(QStringLiteral("runtime")).toObject();
     const QJsonObject backend = result.value(QStringLiteral("backend")).toObject();
@@ -3693,13 +3993,24 @@ void AgentRuntimeClient::acceptInitializeResponse(const QJsonObject &result)
              backend.value(QStringLiteral("version")).toString(),
              result.value(QStringLiteral("protocol")).toObject()
                  .value(QStringLiteral("selected")).toString());
-    emit runtimeInitialized(result);
-    emit connectionStateChanged(m_ready, detail);
     if (m_heartbeatNegotiated) {
         emit runtimeLivenessChanged(true, QStringLiteral("运行时响应正常"));
-        sendHeartbeat();
+        sendHeartbeat(false);
         if (m_heartbeatHealthy) m_heartbeatIntervalTimer->start();
     }
+
+    if (m_reconnectCycleActive) {
+        m_reconnectRecoveryPending = true;
+        m_reconnectInitializeResult = result;
+        const QString recoveryDetail = QStringLiteral(
+            "运行时握手已恢复，正在校验工作区状态");
+        emit connectionStateChanged(false, recoveryDetail);
+        emit reconnectHandshakeReady(m_processGeneration, result);
+        return;
+    }
+
+    emit runtimeInitialized(result);
+    emit connectionStateChanged(m_ready, detail);
 
     if (containsCapability(m_negotiatedStableCapabilities, "runtime.health")) runtimeHealth();
     if (containsCapability(m_negotiatedStableCapabilities, "runtime.degradations")) {
@@ -3733,28 +4044,41 @@ void AgentRuntimeClient::acceptInitializeResponse(const QJsonObject &result)
 void AgentRuntimeClient::rejectInitializeResponse(const QString &reasonCode)
 {
     m_startupTimer->stop();
+    const bool reconnecting = m_reconnectCycleActive;
     const QString requestId = m_initializeRequestId;
-    if (!requestId.isEmpty()) removePendingRequest(requestId);
+    if (!requestId.isEmpty()) {
+        retireResponseId(requestId);
+        removePendingRequest(requestId);
+    }
+    suppressAutomaticReconnect();
+    m_discardProcessOutput = true;
     clearNegotiationState();
     const QString detail = QStringLiteral("运行时握手响应无效（%1）").arg(reasonCode);
+    if (reconnecting) setReconnectState(ReconnectState::Exhausted, 0, detail);
     emit requestFailed(requestId, QStringLiteral("initialize"), detail, -32003);
     emit connectionStateChanged(false, detail);
-    if (m_process->state() != QProcess::NotRunning) m_process->kill();
+    if (m_process->state() != QProcess::NotRunning) m_process->closeWriteChannel();
 }
 
 void AgentRuntimeClient::rejectProtocolMessage(const QString &reasonCode)
 {
     m_startupTimer->stop();
+    const bool reconnecting = m_reconnectCycleActive;
+    suppressAutomaticReconnect();
+    m_discardProcessOutput = true;
     clearNegotiationState();
     const QString detail = QStringLiteral("运行时协议消息无效（%1）").arg(reasonCode);
+    if (reconnecting) setReconnectState(ReconnectState::Exhausted, 0, detail);
     failPending(detail);
     emit connectionStateChanged(false, detail);
-    if (m_process->state() != QProcess::NotRunning) m_process->kill();
+    if (m_process->state() != QProcess::NotRunning) m_process->closeWriteChannel();
 }
 
 void AgentRuntimeClient::clearNegotiationState()
 {
     const bool livenessWasKnown = m_heartbeatNegotiated && m_heartbeatHealthy;
+    m_startupTimer->stop();
+    m_startupGeneration = 0;
     m_heartbeatIntervalTimer->stop();
     m_heartbeatDeadlineTimer->stop();
     if (!m_heartbeatRequestId.isEmpty()) {
@@ -3769,8 +4093,14 @@ void AgentRuntimeClient::clearNegotiationState()
     m_initializeRequestId.clear();
     m_initializeGeneration = 0;
     m_heartbeatRequestId.clear();
+    m_heartbeatDeadlineRequestId.clear();
     m_heartbeatNonce.clear();
     m_heartbeatGeneration = 0;
+    m_heartbeatDeadlineGeneration = 0;
+    m_heartbeatRecoveryAttempt = 0;
+    m_reconnectStabilityGeneration = 0;
+    m_reconnectRecoveryPending = false;
+    m_reconnectInitializeResult = {};
     m_negotiatedStableCapabilities.clear();
     m_negotiatedMaximumFrameBytes = 0;
     if (livenessWasKnown) {
@@ -3801,12 +4131,13 @@ void AgentRuntimeClient::failOrdinaryPending(const QString &message)
     }
 }
 
-void AgentRuntimeClient::sendHeartbeat()
+void AgentRuntimeClient::sendHeartbeat(bool recoveryProbe)
 {
-    if (!m_heartbeatNegotiated || !m_heartbeatHealthy
+    if (!m_heartbeatNegotiated
         || !m_handshakeComplete
         || m_process->state() == QProcess::NotRunning
-        || !m_heartbeatRequestId.isEmpty()) {
+        || !m_heartbeatRequestId.isEmpty()
+        || (!m_heartbeatHealthy && !recoveryProbe)) {
         return;
     }
     if (++m_nextHeartbeatNonce == 0) ++m_nextHeartbeatNonce;
@@ -3819,30 +4150,46 @@ void AgentRuntimeClient::sendHeartbeat()
         {QStringLiteral("nonce"), nonce},
     });
     if (requestId.isEmpty()) {
+        if (m_autoReconnectSuppressed) return;
         m_heartbeatIntervalTimer->stop();
+        const bool changed = m_heartbeatHealthy;
         m_heartbeatHealthy = false;
-        const QString detail = QStringLiteral("运行时响应状态未知（心跳写入失败）");
+        const QString detail = QStringLiteral(
+            "运行时控制通道写入失败，需显式停止后重试");
         failOrdinaryPending(detail);
-        emit runtimeLivenessChanged(false, detail);
+        if (changed) emit runtimeLivenessChanged(false, detail);
+        suppressAutomaticReconnect();
+        m_discardProcessOutput = true;
+        clearNegotiationState();
+        failPending(detail);
+        setReconnectState(ReconnectState::Exhausted, 0, detail);
+        emit connectionStateChanged(false, detail);
         return;
     }
     m_heartbeatRequestId = requestId;
+    m_heartbeatDeadlineRequestId = requestId;
     m_heartbeatNonce = nonce;
     m_heartbeatGeneration = m_processGeneration;
+    m_heartbeatDeadlineGeneration = m_processGeneration;
     m_heartbeatDeadlineTimer->start();
 }
 
 void AgentRuntimeClient::handleHeartbeatTimeout()
 {
     if (!m_heartbeatNegotiated || !m_handshakeComplete
-        || m_heartbeatRequestId.isEmpty()) {
+        || m_heartbeatRequestId.isEmpty()
+        || m_heartbeatDeadlineRequestId != m_heartbeatRequestId
+        || m_heartbeatDeadlineGeneration != m_heartbeatGeneration
+        || m_heartbeatDeadlineGeneration != m_processGeneration) {
         return;
     }
     retireResponseId(m_heartbeatRequestId);
     removePendingRequest(m_heartbeatRequestId);
     m_heartbeatRequestId.clear();
+    m_heartbeatDeadlineRequestId.clear();
     m_heartbeatNonce.clear();
     m_heartbeatGeneration = 0;
+    m_heartbeatDeadlineGeneration = 0;
     m_heartbeatIntervalTimer->stop();
     m_heartbeatDeadlineTimer->stop();
     const bool changed = m_heartbeatHealthy;
@@ -3850,6 +4197,140 @@ void AgentRuntimeClient::handleHeartbeatTimeout()
     const QString detail = QStringLiteral("运行时响应状态未知（心跳超时）");
     failOrdinaryPending(detail);
     if (changed) emit runtimeLivenessChanged(false, detail);
+    scheduleHeartbeatRecoveryProbe();
+}
+
+void AgentRuntimeClient::scheduleHeartbeatRecoveryProbe()
+{
+    static const QList<int> recoveryBackoffMs{0, 500, 2000};
+    if (!m_heartbeatNegotiated || m_heartbeatHealthy || !m_handshakeComplete
+        || m_process->state() == QProcess::NotRunning
+        || m_stopping || m_autoReconnectSuppressed) {
+        return;
+    }
+    if (m_heartbeatRecoveryAttempt >= recoveryBackoffMs.size()) {
+        const QString detail = QStringLiteral(
+            "运行时心跳恢复探针已耗尽，控制连接保持不变");
+        emit heartbeatRecoveryExhausted(m_heartbeatRecoveryAttempt, detail);
+        return;
+    }
+    const int attempt = ++m_heartbeatRecoveryAttempt;
+    const int delayMs = recoveryBackoffMs.at(attempt - 1);
+    const quint64 generation = m_processGeneration;
+    QTimer::singleShot(delayMs, this, [this, attempt, generation]() {
+        if (generation != m_processGeneration
+            || attempt != m_heartbeatRecoveryAttempt
+            || m_heartbeatHealthy || !m_handshakeComplete
+            || m_process->state() == QProcess::NotRunning
+            || m_stopping || m_autoReconnectSuppressed
+            || !m_heartbeatRequestId.isEmpty()) {
+            return;
+        }
+        sendHeartbeat(true);
+    });
+}
+
+void AgentRuntimeClient::handleRetryableProcessFailure(const QString &detail)
+{
+    if (m_stopping || m_autoReconnectSuppressed) return;
+    if (m_process->state() != QProcess::NotRunning) {
+        suppressAutomaticReconnect();
+        m_discardProcessOutput = true;
+        clearNegotiationState();
+        failPending(detail);
+        setReconnectState(ReconnectState::Exhausted, 0, detail);
+        emit connectionStateChanged(false, detail);
+        return;
+    }
+
+    scheduleReconnect(detail);
+    clearNegotiationState();
+    failPending(detail);
+    emit connectionStateChanged(false, detail);
+}
+
+void AgentRuntimeClient::scheduleReconnect(const QString &detail)
+{
+    if (m_stopping || m_autoReconnectSuppressed) return;
+    if (m_process->state() != QProcess::NotRunning) {
+        suppressAutomaticReconnect();
+        setReconnectState(ReconnectState::Exhausted, 0, detail);
+        return;
+    }
+    if (m_reconnectState == ReconnectState::Waiting
+        && m_reconnectTimer->isActive()) {
+        return;
+    }
+
+    m_reconnectStabilityTimer->stop();
+    m_reconnectStabilityGeneration = 0;
+    m_reconnectCycleActive = true;
+    if (m_reconnectAttempt >= maximumReconnectAttempts()) {
+        m_reconnectTimer->stop();
+        m_reconnectScheduledGeneration = 0;
+        const QString exhaustedDetail = QStringLiteral(
+            "运行时自动重连已耗尽（%1/%2）：%3")
+            .arg(m_reconnectAttempt)
+            .arg(maximumReconnectAttempts())
+            .arg(detail);
+        setReconnectState(ReconnectState::Exhausted, 0, exhaustedDetail);
+        return;
+    }
+
+    ++m_reconnectAttempt;
+    const int delayMs = m_reconnectBackoffMs.at(m_reconnectAttempt - 1);
+    m_reconnectScheduledGeneration = m_processGeneration;
+    const QString waitingDetail = QStringLiteral(
+        "运行时将在 %1 毫秒后执行第 %2/%3 次重连")
+        .arg(delayMs)
+        .arg(m_reconnectAttempt)
+        .arg(maximumReconnectAttempts());
+    setReconnectState(ReconnectState::Waiting, delayMs, waitingDetail);
+    m_reconnectTimer->start(delayMs);
+}
+
+void AgentRuntimeClient::beginReconnectAttempt()
+{
+    if (m_stopping || m_autoReconnectSuppressed
+        || m_reconnectState != ReconnectState::Waiting
+        || m_reconnectScheduledGeneration != m_processGeneration) {
+        return;
+    }
+    m_reconnectScheduledGeneration = 0;
+    if (m_process->state() != QProcess::NotRunning) {
+        const QString detail = QStringLiteral(
+            "运行时进程仍在运行，自动重连已停止");
+        suppressAutomaticReconnect();
+        setReconnectState(ReconnectState::Exhausted, 0, detail);
+        emit connectionStateChanged(false, detail);
+        return;
+    }
+
+    setReconnectState(ReconnectState::Restarting, 0,
+                      QStringLiteral("正在启动新的本地运行时代际"));
+    launchProcess(true);
+}
+
+void AgentRuntimeClient::suppressAutomaticReconnect()
+{
+    m_reconnectTimer->stop();
+    m_reconnectStabilityTimer->stop();
+    m_reconnectStabilityGeneration = 0;
+    m_reconnectScheduledGeneration = 0;
+    m_reconnectTerminationPending = false;
+    m_reconnectTerminationGeneration = 0;
+    m_reconnectCycleActive = false;
+    m_autoReconnectSuppressed = true;
+}
+
+void AgentRuntimeClient::setReconnectState(ReconnectState state,
+                                           int nextDelayMs,
+                                           const QString &detail)
+{
+    m_reconnectState = state;
+    emit runtimeReconnectStateChanged(state, m_reconnectAttempt,
+                                      maximumReconnectAttempts(),
+                                      qMax(0, nextDelayMs), detail);
 }
 
 void AgentRuntimeClient::retireResponseId(const QString &requestId)

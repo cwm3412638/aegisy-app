@@ -212,6 +212,15 @@ private:
     void beginTimelineSync(const QString &sessionId);
     void beginTimelineSnapshot(const QString &sessionId);
     void suspendTimelinesForDisconnect();
+    void markRuntimeBackedStateUnverified();
+    void recoverRuntimeBackedStateAfterHandshake();
+    void revalidateWorkspaceEditProposalAfterTimelineRecovery(
+        const QString &sessionId);
+    void beginRuntimeReconnectRecovery(quint64 generation,
+                                       const QJsonObject &result);
+    void continueRuntimeReconnectRecovery();
+    void finishRuntimeReconnectTimeline(const QString &sessionId);
+    bool runtimeRecoveryRequestsAllowed() const;
     void releaseTimelinePendingAccounting(const TimelineSessionState &state);
     void clearTimelinePending(TimelineSessionState &state);
     void freezeTimelineForSnapshotRecovery(const QString &sessionId,
@@ -473,6 +482,7 @@ private:
     QHash<QString, QPushButton *> m_itemArtifactButtons;
     QHash<QString, QPushButton *> m_itemProposalButtons;
     QHash<QString, QLabel *> m_itemProposalStatusLabels;
+    QHash<QString, QJsonObject> m_itemProposalReferences;
     QHash<QString, QString> m_itemKinds;
     QHash<QString, QString> m_itemRoles;
     QHash<QString, QString> m_itemStates;
@@ -690,6 +700,20 @@ private:
     bool m_sessionListRefreshPending = false;
     bool m_sessionHistoryAppending = false;
     bool m_runtimeRecoveryMode = false;
+    bool m_runtimeReconnectActive = false;
+    bool m_runtimeReconnectExhausted = false;
+    bool m_runtimeStateUnverified = false;
+    bool m_activeTurnControlUnverified = false;
+    quint64 m_runtimeReconnectRecoveryGeneration = 0;
+    QSet<QString> m_runtimeReconnectTimelinePending;
+    QHash<QString, QString> m_runtimeReconnectProposalRequests;
+    QString m_runtimeReconnectSessionReadId;
+    QString m_runtimeReconnectTerminalListId;
+    QString m_runtimeReconnectTerminalAttachId;
+    QString m_runtimeReconnectTerminalId;
+    quint64 m_runtimeReconnectTerminalGeneration = 0;
+    bool m_runtimeReconnectSecondPhaseStarted = false;
+    bool m_terminalStateUnverified = false;
     bool m_operationStatusKnown = true;
     bool m_operationStatusBlocked = false;
     bool m_compactionAvailable = false;

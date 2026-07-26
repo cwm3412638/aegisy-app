@@ -446,7 +446,21 @@ bool verifyRustTimelineSnapshotIdentityFixture()
 
 int runFakeRuntime(const QString &testCase)
 {
-    QFile log(qEnvironmentVariable("AEGISY_FAKE_RUNTIME_LOG"));
+    const QString logPath = qEnvironmentVariable("AEGISY_FAKE_RUNTIME_LOG");
+    int priorInitializeCount = 0;
+    QFile history(logPath);
+    if (history.open(QIODevice::ReadOnly)) {
+        while (!history.atEnd()) {
+            const QJsonDocument prior = QJsonDocument::fromJson(history.readLine());
+            if (prior.isObject()
+                && prior.object().value(QStringLiteral("method")).toString()
+                    == QStringLiteral("initialize")) {
+                ++priorInitializeCount;
+            }
+        }
+    }
+    const int invocation = priorInitializeCount + 1;
+    QFile log(logPath);
     if (!log.open(QIODevice::WriteOnly | QIODevice::Append)) return 90;
 
     std::string rawLine;
@@ -456,6 +470,10 @@ int runFakeRuntime(const QString &testCase)
     const QJsonDocument requestDocument = QJsonDocument::fromJson(firstLine);
     if (!requestDocument.isObject()) return 92;
     const QJsonObject request = requestDocument.object();
+
+    if (testCase == QStringLiteral("reconnect-exhaust") && invocation > 1) {
+        return 42;
+    }
 
     QJsonObject response{
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
@@ -703,7 +721,7 @@ int runFakeRuntime(const QString &testCase)
     bool hasCombinedFirstId = false;
     int timelineSyncRequests = 0;
     int timelineSnapshotRequests = 0;
-    QJsonObject delayedHeartbeat;
+    QJsonObject firstDelayedHeartbeat;
     while (std::getline(std::cin, rawLine)) {
         const QByteArray line = QByteArray::fromStdString(rawLine);
         appendLogLine(&log, line);
@@ -713,7 +731,7 @@ int runFakeRuntime(const QString &testCase)
         const QString method = message.value(QStringLiteral("method")).toString();
         if (method == QStringLiteral("runtime/heartbeat")
             && testCase.startsWith(QStringLiteral("heartbeat-"))) {
-            delayedHeartbeat = message;
+            if (firstDelayedHeartbeat.isEmpty()) firstDelayedHeartbeat = message;
             if (testCase == QStringLiteral("heartbeat-normal")) {
                 const QJsonObject params = message.value(QStringLiteral("params")).toObject();
                 const QJsonObject heartbeatResponse{
@@ -739,12 +757,12 @@ int runFakeRuntime(const QString &testCase)
         }
         if (method == QStringLiteral("terminal/stop-user")
             && testCase == QStringLiteral("heartbeat-late")
-            && !delayedHeartbeat.isEmpty()) {
-            const QJsonObject params = delayedHeartbeat.value(
+            && !firstDelayedHeartbeat.isEmpty()) {
+            const QJsonObject params = firstDelayedHeartbeat.value(
                 QStringLiteral("params")).toObject();
             const QJsonObject lateResponse{
                 {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
-                {QStringLiteral("id"), delayedHeartbeat.value(QStringLiteral("id"))},
+                {QStringLiteral("id"), firstDelayedHeartbeat.value(QStringLiteral("id"))},
                 {QStringLiteral("result"), QJsonObject{
                     {QStringLiteral("schema_version"),
                      QStringLiteral("runtime-heartbeat/0.1")},
@@ -755,7 +773,15 @@ int runFakeRuntime(const QString &testCase)
             std::cout << QJsonDocument(lateResponse).toJson(QJsonDocument::Compact)
                              .constData()
                       << std::endl;
-            delayedHeartbeat = {};
+            firstDelayedHeartbeat = {};
+        }
+        if (message.value(QStringLiteral("method")).toString()
+                == QStringLiteral("initialized")
+            && testCase == QStringLiteral("initialize-late")) {
+            std::cout
+                << QJsonDocument(response).toJson(QJsonDocument::Compact).constData()
+                << std::endl;
+            continue;
         }
         if (message.value(QStringLiteral("method")).toString()
                 == QStringLiteral("initialized")
@@ -863,6 +889,13 @@ int runFakeRuntime(const QString &testCase)
                 << QJsonDocument(notification).toJson(QJsonDocument::Compact).constData()
                 << std::endl;
             continue;
+        }
+        if (message.value(QStringLiteral("method")).toString()
+                == QStringLiteral("initialized")
+            && (testCase == QStringLiteral("reconnect-exit-success")
+                || testCase == QStringLiteral("reconnect-exhaust"))
+            && invocation == 1) {
+            return 41;
         }
         if (message.value(QStringLiteral("method")).toString()
             == QStringLiteral("shutdown")) {
@@ -1207,6 +1240,43 @@ bool runHandshakeCase(const QString &testCase, bool expectAccepted,
                   "invalid response produced initialized or business traffic");
 }
 
+bool runLateInitializeResponseCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create late initialize directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("initialize-late"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool disconnected = false;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "late initialize handshake did not complete")) {
+            return false;
+        }
+        waitUntil([&]() { return disconnected; }, 100);
+        if (!expect(!disconnected && client.isReady(),
+                    "late duplicate initialize response closed a healthy connection")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return !client.isControlAvailable(); });
+    }
+    return true;
+}
+
 bool runHeartbeatNormalCase()
 {
     QTemporaryDir directory;
@@ -1438,6 +1508,105 @@ bool runHeartbeatLateAndRehandshakeCase()
     client.stop();
     waitUntil([&]() { return !client.isControlAvailable(); });
     return true;
+}
+
+bool runBoundedProcessReconnectCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create process reconnect directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("reconnect-exit-success"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    int handshakeReadyCount = 0;
+    int recoverySignals = 0;
+    bool sawWaiting = false;
+    bool sawRestarting = false;
+    {
+        AgentRuntimeClient client(nullptr, 5000, 15000, {0, 10, 20});
+        QObject::connect(&client, &AgentRuntimeClient::runtimeReconnectStateChanged,
+                         [&sawWaiting, &sawRestarting](AgentRuntimeClient::ReconnectState state,
+                                                       int, int maximum, int, const QString &) {
+            if (state == AgentRuntimeClient::ReconnectState::Waiting) sawWaiting = maximum == 3;
+            if (state == AgentRuntimeClient::ReconnectState::Restarting) sawRestarting = true;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::reconnectHandshakeReady,
+                         [&client, &handshakeReadyCount, &recoverySignals](quint64 generation,
+                                                                            const QJsonObject &) {
+            ++handshakeReadyCount;
+            ++recoverySignals;
+            if (!client.completeReconnectRecovery(generation, true,
+                                                  QStringLiteral("test recovery"))) {
+                ++recoverySignals;
+            }
+        });
+        client.start();
+        if (!expect(waitUntil([&]() {
+                return handshakeReadyCount == 1 && client.isReady();
+            }, 3000), "bounded process reconnect did not recover")) {
+            return false;
+        }
+        if (!expect(sawWaiting && sawRestarting && recoverySignals == 1
+                        && client.reconnectAttempt() == 1
+                        && client.processGeneration() > 1,
+                    "process reconnect state or generation contract was invalid")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return !client.isControlAvailable(); });
+    }
+    const QList<QJsonObject> initializes = logMessagesForMethod(
+        logPath, QStringLiteral("initialize"));
+    return expect(initializes.size() == 2,
+                  "successful process reconnect did not use exactly one new generation");
+}
+
+bool runProcessReconnectExhaustionCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create reconnect exhaustion directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("reconnect-exhaust"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    int waitingCount = 0;
+    QList<int> delays;
+    bool exhausted = false;
+    {
+        AgentRuntimeClient client(nullptr, 5000, 15000, {0, 10, 20});
+        QObject::connect(&client, &AgentRuntimeClient::runtimeReconnectStateChanged,
+                         [&waitingCount, &delays, &exhausted](
+                             AgentRuntimeClient::ReconnectState state,
+                             int attempt, int, int nextDelay, const QString &) {
+            if (state == AgentRuntimeClient::ReconnectState::Waiting) {
+                ++waitingCount;
+                if (attempt > 0) delays.append(nextDelay);
+            } else if (state == AgentRuntimeClient::ReconnectState::Exhausted) {
+                exhausted = true;
+            }
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return exhausted; }, 3000),
+                    "bounded process reconnect did not exhaust")) {
+            return false;
+        }
+        if (!expect(!client.isReady() && client.reconnectAttempt() == 3,
+                    "reconnect exhaustion exposed an incorrect ready or attempt state")) {
+            return false;
+        }
+        client.stop();
+    }
+    const QList<QJsonObject> initializes = logMessagesForMethod(
+        logPath, QStringLiteral("initialize"));
+    return expect(waitingCount == 3 && delays == QList<int>{0, 10, 20}
+                      && initializes.size() == 4,
+                  "reconnect backoff or attempt cap was not exact");
 }
 
 bool runOrdinaryEnvelopeCase(const QString &testCase)
@@ -2464,9 +2633,12 @@ int main(int argc, char *argv[])
     ok = runHandshakeCase(QStringLiteral("upgrade-runtime-error"), false, true, false,
                           QStringLiteral("upgrade-runtime")) && ok;
     ok = runHandshakeCase(QStringLiteral("malformed-upgrade-error"), false) && ok;
+    ok = runLateInitializeResponseCase() && ok;
     ok = runHeartbeatNormalCase() && ok;
     ok = runHeartbeatTimeoutCase() && ok;
     ok = runHeartbeatLateAndRehandshakeCase() && ok;
+    ok = runBoundedProcessReconnectCase() && ok;
+    ok = runProcessReconnectExhaustionCase() && ok;
     ok = runCapabilityGateCase() && ok;
     ok = runTimelineSyncContractCase() && ok;
     ok = runTimelineSnapshotContractCase() && ok;

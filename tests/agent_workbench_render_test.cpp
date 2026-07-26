@@ -3931,6 +3931,8 @@ int main(int argc, char *argv[])
             }},
         });
         application.processEvents();
+        AgentWorkbenchWidgetTestAccess::prepareRuntimeDegradationRequest(
+            workbench, QStringLiteral("initial-degradation-fixture"));
         composer->setPlainText(QStringLiteral("must-wait-for-capability-check"));
         AgentWorkbenchWidgetTestAccess::submitPrompt(workbench);
         AgentWorkbenchWidgetTestAccess::setPendingPrompt(
@@ -4460,6 +4462,8 @@ int main(int argc, char *argv[])
             {QStringLiteral("experimental"), QJsonArray{}},
         }},
     });
+    AgentWorkbenchWidgetTestAccess::prepareRuntimeDegradationRequest(
+        workbench, QStringLiteral("degradation-fixture"));
     runtimeClient->runtimeDegradationsRead(
         QStringLiteral("degradation-fixture"), validCodexRuntimeDegradationSnapshot());
     runtimeClient->projectionRecoveryStatusRead(QJsonObject{

@@ -149,6 +149,38 @@ Public Timeline fixed-watermark replay slice (`3.5`, partial):
   reconnect flow. Heartbeat Unknown does not kill a possibly live Turn, and automatic
   Timeline pruning remains disabled. Keep task `3.5` unchecked.
 
+Bounded reconnect barrier and OOB handshake ordering slice (`3.5`, partial):
+
+- Qt reconnect barriers now retire their dedicated request IDs on success, malformed
+  response, and explicit failure. `session/read` continues Timeline sync only after a
+  valid response and freezes the affected Session on failure. Terminal `list` and
+  `attach` require exact Session/terminal/generation bindings; if the new output
+  cannot be verified, the prior output remains visible with an unverified state and
+  no exited inference. Latest Proposal revalidation handles success, empty result,
+  drift, invalid response, and request failure without allowing an untrusted response
+  to replace a validated cache. `runtime/degradations` records the request ID at
+  creation and accepts only the exact matching response, isolating late responses
+  across handshake generations.
+- Runtime's independent control reader now queues heartbeat, cancellation, steering,
+  and terminal-stop messages received before `initialized`. The main dispatcher
+  consumes the handshake barrier and re-dispatches the queued messages through the
+  normal out-of-band router, preserving ordering while keeping controls reachable
+  during ordinary queue saturation. A Rust handshake regression fixture covers the
+  race.
+- Focused Qt `agent_workbench_render` and `agent_runtime_environment` tests pass
+  2/2; the complete desktop suite passes 16/16 CTests. The complete Rust workspace
+  passes 28 AAP type, 729 `aegisy-agentd` library (one ignored live fixture), 7
+  daemon-main, 10 context-threshold, 14 handshake Runtime, 18 handshake Schema,
+  67 protocol, and 23 stdio/Codex tests. Strict Clippy, formatting, successful
+  `cmake --build build -j4`, strict OpenSpec validation, and `git diff --check` pass.
+- This slice still does not implement live subscription, explicit acknowledgement,
+  or the race-free subscribe/sync/activate state machine. Windows reconnect/runtime
+  execution evidence is also absent, and automatic pruning remains disabled. Keep
+  task `3.5` unchecked.
+- Generation-bound regression coverage also proves initialize response retirement,
+  inert duplicate late initialize responses, exact heartbeat deadline request/process
+  generation matching, and process-generation-bound reconnect stability timers.
+
 - Workbench schema v15 adds a dedicated `public_timeline_events` journal and one
   `public_timeline_cursors` source/cursor row per Session. Session insertion registers
   the empty cursor idempotently; event insertion and cursor advancement use the same

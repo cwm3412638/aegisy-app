@@ -231,6 +231,32 @@ Protocol properties:
   touches SQLite. A late or prior-process-generation response is inert. Bounded
   process reconnect, live subscription, acknowledgement, and the complete reconnect
   state machine remain later `3.5` slices.
+
+The bounded reconnect barrier is deliberately request-scoped. A reconnect attempt
+records a distinct barrier request ID for each `session/read`, terminal
+`terminal/list`/`terminal/attach`, latest-Proposal read, and degradation snapshot.
+Every success, malformed response, and explicit failure retires that ID. Session
+read failure freezes only its Session and never claims recovery; terminal recovery
+requires exact Session/terminal/generation bindings and retains old output as
+unverified when proof is unavailable; Proposal drift, empty, or invalid responses
+cannot replace a previously validated cache. The degradation response must match
+the exact request ID created for that handshake, so a late response from an older
+connection is inert. This bounded barrier is a recovery prerequisite, not a
+subscription or acknowledgement protocol.
+
+The independent Runtime control reader also has a handshake ordering barrier. Before
+the exact `initialized` notification is consumed, heartbeat, cancellation,
+steering, and terminal-stop messages are queued in arrival order. Once the main
+dispatcher consumes `initialized`, it re-runs those queued messages through the
+ordinary out-of-band router. This prevents the control reader from bypassing
+negotiation while preserving control reachability under a blocked ordinary queue.
+
+Every reconnect control token is generation-bound: initialize IDs are retired on
+success and rejection, heartbeat deadlines require the exact request plus heartbeat
+and process generations, and stability timers require the process generation that
+completed recovery. Stop, negotiation loss, or suppression clears those tokens so
+late callbacks cannot change readiness or recovery state.
+
 - Idempotency keys for turn start, approval responses, writes, and background job
   submission.
 - Server-initiated requests for approval, structured user input, credential

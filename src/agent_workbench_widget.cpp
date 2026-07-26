@@ -1696,20 +1696,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
         }
         m_imageContextAvailable = imageImportAvailable && imagePreviewAvailable;
-        const QStringList timelineSessions = m_timelineSessions.keys();
-        QTimer::singleShot(0, this, [this, timelineSessions]() {
-            for (const QString &sessionId : timelineSessions) {
-                const auto state = m_timelineSessions.constFind(sessionId);
-                if (state != m_timelineSessions.cend() && state->retryOnReconnect) {
-                    if (state->snapshotRecoveryRequired) beginTimelineSnapshot(sessionId);
-                    else beginTimelineSync(sessionId);
-                }
-            }
-        });
+        m_runtimeReconnectActive = false;
+        m_runtimeReconnectExhausted = false;
+        recoverRuntimeBackedStateAfterHandshake();
         if (m_pinnedContextAvailable && !m_projectId.isEmpty()) requestPinnedContext();
-        if (m_workspaceEditProposalAvailable && !m_workSessionId.isEmpty()) {
-            requestLatestWorkspaceEditProposal(m_workSessionId);
-        }
         if (m_pinFileContextAction) {
             m_pinFileContextAction->setEnabled(
                 m_pinnedContextAvailable && !m_runtimeRecoveryMode && !m_projectId.isEmpty());
@@ -1887,8 +1877,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             this, [this](const QString &requestId, const QJsonObject &result) {
         if (m_runtimeDegradationState != RuntimeDegradationState::Pending
                 || requestId.isEmpty()
-                || (!m_runtimeDegradationRequestId.isEmpty()
-                    && requestId != m_runtimeDegradationRequestId)) {
+                || m_runtimeDegradationRequestId.isEmpty()
+                || requestId != m_runtimeDegradationRequestId) {
             return;
         }
         m_runtimeDegradationRequestId.clear();
@@ -1905,6 +1895,12 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         updateRuntimeCapabilityUi();
         updateTurnAction();
         startPendingTurnIfReady();
+    });
+    connect(m_runtime, &AgentRuntimeClient::runtimeDegradationRequestCreated,
+            this, [this](const QString &requestId) {
+        if (m_runtimeDegradationState == RuntimeDegradationState::Pending) {
+            m_runtimeDegradationRequestId = requestId;
+        }
     });
     connect(m_runtime, &AgentRuntimeClient::runtimeHealthRead,
             this, [this](const QJsonObject &health) {
@@ -2086,10 +2082,13 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::connectionStateChanged,
             this, [this](bool ready, const QString &detail) {
-        m_runtimeStatus->setText(
-            ready && m_runtimeRecoveryMode ? QStringLiteral("◇ 只读恢复")
-            : ready ? QStringLiteral("● 运行时就绪")
-                    : QStringLiteral("○ 运行时离线"));
+        if (ready) {
+            m_runtimeStatus->setText(m_runtimeRecoveryMode
+                ? QStringLiteral("◇ 只读恢复")
+                : QStringLiteral("● 运行时就绪"));
+        } else if (!m_runtimeReconnectActive && !m_runtimeReconnectExhausted) {
+            m_runtimeStatus->setText(QStringLiteral("○ 运行时离线"));
+        }
         m_runtimeStatus->setToolTip(detail);
         m_runtimeStatus->setStyleSheet(
             ready && m_runtimeRecoveryMode
@@ -2097,30 +2096,14 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             : ready ? QStringLiteral("color:#067647; font-size:11px; font-weight:600;")
                   : QStringLiteral("color:#b54708; font-size:11px; font-weight:600;"));
         if (!ready) {
-            m_turnRunning = false;
-            m_turnCancelling = false;
-            m_activeTurnSessionId.clear();
-            m_activeTurnId.clear();
+            // Transport loss is not an authoritative Turn terminal. Keep the
+            // confirmed identity until replay or a snapshot proves its state.
+            if (m_turnRunning) m_activeTurnControlUnverified = true;
+            if (m_terminalRunning) m_terminalStateUnverified = true;
+            markRuntimeBackedStateUnverified();
             suspendTimelinesForDisconnect();
             m_unknownTimelineEventCounts.clear();
             m_unknownTimelineEventOverflowCount = 0;
-            m_turnCancelRequestId.clear();
-            const QStringList cachedProposalSessions =
-                m_confirmedWorkspaceEditProposals.keys();
-            for (const QString &sessionId : cachedProposalSessions) {
-                m_unverifiedWorkspaceEditProposalSessions.insert(sessionId);
-            }
-            clearWorkspaceEditProposalPending();
-            if (m_workspaceEditDurableProposal) {
-                m_workspaceEditDisplayedReferenceSessionId.clear();
-                m_workspaceEditDisplayedReferenceProposalId.clear();
-                m_workspaceEditDurableProposal = false;
-                m_workspaceEditFiles->clear();
-                m_workspaceEditDiff->clear();
-                m_workspaceEditMoreButton->setEnabled(false);
-                m_workspaceEditSummary->setText(
-                    QStringLiteral("持久化变更提案等待运行时重新验证"));
-            }
         }
         updateTurnAction();
         updateEditorActions();
@@ -2139,12 +2122,78 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         if (!ready && !detail.contains(QStringLiteral("正在连接"))) addNotice(detail, true);
         updateRecoveryUi();
     });
+    connect(m_runtime, &AgentRuntimeClient::runtimeReconnectStateChanged,
+            this, [this](AgentRuntimeClient::ReconnectState state, int attempt,
+                         int maximumAttempts, int nextDelayMs,
+                         const QString &detail) {
+        const QString progress = maximumAttempts > 0
+            ? QStringLiteral("%1/%2").arg(qMax(1, attempt)).arg(maximumAttempts)
+            : QString();
+        if (state == AgentRuntimeClient::ReconnectState::Waiting) {
+            m_runtimeReconnectActive = true;
+            m_runtimeReconnectExhausted = false;
+            markRuntimeBackedStateUnverified();
+            suspendTimelinesForDisconnect();
+            m_runtimeStatus->setText(QStringLiteral("◇ 等待重连 · %1").arg(progress));
+            m_runtimeStatus->setToolTip(nextDelayMs > 0
+                ? QStringLiteral("%1；%2 毫秒后开始下一次有界重连")
+                      .arg(detail).arg(nextDelayMs)
+                : detail);
+        } else if (state == AgentRuntimeClient::ReconnectState::Restarting) {
+            m_runtimeReconnectActive = true;
+            m_runtimeReconnectExhausted = false;
+            if (m_turnRunning) m_activeTurnControlUnverified = true;
+            if (m_terminalRunning) m_terminalStateUnverified = true;
+            markRuntimeBackedStateUnverified();
+            m_runtimeStatus->setText(QStringLiteral("◇ 正在重连 · %1").arg(progress));
+            m_runtimeStatus->setToolTip(detail);
+        } else if (state == AgentRuntimeClient::ReconnectState::Exhausted) {
+            m_runtimeReconnectActive = false;
+            m_runtimeReconnectExhausted = true;
+            markRuntimeBackedStateUnverified();
+            m_runtimeStatus->setText(QStringLiteral("○ Runtime 重连已停止"));
+            m_runtimeStatus->setToolTip(detail);
+            addNotice(QStringLiteral(
+                "Runtime 有界重连已耗尽；已确认的会话、活动任务和变更提案仍保留为未验证状态。"),
+                true);
+        } else {
+            m_runtimeReconnectActive = false;
+            m_runtimeReconnectExhausted = false;
+            if (!m_runtime->isReady()) {
+                m_runtimeStatus->setText(QStringLiteral("◇ 运行时连接校验中"));
+                m_runtimeStatus->setToolTip(detail);
+            }
+        }
+        m_runtimeStatus->setStyleSheet(
+            QStringLiteral("color:#b54708; font-size:11px; font-weight:600;"));
+        updateTurnAction();
+        updateEditorActions();
+        updateTerminalControls();
+        updateRecoveryUi();
+    });
+    connect(m_runtime, &AgentRuntimeClient::reconnectHandshakeReady,
+            this, [this](quint64 generation, const QJsonObject &result) {
+        beginRuntimeReconnectRecovery(generation, result);
+    });
+    connect(m_runtime, &AgentRuntimeClient::heartbeatRecoveryExhausted,
+            this, [this](int attempts, const QString &detail) {
+        markRuntimeBackedStateUnverified();
+        m_runtimeStatus->setText(QStringLiteral("◇ 运行时状态未知"));
+        m_runtimeStatus->setToolTip(detail);
+        addNotice(QStringLiteral(
+            "同一 Runtime 连接连续 %1 次心跳恢复失败；控制连接仍保留，普通业务继续关闭。")
+            .arg(attempts), true);
+        updateTurnAction();
+        updateEditorActions();
+        updateTerminalControls();
+    });
     connect(m_runtime, &AgentRuntimeClient::runtimeLivenessChanged,
             this, [this](bool healthy, const QString &detail) {
         // A missed heartbeat is not a process exit and does not establish a Turn
         // terminal state. Preserve confirmed UI and keep only out-of-band cleanup
         // controls available until the same connection proves liveness again.
         if (!healthy && m_runtime->isControlAvailable()) {
+            markRuntimeBackedStateUnverified();
             m_runtimeStatus->setText(QStringLiteral("◇ 运行时状态未知"));
             m_runtimeStatus->setToolTip(detail);
             m_runtimeStatus->setStyleSheet(
@@ -2182,6 +2231,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                     || !m_runtime || !m_runtime->isReady();
                 freezeTimelineSession(
                     sessionId, false, retryOnReconnect);
+                finishRuntimeReconnectTimeline(sessionId);
                 if (sessionId == currentTimelineSessionId()) {
                     addNotice(QStringLiteral("时间线同步失败（错误码 %1），当前会话保持冻结。")
                                   .arg(code), true);
@@ -2197,6 +2247,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 if (state->snapshotRequestId != requestId) continue;
                 const QString sessionId = state.key();
                 freezeTimelineForSnapshotRecovery(sessionId, true);
+                finishRuntimeReconnectTimeline(sessionId);
                 if (sessionId == currentTimelineSessionId()) {
                     addNotice(QStringLiteral("时间线快照恢复失败（错误码 %1），当前会话保持冻结。")
                                   .arg(code), true);
@@ -2869,6 +2920,18 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     connect(m_runtime, &AgentRuntimeClient::sessionRead,
             this, [this](const QString &requestId, const QJsonObject &snapshot) {
         if (m_sessionReadRequestId.isEmpty() || requestId != m_sessionReadRequestId) return;
+        const bool reconnectSessionRead = requestId == m_runtimeReconnectSessionReadId;
+        const QString reconnectSessionId = m_sessionReadSessionId;
+        const auto finishReconnectSessionReadFailure = [this, reconnectSessionRead,
+                                                         reconnectSessionId]() {
+            if (!reconnectSessionRead) return;
+            m_runtimeReconnectSessionReadId.clear();
+            if (!reconnectSessionId.isEmpty()) {
+                freezeTimelineSession(reconnectSessionId, false, false);
+                m_runtimeReconnectTimelinePending.remove(reconnectSessionId);
+            }
+            continueRuntimeReconnectRecovery();
+        };
         const bool appendingHistory = m_sessionHistoryAppending;
         const QString requestedSessionId = m_sessionReadSessionId;
         const QString requestedCursor = m_sessionReadCursor;
@@ -2889,6 +2952,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         const QJsonValue pageValue = snapshot.value(QStringLiteral("history_page"));
         if (!sessionValue.isObject() || !itemsValue.isArray() || !pageValue.isObject()) {
             rejectPage();
+            finishReconnectSessionReadFailure();
             return;
         }
         const QJsonObject session = sessionValue.toObject();
@@ -3021,6 +3085,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         }
         if (!validPage) {
             rejectPage();
+            finishReconnectSessionReadFailure();
             return;
         }
 
@@ -3110,11 +3175,24 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         updateContextStrip();
         updateRecoveryUi();
         if (!appendingHistory) beginTimelineSync(id);
+        if (reconnectSessionRead) {
+            m_runtimeReconnectSessionReadId.clear();
+            auto state = m_timelineSessions.find(id);
+            if (state == m_timelineSessions.end() || state->syncRequestId.isEmpty()) {
+                freezeTimelineSession(id, false, false);
+                m_runtimeReconnectTimelinePending.remove(id);
+            }
+            continueRuntimeReconnectRecovery();
+        }
         updateTurnAction();
         updateTerminalControls();
         if (mode == QStringLiteral("work")) {
-            requestTerminalList();
-            requestLatestWorkspaceEditProposal(id);
+            // Reconnect recovery owns these reads. Starting ordinary reads here
+            // would overwrite the generation-bound terminal pending ID.
+            if (m_runtimeReconnectRecoveryGeneration == 0) {
+                requestTerminalList();
+                requestLatestWorkspaceEditProposal(id);
+            }
         }
     });
     connect(m_runtime, &AgentRuntimeClient::timelineSynced,
@@ -3314,11 +3392,56 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::terminalsListed,
             this, [this](const QString &requestId, const QJsonObject &result) {
-        if (requestId != m_terminalListRequestId
-                || result.value(QStringLiteral("session_id")).toString() != m_workSessionId) {
+        const bool reconnectList = requestId == m_runtimeReconnectTerminalListId;
+        const auto finishReconnectTerminalUnavailable = [this, reconnectList]() {
+            if (!reconnectList) return;
+            if (m_terminalListRequestId == m_runtimeReconnectTerminalListId) {
+                m_terminalListRequestId.clear();
+            }
+            m_runtimeReconnectTerminalListId.clear();
+            m_runtimeReconnectTerminalAttachId.clear();
+            m_runtimeReconnectTerminalId.clear();
+            m_runtimeReconnectTerminalGeneration = 0;
+            m_terminalStateUnverified = true;
+            m_terminalStatus->setText(QStringLiteral(
+                "重连后的终端未能验证，已保留已有输出；未推断终端退出。"));
+            updateTerminalControls();
+            continueRuntimeReconnectRecovery();
+        };
+        if (requestId != m_terminalListRequestId) {
+            finishReconnectTerminalUnavailable();
             return;
         }
+        if (result.value(QStringLiteral("session_id")).toString() != m_workSessionId
+                || !result.value(QStringLiteral("terminals")).isArray()) {
+            finishReconnectTerminalUnavailable();
+            return;
+        }
+        if (reconnectList) {
+            const QJsonArray listed = result.value(QStringLiteral("terminals")).toArray();
+            bool matched = false;
+            for (const QJsonValue &value : listed) {
+                if (!value.isObject()) continue;
+                const QJsonObject terminal = value.toObject();
+                if (terminal.value(QStringLiteral("terminal_id")).toString()
+                            != m_runtimeReconnectTerminalId
+                        || terminal.value(QStringLiteral("session_id")).toString()
+                            != m_workSessionId
+                        || terminal.value(QStringLiteral("generation")).toVariant()
+                                .toULongLong()
+                            != m_runtimeReconnectTerminalGeneration) {
+                    continue;
+                }
+                matched = true;
+                break;
+            }
+            if (!matched) {
+                finishReconnectTerminalUnavailable();
+                return;
+            }
+        }
         m_terminalListRequestId.clear();
+        if (reconnectList) m_runtimeReconnectTerminalListId.clear();
         const QJsonArray terminals = result.value(QStringLiteral("terminals")).toArray();
         QString selectedId = m_activeTerminalId;
         QString preferredId;
@@ -3349,6 +3472,17 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             m_terminalPicker->setCurrentIndex(index);
             selectedId = index >= 0 ? m_terminalPicker->itemData(index).toString() : QString();
         }
+        if (reconnectList) {
+            m_runtimeReconnectTerminalAttachId = m_runtime->attachTerminal(
+                m_workSessionId, m_runtimeReconnectTerminalId, m_terminalOutputOffset);
+            if (m_runtimeReconnectTerminalAttachId.isEmpty()) {
+                finishReconnectTerminalUnavailable();
+            } else {
+                m_terminalAttachRequestId = m_runtimeReconnectTerminalAttachId;
+                m_terminalStatus->setText(QStringLiteral("正在校验重连终端..."));
+            }
+            return;
+        }
         if (selectedId != m_activeTerminalId || m_activeTerminalId.isEmpty()) {
             activateTerminal(selectedId);
         } else {
@@ -3364,8 +3498,39 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     connect(m_runtime, &AgentRuntimeClient::terminalAttached,
             this, [this](const QString &requestId, const QJsonObject &terminal) {
         if (requestId != m_terminalAttachRequestId) return;
+        const bool reconnectAttach = requestId == m_runtimeReconnectTerminalAttachId;
+        const auto finishReconnectTerminalUnavailable = [this, reconnectAttach]() {
+            if (!reconnectAttach) return;
+            m_runtimeReconnectTerminalAttachId.clear();
+            m_terminalAttachRequestId.clear();
+            m_runtimeReconnectTerminalId.clear();
+            m_runtimeReconnectTerminalGeneration = 0;
+            m_terminalStateUnverified = true;
+            m_terminalStatus->setText(QStringLiteral(
+                "重连后的终端响应无效，已保留已有输出；未推断终端退出。"));
+            updateTerminalControls();
+            continueRuntimeReconnectRecovery();
+        };
+        if (reconnectAttach
+                && (terminal.value(QStringLiteral("terminal_id")).toString()
+                        != m_runtimeReconnectTerminalId
+                    || terminal.value(QStringLiteral("session_id")).toString()
+                        != m_workSessionId
+                    || terminal.value(QStringLiteral("generation")).toVariant()
+                            .toULongLong()
+                        != m_runtimeReconnectTerminalGeneration)) {
+            finishReconnectTerminalUnavailable();
+            return;
+        }
         m_terminalAttachRequestId.clear();
         applyTerminalSnapshot(terminal);
+        if (reconnectAttach) {
+            m_runtimeReconnectTerminalAttachId.clear();
+            m_runtimeReconnectTerminalId.clear();
+            m_runtimeReconnectTerminalGeneration = 0;
+            m_terminalStateUnverified = false;
+            continueRuntimeReconnectRecovery();
+        }
     });
     connect(m_runtime, &AgentRuntimeClient::terminalExcerptRead,
             this, [this](const QString &requestId, const QJsonObject &excerpt) {
@@ -3953,8 +4118,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         if (method == QStringLiteral("runtime/degradations")
                 && (m_runtimeDegradationState != RuntimeDegradationState::Pending
                     || requestId.isEmpty()
-                    || (!m_runtimeDegradationRequestId.isEmpty()
-                        && requestId != m_runtimeDegradationRequestId))) {
+                    || m_runtimeDegradationRequestId.isEmpty()
+                    || requestId != m_runtimeDegradationRequestId)) {
             return;
         }
         if (method == QStringLiteral("runtime/degradations")) {
@@ -4088,8 +4253,17 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         } else if (method == QStringLiteral("session/read")
                    && !m_sessionReadRequestId.isEmpty()
                    && requestId == m_sessionReadRequestId) {
+            const bool reconnectSessionRead = requestId == m_runtimeReconnectSessionReadId;
+            const QString reconnectSessionId = m_sessionReadSessionId;
             const bool appendingHistory = std::exchange(m_sessionHistoryAppending, false);
             clearSessionReadRequest();
+            if (reconnectSessionRead) {
+                m_runtimeReconnectSessionReadId.clear();
+                if (!reconnectSessionId.isEmpty()) {
+                    freezeTimelineSession(reconnectSessionId, false, false);
+                    m_runtimeReconnectTimelinePending.remove(reconnectSessionId);
+                }
+            }
             if (m_sessionHistoryMoreButton) {
                 m_sessionHistoryMoreButton->setText(QStringLiteral("加载更早记录"));
                 m_sessionHistoryMoreButton->setEnabled(!m_sessionHistoryCursor.isEmpty());
@@ -4098,21 +4272,36 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             addNotice(appendingHistory
                 ? QStringLiteral("加载更早记录失败：%1").arg(message)
                 : QStringLiteral("恢复会话失败：%1").arg(message), true);
+            if (reconnectSessionRead) continueRuntimeReconnectRecovery();
         } else if (method == QStringLiteral("session/start")
                 && !m_pendingTerminalKind.isEmpty()) {
             m_pendingTerminalKind.clear();
             m_pendingTerminalName.clear();
             m_terminalStatus->setText(QStringLiteral("Work 会话创建失败：%1").arg(message));
         } else if (method.startsWith(QStringLiteral("terminal/"))) {
+            const bool reconnectList = requestId == m_runtimeReconnectTerminalListId;
+            const bool reconnectAttach = requestId == m_runtimeReconnectTerminalAttachId;
             if (requestId == m_terminalAttachRequestId) m_terminalAttachRequestId.clear();
             if (requestId == m_terminalListRequestId) m_terminalListRequestId.clear();
+            if (reconnectList || reconnectAttach) {
+                m_runtimeReconnectTerminalListId.clear();
+                m_runtimeReconnectTerminalAttachId.clear();
+                m_runtimeReconnectTerminalId.clear();
+                m_runtimeReconnectTerminalGeneration = 0;
+                m_terminalStateUnverified = true;
+                m_terminalStatus->setText(QStringLiteral(
+                    "重连后的终端恢复失败，已保留已有输出；未推断终端退出。"));
+            }
             if (requestId == m_terminalExcerptRequestId) {
                 m_terminalExcerptRequestId.clear();
                 addNotice(QStringLiteral("固定终端摘录失败：%1").arg(message), true);
             }
-            m_terminalStatus->setText(QStringLiteral("终端操作失败：%1").arg(message));
+            if (!reconnectList && !reconnectAttach) {
+                m_terminalStatus->setText(QStringLiteral("终端操作失败：%1").arg(message));
+            }
             if (method == QStringLiteral("terminal/restart-user")) requestTerminalList();
             updateTerminalControls();
+            if (reconnectList || reconnectAttach) continueRuntimeReconnectRecovery();
         } else if (method == QStringLiteral("artifact/read-command-output")) {
             const QString itemId = m_commandArtifactRequests.take(requestId);
             if (QPushButton *button = m_itemArtifactButtons.value(itemId, nullptr)) {
@@ -4130,8 +4319,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             }
         } else if (method == QStringLiteral("workspace/edit/proposal/latest")
                    || method == QStringLiteral("workspace/edit/proposal/read")) {
+            const bool reconnectProposal = m_runtimeReconnectProposalRequests.contains(requestId);
             const WorkspaceEditProposalRequest request =
                 m_workspaceEditProposalRequests.take(requestId);
+            if (reconnectProposal) m_runtimeReconnectProposalRequests.remove(requestId);
             if (method == QStringLiteral("workspace/edit/proposal/read")) {
                 if (!request.sessionId.isEmpty()) {
                     if (QPushButton *button =
@@ -4154,6 +4345,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                         m_workspaceEditReferenceSelectionProposalId.clear();
                     }
                 }
+                if (reconnectProposal) continueRuntimeReconnectRecovery();
                 return;
             }
             const QString confirmedId = m_confirmedWorkspaceEditProposals
@@ -4181,6 +4373,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                         "color:#B42318; font-size:11px; font-weight:600;"));
                 }
             }
+            if (reconnectProposal) continueRuntimeReconnectRecovery();
         } else if (method == QStringLiteral("workspace/edit/proposal/artifact/read")) {
             const WorkspaceEditProposalArtifactRequest request =
                 m_workspaceEditProposalArtifactRequests.take(requestId);
@@ -6133,7 +6326,8 @@ void AgentWorkbenchWidget::populateWorkspaceEditPreview(const QJsonObject &previ
 
 void AgentWorkbenchWidget::requestLatestWorkspaceEditProposal(const QString &sessionId)
 {
-    if (!m_runtime || !m_runtime->isReady() || !m_workspaceEditProposalAvailable
+    if (!m_runtime || !runtimeRecoveryRequestsAllowed()
+        || !m_workspaceEditProposalAvailable
         || sessionId.isEmpty()) return;
     quint64 &generation = m_workspaceEditProposalGenerations[sessionId];
     if (generation == std::numeric_limits<quint64>::max()) generation = 1;
@@ -6152,7 +6346,7 @@ void AgentWorkbenchWidget::requestWorkspaceEditProposalReference(
     const QString proposalId = reference.value(QStringLiteral("proposal_id")).toString();
     const QJsonObject workspace = m_sessionWorkspaceBindings.value(sessionId);
     const QJsonObject runtime = m_sessionRuntimeBindings.value(sessionId);
-    const bool available = m_runtime && m_runtime->isReady()
+    const bool available = m_runtime && runtimeRecoveryRequestsAllowed()
         && m_workspaceEditProposalAvailable && m_mode == QStringLiteral("work")
         && sessionId == m_workSessionId
         && reference.value(QStringLiteral("project_id")).toString() == m_projectId
@@ -6193,8 +6387,17 @@ void AgentWorkbenchWidget::requestWorkspaceEditProposalReference(
 void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
     const QString &requestId, const QJsonObject &result, bool latest)
 {
+    const bool reconnectProposal = m_runtimeReconnectProposalRequests.contains(requestId);
+    const auto finishReconnectProposal = [this, requestId, reconnectProposal]() {
+        if (!reconnectProposal) return;
+        m_runtimeReconnectProposalRequests.remove(requestId);
+        continueRuntimeReconnectRecovery();
+    };
     const auto found = m_workspaceEditProposalRequests.constFind(requestId);
-    if (found == m_workspaceEditProposalRequests.cend()) return;
+    if (found == m_workspaceEditProposalRequests.cend()) {
+        finishReconnectProposal();
+        return;
+    }
     const WorkspaceEditProposalRequest request = *found;
     m_workspaceEditProposalRequests.remove(requestId);
     const bool expectedRequestKind = latest == request.proposalId.isEmpty();
@@ -6212,6 +6415,7 @@ void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
                 status->setText(QStringLiteral("引用请求已过期 · 重试"));
             }
         }
+        finishReconnectProposal();
         return;
     }
     QPushButton *referenceButton = m_itemProposalButtons.value(request.itemKey, nullptr);
@@ -6277,6 +6481,7 @@ void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
             m_workspaceEditSummary->setStyleSheet(QStringLiteral(
                 "color:#B42318; font-size:11px; font-weight:600;"));
         }
+        finishReconnectProposal();
         return;
     }
     if (!latest) {
@@ -6301,6 +6506,7 @@ void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
             m_workspaceEditReferenceSelectionSessionId.clear();
             m_workspaceEditReferenceSelectionProposalId.clear();
         }
+        finishReconnectProposal();
         return;
     }
     m_unverifiedWorkspaceEditProposalSessions.remove(request.sessionId);
@@ -6322,6 +6528,7 @@ void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
             m_workspaceEditSummary->setText(QStringLiteral("暂无持久化变更提案"));
         }
         updateWorkspaceEditUnreadMarker();
+        finishReconnectProposal();
         return;
     }
     const QString priorId = m_confirmedWorkspaceEditProposals
@@ -6353,6 +6560,7 @@ void AgentWorkbenchWidget::acceptWorkspaceEditProposalResult(
         m_unreadWorkspaceEditProposalSessions.insert(request.sessionId);
         updateWorkspaceEditUnreadMarker();
     }
+    finishReconnectProposal();
 }
 
 void AgentWorkbenchWidget::showWorkspaceEditProposal(
@@ -6484,6 +6692,12 @@ void AgentWorkbenchWidget::loadMoreWorkspaceEditDiff()
                                return request.generation
                                    == m_workspaceEditProposalArtifactGeneration;
                            })) {
+        return;
+    }
+    if (m_workspaceEditDurableProposal
+            && m_unverifiedWorkspaceEditProposalSessions.contains(
+                m_workspaceEditProposalSessionId)) {
+        m_workspaceEditMoreButton->setEnabled(false);
         return;
     }
     m_workspaceEditMoreButton->setEnabled(false);
@@ -6672,7 +6886,7 @@ QWidget *AgentWorkbenchWidget::buildTerminalPage()
 
 void AgentWorkbenchWidget::requestTerminalList()
 {
-    if (m_workSessionId.isEmpty() || !m_runtime->isReady()
+    if (m_workSessionId.isEmpty() || !runtimeRecoveryRequestsAllowed()
             || m_archivedSessionIds.contains(m_workSessionId)
             || m_recoverySessionIds.contains(m_workSessionId)
             || m_runtimeRecoveryMode
@@ -6829,6 +7043,7 @@ void AgentWorkbenchWidget::updateTerminalControls()
     const bool protocolReady = m_runtime && m_runtime->isReady() && !m_runtimeRecoveryMode
         && !m_projectId.isEmpty();
     const bool controlReady = m_runtime && m_runtime->isControlAvailable()
+        && !m_terminalStateUnverified
         && !m_runtimeRecoveryMode && !m_projectId.isEmpty();
     const bool ready = protocolReady
         && (m_workSessionId.isEmpty()
@@ -10911,7 +11126,8 @@ QString AgentWorkbenchWidget::requestSessionHistory(const QString &sessionId,
                                                      int limit,
                                                      bool appending)
 {
-    if (!m_runtime || !m_runtime->isReady() || !m_sessionReadRequestId.isEmpty()
+    if (!m_runtime || !runtimeRecoveryRequestsAllowed()
+            || !m_sessionReadRequestId.isEmpty()
             || sessionId.isEmpty() || limit < 1 || limit > kMaxTimelinePageItems) {
         return {};
     }
@@ -11070,7 +11286,12 @@ void AgentWorkbenchWidget::updateTurnAction()
         m_sendButton->setToolTip(m_turnCancelling
             ? QStringLiteral("已请求停止，正在等待运行时确认终态")
             : QStringLiteral("停止当前任务"));
-        m_sendButton->setEnabled(m_runtime->isControlAvailable() && !m_turnCancelling);
+        m_sendButton->setEnabled(m_runtime->isControlAvailable()
+            && !m_activeTurnControlUnverified && !m_turnCancelling);
+        if (m_activeTurnControlUnverified && !m_turnCancelling) {
+            m_sendButton->setToolTip(
+                QStringLiteral("新 Runtime 尚未证明对该任务的控制所有权；停止操作保持关闭"));
+        }
         return;
     }
     if (m_runtimeDegradationState != RuntimeDegradationState::Valid) {
@@ -12507,6 +12728,232 @@ void AgentWorkbenchWidget::suspendTimelinesForDisconnect()
     updateTurnAction();
 }
 
+bool AgentWorkbenchWidget::runtimeRecoveryRequestsAllowed() const
+{
+    return m_runtime && (m_runtime->isReady()
+        || (m_runtimeReconnectRecoveryGeneration != 0
+            && m_runtime->reconnectState()
+                == AgentRuntimeClient::ReconnectState::Restarting
+            && m_runtime->processGeneration()
+                == m_runtimeReconnectRecoveryGeneration));
+}
+
+void AgentWorkbenchWidget::markRuntimeBackedStateUnverified()
+{
+    m_runtimeStateUnverified = true;
+    for (const QString &sessionId : m_confirmedWorkspaceEditProposals.keys()) {
+        m_unverifiedWorkspaceEditProposalSessions.insert(sessionId);
+    }
+    clearWorkspaceEditProposalPending();
+    if (m_workspaceEditDurableProposal) {
+        m_workspaceEditMoreButton->setEnabled(false);
+        if (!m_workspaceEditSummary->text().startsWith(
+                QStringLiteral("待重新验证 · "))) {
+            m_workspaceEditSummary->setText(QStringLiteral("待重新验证 · %1")
+                .arg(m_workspaceEditSummary->text()));
+        }
+        m_workspaceEditSummary->setStyleSheet(QStringLiteral(
+            "color:#B54708; font-size:11px; font-weight:600;"));
+    }
+}
+
+void AgentWorkbenchWidget::recoverRuntimeBackedStateAfterHandshake()
+{
+    const bool shouldReadUntracked = std::exchange(m_runtimeStateUnverified, false);
+    const QStringList timelineSessions = m_timelineSessions.keys();
+    const QString visibleSessionId = currentTimelineSessionId();
+    QTimer::singleShot(0, this,
+        [this, timelineSessions, visibleSessionId, shouldReadUntracked]() {
+        bool visibleRecoveryScheduled = false;
+        for (const QString &sessionId : timelineSessions) {
+            const auto state = m_timelineSessions.constFind(sessionId);
+            if (state == m_timelineSessions.cend() || !state->retryOnReconnect) continue;
+            if (sessionId == visibleSessionId) visibleRecoveryScheduled = true;
+            if (state->snapshotRecoveryRequired) beginTimelineSnapshot(sessionId);
+            else beginTimelineSync(sessionId);
+        }
+        if (shouldReadUntracked && !visibleSessionId.isEmpty()
+                && !visibleRecoveryScheduled && m_sessionReadRequestId.isEmpty()) {
+            resetSessionHistoryPagination();
+            requestSessionHistory(visibleSessionId);
+        }
+    });
+    if (m_workspaceEditProposalAvailable && !m_workSessionId.isEmpty()
+            && !m_unverifiedWorkspaceEditProposalSessions.contains(m_workSessionId)) {
+        requestLatestWorkspaceEditProposal(m_workSessionId);
+    }
+}
+
+void AgentWorkbenchWidget::beginRuntimeReconnectRecovery(
+    quint64 generation, const QJsonObject &result)
+{
+    if (!m_runtime || generation == 0
+            || generation != m_runtime->processGeneration()
+            || m_runtime->reconnectState()
+                != AgentRuntimeClient::ReconnectState::Restarting) {
+        return;
+    }
+    m_runtimeReconnectRecoveryGeneration = generation;
+    m_runtimeReconnectSecondPhaseStarted = false;
+    m_runtimeReconnectTimelinePending.clear();
+    m_runtimeReconnectProposalRequests.clear();
+    m_runtimeReconnectSessionReadId.clear();
+    m_runtimeReconnectTerminalListId.clear();
+    m_runtimeReconnectTerminalAttachId.clear();
+    m_runtimeReconnectTerminalId.clear();
+    m_runtimeReconnectTerminalGeneration = 0;
+
+    m_timelineSyncAvailable = false;
+    m_timelineSnapshotAvailable = false;
+    m_workspaceEditProposalAvailable = false;
+    const QJsonArray capabilities = result.value(QStringLiteral("capabilities"))
+        .toObject().value(QStringLiteral("stable")).toArray();
+    for (const QJsonValue &value : capabilities) {
+        const QString capability = value.toString();
+        if (capability == QStringLiteral("timeline.replay.fixed-watermark")) {
+            m_timelineSyncAvailable = true;
+        } else if (capability == QStringLiteral("timeline.snapshot.current")) {
+            m_timelineSnapshotAvailable = true;
+        } else if (capability
+                == QStringLiteral("workspace.edit.proposal.read-only")) {
+            m_workspaceEditProposalAvailable = true;
+        }
+    }
+    m_runtimeRecoveryMode = result.value(QStringLiteral("backend")).toObject()
+        .value(QStringLiteral("status")).toString()
+        == QStringLiteral("read-only-recovery");
+
+    QSet<QString> sessions;
+    for (auto state = m_timelineSessions.cbegin();
+         state != m_timelineSessions.cend(); ++state) {
+        if (state->recovery != TimelineRecoveryState::Untracked) {
+            sessions.insert(state.key());
+        }
+    }
+    if (!currentTimelineSessionId().isEmpty()) sessions.insert(currentTimelineSessionId());
+    if (!m_activeTurnSessionId.isEmpty()) sessions.insert(m_activeTurnSessionId);
+    if (!m_workspaceEditProposalSessionId.isEmpty()) {
+        sessions.insert(m_workspaceEditProposalSessionId);
+    }
+    for (const QString &sessionId : m_confirmedWorkspaceEditProposals.keys()) {
+        sessions.insert(sessionId);
+    }
+    if (!m_activeTerminalId.isEmpty() && !m_workSessionId.isEmpty()) {
+        sessions.insert(m_workSessionId);
+    }
+
+    const QString visibleSessionId = currentTimelineSessionId();
+    bool visibleReadStarted = false;
+    for (const QString &sessionId : sessions) {
+        TimelineSessionState *state = ensureTimelineSession(sessionId);
+        if (!state || state->recovery == TimelineRecoveryState::Unrecoverable) continue;
+        state->retryOnReconnect = true;
+        state->recovery = TimelineRecoveryState::Frozen;
+        m_runtimeReconnectTimelinePending.insert(sessionId);
+        if (!visibleReadStarted && sessionId == visibleSessionId
+                && state->projection.sequence == 0
+                && m_sessionReadRequestId.isEmpty()) {
+            resetSessionHistoryPagination();
+            m_runtimeReconnectSessionReadId = requestSessionHistory(sessionId);
+            visibleReadStarted = !m_runtimeReconnectSessionReadId.isEmpty();
+            if (visibleReadStarted) continue;
+        }
+        beginTimelineSync(sessionId);
+        if (state->syncRequestId.isEmpty()) {
+            freezeTimelineSession(sessionId, false, false);
+            m_runtimeReconnectTimelinePending.remove(sessionId);
+        }
+    }
+    continueRuntimeReconnectRecovery();
+}
+
+void AgentWorkbenchWidget::finishRuntimeReconnectTimeline(const QString &sessionId)
+{
+    if (m_runtimeReconnectRecoveryGeneration == 0
+            || !m_runtimeReconnectTimelinePending.remove(sessionId)) {
+        return;
+    }
+    auto state = m_timelineSessions.find(sessionId);
+    if (state != m_timelineSessions.end() && m_activeTurnControlUnverified
+            && sessionId == m_activeTurnSessionId
+            && state->projection.turnStates.value(
+                timelineTurnKey(sessionId, m_activeTurnId))
+                == QStringLiteral("running")) {
+        state->recovery = TimelineRecoveryState::Frozen;
+        state->retryOnReconnect = false;
+        addNotice(QStringLiteral(
+            "活动任务仍显示运行中，但新 Runtime 未证明控制所有权；该会话保持冻结。"),
+            true);
+    } else if (sessionId == m_activeTurnSessionId) {
+        m_activeTurnControlUnverified = false;
+    }
+    continueRuntimeReconnectRecovery();
+}
+
+void AgentWorkbenchWidget::revalidateWorkspaceEditProposalAfterTimelineRecovery(
+    const QString &sessionId)
+{
+    if (m_runtimeReconnectRecoveryGeneration == 0
+            || !m_workspaceEditProposalAvailable
+            || !m_unverifiedWorkspaceEditProposalSessions.contains(sessionId)
+            || !m_confirmedWorkspaceEditProposals.contains(sessionId)) {
+        return;
+    }
+    quint64 &proposalGeneration = m_workspaceEditProposalGenerations[sessionId];
+    if (proposalGeneration == std::numeric_limits<quint64>::max()) {
+        proposalGeneration = 1;
+    } else {
+        ++proposalGeneration;
+    }
+    const QString requestId = m_runtime->latestWorkspaceEditProposal(sessionId);
+    if (requestId.isEmpty()) return;
+    m_workspaceEditProposalRequests.insert(
+        requestId, {sessionId, {}, proposalGeneration, {}, {}});
+    m_runtimeReconnectProposalRequests.insert(requestId, sessionId);
+}
+
+void AgentWorkbenchWidget::continueRuntimeReconnectRecovery()
+{
+    if (!m_runtime || m_runtimeReconnectRecoveryGeneration == 0
+            || m_runtime->processGeneration()
+                != m_runtimeReconnectRecoveryGeneration) {
+        return;
+    }
+    if (!m_runtimeReconnectTimelinePending.isEmpty()
+            || !m_runtimeReconnectSessionReadId.isEmpty()) {
+        return;
+    }
+    if (!m_runtimeReconnectSecondPhaseStarted) {
+        m_runtimeReconnectSecondPhaseStarted = true;
+        for (const QString &sessionId :
+             std::as_const(m_unverifiedWorkspaceEditProposalSessions)) {
+            revalidateWorkspaceEditProposalAfterTimelineRecovery(sessionId);
+        }
+        if (!m_activeTerminalId.isEmpty() && !m_workSessionId.isEmpty()) {
+            m_runtimeReconnectTerminalId = m_activeTerminalId;
+            m_runtimeReconnectTerminalGeneration = m_terminalGeneration;
+            m_runtimeReconnectTerminalListId =
+                m_runtime->listTerminals(m_workSessionId);
+            if (m_runtimeReconnectTerminalListId.isEmpty()) {
+                m_terminalStateUnverified = true;
+            } else {
+                m_terminalListRequestId = m_runtimeReconnectTerminalListId;
+            }
+        }
+    }
+    if (!m_runtimeReconnectProposalRequests.isEmpty()
+            || !m_runtimeReconnectTerminalListId.isEmpty()
+            || !m_runtimeReconnectTerminalAttachId.isEmpty()) {
+        return;
+    }
+    const quint64 generation = m_runtimeReconnectRecoveryGeneration;
+    m_runtimeReconnectRecoveryGeneration = 0;
+    m_runtimeReconnectSecondPhaseStarted = false;
+    m_runtimeStateUnverified = false;
+    m_runtime->completeReconnectRecovery(
+        generation, true, QStringLiteral("运行时连接与已跟踪工作区状态已恢复"));
+}
+
 void AgentWorkbenchWidget::publishTimelineProjection(
     const QString &sessionId, const TimelineProjection &projection)
 {
@@ -12594,7 +13041,7 @@ void AgentWorkbenchWidget::beginTimelineSync(const QString &sessionId)
             || !state->syncRequestId.isEmpty()) {
         return;
     }
-    if (!m_runtime || !m_runtime->isReady() || !m_timelineSyncAvailable) {
+    if (!m_runtime || !runtimeRecoveryRequestsAllowed() || !m_timelineSyncAvailable) {
         freezeTimelineSession(sessionId, false, true);
         return;
     }
@@ -12631,7 +13078,7 @@ void AgentWorkbenchWidget::beginTimelineSnapshot(const QString &sessionId)
         return;
     }
     const bool requesterReady = static_cast<bool>(m_timelineSnapshotRequester)
-        || (m_runtime && m_runtime->isReady());
+        || (m_runtime && runtimeRecoveryRequestsAllowed());
     if (!requesterReady || !m_timelineSnapshotAvailable) {
         state->snapshotRecoveryRequired = true;
         freezeTimelineForSnapshotRecovery(sessionId, true);
@@ -12848,6 +13295,7 @@ void AgentWorkbenchWidget::handleTimelineSyncPage(const QString &requestId,
     }
     if (!valid) {
         freezeTimelineSession(sessionId, false);
+        finishRuntimeReconnectTimeline(sessionId);
         return;
     }
 
@@ -12881,6 +13329,7 @@ void AgentWorkbenchWidget::handleTimelineSyncPage(const QString &requestId,
             applyTimelineEventPresentation(staged.event, staged.item, staged.recognized);
         }
         restoreActiveTurnFromTimeline();
+        finishRuntimeReconnectTimeline(sessionId);
         if (sessionId == currentTimelineSessionId()) {
             updateTurnAction();
             startPendingTurnIfReady();
@@ -12894,7 +13343,10 @@ void AgentWorkbenchWidget::handleTimelineSyncPage(const QString &requestId,
     stateIt->syncRequestId = m_runtime->syncTimeline(
         sessionId, nextSequence, nextEventId, stateIt->watermark,
         kTimelineSyncPageLimit);
-    if (stateIt->syncRequestId.isEmpty()) freezeTimelineSession(sessionId, false);
+    if (stateIt->syncRequestId.isEmpty()) {
+        freezeTimelineSession(sessionId, false);
+        finishRuntimeReconnectTimeline(sessionId);
+    }
 }
 
 void AgentWorkbenchWidget::handleTimelineSnapshotPage(

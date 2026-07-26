@@ -1224,15 +1224,10 @@ impl RuntimeControl {
         let state = self.lock();
         if !state.protocol_ready {
             drop(state);
-            return Some(vec![serde_json::to_value(Response::error(
-                request
-                    .id
-                    .clone()
-                    .expect("out-of-band requests require IDs"),
-                -32002,
-                "initialize handshake required",
-            ))
-            .expect("out-of-band readiness response serialization")]);
+            // The initialized notification is consumed by the ordered runtime
+            // dispatcher. Queue an out-of-band request until that transition is
+            // visible so a heartbeat cannot overtake the handshake.
+            return None;
         }
         if required
             .iter()
@@ -19860,6 +19855,27 @@ mod turn_cancel_tests {
             }
         })
         .to_string()
+    }
+
+    fn heartbeat_request(id: &str, nonce: &str) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "runtime/heartbeat",
+            "params": {
+                "schema_version": "runtime-heartbeat-request/0.1",
+                "nonce": nonce
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn out_of_band_request_before_initialized_stays_on_ordered_dispatch_path() {
+        let control = RuntimeControl::default();
+        assert!(control
+            .handle_out_of_band_line(&heartbeat_request("heartbeat-before-init", "nonce-1"))
+            .is_none());
     }
 
     #[test]

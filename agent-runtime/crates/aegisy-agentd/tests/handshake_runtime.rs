@@ -414,10 +414,7 @@ fn out_of_band_requests_obey_handshake_capabilities_and_the_fixed_frame_limit() 
         "terminal/stop-user",
         json!({"session_id": "missing", "terminal_id": "missing"}),
     );
-    assert_eq!(
-        control.handle_out_of_band_line(&stop).unwrap()[0]["error"]["code"],
-        -32002
-    );
+    assert!(control.handle_out_of_band_line(&stop).is_none());
 
     let params = initialize_params(&[
         "runtime.preview",
@@ -478,10 +475,7 @@ fn heartbeat_is_strict_negotiated_and_reachable_only_on_the_ready_control_path()
 
     let mut runtime = Runtime::default();
     let control = runtime.control();
-    assert_eq!(
-        control.handle_out_of_band_line(&heartbeat).unwrap()[0]["error"]["code"],
-        -32002
-    );
+    assert!(control.handle_out_of_band_line(&heartbeat).is_none());
 
     ready(&mut runtime, &["runtime.preview", "permission.read-only"]);
     assert_eq!(

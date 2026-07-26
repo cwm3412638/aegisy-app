@@ -2774,7 +2774,7 @@ Implemented visual baseline:
 
 ## Verification Snapshot (2026-07-26)
 
-- The out-of-band Runtime heartbeat stage passes 28 AAP tests, 728
+- The out-of-band Runtime heartbeat stage passes 28 AAP tests, 729
   `aegisy-agentd` library tests with one ignored live fixture, 7 daemon-main, 10
   context-threshold, 14 handshake Runtime, 18 Schema, 67 protocol, and 23
   stdio/Codex tests: 895 passed, zero failed, and one ignored in the final complete
@@ -2989,6 +2989,44 @@ Implemented visual baseline:
   per-Attempt/Retry Usage, and
   any AAP/Qt, audit/export, or retention surface remain absent, so `20.1` and `20.2`
   stay unchecked.
+
+## Bounded Reconnect And OOB Update (2026-07-26)
+
+- The bounded reconnect barrier is implemented at the Qt request boundary. Dedicated
+  reconnect IDs for `session/read`, terminal `terminal/list`/`terminal/attach`, and
+  latest Proposal revalidation are retired on success, malformed response, and
+  explicit failure. A failed `session/read` freezes only the affected Session and
+  never fabricates recovery; successful reads continue Timeline sync. Terminal
+  responses are accepted only when Session, terminal, and generation match. If a
+  reconnect cannot verify the new output, the prior output remains visible and is
+  marked unverified rather than inferred exited. Proposal responses that are empty,
+  drifted, invalid, or failed cannot replace a previously validated cache.
+- `AgentRuntimeClient` emits a degradation-request-created signal, and Workbench
+  accepts `runtime/degradations` only when the response ID exactly matches the
+  request ID recorded for that handshake. Late responses from an older connection
+  are inert. This is request correlation, not a capability or authority grant.
+- Initialize success and failure paths retire their response IDs before clearing
+  pending state, so a duplicate late handshake response cannot become a new
+  protocol authority. Heartbeat deadlines bind the exact request ID to both the
+  heartbeat generation and current process generation; reconnect stability timers
+  bind the same process generation and are cleared on negotiation loss, stop, or
+  suppression. Stale deadline/timer callbacks are inert.
+- Runtime's independent OOB control reader now queues heartbeat, cancellation,
+  steering, and terminal-stop messages received before `initialized`; after the
+  main dispatcher consumes the exact handshake notification, it re-runs queued
+  messages through the normal OOB router. This closes the handshake race without
+  bypassing negotiation or losing controls while the ordinary queue is blocked.
+- Verification for this slice: focused Qt render/environment tests 2/2, complete
+  desktop CTest 16/16, Rust AAP 28, `aegisy-agentd` library 729 (one ignored live
+  fixture), daemon-main 7, context-threshold 10, handshake Runtime 14, handshake
+  Schema 18, protocol 67, and stdio/Codex 23 all passed. Strict Clippy, Rust
+  formatting, `cmake --build build -j4`, and `git diff --check` passed. Strict
+  OpenSpec validation passes after the documentation update.
+- OpenSpec `3.5` remains intentionally unchecked. Live subscription, explicit
+  acknowledgement, race-free subscribe/sync/activate orchestration, and complete
+  Windows reconnect/runtime evidence are still missing. Automatic Timeline pruning
+  remains disabled. The detailed plan is in
+  `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Next Product Priorities
 
