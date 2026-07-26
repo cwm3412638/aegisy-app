@@ -2798,7 +2798,9 @@ Implemented visual baseline:
   state in device-local `QSettings` and restores the fixed rail/conversation/
   workspace defaults when the setting is absent, malformed, or over 4 KiB. No
   project path, Session content, permission, or Runtime authority is stored in
-  this layout key. Editor tabs and split state remain separately project-scoped.
+  this layout key. The toolbar exposes an icon-only reset action with an
+  accessible tooltip that restores the defaults. Editor tabs and split state
+  remain separately project-scoped; the render fixture verifies the reset path.
 
 ## Verification Snapshot (2026-07-26)
 

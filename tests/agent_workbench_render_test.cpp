@@ -4825,6 +4825,8 @@ int main(int argc, char *argv[])
 #endif
 
     QSplitter *splitter = workbench.findChild<QSplitter *>();
+    QPushButton *resetLayout = workbench.findChild<QPushButton *>(
+        QStringLiteral("agentResetWorkbenchLayoutButton"));
     QTabWidget *tabs = workbench.findChild<QTabWidget *>();
     QComboBox *modelPicker = workbench.findChild<QComboBox *>();
     QTreeWidget *fileTree = workbench.findChild<QTreeWidget *>(QStringLiteral("agentFileTree"));
@@ -4991,6 +4993,17 @@ int main(int argc, char *argv[])
     QPushButton *chat = buttonWithText(workbench, QStringLiteral("Chat"));
     QPushButton *work = buttonWithText(workbench, QStringLiteral("Work"));
     AgentRuntimeClient *runtimeClient = workbench.findChild<AgentRuntimeClient *>();
+    if (splitter && resetLayout) {
+        splitter->setSizes({260, 260, 260});
+        resetLayout->click();
+        const QList<int> restored = splitter->sizes();
+        if (!expect(restored.size() == 3 && restored.at(0) >= 150
+                        && restored.at(0) <= 230 && restored.at(1) >= 300
+                        && restored.at(2) >= 400,
+                    "workbench layout reset did not restore the default pane proportions")) {
+            return 1;
+        }
+    }
     const QImage image = workbench.grab().toImage().convertToFormat(QImage::Format_ARGB32);
     const int pixels = image.width() * image.height();
     const QPoint tabStripTail = tabs
@@ -5019,6 +5032,9 @@ int main(int argc, char *argv[])
                        "execution-context strip did not expose the read-only empty state")
             || !expect(splitter && splitter->count() == 3,
                        "workbench must keep three primary panes")
+            || !expect(resetLayout
+                           && resetLayout->toolTip().contains(QStringLiteral("默认布局")),
+                       "workbench layout reset control is missing")
             || !expect(tabs && tabs->count() == 7,
                        "workspace canvas must expose seven initial views")
             || !expect(workspaceSearch && workspaceSearchMode && workspaceSearchResults

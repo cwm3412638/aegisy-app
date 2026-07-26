@@ -413,6 +413,7 @@ private:
     void requestModelCapabilityCheck();
     void loadWorkbenchLayout();
     void saveWorkbenchLayout();
+    void resetWorkbenchLayout();
 
     AgentRuntimeClient *m_runtime = nullptr;
     QButtonGroup *m_modeGroup = nullptr;
@@ -420,6 +421,7 @@ private:
     QLabel *m_emergencyPolicyBanner = nullptr;
     QLabel *m_runtimeCapabilityStatus = nullptr;
     QPushButton *m_runtimeRestartButton = nullptr;
+    QPushButton *m_resetLayoutButton = nullptr;
     QSplitter *m_workbenchSplitter = nullptr;
     bool m_modelProfileReadOnlyAvailable = false;
     bool m_modelProfileSnapshotValid = false;

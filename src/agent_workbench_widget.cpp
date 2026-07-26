@@ -1,6 +1,7 @@
 #include "agent_workbench_widget.h"
 
 #include "agent_runtime_client.h"
+#include "app_theme.h"
 #ifdef AEGISY_HAS_MONACO
 #include "monaco_editor_bridge.h"
 #include "terminal_web_bridge.h"
@@ -4838,6 +4839,16 @@ void AgentWorkbenchWidget::buildUi()
         "width:24px; background:#f9fafb; border:none; border-left:1px solid #e4e7ec;"
         "border-top-right-radius:6px; border-bottom-right-radius:6px; }"));
     toolbarLayout->addWidget(m_modelPicker);
+    m_resetLayoutButton = new QPushButton(toolbar);
+    m_resetLayoutButton->setObjectName(QStringLiteral("agentResetWorkbenchLayoutButton"));
+    m_resetLayoutButton->setIcon(QIcon(QStringLiteral(":/icons/lucide/columns-2.svg")));
+    m_resetLayoutButton->setFixedSize(30, 30);
+    m_resetLayoutButton->setToolTip(QStringLiteral("恢复工作台默认布局"));
+    m_resetLayoutButton->setAccessibleName(QStringLiteral("恢复工作台默认布局"));
+    m_resetLayoutButton->setStyleSheet(AppTheme::iconButtonStyle());
+    connect(m_resetLayoutButton, &QPushButton::clicked,
+            this, &AgentWorkbenchWidget::resetWorkbenchLayout);
+    toolbarLayout->addWidget(m_resetLayoutButton);
     m_runtimeStatus = new QLabel(QStringLiteral("○ 正在连接"), toolbar);
     m_runtimeStatus->setObjectName(QStringLiteral("agentRuntimeStatus"));
     m_runtimeStatus->setStyleSheet(QStringLiteral("border:none; color:#b54708; font-size:11px; font-weight:600;"));
@@ -8568,6 +8579,15 @@ void AgentWorkbenchWidget::saveWorkbenchLayout()
     if (state.isEmpty() || state.size() > 4096) return;
     QSettings settings;
     settings.setValue(QStringLiteral("agent_workbench/layout/splitter_state"), state);
+}
+
+void AgentWorkbenchWidget::resetWorkbenchLayout()
+{
+    if (!m_workbenchSplitter) return;
+    QSettings settings;
+    settings.remove(QStringLiteral("agent_workbench/layout/splitter_state"));
+    m_workbenchSplitter->setSizes({188, 390, 520});
+    saveWorkbenchLayout();
 }
 
 void AgentWorkbenchWidget::loadEditorViewState()
