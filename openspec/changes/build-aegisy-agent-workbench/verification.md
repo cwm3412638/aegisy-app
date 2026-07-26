@@ -56,10 +56,11 @@
   or for malformed/failed/oversized output, including cleanup after timeout or
   read failure. The `.gitignore` compatibility path is
   intentionally isolated from this product gate. The `git_status::tests` focused
-  run passes 7/7, including the `2.30.9` rejection, `2.31.0` boundary acceptance,
-  Apple/Git-for-Windows parsing, installed-Git preflight, and repository status
-  regressions. This does not replace clean Windows runner or signed-package
-  evidence required for release support.
+  run passes 9/9, including real executable fixtures for `2.30.9` rejection,
+  non-zero exit, malformed output, oversized output, and timeout kill/reap, plus
+  `2.31.0` boundary acceptance, Apple/Git-for-Windows parsing, installed-Git
+  preflight, and repository status regressions. This does not replace clean
+  Windows runner or signed-package evidence required for release support.
 - Windows packaging policy evidence: `installer.iss` declares the Windows 10 1809
   technical floor as `MinVersion=10.0.17763`; the generated application resource
   embeds the requested `asInvoker` execution level and a

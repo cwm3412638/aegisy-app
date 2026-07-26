@@ -931,6 +931,9 @@ void ApiClient::sendChatMessage(const QString &requestId,
     m_chatRequestId = requestId;
     m_chatBuffer.clear();
     m_chatContent.clear();
+    m_chatSawStreamEvent = false;
+    m_chatSawDone = false;
+    m_chatMalformedEvent = false;
 
     QNetworkRequest request(QUrl(m_baseUrl + QStringLiteral("/v1/chat/completions")));
     request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
@@ -958,41 +961,9 @@ void ApiClient::sendChatMessage(const QString &requestId,
     connect(reply, &QNetworkReply::readyRead, this, [this, reply, requestId]() {
         if (reply != m_chatReply) return;
         m_chatBuffer.append(reply->readAll());
-        while (true) {
-            const int newline = m_chatBuffer.indexOf('\n');
-            if (newline < 0) break;
-            QByteArray line = m_chatBuffer.left(newline).trimmed();
-            m_chatBuffer.remove(0, newline + 1);
-            if (!line.startsWith("data:")) continue;
-            line = line.mid(5).trimmed();
-            if (line == "[DONE]") continue;
-            const QJsonObject event = QJsonDocument::fromJson(line).object();
-            const QJsonObject usage = event.value(QStringLiteral("usage")).toObject();
-            if (!usage.isEmpty()) {
-                emit chatUsageReceived(
-                    requestId,
-                    usage.value(QStringLiteral("prompt_tokens")).toInt(),
-                    usage.value(QStringLiteral("completion_tokens")).toInt(),
-                    usage.value(QStringLiteral("total_tokens")).toInt());
-            }
-            const QJsonArray choices = event.value(QStringLiteral("choices")).toArray();
-            const QJsonObject choice = choices.isEmpty() ? QJsonObject() : choices.at(0).toObject();
-            const QJsonValue contentValue = choice.value(QStringLiteral("delta")).toObject()
-                .value(QStringLiteral("content"));
-            QString chunk;
-            if (contentValue.isString()) {
-                chunk = contentValue.toString();
-            } else if (contentValue.isArray()) {
-                for (const QJsonValue &part : contentValue.toArray()) {
-                    const QJsonObject object = part.toObject();
-                    chunk += object.value(QStringLiteral("text")).toString();
-                }
-            }
-            if (!chunk.isEmpty()) {
-                m_chatContent += chunk;
-                emit chatChunkReceived(requestId, chunk);
-            }
-        }
+        const bool eventStream = reply->header(QNetworkRequest::ContentTypeHeader)
+            .toString().contains(QStringLiteral("text/event-stream"), Qt::CaseInsensitive);
+        if (eventStream) processChatEvents(false);
     });
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, requestId]() {
@@ -1000,20 +971,27 @@ void ApiClient::sendChatMessage(const QString &requestId,
             reply->deleteLater();
             return;
         }
-        const QByteArray remaining = m_chatBuffer + reply->readAll();
+        const bool eventStream = reply->header(QNetworkRequest::ContentTypeHeader)
+            .toString().contains(QStringLiteral("text/event-stream"), Qt::CaseInsensitive);
+        m_chatBuffer.append(reply->readAll());
+        QByteArray remaining;
+        if (eventStream) {
+            processChatEvents(true);
+        } else {
+            remaining = m_chatBuffer;
+            m_chatBuffer.clear();
+        }
         const bool canceled = reply->error() == QNetworkReply::OperationCanceledError;
         if (reply->error() != QNetworkReply::NoError && !canceled) {
-            const QJsonObject errorObject = QJsonDocument::fromJson(remaining).object();
-            QString error = errorObject.value(QStringLiteral("detail")).toString();
-            if (error.isEmpty()) error = errorObject.value(QStringLiteral("message")).toString();
-            if (error.isEmpty()) {
-                error = errorObject.value(QStringLiteral("error")).toObject()
-                    .value(QStringLiteral("message")).toString();
+            QString error = reply->errorString();
+            if (m_chatSawStreamEvent || m_chatMalformedEvent) {
+                error = QStringLiteral("stream disconnected before completion");
             }
-            if (error.isEmpty()) error = reply->errorString();
             emit chatFailed(requestId, error);
         } else if (!canceled) {
-            if (m_chatContent.isEmpty() && !remaining.trimmed().isEmpty()) {
+            if (eventStream && (!m_chatSawDone || m_chatMalformedEvent)) {
+                emit chatFailed(requestId, QStringLiteral("stream disconnected before completion"));
+            } else if (m_chatContent.isEmpty() && !remaining.trimmed().isEmpty()) {
                 const QJsonObject response = QJsonDocument::fromJson(remaining).object();
                 const QJsonObject usage = response.value(QStringLiteral("usage")).toObject();
                 if (!usage.isEmpty()) {
@@ -1030,15 +1008,80 @@ void ApiClient::sendChatMessage(const QString &requestId,
                 if (!m_chatContent.isEmpty()) {
                     emit chatChunkReceived(requestId, m_chatContent);
                 }
+            } else {
+                emit chatCompleted(requestId, m_chatContent);
             }
-            emit chatCompleted(requestId, m_chatContent);
         }
         reply->deleteLater();
         m_chatReply = nullptr;
         m_chatBuffer.clear();
         m_chatContent.clear();
         m_chatRequestId.clear();
+        m_chatSawStreamEvent = false;
+        m_chatSawDone = false;
+        m_chatMalformedEvent = false;
     });
+}
+
+void ApiClient::processChatEvents(bool flushTrailingData)
+{
+    while (true) {
+        const int newline = m_chatBuffer.indexOf('\n');
+        if (newline < 0) break;
+        const QByteArray line = m_chatBuffer.left(newline);
+        m_chatBuffer.remove(0, newline + 1);
+        processChatEventLine(line);
+    }
+    if (flushTrailingData) {
+        const QByteArray trailing = m_chatBuffer.trimmed();
+        m_chatBuffer.clear();
+        if (!trailing.isEmpty()) processChatEventLine(trailing);
+    }
+}
+
+void ApiClient::processChatEventLine(const QByteArray &rawLine)
+{
+    QByteArray line = rawLine.trimmed();
+    if (!line.startsWith("data:")) return;
+    line = line.mid(5).trimmed();
+    if (line.isEmpty()) return;
+    if (line == "[DONE]") {
+        m_chatSawDone = true;
+        return;
+    }
+    m_chatSawStreamEvent = true;
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(line, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        m_chatMalformedEvent = true;
+        return;
+    }
+    const QJsonObject event = document.object();
+    const QJsonObject usage = event.value(QStringLiteral("usage")).toObject();
+    if (!usage.isEmpty()) {
+        emit chatUsageReceived(
+            m_chatRequestId,
+            usage.value(QStringLiteral("prompt_tokens")).toInt(),
+            usage.value(QStringLiteral("completion_tokens")).toInt(),
+            usage.value(QStringLiteral("total_tokens")).toInt());
+    }
+    const QJsonArray choices = event.value(QStringLiteral("choices")).toArray();
+    const QJsonObject choice = choices.isEmpty() ? QJsonObject() : choices.at(0).toObject();
+    const QJsonValue contentValue = choice.value(QStringLiteral("delta")).toObject()
+        .value(QStringLiteral("content"));
+    QString chunk;
+    if (contentValue.isString()) {
+        chunk = contentValue.toString();
+    } else if (contentValue.isArray()) {
+        for (const QJsonValue &part : contentValue.toArray()) {
+            const QJsonObject object = part.toObject();
+            chunk += object.value(QStringLiteral("text")).toString();
+        }
+    }
+    if (!chunk.isEmpty()) {
+        m_chatContent += chunk;
+        emit chatChunkReceived(m_chatRequestId, chunk);
+    }
 }
 
 void ApiClient::cancelChatMessage()
@@ -1051,6 +1094,9 @@ void ApiClient::cancelChatMessage()
     m_chatBuffer.clear();
     m_chatContent.clear();
     m_chatRequestId.clear();
+    m_chatSawStreamEvent = false;
+    m_chatSawDone = false;
+    m_chatMalformedEvent = false;
 }
 
 void ApiClient::requestPresentationPlan(const QString &requestId,

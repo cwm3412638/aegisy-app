@@ -836,11 +836,17 @@ fn verify_git_version(executable: &Path, root: &Path) -> Result<(), GitStatusErr
 }
 
 fn read_git_version_output(child: &mut Child) -> Result<(ExitStatus, Vec<u8>), GitStatusError> {
+    read_git_version_output_with_timeout(child, GIT_VERSION_TIMEOUT)
+}
+
+fn read_git_version_output_with_timeout(
+    child: &mut Child,
+    timeout: Duration,
+) -> Result<(ExitStatus, Vec<u8>), GitStatusError> {
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_git_version_child(child);
             return Err(git_unavailable("Git version output is unavailable"));
         }
     };
@@ -853,7 +859,7 @@ fn read_git_version_output(child: &mut Child) -> Result<(ExitStatus, Vec<u8>), G
             .map(|_| bytes);
         let _ = sender.send(result);
     });
-    let deadline = Instant::now() + GIT_VERSION_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let mut output: Option<Vec<u8>> = None;
     let exit = loop {
         if output.is_none() {
@@ -861,16 +867,14 @@ fn read_git_version_output(child: &mut Child) -> Result<(ExitStatus, Vec<u8>), G
                 match result {
                     Ok(bytes) => {
                         if bytes.len() as u64 > MAX_GIT_VERSION_BYTES {
-                            let _ = child.kill();
-                            let _ = child.wait();
+                            terminate_git_version_child(child);
                             let _ = reader.join();
                             return Err(git_unavailable("Git version output exceeded its limit"));
                         }
                         output = Some(bytes);
                     }
                     Err(_) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        terminate_git_version_child(child);
                         let _ = reader.join();
                         return Err(git_unavailable("cannot read Git version"));
                     }
@@ -883,14 +887,12 @@ fn read_git_version_output(child: &mut Child) -> Result<(ExitStatus, Vec<u8>), G
                 thread::sleep(Duration::from_millis(10));
             }
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_git_version_child(child);
                 let _ = reader.join();
                 return Err(git_unavailable("Git version check timed out"));
             }
             Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_git_version_child(child);
                 let _ = reader.join();
                 return Err(git_unavailable("cannot wait for Git version"));
             }
@@ -911,6 +913,11 @@ fn read_git_version_output(child: &mut Child) -> Result<(ExitStatus, Vec<u8>), G
         }
     };
     Ok((exit, stdout))
+}
+
+fn terminate_git_version_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn is_supported_git_version(version: GitVersion) -> bool {
@@ -1016,6 +1023,9 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn root(label: &str) -> PathBuf {
@@ -1043,6 +1053,27 @@ mod tests {
         git(root, &["init", "-q"], true);
         git(root, &["config", "user.name", "Aegisy Test"], true);
         git(root, &["config", "user.email", "test@aegisy.local"], true);
+    }
+
+    #[cfg(unix)]
+    fn version_fixture(root: &Path, label: &str, body: &str) -> PathBuf {
+        let executable = root.join(label);
+        fs::write(&executable, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        executable
+    }
+
+    #[cfg(unix)]
+    fn version_output_fixture(root: &Path, label: &str, output: &str, exit_code: i32) -> PathBuf {
+        version_fixture(
+            root,
+            label,
+            &format!(
+                "printf '%s' '{}'\nexit {}",
+                output.replace('\'', "'\\''"),
+                exit_code
+            ),
+        )
     }
 
     #[test]
@@ -1100,6 +1131,63 @@ mod tests {
             .unwrap();
         assert!(output.success);
         assert!(parse_git_version(&output.stdout).is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_real_git_executable_version_failures() {
+        let cases = [
+            (
+                "below-minimum",
+                "git version 2.30.9\n",
+                0,
+                "Git 2.31.0 or newer is required",
+            ),
+            (
+                "nonzero",
+                "git version 2.50.1\n",
+                7,
+                "Git version check failed",
+            ),
+            (
+                "malformed",
+                "not a Git version\n",
+                0,
+                "Git returned an unsupported version format",
+            ),
+            (
+                "oversized",
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                0,
+                "Git version output exceeded its limit",
+            ),
+        ];
+        for (label, output, exit_code, message) in cases {
+            let root = root(label);
+            let executable = version_output_fixture(&root, "git", output, exit_code);
+            let error = verify_git_version(&executable, &root).unwrap_err();
+            assert_eq!(error.code, -32041, "fixture: {label}");
+            assert_eq!(error.message, message, "fixture: {label}");
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kills_and_reaps_a_timed_out_git_version_fixture() {
+        let root = root("version-timeout");
+        let executable = version_fixture(&root, "git", "while :; do :; done");
+        let mut child = Command::new(&executable)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let error = read_git_version_output_with_timeout(&mut child, Duration::from_millis(50))
+            .unwrap_err();
+        assert_eq!(error.code, -32041);
+        assert_eq!(error.message, "Git version check timed out");
+        assert!(child.try_wait().unwrap().is_some());
         fs::remove_dir_all(root).unwrap();
     }
 

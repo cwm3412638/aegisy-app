@@ -3408,8 +3408,11 @@ Implemented visual baseline:
   without the product version gate. This keeps ignored files excluded when a
   legacy Git is installed and never grants that Git product-operation authority.
   All other callers use the gated constructor; the focused `git_status::tests`
-  suite passes 7/7, including the minimum-version boundary and current-install
-  preflight.
+  suite passes 9/9, including real executable fixtures for below-minimum,
+  non-zero exit, malformed, oversized, and timeout cases in addition to the
+  minimum-version boundary and current-install preflight. Version-check failure,
+  timeout, and bounded-read paths share one kill-and-wait cleanup helper so a
+  failed preflight cannot leave an owned Git child behind.
 - This is Runtime implementation evidence only. Windows clean-runner Git,
   signed-package, long-path, and full cross-platform release evidence remain
   open, and the OpenSpec baseline remains 53/235 completed tasks.
@@ -3425,6 +3428,20 @@ Implemented visual baseline:
   This proves source policy wiring only; clean Windows OS long-path policy,
   installer/TLS behavior, signed package, upgrade, and runtime evidence remain
   open. Do not advertise Windows release support from this static gate.
+
+## Chat Streaming Boundary (2026-07-26)
+
+- `ApiClient` now keeps one shared SSE parser for incremental reads and the
+  `finished` callback. A final `data:` record without a trailing newline is
+  consumed before completion, and an SSE response is successful only after a
+  parsed `[DONE]` marker. Malformed or truncated event streams fail closed with
+  the fixed `stream disconnected before completion` message rather than
+  treating a partial answer as complete.
+- Non-SSE JSON responses retain their complete body for the existing fallback
+  decoder; the SSE parser is not allowed to consume or erase that body. This
+  boundary is covered by the existing account/API client CTest and the desktop
+  build. Provider/network behavior still requires redacted live reproduction
+  when investigating a remaining transport error.
 
 ## Next Product Priorities
 

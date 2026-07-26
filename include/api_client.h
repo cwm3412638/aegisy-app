@@ -146,6 +146,8 @@ private:
                                         int exhaustedRetries = 0);
     void processImageGenerationEvents(bool flushTrailingData);
     void processImageGenerationPayload(const QByteArray &payload);
+    void processChatEvents(bool flushTrailingData);
+    void processChatEventLine(const QByteArray &line);
 
     QNetworkAccessManager *m_networkManager;
     QString m_baseUrl;
@@ -163,6 +165,9 @@ private:
     QByteArray m_chatBuffer;
     QString m_chatContent;
     QString m_chatRequestId;
+    bool m_chatSawStreamEvent = false;
+    bool m_chatSawDone = false;
+    bool m_chatMalformedEvent = false;
     bool m_authExpirationEmitted = false;
 
     // 通用 POST 请求

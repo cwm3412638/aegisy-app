@@ -66,11 +66,21 @@ public:
                             socket->disconnectFromHost();
                             return;
                         }
-                        const QByteArray payload =
-                            "data: {\"choices\":[{\"delta\":{\"content\":\"\\u4f60\\u597d\"}}]}\n\n"
-                            "data: {\"choices\":[{\"delta\":{\"content\":\"！\"}}]}\n\n"
-                            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n\n"
-                            "data: [DONE]\n\n";
+                        QByteArray payload;
+                        if (chatResponseMode == 1) {
+                            payload =
+                                "data: {\"choices\":[{\"delta\":{\"content\":\"尾部\"}}]}\n\n"
+                                "data: [DONE]";
+                        } else if (chatResponseMode == 2) {
+                            payload =
+                                "data: {\"choices\":[{\"delta\":{\"content\":\"部分\"}}]}\n\n";
+                        } else {
+                            payload =
+                                "data: {\"choices\":[{\"delta\":{\"content\":\"\\u4f60\\u597d\"}}]}\n\n"
+                                "data: {\"choices\":[{\"delta\":{\"content\":\"！\"}}]}\n\n"
+                                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n\n"
+                                "data: [DONE]\n\n";
+                        }
                         socket->write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: "
                                       + QByteArray::number(payload.size())
                                       + "\r\nConnection: close\r\n\r\n" + payload);
@@ -135,6 +145,7 @@ public:
         path.clear();
         body = QJsonObject();
         presentationRequestCount = 0;
+        chatResponseMode = 0;
     }
 
     QTcpServer server;
@@ -142,6 +153,7 @@ public:
     QString path;
     QJsonObject body;
     int presentationRequestCount = 0;
+    int chatResponseMode = 0;
 };
 
 namespace {
@@ -319,6 +331,55 @@ int main(int argc, char **argv)
                     "chat usage option mismatch")
         || !require(server.body.value(QStringLiteral("messages")).toArray().size() == 1,
                     "chat messages mismatch")) return 1;
+
+    server.clear();
+    server.chatResponseMode = 1;
+    succeeded = false;
+    streamedContent.clear();
+    QString trailingDoneFailure;
+    if (!waitFor([&]() {
+            client.sendChatMessage(QStringLiteral("chat-trailing-done"), QStringLiteral("sk-chat-test"),
+                                   QStringLiteral("gpt-test"), messages);
+        }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::chatCompleted, &loop,
+                [&](const QString &requestId, const QString &content) {
+                    succeeded = requestId == QStringLiteral("chat-trailing-done")
+                        && content == QStringLiteral("尾部");
+                    loop.quit();
+                });
+            QObject::connect(&client, &ApiClient::chatFailed, &loop,
+                [&](const QString &, const QString &error) {
+                    trailingDoneFailure = error;
+                    loop.quit();
+                });
+        })
+        || !require(succeeded, "SSE final data without newline was not completed")
+        || !require(trailingDoneFailure.isEmpty(), "SSE final data without newline unexpectedly failed")) return 1;
+
+    server.clear();
+    server.chatResponseMode = 2;
+    succeeded = false;
+    QString truncatedFailure;
+    if (!waitFor([&]() {
+            client.sendChatMessage(QStringLiteral("chat-truncated"), QStringLiteral("sk-chat-test"),
+                                   QStringLiteral("gpt-test"), messages);
+        }, [&](QEventLoop &loop) {
+            QObject::connect(&client, &ApiClient::chatCompleted, &loop,
+                [&](const QString &requestId, const QString &) {
+                    if (requestId == QStringLiteral("chat-truncated")) succeeded = true;
+                    loop.quit();
+                });
+            QObject::connect(&client, &ApiClient::chatFailed, &loop,
+                [&](const QString &requestId, const QString &error) {
+                    if (requestId == QStringLiteral("chat-truncated")) {
+                        truncatedFailure = error;
+                        loop.quit();
+                    }
+                });
+        })
+        || !require(!succeeded, "truncated SSE stream was reported complete")
+        || !require(truncatedFailure == QStringLiteral("stream disconnected before completion"),
+                    "truncated SSE stream did not fail with the stable error")) return 1;
 
     server.clear();
     succeeded = false;
