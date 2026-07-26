@@ -35,7 +35,7 @@ or a screenshot is not release evidence by itself.
 | macOS 26, Apple silicon (`arm64`) | Qt 6.8 supports macOS 12+ on `arm64` | `CMAKE_OSX_DEPLOYMENT_TARGET` and `package-macos.sh` currently default to `26.0`; package architecture is detected with `lipo` | Current macOS 26.5.2 development host uses Qt 6.11.1; the built GUI artifact is arm64 and passes the recorded local tests | Internal development baseline only. A pinned Qt release line, Developer ID signed, notarized, clean-machine package and the full matrix below are still required before public support. |
 | macOS 12-15, Apple silicon | Upstream-capable | The current package target `26.0` cannot run here | No repository release evidence | Unsupported by the current package. Lowering the deployment target requires a separate build, signed-package, dependency, WebEngine, updater, and runtime test gate. |
 | macOS 12+, Intel (`x86_64`) | Upstream-capable | CMake can target it, but no maintained package or universal-build configuration exists | No current clean-host or signed-package evidence | Unsupported. A native `x86_64` or verified universal package is required before promotion. |
-| Windows 10 1809+ x64 | Qt 6.8 and ConPTY technical floor | `package-windows.bat` selects Visual Studio 2022 `x64`; CI pins Qt 6.8.3 and x64 OpenSSL | `windows-2022` CI builds selected Qt/Rust/package gates; clean Windows 10 installer, TLS, ConPTY, Git, high-DPI, IME, and update evidence is incomplete | Preview candidate only, not release-supported. Runtime terminal code rejects pre-1809, but the installer does not yet declare `MinVersion`; release packaging must enforce the same floor. |
+| Windows 10 1809+ x64 | Qt 6.8 and ConPTY technical floor | `package-windows.bat` selects Visual Studio 2022 `x64`; CI pins Qt 6.8.3 and x64 OpenSSL; Inno Setup declares `MinVersion=10.0.17763`; the application manifest declares `longPathAware=true` | `windows-2022` CI builds selected Qt/Rust/package gates; static packaging-policy CTest passes; clean Windows 10 installer, TLS, ConPTY, Git, high-DPI, IME, and update evidence is incomplete | Preview candidate only, not release-supported. Runtime terminal code rejects pre-1809; clean-host OS long-path policy and signed package validation remain required. |
 | Windows 11 x64 | Qt 6.8 upstream target | Same x64 package as above | CI build evidence exists; clean-user-machine acceptance is incomplete | Preview candidate only, not release-supported. |
 | Windows on ARM64 / ARM64EC | Qt 6.8 lists ARM64 but not ARM64EC | Repository packaging, Rust target, OpenSSL, updater, and tests are x64-only | None | Unsupported. x64 emulation does not count as native ARM64 support. |
 | Linux, mobile, web, remote browser | Some dependencies may support these targets | No Aegisy desktop package target | None | Unsupported. Remote Workbench is governed separately by the feature policy and requires its own OpenSpec/security gate. |
@@ -53,11 +53,12 @@ The repository target is intentionally narrower than Qt's capability.
 | Metadata and recovery stores | Platform application-data location, disjoint from project roots, private to the user | SQLite WAL recovery, permissions/ACLs, low-space, backup, tamper, deletion, and conservative Blob GC | Storing the Workbench database, checkpoint store, or credential material inside a project is unsupported. |
 | Git metadata | In-root `.git` for mutation foundations; read-only nested repository queries are separately scoped | Worktree/common-dir identity, index/ref races, long paths, case collisions, hooks/filter denial, crash recovery | External gitdirs, parent-repository mutation, linked-worktree mutation, LFS/filter execution, and arbitrary remote credentials remain gated unless a task explicitly authorizes them. |
 
-`MAX_PATH` success on one host is not long-path support. The current Windows
-application manifest has no `longPathAware` declaration. Windows release evidence
-must first add and verify the intended application/OS policy, then exercise project
-paths above 260 UTF-16 code units across build, file, Git, terminal, and recovery
-paths.
+`MAX_PATH` success on one host is not long-path support. The Windows application
+manifest now declares `longPathAware=true`, and the installer declares the Windows
+10 1809 floor; `windows_packaging_policy` checks these source policies on every
+platform build. Windows release evidence must still verify the OS long-path policy
+on a clean host, then exercise project paths above 260 UTF-16 code units across
+build, file, Git, terminal, and recovery paths.
 
 ## Shell And Terminal Matrix
 

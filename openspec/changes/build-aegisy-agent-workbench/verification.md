@@ -60,6 +60,13 @@
   Apple/Git-for-Windows parsing, installed-Git preflight, and repository status
   regressions. This does not replace clean Windows runner or signed-package
   evidence required for release support.
+- Windows packaging policy evidence: `installer.iss` declares the Windows 10 1809
+  technical floor as `MinVersion=10.0.17763`; the generated application resource
+  embeds the requested `asInvoker` execution level and a
+  `longPathAware=true` manifest setting. The cross-platform
+  `windows_packaging_policy` CTest passes and checks all three source files.
+  This is a source-policy gate only; clean Windows OS long-path behavior, TLS,
+  installer execution, signing, and upgrade evidence remain required.
 
 ## Milestone Evidence
 

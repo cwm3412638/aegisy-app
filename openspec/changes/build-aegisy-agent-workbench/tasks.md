@@ -32,6 +32,11 @@
     promotion owners and gates. Missing Windows, Intel macOS, ARM64 Windows,
     long-path, or signed package evidence remains explicit rather than inherited
     from Qt or compilation.
+  - Windows packaging now declares `MinVersion=10.0.17763` in `installer.iss` and
+    embeds a requested-execution-level plus `longPathAware=true` application
+    manifest through the Windows resource script. The cross-platform static
+    `windows_packaging_policy` CTest verifies those source policies; clean-host
+    OS long-path, TLS, installer, and signed-package evidence remains open.
 - [x] 1.8 Add a workbench feature-flag policy covering internal, preview, beta, stable, remote, and emergency-disable states
   - `docs/AEGISY-WORKBENCH-FEATURE-CHANNEL-POLICY.md` models maturity channel,
     execution surface, and emergency revocation as independent axes. Effective

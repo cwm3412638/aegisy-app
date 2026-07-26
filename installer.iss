@@ -36,6 +36,8 @@ SetupIconFile=assets\AegisyClient.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; Windows 10 1809 is the declared ConPTY and long-path technical floor.
+MinVersion=10.0.17763
 CloseApplications=yes
 RestartApplications=yes
 

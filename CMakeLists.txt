@@ -298,6 +298,13 @@ if(WIN32)
 
     set(AEGISY_WINDOWS_ICON_PATH
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/AegisyClient.ico")
+    set(AEGISY_WINDOWS_MANIFEST_PATH
+        "${CMAKE_CURRENT_BINARY_DIR}/AegisyClient.manifest")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows/AegisyClient.manifest.in"
+        "${AEGISY_WINDOWS_MANIFEST_PATH}"
+        @ONLY
+    )
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows/AegisyClient.rc.in"
         "${CMAKE_CURRENT_BINARY_DIR}/AegisyClient.rc"
@@ -645,6 +652,12 @@ if(BUILD_TESTING)
                 -DAEGISY_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
                 -DMANIFEST_VERIFIER=$<TARGET_FILE:AegisyArtifactManifestTest>
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/artifact_manifest_generator_test.cmake")
+
+    add_test(NAME windows_packaging_policy
+        COMMAND "${CMAKE_COMMAND}"
+                -DAEGISY_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                -DAEGISY_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_packaging_policy_test.cmake")
 
     if(AEGISY_MONACO_ENABLED)
         add_executable(AegisyMonacoEditorRenderTest

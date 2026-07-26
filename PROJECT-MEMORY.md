@@ -3373,9 +3373,10 @@ Implemented visual baseline:
   capability, repository target, executed evidence, and release support. The current
   local baseline is macOS 26.5.2 arm64, Qt 6.11.1, an arm64 artifact, and deployment
   target 26.0. Windows is an x64/MSVC 2022/Qt 6.8.3 target with Windows 10 1809 as
-  the ConPTY technical floor, but the installer still lacks `MinVersion`, the app
-  manifest lacks `longPathAware`, and clean installer/TLS/ConPTY/Git/IME/scaling/
-  accessibility/update evidence remains absent. macOS Intel, Windows ARM64, Linux,
+  the ConPTY technical floor; `installer.iss` now declares `MinVersion=10.0.17763`
+  and the application manifest embeds `longPathAware=true`. Clean installer/TLS/
+  ConPTY/Git/IME/scaling/accessibility/update and OS long-path evidence remains
+  absent. macOS Intel, Windows ARM64, Linux,
   remote, network/cloud/removable filesystems, WSL/Git Bash/MSYS/Cygwin, and other
   unverified combinations are unsupported. The external Git contract has a
   `2.31.0` minimum enforced by `GitRunner::new` with the stable Git-unavailable
@@ -3412,6 +3413,18 @@ Implemented visual baseline:
 - This is Runtime implementation evidence only. Windows clean-runner Git,
   signed-package, long-path, and full cross-platform release evidence remain
   open, and the OpenSpec baseline remains 53/235 completed tasks.
+
+## Windows Packaging Policy Foundation (2026-07-26)
+
+- `installer.iss` now declares `MinVersion=10.0.17763`, matching the Windows 10
+  1809 ConPTY technical floor. The CMake Windows resource script embeds a
+  requested `asInvoker` execution level and the generated application manifest
+  sets `longPathAware=true`.
+- The cross-platform `windows_packaging_policy` CTest checks the installer,
+  manifest template, and resource script, and passes alongside the desktop build.
+  This proves source policy wiring only; clean Windows OS long-path policy,
+  installer/TLS behavior, signed package, upgrade, and runtime evidence remain
+  open. Do not advertise Windows release support from this static gate.
 
 ## Next Product Priorities
 
@@ -3472,10 +3485,11 @@ Implemented visual baseline:
    only after token, routing, and cross-platform evidence gates pass. The
    current Qt profile count is metadata-only and is not a picker.
 17. Before any public platform claim, deliberately select and pin the macOS Qt/
-    deployment target, add Windows installer `MinVersion` and application
-    `longPathAware` policy with clean-host tests, and execute the complete signed
-    platform matrix. Runtime enforcement of the Git `2.31.0` floor is complete,
-    but it does not replace the clean Windows and signed-package evidence gate.
+    deployment target, validate the now-implemented Windows installer
+    `MinVersion=10.0.17763` and application `longPathAware` policy on a clean host,
+    and execute the complete signed platform matrix. Runtime enforcement of the
+    Git `2.31.0` floor is complete, but source policy does not replace clean
+    Windows and signed-package evidence.
 18. Implement the repository-owned feature registry and channel delivery only after
     its signed-artifact upper bound and fail-closed intersection are testable. Finish
     emergency production publication, secure high-water anchoring, Runtime binding
