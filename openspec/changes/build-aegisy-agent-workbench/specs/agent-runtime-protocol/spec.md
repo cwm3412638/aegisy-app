@@ -210,6 +210,42 @@ client SHALL drain queued live events through the ordinary validator. A malforme
 page, anchor drift, request failure, missing capability, or queue/batch overflow
 SHALL preserve the confirmed projection and leave that Session frozen.
 
+The non-routable subscription contract foundation SHALL represent subscribe as
+exactly one of `sync-required` with a non-null fixed watermark or
+`snapshot-required` with a null watermark; subscribe SHALL NOT return active or
+failed inline. A syntactically valid activation SHALL NOT be treated as recovery
+evidence. Typed activation validation SHALL additionally consume a private,
+non-serializable structural proof derived from the complete contiguous Sync page
+chain through the subscribed fixed watermark under the 10,000-Event/64 MiB recovery
+bound, or from the complete fixed-header Snapshot page chain whose ordered Items and
+domain-separated snapshot identity have all been validated. This proof SHALL NOT be
+treated as connection authority: the live Runtime SHALL additionally consume the
+matching connection-owned registry token. The activation source, Session, connection
+generation, subscription, cursor, watermark, and optional Snapshot identity SHALL
+exactly equal that proof. Subscribe, Sync, Snapshot, activate, and live failures
+SHALL be terminal and cleanup-required. Request-stage failures SHALL carry a
+domain-separated identity of the complete exact request, including Snapshot identity,
+continuation cursor, and page limit; live failure SHALL bind the exact active cursor.
+
+These definitions SHALL remain outside the top-level stable method routing schema
+until a negotiated Runtime implementation exists. The later live implementation
+SHALL bind every recovery page request to one connection-owned subscription attempt,
+forbid subscription-ID reuse within that connection generation, atomically register
+the attempt while capturing its fixed head, buffer every event after that head,
+consume its private registry token, atomically activate and drain the buffer, and
+retire all pending state on every
+failure or disconnect. A live event received before the exact activation response,
+from another generation, or from another subscription SHALL be inert and SHALL NOT
+change the confirmed client projection.
+
+#### Scenario: Activation has only well-formed but unverified recovery metadata
+- **WHEN** activation carries a valid-looking cursor, watermark, or Snapshot identity without the complete matching recovery proof
+- **THEN** activation SHALL be rejected and the subscription SHALL NOT become active
+
+#### Scenario: Subscription failure changes stage or binding
+- **WHEN** a terminal failure changes its stage, connection generation, Session, subscription, cursor, or fixed watermark
+- **THEN** it SHALL NOT retire or advance the matching attempt and the malformed traffic SHALL fail closed
+
 When the requested `after` anchor is strictly older than the validated durable
 retention floor, Runtime SHALL return JSON-RPC error `-32148` with exact
 `timeline-retention-gap/0.1` data. The data SHALL bind the Session, requested after

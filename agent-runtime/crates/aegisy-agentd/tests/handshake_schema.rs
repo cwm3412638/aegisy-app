@@ -1,9 +1,11 @@
 use aegisy_aap::mutation_ack::{Acknowledgement, MutationRequest, State};
 use aegisy_aap::stable::v0_1::{
     timeline_event_id, EventEnvelope, InitializeParams, InitializeResult, ItemUpdate,
-    RuntimeHeartbeatParams, RuntimeHeartbeatResult, TimelineItem, TimelineRetentionGapData,
-    TimelineSessionSnapshotPage, TimelineSnapshotParams, TimelineSyncPage, TimelineSyncParams,
-    TurnState,
+    RuntimeHeartbeatParams, RuntimeHeartbeatResult, TimelineActivateParams, TimelineActivateResult,
+    TimelineItem, TimelineRetentionGapData, TimelineSessionSnapshotPage, TimelineSnapshotParams,
+    TimelineSubscribeParams, TimelineSubscribeResult, TimelineSubscriptionEvent,
+    TimelineSubscriptionFailure, TimelineSubscriptionRecoveryProof, TimelineSyncPage,
+    TimelineSyncParams, TurnState,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -326,6 +328,41 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
     assert_eq!(definitions["jsonRpcRequestId"]["type"], "string");
     assert_eq!(definitions["jsonRpcRequestId"]["pattern"], r"^[!-~]+$");
     assert_eq!(definitions["jsonRpcRequestId"]["maxLength"], 128);
+
+    for non_routable in [
+        "timelineSubscribeRequest",
+        "timelineActivateRequest",
+        "timelineSubscriptionEventNotification",
+        "timelineSubscriptionFailureNotification",
+    ] {
+        assert!(
+            !definitions.contains_key(non_routable),
+            "contract-only subscription route was registered as $defs.{non_routable}"
+        );
+    }
+    let routed_methods = schema["allOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|rule| {
+            rule.get("if")?
+                .get("properties")?
+                .get("method")?
+                .get("const")?
+                .as_str()
+        })
+        .collect::<HashSet<_>>();
+    for non_routable in [
+        "timeline/subscribe",
+        "timeline/activate",
+        "timeline/subscription-event",
+        "timeline/subscription-failure",
+    ] {
+        assert!(
+            !routed_methods.contains(non_routable),
+            "contract-only subscription method was registered: {non_routable}"
+        );
+    }
     assert_eq!(schema["properties"]["method"]["maxLength"], 128);
     assert_eq!(
         schema["properties"]["method"]["pattern"],
@@ -1477,4 +1514,196 @@ fn mutation_acknowledgement_metadata_schema_is_strict_and_generation_bound() {
     let mut stale = later.clone();
     stale.generation += 1;
     assert!(!stale.matches_request(&request));
+}
+
+#[test]
+fn timeline_subscription_contract_is_generation_bound_and_requires_activation() {
+    let timeline = fixture_messages("aap-timeline-events.jsonl");
+    let watermark = json!({
+        "sequence": 1,
+        "event_id": timeline[0]["params"]["event_id"].clone()
+    });
+    let subscribe = json!({
+        "jsonrpc": "2.0",
+        "id": "subscribe-1",
+        "method": "timeline/subscribe",
+        "params": {
+            "schema_version": "timeline-subscribe-request/0.1",
+            "connection_generation": 7,
+            "session_id": "session-1",
+            "subscription_id": "subscription-1",
+            "cursor": {"sequence": 0, "event_id": null},
+            "watermark": null
+        }
+    });
+    let subscribed = json!({
+        "jsonrpc": "2.0",
+        "id": "subscribe-1",
+        "result": {
+            "schema_version": "timeline-subscribe-result/0.1",
+            "connection_generation": 7,
+            "session_id": "session-1",
+            "subscription_id": "subscription-1",
+            "state": "sync-required",
+            "cursor": {"sequence": 0, "event_id": null},
+            "watermark": watermark.clone(),
+            "next_method": "timeline/sync"
+        }
+    });
+    let activate = json!({
+        "jsonrpc": "2.0",
+        "id": "activate-1",
+        "method": "timeline/activate",
+        "params": {
+            "schema_version": "timeline-subscription-activate-request/0.1",
+            "connection_generation": 7,
+            "session_id": "session-1",
+            "subscription_id": "subscription-1",
+            "source": "sync",
+            "cursor": watermark.clone(),
+            "watermark": watermark.clone(),
+            "snapshot_identity": null
+        }
+    });
+    let active = json!({
+        "jsonrpc": "2.0",
+        "id": "activate-1",
+        "result": {
+            "schema_version": "timeline-subscription-active/0.1",
+            "connection_generation": 7,
+            "session_id": "session-1",
+            "subscription_id": "subscription-1",
+            "state": "active",
+            "cursor": watermark.clone(),
+            "watermark": watermark.clone()
+        }
+    });
+    let event = json!({
+        "jsonrpc": "2.0",
+        "method": "timeline/subscription-event",
+        "params": {
+            "schema_version": "timeline-subscription-event/0.1",
+            "connection_generation": 7,
+            "session_id": "session-1",
+            "subscription_id": "subscription-1",
+            "state": "active",
+            "cursor": watermark.clone(),
+            "watermark": watermark.clone(),
+            "event": timeline[1]["params"].clone()
+        }
+    });
+    let activate_request: TimelineActivateParams =
+        serde_json::from_value(activate["params"].clone()).unwrap();
+    let failure = json!({
+        "schema_version": "timeline-subscription-failure/0.1",
+        "connection_generation": 7,
+        "session_id": "session-1",
+        "subscription_id": "subscription-1",
+        "state": "failed",
+        "stage": "activate",
+        "cursor": watermark.clone(),
+        "watermark": watermark,
+        "request_identity": activate_request.request_identity().unwrap(),
+        "reason": "connection-retired",
+        "retryable": true,
+        "cleanup_required": true
+    });
+
+    assert!(schema_definition_valid(
+        "timelineSubscribeParams",
+        &subscribe["params"]
+    ));
+    assert!(schema_definition_valid(
+        "timelineSubscribeResult",
+        &subscribed["result"]
+    ));
+    assert!(schema_definition_valid(
+        "timelineActivateParams",
+        &activate["params"]
+    ));
+    assert!(schema_definition_valid(
+        "timelineActivateResult",
+        &active["result"]
+    ));
+    assert!(schema_definition_valid(
+        "timelineSubscriptionEvent",
+        &event["params"]
+    ));
+    assert!(schema_definition_valid(
+        "timelineSubscriptionFailure",
+        &failure
+    ));
+
+    let subscribe_params: TimelineSubscribeParams =
+        serde_json::from_value(subscribe["params"].clone()).unwrap();
+    let subscribe_result: TimelineSubscribeResult =
+        serde_json::from_value(subscribed["result"].clone()).unwrap();
+    subscribe_result
+        .validate_for_request(&subscribe_params)
+        .unwrap();
+    let activate_params: TimelineActivateParams =
+        serde_json::from_value(activate["params"].clone()).unwrap();
+    let watermark_event: EventEnvelope =
+        serde_json::from_value(timeline[0]["params"].clone()).unwrap();
+    let sync_page = TimelineSyncPage {
+        schema_version: "timeline-sync-page/0.1".into(),
+        session_id: "session-1".into(),
+        after: subscribe_params.cursor.clone(),
+        watermark: subscribe_result.watermark.clone().unwrap(),
+        events: vec![watermark_event],
+        next_after: None,
+        complete: true,
+    };
+    let recovery =
+        TimelineSubscriptionRecoveryProof::from_sync_pages(&subscribe_result, &[sync_page])
+            .unwrap();
+    activate_params.validate_for_recovery(&recovery).unwrap();
+    let activate_result: TimelineActivateResult =
+        serde_json::from_value(active["result"].clone()).unwrap();
+    activate_result
+        .validate_for_recovery(&activate_params, &recovery)
+        .unwrap();
+    let live: TimelineSubscriptionEvent = serde_json::from_value(event["params"].clone()).unwrap();
+    live.validate_for_active_cursor(&activate_result, &activate_result.cursor, 7)
+        .unwrap();
+    let failed: TimelineSubscriptionFailure = serde_json::from_value(failure).unwrap();
+    failed
+        .validate_for_activation(&activate_params, &recovery)
+        .unwrap();
+
+    let mut stale_event = event.clone();
+    stale_event["params"]["connection_generation"] = json!(6);
+    assert!(strict_envelope_valid(&stale_event));
+    let stale: TimelineSubscriptionEvent =
+        serde_json::from_value(stale_event["params"].clone()).unwrap();
+    assert!(stale
+        .validate_for_active_cursor(&activate_result, &activate_result.cursor, 7)
+        .is_err());
+
+    let mut invalid_failure = serde_json::to_value(&failed).unwrap();
+    invalid_failure["cleanup_required"] = json!(false);
+    assert!(!schema_definition_valid(
+        "timelineSubscriptionFailure",
+        &invalid_failure
+    ));
+    assert!(serde_json::from_value::<TimelineSubscriptionFailure>(invalid_failure).is_err());
+
+    let mut inline_active = subscribed;
+    inline_active["result"]["state"] = json!("active");
+    assert!(!schema_definition_valid(
+        "timelineSubscribeResult",
+        &inline_active["result"]
+    ));
+    assert!(
+        serde_json::from_value::<TimelineSubscribeResult>(inline_active["result"].clone()).is_err()
+    );
+
+    let mut missing_watermark = inline_active["result"].clone();
+    missing_watermark["state"] = json!("sync-required");
+    missing_watermark["watermark"] = Value::Null;
+    assert!(!schema_definition_valid(
+        "timelineSubscribeResult",
+        &missing_watermark
+    ));
+    assert!(serde_json::from_value::<TimelineSubscribeResult>(missing_watermark).is_err());
 }

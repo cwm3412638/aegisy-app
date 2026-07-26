@@ -681,6 +681,21 @@ fn terminal_stop_requires_lifecycle_platform_and_out_of_band_capabilities() {
 fn stable_capability_registry_remains_within_initialize_bounds() {
     assert!(!STABLE_CAPABILITY_REGISTRY.is_empty());
     assert!(STABLE_CAPABILITY_REGISTRY.len() <= 128);
+    assert!(!STABLE_CAPABILITY_REGISTRY
+        .iter()
+        .any(|capability| capability.starts_with("timeline.subscription")));
+
+    let mut runtime = Runtime::default();
+    ready(&mut runtime, &["runtime.preview", "permission.read-only"]);
+    for (id, method) in [
+        ("subscription-not-routable", "timeline/subscribe"),
+        ("activation-not-routable", "timeline/activate"),
+        ("failure-not-routable", "timeline/subscription-failure"),
+    ] {
+        let response = runtime.handle_line(&request(id, method, json!({})));
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0]["error"]["code"], -32601);
+    }
 }
 
 #[test]

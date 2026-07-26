@@ -2774,6 +2774,18 @@ Implemented visual baseline:
 
 ## Verification Snapshot (2026-07-26)
 
+- The non-routable Timeline subscription contract foundation passes the complete
+  Rust workspace: 37 AAP type, 729 `aegisy-agentd` library tests with one ignored
+  live fixture, 7 daemon-main, 10 context-threshold, 14 handshake Runtime, 20
+  handshake Schema, 67 protocol, and 23 stdio/Codex tests (907 passed, zero failed,
+  one ignored). Strict Clippy, formatting, JSON Schema parsing, strict OpenSpec
+  validation, and `git diff --check` pass. The types require a private complete
+  Sync/Snapshot structural recovery proof before activation and an exact complete
+  request identity or active-state binding for terminal failures. The proof is not
+  connection authority; future Runtime activation must also consume the exact
+  connection-owned registry token. No method, capability, Runtime/Qt path, mutation authority,
+  or automatic pruning was added; keep OpenSpec `3.5` unchecked.
+
 - The out-of-band Runtime heartbeat stage passes 28 AAP tests, 729
   `aegisy-agentd` library tests with one ignored live fixture, 7 daemon-main, 10
   context-threshold, 14 handshake Runtime, 18 Schema, 67 protocol, and 23
@@ -3048,6 +3060,40 @@ Implemented visual baseline:
   context-threshold, 14 handshake Runtime, 19 handshake Schema, 67 protocol, and
   23 stdio/Codex tests. Strict Clippy, Rust formatting, strict OpenSpec validation,
   and `git diff --check` pass.
+
+## Timeline Subscription Contract Foundation (2026-07-26)
+
+- Stable AAP `$defs` and Rust types now define strict metadata for Timeline
+  subscribe, recovery activation, active live events, and terminal failures. This
+  foundation is deliberately non-routable: no top-level method schema, negotiated
+  capability, Runtime handler, Qt request path, or execution authority was added.
+- Subscribe can return only `sync-required` with one non-null fixed watermark or
+  `snapshot-required` with a null watermark; it cannot become active inline. A
+  private, non-serializable `TimelineSubscriptionRecoveryProof` is the typed
+  structural bridge to activation, not connection authority. Sync proof construction
+  validates one complete contiguous fixed-watermark page chain under a
+  10,000-Event/64 MiB bound. Snapshot proof construction validates the complete
+  fixed-header page chain, ordered Items, totals, active/open Turn state, and the
+  domain-separated Snapshot identity. Well-formed but unverified activation data
+  cannot produce this proof.
+- Terminal failure validation is stage-specific for subscribe, sync, snapshot,
+  activate, and live state and binds the exact connection generation, Session,
+  subscription, cursor, watermark, and a domain-separated identity of the complete
+  typed request or exact active state. Snapshot identity, continuation cursor, and
+  page-limit drift cannot reuse a late failure. Every accepted failure requires cleanup.
+- The complete Rust workspace passes 37 AAP type tests, 729 `aegisy-agentd` library
+  tests with one ignored live fixture, 7 daemon-main, 10 context-threshold, 14
+  handshake Runtime, 20 handshake Schema, 67 protocol, and 23 stdio/Codex tests:
+  907 passed, zero failed, and one ignored. Strict workspace Clippy, Rust formatting,
+  JSON Schema parsing, strict OpenSpec validation, and `git diff --check` pass.
+- OpenSpec `3.5` remains unchecked. The next stage must bind every Sync/Snapshot page
+  request to a connection-owned attempt, forbid subscription-ID reuse, atomically
+  register and capture the fixed head, buffer later events, consume the exact
+  connection-owned registry token, atomically activate and drain that buffer, retire
+  all state on every failure/disconnect, and implement the
+  matching Qt generation state machine. Explicit acknowledgement and complete
+  Windows reconnect/runtime evidence also remain absent. Automatic Timeline pruning
+  remains disabled, and Agent/Codex remains read-only.
 
 ## Next Product Priorities
 

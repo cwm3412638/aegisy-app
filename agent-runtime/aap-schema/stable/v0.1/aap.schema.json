@@ -923,6 +923,245 @@
         }
       ]
     },
+    "timelineSubscriptionState": {
+      "enum": ["sync-required", "snapshot-required", "active", "failed"]
+    },
+    "timelineSubscriptionSource": {
+      "enum": ["sync", "snapshot"]
+    },
+    "timelineSubscriptionFailureStage": {
+      "enum": ["subscribe", "sync", "snapshot", "activate", "live"]
+    },
+    "timelineSubscriptionRequestIdentity": {
+      "type": "string",
+      "pattern": "^timeline-subscription-request:sha256:[0-9a-f]{64}$"
+    },
+    "timelineSubscribeParams": {
+      "$comment": "Contract-only reconnect barrier. Runtime 0.1 does not advertise or dispatch this method. The generation, Session, subscription, cursor, and optional fixed watermark must remain exact through every later state.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "connection_generation",
+        "session_id",
+        "subscription_id",
+        "cursor",
+        "watermark"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "timeline-subscribe-request/0.1" },
+        "connection_generation": { "$ref": "#/$defs/safePositiveInteger" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "subscription_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "cursor": { "$ref": "#/$defs/timelineAnchor" },
+        "watermark": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineAnchor" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "timelineSubscribeResult": {
+      "$comment": "Subscribe never grants live authority directly. It selects exactly one bounded recovery route; only a separately validated activation may enter active.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "connection_generation",
+        "session_id",
+        "subscription_id",
+        "state",
+        "cursor",
+        "watermark",
+        "next_method"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "timeline-subscribe-result/0.1" },
+        "connection_generation": { "$ref": "#/$defs/safePositiveInteger" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "subscription_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "state": { "$ref": "#/$defs/timelineSubscriptionState" },
+        "cursor": { "$ref": "#/$defs/timelineAnchor" },
+        "watermark": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineAnchor" },
+            { "type": "null" }
+          ]
+        },
+        "next_method": { "enum": ["timeline/sync", "timeline/snapshot"] }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "state": { "const": "sync-required" },
+            "watermark": { "$ref": "#/$defs/timelineAnchor" },
+            "next_method": { "const": "timeline/sync" }
+          }
+        },
+        {
+          "properties": {
+            "state": { "const": "snapshot-required" },
+            "watermark": { "type": "null" },
+            "next_method": { "const": "timeline/snapshot" }
+          }
+        }
+      ]
+    },
+    "timelineActivateParams": {
+      "$comment": "Activation is legal only after complete fixed-watermark sync or complete identity-validated snapshot replacement. cursor and watermark must be the same exact anchor; typed peers additionally bind this object to the prior subscribe result.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "connection_generation",
+        "session_id",
+        "subscription_id",
+        "source",
+        "cursor",
+        "watermark",
+        "snapshot_identity"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "timeline-subscription-activate-request/0.1" },
+        "connection_generation": { "$ref": "#/$defs/safePositiveInteger" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "subscription_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "source": { "$ref": "#/$defs/timelineSubscriptionSource" },
+        "cursor": { "$ref": "#/$defs/timelineAnchor" },
+        "watermark": { "$ref": "#/$defs/timelineAnchor" },
+        "snapshot_identity": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineSnapshotId" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "source": { "const": "sync" },
+            "snapshot_identity": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "source": { "const": "snapshot" },
+            "snapshot_identity": { "$ref": "#/$defs/timelineSnapshotId" }
+          }
+        }
+      ]
+    },
+    "timelineActivateResult": {
+      "$comment": "This result is a contract shape only. No Runtime handler or negotiated capability currently creates it.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "connection_generation",
+        "session_id",
+        "subscription_id",
+        "state",
+        "cursor",
+        "watermark"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "timeline-subscription-active/0.1" },
+        "connection_generation": { "$ref": "#/$defs/safePositiveInteger" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "subscription_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "state": { "const": "active" },
+        "cursor": { "$ref": "#/$defs/timelineAnchor" },
+        "watermark": { "$ref": "#/$defs/timelineAnchor" }
+      }
+    },
+    "timelineSubscriptionEvent": {
+      "$comment": "The nested event must be contiguous after cursor, belong to session_id, and be validated only against the active subscription for the exact current connection generation.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "connection_generation",
+        "session_id",
+        "subscription_id",
+        "state",
+        "cursor",
+        "watermark",
+        "event"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "timeline-subscription-event/0.1" },
+        "connection_generation": { "$ref": "#/$defs/safePositiveInteger" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "subscription_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "state": { "const": "active" },
+        "cursor": { "$ref": "#/$defs/timelineAnchor" },
+        "watermark": { "$ref": "#/$defs/timelineAnchor" },
+        "event": { "$ref": "#/$defs/timelineEvent" }
+      }
+    },
+    "timelineSubscriptionFailure": {
+      "$comment": "Every failure is terminal for this subscription attempt and requires the client to retire its pending state. It never authorizes fallback replay, activation, or live delivery.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "connection_generation",
+        "session_id",
+        "subscription_id",
+        "state",
+        "stage",
+        "cursor",
+        "watermark",
+        "request_identity",
+        "reason",
+        "retryable",
+        "cleanup_required"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "timeline-subscription-failure/0.1" },
+        "connection_generation": { "$ref": "#/$defs/safePositiveInteger" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "subscription_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "state": { "const": "failed" },
+        "stage": { "$ref": "#/$defs/timelineSubscriptionFailureStage" },
+        "cursor": { "$ref": "#/$defs/timelineAnchor" },
+        "watermark": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineAnchor" },
+            { "type": "null" }
+          ]
+        },
+        "request_identity": {
+          "oneOf": [
+            { "$ref": "#/$defs/timelineSubscriptionRequestIdentity" },
+            { "type": "null" }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "retryable": { "type": "boolean" },
+        "cleanup_required": { "const": true }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "stage": { "enum": ["subscribe", "sync", "snapshot", "activate"] },
+            "request_identity": { "$ref": "#/$defs/timelineSubscriptionRequestIdentity" }
+          }
+        },
+        {
+          "properties": {
+            "stage": { "const": "live" },
+            "request_identity": { "type": "null" }
+          }
+        }
+      ]
+    },
     "timelineSyncParams": {
       "type": "object",
       "$comment": "When watermark is present, typed peers require after <= watermark and identical Event IDs when both anchors name the same sequence.",

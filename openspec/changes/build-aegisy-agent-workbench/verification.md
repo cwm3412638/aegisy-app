@@ -181,6 +181,38 @@ Bounded reconnect barrier and OOB handshake ordering slice (`3.5`, partial):
   inert duplicate late initialize responses, exact heartbeat deadline request/process
   generation matching, and process-generation-bound reconnect stability timers.
 
+Non-routable Timeline subscription contract foundation (`3.5`, partial):
+
+- Stable Schema `$defs` and Rust types define strict subscribe, activate, live-event,
+  and failure objects while deliberately leaving the top-level AAP method schema,
+  negotiated capabilities, Runtime dispatch, and Qt client unchanged.
+- `sync-required` requires one non-null fixed watermark and `snapshot-required`
+  requires a null watermark. Subscribe cannot return active or failed inline.
+  Activation must match a private non-serializable structural recovery proof. Sync
+  proof creation validates the complete 10,000-Event/64 MiB-bounded page chain from
+  the subscribed cursor to the exact watermark; Snapshot proof creation validates fixed headers, contiguous
+  pages, ordered complete Items, and the domain-separated complete snapshot identity.
+  A merely well-formed anchor or snapshot identity cannot produce verified recovery.
+  The proof is not connection authority; the later Runtime must also consume the
+  connection-owned registry token for the exact attempt.
+- Failure validation fixes subscribe, sync, snapshot, activate, and live stages to
+  their exact connection generation, Session, subscription, cursor, watermark, and
+  a domain-separated identity of the complete typed request or exact active state.
+  Snapshot identity, continuation cursor, and page limit drift therefore cannot
+  reuse a late failure. Every accepted failure remains terminal and requires cleanup.
+- This slice does not yet bind ordinary `timeline/sync` or `timeline/snapshot` page
+  requests to a connection-owned subscription attempt, implement Runtime atomic
+  registration/head capture or activation/buffer drain, register a wire method,
+  handle event-before-activate in Qt, provide explicit acknowledgement, or supply
+  Windows reconnect/runtime evidence. Automatic pruning remains disabled and task
+  `3.5` stays unchecked.
+- Verification passes the complete Rust workspace: 37 AAP type, 729
+  `aegisy-agentd` library tests with one ignored live fixture, 7 daemon-main, 10
+  context-threshold, 14 handshake Runtime, 20 handshake Schema, 67 protocol, and 23
+  stdio/Codex tests (907 passed, zero failed, one ignored). Strict workspace Clippy,
+  Rust formatting, JSON Schema parsing, strict OpenSpec validation, and
+  `git diff --check` pass.
+
 Metadata-only acknowledgement contract foundation (`3.5`/`3.6`, partial):
 
 - Stable AAP schema and Rust types define `mutation-acknowledgement/0.1` request
