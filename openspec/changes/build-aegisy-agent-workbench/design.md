@@ -216,8 +216,9 @@ Protocol properties:
   the retained tail through one fixed head, and Qt stages every page privately before
   atomically replacing one Session. The v16 checkpoint remains internal lifecycle
   authority and is never exposed as Item content. This retention-gap path now feeds
-  the negotiated subscription state machine; acknowledgement and complete
-  cross-platform reconnect evidence remain separate.
+  the negotiated subscription state machine. Durable Turn-start acknowledgement is
+  implemented on top of this Journal, while complete cross-platform reconnect
+  evidence remains a separate release gate.
 - Bounded outbound queues, overload errors, cancellation, heartbeat, and
   backpressure. The first heartbeat slice negotiates
   `runtime.heartbeat.out-of-band` and uses the existing independent stdio control
@@ -230,8 +231,9 @@ Protocol properties:
   available through the initialized control connection. The heartbeat carries no
   timestamp, PID, Store/Provider state, permission, or execution authority and never
   touches SQLite. A late or prior-process-generation response is inert. Bounded
-  process reconnect and live subscription are implemented below; acknowledgement and
-  complete Windows reconnect/runtime evidence remain later `3.5` gates.
+  process reconnect and live subscription are implemented below. Durable Turn-start
+  acknowledgement is implemented as a separate Store-backed slice; complete Windows
+  reconnect/runtime evidence remains a later `3.5` gate.
 
 The bounded reconnect barrier is deliberately request-scoped. A reconnect attempt
 records a distinct barrier request ID for each `session/read`, terminal
@@ -243,7 +245,8 @@ unverified when proof is unavailable; Proposal drift, empty, or invalid response
 cannot replace a previously validated cache. The degradation response must match
 the exact request ID created for that handshake, so a late response from an older
 connection is inert. The live subscription state machine composes with this bounded
-barrier; it does not provide mutation acknowledgement.
+barrier; it does not provide acknowledgement for approval, file, Git, or background
+job mutations.
 
 The independent Runtime control reader also has a handshake ordering barrier. Before
 the exact `initialized` notification is consumed, heartbeat, cancellation,
@@ -308,21 +311,33 @@ is unsafe, or Runtime reports `session-attempt-exists` or
 falsely complete reconnect, and never retries those ownership conflicts on the same
 connection. Old-generation traffic remains inert.
 Heartbeat Unknown without such a pending request keeps the existing same-process
-probe behavior. OpenSpec `3.5` remains unchecked for explicit acknowledgement and
-complete Windows reconnect/runtime evidence, and automatic Timeline pruning remains
-disabled.
+probe behavior. OpenSpec `3.5` remains unchecked for complete Windows
+reconnect/runtime evidence, and automatic Timeline pruning remains disabled.
 
 - Idempotency keys for turn start, approval responses, writes, and background job
   submission.
 
-Before any mutation-shaped producer is exposed, its acknowledgement evidence uses
-the metadata-only `mutation-acknowledgement/0.1` contract. The request and every
-response bind exact request ID, idempotency key, Session, and process generation;
-states may advance only from `accepted` to `acknowledged` to `terminal`, with
-same-state retries idempotent. This contract is not itself a mutation method,
-ledger, approval, or execution authority. A concrete producer must add durable
-ack consumption, recovery/reconciliation, and reviewed Qt behavior before it is
-advertised.
+Turn-start is the first durable mutation slice. AAP capability
+`session.mutation-acknowledgements` exposes the session-scoped list method
+`session/mutation-acknowledgements` and the exact-anchor consume method
+`mutation/acknowledgement/consume`. Runtime reserves a schema-v20
+`mutation_acknowledgements` row before dispatch, keyed by Session, `turn-start`,
+idempotency key, and a SHA-256 request fingerprint. An equivalent retry returns the
+same operation identity and Turn binding; a conflicting fingerprint fails without
+dispatch. Accepted and terminal Timeline anchors are bound atomically with the
+corresponding projection and Journal transaction using revision compare-and-swap.
+Startup converts accepted rows whose dispatch outcome is uncertain to
+`reconciliation-required`; those rows cannot be redispatched. Qt lists only
+unconsumed rows, validates Session/Turn/sequence/Event-ID anchors, and consumes
+accepted evidence before terminal evidence. Anchor drift, unavailable storage,
+malformed data, tampering, or read-only recovery freezes the affected Session and
+never fabricates success. The ledger stores metadata and Timeline identities only;
+it grants no mutation, approval, or execution authority.
+
+Approval responses, editor/file writes, Git mutations, and background-job submission
+still have no durable acknowledgement producers or consumption routes. They remain
+future work and must reuse the same reservation, reconciliation, and reviewed Qt
+recovery boundaries before being advertised.
 
 - Server-initiated requests for approval, structured user input, credential
   refresh, and extension elicitation.
@@ -508,7 +523,7 @@ A disconnect drops incomplete page staging but preserves confirmed UI, bounded q
 live events, their accounting, and recovery intent so capture restarts after a fresh
 handshake. Automatic pruning remains disabled. The later subscription/reconnect
 design below supersedes those historical gaps; OpenSpec task `3.5` stays unchecked
-until durable explicit acknowledgement and complete Windows recovery evidence land.
+until complete Windows recovery evidence lands.
 
 Credentials remain in OS secure storage. The database contains credential IDs or
 short-lived token references, never API keys or long-lived Aegisy JWT values.

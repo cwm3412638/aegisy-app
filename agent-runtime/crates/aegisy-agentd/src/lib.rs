@@ -82,6 +82,14 @@ mod workspace_edit_preview;
 pub mod workspace_edit_proposal;
 pub mod workspace_edit_restore;
 
+use aegisy_aap::durable_mutation_ack::{
+    self as durable_mutation_ack, ConsumeParams as DurableMutationConsumeParams,
+    ConsumeResult as DurableMutationConsumeResult, ListParams as DurableMutationListParams,
+};
+use aegisy_aap::mutation_ack::{
+    Acknowledgement as ConnectionMutationAcknowledgement,
+    MutationRequest as ConnectionMutationRequest, State as ConnectionMutationState,
+};
 use aegisy_aap::stable::v0_1::{
     timeline_snapshot_identity, timeline_snapshot_item_canonical_bytes,
     timeline_snapshot_item_identity, timeline_snapshot_page_identity, BackendDescriptor,
@@ -155,15 +163,16 @@ use turn_trace_producer::{
 use usage_authority::from_provider_token_usage;
 use workbench_store::{
     durable_blob_reference_id, workspace_edit_proposal_timeline_projection,
-    BackgroundNotificationCursor, DurableBlobKind, DurableBlobWrite, PortableSessionImportCommand,
-    PortableSessionPackage, PreviewTurnCommit, RetentionPolicy, SessionDeletionScope,
-    SessionProjectionConsistency, SessionSearchRequest, StoredItem, StoredItemAppend,
-    StoredProjectCreate, StoredProjectNavigationEntry, StoredProjectTrustAcknowledge,
-    StoredProjectTrustAcknowledgement, StoredSessionCreate, StoredSessionLineage,
-    StoredSessionMode, StoredSessionRuntimeBindingCreate, StoredSessionWorkspaceBinding,
-    StoredSessionWorkspaceBindingCreate, StoredTurnCreate, StoredWorkspaceEditProposal,
-    WorkbenchRecoveryDiagnostic, WorkbenchStore, WorkbenchStoreOpen,
-    WorkspaceEditProposalArtifactWrite,
+    BackgroundNotificationCursor, DurableBlobKind, DurableBlobWrite, MutationLedgerBinding,
+    PortableSessionImportCommand, PortableSessionPackage, PreviewMutationLedgerBinding,
+    PreviewTurnCommit, ReserveTurnStartMutation, RetentionPolicy, SessionDeletionScope,
+    SessionProjectionConsistency, SessionSearchRequest, StoredDurableMutationAcknowledgement,
+    StoredItem, StoredItemAppend, StoredProjectCreate, StoredProjectNavigationEntry,
+    StoredProjectTrustAcknowledge, StoredProjectTrustAcknowledgement, StoredSessionCreate,
+    StoredSessionLineage, StoredSessionMode, StoredSessionRuntimeBindingCreate,
+    StoredSessionWorkspaceBinding, StoredSessionWorkspaceBindingCreate, StoredTurnCreate,
+    StoredWorkspaceEditProposal, TurnStartMutationReservation, WorkbenchRecoveryDiagnostic,
+    WorkbenchStore, WorkbenchStoreOpen, WorkspaceEditProposalArtifactWrite,
 };
 use workspace::{
     collect_search_candidates, list_directory, path_metadata, read_text_file, search_workspace,
@@ -238,6 +247,7 @@ pub const STABLE_CAPABILITY_REGISTRY: &[&str] = &[
     "session.fork",
     "session.history.paginated",
     "session.list",
+    "session.mutation-acknowledgements",
     "session.metadata.manage",
     "session.portable.export",
     "session.portable.import",
@@ -1646,10 +1656,13 @@ struct RetentionPolicySetParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TurnStartParams {
     session_id: String,
     input: String,
     idempotency_key: String,
+    #[serde(default)]
+    generation: Option<u64>,
     #[serde(default)]
     context: Vec<TurnContextItem>,
     #[serde(default)]
@@ -1663,6 +1676,8 @@ struct PreviewTurn {
     params: TurnStartParams,
     backend_input: String,
     persistence_input: String,
+    request_fingerprint: String,
+    mutation_operation: Option<StoredDurableMutationAcknowledgement>,
     prepared_context: turn_context::PreparedTurnContext,
     user_item: TimelineItem,
 }
@@ -1673,6 +1688,73 @@ struct PendingTurnTerminal {
     terminal_at_ms: u64,
     trace: TurnTrace,
     item: Option<TimelineItem>,
+}
+
+fn connection_mutation_acknowledgement(
+    request: &Request,
+    params: &TurnStartParams,
+    state: ConnectionMutationState,
+) -> Result<ConnectionMutationAcknowledgement, String> {
+    let request_id = request
+        .id
+        .as_ref()
+        .and_then(Value::as_str)
+        .ok_or_else(|| "turn start requires a bounded string request ID".to_owned())?;
+    let mutation_request = ConnectionMutationRequest::new(
+        request_id,
+        &params.idempotency_key,
+        &params.session_id,
+        params
+            .generation
+            .ok_or_else(|| "durable turn start requires a process generation".to_owned())?,
+    )
+    .map_err(str::to_owned)?;
+    Ok(ConnectionMutationAcknowledgement::from_request(
+        &mutation_request,
+        state,
+    ))
+}
+
+fn durable_turn_start_response(
+    request: &Request,
+    params: &TurnStartParams,
+    prepared_context: &PreparedTurnContext,
+    request_fingerprint: &str,
+    operation: &StoredDurableMutationAcknowledgement,
+    turn_state: &str,
+) -> Result<Value, String> {
+    operation
+        .validate()
+        .map_err(|cause| format!("durable mutation operation is invalid: {cause}"))?;
+    if operation.session_id != params.session_id
+        || operation.idempotency_key != params.idempotency_key
+        || operation.request_fingerprint != request_fingerprint
+    {
+        return Err("durable mutation operation does not match turn start".into());
+    }
+    let turn_id = operation
+        .turn_id
+        .as_deref()
+        .ok_or_else(|| "durable mutation operation has no Turn binding".to_owned())?;
+    let acknowledgement =
+        connection_mutation_acknowledgement(request, params, ConnectionMutationState::Accepted)?;
+    serde_json::to_value(Response::success(
+        request.id.clone().unwrap_or(Value::Null),
+        json!({
+            "turn": { "id": turn_id, "state": turn_state },
+            "context": {
+                "item_count": prepared_context.item_count,
+                "bytes": prepared_context.bytes,
+                "truncated": prepared_context.truncated,
+                "manifest": prepared_context.manifest,
+                "budget": prepared_context.budget
+            },
+            "request_fingerprint": request_fingerprint,
+            "mutation_acknowledgement": acknowledgement,
+            "mutation_operation": operation
+        }),
+    ))
+    .map_err(|_| "cannot serialize durable turn start response".to_owned())
 }
 
 fn timeline_notification(envelope: &EventEnvelope) -> Result<Value, String> {
@@ -4758,6 +4840,8 @@ impl Runtime {
             && !matches!(
                 request.method.as_str(),
                 "session/read"
+                    | "session/mutation-acknowledgements"
+                    | "mutation/acknowledgement/consume"
                     | "timeline/sync"
                     | "timeline/subscribe"
                     | "timeline/subscription-sync"
@@ -4857,6 +4941,8 @@ impl Runtime {
             && !matches!(
                 request.method.as_str(),
                 "session/read"
+                    | "session/mutation-acknowledgements"
+                    | "mutation/acknowledgement/consume"
                     | "timeline/subscribe"
                     | "timeline/subscription-sync"
                     | "timeline/subscription-snapshot"
@@ -4897,6 +4983,8 @@ impl Runtime {
         let pending_deletion_read = matches!(
             request.method.as_str(),
             "session/read"
+                | "session/mutation-acknowledgements"
+                | "mutation/acknowledgement/consume"
                 | "timeline/sync"
                 | "timeline/subscribe"
                 | "timeline/subscription-sync"
@@ -5050,6 +5138,8 @@ impl Runtime {
             "session/import" => self.session_import(request),
             "session/list" => self.session_list(request),
             "session/search" => self.session_search(request),
+            "session/mutation-acknowledgements" => self.mutation_acknowledgement_list(request),
+            "mutation/acknowledgement/consume" => self.mutation_acknowledgement_consume(request),
             "session/background-notifications" => self.background_notification_inspect(request),
             "session/background-recovery" => self.background_recovery_inspect(request),
             "operation/probe" => self.operation_probe(request),
@@ -5157,6 +5247,75 @@ impl Runtime {
                 .is_some_and(|registry| registry.status(subscription_id).is_ok())
     }
 
+    fn reserve_turn_start_mutation(
+        &mut self,
+        params: &TurnStartParams,
+        request_fingerprint: &str,
+    ) -> Result<Option<TurnStartMutationReservation>, (i64, String)> {
+        if !self
+            .negotiated_capabilities
+            .contains(durable_mutation_ack::CAPABILITY)
+        {
+            return Ok(None);
+        }
+        let Some(store) = self.workbench_store.as_mut() else {
+            return Err((
+                -32113,
+                "durable mutation acknowledgement storage is unavailable".into(),
+            ));
+        };
+        let mut reservation = store
+            .reserve_turn_start_mutation(ReserveTurnStartMutation {
+                session_id: params.session_id.clone(),
+                idempotency_key: params.idempotency_key.clone(),
+                request_fingerprint: request_fingerprint.into(),
+                accepted_at_ms: now_ms(),
+            })
+            .map_err(|cause| (-32113, cause.message))?;
+        if !reservation.created
+            && reservation.operation.state == durable_mutation_ack::OperationState::Accepted
+            && reservation.operation.turn_id.is_none()
+        {
+            reservation.operation = store
+                .mark_mutation_reconciliation_required(
+                    &params.session_id,
+                    &reservation.operation.operation_identity,
+                    reservation.operation.revision,
+                    now_ms(),
+                )
+                .map_err(|cause| (-32113, cause.message))?;
+        }
+        Ok(Some(reservation))
+    }
+
+    fn mark_turn_mutation_reconciliation_required(
+        &mut self,
+        operation: &mut Option<StoredDurableMutationAcknowledgement>,
+    ) -> Result<(), String> {
+        let Some(current) = operation.as_ref() else {
+            return Ok(());
+        };
+        if current.state == durable_mutation_ack::OperationState::ReconciliationRequired {
+            return Ok(());
+        }
+        if current.state == durable_mutation_ack::OperationState::Terminal {
+            return Err("terminal mutation cannot require reconciliation".into());
+        }
+        let Some(store) = self.workbench_store.as_mut() else {
+            return Err("durable mutation acknowledgement storage is unavailable".into());
+        };
+        let updated = store
+            .mark_mutation_reconciliation_required(
+                &current.session_id,
+                &current.operation_identity,
+                current.revision,
+                now_ms(),
+            )
+            .map_err(|cause| cause.message)?;
+        *operation = Some(updated);
+        Ok(())
+    }
+
     fn required_capabilities(request: &Request) -> Vec<&'static str> {
         let primary = match request.method.as_str() {
             "runtime/recovery/status" => "runtime.recovery.status",
@@ -5190,6 +5349,9 @@ impl Runtime {
             "session/import/preview" | "session/import" => "session.portable.import",
             "session/list" => "session.list",
             "session/search" => "session.search.branch",
+            "session/mutation-acknowledgements" | "mutation/acknowledgement/consume" => {
+                durable_mutation_ack::CAPABILITY
+            }
             "session/background-notifications" => "background-notification.outbox.read-only",
             "session/background-recovery" => "background-job.recovery.inspect",
             "operation/reconcile" => "operation.reconciliation",
@@ -6007,6 +6169,7 @@ impl Runtime {
             }
             if self.workbench_store.is_some() {
                 capabilities.extend([
+                    durable_mutation_ack::CAPABILITY.into(),
                     "background-notification.outbox.read-only".into(),
                     "background-job.recovery.inspect".into(),
                     "timeline.replay.fixed-watermark".into(),
@@ -7380,6 +7543,96 @@ impl Runtime {
                 format!("cannot inspect background notifications: {}", error.message),
             ),
         }
+    }
+
+    fn mutation_acknowledgement_list(&self, request: Request) -> Vec<Value> {
+        let params: DurableMutationListParams = match serde_json::from_value(request.params.clone())
+        {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_for(&request, -32602, format!("invalid params: {error}"))
+            }
+        };
+        if let Err(cause) = params.validate() {
+            return self.error_for(&request, -32602, cause);
+        }
+        let Some(store) = self.workbench_store.as_ref() else {
+            return self.error_for(
+                &request,
+                -32113,
+                "durable mutation acknowledgement storage is unavailable",
+            );
+        };
+        let page = match store.list_unconsumed_mutation_acknowledgements(
+            &params.session_id,
+            params.after.as_ref(),
+            params.limit as usize,
+        ) {
+            Ok(page) => page,
+            Err(error) => return self.error_for(&request, -32113, error.message),
+        };
+        if let Err(cause) = page.validate_for_request(&params) {
+            return self.error_for(
+                &request,
+                -32113,
+                format!("durable mutation acknowledgement page is invalid: {cause}"),
+            );
+        }
+        self.success_for(
+            &request,
+            serde_json::to_value(page).expect("durable mutation page serialization"),
+        )
+    }
+
+    fn mutation_acknowledgement_consume(&mut self, request: Request) -> Vec<Value> {
+        let params: DurableMutationConsumeParams =
+            match serde_json::from_value(request.params.clone()) {
+                Ok(params) => params,
+                Err(error) => {
+                    return self.error_for(&request, -32602, format!("invalid params: {error}"))
+                }
+            };
+        if let Err(cause) = params.validate() {
+            return self.error_for(&request, -32602, cause);
+        }
+        let Some(store) = self.workbench_store.as_mut() else {
+            return self.error_for(
+                &request,
+                -32113,
+                "durable mutation acknowledgement storage is unavailable",
+            );
+        };
+        let operation = match store.consume_mutation_acknowledgement(
+            &params.session_id,
+            &params.operation_identity,
+            params.target,
+            params.expected_revision,
+            &params.confirmed_anchor,
+            now_ms(),
+        ) {
+            Ok(operation) => operation,
+            Err(error) => return self.error_for(&request, -32113, error.message),
+        };
+        let result = DurableMutationConsumeResult {
+            schema_version: durable_mutation_ack::CONSUME_RESULT_SCHEMA_VERSION.into(),
+            session_id: params.session_id.clone(),
+            operation_identity: params.operation_identity.clone(),
+            expected_revision: params.expected_revision,
+            target: params.target,
+            confirmed_anchor: params.confirmed_anchor.clone(),
+            operation,
+        };
+        if let Err(cause) = result.validate_for_request(&params) {
+            return self.error_for(
+                &request,
+                -32113,
+                format!("durable mutation acknowledgement consumption is invalid: {cause}"),
+            );
+        }
+        self.success_for(
+            &request,
+            serde_json::to_value(result).expect("durable mutation consume result serialization"),
+        )
     }
 
     fn background_recovery_inspect(&self, request: Request) -> Vec<Value> {
@@ -10462,6 +10715,7 @@ impl Runtime {
         turn_id: &str,
         input: &str,
         idempotency_key: &str,
+        mutation_operation: &mut Option<StoredDurableMutationAcknowledgement>,
     ) -> Result<Value, String> {
         let observed_at_ms = now_ms();
         let prepared = self
@@ -10471,18 +10725,32 @@ impl Runtime {
         let created_at_ms = prepared.envelope().timestamp_ms;
         let message = timeline_notification(prepared.envelope())?;
         if let Some(store) = self.workbench_store.as_mut() {
-            store
-                .create_turn_with_public_event(
-                    StoredTurnCreate {
-                        turn_id: turn_id.into(),
-                        session_id: session_id.into(),
-                        idempotency_key: Some(idempotency_key.into()),
-                        input_hash: ContentHash::for_bytes(input.as_bytes()),
-                        created_at_ms,
-                    },
-                    prepared.envelope(),
-                )
-                .map_err(|cause| cause.message)?;
+            let turn = StoredTurnCreate {
+                turn_id: turn_id.into(),
+                session_id: session_id.into(),
+                idempotency_key: Some(idempotency_key.into()),
+                input_hash: ContentHash::for_bytes(input.as_bytes()),
+                created_at_ms,
+            };
+            if let Some(operation) = mutation_operation.as_ref() {
+                let committed = store
+                    .create_turn_with_public_event_and_mutation(
+                        turn,
+                        prepared.envelope(),
+                        &MutationLedgerBinding {
+                            operation_identity: operation.operation_identity.clone(),
+                            expected_revision: operation.revision,
+                        },
+                    )
+                    .map_err(|cause| cause.message)?;
+                debug_assert_eq!(committed.turn.turn_id, turn_id);
+                debug_assert_eq!(committed.turn.session_id, session_id);
+                *mutation_operation = Some(committed.operation);
+            } else {
+                store
+                    .create_turn_with_public_event(turn, prepared.envelope())
+                    .map_err(|cause| cause.message)?;
+            }
         }
         prepared
             .commit(&mut self.event_sequencer)
@@ -10671,6 +10939,7 @@ impl Runtime {
             .map_err(|cause| cause.message)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn persist_turn_state_with_trace_and_timeline(
         &mut self,
         session_id: &str,
@@ -10679,6 +10948,7 @@ impl Runtime {
         terminal_at_ms: u64,
         trace: &TurnTrace,
         item: Option<TimelineItem>,
+        mutation_operation: &mut Option<StoredDurableMutationAcknowledgement>,
     ) -> Result<Value, String> {
         let event_name = match state {
             "completed" => "turn.completed",
@@ -10716,16 +10986,36 @@ impl Runtime {
             .map_err(|error| format!("cannot sequence turn terminal: {}", error.code()))?;
         let message = timeline_notification(prepared.envelope())?;
         if let Some(store) = self.workbench_store.as_mut() {
-            store
-                .finish_turn_with_trace_and_public_event(
-                    session_id,
-                    turn_id,
-                    state,
-                    terminal_at_ms,
-                    trace,
-                    (terminal_item, prepared.envelope()),
-                )
-                .map_err(|cause| cause.message)?;
+            if let Some(operation) = mutation_operation.as_ref() {
+                let committed = store
+                    .finish_turn_with_trace_public_event_and_mutation(
+                        session_id,
+                        turn_id,
+                        state,
+                        terminal_at_ms,
+                        trace,
+                        (terminal_item, prepared.envelope()),
+                        &MutationLedgerBinding {
+                            operation_identity: operation.operation_identity.clone(),
+                            expected_revision: operation.revision,
+                        },
+                    )
+                    .map_err(|cause| cause.message)?;
+                debug_assert_eq!(committed.turn.turn_id, turn_id);
+                debug_assert_eq!(committed.turn.session_id, session_id);
+                *mutation_operation = Some(committed.operation);
+            } else {
+                store
+                    .finish_turn_with_trace_and_public_event(
+                        session_id,
+                        turn_id,
+                        state,
+                        terminal_at_ms,
+                        trace,
+                        (terminal_item, prepared.envelope()),
+                    )
+                    .map_err(|cause| cause.message)?;
+            }
         }
         prepared
             .commit(&mut self.event_sequencer)
@@ -11688,6 +11978,23 @@ impl Runtime {
             );
             return;
         }
+        if params.generation.is_some_and(|generation| {
+            generation == 0 || generation > aegisy_aap::MAX_SAFE_JSON_INTEGER
+        }) || (self
+            .negotiated_capabilities
+            .contains(durable_mutation_ack::CAPABILITY)
+            && params.generation.is_none())
+        {
+            self.emit_all(
+                self.error_for(
+                    &request,
+                    -32602,
+                    "turn generation must be a positive safe integer",
+                ),
+                emit,
+            );
+            return;
+        }
         if self.archived_sessions.contains(&params.session_id) {
             self.emit_all(
                 self.error_for(
@@ -11780,6 +12087,7 @@ impl Runtime {
             backend_input,
             ContentHash::for_bytes(&manifest_bytes).sha256
         );
+        let request_fingerprint = ContentHash::for_bytes(persistence_input.as_bytes()).sha256;
         let user_item = TimelineItem {
             id: self.allocate_id("item"),
             kind: "message".into(),
@@ -11791,12 +12099,58 @@ impl Runtime {
 
         match &self.backend {
             Backend::Preview => {
+                let reservation =
+                    match self.reserve_turn_start_mutation(&params, &request_fingerprint) {
+                        Ok(reservation) => reservation,
+                        Err((code, message)) => {
+                            self.emit_all(self.error_for(&request, code, message), emit);
+                            return;
+                        }
+                    };
+                if let Some(existing) = reservation.as_ref().filter(|entry| !entry.created) {
+                    if existing.operation.state
+                        == durable_mutation_ack::OperationState::ReconciliationRequired
+                    {
+                        self.emit_all(
+                            self.error_for(
+                                &request,
+                                -32153,
+                                "turn start mutation requires explicit reconciliation",
+                            ),
+                            emit,
+                        );
+                        return;
+                    }
+                    let turn_state = if existing.operation.state
+                        == durable_mutation_ack::OperationState::Terminal
+                    {
+                        "terminal"
+                    } else {
+                        "started"
+                    };
+                    match durable_turn_start_response(
+                        &request,
+                        &params,
+                        &prepared_context,
+                        &request_fingerprint,
+                        &existing.operation,
+                        turn_state,
+                    ) {
+                        Ok(message) => emit(message),
+                        Err(message) => {
+                            self.emit_all(self.error_for(&request, -32113, message), emit)
+                        }
+                    }
+                    return;
+                }
                 self.preview_turn(
                     PreviewTurn {
                         request,
                         params,
                         backend_input,
                         persistence_input,
+                        request_fingerprint,
+                        mutation_operation: reservation.map(|entry| entry.operation),
                         prepared_context,
                         user_item,
                     },
@@ -11901,6 +12255,48 @@ impl Runtime {
             .map(|lease| lease.path().to_path_buf())
             .collect::<Vec<_>>();
 
+        let reservation = match self.reserve_turn_start_mutation(&params, &request_fingerprint) {
+            Ok(reservation) => reservation,
+            Err((code, message)) => {
+                self.emit_all(self.error_for(&request, code, message), emit);
+                return;
+            }
+        };
+        if let Some(existing) = reservation.as_ref().filter(|entry| !entry.created) {
+            if existing.operation.state
+                == durable_mutation_ack::OperationState::ReconciliationRequired
+            {
+                self.emit_all(
+                    self.error_for(
+                        &request,
+                        -32153,
+                        "turn start mutation requires explicit reconciliation",
+                    ),
+                    emit,
+                );
+                return;
+            }
+            let turn_state =
+                if existing.operation.state == durable_mutation_ack::OperationState::Terminal {
+                    "terminal"
+                } else {
+                    "started"
+                };
+            match durable_turn_start_response(
+                &request,
+                &params,
+                &prepared_context,
+                &request_fingerprint,
+                &existing.operation,
+                turn_state,
+            ) {
+                Ok(message) => emit(message),
+                Err(message) => self.emit_all(self.error_for(&request, -32113, message), emit),
+            }
+            return;
+        }
+        let mut mutation_operation = reservation.map(|entry| entry.operation);
+
         let mut backend = std::mem::replace(
             &mut self.backend,
             Backend::Unavailable("Codex turn is already running".into()),
@@ -11985,6 +12381,7 @@ impl Runtime {
                                 &turn_id,
                                 &persistence_input,
                                 &params.idempotency_key,
+                                &mut mutation_operation,
                             ) {
                                 Ok(message) => message,
                                 Err(error) => {
@@ -12015,22 +12412,40 @@ impl Runtime {
                                         return;
                                     }
                                 };
-                            emit(
-                                serde_json::to_value(Response::success(
-                                    request.id.clone().unwrap_or(Value::Null),
-                                    json!({
-                                        "turn": { "id": turn_id, "state": "started" },
-                                        "context": {
-                                            "item_count": prepared_context.item_count,
-                                            "bytes": prepared_context.bytes,
-                                            "truncated": prepared_context.truncated,
-                                            "manifest": prepared_context.manifest,
-                                            "budget": prepared_context.budget
-                                        }
-                                    }),
-                                ))
-                                .expect("response serialization"),
-                            );
+                            if let Some(operation) = mutation_operation.as_ref() {
+                                match durable_turn_start_response(
+                                    &request,
+                                    &params,
+                                    &prepared_context,
+                                    &request_fingerprint,
+                                    operation,
+                                    "started",
+                                ) {
+                                    Ok(message) => emit(message),
+                                    Err(error) => {
+                                        persistence_error = Some(error);
+                                        cancellation.request();
+                                        return;
+                                    }
+                                }
+                            } else {
+                                emit(
+                                    serde_json::to_value(Response::success(
+                                        request.id.clone().unwrap_or(Value::Null),
+                                        json!({
+                                            "turn": { "id": turn_id, "state": "started" },
+                                            "context": {
+                                                "item_count": prepared_context.item_count,
+                                                "bytes": prepared_context.bytes,
+                                                "truncated": prepared_context.truncated,
+                                                "manifest": prepared_context.manifest,
+                                                "budget": prepared_context.budget
+                                            }
+                                        }),
+                                    ))
+                                    .expect("response serialization"),
+                                );
+                            }
                             emit(turn_started_message);
                             if let Some(state) = self.sessions.get_mut(&params.session_id) {
                                 state.items.push(persisted_user_item);
@@ -13011,6 +13426,7 @@ impl Runtime {
                                 pending.terminal_at_ms,
                                 &pending.trace,
                                 pending.item.clone(),
+                                &mut mutation_operation,
                             ) {
                                 Ok(message) => message,
                                 Err(error) => {
@@ -13162,6 +13578,7 @@ impl Runtime {
                                 pending.terminal_at_ms,
                                 &pending.trace,
                                 pending.item.clone(),
+                                &mut mutation_operation,
                             ) {
                                 Ok(message) => message,
                                 Err(error) => {
@@ -13276,6 +13693,7 @@ impl Runtime {
                                 pending.terminal_at_ms,
                                 &pending.trace,
                                 pending.item.clone(),
+                                &mut mutation_operation,
                             ) {
                                 Ok(message) => message,
                                 Err(error) => {
@@ -13351,6 +13769,7 @@ impl Runtime {
             state.context_threshold_status = context_threshold_status;
         }
         if let Some(error) = fatal_sequence_error {
+            let _ = self.mark_turn_mutation_reconciliation_required(&mut mutation_operation);
             self.backend = Backend::Unavailable(format!(
                 "Timeline event sequencing is unavailable: {}",
                 error.code()
@@ -13367,6 +13786,7 @@ impl Runtime {
                     pending.terminal_at_ms,
                     &pending.trace,
                     pending.item.clone(),
+                    &mut mutation_operation,
                 ) {
                     Ok(timeline_message) => {
                         terminal_persisted = true;
@@ -13448,6 +13868,7 @@ impl Runtime {
                                     terminal_at_ms,
                                     &trace,
                                     Some(item),
+                                    &mut mutation_operation,
                                 )
                             })
                     })
@@ -13470,6 +13891,15 @@ impl Runtime {
         }
         if let Some(error) = persistence_error {
             if !started {
+                if let Err(reconciliation_error) =
+                    self.mark_turn_mutation_reconciliation_required(&mut mutation_operation)
+                {
+                    self.backend = Backend::Unavailable(format!(
+                        "Durable mutation reconciliation is unavailable: {reconciliation_error}"
+                    ));
+                    self.shutdown = true;
+                    return;
+                }
                 self.emit_all(self.error_for(&request, -32113, error), emit);
             } else if !terminal_persisted {
                 self.backend = Backend::Unavailable(
@@ -13548,6 +13978,7 @@ impl Runtime {
                             terminal_at_ms,
                             &trace,
                             Some(item),
+                            &mut mutation_operation,
                         )
                     });
                 match terminal_result {
@@ -13560,11 +13991,38 @@ impl Runtime {
                     }
                 }
             } else {
+                if let Err(reconciliation_error) =
+                    self.mark_turn_mutation_reconciliation_required(&mut mutation_operation)
+                {
+                    self.backend = Backend::Unavailable(format!(
+                        "Durable mutation reconciliation is unavailable: {reconciliation_error}"
+                    ));
+                    self.shutdown = true;
+                    return;
+                }
                 self.emit_all(
                     self.error_for(&request, -32112, runtime_error_content(&error)),
                     emit,
                 );
             }
+        } else if !started {
+            if let Err(reconciliation_error) =
+                self.mark_turn_mutation_reconciliation_required(&mut mutation_operation)
+            {
+                self.backend = Backend::Unavailable(format!(
+                    "Durable mutation reconciliation is unavailable: {reconciliation_error}"
+                ));
+                self.shutdown = true;
+                return;
+            }
+            self.emit_all(
+                self.error_for(
+                    &request,
+                    -32112,
+                    "provider returned without an authoritative Turn start",
+                ),
+                emit,
+            );
         }
     }
 
@@ -13577,6 +14035,8 @@ impl Runtime {
             params,
             backend_input,
             persistence_input,
+            request_fingerprint,
+            mut mutation_operation,
             prepared_context,
             user_item,
         } = turn;
@@ -13703,7 +14163,7 @@ impl Runtime {
         user_item_request.created_at_ms = public_events[1].timestamp_ms;
         agent_item_request.created_at_ms = public_events[4].timestamp_ms;
         if let Some(store) = self.workbench_store.as_mut() {
-            let committed = store.commit_preview_turn(PreviewTurnCommit {
+            let commit = PreviewTurnCommit {
                 turn: StoredTurnCreate {
                     turn_id: turn_id.clone(),
                     session_id: params.session_id.clone(),
@@ -13714,7 +14174,34 @@ impl Runtime {
                 user_item: user_item_request,
                 agent_item: agent_item_request,
                 public_events,
-            });
+            };
+            let committed = if let Some(operation) = mutation_operation.as_ref() {
+                let terminal_expected_revision = operation
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| "preview mutation revision is exhausted".to_owned());
+                match terminal_expected_revision {
+                    Ok(terminal_expected_revision) => store
+                        .commit_preview_turn_with_mutation(
+                            commit,
+                            &PreviewMutationLedgerBinding {
+                                operation_identity: operation.operation_identity.clone(),
+                                accepted_expected_revision: operation.revision,
+                                terminal_expected_revision,
+                            },
+                        )
+                        .map(|result| {
+                            mutation_operation = Some(result.operation);
+                            result.preview
+                        }),
+                    Err(message) => {
+                        self.emit_all(self.error_for(&request, -32113, message), emit);
+                        return;
+                    }
+                }
+            } else {
+                store.commit_preview_turn(commit)
+            };
             match committed {
                 Ok(committed) => {
                     debug_assert_eq!(committed.turn.state, "completed");
@@ -13739,22 +14226,39 @@ impl Runtime {
             state.items.push(persisted_user_item);
             state.items.push(agent_item);
         }
-        emit(
-            serde_json::to_value(Response::success(
-                request.id.unwrap_or(Value::Null),
-                json!({
-                    "turn": { "id": turn_id, "state": "started" },
-                    "context": {
-                        "item_count": prepared_context.item_count,
-                        "bytes": prepared_context.bytes,
-                        "truncated": prepared_context.truncated,
-                        "manifest": prepared_context.manifest,
-                        "budget": prepared_context.budget
-                    }
-                }),
-            ))
-            .expect("response serialization"),
-        );
+        if let Some(operation) = mutation_operation.as_ref() {
+            match durable_turn_start_response(
+                &request,
+                &params,
+                &prepared_context,
+                &request_fingerprint,
+                operation,
+                "started",
+            ) {
+                Ok(message) => emit(message),
+                Err(message) => {
+                    self.emit_all(self.error_for(&request, -32113, message), emit);
+                    return;
+                }
+            }
+        } else {
+            emit(
+                serde_json::to_value(Response::success(
+                    request.id.unwrap_or(Value::Null),
+                    json!({
+                        "turn": { "id": turn_id, "state": "started" },
+                        "context": {
+                            "item_count": prepared_context.item_count,
+                            "bytes": prepared_context.bytes,
+                            "truncated": prepared_context.truncated,
+                            "manifest": prepared_context.manifest,
+                            "budget": prepared_context.budget
+                        }
+                    }),
+                ))
+                .expect("response serialization"),
+            );
+        }
         for message in timeline {
             emit(message);
         }
@@ -18757,7 +19261,8 @@ mod timeline_event_runtime_tests {
             json!({
                 "session_id": session_id,
                 "input": "must not start",
-                "idempotency_key": "turn-without-subscription"
+                "idempotency_key": "turn-without-subscription",
+                "generation": 1
             }),
         ));
 
@@ -19092,12 +19597,14 @@ mod timeline_event_runtime_tests {
             .commit(&mut runtime.event_sequencer)
             .unwrap();
 
+        let mut mutation_operation = None;
         let notification = runtime
             .persist_turn_with_timeline(
                 "clock-session",
                 "clock-next-turn",
                 "next",
                 "clock-next-key",
+                &mut mutation_operation,
             )
             .unwrap();
         assert_eq!(notification["params"]["timestamp_ms"], future_timestamp);
@@ -21734,7 +22241,8 @@ mod durable_runtime_tests {
             json!({
                 "session_id": "session-2",
                 "input": "hello durable store",
-                "idempotency_key": "turn-request-1"
+                "idempotency_key": "turn-request-1",
+                "generation": 1
             }),
         ));
         assert_eq!(events[0]["result"]["turn"]["id"], "turn-4");
@@ -21879,7 +22387,8 @@ mod durable_runtime_tests {
             json!({
                 "session_id": session_id,
                 "input": "persist before live failure",
-                "idempotency_key": "terminal-close-turn"
+                "idempotency_key": "terminal-close-turn",
+                "generation": 1
             }),
         ));
         let turn_id = turn[0]["result"]["turn"]["id"].as_str().unwrap().to_owned();
@@ -22065,7 +22574,8 @@ mod durable_runtime_tests {
             json!({
                 "session_id": &session_id,
                 "input": "persist two timeline items",
-                "idempotency_key": "automatic-recovery-turn"
+                "idempotency_key": "automatic-recovery-turn",
+                "generation": 1
             }),
         ));
         assert!(turn

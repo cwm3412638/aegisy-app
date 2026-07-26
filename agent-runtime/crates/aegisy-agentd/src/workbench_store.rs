@@ -62,7 +62,16 @@ use crate::workspace_edit_proposal::{
     WorkspaceEditProposal, WorkspaceEditProposalArtifactKind,
     EVENT_SCHEMA_VERSION as WORKSPACE_EDIT_PROPOSAL_EVENT_SCHEMA_VERSION,
 };
-use aegisy_aap::stable::v0_1::{EventEnvelope, TimelineItem, TurnState};
+use aegisy_aap::durable_mutation_ack;
+pub use aegisy_aap::durable_mutation_ack::{
+    ConsumeTarget as DurableMutationConsumptionPhase,
+    Cursor as DurableMutationAcknowledgementCursor, MutationKind as DurableMutationKind,
+    Operation as StoredDurableMutationAcknowledgement, OperationState as DurableMutationState,
+    Page as DurableMutationAcknowledgementPage,
+};
+use aegisy_aap::stable::v0_1::{
+    EventEnvelope, TimelineAnchor as MutationTimelineAnchor, TimelineItem, TurnState,
+};
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
@@ -75,7 +84,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE: &str = "aegisy-workbench.sqlite3";
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 const APPLICATION_ID: i64 = 0x4145_4759;
 const MAX_AUTHORIZATION_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 const MAX_EVENT_BYTES: usize = crate::turn_trace::MAX_DURABLE_EVENT_BYTES;
@@ -100,6 +109,11 @@ const MAX_MODEL_PROFILE_PROJECTIONS: usize = 1_025;
 const MAX_MODEL_PROFILE_EVENTS: usize = 10_000;
 const MAX_MODEL_PROFILE_JSON_BYTES: usize = 64 * 1024;
 const MAX_WORKSPACE_EDIT_PROPOSALS: usize = 10_000;
+const MAX_MUTATION_ACKNOWLEDGEMENTS: usize = 10_000;
+const MAX_MUTATION_ACKNOWLEDGEMENT_PAGE: usize = 100;
+const MAX_SAFE_DURABLE_INTEGER: u64 = 9_007_199_254_740_991;
+const MUTATION_ACKNOWLEDGEMENT_SCHEMA_VERSION: &str =
+    durable_mutation_ack::OPERATION_SCHEMA_VERSION;
 const MAX_WORKSPACE_EDIT_PROPOSAL_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_WORKSPACE_EDIT_PROPOSAL_CONTENT_BYTES: u64 = 512 * 1024;
 const MAX_WORKSPACE_EDIT_PROPOSAL_FILE_DIFF_BYTES: u64 = 512 * 1024;
@@ -188,6 +202,11 @@ const REQUIRED_WORKSPACE_EDIT_PROPOSAL_TRIGGERS: [&str; 3] = [
     "workspace_edit_proposals_immutable_update",
     "workspace_edit_proposal_artifacts_immutable_update",
     "workspace_edit_proposal_timeline_immutable_update",
+];
+const REQUIRED_MUTATION_ACKNOWLEDGEMENT_TABLES: [&str; 1] = ["mutation_acknowledgements"];
+const REQUIRED_MUTATION_ACKNOWLEDGEMENT_INDEXES: [&str; 2] = [
+    "mutation_acknowledgements_pending_idx",
+    "mutation_acknowledgements_turn_idx",
 ];
 const REQUIRED_PUBLIC_TIMELINE_TABLES: [&str; 5] = [
     "public_timeline_events",
@@ -300,6 +319,105 @@ const SESSION_WORKSPACE_BINDING_SCHEMA_SQL: &str = "
         FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
         FOREIGN KEY(project_id, root_id) REFERENCES project_roots(project_id, root_id)
     ) STRICT;
+";
+const MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS mutation_acknowledgements (
+        schema_version TEXT NOT NULL
+            CHECK(schema_version = 'mutation-acknowledgement-operation/0.1'),
+        operation_identity TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        mutation_kind TEXT NOT NULL CHECK(mutation_kind = 'turn-start'),
+        idempotency_key TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        state TEXT NOT NULL
+            CHECK(state IN ('accepted','terminal','reconciliation-required')),
+        revision INTEGER NOT NULL
+            CHECK(revision >= 1 AND revision <= 9007199254740991),
+        turn_id TEXT,
+        accepted_sequence INTEGER
+            CHECK(accepted_sequence IS NULL OR
+                  (accepted_sequence >= 1 AND accepted_sequence <= 9007199254740991)),
+        accepted_event_id TEXT,
+        accepted_timestamp_ms INTEGER
+            CHECK(accepted_timestamp_ms IS NULL OR
+                  (accepted_timestamp_ms >= 1 AND accepted_timestamp_ms <= 9007199254740991)),
+        terminal_sequence INTEGER
+            CHECK(terminal_sequence IS NULL OR
+                  (terminal_sequence >= 1 AND terminal_sequence <= 9007199254740991)),
+        terminal_event_id TEXT,
+        terminal_timestamp_ms INTEGER
+            CHECK(terminal_timestamp_ms IS NULL OR
+                  (terminal_timestamp_ms >= 1 AND terminal_timestamp_ms <= 9007199254740991)),
+        accepted_receipt_identity TEXT,
+        accepted_consumed_revision INTEGER
+            CHECK(accepted_consumed_revision IS NULL OR
+                  (accepted_consumed_revision >= 1 AND
+                   accepted_consumed_revision <= 9007199254740991)),
+        accepted_consumed_at_ms INTEGER
+            CHECK(accepted_consumed_at_ms IS NULL OR
+                  (accepted_consumed_at_ms >= 1 AND
+                   accepted_consumed_at_ms <= 9007199254740991)),
+        terminal_receipt_identity TEXT,
+        terminal_consumed_revision INTEGER
+            CHECK(terminal_consumed_revision IS NULL OR
+                  (terminal_consumed_revision >= 1 AND
+                   terminal_consumed_revision <= 9007199254740991)),
+        terminal_consumed_at_ms INTEGER
+            CHECK(terminal_consumed_at_ms IS NULL OR
+                  (terminal_consumed_at_ms >= 1 AND
+                   terminal_consumed_at_ms <= 9007199254740991)),
+        accepted_at_ms INTEGER NOT NULL
+            CHECK(accepted_at_ms >= 1 AND accepted_at_ms <= 9007199254740991),
+        updated_at_ms INTEGER NOT NULL
+            CHECK(updated_at_ms >= accepted_at_ms AND updated_at_ms <= 9007199254740991),
+        UNIQUE(session_id, mutation_kind, idempotency_key),
+        CHECK(
+            (turn_id IS NULL AND accepted_sequence IS NULL AND
+             accepted_event_id IS NULL AND accepted_timestamp_ms IS NULL)
+            OR
+            (turn_id IS NOT NULL AND accepted_sequence IS NOT NULL AND
+             accepted_event_id IS NOT NULL AND accepted_timestamp_ms IS NOT NULL)
+        ),
+        CHECK(
+            (terminal_sequence IS NULL AND terminal_event_id IS NULL AND
+             terminal_timestamp_ms IS NULL)
+            OR
+            (terminal_sequence IS NOT NULL AND terminal_event_id IS NOT NULL AND
+             terminal_timestamp_ms IS NOT NULL AND turn_id IS NOT NULL)
+        ),
+        CHECK(
+            (state = 'terminal' AND terminal_sequence IS NOT NULL)
+            OR
+            (state IN ('accepted','reconciliation-required') AND
+             terminal_sequence IS NULL)
+        ),
+        CHECK(
+            (accepted_receipt_identity IS NULL AND
+             accepted_consumed_revision IS NULL AND accepted_consumed_at_ms IS NULL)
+            OR
+            (accepted_receipt_identity IS NOT NULL AND
+             accepted_consumed_revision IS NOT NULL AND accepted_consumed_at_ms IS NOT NULL AND
+             accepted_consumed_revision <= revision AND turn_id IS NOT NULL)
+        ),
+        CHECK(
+            (terminal_receipt_identity IS NULL AND
+             terminal_consumed_revision IS NULL AND terminal_consumed_at_ms IS NULL)
+            OR
+            (terminal_receipt_identity IS NOT NULL AND
+             terminal_consumed_revision IS NOT NULL AND terminal_consumed_at_ms IS NOT NULL AND
+             terminal_consumed_revision <= revision AND state = 'terminal')
+        ),
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE RESTRICT,
+        FOREIGN KEY(turn_id) REFERENCES turns(turn_id) ON DELETE RESTRICT
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS mutation_acknowledgements_pending_idx
+        ON mutation_acknowledgements(session_id, operation_identity)
+        WHERE state = 'reconciliation-required'
+           OR accepted_receipt_identity IS NULL
+           OR (state = 'terminal' AND terminal_receipt_identity IS NULL);
+    CREATE UNIQUE INDEX IF NOT EXISTS mutation_acknowledgements_turn_idx
+        ON mutation_acknowledgements(session_id, turn_id)
+        WHERE turn_id IS NOT NULL;
 ";
 const TURN_ITEM_SCHEMA_SQL: &str = "
     CREATE TABLE turns (
@@ -919,6 +1037,38 @@ pub struct StoredOperationReconciliation {
     pub updated_at_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReserveTurnStartMutation {
+    pub session_id: String,
+    pub idempotency_key: String,
+    pub request_fingerprint: String,
+    pub accepted_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnStartMutationReservation {
+    pub operation: StoredDurableMutationAcknowledgement,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DurableMutationConsumptionReceipt {
+    receipt_identity: String,
+    revision: u64,
+    consumed_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DurableMutationLedgerRow {
+    operation: StoredDurableMutationAcknowledgement,
+    accepted_consumption: Option<DurableMutationConsumptionReceipt>,
+    terminal_consumption: Option<DurableMutationConsumptionReceipt>,
+    accepted_timestamp_ms: Option<u64>,
+    terminal_timestamp_ms: Option<u64>,
+    accepted_at_ms: u64,
+    updated_at_ms: u64,
+}
+
 #[derive(Debug, Deserialize)]
 struct GitWorkflowLifecyclePayload {
     schema_version: String,
@@ -1402,6 +1552,31 @@ pub(crate) struct PreviewTurnCommit {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct MutationLedgerBinding {
+    pub operation_identity: String,
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreviewMutationLedgerBinding {
+    pub operation_identity: String,
+    pub accepted_expected_revision: u64,
+    pub terminal_expected_revision: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoredTurnMutationCommit {
+    pub turn: StoredTurn,
+    pub operation: StoredDurableMutationAcknowledgement,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StoredPreviewTurnMutationCommit {
+    pub preview: StoredPreviewTurn,
+    pub operation: StoredDurableMutationAcknowledgement,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct StoredPreviewTurn {
     pub turn: StoredTurn,
     pub user_item: StoredItem,
@@ -1793,6 +1968,14 @@ impl WorkbenchStore {
                 "cannot verify the public timeline journal at startup",
             )
         })?;
+        store
+            .mark_open_accepted_mutations_reconciliation_required()
+            .map_err(|cause| {
+                coded_error(
+                    cause.code,
+                    "cannot reconcile accepted mutations during startup",
+                )
+            })?;
         Ok(store)
     }
 
@@ -1814,6 +1997,346 @@ impl WorkbenchStore {
 
     pub fn take_startup_rebuild_notice(&mut self, session_id: &str) -> bool {
         self.startup_rebuilt_sessions.remove(session_id)
+    }
+
+    pub fn reserve_turn_start_mutation(
+        &mut self,
+        request: ReserveTurnStartMutation,
+    ) -> Result<TurnStartMutationReservation, WorkbenchStoreError> {
+        validate_identifier(&request.session_id, "mutation session ID")?;
+        validate_identifier(&request.idempotency_key, "mutation idempotency key")?;
+        validate_lower_sha256(&request.request_fingerprint, "mutation request fingerprint")?;
+        validate_positive_safe_integer(request.accepted_at_ms, "mutation acceptance time")?;
+        self.ensure_session_writable(&request.session_id)?;
+        let mutation_kind = DurableMutationKind::TurnStart;
+        let operation_identity = durable_mutation_operation_identity(
+            &request.session_id,
+            mutation_kind,
+            &request.idempotency_key,
+            &request.request_fingerprint,
+        )?;
+        let transaction =
+            self.begin_database_write("cannot start mutation reservation transaction")?;
+        let session_status = transaction
+            .query_row(
+                "SELECT status FROM sessions WHERE session_id = ?1",
+                [&request.session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot validate mutation session"))?
+            .ok_or_else(|| error("mutation session does not exist"))?;
+        if session_status == "archived" {
+            return Err(coded_error(
+                "mutation-session-archived",
+                "cannot reserve a mutation in an archived session",
+            ));
+        }
+        if let Some(existing) = load_mutation_acknowledgement_by_key(
+            &transaction,
+            &request.session_id,
+            mutation_kind,
+            &request.idempotency_key,
+        )? {
+            if existing.operation.request_fingerprint != request.request_fingerprint
+                || existing.operation.operation_identity != operation_identity
+            {
+                return Err(coded_error(
+                    "mutation-idempotency-conflict",
+                    "mutation idempotency key is bound to a different request fingerprint",
+                ));
+            }
+            validate_mutation_acknowledgement(&transaction, &existing)?;
+            let operation = existing.operation;
+            drop(transaction);
+            return Ok(TurnStartMutationReservation {
+                operation,
+                created: false,
+            });
+        }
+        let count = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_acknowledgements",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|_| error("cannot count durable mutation acknowledgements"))?;
+        if to_u64(count, "durable mutation acknowledgement count")?
+            >= MAX_MUTATION_ACKNOWLEDGEMENTS as u64
+        {
+            return Err(coded_error(
+                "mutation-acknowledgement-limit-exceeded",
+                "durable mutation acknowledgement limit exceeded",
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT INTO mutation_acknowledgements (
+                    schema_version, operation_identity, session_id, mutation_kind,
+                    idempotency_key, request_fingerprint, state, revision,
+                    accepted_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'accepted', 1, ?7, ?7)",
+                params![
+                    MUTATION_ACKNOWLEDGEMENT_SCHEMA_VERSION,
+                    operation_identity,
+                    request.session_id,
+                    mutation_kind.as_str(),
+                    request.idempotency_key,
+                    request.request_fingerprint,
+                    to_i64(request.accepted_at_ms, "mutation acceptance time")?,
+                ],
+            )
+            .map_err(|_| error("cannot reserve durable mutation acknowledgement"))?;
+        let stored = load_mutation_acknowledgement(&transaction, &operation_identity)?
+            .ok_or_else(|| error("reserved mutation acknowledgement is missing"))?;
+        validate_mutation_acknowledgement(&transaction, &stored)?;
+        let operation = stored.operation;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit mutation reservation transaction"))?;
+        Ok(TurnStartMutationReservation {
+            operation,
+            created: true,
+        })
+    }
+
+    pub fn mark_mutation_reconciliation_required(
+        &mut self,
+        session_id: &str,
+        operation_identity: &str,
+        expected_revision: u64,
+        observed_at_ms: u64,
+    ) -> Result<StoredDurableMutationAcknowledgement, WorkbenchStoreError> {
+        validate_identifier(session_id, "mutation reconciliation session ID")?;
+        validate_durable_mutation_operation_identity(operation_identity)?;
+        validate_positive_safe_integer(expected_revision, "mutation expected revision")?;
+        validate_positive_safe_integer(observed_at_ms, "mutation reconciliation time")?;
+        let existing = load_mutation_acknowledgement(&self.connection, operation_identity)?
+            .ok_or_else(|| {
+                coded_error(
+                    "mutation-acknowledgement-not-found",
+                    "mutation acknowledgement does not exist",
+                )
+            })?;
+        if existing.operation.session_id != session_id {
+            return Err(coded_error(
+                "mutation-acknowledgement-owner-mismatch",
+                "mutation acknowledgement belongs to another session",
+            ));
+        }
+        self.ensure_session_writable(session_id)?;
+        let transaction =
+            self.begin_database_write("cannot start mutation reconciliation transaction")?;
+        let stored = mark_mutation_reconciliation_required_tx(
+            &transaction,
+            session_id,
+            operation_identity,
+            expected_revision,
+            observed_at_ms,
+        )?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit mutation reconciliation transaction"))?;
+        Ok(stored.operation)
+    }
+
+    pub fn list_unconsumed_mutation_acknowledgements(
+        &self,
+        session_id: &str,
+        cursor: Option<&DurableMutationAcknowledgementCursor>,
+        limit: usize,
+    ) -> Result<DurableMutationAcknowledgementPage, WorkbenchStoreError> {
+        validate_identifier(session_id, "mutation acknowledgement session ID")?;
+        self.ensure_session_readable(session_id)?;
+        if limit == 0 || limit > MAX_MUTATION_ACKNOWLEDGEMENT_PAGE {
+            return Err(coded_error(
+                "mutation-acknowledgement-page-limit-invalid",
+                "mutation acknowledgement page limit is invalid",
+            ));
+        }
+        if let Some(cursor) = cursor {
+            validate_mutation_acknowledgement_cursor(&self.connection, session_id, cursor)?;
+        }
+        let fetch_limit = i64::try_from(limit + 1)
+            .map_err(|_| error("mutation acknowledgement page limit is invalid"))?;
+        let mut records = if let Some(cursor) = cursor {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT schema_version, operation_identity, session_id, mutation_kind,
+                            idempotency_key, request_fingerprint, state, revision, turn_id,
+                            accepted_sequence, accepted_event_id, accepted_timestamp_ms,
+                            terminal_sequence, terminal_event_id, terminal_timestamp_ms,
+                            accepted_receipt_identity,
+                            accepted_consumed_revision, accepted_consumed_at_ms,
+                            terminal_receipt_identity, terminal_consumed_revision,
+                            terminal_consumed_at_ms, accepted_at_ms, updated_at_ms
+                     FROM mutation_acknowledgements
+                     WHERE session_id = ?1
+                       AND (state = 'reconciliation-required'
+                            OR accepted_receipt_identity IS NULL
+                            OR (state = 'terminal' AND terminal_receipt_identity IS NULL))
+                       AND operation_identity > ?2
+                     ORDER BY operation_identity LIMIT ?3",
+                )
+                .map_err(|_| error("cannot prepare mutation acknowledgement page"))?;
+            let rows = statement
+                .query_map(
+                    params![session_id, cursor.operation_identity, fetch_limit,],
+                    mutation_acknowledgement_from_row,
+                )
+                .map_err(|_| error("cannot read mutation acknowledgement page"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| error("mutation acknowledgement page row is invalid"))?;
+            rows
+        } else {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT schema_version, operation_identity, session_id, mutation_kind,
+                            idempotency_key, request_fingerprint, state, revision, turn_id,
+                            accepted_sequence, accepted_event_id, accepted_timestamp_ms,
+                            terminal_sequence, terminal_event_id, terminal_timestamp_ms,
+                            accepted_receipt_identity,
+                            accepted_consumed_revision, accepted_consumed_at_ms,
+                            terminal_receipt_identity, terminal_consumed_revision,
+                            terminal_consumed_at_ms, accepted_at_ms, updated_at_ms
+                     FROM mutation_acknowledgements
+                     WHERE session_id = ?1
+                       AND (state = 'reconciliation-required'
+                            OR accepted_receipt_identity IS NULL
+                            OR (state = 'terminal' AND terminal_receipt_identity IS NULL))
+                     ORDER BY operation_identity LIMIT ?2",
+                )
+                .map_err(|_| error("cannot prepare mutation acknowledgement page"))?;
+            let rows = statement
+                .query_map(
+                    params![session_id, fetch_limit],
+                    mutation_acknowledgement_from_row,
+                )
+                .map_err(|_| error("cannot read mutation acknowledgement page"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| error("mutation acknowledgement page row is invalid"))?;
+            rows
+        };
+        for record in &records {
+            validate_mutation_acknowledgement(&self.connection, record)?;
+        }
+        let complete = records.len() <= limit;
+        if !complete {
+            records.truncate(limit);
+        }
+        let operations = records
+            .into_iter()
+            .map(|record| record.operation)
+            .collect::<Vec<_>>();
+        let next_after = if complete {
+            None
+        } else {
+            operations
+                .last()
+                .map(|operation| DurableMutationAcknowledgementCursor {
+                    operation_identity: operation.operation_identity.clone(),
+                    revision: operation.revision,
+                })
+        };
+        let page = DurableMutationAcknowledgementPage {
+            schema_version: durable_mutation_ack::PAGE_SCHEMA_VERSION.into(),
+            session_id: session_id.into(),
+            after: cursor.cloned(),
+            operations,
+            next_after,
+            complete,
+        };
+        page.validate()
+            .map_err(|cause| coded_error("mutation-acknowledgement-page-invalid", cause))?;
+        Ok(page)
+    }
+
+    pub fn consume_mutation_acknowledgement(
+        &mut self,
+        session_id: &str,
+        operation_identity: &str,
+        phase: DurableMutationConsumptionPhase,
+        expected_revision: u64,
+        confirmed_anchor: &MutationTimelineAnchor,
+        consumed_at_ms: u64,
+    ) -> Result<StoredDurableMutationAcknowledgement, WorkbenchStoreError> {
+        validate_identifier(session_id, "mutation consumption session ID")?;
+        validate_durable_mutation_operation_identity(operation_identity)?;
+        validate_positive_safe_integer(expected_revision, "mutation consumption revision")?;
+        validate_positive_safe_integer(consumed_at_ms, "mutation consumption time")?;
+        let existing = load_mutation_acknowledgement(&self.connection, operation_identity)?
+            .ok_or_else(|| {
+                coded_error(
+                    "mutation-acknowledgement-not-found",
+                    "mutation acknowledgement does not exist",
+                )
+            })?;
+        if existing.operation.session_id != session_id {
+            return Err(coded_error(
+                "mutation-acknowledgement-owner-mismatch",
+                "mutation acknowledgement belongs to another session",
+            ));
+        }
+        self.ensure_session_writable(session_id)?;
+        let transaction =
+            self.begin_database_write("cannot start mutation consumption transaction")?;
+        let stored = consume_mutation_acknowledgement_tx(
+            &transaction,
+            session_id,
+            operation_identity,
+            phase,
+            expected_revision,
+            confirmed_anchor,
+            consumed_at_ms,
+        )?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit mutation consumption transaction"))?;
+        Ok(stored.operation)
+    }
+
+    fn mark_open_accepted_mutations_reconciliation_required(
+        &mut self,
+    ) -> Result<(), WorkbenchStoreError> {
+        let accepted_count = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_acknowledgements WHERE state = 'accepted'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|_| error("cannot count accepted mutation acknowledgements"))?;
+        if accepted_count == 0 {
+            return Ok(());
+        }
+        let observed_at_ms = now_ms_for_store().clamp(1, MAX_SAFE_DURABLE_INTEGER);
+        let transaction = self.begin_database_write(
+            "cannot start accepted mutation startup reconciliation transaction",
+        )?;
+        let changed = transaction
+            .execute(
+                "UPDATE mutation_acknowledgements
+                 SET state = 'reconciliation-required', revision = revision + 1,
+                     updated_at_ms = CASE
+                         WHEN updated_at_ms < ?1 THEN ?1 ELSE updated_at_ms END
+                 WHERE state = 'accepted' AND revision < 9007199254740991",
+                [to_i64(
+                    observed_at_ms,
+                    "mutation startup reconciliation time",
+                )?],
+            )
+            .map_err(|_| error("cannot reconcile accepted mutations during startup"))?;
+        if changed as i64 != accepted_count {
+            return Err(error(
+                "accepted mutation revision cannot advance during startup",
+            ));
+        }
+        verify_mutation_acknowledgement_store(&transaction)?;
+        transaction
+            .commit()
+            .map_err(|_| error("cannot commit accepted mutation startup reconciliation"))
     }
 
     fn ensure_session_writable(&self, session_id: &str) -> Result<(), WorkbenchStoreError> {
@@ -6820,6 +7343,12 @@ impl WorkbenchStore {
                 .map_err(|_| error("cannot purge deleted session background jobs"))?;
             transaction
                 .execute(
+                    "DELETE FROM mutation_acknowledgements WHERE session_id = ?1",
+                    [&member.session_id],
+                )
+                .map_err(|_| error("cannot purge deleted session mutation acknowledgements"))?;
+            transaction
+                .execute(
                     "DELETE FROM items WHERE session_id = ?1",
                     [&member.session_id],
                 )
@@ -7424,7 +7953,8 @@ impl WorkbenchStore {
         &mut self,
         request: StoredTurnCreate,
     ) -> Result<StoredTurn, WorkbenchStoreError> {
-        self.create_turn_internal(request, None)
+        self.create_turn_internal(request, None, None)
+            .map(|result| result.0)
     }
 
     pub(crate) fn create_turn_with_public_event(
@@ -7432,14 +7962,36 @@ impl WorkbenchStore {
         request: StoredTurnCreate,
         public_event: &EventEnvelope,
     ) -> Result<StoredTurn, WorkbenchStoreError> {
-        self.create_turn_internal(request, Some(public_event))
+        self.create_turn_internal(request, Some(public_event), None)
+            .map(|result| result.0)
+    }
+
+    pub(crate) fn create_turn_with_public_event_and_mutation(
+        &mut self,
+        request: StoredTurnCreate,
+        public_event: &EventEnvelope,
+        mutation: &MutationLedgerBinding,
+    ) -> Result<StoredTurnMutationCommit, WorkbenchStoreError> {
+        let (turn, operation) =
+            self.create_turn_internal(request, Some(public_event), Some(mutation))?;
+        Ok(StoredTurnMutationCommit {
+            turn,
+            operation: operation.ok_or_else(|| error("accepted mutation result is missing"))?,
+        })
     }
 
     fn create_turn_internal(
         &mut self,
         request: StoredTurnCreate,
         public_event: Option<&EventEnvelope>,
-    ) -> Result<StoredTurn, WorkbenchStoreError> {
+        mutation: Option<&MutationLedgerBinding>,
+    ) -> Result<(StoredTurn, Option<StoredDurableMutationAcknowledgement>), WorkbenchStoreError>
+    {
+        if mutation.is_some() && public_event.is_none() {
+            return Err(error(
+                "mutation accepted binding requires a public Turn-start event",
+            ));
+        }
         validate_identifier(&request.turn_id, "turn ID")?;
         validate_identifier(&request.session_id, "turn session ID")?;
         self.ensure_session_writable(&request.session_id)?;
@@ -7489,16 +8041,26 @@ impl WorkbenchStore {
                     ));
                 }
                 let stored = load_turn_from_connection(&transaction, &request.turn_id)?;
+                let mut operation = None;
                 if let Some(public_event) = public_event {
                     public_timeline_journal::append_event_tx(&transaction, public_event)
                         .map_err(public_timeline_error)?;
+                    if let Some(mutation) = mutation {
+                        operation = Some(bind_mutation_accepted_in_transaction(
+                            &transaction,
+                            &mutation.operation_identity,
+                            mutation.expected_revision,
+                            &request.turn_id,
+                            public_event,
+                        )?);
+                    }
                     transaction
                         .commit()
                         .map_err(|_| error("cannot commit idempotent turn timeline transaction"))?;
                 } else {
                     drop(transaction);
                 }
-                return Ok(stored);
+                return Ok((stored, operation));
             }
         }
         transaction
@@ -7547,17 +8109,55 @@ impl WorkbenchStore {
             public_timeline_journal::append_event_tx(&transaction, public_event)
                 .map_err(public_timeline_error)?;
         }
+        let operation = match (mutation, public_event) {
+            (Some(mutation), Some(public_event)) => Some(bind_mutation_accepted_in_transaction(
+                &transaction,
+                &mutation.operation_identity,
+                mutation.expected_revision,
+                &request.turn_id,
+                public_event,
+            )?),
+            (None, _) => None,
+            (Some(_), None) => unreachable!("mutation binding requires public event"),
+        };
         let stored = load_turn_from_connection(&transaction, &request.turn_id)?;
         transaction
             .commit()
             .map_err(|_| error("cannot commit turn transaction"))?;
-        Ok(stored)
+        Ok((stored, operation))
     }
 
     pub(crate) fn commit_preview_turn(
         &mut self,
         request: PreviewTurnCommit,
     ) -> Result<StoredPreviewTurn, WorkbenchStoreError> {
+        self.commit_preview_turn_internal(request, None)
+            .map(|result| result.0)
+    }
+
+    pub(crate) fn commit_preview_turn_with_mutation(
+        &mut self,
+        request: PreviewTurnCommit,
+        mutation: &PreviewMutationLedgerBinding,
+    ) -> Result<StoredPreviewTurnMutationCommit, WorkbenchStoreError> {
+        let (preview, operation) = self.commit_preview_turn_internal(request, Some(mutation))?;
+        Ok(StoredPreviewTurnMutationCommit {
+            preview,
+            operation: operation.ok_or_else(|| error("terminal mutation result is missing"))?,
+        })
+    }
+
+    fn commit_preview_turn_internal(
+        &mut self,
+        request: PreviewTurnCommit,
+        mutation: Option<&PreviewMutationLedgerBinding>,
+    ) -> Result<
+        (
+            StoredPreviewTurn,
+            Option<StoredDurableMutationAcknowledgement>,
+        ),
+        WorkbenchStoreError,
+    > {
         validate_identifier(&request.turn.turn_id, "turn ID")?;
         validate_identifier(&request.turn.session_id, "turn session ID")?;
         self.ensure_session_writable(&request.turn.session_id)?;
@@ -7693,15 +8293,41 @@ impl WorkbenchStore {
             public_timeline_journal::append_event_tx(&transaction, event)
                 .map_err(public_timeline_error)?;
         }
+        let operation = if let Some(mutation) = mutation {
+            let accepted = bind_mutation_accepted_in_transaction(
+                &transaction,
+                &mutation.operation_identity,
+                mutation.accepted_expected_revision,
+                &request.turn.turn_id,
+                &request.public_events[0],
+            )?;
+            if accepted.revision != mutation.terminal_expected_revision {
+                return Err(coded_error(
+                    "mutation-acknowledgement-cas-failed",
+                    "preview mutation terminal revision does not follow accepted binding",
+                ));
+            }
+            Some(bind_mutation_terminal_in_transaction(
+                &transaction,
+                &mutation.operation_identity,
+                mutation.terminal_expected_revision,
+                &request.public_events[5],
+            )?)
+        } else {
+            None
+        };
         let turn = load_turn_from_connection(&transaction, &request.turn.turn_id)?;
         transaction
             .commit()
             .map_err(|_| error("cannot commit preview turn transaction"))?;
-        Ok(StoredPreviewTurn {
-            turn,
-            user_item,
-            agent_item,
-        })
+        Ok((
+            StoredPreviewTurn {
+                turn,
+                user_item,
+                agent_item,
+            },
+            operation,
+        ))
     }
 
     pub fn load_turn(&self, turn_id: &str) -> Result<StoredTurn, WorkbenchStoreError> {
@@ -7870,7 +8496,8 @@ impl WorkbenchStore {
         state: &str,
         updated_at_ms: u64,
     ) -> Result<StoredTurn, WorkbenchStoreError> {
-        self.finish_turn_internal(session_id, turn_id, state, updated_at_ms, None, None)
+        self.finish_turn_internal(session_id, turn_id, state, updated_at_ms, None, None, None)
+            .map(|result| result.0)
     }
 
     #[cfg(test)]
@@ -7889,7 +8516,9 @@ impl WorkbenchStore {
             updated_at_ms,
             None,
             Some(public_projection),
+            None,
         )
+        .map(|result| result.0)
     }
 
     #[cfg(test)]
@@ -7909,7 +8538,9 @@ impl WorkbenchStore {
             updated_at_ms,
             Some(prepared_trace),
             None,
+            None,
         )
+        .map(|result| result.0)
     }
 
     pub(crate) fn finish_turn_with_trace_and_public_event(
@@ -7929,9 +8560,41 @@ impl WorkbenchStore {
             updated_at_ms,
             Some(prepared_trace),
             Some(public_projection),
+            None,
         )
+        .map(|result| result.0)
     }
 
+    // The mutation binding is part of the same atomic terminal transaction; keep
+    // the explicit arguments aligned with the legacy trace API.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finish_turn_with_trace_public_event_and_mutation(
+        &mut self,
+        session_id: &str,
+        turn_id: &str,
+        state: &str,
+        updated_at_ms: u64,
+        trace: &TurnTrace,
+        public_projection: (Option<StoredItemAppend>, &EventEnvelope),
+        mutation: &MutationLedgerBinding,
+    ) -> Result<StoredTurnMutationCommit, WorkbenchStoreError> {
+        let prepared_trace = prepare_turn_trace_record(session_id, turn_id, state, trace)?;
+        let (turn, operation) = self.finish_turn_internal(
+            session_id,
+            turn_id,
+            state,
+            updated_at_ms,
+            Some(prepared_trace),
+            Some(public_projection),
+            Some(mutation),
+        )?;
+        Ok(StoredTurnMutationCommit {
+            turn,
+            operation: operation.ok_or_else(|| error("terminal mutation result is missing"))?,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn finish_turn_internal(
         &mut self,
         session_id: &str,
@@ -7940,7 +8603,14 @@ impl WorkbenchStore {
         updated_at_ms: u64,
         prepared_trace: Option<PreparedTurnTraceRecord>,
         public_projection: Option<(Option<StoredItemAppend>, &EventEnvelope)>,
-    ) -> Result<StoredTurn, WorkbenchStoreError> {
+        mutation: Option<&MutationLedgerBinding>,
+    ) -> Result<(StoredTurn, Option<StoredDurableMutationAcknowledgement>), WorkbenchStoreError>
+    {
+        if mutation.is_some() && public_projection.is_none() {
+            return Err(error(
+                "mutation terminal binding requires a public Turn terminal event",
+            ));
+        }
         let (terminal_item, public_event) = public_projection
             .map(|(item, event)| (item, Some(event)))
             .unwrap_or((None, None));
@@ -8058,7 +8728,7 @@ impl WorkbenchStore {
                         ));
                     }
                     drop(transaction);
-                    return Ok(stored);
+                    return Ok((stored, None));
                 }
                 return Err(coded_error(
                     "turn-trace-conflict",
@@ -8133,11 +8803,21 @@ impl WorkbenchStore {
             public_timeline_journal::append_event_tx(&transaction, public_event)
                 .map_err(public_timeline_error)?;
         }
+        let operation = match (mutation, public_event) {
+            (Some(mutation), Some(public_event)) => Some(bind_mutation_terminal_in_transaction(
+                &transaction,
+                &mutation.operation_identity,
+                mutation.expected_revision,
+                public_event,
+            )?),
+            (None, _) => None,
+            (Some(_), None) => unreachable!("mutation binding requires public event"),
+        };
         let stored = load_turn_from_connection(&transaction, turn_id)?;
         transaction
             .commit()
             .map_err(|_| error("cannot commit turn completion transaction"))?;
-        Ok(stored)
+        Ok((stored, operation))
     }
 
     pub fn read_turn_trace(
@@ -11992,6 +12672,22 @@ impl WorkbenchStore {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
+        if version == 19 {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| error("cannot start mutation acknowledgement migration"))?;
+            transaction
+                .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
+            verify_required_schema(&transaction)?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|_| error("cannot update workbench schema version"))?;
+            return transaction
+                .commit()
+                .map_err(|_| error("cannot commit mutation acknowledgement migration"));
+        }
         if version == 18 {
             let transaction = self
                 .connection
@@ -12008,6 +12704,9 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply proposal Timeline reference migration"))?;
+            transaction
+                .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -12024,6 +12723,9 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply workspace edit proposal migration"))?;
+            transaction
+                .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -12042,6 +12744,9 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply workspace edit proposal migration"))?;
+            transaction
+                .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -12060,6 +12765,9 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply workspace edit proposal migration"))?;
+            transaction
+                .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -12077,6 +12785,9 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply workspace edit proposal migration"))?;
+            transaction
+                .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -12097,6 +12808,9 @@ impl WorkbenchStore {
             transaction
                 .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
                 .map_err(|_| error("cannot apply workspace edit proposal migration"))?;
+            transaction
+                .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
+                .map_err(|_| error("cannot apply mutation acknowledgement migration"))?;
             verify_required_schema(&transaction)?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -12479,6 +13193,7 @@ impl WorkbenchStore {
         verify_background_scheduler_lease_store(&self.connection)?;
         verify_background_recovery_decision_store(&self.connection)?;
         verify_background_notification_store(&self.connection)?;
+        verify_mutation_acknowledgement_store(&self.connection)?;
         verify_model_profile_store(self)?;
         verify_session_workspace_binding_store(self)
     }
@@ -17574,6 +18289,830 @@ fn now_ms_for_store() -> u64 {
         .unwrap_or(0)
 }
 
+fn validate_positive_safe_integer(value: u64, label: &str) -> Result<(), WorkbenchStoreError> {
+    if value == 0 || value > MAX_SAFE_DURABLE_INTEGER {
+        return Err(error(format!("{label} is out of range")));
+    }
+    Ok(())
+}
+
+fn durable_mutation_operation_identity(
+    session_id: &str,
+    mutation_kind: DurableMutationKind,
+    idempotency_key: &str,
+    request_fingerprint: &str,
+) -> Result<String, WorkbenchStoreError> {
+    durable_mutation_ack::operation_identity(
+        session_id,
+        mutation_kind,
+        idempotency_key,
+        request_fingerprint,
+    )
+    .map_err(|cause| coded_error("mutation-operation-identity-invalid", cause))
+}
+
+fn validate_durable_mutation_operation_identity(
+    operation_identity: &str,
+) -> Result<(), WorkbenchStoreError> {
+    let Some(hash) =
+        operation_identity.strip_prefix(durable_mutation_ack::OPERATION_IDENTITY_PREFIX)
+    else {
+        return Err(error("mutation operation identity is invalid"));
+    };
+    validate_lower_sha256(hash, "mutation operation identity")
+}
+
+fn durable_mutation_receipt_identity(
+    operation_identity: &str,
+    phase: DurableMutationConsumptionPhase,
+    revision: u64,
+    consumed_at_ms: u64,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"aegisy-durable-mutation-consumption/0.1\0");
+    for value in [operation_identity, mutation_consumption_phase_name(phase)] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update(revision.to_be_bytes());
+    digest.update(consumed_at_ms.to_be_bytes());
+    format!("mutation-consumption:sha256:{:x}", digest.finalize())
+}
+
+fn mutation_consumption_phase_name(phase: DurableMutationConsumptionPhase) -> &'static str {
+    match phase {
+        DurableMutationConsumptionPhase::Accepted => "accepted",
+        DurableMutationConsumptionPhase::Terminal => "terminal",
+    }
+}
+
+fn parse_durable_mutation_kind(value: &str) -> rusqlite::Result<DurableMutationKind> {
+    match value {
+        "turn-start" => Ok(DurableMutationKind::TurnStart),
+        _ => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "durable mutation kind is invalid",
+            ),
+        ))),
+    }
+}
+
+fn parse_durable_mutation_state(value: &str) -> rusqlite::Result<DurableMutationState> {
+    match value {
+        "accepted" => Ok(DurableMutationState::Accepted),
+        "terminal" => Ok(DurableMutationState::Terminal),
+        "reconciliation-required" => Ok(DurableMutationState::ReconciliationRequired),
+        _ => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "durable mutation state is invalid",
+            ),
+        ))),
+    }
+}
+
+fn mutation_anchor_from_columns(
+    sequence: Option<i64>,
+    event_id: Option<String>,
+    timestamp_ms: Option<i64>,
+) -> rusqlite::Result<(Option<MutationTimelineAnchor>, Option<u64>)> {
+    match (sequence, event_id, timestamp_ms) {
+        (None, None, None) => Ok((None, None)),
+        (Some(sequence), Some(event_id), Some(timestamp_ms)) => Ok((
+            Some(MutationTimelineAnchor {
+                sequence: to_u64_sql(sequence, "mutation anchor sequence")?,
+                event_id: Some(event_id),
+            }),
+            Some(to_u64_sql(timestamp_ms, "mutation anchor timestamp")?),
+        )),
+        _ => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "durable mutation anchor is incomplete",
+            ),
+        ))),
+    }
+}
+
+fn mutation_receipt_from_columns(
+    receipt_identity: Option<String>,
+    revision: Option<i64>,
+    consumed_at_ms: Option<i64>,
+) -> rusqlite::Result<Option<DurableMutationConsumptionReceipt>> {
+    match (receipt_identity, revision, consumed_at_ms) {
+        (None, None, None) => Ok(None),
+        (Some(receipt_identity), Some(revision), Some(consumed_at_ms)) => {
+            Ok(Some(DurableMutationConsumptionReceipt {
+                receipt_identity,
+                revision: to_u64_sql(revision, "mutation consumption revision")?,
+                consumed_at_ms: to_u64_sql(consumed_at_ms, "mutation consumption time")?,
+            }))
+        }
+        _ => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "durable mutation consumption receipt is incomplete",
+            ),
+        ))),
+    }
+}
+
+fn mutation_acknowledgement_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<DurableMutationLedgerRow> {
+    let (accepted_anchor, accepted_timestamp_ms) =
+        mutation_anchor_from_columns(row.get(9)?, row.get(10)?, row.get(11)?)?;
+    let (terminal_anchor, terminal_timestamp_ms) =
+        mutation_anchor_from_columns(row.get(12)?, row.get(13)?, row.get(14)?)?;
+    let accepted_consumption =
+        mutation_receipt_from_columns(row.get(15)?, row.get(16)?, row.get(17)?)?;
+    let terminal_consumption =
+        mutation_receipt_from_columns(row.get(18)?, row.get(19)?, row.get(20)?)?;
+    Ok(DurableMutationLedgerRow {
+        operation: StoredDurableMutationAcknowledgement {
+            schema_version: row.get(0)?,
+            operation_identity: row.get(1)?,
+            session_id: row.get(2)?,
+            mutation_kind: parse_durable_mutation_kind(&row.get::<_, String>(3)?)?,
+            idempotency_key: row.get(4)?,
+            request_fingerprint: row.get(5)?,
+            state: parse_durable_mutation_state(&row.get::<_, String>(6)?)?,
+            revision: to_u64_sql(row.get(7)?, "mutation acknowledgement revision")?,
+            turn_id: row.get(8)?,
+            accepted_anchor,
+            terminal_anchor,
+            accepted_consumed: accepted_consumption.is_some(),
+            terminal_consumed: terminal_consumption.is_some(),
+        },
+        accepted_consumption,
+        terminal_consumption,
+        accepted_timestamp_ms,
+        terminal_timestamp_ms,
+        accepted_at_ms: to_u64_sql(row.get(21)?, "mutation acceptance time")?,
+        updated_at_ms: to_u64_sql(row.get(22)?, "mutation update time")?,
+    })
+}
+
+const MUTATION_ACKNOWLEDGEMENT_SELECT: &str =
+    "SELECT schema_version, operation_identity, session_id, mutation_kind,
+            idempotency_key, request_fingerprint, state, revision, turn_id,
+            accepted_sequence, accepted_event_id, accepted_timestamp_ms,
+            terminal_sequence, terminal_event_id, terminal_timestamp_ms,
+            accepted_receipt_identity, accepted_consumed_revision,
+            accepted_consumed_at_ms, terminal_receipt_identity,
+            terminal_consumed_revision, terminal_consumed_at_ms,
+            accepted_at_ms, updated_at_ms
+     FROM mutation_acknowledgements";
+
+fn load_mutation_acknowledgement(
+    connection: &Connection,
+    operation_identity: &str,
+) -> Result<Option<DurableMutationLedgerRow>, WorkbenchStoreError> {
+    connection
+        .query_row(
+            &format!("{MUTATION_ACKNOWLEDGEMENT_SELECT} WHERE operation_identity = ?1"),
+            [operation_identity],
+            mutation_acknowledgement_from_row,
+        )
+        .optional()
+        .map_err(|_| error("cannot read durable mutation acknowledgement"))
+}
+
+fn load_mutation_acknowledgement_by_key(
+    connection: &Connection,
+    session_id: &str,
+    mutation_kind: DurableMutationKind,
+    idempotency_key: &str,
+) -> Result<Option<DurableMutationLedgerRow>, WorkbenchStoreError> {
+    connection
+        .query_row(
+            &format!(
+                "{MUTATION_ACKNOWLEDGEMENT_SELECT}
+                 WHERE session_id = ?1 AND mutation_kind = ?2 AND idempotency_key = ?3"
+            ),
+            params![session_id, mutation_kind.as_str(), idempotency_key],
+            mutation_acknowledgement_from_row,
+        )
+        .optional()
+        .map_err(|_| error("cannot read mutation idempotency record"))
+}
+
+fn validate_mutation_timeline_anchor(
+    connection: &Connection,
+    operation: &StoredDurableMutationAcknowledgement,
+    anchor: &MutationTimelineAnchor,
+    timestamp_ms: u64,
+    expected_event: Option<&str>,
+) -> Result<EventEnvelope, WorkbenchStoreError> {
+    anchor
+        .validate()
+        .map_err(|cause| coded_error("mutation-timeline-anchor-invalid", cause))?;
+    let event = connection
+        .query_row(
+            "SELECT event_id, timestamp_ms, turn_id, envelope_json
+             FROM public_timeline_events WHERE session_id = ?1 AND sequence = ?2",
+            params![
+                operation.session_id,
+                to_i64(anchor.sequence, "mutation timeline anchor sequence")?
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| error("cannot read mutation timeline anchor"))?
+        .ok_or_else(|| error("mutation timeline anchor event is missing"))?;
+    if anchor.event_id.as_deref() != Some(event.0.as_str())
+        || timestamp_ms != to_u64(event.1, "mutation timeline timestamp")?
+        || operation.turn_id.as_deref() != Some(event.2.as_str())
+    {
+        return Err(error("mutation timeline anchor binding is invalid"));
+    }
+    let envelope: EventEnvelope = serde_json::from_str(&event.3)
+        .map_err(|_| error("mutation timeline anchor envelope is invalid"))?;
+    envelope
+        .validate()
+        .map_err(|cause| coded_error("mutation-timeline-envelope-invalid", cause))?;
+    if envelope.session_id != operation.session_id
+        || operation.turn_id.as_deref() != Some(envelope.turn_id.as_str())
+        || envelope.sequence != anchor.sequence
+        || anchor.event_id.as_deref() != Some(envelope.event_id.as_str())
+        || envelope.timestamp_ms != timestamp_ms
+        || expected_event.is_some_and(|expected| envelope.event != expected)
+    {
+        return Err(error("mutation timeline envelope binding is invalid"));
+    }
+    Ok(envelope)
+}
+
+fn validate_mutation_acknowledgement(
+    connection: &Connection,
+    stored: &DurableMutationLedgerRow,
+) -> Result<(), WorkbenchStoreError> {
+    let operation = &stored.operation;
+    operation
+        .validate()
+        .map_err(|cause| coded_error("mutation-acknowledgement-invalid", cause))?;
+    validate_positive_safe_integer(stored.accepted_at_ms, "mutation acceptance time")?;
+    validate_positive_safe_integer(stored.updated_at_ms, "mutation update time")?;
+    if stored.updated_at_ms < stored.accepted_at_ms {
+        return Err(error("mutation acknowledgement time moved backwards"));
+    }
+    let session_exists = connection
+        .query_row(
+            "SELECT 1 FROM sessions WHERE session_id = ?1",
+            [&operation.session_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|_| error("cannot validate mutation session binding"))?
+        .is_some();
+    if !session_exists {
+        return Err(error("mutation acknowledgement session is missing"));
+    }
+    if let Some(turn_id) = operation.turn_id.as_deref() {
+        let turn_session = connection
+            .query_row(
+                "SELECT session_id FROM turns WHERE turn_id = ?1",
+                [turn_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot validate mutation turn binding"))?;
+        if turn_session.as_deref() != Some(operation.session_id.as_str()) {
+            return Err(error("mutation acknowledgement turn binding is invalid"));
+        }
+    }
+    if let Some(anchor) = operation.accepted_anchor.as_ref() {
+        let timestamp_ms = stored
+            .accepted_timestamp_ms
+            .ok_or_else(|| error("mutation accepted timestamp is missing"))?;
+        let envelope = validate_mutation_timeline_anchor(
+            connection,
+            operation,
+            anchor,
+            timestamp_ms,
+            Some("turn.started"),
+        )?;
+        if envelope.turn_state != TurnState::Running || envelope.item.is_some() {
+            return Err(error("mutation accepted Timeline event is invalid"));
+        }
+    }
+    if let Some(anchor) = operation.terminal_anchor.as_ref() {
+        let timestamp_ms = stored
+            .terminal_timestamp_ms
+            .ok_or_else(|| error("mutation terminal timestamp is missing"))?;
+        let envelope =
+            validate_mutation_timeline_anchor(connection, operation, anchor, timestamp_ms, None)?;
+        if !matches!(
+            (envelope.event.as_str(), envelope.turn_state),
+            ("turn.completed", TurnState::Completed)
+                | ("turn.failed", TurnState::Failed)
+                | ("turn.interrupted", TurnState::Interrupted)
+        ) {
+            return Err(error("mutation terminal Timeline event is invalid"));
+        }
+    }
+    for (phase, receipt) in [
+        (
+            DurableMutationConsumptionPhase::Accepted,
+            stored.accepted_consumption.as_ref(),
+        ),
+        (
+            DurableMutationConsumptionPhase::Terminal,
+            stored.terminal_consumption.as_ref(),
+        ),
+    ] {
+        if let Some(receipt) = receipt {
+            validate_positive_safe_integer(receipt.revision, "mutation receipt revision")?;
+            validate_positive_safe_integer(receipt.consumed_at_ms, "mutation receipt time")?;
+            if receipt.revision > operation.revision
+                || receipt.consumed_at_ms < stored.accepted_at_ms
+                || receipt.consumed_at_ms > stored.updated_at_ms
+                || receipt.receipt_identity
+                    != durable_mutation_receipt_identity(
+                        &operation.operation_identity,
+                        phase,
+                        receipt.revision,
+                        receipt.consumed_at_ms,
+                    )
+            {
+                return Err(error("mutation consumption receipt is invalid"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_mutation_acknowledgement_store(
+    connection: &Connection,
+) -> Result<(), WorkbenchStoreError> {
+    let count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM mutation_acknowledgements",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|_| error("cannot count durable mutation acknowledgements"))?;
+    if to_u64(count, "durable mutation acknowledgement count")?
+        > MAX_MUTATION_ACKNOWLEDGEMENTS as u64
+    {
+        return Err(error(
+            "durable mutation acknowledgement count exceeds its startup limit",
+        ));
+    }
+    let mut statement = connection
+        .prepare(&format!(
+            "{MUTATION_ACKNOWLEDGEMENT_SELECT} ORDER BY operation_identity LIMIT ?1"
+        ))
+        .map_err(|_| error("cannot prepare mutation acknowledgement startup scan"))?;
+    let rows = statement
+        .query_map(
+            [MAX_MUTATION_ACKNOWLEDGEMENTS as i64 + 1],
+            mutation_acknowledgement_from_row,
+        )
+        .map_err(|_| error("cannot read mutation acknowledgement startup scan"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| error("mutation acknowledgement startup row is invalid"))?;
+    if rows.len() > MAX_MUTATION_ACKNOWLEDGEMENTS {
+        return Err(error(
+            "durable mutation acknowledgement startup limit exceeded",
+        ));
+    }
+    rows.iter()
+        .try_for_each(|row| validate_mutation_acknowledgement(connection, row))
+}
+
+fn validate_mutation_acknowledgement_cursor(
+    connection: &Connection,
+    session_id: &str,
+    cursor: &DurableMutationAcknowledgementCursor,
+) -> Result<(), WorkbenchStoreError> {
+    cursor
+        .validate()
+        .map_err(|cause| coded_error("mutation-acknowledgement-cursor-invalid", cause))?;
+    let stored = load_mutation_acknowledgement(connection, &cursor.operation_identity)?
+        .ok_or_else(|| error("mutation acknowledgement cursor does not exist"))?;
+    if stored.operation.session_id != session_id || stored.operation.revision != cursor.revision {
+        return Err(coded_error(
+            "mutation-acknowledgement-cursor-drift",
+            "mutation acknowledgement cursor no longer matches its operation",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn bind_mutation_accepted_in_transaction(
+    transaction: &Transaction<'_>,
+    operation_identity: &str,
+    expected_revision: u64,
+    turn_id: &str,
+    accepted_event: &EventEnvelope,
+) -> Result<StoredDurableMutationAcknowledgement, WorkbenchStoreError> {
+    validate_durable_mutation_operation_identity(operation_identity)?;
+    validate_positive_safe_integer(expected_revision, "mutation accepted revision")?;
+    validate_identifier(turn_id, "mutation accepted turn ID")?;
+    accepted_event
+        .validate()
+        .map_err(|cause| coded_error("mutation-accepted-event-invalid", cause))?;
+    if accepted_event.event != "turn.started"
+        || accepted_event.turn_state != TurnState::Running
+        || accepted_event.turn_id != turn_id
+        || accepted_event.item.is_some()
+    {
+        return Err(coded_error(
+            "mutation-accepted-event-invalid",
+            "mutation accepted event is not a Turn-start envelope",
+        ));
+    }
+    let current =
+        load_mutation_acknowledgement(transaction, operation_identity)?.ok_or_else(|| {
+            coded_error(
+                "mutation-acknowledgement-not-found",
+                "mutation acknowledgement does not exist",
+            )
+        })?;
+    validate_mutation_acknowledgement(transaction, &current)?;
+    let accepted_anchor = MutationTimelineAnchor {
+        sequence: accepted_event.sequence,
+        event_id: Some(accepted_event.event_id.clone()),
+    };
+    if current.operation.turn_id.as_deref() == Some(turn_id)
+        && current.operation.accepted_anchor.as_ref() == Some(&accepted_anchor)
+    {
+        return Ok(current.operation);
+    }
+    if current.operation.state == DurableMutationState::ReconciliationRequired {
+        return Err(coded_error(
+            "mutation-reconciliation-required",
+            "an uncertain mutation cannot be rebound or redispatched",
+        ));
+    }
+    if current.operation.state != DurableMutationState::Accepted
+        || current.operation.revision != expected_revision
+        || current.operation.turn_id.is_some()
+        || current.operation.accepted_anchor.is_some()
+        || accepted_event.session_id != current.operation.session_id
+        || accepted_event.timestamp_ms < current.accepted_at_ms
+    {
+        return Err(coded_error(
+            "mutation-acknowledgement-cas-failed",
+            "mutation accepted binding changed before commit",
+        ));
+    }
+    let turn_binding = transaction
+        .query_row(
+            "SELECT session_id FROM turns WHERE turn_id = ?1",
+            [turn_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| error("cannot validate accepted mutation turn"))?;
+    if turn_binding.as_deref() != Some(current.operation.session_id.as_str()) {
+        return Err(error("accepted mutation turn binding is invalid"));
+    }
+    let revision = expected_revision
+        .checked_add(1)
+        .filter(|value| *value <= MAX_SAFE_DURABLE_INTEGER)
+        .ok_or_else(|| error("mutation accepted revision is exhausted"))?;
+    let mut next = current.operation.clone();
+    next.revision = revision;
+    next.turn_id = Some(turn_id.into());
+    next.accepted_anchor = Some(accepted_anchor);
+    next.can_follow(&current.operation)
+        .map_err(|cause| coded_error("mutation-accepted-transition-invalid", cause))?;
+    let changed = transaction
+        .execute(
+            "UPDATE mutation_acknowledgements
+             SET revision = ?1, turn_id = ?2, accepted_sequence = ?3,
+                 accepted_event_id = ?4, accepted_timestamp_ms = ?5,
+                 updated_at_ms = ?5
+             WHERE operation_identity = ?6 AND state = 'accepted'
+               AND revision = ?7 AND turn_id IS NULL",
+            params![
+                to_i64(revision, "mutation accepted revision")?,
+                turn_id,
+                to_i64(accepted_event.sequence, "mutation accepted sequence")?,
+                accepted_event.event_id,
+                to_i64(accepted_event.timestamp_ms, "mutation accepted timestamp")?,
+                operation_identity,
+                to_i64(expected_revision, "mutation accepted expected revision")?,
+            ],
+        )
+        .map_err(|_| error("cannot bind accepted mutation acknowledgement"))?;
+    if changed != 1 {
+        return Err(coded_error(
+            "mutation-acknowledgement-cas-failed",
+            "mutation accepted binding changed before commit",
+        ));
+    }
+    let stored = load_mutation_acknowledgement(transaction, operation_identity)?
+        .ok_or_else(|| error("accepted mutation acknowledgement is missing"))?;
+    validate_mutation_acknowledgement(transaction, &stored)?;
+    Ok(stored.operation)
+}
+
+pub(crate) fn bind_mutation_terminal_in_transaction(
+    transaction: &Transaction<'_>,
+    operation_identity: &str,
+    expected_revision: u64,
+    terminal_event: &EventEnvelope,
+) -> Result<StoredDurableMutationAcknowledgement, WorkbenchStoreError> {
+    validate_durable_mutation_operation_identity(operation_identity)?;
+    validate_positive_safe_integer(expected_revision, "mutation terminal revision")?;
+    terminal_event
+        .validate()
+        .map_err(|cause| coded_error("mutation-terminal-event-invalid", cause))?;
+    if !matches!(
+        (terminal_event.event.as_str(), terminal_event.turn_state),
+        ("turn.completed", TurnState::Completed)
+            | ("turn.failed", TurnState::Failed)
+            | ("turn.interrupted", TurnState::Interrupted)
+    ) {
+        return Err(coded_error(
+            "mutation-terminal-event-invalid",
+            "mutation terminal event is not a Turn terminal envelope",
+        ));
+    }
+    let current =
+        load_mutation_acknowledgement(transaction, operation_identity)?.ok_or_else(|| {
+            coded_error(
+                "mutation-acknowledgement-not-found",
+                "mutation acknowledgement does not exist",
+            )
+        })?;
+    validate_mutation_acknowledgement(transaction, &current)?;
+    let terminal_anchor = MutationTimelineAnchor {
+        sequence: terminal_event.sequence,
+        event_id: Some(terminal_event.event_id.clone()),
+    };
+    if current.operation.state == DurableMutationState::Terminal
+        && current.operation.terminal_anchor.as_ref() == Some(&terminal_anchor)
+    {
+        return Ok(current.operation);
+    }
+    if current.operation.state == DurableMutationState::ReconciliationRequired {
+        return Err(coded_error(
+            "mutation-reconciliation-required",
+            "an uncertain mutation requires authoritative reconciliation before terminal binding",
+        ));
+    }
+    let accepted_anchor = current
+        .operation
+        .accepted_anchor
+        .as_ref()
+        .ok_or_else(|| error("mutation terminal binding is missing accepted evidence"))?;
+    if current.operation.state != DurableMutationState::Accepted
+        || current.operation.revision != expected_revision
+        || current.operation.turn_id.as_deref() != Some(terminal_event.turn_id.as_str())
+        || current.operation.session_id != terminal_event.session_id
+        || terminal_event.sequence <= accepted_anchor.sequence
+        || terminal_event.timestamp_ms
+            < current
+                .accepted_timestamp_ms
+                .ok_or_else(|| error("mutation accepted timestamp is missing"))?
+    {
+        return Err(coded_error(
+            "mutation-acknowledgement-cas-failed",
+            "mutation terminal binding changed before commit",
+        ));
+    }
+    let revision = expected_revision
+        .checked_add(1)
+        .filter(|value| *value <= MAX_SAFE_DURABLE_INTEGER)
+        .ok_or_else(|| error("mutation terminal revision is exhausted"))?;
+    let mut next = current.operation.clone();
+    next.revision = revision;
+    next.state = DurableMutationState::Terminal;
+    next.terminal_anchor = Some(terminal_anchor);
+    next.can_follow(&current.operation)
+        .map_err(|cause| coded_error("mutation-terminal-transition-invalid", cause))?;
+    let changed = transaction
+        .execute(
+            "UPDATE mutation_acknowledgements
+             SET state = 'terminal', revision = ?1, terminal_sequence = ?2,
+                 terminal_event_id = ?3, terminal_timestamp_ms = ?4,
+                 updated_at_ms = ?4
+             WHERE operation_identity = ?5 AND state = 'accepted' AND revision = ?6",
+            params![
+                to_i64(revision, "mutation terminal revision")?,
+                to_i64(terminal_event.sequence, "mutation terminal sequence")?,
+                terminal_event.event_id,
+                to_i64(terminal_event.timestamp_ms, "mutation terminal timestamp")?,
+                operation_identity,
+                to_i64(expected_revision, "mutation terminal expected revision")?,
+            ],
+        )
+        .map_err(|_| error("cannot bind terminal mutation acknowledgement"))?;
+    if changed != 1 {
+        return Err(coded_error(
+            "mutation-acknowledgement-cas-failed",
+            "mutation terminal binding changed before commit",
+        ));
+    }
+    let stored = load_mutation_acknowledgement(transaction, operation_identity)?
+        .ok_or_else(|| error("terminal mutation acknowledgement is missing"))?;
+    validate_mutation_acknowledgement(transaction, &stored)?;
+    Ok(stored.operation)
+}
+
+fn mark_mutation_reconciliation_required_tx(
+    transaction: &Transaction<'_>,
+    session_id: &str,
+    operation_identity: &str,
+    expected_revision: u64,
+    observed_at_ms: u64,
+) -> Result<DurableMutationLedgerRow, WorkbenchStoreError> {
+    let current =
+        load_mutation_acknowledgement(transaction, operation_identity)?.ok_or_else(|| {
+            coded_error(
+                "mutation-acknowledgement-not-found",
+                "mutation acknowledgement does not exist",
+            )
+        })?;
+    validate_mutation_acknowledgement(transaction, &current)?;
+    if current.operation.session_id != session_id {
+        return Err(coded_error(
+            "mutation-acknowledgement-owner-mismatch",
+            "mutation acknowledgement belongs to another session",
+        ));
+    }
+    if current.operation.state == DurableMutationState::ReconciliationRequired {
+        return Ok(current);
+    }
+    if current.operation.state == DurableMutationState::Terminal {
+        return Err(coded_error(
+            "mutation-already-terminal",
+            "a terminal mutation cannot become reconciliation-required",
+        ));
+    }
+    if current.operation.revision != expected_revision || observed_at_ms < current.updated_at_ms {
+        return Err(coded_error(
+            "mutation-acknowledgement-cas-failed",
+            "mutation acknowledgement changed before reconciliation",
+        ));
+    }
+    let revision = expected_revision
+        .checked_add(1)
+        .filter(|value| *value <= MAX_SAFE_DURABLE_INTEGER)
+        .ok_or_else(|| error("mutation reconciliation revision is exhausted"))?;
+    let mut next = current.operation.clone();
+    next.revision = revision;
+    next.state = DurableMutationState::ReconciliationRequired;
+    next.can_follow(&current.operation)
+        .map_err(|cause| coded_error("mutation-reconciliation-transition-invalid", cause))?;
+    let changed = transaction
+        .execute(
+            "UPDATE mutation_acknowledgements
+             SET state = 'reconciliation-required', revision = ?1, updated_at_ms = ?2
+             WHERE operation_identity = ?3 AND state = 'accepted' AND revision = ?4",
+            params![
+                to_i64(revision, "mutation reconciliation revision")?,
+                to_i64(observed_at_ms, "mutation reconciliation time")?,
+                operation_identity,
+                to_i64(
+                    expected_revision,
+                    "mutation reconciliation expected revision"
+                )?,
+            ],
+        )
+        .map_err(|_| error("cannot mark mutation reconciliation required"))?;
+    if changed != 1 {
+        return Err(coded_error(
+            "mutation-acknowledgement-cas-failed",
+            "mutation acknowledgement changed before reconciliation",
+        ));
+    }
+    let stored = load_mutation_acknowledgement(transaction, operation_identity)?
+        .ok_or_else(|| error("reconciliation-required mutation acknowledgement is missing"))?;
+    validate_mutation_acknowledgement(transaction, &stored)?;
+    Ok(stored)
+}
+
+fn consume_mutation_acknowledgement_tx(
+    transaction: &Transaction<'_>,
+    session_id: &str,
+    operation_identity: &str,
+    phase: DurableMutationConsumptionPhase,
+    expected_revision: u64,
+    confirmed_anchor: &MutationTimelineAnchor,
+    consumed_at_ms: u64,
+) -> Result<DurableMutationLedgerRow, WorkbenchStoreError> {
+    confirmed_anchor
+        .validate()
+        .map_err(|cause| coded_error("mutation-confirmed-anchor-invalid", cause))?;
+    let current =
+        load_mutation_acknowledgement(transaction, operation_identity)?.ok_or_else(|| {
+            coded_error(
+                "mutation-acknowledgement-not-found",
+                "mutation acknowledgement does not exist",
+            )
+        })?;
+    validate_mutation_acknowledgement(transaction, &current)?;
+    if current.operation.session_id != session_id {
+        return Err(coded_error(
+            "mutation-acknowledgement-owner-mismatch",
+            "mutation acknowledgement belongs to another session",
+        ));
+    }
+    let (bound_anchor, existing_receipt) = match phase {
+        DurableMutationConsumptionPhase::Accepted => (
+            current.operation.accepted_anchor.as_ref(),
+            current.accepted_consumption.as_ref(),
+        ),
+        DurableMutationConsumptionPhase::Terminal => (
+            current.operation.terminal_anchor.as_ref(),
+            current.terminal_consumption.as_ref(),
+        ),
+    };
+    if bound_anchor != Some(confirmed_anchor) {
+        return Err(coded_error(
+            "mutation-confirmed-anchor-mismatch",
+            "mutation consumption anchor does not match durable evidence",
+        ));
+    }
+    if let Some(receipt) = existing_receipt {
+        if receipt.revision == expected_revision.saturating_add(1) {
+            return Ok(current);
+        }
+        return Err(coded_error(
+            "mutation-acknowledgement-cas-failed",
+            "mutation consumption receipt is already bound to another revision",
+        ));
+    }
+    if current.operation.revision != expected_revision
+        || consumed_at_ms < current.updated_at_ms
+        || (phase == DurableMutationConsumptionPhase::Terminal
+            && (current.operation.state != DurableMutationState::Terminal
+                || !current.operation.accepted_consumed))
+    {
+        return Err(coded_error(
+            "mutation-acknowledgement-cas-failed",
+            "mutation acknowledgement changed before consumption",
+        ));
+    }
+    let revision = expected_revision
+        .checked_add(1)
+        .filter(|value| *value <= MAX_SAFE_DURABLE_INTEGER)
+        .ok_or_else(|| error("mutation consumption revision is exhausted"))?;
+    let receipt_identity =
+        durable_mutation_receipt_identity(operation_identity, phase, revision, consumed_at_ms);
+    let mut next = current.operation.clone();
+    next.revision = revision;
+    match phase {
+        DurableMutationConsumptionPhase::Accepted => next.accepted_consumed = true,
+        DurableMutationConsumptionPhase::Terminal => next.terminal_consumed = true,
+    }
+    next.can_follow(&current.operation)
+        .map_err(|cause| coded_error("mutation-consumption-transition-invalid", cause))?;
+    let (receipt_column, revision_column, time_column) = match phase {
+        DurableMutationConsumptionPhase::Accepted => (
+            "accepted_receipt_identity",
+            "accepted_consumed_revision",
+            "accepted_consumed_at_ms",
+        ),
+        DurableMutationConsumptionPhase::Terminal => (
+            "terminal_receipt_identity",
+            "terminal_consumed_revision",
+            "terminal_consumed_at_ms",
+        ),
+    };
+    let sql = format!(
+        "UPDATE mutation_acknowledgements
+         SET revision = ?1, {receipt_column} = ?2, {revision_column} = ?1,
+             {time_column} = ?3, updated_at_ms = ?3
+         WHERE operation_identity = ?4 AND revision = ?5 AND {receipt_column} IS NULL"
+    );
+    let changed = transaction
+        .execute(
+            &sql,
+            params![
+                to_i64(revision, "mutation consumption revision")?,
+                receipt_identity,
+                to_i64(consumed_at_ms, "mutation consumption time")?,
+                operation_identity,
+                to_i64(expected_revision, "mutation consumption expected revision")?,
+            ],
+        )
+        .map_err(|_| error("cannot consume durable mutation acknowledgement"))?;
+    if changed != 1 {
+        return Err(coded_error(
+            "mutation-acknowledgement-cas-failed",
+            "mutation acknowledgement changed before consumption",
+        ));
+    }
+    let stored = load_mutation_acknowledgement(transaction, operation_identity)?
+        .ok_or_else(|| error("consumed mutation acknowledgement is missing"))?;
+    validate_mutation_acknowledgement(transaction, &stored)?;
+    Ok(stored)
+}
+
 fn validate_rebuilt_project(project: &StoredProject) -> Result<(), WorkbenchStoreError> {
     validate_identifier(&project.project_id, "project ID")?;
     validate_identity_text(&project.root_identity, "project root identity")?;
@@ -17662,6 +19201,9 @@ fn apply_session_search_indexes(connection: &Connection) -> Result<(), Workbench
     connection
         .execute_batch(MODEL_PROFILE_SCHEMA_SQL)
         .map_err(|_| error("cannot apply model profile schema migration"))?;
+    connection
+        .execute_batch(MUTATION_ACKNOWLEDGEMENT_SCHEMA_SQL)
+        .map_err(|_| error("cannot apply mutation acknowledgement schema migration"))?;
     public_timeline_journal::apply_schema(connection).map_err(public_timeline_error)?;
     connection
         .execute_batch(WORKSPACE_EDIT_PROPOSAL_SCHEMA_SQL)
@@ -17684,6 +19226,7 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
         .chain(REQUIRED_BACKGROUND_NOTIFICATION_TABLES)
         .chain(REQUIRED_MODEL_PROFILE_TABLES)
         .chain(REQUIRED_WORKSPACE_EDIT_PROPOSAL_TABLES)
+        .chain(REQUIRED_MUTATION_ACKNOWLEDGEMENT_TABLES)
         .chain(REQUIRED_PUBLIC_TIMELINE_TABLES)
     {
         let exists: Option<String> = connection
@@ -17818,6 +19361,35 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             "media_type",
         ],
     )?;
+    verify_required_table_columns(
+        connection,
+        "mutation_acknowledgements",
+        &[
+            "schema_version",
+            "operation_identity",
+            "session_id",
+            "mutation_kind",
+            "idempotency_key",
+            "request_fingerprint",
+            "state",
+            "revision",
+            "turn_id",
+            "accepted_sequence",
+            "accepted_event_id",
+            "accepted_timestamp_ms",
+            "terminal_sequence",
+            "terminal_event_id",
+            "terminal_timestamp_ms",
+            "accepted_receipt_identity",
+            "accepted_consumed_revision",
+            "accepted_consumed_at_ms",
+            "terminal_receipt_identity",
+            "terminal_consumed_revision",
+            "terminal_consumed_at_ms",
+            "accepted_at_ms",
+            "updated_at_ms",
+        ],
+    )?;
     for table in REQUIRED_PUBLIC_TIMELINE_TABLES {
         verify_required_session_delete_restriction(connection, table)?;
     }
@@ -17895,6 +19467,21 @@ fn verify_required_schema(connection: &Connection) -> Result<(), WorkbenchStoreE
             .map_err(|_| error("cannot verify workspace edit proposal indexes"))?;
         if exists.as_deref() != Some(index) {
             return Err(error("workspace edit proposal indexes are incomplete"));
+        }
+    }
+    for index in REQUIRED_MUTATION_ACKNOWLEDGEMENT_INDEXES {
+        let exists: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| error("cannot verify mutation acknowledgement indexes"))?;
+        if exists.as_deref() != Some(index) {
+            return Err(error(
+                "workbench database mutation acknowledgement indexes are incomplete",
+            ));
         }
     }
     for trigger in REQUIRED_WORKSPACE_EDIT_PROPOSAL_TRIGGERS {
@@ -36059,5 +37646,453 @@ mod tests {
         assert!(candidate.source_complete);
         assert!(candidate.matches_current_projection);
         assert!(candidate.issues.is_empty());
+    }
+
+    #[test]
+    fn durable_mutation_acknowledgement_reservation_and_startup_reconciliation_are_fail_closed() {
+        let root = Root::new("mutation-reservation-reconciliation");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "mutation-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Mutation session".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        let request = ReserveTurnStartMutation {
+            session_id: "mutation-session".into(),
+            idempotency_key: "mutation-key".into(),
+            request_fingerprint: "a".repeat(64),
+            accepted_at_ms: 2,
+        };
+        let first = store.reserve_turn_start_mutation(request.clone()).unwrap();
+        assert!(first.created);
+        assert_eq!(first.operation.revision, 1);
+        assert_eq!(first.operation.state, DurableMutationState::Accepted);
+        let retry = store.reserve_turn_start_mutation(request.clone()).unwrap();
+        assert!(!retry.created);
+        assert_eq!(retry.operation, first.operation);
+        let conflict = store
+            .reserve_turn_start_mutation(ReserveTurnStartMutation {
+                request_fingerprint: "b".repeat(64),
+                ..request
+            })
+            .unwrap_err();
+        assert_eq!(conflict.code, "mutation-idempotency-conflict");
+
+        drop(store);
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        let page = reopened
+            .list_unconsumed_mutation_acknowledgements("mutation-session", None, 10)
+            .unwrap();
+        assert_eq!(page.operations.len(), 1);
+        let operation = &page.operations[0];
+        assert_eq!(
+            operation.state,
+            DurableMutationState::ReconciliationRequired
+        );
+        assert_eq!(operation.revision, 2);
+        let repeated = reopened
+            .mark_mutation_reconciliation_required(
+                "mutation-session",
+                &operation.operation_identity,
+                operation.revision,
+                3,
+            )
+            .unwrap();
+        assert_eq!(repeated, *operation);
+
+        let mut sequencer = crate::event_sequencer::EventSequencer::default();
+        let accepted = sequencer
+            .sequence(
+                10,
+                "mutation-session",
+                "mutation-turn",
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        let transaction = reopened
+            .begin_database_write("mutation reconciliation binding test")
+            .unwrap();
+        let error = bind_mutation_accepted_in_transaction(
+            &transaction,
+            &operation.operation_identity,
+            repeated.revision,
+            "mutation-turn",
+            &accepted,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "mutation-reconciliation-required");
+    }
+
+    #[test]
+    fn durable_mutation_acknowledgement_atomic_turn_and_consumption_cas_are_restart_safe() {
+        let root = Root::new("mutation-atomic-consumption");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "mutation-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Mutation session".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        let reservation = store
+            .reserve_turn_start_mutation(ReserveTurnStartMutation {
+                session_id: "mutation-session".into(),
+                idempotency_key: "mutation-key".into(),
+                request_fingerprint: "a".repeat(64),
+                accepted_at_ms: 2,
+            })
+            .unwrap();
+        let mut sequencer = crate::event_sequencer::EventSequencer::default();
+        let accepted = sequencer
+            .sequence(
+                10,
+                "mutation-session",
+                "mutation-turn",
+                "turn.started",
+                None,
+            )
+            .unwrap();
+        let terminal = sequencer
+            .sequence(
+                11,
+                "mutation-session",
+                "mutation-turn",
+                "turn.completed",
+                None,
+            )
+            .unwrap();
+        let binding = MutationLedgerBinding {
+            operation_identity: reservation.operation.operation_identity.clone(),
+            expected_revision: reservation.operation.revision,
+        };
+        let created = store
+            .create_turn_with_public_event_and_mutation(
+                StoredTurnCreate {
+                    turn_id: "mutation-turn".into(),
+                    session_id: "mutation-session".into(),
+                    idempotency_key: Some("mutation-key".into()),
+                    input_hash: ContentHash::for_bytes(b"mutation input"),
+                    created_at_ms: accepted.timestamp_ms,
+                },
+                &accepted,
+                &binding,
+            )
+            .unwrap();
+        assert_eq!(created.operation.state, DurableMutationState::Accepted);
+        assert_eq!(created.operation.revision, 2);
+        let terminal_binding = MutationLedgerBinding {
+            operation_identity: created.operation.operation_identity.clone(),
+            expected_revision: created.operation.revision,
+        };
+        let finished = store
+            .finish_turn_internal(
+                "mutation-session",
+                "mutation-turn",
+                "completed",
+                terminal.timestamp_ms,
+                None,
+                Some((None, &terminal)),
+                Some(&terminal_binding),
+            )
+            .unwrap();
+        let operation = finished.1.unwrap();
+        assert_eq!(operation.state, DurableMutationState::Terminal);
+        assert_eq!(operation.revision, 3);
+        assert_eq!(
+            store
+                .sync_public_timeline("mutation-session", 0, None, 10)
+                .unwrap()
+                .events
+                .len(),
+            2
+        );
+
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "other-mutation-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Other mutation session".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+
+        let accepted_anchor = operation.accepted_anchor.clone().unwrap();
+        let terminal_anchor = operation.terminal_anchor.clone().unwrap();
+        let owner_error = store
+            .consume_mutation_acknowledgement(
+                "other-mutation-session",
+                &operation.operation_identity,
+                DurableMutationConsumptionPhase::Accepted,
+                operation.revision,
+                &accepted_anchor,
+                12,
+            )
+            .unwrap_err();
+        assert_eq!(owner_error.code, "mutation-acknowledgement-owner-mismatch");
+        let consumed = store
+            .consume_mutation_acknowledgement(
+                "mutation-session",
+                &operation.operation_identity,
+                DurableMutationConsumptionPhase::Accepted,
+                operation.revision,
+                &accepted_anchor,
+                12,
+            )
+            .unwrap();
+        assert_eq!(consumed.revision, 4);
+        assert!(consumed.accepted_consumed);
+        let repeated = store
+            .consume_mutation_acknowledgement(
+                "mutation-session",
+                &operation.operation_identity,
+                DurableMutationConsumptionPhase::Accepted,
+                operation.revision,
+                &accepted_anchor,
+                12,
+            )
+            .unwrap();
+        assert_eq!(repeated, consumed);
+        let wrong_anchor = MutationTimelineAnchor {
+            sequence: terminal_anchor.sequence,
+            event_id: Some(
+                "event:sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                    .into(),
+            ),
+        };
+        let error = store
+            .consume_mutation_acknowledgement(
+                "mutation-session",
+                &operation.operation_identity,
+                DurableMutationConsumptionPhase::Terminal,
+                consumed.revision,
+                &wrong_anchor,
+                13,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "mutation-confirmed-anchor-mismatch");
+        let terminal_consumed = store
+            .consume_mutation_acknowledgement(
+                "mutation-session",
+                &operation.operation_identity,
+                DurableMutationConsumptionPhase::Terminal,
+                consumed.revision,
+                &terminal_anchor,
+                13,
+            )
+            .unwrap();
+        assert_eq!(terminal_consumed.revision, 5);
+        assert!(terminal_consumed.terminal_consumed);
+        assert!(store
+            .list_unconsumed_mutation_acknowledgements("mutation-session", None, 10)
+            .unwrap()
+            .operations
+            .is_empty());
+
+        drop(store);
+        let reopened = WorkbenchStore::open(&root.path).unwrap();
+        let page = reopened
+            .list_unconsumed_mutation_acknowledgements("mutation-session", None, 10)
+            .unwrap();
+        assert!(page.operations.is_empty());
+    }
+
+    #[test]
+    fn durable_mutation_acknowledgement_v19_to_v20_migration_preserves_data_and_backup() {
+        let root = Root::new("mutation-v19-migration");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "migration-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Migration session".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "DROP TABLE mutation_acknowledgements;
+                 PRAGMA user_version = 19;",
+            )
+            .unwrap();
+        drop(store);
+
+        let mut reopened = WorkbenchStore::open(&root.path).unwrap();
+        let version: i64 = reopened
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(
+            reopened.load_session("migration-session").unwrap().title,
+            "Migration session"
+        );
+        let reservation = reopened
+            .reserve_turn_start_mutation(ReserveTurnStartMutation {
+                session_id: "migration-session".into(),
+                idempotency_key: "migration-key".into(),
+                request_fingerprint: "a".repeat(64),
+                accepted_at_ms: 2,
+            })
+            .unwrap();
+        assert!(reservation.created);
+        let backups = migration_backup_manifests(&root.path).unwrap();
+        assert!(backups.iter().any(|backup| {
+            backup.source_schema_version == 19
+                && backup.target_schema_version == SCHEMA_VERSION as u64
+        }));
+    }
+
+    #[test]
+    fn durable_mutation_acknowledgement_semantic_tamper_enters_read_only_recovery() {
+        let root = Root::new("mutation-semantic-tamper");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "tamper-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Tamper session".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        store
+            .reserve_turn_start_mutation(ReserveTurnStartMutation {
+                session_id: "tamper-session".into(),
+                idempotency_key: "tamper-key".into(),
+                request_fingerprint: "a".repeat(64),
+                accepted_at_ms: 2,
+            })
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE mutation_acknowledgements SET request_fingerprint = ?1",
+                ["b".repeat(64)],
+            )
+            .unwrap();
+        drop(store);
+        let diagnostic = match WorkbenchStore::open_or_recover(&root.path).unwrap() {
+            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => diagnostic,
+            WorkbenchStoreOpen::Writable(_) => panic!("semantic tamper must not open writable"),
+        };
+        assert_eq!(
+            diagnostic.reason_code,
+            "workbench-database-integrity-failed"
+        );
+    }
+
+    #[test]
+    fn durable_mutation_acknowledgement_preview_failure_rolls_back_ledger_and_retries_atomically() {
+        let root = Root::new("mutation-preview-atomicity");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        store
+            .create_session(StoredSessionCreate {
+                session_id: "preview-atomic-session".into(),
+                project_id: None,
+                mode: StoredSessionMode::Chat,
+                title: "Preview mutation".into(),
+                parent_session_id: None,
+                lineage_kind: StoredSessionLineage::New,
+                environment_identity: None,
+                created_at_ms: 1,
+            })
+            .unwrap();
+        let reservation = store
+            .reserve_turn_start_mutation(ReserveTurnStartMutation {
+                session_id: "preview-atomic-session".into(),
+                idempotency_key: "preview-atomic-key".into(),
+                request_fingerprint: "a".repeat(64),
+                accepted_at_ms: 2,
+            })
+            .unwrap();
+        let binding = PreviewMutationLedgerBinding {
+            operation_identity: reservation.operation.operation_identity.clone(),
+            accepted_expected_revision: reservation.operation.revision,
+            terminal_expected_revision: reservation.operation.revision + 1,
+        };
+        let request = preview_turn_commit_fixture();
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_mutation_preview_public_event
+                 BEFORE INSERT ON public_timeline_events
+                 WHEN NEW.sequence = 4
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected mutation preview journal failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(store
+            .commit_preview_turn_with_mutation(request.clone(), &binding)
+            .is_err());
+        assert_preview_turn_absent(&store);
+        let after_failure = store
+            .reserve_turn_start_mutation(ReserveTurnStartMutation {
+                session_id: "preview-atomic-session".into(),
+                idempotency_key: "preview-atomic-key".into(),
+                request_fingerprint: "a".repeat(64),
+                accepted_at_ms: 2,
+            })
+            .unwrap();
+        assert!(!after_failure.created);
+        assert_eq!(after_failure.operation.revision, 1);
+        assert_eq!(
+            after_failure.operation.state,
+            DurableMutationState::Accepted
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_mutation_preview_public_event;")
+            .unwrap();
+
+        let committed = store
+            .commit_preview_turn_with_mutation(request, &binding)
+            .unwrap();
+        assert_eq!(committed.preview.turn.state, "completed");
+        assert_eq!(committed.operation.state, DurableMutationState::Terminal);
+        assert_eq!(committed.operation.revision, 3);
+        assert_eq!(
+            store
+                .sync_public_timeline("preview-atomic-session", 0, None, 10)
+                .unwrap()
+                .events
+                .len(),
+            6
+        );
+        let persisted: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_acknowledgements
+                 WHERE operation_identity = ?1 AND state = 'terminal' AND revision = 3",
+                [&committed.operation.operation_identity],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted, 1);
     }
 }

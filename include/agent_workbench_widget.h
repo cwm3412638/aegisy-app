@@ -66,6 +66,11 @@ private:
         Frozen,
         Unrecoverable,
     };
+    enum class TimelineAnchorConfirmation {
+        Pending,
+        Confirmed,
+        Drifted,
+    };
     struct TimelineProjection {
         quint64 sequence = 0;
         quint64 timestampMs = 0;
@@ -117,6 +122,21 @@ private:
         qsizetype queuedLiveBytes = 0;
         int subscriptionRetryCount = 0;
         bool retryOnReconnect = false;
+    };
+    struct DurableMutationListRequest {
+        QString sessionId;
+        QJsonObject after;
+        quint64 generation = 0;
+        bool reconnectRecovery = false;
+    };
+    struct DurableMutationConsumeRequest {
+        QString sessionId;
+        QString operationIdentity;
+        QString target;
+        QJsonObject confirmedAnchor;
+        quint64 expectedRevision = 0;
+        quint64 generation = 0;
+        bool reconnectRecovery = false;
     };
 
     void buildUi();
@@ -176,7 +196,8 @@ private:
     void startPendingTurnIfReady();
     void ensureSessionAndSubmit(const QString &prompt, const QJsonArray &context,
                                 const QString &pinnedContextSetIdentity,
-                                const QStringList &pinnedContextIds);
+                                const QStringList &pinnedContextIds,
+                                const QString &idempotencyKey);
     void addContextItem(QJsonObject item);
     void addSelectedFileContext();
     void pinSelectedFileContext();
@@ -227,6 +248,23 @@ private:
                                            const QJsonObject &failure);
     void handleTimelineSubscriptionActivated(const QString &requestId,
                                              const QJsonObject &result);
+    void handleTurnStarted(const QString &requestId, quint64 generation,
+                           const QJsonObject &result);
+    void handleMutationAcknowledgementPage(const QString &requestId,
+                                           const QJsonObject &page);
+    void handleMutationAcknowledgementConsumed(const QString &requestId,
+                                               const QJsonObject &result);
+    void beginMutationAcknowledgementRecovery(
+        const QString &sessionId, const QJsonObject &after = QJsonObject(),
+        bool reconnectRecovery = false);
+    bool acceptDurableMutationOperation(const QJsonObject &operation);
+    void processSessionMutationAcknowledgements(const QString &sessionId,
+                                                bool reconnectRecovery = false);
+    TimelineAnchorConfirmation timelineAnchorConfirmation(
+        const QString &sessionId, const QJsonObject &anchor) const;
+    void freezeSessionForMutationReconciliation(const QString &sessionId,
+                                                const QString &detail);
+    void finishReconnectMutationRecovery(const QString &sessionId);
     TimelineSessionState *ensureTimelineSession(const QString &sessionId);
     void beginTimelineSync(const QString &sessionId);
     void beginTimelineSubscription(const QString &sessionId);
@@ -516,6 +554,13 @@ private:
     QHash<QString, quint64> m_unknownTimelineEventCounts;
     quint64 m_unknownTimelineEventOverflowCount = 0;
     QHash<QString, TimelineSessionState> m_timelineSessions;
+    QHash<QString, QJsonObject> m_durableMutationOperations;
+    QHash<QString, QSet<QString>> m_durableMutationSessionOperations;
+    QHash<QString, DurableMutationListRequest> m_mutationListRequests;
+    QHash<QString, DurableMutationConsumeRequest> m_mutationConsumeRequests;
+    QHash<QString, QString> m_mutationSessionListRequests;
+    QHash<QString, int> m_mutationConsumeRecoveryAttempts;
+    QSet<QString> m_mutationReconciliationSessionIds;
     qsizetype m_timelineTrackedEventCount = 0;
     qsizetype m_timelinePendingEventCount = 0;
     qsizetype m_timelinePendingBytes = 0;
@@ -523,6 +568,7 @@ private:
     bool m_timelineSyncAvailable = false;
     bool m_timelineSnapshotAvailable = false;
     bool m_timelineSubscriptionAvailable = false;
+    bool m_mutationAcknowledgementAvailable = false;
     std::function<QString(const QString &, const QString &, const QJsonObject &,
                           const QJsonObject &, int)> m_timelineSnapshotRequester;
     std::function<QString(quint64, const QString &, const QString &, const QString &,
@@ -700,6 +746,7 @@ private:
     QString m_pendingTerminalName;
     QString m_terminalSelection;
     QString m_pendingPrompt;
+    QString m_pendingTurnIdempotencyKey;
     QString m_activeTurnSessionId;
     QString m_activeTurnId;
     QHash<QString, quint64> m_lastTimelineEventSequences;
@@ -736,6 +783,7 @@ private:
     bool m_activeTurnControlUnverified = false;
     quint64 m_runtimeReconnectRecoveryGeneration = 0;
     QSet<QString> m_runtimeReconnectTimelinePending;
+    QSet<QString> m_runtimeReconnectMutationSessions;
     QHash<QString, QString> m_runtimeReconnectProposalRequests;
     QString m_runtimeReconnectSessionReadId;
     QString m_runtimeReconnectTerminalListId;
@@ -743,6 +791,7 @@ private:
     QString m_runtimeReconnectTerminalId;
     quint64 m_runtimeReconnectTerminalGeneration = 0;
     bool m_runtimeReconnectSecondPhaseStarted = false;
+    bool m_runtimeReconnectMutationRecoveryStarted = false;
     bool m_terminalStateUnverified = false;
     bool m_operationStatusKnown = true;
     bool m_operationStatusBlocked = false;

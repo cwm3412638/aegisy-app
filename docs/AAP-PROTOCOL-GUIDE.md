@@ -95,7 +95,7 @@ project. The current Codex adapter uses `permission_profile: read-only`.
 ```jsonl
 {"jsonrpc":"2.0","id":"2","method":"session/start","params":{"mode":"chat","title":"AAP example"}}
 {"jsonrpc":"2.0","id":"2","result":{"session":{"id":"session-1","mode":"chat","title":"AAP example"},"runtime":{"adapter":"preview","version":"0.1.0","provider":"local","model":"deterministic-echo","permission_profile":"read-only"},"environment":{"environment_id":"environment:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","identity":"environment:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
-{"jsonrpc":"2.0","id":"3","method":"turn/start","params":{"session_id":"session-1","input":"Inspect the project","idempotency_key":"turn-key-1"}}
+{"jsonrpc":"2.0","id":"3","method":"turn/start","params":{"session_id":"session-1","input":"Inspect the project","idempotency_key":"turn-key-1","generation":1}}
 {"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:f305276603e639d98638df9dfc805247f46cda7c3e68abac647f52335996fb24","sequence":1,"timestamp_ms":1730000000000,"correlation_id":"turn-1","session_id":"session-1","turn_id":"turn-1","turn_state":"running","event":"turn.started","item":null,"item_update":null}}
 {"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:fc245999261fadedb20f05abf2846b0ddd3fcd03b1dfcead7130fd05e55a3b9a","sequence":2,"timestamp_ms":1730000000001,"correlation_id":"turn-1","session_id":"session-1","turn_id":"turn-1","turn_state":"running","event":"item.started","item":{"id":"item-1","kind":"message","role":"agent","state":"started","content":""},"item_update":{"revision":1,"content_mode":"snapshot-replacement"}}}
 {"jsonrpc":"2.0","method":"event","params":{"schema_version":"timeline-event/0.1","event_id":"event:sha256:d70dbd6c228cc8308796f50d4add55627491625139999fcd627e2ea7d0e1e84a","sequence":3,"timestamp_ms":1730000000002,"correlation_id":"turn-1","session_id":"session-1","turn_id":"turn-1","turn_state":"running","event":"item.delta","item":{"id":"item-1","kind":"message","role":"agent","state":"delta","content":"Project summary"},"item_update":{"revision":2,"content_mode":"snapshot-replacement"}}}
@@ -136,8 +136,16 @@ rather than append. Streaming Items follow `started -> delta* -> completed`;
 an atomic Item may emit only `completed` at revision one. Session, Turn, Item,
 kind, and role identity cannot drift. A Turn has exactly one terminal state:
 `completed`, `interrupted`, or `failed`; `turn.persistence-failed` is not a valid
-fourth terminal. Reusing an idempotency key with different input is an error;
-retrying the same request returns the original turn identity.
+fourth terminal. Turn-start reserves a durable operation before dispatch. Reusing an
+idempotency key with a different request fingerprint is an error; an equivalent retry
+returns the original operation and Turn identity without a second dispatch.
+
+The `turn/start` success result includes `request_fingerprint`, a connection-scoped
+`mutation_acknowledgement` (`mutation-acknowledgement/0.1`), and the metadata-only
+`mutation_operation` (`mutation-acknowledgement-operation/0.1`). The durable operation
+identity is derived from Session, `turn-start`, idempotency key, and request
+fingerprint, so it survives process reconnect; the transient acknowledgement also
+binds the JSON-RPC request ID and process generation.
 
 To keep Event IDs byte-identical across Rust and Qt, optional Item `data` is a
 canonical JSON tree with at most 16 levels and 4,096 total values. Objects contain
@@ -347,9 +355,41 @@ in-memory state. Adapter, transport, protocol, and persistence compensation like
 commit the exact Error Item, Turn Trace, terminal projection, internal trace/terminal
 events, and public terminal event in one transaction before notification; an existing
 Trace cannot receive a later Journal repair. Snapshot, structured retention-gap
-recovery, live subscription, and bounded reconnect orchestration are implemented.
-Explicit acknowledgement and complete Windows reconnect/runtime evidence remain
-later parts of OpenSpec `3.5`; keep that task incomplete.
+recovery, live subscription, bounded reconnect orchestration, and durable Turn-start
+acknowledgement are implemented. Complete Windows reconnect/runtime evidence remains
+open; keep OpenSpec task `3.5` incomplete.
+
+## Durable Mutation Acknowledgement
+
+The stable capability `session.mutation-acknowledgements` is advertised only when
+the Workbench Store is healthy and writable. It currently covers `turn-start` only;
+approval responses, file writes, Git mutations, and background jobs have no producer.
+The ledger is metadata-only and never grants mutation, approval, or execution
+authority.
+
+Before dispatch, Runtime reserves one operation using the Session, idempotency key,
+and canonical request fingerprint. An equivalent retry returns the same operation and
+Turn; a conflicting fingerprint fails. The accepted `turn.started` and terminal
+Timeline anchors are bound atomically with their projection and Journal writes using
+revision CAS. Store startup turns an accepted operation with uncertain dispatch into
+`reconciliation-required`, which is listed for recovery and cannot be redispatched.
+
+Qt calls `session/mutation-acknowledgements` with a Session-scoped keyset cursor and
+validates every operation before acting. It calls
+`mutation/acknowledgement/consume` only after confirming the exact Timeline anchor:
+
+```jsonl
+{"jsonrpc":"2.0","id":"ack-list-1","method":"session/mutation-acknowledgements","params":{"schema_version":"mutation-acknowledgement-list-request/0.1","session_id":"session-1","after":null,"limit":100}}
+{"jsonrpc":"2.0","id":"ack-consume-1","method":"mutation/acknowledgement/consume","params":{"schema_version":"mutation-acknowledgement-consume-request/0.1","session_id":"session-1","operation_identity":"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expected_revision":2,"target":"accepted","confirmed_anchor":{"sequence":1,"event_id":"event:sha256:f305276603e639d98638df9dfc805247f46cda7c3e68abac647f52335996fb24"}}}
+```
+
+Consumption requires Session ownership, operation identity, target phase, expected
+revision, and exact sequence/Event-ID anchor. Accepted evidence is consumed before
+terminal evidence; equivalent retries are idempotent. Anchor drift, cross-Session
+access, malformed or tampered rows, unavailable/read-only storage, and reconciliation
+required state fail closed and freeze the affected Session. Purge removes the ledger
+rows with the Session, while migration v19-to-v20 preserves existing data and creates
+no fabricated acknowledgement.
 
 ## Structured Errors And Cancellation
 
@@ -964,8 +1004,8 @@ does not contain attachment text, and bounded/truncated context is explicitly
 marked rather than silently treated as complete.
 
 ```jsonl
-{"jsonrpc":"2.0","id":"20","method":"turn/start","params":{"session_id":"session-1","input":"Review this file","idempotency_key":"turn-1","context":[{"id":"context-file","kind":"file","label":"main.rs","origin":"file-tree","path":"main.rs","revision":"content:old"}]}}
-{"jsonrpc":"2.0","id":"20","result":{"turn":{"id":"turn-1","state":"started"},"context":{"item_count":1,"bytes":96,"truncated":false,"manifest":{"schema_version":"context-manifest/0.1","entries":[{"id":"context-file","kind":"file","source":"file-tree","priority":"pinned","trust":"untrusted-data","content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","token_size":12,"freshness":"stale","inclusion_reason":"user-selected","included":true}],"estimated_tokens":12,"truncated":false}}}}
+{"jsonrpc":"2.0","id":"20","method":"turn/start","params":{"session_id":"session-1","input":"Review this file","idempotency_key":"turn-1","generation":1,"context":[{"id":"context-file","kind":"file","label":"main.rs","origin":"file-tree","path":"main.rs","revision":"content:old"}]}}
+{"jsonrpc":"2.0","id":"20","result":{"turn":{"id":"turn-1","state":"started"},"context":{"item_count":1,"bytes":96,"truncated":false,"manifest":{"schema_version":"context-manifest/0.1","entries":[{"id":"context-file","kind":"file","source":"file-tree","priority":"pinned","trust":"untrusted-data","content_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","token_size":12,"freshness":"stale","inclusion_reason":"user-selected","included":true}],"estimated_tokens":12,"truncated":false}},"request_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mutation_acknowledgement":{"schema_version":"mutation-acknowledgement/0.1","request_id":"20","idempotency_key":"turn-1","session_id":"session-1","generation":1,"state":"accepted"},"mutation_operation":{"schema_version":"mutation-acknowledgement-operation/0.1","operation_identity":"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","session_id":"session-1","mutation_kind":"turn-start","idempotency_key":"turn-1","request_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","revision":2,"state":"accepted","turn_id":"turn-1","accepted_anchor":{"sequence":1,"event_id":"event:sha256:f305276603e639d98638df9dfc805247f46cda7c3e68abac647f52335996fb24"},"terminal_anchor":null,"accepted_consumed":false,"terminal_consumed":false}}}
 ```
 
 This is metadata for later context budgeting and inspection, not an authority

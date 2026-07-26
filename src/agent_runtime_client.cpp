@@ -233,6 +233,7 @@ const QStringList &declaredCapabilities()
         QStringLiteral("session.fork"),
         QStringLiteral("session.history.paginated"),
         QStringLiteral("session.list"),
+        QStringLiteral("session.mutation-acknowledgements"),
         QStringLiteral("session.metadata.manage"),
         QStringLiteral("session.portable.export"),
         QStringLiteral("session.portable.import"),
@@ -1419,6 +1420,295 @@ bool isValidTimelineSubscriptionFailureForRequest(
             == request.value(QStringLiteral("watermark"));
 }
 
+bool isValidMutationFingerprint(const QJsonValue &value)
+{
+    static const QRegularExpression pattern(QStringLiteral("^[0-9a-f]{64}$"));
+    return value.isString() && pattern.match(value.toString()).hasMatch();
+}
+
+bool isValidDurableMutationOperationIdentity(const QJsonValue &value)
+{
+    static const QRegularExpression pattern(
+        QStringLiteral("^mutation-operation:sha256:[0-9a-f]{64}$"));
+    return value.isString() && pattern.match(value.toString()).hasMatch();
+}
+
+bool isValidPositiveTimelineAnchor(const QJsonValue &value)
+{
+    return value.isObject() && isValidTimelineAnchor(value.toObject())
+        && value.toObject().value(QStringLiteral("sequence")).toDouble() > 0.0;
+}
+
+bool isValidDurableMutationCursor(const QJsonValue &value)
+{
+    if (!value.isObject()) return false;
+    const QJsonObject cursor = value.toObject();
+    return hasExactKeys(cursor, {
+            QStringLiteral("operation_identity"), QStringLiteral("revision"),
+        })
+        && isValidDurableMutationOperationIdentity(
+            cursor.value(QStringLiteral("operation_identity")))
+        && isPositiveSafeJsonInteger(cursor.value(QStringLiteral("revision")));
+}
+
+bool isValidDurableMutationOperation(const QJsonValue &value)
+{
+    if (!value.isObject()) return false;
+    const QJsonObject operation = value.toObject();
+    if (!hasExactKeys(operation, {
+            QStringLiteral("schema_version"),
+            QStringLiteral("operation_identity"),
+            QStringLiteral("session_id"), QStringLiteral("mutation_kind"),
+            QStringLiteral("idempotency_key"),
+            QStringLiteral("request_fingerprint"), QStringLiteral("revision"),
+            QStringLiteral("state"), QStringLiteral("turn_id"),
+            QStringLiteral("accepted_anchor"), QStringLiteral("terminal_anchor"),
+            QStringLiteral("accepted_consumed"),
+            QStringLiteral("terminal_consumed"),
+        })
+        || operation.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("mutation-acknowledgement-operation/0.1")
+        || !isValidDurableMutationOperationIdentity(
+            operation.value(QStringLiteral("operation_identity")))
+        || !isBoundedTimelineIdentity(operation.value(QStringLiteral("session_id")))
+        || operation.value(QStringLiteral("mutation_kind")).toString()
+            != QStringLiteral("turn-start")
+        || !isBoundedTimelineIdentity(
+            operation.value(QStringLiteral("idempotency_key")))
+        || !isValidMutationFingerprint(
+            operation.value(QStringLiteral("request_fingerprint")))
+        || !isPositiveSafeJsonInteger(operation.value(QStringLiteral("revision")))
+        || !operation.value(QStringLiteral("accepted_consumed")).isBool()
+        || !operation.value(QStringLiteral("terminal_consumed")).isBool()) {
+        return false;
+    }
+    const QString expectedIdentity =
+        AgentRuntimeClient::durableMutationOperationIdentity(
+            operation.value(QStringLiteral("session_id")).toString(),
+            operation.value(QStringLiteral("mutation_kind")).toString(),
+            operation.value(QStringLiteral("idempotency_key")).toString(),
+            operation.value(QStringLiteral("request_fingerprint")).toString());
+    if (expectedIdentity.isEmpty()
+            || operation.value(QStringLiteral("operation_identity")).toString()
+                != expectedIdentity) {
+        return false;
+    }
+    const QJsonValue turnId = operation.value(QStringLiteral("turn_id"));
+    const QJsonValue acceptedAnchor = operation.value(QStringLiteral("accepted_anchor"));
+    const QJsonValue terminalAnchor = operation.value(QStringLiteral("terminal_anchor"));
+    const bool acceptedConsumed = operation.value(
+        QStringLiteral("accepted_consumed")).toBool();
+    const bool terminalConsumed = operation.value(
+        QStringLiteral("terminal_consumed")).toBool();
+    if (!(turnId.isNull() || isBoundedTimelineIdentity(turnId))
+            || !(acceptedAnchor.isNull()
+                 || isValidPositiveTimelineAnchor(acceptedAnchor))
+            || !(terminalAnchor.isNull()
+                 || isValidPositiveTimelineAnchor(terminalAnchor))
+            || (acceptedAnchor.isObject() && turnId.isNull())
+            || (acceptedConsumed && acceptedAnchor.isNull())
+            || (terminalConsumed && !acceptedConsumed)) {
+        return false;
+    }
+    const QString state = operation.value(QStringLiteral("state")).toString();
+    if (state == QStringLiteral("accepted")
+            || state == QStringLiteral("reconciliation-required")) {
+        return terminalAnchor.isNull() && !terminalConsumed;
+    }
+    if (state != QStringLiteral("terminal") || turnId.isNull()
+            || !acceptedAnchor.isObject() || !terminalAnchor.isObject()) {
+        return false;
+    }
+    return terminalAnchor.toObject().value(QStringLiteral("sequence")).toDouble()
+        > acceptedAnchor.toObject().value(QStringLiteral("sequence")).toDouble();
+}
+
+bool isValidDurableMutationPage(const QJsonObject &page,
+                                const QJsonObject &request)
+{
+    if (!hasExactKeys(page, {
+            QStringLiteral("schema_version"), QStringLiteral("session_id"),
+            QStringLiteral("after"), QStringLiteral("operations"),
+            QStringLiteral("next_after"), QStringLiteral("complete"),
+        })
+        || page.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("mutation-acknowledgement-page/0.1")
+        || page.value(QStringLiteral("session_id"))
+            != request.value(QStringLiteral("session_id"))
+        || page.value(QStringLiteral("after")) != request.value(QStringLiteral("after"))
+        || !page.value(QStringLiteral("operations")).isArray()
+        || !page.value(QStringLiteral("complete")).isBool()) {
+        return false;
+    }
+    const QJsonArray operations = page.value(QStringLiteral("operations")).toArray();
+    const int requestedLimit = request.value(QStringLiteral("limit")).toInt();
+    if (operations.size() > requestedLimit || operations.size() > 100) return false;
+    QString previousIdentity;
+    const QJsonValue after = page.value(QStringLiteral("after"));
+    if (after.isObject()) {
+        if (!isValidDurableMutationCursor(after)) return false;
+        previousIdentity = after.toObject().value(
+            QStringLiteral("operation_identity")).toString();
+    } else if (!after.isNull()) {
+        return false;
+    }
+    QJsonObject lastOperation;
+    for (const QJsonValue &operationValue : operations) {
+        if (!isValidDurableMutationOperation(operationValue)) return false;
+        const QJsonObject operation = operationValue.toObject();
+        const QString identity = operation.value(
+            QStringLiteral("operation_identity")).toString();
+        if (operation.value(QStringLiteral("session_id"))
+                != request.value(QStringLiteral("session_id"))
+                || (!previousIdentity.isEmpty() && identity <= previousIdentity)) {
+            return false;
+        }
+        previousIdentity = identity;
+        lastOperation = operation;
+    }
+    const bool complete = page.value(QStringLiteral("complete")).toBool();
+    const QJsonValue nextAfter = page.value(QStringLiteral("next_after"));
+    if (complete) return nextAfter.isNull();
+    if (lastOperation.isEmpty() || !isValidDurableMutationCursor(nextAfter)) return false;
+    const QJsonObject cursor = nextAfter.toObject();
+    return cursor.value(QStringLiteral("operation_identity"))
+            == lastOperation.value(QStringLiteral("operation_identity"))
+        && cursor.value(QStringLiteral("revision"))
+            == lastOperation.value(QStringLiteral("revision"));
+}
+
+bool isValidDurableMutationConsumeResult(const QJsonObject &result,
+                                         const QJsonObject &request)
+{
+    if (!hasExactKeys(result, {
+            QStringLiteral("schema_version"), QStringLiteral("session_id"),
+            QStringLiteral("operation_identity"),
+            QStringLiteral("expected_revision"), QStringLiteral("target"),
+            QStringLiteral("confirmed_anchor"), QStringLiteral("operation"),
+        })
+        || result.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("mutation-acknowledgement-consume-result/0.1")
+        || result.value(QStringLiteral("session_id"))
+            != request.value(QStringLiteral("session_id"))
+        || result.value(QStringLiteral("operation_identity"))
+            != request.value(QStringLiteral("operation_identity"))
+        || result.value(QStringLiteral("expected_revision"))
+            != request.value(QStringLiteral("expected_revision"))
+        || result.value(QStringLiteral("target"))
+            != request.value(QStringLiteral("target"))
+        || result.value(QStringLiteral("confirmed_anchor"))
+            != request.value(QStringLiteral("confirmed_anchor"))
+        || !isValidPositiveTimelineAnchor(
+            result.value(QStringLiteral("confirmed_anchor")))
+        || !isValidDurableMutationOperation(
+            result.value(QStringLiteral("operation")))) {
+        return false;
+    }
+    const QJsonObject operation = result.value(QStringLiteral("operation")).toObject();
+    const double expectedRevision = result.value(
+        QStringLiteral("expected_revision")).toDouble();
+    if (operation.value(QStringLiteral("session_id"))
+            != result.value(QStringLiteral("session_id"))
+            || operation.value(QStringLiteral("operation_identity"))
+                != result.value(QStringLiteral("operation_identity"))
+            || operation.value(QStringLiteral("revision")).toDouble()
+                != expectedRevision + 1.0) {
+        return false;
+    }
+    const QString target = result.value(QStringLiteral("target")).toString();
+    if (target == QStringLiteral("accepted")) {
+        return operation.value(QStringLiteral("accepted_consumed")).toBool()
+            && operation.value(QStringLiteral("accepted_anchor"))
+                == result.value(QStringLiteral("confirmed_anchor"));
+    }
+    return target == QStringLiteral("terminal")
+        && operation.value(QStringLiteral("state")).toString()
+            == QStringLiteral("terminal")
+        && operation.value(QStringLiteral("accepted_consumed")).toBool()
+        && operation.value(QStringLiteral("terminal_consumed")).toBool()
+        && operation.value(QStringLiteral("terminal_anchor"))
+            == result.value(QStringLiteral("confirmed_anchor"));
+}
+
+bool isValidTurnStartResult(const QJsonObject &result,
+                            const QJsonObject &request)
+{
+    if (!hasExactKeys(result, {
+            QStringLiteral("turn"), QStringLiteral("context"),
+            QStringLiteral("request_fingerprint"),
+            QStringLiteral("mutation_acknowledgement"),
+            QStringLiteral("mutation_operation"),
+        })
+        || !isValidMutationFingerprint(
+            result.value(QStringLiteral("request_fingerprint")))
+        || !result.value(QStringLiteral("turn")).isObject()
+        || !result.value(QStringLiteral("context")).isObject()
+        || !result.value(QStringLiteral("mutation_acknowledgement")).isObject()
+        || !isValidDurableMutationOperation(
+            result.value(QStringLiteral("mutation_operation")))) {
+        return false;
+    }
+    const QJsonObject turn = result.value(QStringLiteral("turn")).toObject();
+    const QJsonObject context = result.value(QStringLiteral("context")).toObject();
+    const QJsonObject acknowledgement = result.value(
+        QStringLiteral("mutation_acknowledgement")).toObject();
+    const QJsonObject operation = result.value(
+        QStringLiteral("mutation_operation")).toObject();
+    if (!hasExactKeys(turn, {QStringLiteral("id"), QStringLiteral("state")})
+        || !isBoundedTimelineIdentity(turn.value(QStringLiteral("id")))
+        || turn.value(QStringLiteral("state")).toString() != QStringLiteral("started")
+        || !hasExactKeys(context, {
+            QStringLiteral("item_count"), QStringLiteral("bytes"),
+            QStringLiteral("truncated"), QStringLiteral("manifest"),
+            QStringLiteral("budget"),
+        })
+        || !isSafeJsonInteger(context.value(QStringLiteral("item_count")))
+        || context.value(QStringLiteral("item_count")).toDouble() < 0.0
+        || !isSafeJsonInteger(context.value(QStringLiteral("bytes")))
+        || context.value(QStringLiteral("bytes")).toDouble() < 0.0
+        || !context.value(QStringLiteral("truncated")).isBool()
+        || !context.value(QStringLiteral("manifest")).isObject()
+        || !context.value(QStringLiteral("budget")).isObject()
+        || !hasExactKeys(acknowledgement, {
+            QStringLiteral("schema_version"), QStringLiteral("request_id"),
+            QStringLiteral("idempotency_key"), QStringLiteral("session_id"),
+            QStringLiteral("generation"), QStringLiteral("state"),
+        })
+        || acknowledgement.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("mutation-acknowledgement/0.1")
+        || acknowledgement.value(QStringLiteral("request_id"))
+            != request.value(QStringLiteral("request_id"))
+        || acknowledgement.value(QStringLiteral("idempotency_key"))
+            != request.value(QStringLiteral("idempotency_key"))
+        || acknowledgement.value(QStringLiteral("session_id"))
+            != request.value(QStringLiteral("session_id"))
+        || acknowledgement.value(QStringLiteral("generation"))
+            != request.value(QStringLiteral("generation"))
+        || acknowledgement.value(QStringLiteral("state")).toString()
+            != QStringLiteral("accepted")) {
+        return false;
+    }
+    const QString operationState = operation.value(QStringLiteral("state")).toString();
+    const bool acceptedState = operationState == QStringLiteral("accepted")
+        && operation.value(QStringLiteral("terminal_anchor")).isNull();
+    const bool terminalState = operationState == QStringLiteral("terminal")
+        && isValidPositiveTimelineAnchor(
+            operation.value(QStringLiteral("terminal_anchor")));
+    return (acceptedState || terminalState)
+        && operation.value(QStringLiteral("session_id"))
+            == request.value(QStringLiteral("session_id"))
+        && operation.value(QStringLiteral("idempotency_key"))
+            == request.value(QStringLiteral("idempotency_key"))
+        && operation.value(QStringLiteral("request_fingerprint"))
+            == result.value(QStringLiteral("request_fingerprint"))
+        && operation.value(QStringLiteral("turn_id"))
+            == turn.value(QStringLiteral("id"))
+        && isValidPositiveTimelineAnchor(
+            operation.value(QStringLiteral("accepted_anchor")))
+        && !operation.value(QStringLiteral("accepted_consumed")).toBool()
+        && !operation.value(QStringLiteral("terminal_consumed")).toBool();
+}
+
 bool validateInitializeResult(const QJsonObject &result,
                               QSet<QString> *stableCapabilities,
                               int *maximumFrameBytes,
@@ -1723,6 +2013,10 @@ QStringList requiredCapabilitiesForMethod(const QString &method,
         {QStringLiteral("session/fork"), QStringLiteral("session.fork")},
         {QStringLiteral("session/list"), QStringLiteral("session.list")},
         {QStringLiteral("session/search"), QStringLiteral("session.search.branch")},
+        {QStringLiteral("session/mutation-acknowledgements"),
+         QStringLiteral("session.mutation-acknowledgements")},
+        {QStringLiteral("mutation/acknowledgement/consume"),
+         QStringLiteral("session.mutation-acknowledgements")},
         {QStringLiteral("session/title"), QStringLiteral("session.metadata.manage")},
         {QStringLiteral("session/archive"), QStringLiteral("session.metadata.manage")},
         {QStringLiteral("session/unarchive"), QStringLiteral("session.metadata.manage")},
@@ -1821,6 +2115,7 @@ QStringList requiredCapabilitiesForMethod(const QString &method,
     QStringList required;
     if (method == QStringLiteral("turn/start")) {
         required.append(QStringLiteral("timeline.streaming"));
+        required.append(QStringLiteral("session.mutation-acknowledgements"));
     } else {
         const auto capability = capabilities.constFind(method);
         if (capability == capabilities.cend()) return {QStringLiteral("__unknown_method__")};
@@ -1883,6 +2178,8 @@ bool isReconnectRecoveryMethod(const QString &method)
         QStringLiteral("timeline/subscription-sync"),
         QStringLiteral("timeline/subscription-snapshot"),
         QStringLiteral("timeline/subscription-activate"),
+        QStringLiteral("session/mutation-acknowledgements"),
+        QStringLiteral("mutation/acknowledgement/consume"),
         QStringLiteral("workspace/edit/proposal/latest"),
         QStringLiteral("workspace/edit/proposal/read"),
     };
@@ -2275,6 +2572,36 @@ QString AgentRuntimeClient::timelineSubscriptionRequestIdentity(
     return domainSeparatedTimelineSubscriptionRequestIdentity(stage, request);
 }
 
+QString AgentRuntimeClient::durableMutationOperationIdentity(
+    const QString &sessionId, const QString &mutationKind,
+    const QString &idempotencyKey, const QString &requestFingerprint)
+{
+    if (!isBoundedTimelineIdentity(QJsonValue(sessionId))
+            || mutationKind != QStringLiteral("turn-start")
+            || !isBoundedTimelineIdentity(QJsonValue(idempotencyKey))
+            || !isValidMutationFingerprint(QJsonValue(requestFingerprint))) {
+        return {};
+    }
+    QByteArray material = QByteArrayLiteral(
+        "aegisy-durable-mutation-operation/0.1");
+    material.append('\0');
+    const auto appendField = [&material](const QString &value) {
+        const QByteArray bytes = value.toUtf8();
+        const quint64 size = static_cast<quint64>(bytes.size());
+        for (int shift = 56; shift >= 0; shift -= 8) {
+            material.append(static_cast<char>((size >> shift) & 0xff));
+        }
+        material.append(bytes);
+    };
+    appendField(sessionId);
+    appendField(mutationKind);
+    appendField(idempotencyKey);
+    appendField(requestFingerprint);
+    return QStringLiteral("mutation-operation:sha256:")
+        + QString::fromLatin1(QCryptographicHash::hash(
+            material, QCryptographicHash::Sha256).toHex());
+}
+
 QString AgentRuntimeClient::workspaceEditProposalPreviewIdentity(
     const QJsonObject &proposal)
 {
@@ -2580,6 +2907,9 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
     m_pendingGenerations.clear();
     m_pendingTimelineSyncRequests.clear();
     m_pendingTimelineSubscriptionRequests.clear();
+    m_pendingTurnRequests.clear();
+    m_pendingMutationListRequests.clear();
+    m_pendingMutationConsumeRequests.clear();
     const QString connectingDetail = reconnectAttempt
         ? QStringLiteral("正在执行第 %1/%2 次运行时重连")
               .arg(m_reconnectAttempt)
@@ -3060,15 +3390,23 @@ QString AgentRuntimeClient::runRetentionMaintenance()
 QString AgentRuntimeClient::startTurn(const QString &sessionId, const QString &input,
                                       const QJsonArray &context,
                                       const QString &pinnedContextSetIdentity,
-                                      const QStringList &pinnedContextIds)
+                                      const QStringList &pinnedContextIds,
+                                      const QString &idempotencyKey)
 {
-    ++m_nextTurnKey;
+    if (!isBoundedTimelineIdentity(QJsonValue(sessionId))
+            || input.trimmed().isEmpty()
+            || !isBoundedTimelineIdentity(QJsonValue(idempotencyKey))
+            || m_processGeneration == 0
+            || m_processGeneration
+                > static_cast<quint64>(kMaximumSafeJsonInteger)) {
+        return {};
+    }
     QJsonObject params{
         {QStringLiteral("session_id"), sessionId},
         {QStringLiteral("input"), input},
         {QStringLiteral("context"), context},
-        {QStringLiteral("idempotency_key"),
-         QStringLiteral("qt-turn-%1").arg(m_nextTurnKey)},
+        {QStringLiteral("idempotency_key"), idempotencyKey},
+        {QStringLiteral("generation"), static_cast<double>(m_processGeneration)},
     };
     if (!pinnedContextIds.isEmpty()) {
         params.insert(QStringLiteral("pinned_context_set_identity"),
@@ -3076,7 +3414,16 @@ QString AgentRuntimeClient::startTurn(const QString &sessionId, const QString &i
         params.insert(QStringLiteral("pinned_context_ids"),
                       QJsonArray::fromStringList(pinnedContextIds));
     }
-    return sendRequest(QStringLiteral("turn/start"), params);
+    const QString requestId = sendRequest(QStringLiteral("turn/start"), params);
+    if (!requestId.isEmpty()) {
+        m_pendingTurnRequests.insert(requestId, {
+            {QStringLiteral("request_id"), requestId},
+            {QStringLiteral("session_id"), sessionId},
+            {QStringLiteral("idempotency_key"), idempotencyKey},
+            {QStringLiteral("generation"), static_cast<double>(m_processGeneration)},
+        });
+    }
+    return requestId;
 }
 
 QString AgentRuntimeClient::inspectTurnContext(const QString &sessionId,
@@ -3472,6 +3819,69 @@ QString AgentRuntimeClient::activateTimelineSubscription(
         m_pendingTimelineSubscriptionRequests.insert(requestId, {
             {QStringLiteral("request"), params},
         });
+    }
+    return requestId;
+}
+
+QString AgentRuntimeClient::listMutationAcknowledgements(
+    const QString &sessionId, const QJsonObject &after, int limit)
+{
+    const QString method = QStringLiteral("session/mutation-acknowledgements");
+    const bool hasAfter = !after.isEmpty();
+    if (!isBoundedTimelineIdentity(QJsonValue(sessionId))
+            || (hasAfter && !isValidDurableMutationCursor(QJsonValue(after)))
+            || limit < 1 || limit > 100) {
+        emit requestFailed({}, method,
+                           QStringLiteral("持久化操作确认列表请求无效"), -32602);
+        return {};
+    }
+    const QJsonObject params{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("mutation-acknowledgement-list-request/0.1")},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("after"), hasAfter
+             ? QJsonValue(after) : QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("limit"), limit},
+    };
+    const QString requestId = sendRequest(method, params);
+    if (!requestId.isEmpty()) {
+        m_pendingMutationListRequests.insert(requestId, params);
+    }
+    return requestId;
+}
+
+QString AgentRuntimeClient::consumeMutationAcknowledgement(
+    const QString &sessionId, const QString &operationIdentity,
+    quint64 expectedRevision, const QString &target,
+    const QJsonObject &confirmedAnchor)
+{
+    const QString method = QStringLiteral("mutation/acknowledgement/consume");
+    if (!isBoundedTimelineIdentity(QJsonValue(sessionId))
+            || !isValidDurableMutationOperationIdentity(
+                QJsonValue(operationIdentity))
+            || expectedRevision == 0
+            || expectedRevision
+                > static_cast<quint64>(kMaximumSafeJsonInteger)
+            || (target != QStringLiteral("accepted")
+                && target != QStringLiteral("terminal"))
+            || !isValidPositiveTimelineAnchor(QJsonValue(confirmedAnchor))) {
+        emit requestFailed({}, method,
+                           QStringLiteral("持久化操作确认消费请求无效"), -32602);
+        return {};
+    }
+    const QJsonObject params{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("mutation-acknowledgement-consume-request/0.1")},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("operation_identity"), operationIdentity},
+        {QStringLiteral("expected_revision"),
+         static_cast<double>(expectedRevision)},
+        {QStringLiteral("target"), target},
+        {QStringLiteral("confirmed_anchor"), confirmedAnchor},
+    };
+    const QString requestId = sendRequest(method, params);
+    if (!requestId.isEmpty()) {
+        m_pendingMutationConsumeRequests.insert(requestId, params);
     }
     return requestId;
 }
@@ -4501,6 +4911,46 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         }
         return;
     }
+    if (pendingMethod == QStringLiteral("turn/start")) {
+        const QJsonObject turnRequest = m_pendingTurnRequests.value(id);
+        if (turnRequest.isEmpty()
+                || turnRequest.value(QStringLiteral("generation")).toDouble()
+                    != static_cast<double>(m_processGeneration)
+                || !isValidTurnStartResult(result, turnRequest)) {
+            rejectProtocolMessage(QStringLiteral("turn-start-result"));
+            return;
+        }
+        const quint64 responseGeneration = static_cast<quint64>(
+            turnRequest.value(QStringLiteral("generation")).toDouble());
+        removePendingRequest(id);
+        emit turnStarted(id, responseGeneration, result);
+        return;
+    }
+    if (pendingMethod
+            == QStringLiteral("session/mutation-acknowledgements")) {
+        const QJsonObject listRequest = m_pendingMutationListRequests.value(id);
+        if (listRequest.isEmpty()
+                || !isValidDurableMutationPage(result, listRequest)) {
+            rejectProtocolMessage(QStringLiteral("mutation-acknowledgement-page"));
+            return;
+        }
+        removePendingRequest(id);
+        emit mutationAcknowledgementsListed(id, result);
+        return;
+    }
+    if (pendingMethod
+            == QStringLiteral("mutation/acknowledgement/consume")) {
+        const QJsonObject consumeRequest =
+            m_pendingMutationConsumeRequests.value(id);
+        if (consumeRequest.isEmpty()
+                || !isValidDurableMutationConsumeResult(result, consumeRequest)) {
+            rejectProtocolMessage(QStringLiteral("mutation-acknowledgement-consume"));
+            return;
+        }
+        removePendingRequest(id);
+        emit mutationAcknowledgementConsumed(id, result);
+        return;
+    }
     removePendingRequest(id);
     if (pendingMethod == QStringLiteral("project/list")) {
         emit projectsListed(id, result);
@@ -4861,6 +5311,9 @@ void AgentRuntimeClient::failPending(const QString &message)
     m_pendingGenerations.clear();
     m_pendingTimelineSyncRequests.clear();
     m_pendingTimelineSubscriptionRequests.clear();
+    m_pendingTurnRequests.clear();
+    m_pendingMutationListRequests.clear();
+    m_pendingMutationConsumeRequests.clear();
     for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
         retireResponseId(it.key());
         emit requestFailed(it.key(), it.value(), message, -1);
@@ -5183,4 +5636,7 @@ void AgentRuntimeClient::removePendingRequest(const QString &requestId)
     m_pendingGenerations.remove(requestId);
     m_pendingTimelineSyncRequests.remove(requestId);
     m_pendingTimelineSubscriptionRequests.remove(requestId);
+    m_pendingTurnRequests.remove(requestId);
+    m_pendingMutationListRequests.remove(requestId);
+    m_pendingMutationConsumeRequests.remove(requestId);
 }

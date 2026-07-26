@@ -12,6 +12,7 @@ const TIMELINE_SUBSCRIPTION_REQUEST_ROUTES: [(&str, &str); 4] = [
     ("subscription-snapshot", "timeline/subscription-snapshot"),
     ("subscription-activate", "timeline/subscription-activate"),
 ];
+const DURABLE_MUTATION_ACK_CAPABILITY: &str = "session.mutation-acknowledgements";
 
 fn request(id: &str, method: &str, params: Value) -> String {
     json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
@@ -91,6 +92,7 @@ fn ready_timeline_subscription_runtime(root: &Path) -> Runtime {
             TIMELINE_SUBSCRIPTION_CAPABILITY,
             "timeline.replay.fixed-watermark",
             "timeline.snapshot.current",
+            DURABLE_MUTATION_ACK_CAPABILITY,
         ],
     );
     assert!(initialized["result"]["capabilities"]["stable"]
@@ -98,6 +100,11 @@ fn ready_timeline_subscription_runtime(root: &Path) -> Runtime {
         .unwrap()
         .iter()
         .any(|capability| capability == TIMELINE_SUBSCRIPTION_CAPABILITY));
+    assert!(initialized["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == DURABLE_MUTATION_ACK_CAPABILITY));
     runtime
 }
 
@@ -121,7 +128,8 @@ fn start_preview_turn(runtime: &mut Runtime, request_id: &str, session_id: &str)
         json!({
             "session_id": session_id,
             "input": request_id,
-            "idempotency_key": request_id
+            "idempotency_key": request_id,
+            "generation": 1
         }),
     ))
 }
@@ -878,6 +886,7 @@ fn healthy_store_advertises_subscription_routes_and_preserves_legacy_recovery_ro
             TIMELINE_SUBSCRIPTION_CAPABILITY,
             "timeline.replay.fixed-watermark",
             "timeline.snapshot.current",
+            DURABLE_MUTATION_ACK_CAPABILITY,
         ],
     );
     let capabilities = initialized["result"]["capabilities"]["stable"]
@@ -950,8 +959,25 @@ fn store_recovery_mode_never_advertises_timeline_subscription() {
     assert!(!capabilities
         .iter()
         .any(|capability| capability == TIMELINE_SUBSCRIPTION_CAPABILITY));
+    assert!(!capabilities
+        .iter()
+        .any(|capability| capability == DURABLE_MUTATION_ACK_CAPABILITY));
 
     for (id, method) in TIMELINE_SUBSCRIPTION_REQUEST_ROUTES {
+        let response = runtime.handle_line(&request(id, method, json!({})));
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0]["error"]["code"], -32006, "{response:?}");
+    }
+    for (id, method) in [
+        (
+            "mutation-list-recovery",
+            "session/mutation-acknowledgements",
+        ),
+        (
+            "mutation-consume-recovery",
+            "mutation/acknowledgement/consume",
+        ),
+    ] {
         let response = runtime.handle_line(&request(id, method, json!({})));
         assert_eq!(response.len(), 1);
         assert_eq!(response[0]["error"]["code"], -32006, "{response:?}");

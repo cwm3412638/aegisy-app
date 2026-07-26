@@ -116,6 +116,36 @@
     {
       "if": {
         "required": ["method"],
+        "properties": {
+          "method": { "const": "session/mutation-acknowledgements" }
+        }
+      },
+      "then": {
+        "required": ["id", "params"],
+        "properties": {
+          "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+          "params": { "$ref": "#/$defs/durableMutationListParams" }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["method"],
+        "properties": {
+          "method": { "const": "mutation/acknowledgement/consume" }
+        }
+      },
+      "then": {
+        "required": ["id", "params"],
+        "properties": {
+          "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+          "params": { "$ref": "#/$defs/durableMutationConsumeParams" }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["method"],
         "properties": { "method": { "const": "event" } }
       },
       "then": {
@@ -370,6 +400,348 @@
         "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
         "generation": { "$ref": "#/$defs/safePositiveInteger" },
         "state": { "$ref": "#/$defs/mutationAcknowledgementState" }
+      }
+    },
+    "durableMutationOperationIdentity": {
+      "type": "string",
+      "pattern": "^mutation-operation:sha256:[0-9a-f]{64}$",
+      "minLength": 90,
+      "maxLength": 90
+    },
+    "durableMutationRequestFingerprint": {
+      "$comment": "SHA-256 over the mutation request under the producer's reviewed canonicalization. The request body itself is forbidden from this contract.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "durableMutationKind": {
+      "enum": ["turn-start"]
+    },
+    "durableMutationCapability": {
+      "const": "session.mutation-acknowledgements"
+    },
+    "durableMutationState": {
+      "enum": ["accepted", "terminal", "reconciliation-required"]
+    },
+    "durableMutationConsumeTarget": {
+      "enum": ["accepted", "terminal"]
+    },
+    "nullableBoundedGraphicalId": {
+      "oneOf": [
+        { "$ref": "#/$defs/boundedGraphicalId" },
+        { "type": "null" }
+      ]
+    },
+    "positiveTimelineAnchor": {
+      "allOf": [
+        { "$ref": "#/$defs/timelineAnchor" },
+        {
+          "properties": {
+            "sequence": { "$ref": "#/$defs/safePositiveInteger" },
+            "event_id": { "$ref": "#/$defs/timelineEventId" }
+          }
+        }
+      ]
+    },
+    "nullableTimelineAnchor": {
+      "oneOf": [
+        { "$ref": "#/$defs/positiveTimelineAnchor" },
+        { "type": "null" }
+      ]
+    },
+    "durableMutationOperation": {
+      "$comment": "Metadata-only durable mutation acknowledgement. Typed peers recompute operation_identity from session_id, mutation_kind, idempotency_key, and request_fingerprint. No prompt, context, body, provider payload, result content, permission, approval, or execution authority is permitted.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "operation_identity",
+        "session_id",
+        "mutation_kind",
+        "idempotency_key",
+        "request_fingerprint",
+        "revision",
+        "state",
+        "turn_id",
+        "accepted_anchor",
+        "terminal_anchor",
+        "accepted_consumed",
+        "terminal_consumed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "mutation-acknowledgement-operation/0.1"
+        },
+        "operation_identity": {
+          "$ref": "#/$defs/durableMutationOperationIdentity"
+        },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "mutation_kind": { "$ref": "#/$defs/durableMutationKind" },
+        "idempotency_key": { "$ref": "#/$defs/boundedGraphicalId" },
+        "request_fingerprint": {
+          "$ref": "#/$defs/durableMutationRequestFingerprint"
+        },
+        "revision": { "$ref": "#/$defs/safePositiveInteger" },
+        "state": { "$ref": "#/$defs/durableMutationState" },
+        "turn_id": { "$ref": "#/$defs/nullableBoundedGraphicalId" },
+        "accepted_anchor": { "$ref": "#/$defs/nullableTimelineAnchor" },
+        "terminal_anchor": { "$ref": "#/$defs/nullableTimelineAnchor" },
+        "accepted_consumed": { "type": "boolean" },
+        "terminal_consumed": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "accepted_anchor": { "$ref": "#/$defs/positiveTimelineAnchor" }
+            }
+          },
+          "then": {
+            "properties": {
+              "turn_id": { "$ref": "#/$defs/boundedGraphicalId" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "terminal_consumed": { "const": true } }
+          },
+          "then": {
+            "properties": { "accepted_consumed": { "const": true } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "accepted_consumed": { "const": true } }
+          },
+          "then": {
+            "properties": {
+              "turn_id": { "$ref": "#/$defs/boundedGraphicalId" },
+              "accepted_anchor": { "$ref": "#/$defs/timelineAnchor" }
+            }
+          }
+        }
+      ],
+      "oneOf": [
+        {
+          "properties": {
+            "state": { "const": "accepted" },
+            "terminal_anchor": { "type": "null" },
+            "terminal_consumed": { "const": false }
+          }
+        },
+        {
+          "$comment": "Typed peers additionally require positive accepted/terminal anchors and a terminal sequence strictly after the accepted sequence.",
+          "properties": {
+            "state": { "const": "terminal" },
+            "turn_id": { "$ref": "#/$defs/boundedGraphicalId" },
+            "accepted_anchor": { "$ref": "#/$defs/positiveTimelineAnchor" },
+            "terminal_anchor": { "$ref": "#/$defs/positiveTimelineAnchor" }
+          }
+        },
+        {
+          "$comment": "Accepted-only state found after restart is unknown and requires reconciliation; it never fabricates terminal evidence.",
+          "properties": {
+            "state": { "const": "reconciliation-required" },
+            "terminal_anchor": { "type": "null" },
+            "terminal_consumed": { "const": false }
+          }
+        }
+      ]
+    },
+    "durableMutationCursor": {
+      "$comment": "Strict keyset cursor. Typed peers require it to equal the final operation identity and revision on an incomplete page.",
+      "type": "object",
+      "required": ["operation_identity", "revision"],
+      "additionalProperties": false,
+      "properties": {
+        "operation_identity": {
+          "$ref": "#/$defs/durableMutationOperationIdentity"
+        },
+        "revision": { "$ref": "#/$defs/safePositiveInteger" }
+      }
+    },
+    "nullableDurableMutationCursor": {
+      "oneOf": [
+        { "$ref": "#/$defs/durableMutationCursor" },
+        { "type": "null" }
+      ]
+    },
+    "durableMutationListParams": {
+      "type": "object",
+      "required": ["schema_version", "session_id", "after", "limit"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "mutation-acknowledgement-list-request/0.1"
+        },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "after": { "$ref": "#/$defs/nullableDurableMutationCursor" },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "durableMutationPage": {
+      "$comment": "Typed peers require exact request echo, same-Session operations in strictly increasing identity order, no duplicates, and a next cursor equal to the final operation identity/revision.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "session_id",
+        "after",
+        "operations",
+        "next_after",
+        "complete"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": { "const": "mutation-acknowledgement-page/0.1" },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "after": { "$ref": "#/$defs/nullableDurableMutationCursor" },
+        "operations": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/durableMutationOperation" }
+        },
+        "next_after": { "$ref": "#/$defs/nullableDurableMutationCursor" },
+        "complete": { "type": "boolean" }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "complete": { "const": true },
+            "next_after": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "complete": { "const": false },
+            "operations": { "minItems": 1 },
+            "next_after": { "$ref": "#/$defs/durableMutationCursor" }
+          }
+        }
+      ]
+    },
+    "durableMutationConsumeParams": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "session_id",
+        "operation_identity",
+        "expected_revision",
+        "target",
+        "confirmed_anchor"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "mutation-acknowledgement-consume-request/0.1"
+        },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "operation_identity": {
+          "$ref": "#/$defs/durableMutationOperationIdentity"
+        },
+        "expected_revision": { "$ref": "#/$defs/safePositiveInteger" },
+        "target": { "$ref": "#/$defs/durableMutationConsumeTarget" },
+        "confirmed_anchor": { "$ref": "#/$defs/positiveTimelineAnchor" }
+      }
+    },
+    "durableMutationConsumeResult": {
+      "$comment": "Typed peers require the operation to match the request, advance expected_revision by exactly one, repeat the user-confirmed Timeline anchor, and set the selected consumed flag. The anchor must equal accepted_anchor or terminal_anchor for the selected target. Terminal consumption additionally requires terminal state and accepted consumption.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "session_id",
+        "operation_identity",
+        "expected_revision",
+        "target",
+        "confirmed_anchor",
+        "operation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "mutation-acknowledgement-consume-result/0.1"
+        },
+        "session_id": { "$ref": "#/$defs/boundedGraphicalId" },
+        "operation_identity": {
+          "$ref": "#/$defs/durableMutationOperationIdentity"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740990
+        },
+        "target": { "$ref": "#/$defs/durableMutationConsumeTarget" },
+        "confirmed_anchor": { "$ref": "#/$defs/positiveTimelineAnchor" },
+        "operation": { "$ref": "#/$defs/durableMutationOperation" }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "target": { "const": "accepted" },
+            "operation": {
+              "properties": { "accepted_consumed": { "const": true } }
+            }
+          }
+        },
+        {
+          "properties": {
+            "target": { "const": "terminal" },
+            "operation": {
+              "properties": {
+                "state": { "const": "terminal" },
+                "accepted_consumed": { "const": true },
+                "terminal_consumed": { "const": true }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "durableMutationListRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "method": { "const": "session/mutation-acknowledgements" },
+        "params": { "$ref": "#/$defs/durableMutationListParams" }
+      }
+    },
+    "durableMutationListSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "result": { "$ref": "#/$defs/durableMutationPage" }
+      }
+    },
+    "durableMutationConsumeRequest": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "method": { "const": "mutation/acknowledgement/consume" },
+        "params": { "$ref": "#/$defs/durableMutationConsumeParams" }
+      }
+    },
+    "durableMutationConsumeSuccessResponse": {
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/jsonRpcRequestId" },
+        "result": { "$ref": "#/$defs/durableMutationConsumeResult" }
       }
     },
     "protocolVersion": {

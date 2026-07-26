@@ -243,28 +243,38 @@ Live Timeline subscription and ownership recovery (`3.5`, partial):
   failed, one ignored); strict workspace Clippy and formatting; desktop build and
   all 16 CTests; JSON Schema parsing; strict OpenSpec validation; and
   `git diff --check`.
-- This does not provide durable explicit mutation acknowledgement or complete
-  Windows reconnect/runtime evidence. Agent/Codex remains read-only, automatic
-  Timeline pruning remains disabled, and task `3.5` stays unchecked.
+- This live-subscription slice does not provide complete Windows reconnect/runtime
+  evidence. Durable Turn-start acknowledgement is verified by the separate slice
+  below. Agent/Codex remains read-only, automatic Timeline pruning remains disabled,
+  and task `3.5` stays unchecked.
 
-Metadata-only acknowledgement contract foundation (`3.5`/`3.6`, partial):
+Durable Turn-start acknowledgement (`3.5`/`3.6`, partial):
 
-- Stable AAP schema and Rust types define `mutation-acknowledgement/0.1` request
-  and acknowledgement objects with bounded graphical IDs, positive safe-integer
-  generation, exact Session/idempotency/request binding, and only
-  `accepted`/`acknowledged`/`terminal` states.
-- Serialization is strict and denies unknown fields; same-state retries are valid,
-  backward transitions and binding/generation drift are rejected, and the contract
-  explicitly grants no mutation, approval, or execution authority. It is not
-  registered as an AAP method/capability and has no Runtime/Qt producer or durable
-  ledger.
-- The complete Rust workspace passes 32 AAP type, 729 `aegisy-agentd` library
-  tests with one ignored live fixture, 7 daemon-main, 10 context-threshold, 14
-  handshake Runtime, 19 handshake Schema, 67 protocol, and 23 stdio/Codex tests.
-  Strict Clippy, Rust formatting, strict OpenSpec validation, and
-  `git diff --check` pass. This does not complete explicit acknowledgement,
-  idempotency, or any mutation task; concrete producers, durable consumption,
-  reconciliation, and Windows evidence remain required.
+- Schema v20 adds the strict `mutation_acknowledgements` ledger and v19-to-v20
+  migration/backup path. The stable AAP contract registers
+  `session.mutation-acknowledgements` and `mutation/acknowledgement/consume` behind
+  `session.mutation-acknowledgements`; pages are Session-scoped, bounded, and
+  cursor-validated.
+- `turn/start` reserves one metadata-only `turn-start` operation before dispatch,
+  keyed by Session, idempotency key, and request fingerprint. Equivalent retries
+  return the original operation/Turn; conflicting fingerprints fail without a
+  second dispatch. Accepted `turn.started` and terminal Timeline anchors bind in
+  the same projection/Journal transaction with revision CAS. Startup converts
+  accepted operations with uncertain dispatch to `reconciliation-required`, which
+  cannot be redispatched.
+- Qt consumes only after validating the exact Session, Turn, sequence, Event-ID,
+  and revision anchor; accepted evidence is consumed before terminal evidence.
+  Drift, cross-Session access, malformed/tampered rows, unavailable/read-only Store,
+  and failed recovery freeze the affected Session for reconciliation. The operation
+  contains no prompt, context, provider body, result content, permission, approval,
+  or execution authority.
+- Focused evidence passes 5 durable acknowledgement tests and 169 Workbench Store
+  tests. Preview reservation/binding rollback and retry, startup reconciliation/no
+  redispatch, accepted/terminal CAS binding, confirmed-anchor consumption,
+  cross-Session rejection, tamper detection, read-only recovery, purge, and the
+  schema migration are covered by the implementation tests. Approval, file-write,
+  Git, and job mutation producers remain absent, and complete Windows
+  reconnect/runtime evidence remains open; keep `3.5` and `3.6` unchecked.
 
 - Workbench schema v15 adds a dedicated `public_timeline_events` journal and one
   `public_timeline_cursors` source/cursor row per Session. Session insertion registers
@@ -973,8 +983,8 @@ Current editor evidence:
   The later fixed-watermark, snapshot, bounded-reconnect, and live-subscription
   sections above now add durable public replay, bounded per-Session gap catch-up,
   internal checkpoint-plus-tail restart authority, structured retention-gap recovery,
-  and live delivery. Explicit acknowledgement and Windows recovery/runtime evidence
-  remain incomplete. Full
+  and live delivery. Durable Turn-start acknowledgement is covered by the dedicated
+  section above; complete Windows recovery/runtime evidence remains incomplete. Full
   vendor capability negotiation and the remaining desktop/dependent feature gates
   are also incomplete, so `3.5` and `7.9` remain unchecked.
 - Large command-output tests cover a Unicode-safe 64 KiB head/192 KiB tail,

@@ -425,7 +425,8 @@ fn stdio_agent_message_lifecycle_is_ordered_and_fails_closed() {
                 json!({
                     "session_id": session_id,
                     "input": case,
-                    "idempotency_key": request_id
+                    "idempotency_key": request_id,
+                    "generation": 1
                 }),
             ),
         );
@@ -1089,7 +1090,8 @@ fn stdio_turn_metadata_items_survive_durable_restart_replay() {
             json!({
                 "session_id": session_id,
                 "input": "emit metadata",
-                "idempotency_key": "metadata-fixture-turn"
+                "idempotency_key": "metadata-fixture-turn",
+                "generation": 1
             }),
         ),
     );
@@ -1583,7 +1585,8 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
             json!({
                 "session_id": session_id,
                 "input": "first attempt",
-                "idempotency_key": "reconnect-first"
+                "idempotency_key": "reconnect-first",
+                "generation": 1
             }),
         ),
     );
@@ -1621,7 +1624,8 @@ fn stdio_codex_transport_failure_reconnects_and_preserves_session_binding() {
             json!({
                 "session_id": session_id,
                 "input": "retry after reconnect",
-                "idempotency_key": "reconnect-second"
+                "idempotency_key": "reconnect-second",
+                "generation": 1
             }),
         ),
     );
@@ -1880,6 +1884,7 @@ fn stdio_codex_provider_failure_preserves_content_free_upstream_classification()
                 "session_id": session_id,
                 "input": "provider failure",
                 "idempotency_key": "provider-failure-turn",
+                "generation": 1,
                 "context": [{
                     "id": "excluded-context",
                     "kind": "selection",
@@ -2131,7 +2136,8 @@ fn stdio_codex_approval_request_is_declined_without_execution_authority() {
             json!({
                 "session_id": session_id,
                 "input": "request a destructive command",
-                "idempotency_key": "approval-turn"
+                "idempotency_key": "approval-turn",
+                "generation": 1
             }),
         ),
     );
@@ -2478,7 +2484,8 @@ fn stdio_codex_approval_request_must_match_the_active_turn() {
             json!({
                 "session_id": session_id,
                 "input": "inspect only",
-                "idempotency_key": "mismatch-turn"
+                "idempotency_key": "mismatch-turn",
+                "generation": 1
             }),
         ),
     );
@@ -2535,7 +2542,8 @@ fn stdio_runtime_denial_budget_error_resolves_request_and_reuses_backend() {
             json!({
                 "session_id": session_id,
                 "input": "exercise bounded denial metadata",
-                "idempotency_key": "denial-budget-first"
+                "idempotency_key": "denial-budget-first",
+                "generation": 1
             }),
         ),
     );
@@ -2572,7 +2580,8 @@ fn stdio_runtime_denial_budget_error_resolves_request_and_reuses_backend() {
             json!({
                 "session_id": session_id,
                 "input": "verify the same backend remains usable",
-                "idempotency_key": "denial-budget-second"
+                "idempotency_key": "denial-budget-second",
+                "generation": 1
             }),
         ),
     );
@@ -2633,7 +2642,8 @@ fn stdio_invalid_runtime_denial_requests_discard_backend_and_restart_cleanly() {
                 json!({
                     "session_id": session_id,
                     "input": "emit malformed approval request",
-                    "idempotency_key": format!("{fixture_case}-first")
+                    "idempotency_key": format!("{fixture_case}-first"),
+                    "generation": 1
                 }),
             ),
         );
@@ -2665,7 +2675,8 @@ fn stdio_invalid_runtime_denial_requests_discard_backend_and_restart_cleanly() {
                 json!({
                     "session_id": session_id,
                     "input": "verify restart",
-                    "idempotency_key": format!("{fixture_case}-second")
+                    "idempotency_key": format!("{fixture_case}-second"),
+                    "generation": 1
                 }),
             ),
         );
@@ -2713,7 +2724,8 @@ fn stdio_runtime_denial_write_failure_discards_backend_until_restart() {
             json!({
                 "session_id": session_id,
                 "input": "force denial response write failure",
-                "idempotency_key": "denial-write-first"
+                "idempotency_key": "denial-write-first",
+                "generation": 1
             }),
         ),
     );
@@ -2743,7 +2755,8 @@ fn stdio_runtime_denial_write_failure_discards_backend_until_restart() {
             json!({
                 "session_id": session_id,
                 "input": "verify restarted backend",
-                "idempotency_key": "denial-write-second"
+                "idempotency_key": "denial-write-second",
+                "generation": 1
             }),
         ),
     );
@@ -2861,7 +2874,8 @@ fn stdio_command_output_produces_scoped_observed_diagnostics_and_raw_authority()
             json!({
                 "session_id": session_id,
                 "input": "emit diagnostics",
-                "idempotency_key": "diagnostic-fixture-turn"
+                "idempotency_key": "diagnostic-fixture-turn",
+                "generation": 1
             }),
         ),
     );
@@ -3217,7 +3231,8 @@ fn stdio_command_completed_and_declined_preserve_exact_provider_tool_states() {
                 json!({
                     "session_id": session_id,
                     "input": input,
-                    "idempotency_key": format!("{item_id}-turn")
+                    "idempotency_key": format!("{item_id}-turn"),
+                    "generation": 1
                 }),
             ),
         );
@@ -3399,7 +3414,8 @@ fn stdio_completed_turn_with_incomplete_command_fails_durably_and_restarts_start
             json!({
                 "session_id": session_id,
                 "input": "emit incomplete command",
-                "idempotency_key": "tool-incomplete-turn"
+                "idempotency_key": "tool-incomplete-turn",
+                "generation": 1
             }),
         ),
     );
@@ -3596,7 +3612,8 @@ fn stdio_command_persistence_failure_retains_started_without_terminal_tool_or_bl
             json!({
                 "session_id": session_id,
                 "input": "emit diagnostics",
-                "idempotency_key": "tool-persistence-failure-turn"
+                "idempotency_key": "tool-persistence-failure-turn",
+                "generation": 1
             }),
         ),
     );
@@ -3754,7 +3771,8 @@ fn stdio_trace_budget_exhaustion_fails_durably_before_command_terminal_persisten
             json!({
                 "session_id": session_id,
                 "input": "exhaust durable trace budget",
-                "idempotency_key": "trace-budget-fixture-turn"
+                "idempotency_key": "trace-budget-fixture-turn",
+                "generation": 1
             }),
         ),
     );
@@ -4069,7 +4087,8 @@ fn stdio_control_heartbeats_steers_and_cancels_while_normal_dispatch_is_blocked(
             json!({
                 "session_id": session_id,
                 "input": "wait for cancellation",
-                "idempotency_key": "cancel-fixture-turn"
+                "idempotency_key": "cancel-fixture-turn",
+                "generation": 1
             }),
         ),
     );
@@ -4579,7 +4598,8 @@ fn stdio_unknown_codex_notification_is_only_a_bounded_health_diagnostic() {
             json!({
                 "session_id": session_id,
                 "input": "emit unknown diagnostics",
-                "idempotency_key": "unknown-notification-turn"
+                "idempotency_key": "unknown-notification-turn",
+                "generation": 1
             }),
         ),
     );
@@ -4671,7 +4691,8 @@ fn stdio_user_input_server_request_returns_unsupported_without_fake_answers() {
             json!({
                 "session_id": session_id,
                 "input": "request unsupported user input",
-                "idempotency_key": "user-input-turn"
+                "idempotency_key": "user-input-turn",
+                "generation": 1
             }),
         ),
     );
@@ -4909,7 +4930,8 @@ fn stdio_control_stops_user_terminal_while_model_dispatch_is_blocked() {
             json!({
                 "session_id": session_id,
                 "input": "wait while the user stops a terminal",
-                "idempotency_key": "terminal-stop-fixture-turn"
+                "idempotency_key": "terminal-stop-fixture-turn",
+                "generation": 1
             }),
         ),
     );

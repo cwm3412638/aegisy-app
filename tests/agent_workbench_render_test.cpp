@@ -274,10 +274,14 @@ public:
         widget.m_activeTurnId = QStringLiteral("active-turn");
         composer->setPlainText(QStringLiteral("must-not-start-another-turn"));
         widget.updateTurnAction();
+        const bool expectedStopEnabled = widget.m_runtime
+            && widget.m_runtime->isControlAvailable()
+            && !widget.m_activeTurnControlUnverified;
         widget.submitPrompt();
         const bool inert = composer->toPlainText()
                 == QStringLiteral("must-not-start-another-turn")
             && sendButton->text() == QStringLiteral("停止")
+            && sendButton->isEnabled() == expectedStopEnabled
             && widget.m_activeTurnSessionId == QStringLiteral("active-session")
             && widget.m_activeTurnId == QStringLiteral("active-turn");
         widget.m_turnRunning = previousRunning;
@@ -326,6 +330,13 @@ public:
         widget.startPendingTurnIfReady();
     }
 
+    static void setMutationAcknowledgementAvailable(AgentWorkbenchWidget &widget,
+                                                    bool available)
+    {
+        widget.m_mutationAcknowledgementAvailable = available;
+        widget.updateTurnAction();
+    }
+
     static void submitPrompt(AgentWorkbenchWidget &widget)
     {
         widget.submitPrompt();
@@ -352,6 +363,37 @@ public:
                                               const QString &sessionId)
     {
         return widget.m_lastTimelineEventSequences.value(sessionId, 0);
+    }
+
+    static QString currentSessionId(const AgentWorkbenchWidget &widget)
+    {
+        return widget.m_mode == QStringLiteral("work")
+            ? widget.m_workSessionId : widget.m_chatSessionId;
+    }
+
+    static bool mutationReconciliationBlocked(
+        const AgentWorkbenchWidget &widget, const QString &sessionId)
+    {
+        return widget.m_mutationReconciliationSessionIds.contains(sessionId);
+    }
+
+    static bool terminalMutationAcknowledgementConsumed(
+        const AgentWorkbenchWidget &widget, const QString &sessionId)
+    {
+        const QSet<QString> identities =
+            widget.m_durableMutationSessionOperations.value(sessionId);
+        return std::any_of(
+            identities.cbegin(), identities.cend(),
+            [&widget](const QString &identity) {
+                const QJsonObject operation =
+                    widget.m_durableMutationOperations.value(identity);
+                return operation.value(QStringLiteral("state")).toString()
+                        == QStringLiteral("terminal")
+                    && operation.value(
+                        QStringLiteral("accepted_consumed")).toBool()
+                    && operation.value(
+                        QStringLiteral("terminal_consumed")).toBool();
+            });
     }
 
     static quint64 timelineTimestampForSession(const AgentWorkbenchWidget &widget,
@@ -4759,6 +4801,19 @@ int main(int argc, char *argv[])
                 "AAP turn did not render user and agent timeline items")) {
         return 1;
     }
+    const QString previewTurnSessionId =
+        AgentWorkbenchWidgetTestAccess::currentSessionId(workbench);
+    if (!expect(!previewTurnSessionId.isEmpty()
+                    && waitUntil(application, [&workbench, &previewTurnSessionId]() {
+                        return !AgentWorkbenchWidgetTestAccess::mutationReconciliationBlocked(
+                                   workbench, previewTurnSessionId)
+                            && AgentWorkbenchWidgetTestAccess::
+                                terminalMutationAcknowledgementConsumed(
+                                    workbench, previewTurnSessionId);
+                    }),
+                "response-before-events mutation anchors were not consumed in order")) {
+        return 1;
+    }
 #endif
 
     QSplitter *splitter = workbench.findChild<QSplitter *>();
@@ -5187,6 +5242,7 @@ int main(int argc, char *argv[])
                 QStringLiteral("model.catalog.refresh.status.read-only"),
                 QStringLiteral("model.profile.read-only"),
                 QStringLiteral("timeline.replay.fixed-watermark"),
+                QStringLiteral("session.mutation-acknowledgements"),
             }},
             {QStringLiteral("experimental"), QJsonArray{}},
         }},
@@ -5354,11 +5410,43 @@ int main(int argc, char *argv[])
                 "malformed catalog response did not fail closed")) {
         return 1;
     }
-    if (!expect(runtimeCapability->text().contains(QStringLiteral("Agent 只读"))
-                    && runtimeCapability->text().contains(QStringLiteral("Compact 不可用"))
-                    && runtimeCapability->text().contains(QStringLiteral("删除不可用"))
-                    && runtimeCapability->toolTip().contains(QStringLiteral("不会显示为成功")),
+    const bool degradationProjected =
+        runtimeCapability->text().contains(QStringLiteral("Agent 只读"))
+        && runtimeCapability->text().contains(QStringLiteral("Compact 不可用"))
+        && runtimeCapability->text().contains(QStringLiteral("删除不可用"))
+        && runtimeCapability->toolTip().contains(QStringLiteral("不会显示为成功"));
+    if (!degradationProjected) {
+        qCritical() << "runtime degradation projection diagnostics"
+                    << runtimeCapability->text()
+                    << runtimeCapability->toolTip();
+    }
+    if (!expect(degradationProjected,
                 "runtime degradations were not projected into a fail-closed capability state")) {
+        return 1;
+    }
+    AgentWorkbenchWidgetTestAccess::setMutationAcknowledgementAvailable(
+        workbench, false);
+    AgentWorkbenchWidgetTestAccess::setPendingPrompt(
+        workbench, QStringLiteral("queued-without-durable-acknowledgement"));
+    AgentWorkbenchWidgetTestAccess::tryStartPendingTurn(workbench);
+    if (!expect(sendButton->text() == QStringLiteral("确认能力未知")
+                    && !sendButton->isEnabled()
+                    && AgentWorkbenchWidgetTestAccess::pendingPrompt(workbench)
+                        == QStringLiteral("queued-without-durable-acknowledgement"),
+                "missing durable acknowledgement capability did not gate every new-Turn path")) {
+        return 1;
+    }
+    if (!expect(AgentWorkbenchWidgetTestAccess::activeTurnSubmitIsInert(
+                    workbench, operationComposer, sendButton),
+                "missing durable acknowledgement capability hid the active Turn Stop action")) {
+        return 1;
+    }
+    AgentWorkbenchWidgetTestAccess::setPendingPrompt(workbench, QString());
+    AgentWorkbenchWidgetTestAccess::setMutationAcknowledgementAvailable(
+        workbench, true);
+    if (!expect(sendButton->text() == QStringLiteral("发送")
+                    && sendButton->isEnabled(),
+                "negotiated durable acknowledgement capability did not restore normal Send")) {
         return 1;
     }
     if (!expect(AgentWorkbenchWidgetTestAccess::activeTurnSubmitIsInert(

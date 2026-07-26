@@ -404,8 +404,9 @@ requirement by itself. The schema v16 floor/checkpoint remains internal retentio
 startup authority; schema v17 separately persists the public floor-visible state.
 Automatic production pruning SHALL remain unreachable until a later reviewed stage
 explicitly enables it. The later negotiated live-subscription and reconnect scenarios
-satisfy those portions; explicit acknowledgement and complete Windows recovery
-evidence SHALL remain required before this requirement is considered complete.
+satisfy those portions; durable Turn-start acknowledgement is implemented separately,
+while complete Windows recovery evidence SHALL remain required before this requirement
+is considered complete.
 
 #### Scenario: Prepared event persistence fails
 - **WHEN** Runtime prepares and serializes an event but its Journal or combined projection transaction fails
@@ -492,9 +493,9 @@ evidence SHALL remain required before this requirement is considered complete.
 - **THEN** the runtime SHALL return structured `-32148`; only a separately negotiated identity-complete `timeline/snapshot` result MAY let the client atomically replace that Session at a fixed watermark before continuing live delivery
 
 The schema-v17 floor-visible projection, fixed-head Runtime paging, Qt atomic
-replacement, and negotiated fixed-watermark subscription form the current recovery
-chain. Explicit mutation acknowledgement and complete Windows reconnect/runtime
-evidence remain required to finish this requirement.
+replacement, negotiated fixed-watermark subscription, and schema-v20 Turn-start
+acknowledgement form the current recovery chain. Complete Windows reconnect/runtime
+evidence remains required to finish this requirement.
 
 #### Scenario: Snapshot pages stay fixed while a Turn continues
 - **WHEN** Runtime captures a snapshot watermark during a running Turn and later Item deltas or a terminal event append while Qt pages
@@ -522,15 +523,49 @@ evidence remain required to finish this requirement.
 
 ### Requirement: Mutating protocol requests are idempotent
 The protocol SHALL require or accept client-generated idempotency keys for turn
-starts, approval responses, file writes, Git mutations, and job submission.
+starts, approval responses, file writes, Git mutations, and job submission. The
+currently advertised mutation producer is limited to `turn/start`; approval, file,
+Git, and job producers remain unavailable until they have the same durable ledger and
+authority review.
+
+For `turn/start`, Runtime SHALL reserve a schema-v20 durable operation before
+dispatch. The operation identity SHALL be derived from Session, mutation kind,
+idempotency key, and request fingerprint, and SHALL not include process generation.
+The response SHALL expose the request fingerprint, connection acknowledgement, and
+metadata-only durable operation. The operation SHALL contain no prompt, context,
+provider body, result content, permission, approval, or execution authority.
 
 #### Scenario: Client retries after timeout
 - **WHEN** the runtime receives the same key and equivalent request again
-- **THEN** it SHALL return the original operation identity or result without applying the mutation twice
+- **THEN** it SHALL return the original operation identity and Turn identity without dispatching a second Turn
+
+#### Scenario: Reservation precedes dispatch
+- **WHEN** a valid `turn/start` request is admitted
+- **THEN** Runtime SHALL commit the accepted durable operation before dispatch, and a reservation or dispatch failure SHALL leave no fabricated accepted Turn
 
 #### Scenario: Key is reused with different content
 - **WHEN** an existing idempotency key accompanies a non-equivalent request
 - **THEN** the runtime SHALL reject it as a conflict and SHALL NOT apply either a second or merged mutation
+
+#### Scenario: Accepted and terminal Timeline evidence bind atomically
+- **WHEN** the reserved Turn-start produces its `turn.started` or terminal Timeline event
+- **THEN** Runtime SHALL bind the exact Session, Turn, sequence, Event ID, timestamp, and operation revision in the same SQLite transaction as the corresponding projection and Journal row using compare-and-swap
+
+#### Scenario: Startup finds an uncertain accepted operation
+- **WHEN** Store startup finds an accepted Turn-start whose dispatch outcome is not durably proven
+- **THEN** it SHALL advance that operation to `reconciliation-required`, SHALL expose it for Session-scoped recovery, and SHALL refuse redispatch
+
+#### Scenario: Client lists pending durable operations
+- **WHEN** a client calls `session/mutation-acknowledgements`
+- **THEN** Runtime SHALL return only unconsumed operations for that Session in bounded operation-identity order with a validated continuation cursor; another Session's rows SHALL be rejected
+
+#### Scenario: Client consumes confirmed evidence
+- **WHEN** Qt has validated the exact bound Timeline anchor and calls `mutation/acknowledgement/consume`
+- **THEN** Runtime SHALL require Session ownership, operation identity, target phase, expected revision, and exact sequence/Event-ID anchor; accepted evidence SHALL be consumed before terminal evidence and a repeated equivalent consume SHALL be idempotent
+
+#### Scenario: Evidence cannot be confirmed
+- **WHEN** an anchor drifts, a row is malformed or tampered, Store is unavailable/read-only, or reconciliation is required
+- **THEN** consumption SHALL fail closed, the affected Session SHALL freeze for reconciliation, and the client SHALL not infer mutation success
 
 ### Requirement: Turns can be cancelled and conditionally steered
 The protocol SHALL support cancellation and SHALL advertise whether the active

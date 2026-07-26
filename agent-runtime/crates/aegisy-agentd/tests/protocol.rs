@@ -1552,7 +1552,8 @@ fn operation_probe_uses_durable_terminal_event_when_event_is_omitted() {
         json!({
             "session_id": session_id,
             "input": "probe terminal event",
-            "idempotency_key": "probe-terminal-event"
+            "idempotency_key": "probe-terminal-event",
+            "generation": 1
         }),
     ));
     let turn_id = turn[0]["result"]["turn"]["id"].as_str().unwrap().to_owned();
@@ -2923,7 +2924,7 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
     let first_turn = runtime.handle_line(&request(
         "3",
         "turn/start",
-        json!({ "session_id": session_id, "input": "first", "idempotency_key": "first" }),
+        json!({ "session_id": session_id, "input": "first", "idempotency_key": "first", "generation": 1 }),
     ));
     let first_turn_id = first_turn[0]["result"]["turn"]["id"]
         .as_str()
@@ -2959,7 +2960,7 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
     let second_turn = restarted.handle_line(&request(
         "6",
         "turn/start",
-        json!({ "session_id": session_id, "input": "second", "idempotency_key": "second" }),
+        json!({ "session_id": session_id, "input": "second", "idempotency_key": "second", "generation": 1 }),
     ));
     assert_eq!(second_turn[0]["result"]["turn"]["state"], "started");
     let forked = restarted.handle_line(&request(
@@ -3041,6 +3042,171 @@ fn durable_preview_session_resumes_and_forks_at_a_completed_turn() {
         json!({ "session_id": fork_id }),
     ));
     assert_eq!(fork_resumed[0]["result"]["resumed"], true);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn durable_turn_start_acknowledgement_is_atomic_consumable_and_idempotent() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("aegisy-durable-turn-ack-{unique}"));
+    fs::create_dir_all(&root).unwrap();
+
+    let mut runtime = Runtime::with_store(&root).unwrap();
+    let initialized = runtime.handle_line(&request(
+        "initialize",
+        "initialize",
+        initialize_params("durable-turn-ack"),
+    ));
+    assert!(initialized[0]["result"]["capabilities"]["stable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "session.mutation-acknowledgements"));
+    runtime.handle_line(&notification("initialized", json!({})));
+
+    let session = runtime.handle_line(&request(
+        "session-start",
+        "session/start",
+        json!({"mode": "chat", "title": "Durable turn acknowledgement"}),
+    ));
+    let session_id = session[0]["result"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let turn_params = json!({
+        "session_id": session_id,
+        "input": "durable acknowledgement preview",
+        "idempotency_key": "durable-turn-1",
+        "generation": 1
+    });
+
+    let missing_generation = runtime.handle_line(&request(
+        "turn-missing-generation",
+        "turn/start",
+        json!({
+            "session_id": session_id,
+            "input": "must fail before durable reservation",
+            "idempotency_key": "durable-turn-missing-generation"
+        }),
+    ));
+    assert_eq!(missing_generation[0]["error"]["code"], -32602);
+
+    let first = runtime.handle_line(&request("turn-1", "turn/start", turn_params.clone()));
+    assert_eq!(first.len(), 7);
+    let first_result = first[0]["result"].clone();
+    assert_eq!(first_result["turn"]["state"], "started");
+    assert_eq!(
+        first_result["mutation_acknowledgement"]["state"],
+        "accepted"
+    );
+    assert_eq!(first_result["mutation_operation"]["state"], "terminal");
+    let operation_identity = first_result["mutation_operation"]["operation_identity"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let accepted_anchor = first_result["mutation_operation"]["accepted_anchor"].clone();
+    let terminal_anchor = first_result["mutation_operation"]["terminal_anchor"].clone();
+    assert_eq!(accepted_anchor["sequence"], 1);
+    assert_eq!(terminal_anchor["sequence"], 6);
+    assert_eq!(first_result["mutation_operation"]["revision"], 3);
+    assert_eq!(first[1]["params"]["sequence"], 1);
+    assert_eq!(first[6]["params"]["sequence"], 6);
+
+    let list_params = json!({
+        "schema_version": "mutation-acknowledgement-list-request/0.1",
+        "session_id": first_result["mutation_operation"]["session_id"],
+        "after": null,
+        "limit": 100
+    });
+    let listed = runtime.handle_line(&request(
+        "mutation-list",
+        "session/mutation-acknowledgements",
+        list_params,
+    ));
+    assert!(listed[0]["result"]["operations"].is_array(), "{listed:?}");
+    assert_eq!(
+        listed[0]["result"]["operations"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        listed[0]["result"]["operations"][0]["operation_identity"],
+        operation_identity
+    );
+
+    let accepted_revision = first_result["mutation_operation"]["revision"]
+        .as_u64()
+        .unwrap();
+    let accepted = runtime.handle_line(&request(
+        "mutation-consume-accepted",
+        "mutation/acknowledgement/consume",
+        json!({
+            "schema_version": "mutation-acknowledgement-consume-request/0.1",
+            "session_id": first_result["mutation_operation"]["session_id"],
+            "operation_identity": operation_identity,
+            "expected_revision": accepted_revision,
+            "target": "accepted",
+            "confirmed_anchor": accepted_anchor
+        }),
+    ));
+    assert_eq!(
+        accepted[0]["result"]["operation"]["accepted_consumed"],
+        true
+    );
+    assert_eq!(accepted[0]["result"]["operation"]["revision"], 4);
+
+    let terminal = runtime.handle_line(&request(
+        "mutation-consume-terminal",
+        "mutation/acknowledgement/consume",
+        json!({
+            "schema_version": "mutation-acknowledgement-consume-request/0.1",
+            "session_id": first_result["mutation_operation"]["session_id"],
+            "operation_identity": operation_identity,
+            "expected_revision": 4,
+            "target": "terminal",
+            "confirmed_anchor": terminal_anchor
+        }),
+    ));
+    assert_eq!(
+        terminal[0]["result"]["operation"]["terminal_consumed"],
+        true
+    );
+    assert_eq!(terminal[0]["result"]["operation"]["revision"], 5);
+
+    let retry = runtime.handle_line(&request("turn-retry", "turn/start", turn_params));
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0]["result"]["turn"]["id"], first_result["turn"]["id"]);
+    assert_eq!(retry[0]["result"]["mutation_operation"]["revision"], 5);
+
+    let conflict = runtime.handle_line(&request(
+        "turn-conflict",
+        "turn/start",
+        json!({
+            "session_id": first_result["mutation_operation"]["session_id"],
+            "input": "different input must not redispatch",
+            "idempotency_key": "durable-turn-1",
+            "generation": 1
+        }),
+    ));
+    assert_eq!(conflict[0]["error"]["code"], -32113);
+
+    let empty = runtime.handle_line(&request(
+        "mutation-list-after-consume",
+        "session/mutation-acknowledgements",
+        json!({
+            "schema_version": "mutation-acknowledgement-list-request/0.1",
+            "session_id": first_result["mutation_operation"]["session_id"],
+            "after": null,
+            "limit": 100
+        }),
+    ));
+    assert!(empty[0]["result"]["operations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -3289,7 +3455,8 @@ fn portable_session_protocol_previews_exports_validates_and_imports_a_copy() {
         json!({
             "session_id": &source_session_id,
             "input": "portable conversation",
-            "idempotency_key": "portable-protocol-turn"
+            "idempotency_key": "portable-protocol-turn",
+            "generation": 1
         }),
     ));
     assert!(turn[0].get("result").is_some());
@@ -3687,7 +3854,8 @@ fn durable_timeline_sync_fixes_watermark_rejects_forgery_and_survives_restart() 
         json!({
             "session_id": session_id,
             "input": "first fixed-watermark turn",
-            "idempotency_key": "timeline-turn-one"
+            "idempotency_key": "timeline-turn-one",
+            "generation": 1
         }),
     ));
     assert_eq!(first_turn.len(), 7);
@@ -3754,7 +3922,8 @@ fn durable_timeline_sync_fixes_watermark_rejects_forgery_and_survives_restart() 
         json!({
             "session_id": session_id,
             "input": "event arriving after the fixed watermark",
-            "idempotency_key": "timeline-turn-two"
+            "idempotency_key": "timeline-turn-two",
+            "generation": 1
         }),
     ));
     assert_eq!(second_turn[1]["params"]["sequence"], 7);
@@ -3809,7 +3978,8 @@ fn durable_timeline_sync_fixes_watermark_rejects_forgery_and_survives_restart() 
         json!({
             "session_id": other_session_id,
             "input": "other session",
-            "idempotency_key": "timeline-other-turn"
+            "idempotency_key": "timeline-other-turn",
+            "generation": 1
         }),
     ));
     let other_watermark = json!({
@@ -3951,7 +4121,8 @@ fn durable_timeline_sync_fixes_watermark_rejects_forgery_and_survives_restart() 
         json!({
             "session_id": session_id,
             "input": "turn after Runtime restart",
-            "idempotency_key": "timeline-turn-three"
+            "idempotency_key": "timeline-turn-three",
+            "generation": 1
         }),
     ));
     assert_eq!(third_turn[1]["params"]["sequence"], 13);
@@ -4014,7 +4185,8 @@ fn durable_timeline_sync_pages_large_history_below_the_aap_frame_limit() {
             json!({
                 "session_id": session_id,
                 "input": format!("{turn}:{body}"),
-                "idempotency_key": format!("timeline-frame-turn-{turn}")
+                "idempotency_key": format!("timeline-frame-turn-{turn}"),
+                "generation": 1
             }),
         ));
         assert!(
@@ -4668,6 +4840,7 @@ fn selected_file_pins_share_inspection_and_turn_assembly_with_stale_detection() 
             "session_id": session_id,
             "input": "inspect the selected pin",
             "idempotency_key": "pinned-turn-1",
+            "generation": 1,
             "pinned_context_set_identity": set_identity,
             "pinned_context_ids": ["pin-file"]
         }),
@@ -4823,6 +4996,7 @@ fn durable_artifact_pin_reloads_after_restart_and_keeps_inspection_metadata_only
             "session_id": session_id,
             "input": "review the artifact",
             "idempotency_key": "artifact-turn-1",
+            "generation": 1,
             "pinned_context_set_identity": identity,
             "pinned_context_ids": ["pin-artifact"]
         }),

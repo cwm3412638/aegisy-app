@@ -508,6 +508,15 @@ int runFakeRuntime(const QString &testCase)
                 QStringLiteral("timeline.subscription.fixed-watermark"));
         }
         setStableCapabilities(stableCapabilities);
+    } else if (testCase == QStringLiteral("turn-start-ack")) {
+        setStableCapabilities(QJsonArray{
+            QStringLiteral("runtime.preview"),
+            QStringLiteral("runtime.health"),
+            QStringLiteral("runtime.degradations"),
+            QStringLiteral("timeline.streaming"),
+            QStringLiteral("session.mutation-acknowledgements"),
+            QStringLiteral("permission.read-only"),
+        });
     } else if (testCase == QStringLiteral("valid-list-only")) {
         QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
                                       .value(QStringLiteral("stable")).toArray();
@@ -1017,6 +1026,72 @@ int runFakeRuntime(const QString &testCase)
                 << std::endl;
             continue;
         }
+        if (message.value(QStringLiteral("method")).toString()
+                == QStringLiteral("turn/start")
+            && testCase == QStringLiteral("turn-start-ack")) {
+            const QJsonObject params = message.value(QStringLiteral("params")).toObject();
+            const QString fingerprint = QStringLiteral(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+            const QString sessionId = params.value(QStringLiteral("session_id")).toString();
+            const QString key = params.value(QStringLiteral("idempotency_key")).toString();
+            const QString turnId = QStringLiteral("turn-1");
+            const QString eventId = QStringLiteral("event:sha256:")
+                + QString(64, QLatin1Char('a'));
+            const QString operationIdentity = AgentRuntimeClient::
+                durableMutationOperationIdentity(sessionId, QStringLiteral("turn-start"),
+                                                 key, fingerprint);
+            const QJsonObject operation{
+                {QStringLiteral("schema_version"),
+                 QStringLiteral("mutation-acknowledgement-operation/0.1")},
+                {QStringLiteral("operation_identity"), operationIdentity},
+                {QStringLiteral("session_id"), sessionId},
+                {QStringLiteral("mutation_kind"), QStringLiteral("turn-start")},
+                {QStringLiteral("idempotency_key"), key},
+                {QStringLiteral("request_fingerprint"), fingerprint},
+                {QStringLiteral("revision"), 2},
+                {QStringLiteral("state"), QStringLiteral("accepted")},
+                {QStringLiteral("turn_id"), turnId},
+                {QStringLiteral("accepted_anchor"), QJsonObject{
+                    {QStringLiteral("sequence"), 1},
+                    {QStringLiteral("event_id"), eventId},
+                }},
+                {QStringLiteral("terminal_anchor"), QJsonValue(QJsonValue::Null)},
+                {QStringLiteral("accepted_consumed"), false},
+                {QStringLiteral("terminal_consumed"), false},
+            };
+            const QJsonObject result{
+                {QStringLiteral("turn"), QJsonObject{
+                    {QStringLiteral("id"), turnId},
+                    {QStringLiteral("state"), QStringLiteral("started")},
+                }},
+                {QStringLiteral("context"), QJsonObject{
+                    {QStringLiteral("item_count"), 0},
+                    {QStringLiteral("bytes"), 0},
+                    {QStringLiteral("truncated"), false},
+                    {QStringLiteral("manifest"), QJsonObject{}},
+                    {QStringLiteral("budget"), QJsonObject{}},
+                }},
+                {QStringLiteral("request_fingerprint"), fingerprint},
+                {QStringLiteral("mutation_acknowledgement"), QJsonObject{
+                    {QStringLiteral("schema_version"),
+                     QStringLiteral("mutation-acknowledgement/0.1")},
+                    {QStringLiteral("request_id"), message.value(QStringLiteral("id"))},
+                    {QStringLiteral("idempotency_key"), key},
+                    {QStringLiteral("session_id"), sessionId},
+                    {QStringLiteral("generation"), params.value(QStringLiteral("generation"))},
+                    {QStringLiteral("state"), QStringLiteral("accepted")},
+                }},
+                {QStringLiteral("mutation_operation"), operation},
+            };
+            const QJsonObject turnResponse{
+                {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+                {QStringLiteral("result"), result},
+            };
+            std::cout << QJsonDocument(turnResponse).toJson(QJsonDocument::Compact).constData()
+                      << std::endl;
+            continue;
+        }
         if (message.value(QStringLiteral("id")).isString()) {
             if (testCase == QStringLiteral("combined-legal-frames")) {
                 if (!hasCombinedFirstId) {
@@ -1146,6 +1221,9 @@ bool runHandshakeCase(const QString &testCase, bool expectAccepted,
 
     bool initialized = false;
     bool initializeFailed = false;
+    bool turnStarted = false;
+    QString turnStartRequestId;
+    quint64 turnStartGeneration = 0;
     QString failureMessage;
     {
         AgentRuntimeClient client;
@@ -1160,6 +1238,14 @@ bool runHandshakeCase(const QString &testCase, bool expectAccepted,
                 initializeFailed = true;
                 failureMessage = message;
             }
+        });
+        QObject::connect(&client, &AgentRuntimeClient::turnStarted,
+                         [&turnStarted, &turnStartRequestId, &turnStartGeneration](
+                             const QString &requestId, quint64 generation,
+                             const QJsonObject &) {
+            turnStarted = true;
+            turnStartRequestId = requestId;
+            turnStartGeneration = generation;
         });
         client.start();
         const QString prematureRequest = client.listProjects();
@@ -1181,6 +1267,23 @@ bool runHandshakeCase(const QString &testCase, bool expectAccepted,
                         && logContainsMethod(logPath, QStringLiteral("runtime/degradations"));
                 }), "negotiated startup requests were not sent")) {
                 return false;
+            }
+            if (testCase == QStringLiteral("turn-start-ack")) {
+                const QString requestId = client.startTurn(
+                    QStringLiteral("session-1"), QStringLiteral("hello"), {}, {}, {},
+                    QStringLiteral("gesture-550e8400"));
+                if (!expect(!requestId.isEmpty(),
+                            "turn/start request was not sent with durable idempotency")) {
+                    return false;
+                }
+                if (!expect(waitUntil([&]() { return turnStarted; }),
+                            "validated turn/start response signal was not emitted")) {
+                    return false;
+                }
+                if (!expect(turnStartRequestId == requestId && turnStartGeneration > 0,
+                            "turn/start response lost exact request generation binding")) {
+                    return false;
+                }
             }
             client.stop();
             if (expectReady) {
@@ -2799,9 +2902,23 @@ int main(int argc, char *argv[])
     ok = expect(verifyRustTimelineIdentityFixture(),
                 "Qt Timeline Event identity diverged from the Rust fixture") && ok;
     ok = verifyRustTimelineSnapshotIdentityFixture() && ok;
+    ok = expect(AgentRuntimeClient::durableMutationOperationIdentity(
+                    QStringLiteral("session-1"), QStringLiteral("turn-start"),
+                    QStringLiteral("gesture-550e8400"),
+                    QStringLiteral(
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
+                    == QStringLiteral(
+                        "mutation-operation:sha256:cc814865240ac3d6c8c514b9c0426f1fe5b4b40c00fa918d087e4cce044143a3"),
+                "Qt durable mutation operation identity diverged from the AAP contract") && ok;
+    ok = expect(AgentRuntimeClient::durableMutationOperationIdentity(
+                    QStringLiteral("session-1"), QStringLiteral("turn-start"),
+                    QStringLiteral("gesture-550e8400"), QStringLiteral("not-a-fingerprint"))
+                    .isEmpty(),
+                "Qt accepted an invalid durable mutation fingerprint") && ok;
     ok = workspaceEditProposalPreviewIdentityMatchesRustFixture() && ok;
     ok = workspaceEditProposalPageIdentityMatchesRustFixture() && ok;
     ok = runHandshakeCase(QStringLiteral("valid-preview"), true) && ok;
+    ok = runHandshakeCase(QStringLiteral("turn-start-ack"), true) && ok;
     ok = runHandshakeCase(QStringLiteral("valid-codex"), true) && ok;
     ok = runHandshakeCase(QStringLiteral("valid-recovery"), true, true, true) && ok;
     ok = runHandshakeCase(QStringLiteral("valid-unavailable"), true, false, false) && ok;

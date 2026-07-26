@@ -64,6 +64,10 @@ public:
     static QString timelineSnapshotPageIdentity(const QJsonObject &page);
     static QString timelineSubscriptionRequestIdentity(const QString &stage,
                                                        const QJsonObject &request);
+    static QString durableMutationOperationIdentity(const QString &sessionId,
+                                                    const QString &mutationKind,
+                                                    const QString &idempotencyKey,
+                                                    const QString &requestFingerprint);
     static QString workspaceEditProposalPreviewIdentity(const QJsonObject &proposal);
     static QString workspaceEditProposalArtifactPageIdentity(const QJsonObject &page);
 
@@ -128,7 +132,8 @@ public:
     QString startTurn(const QString &sessionId, const QString &input,
                       const QJsonArray &context = {},
                       const QString &pinnedContextSetIdentity = QString(),
-                      const QStringList &pinnedContextIds = {});
+                      const QStringList &pinnedContextIds = {},
+                      const QString &idempotencyKey = QString());
     QString inspectTurnContext(const QString &sessionId,
                                const QJsonArray &context = {},
                                const QString &pinnedContextSetIdentity = QString(),
@@ -172,6 +177,14 @@ public:
                                          const QJsonObject &cursor,
                                          const QJsonObject &watermark,
                                          const QString &snapshotIdentity = QString());
+    QString listMutationAcknowledgements(const QString &sessionId,
+                                         const QJsonObject &after = QJsonObject(),
+                                         int limit = 100);
+    QString consumeMutationAcknowledgement(const QString &sessionId,
+                                            const QString &operationIdentity,
+                                            quint64 expectedRevision,
+                                            const QString &target,
+                                            const QJsonObject &confirmedAnchor);
     QString backgroundNotifications(const QString &sessionId,
                                     const QJsonObject &cursor = QJsonObject(),
                                     int limit = 100);
@@ -356,6 +369,12 @@ signals:
     void timelineSubscriptionEvent(const QJsonObject &event);
     void timelineSubscriptionFailed(const QString &requestId,
                                     const QJsonObject &failure);
+    void turnStarted(const QString &requestId, quint64 processGeneration,
+                     const QJsonObject &result);
+    void mutationAcknowledgementsListed(const QString &requestId,
+                                        const QJsonObject &page);
+    void mutationAcknowledgementConsumed(const QString &requestId,
+                                         const QJsonObject &result);
     void backgroundNotificationsRead(const QString &requestId, const QJsonObject &result);
     void backgroundRecoveryRead(const QString &requestId, const QJsonObject &result);
     void projectionRecoveryStatusRead(const QJsonObject &status);
@@ -461,10 +480,12 @@ private:
     QHash<QString, quint64> m_pendingGenerations;
     QHash<QString, QJsonObject> m_pendingTimelineSyncRequests;
     QHash<QString, QJsonObject> m_pendingTimelineSubscriptionRequests;
+    QHash<QString, QJsonObject> m_pendingTurnRequests;
+    QHash<QString, QJsonObject> m_pendingMutationListRequests;
+    QHash<QString, QJsonObject> m_pendingMutationConsumeRequests;
     QSet<QString> m_retiredResponseIds;
     QStringList m_retiredResponseOrder;
     quint64 m_nextRequestId = 0;
-    quint64 m_nextTurnKey = 0;
     quint64 m_nextTimelineSubscriptionId = 0;
     quint64 m_processGeneration = 0;
     quint64 m_initializeGeneration = 0;

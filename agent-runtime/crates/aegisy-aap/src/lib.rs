@@ -698,6 +698,1177 @@ pub mod mutation_ack {
     }
 }
 
+/// Durable, metadata-only mutation acknowledgement discovery and consumption.
+///
+/// This contract is deliberately separate from [`mutation_ack`], whose `0.1`
+/// records bind one JSON-RPC request to one process generation. Durable operation
+/// identity never includes that process generation and survives reconnects. The
+/// contract contains no prompt, context, request body, mutation result, approval,
+/// or execution authority.
+pub mod durable_mutation_ack {
+    use super::{
+        deserialize_positive_safe_json_integer, valid_ascii_graphical, valid_sha256_identity,
+        MAX_SAFE_JSON_INTEGER,
+    };
+    use crate::stable::v0_1::TimelineAnchor;
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+    use sha2::{Digest, Sha256};
+    use std::collections::HashSet;
+
+    pub const CAPABILITY: &str = "session.mutation-acknowledgements";
+    pub const LIST_METHOD: &str = "session/mutation-acknowledgements";
+    pub const CONSUME_METHOD: &str = "mutation/acknowledgement/consume";
+    pub const OPERATION_SCHEMA_VERSION: &str = "mutation-acknowledgement-operation/0.1";
+    pub const LIST_REQUEST_SCHEMA_VERSION: &str = "mutation-acknowledgement-list-request/0.1";
+    pub const PAGE_SCHEMA_VERSION: &str = "mutation-acknowledgement-page/0.1";
+    pub const CONSUME_REQUEST_SCHEMA_VERSION: &str = "mutation-acknowledgement-consume-request/0.1";
+    pub const CONSUME_RESULT_SCHEMA_VERSION: &str = "mutation-acknowledgement-consume-result/0.1";
+    pub const OPERATION_IDENTITY_PREFIX: &str = "mutation-operation:sha256:";
+    pub const MAX_ID_BYTES: usize = 128;
+    pub const MAX_PAGE_OPERATIONS: usize = 100;
+
+    fn valid_request_fingerprint(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    fn update_identity_field(digest: &mut Sha256, value: &str) -> Result<(), &'static str> {
+        let length = u64::try_from(value.len())
+            .map_err(|_| "durable mutation identity field is too large")?;
+        digest.update(length.to_be_bytes());
+        digest.update(value.as_bytes());
+        Ok(())
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum MutationKind {
+        TurnStart,
+    }
+
+    impl MutationKind {
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::TurnStart => "turn-start",
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum OperationState {
+        Accepted,
+        Terminal,
+        ReconciliationRequired,
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum ConsumeTarget {
+        Accepted,
+        Terminal,
+    }
+
+    pub fn operation_identity(
+        session_id: &str,
+        mutation_kind: MutationKind,
+        idempotency_key: &str,
+        request_fingerprint: &str,
+    ) -> Result<String, &'static str> {
+        if !valid_ascii_graphical(session_id, MAX_ID_BYTES) {
+            return Err("durable mutation session id is invalid");
+        }
+        if !valid_ascii_graphical(idempotency_key, MAX_ID_BYTES) {
+            return Err("durable mutation idempotency key is invalid");
+        }
+        if !valid_request_fingerprint(request_fingerprint) {
+            return Err("durable mutation request fingerprint is invalid");
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"aegisy-durable-mutation-operation/0.1\0");
+        update_identity_field(&mut digest, session_id)?;
+        update_identity_field(&mut digest, mutation_kind.as_str())?;
+        update_identity_field(&mut digest, idempotency_key)?;
+        update_identity_field(&mut digest, request_fingerprint)?;
+        Ok(format!(
+            "{OPERATION_IDENTITY_PREFIX}{:x}",
+            digest.finalize()
+        ))
+    }
+
+    fn parse_nullable_graphical_id(value: Value) -> Result<Option<String>, &'static str> {
+        match value {
+            Value::Null => Ok(None),
+            Value::String(value) if valid_ascii_graphical(&value, MAX_ID_BYTES) => Ok(Some(value)),
+            Value::String(_) => Err("durable mutation optional identifier is invalid"),
+            _ => Err("durable mutation optional identifier must be a string or null"),
+        }
+    }
+
+    fn parse_nullable_anchor(value: Value) -> Result<Option<TimelineAnchor>, &'static str> {
+        if value.is_null() {
+            Ok(None)
+        } else {
+            serde_json::from_value(value)
+                .map(Some)
+                .map_err(|_| "durable mutation timeline anchor is invalid")
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Operation {
+        pub schema_version: String,
+        pub operation_identity: String,
+        pub session_id: String,
+        pub mutation_kind: MutationKind,
+        pub idempotency_key: String,
+        pub request_fingerprint: String,
+        pub revision: u64,
+        pub state: OperationState,
+        pub turn_id: Option<String>,
+        pub accepted_anchor: Option<TimelineAnchor>,
+        pub terminal_anchor: Option<TimelineAnchor>,
+        pub accepted_consumed: bool,
+        pub terminal_consumed: bool,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct OperationWire {
+        schema_version: String,
+        operation_identity: String,
+        session_id: String,
+        mutation_kind: MutationKind,
+        idempotency_key: String,
+        request_fingerprint: String,
+        #[serde(deserialize_with = "deserialize_positive_safe_json_integer")]
+        revision: u64,
+        state: OperationState,
+        turn_id: Value,
+        accepted_anchor: Value,
+        terminal_anchor: Value,
+        accepted_consumed: bool,
+        terminal_consumed: bool,
+    }
+
+    impl Operation {
+        pub fn accepted(
+            session_id: impl Into<String>,
+            idempotency_key: impl Into<String>,
+            request_fingerprint: impl Into<String>,
+        ) -> Result<Self, &'static str> {
+            let session_id = session_id.into();
+            let idempotency_key = idempotency_key.into();
+            let request_fingerprint = request_fingerprint.into();
+            let operation_identity = operation_identity(
+                &session_id,
+                MutationKind::TurnStart,
+                &idempotency_key,
+                &request_fingerprint,
+            )?;
+            let operation = Self {
+                schema_version: OPERATION_SCHEMA_VERSION.into(),
+                operation_identity,
+                session_id,
+                mutation_kind: MutationKind::TurnStart,
+                idempotency_key,
+                request_fingerprint,
+                revision: 1,
+                state: OperationState::Accepted,
+                turn_id: None,
+                accepted_anchor: None,
+                terminal_anchor: None,
+                accepted_consumed: false,
+                terminal_consumed: false,
+            };
+            operation.validate()?;
+            Ok(operation)
+        }
+
+        pub fn validate(&self) -> Result<(), &'static str> {
+            if self.schema_version != OPERATION_SCHEMA_VERSION {
+                return Err("durable mutation operation schema version is invalid");
+            }
+            if !valid_sha256_identity(&self.operation_identity, OPERATION_IDENTITY_PREFIX) {
+                return Err("durable mutation operation identity is invalid");
+            }
+            if !valid_ascii_graphical(&self.session_id, MAX_ID_BYTES) {
+                return Err("durable mutation session id is invalid");
+            }
+            if !valid_ascii_graphical(&self.idempotency_key, MAX_ID_BYTES) {
+                return Err("durable mutation idempotency key is invalid");
+            }
+            if !valid_request_fingerprint(&self.request_fingerprint) {
+                return Err("durable mutation request fingerprint is invalid");
+            }
+            if self.revision == 0 || self.revision > MAX_SAFE_JSON_INTEGER {
+                return Err("durable mutation revision is outside the safe integer range");
+            }
+            if self.operation_identity
+                != operation_identity(
+                    &self.session_id,
+                    self.mutation_kind,
+                    &self.idempotency_key,
+                    &self.request_fingerprint,
+                )?
+            {
+                return Err("durable mutation operation identity does not match its binding");
+            }
+            if self
+                .turn_id
+                .as_deref()
+                .is_some_and(|turn_id| !valid_ascii_graphical(turn_id, MAX_ID_BYTES))
+            {
+                return Err("durable mutation turn id is invalid");
+            }
+            if self.terminal_consumed && !self.accepted_consumed {
+                return Err("terminal consumption requires accepted consumption");
+            }
+            if let Some(anchor) = &self.accepted_anchor {
+                anchor.validate()?;
+                if anchor.sequence == 0 || self.turn_id.is_none() {
+                    return Err("accepted anchor requires a bound turn and positive sequence");
+                }
+            }
+            if self.accepted_consumed && self.accepted_anchor.is_none() {
+                return Err("accepted consumption requires accepted timeline evidence");
+            }
+            match self.state {
+                OperationState::Accepted | OperationState::ReconciliationRequired => {
+                    if self.terminal_anchor.is_some() || self.terminal_consumed {
+                        return Err("non-terminal mutation cannot carry terminal evidence");
+                    }
+                }
+                OperationState::Terminal => {
+                    let accepted = self
+                        .accepted_anchor
+                        .as_ref()
+                        .ok_or("terminal mutation requires its accepted anchor")?;
+                    let terminal = self
+                        .terminal_anchor
+                        .as_ref()
+                        .ok_or("terminal mutation requires its terminal anchor")?;
+                    if self.turn_id.is_none() {
+                        return Err("terminal mutation requires its turn id");
+                    }
+                    terminal.validate()?;
+                    if terminal.sequence <= accepted.sequence {
+                        return Err("terminal anchor does not follow the accepted anchor");
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        /// Validates one durable revision transition. Immutable operation binding
+        /// and already-observed Turn/Timeline identities cannot drift; consumption
+        /// flags and lifecycle state are monotonic.
+        pub fn can_follow(&self, previous: &Self) -> Result<(), &'static str> {
+            previous.validate()?;
+            self.validate()?;
+            if self.operation_identity != previous.operation_identity
+                || self.session_id != previous.session_id
+                || self.mutation_kind != previous.mutation_kind
+                || self.idempotency_key != previous.idempotency_key
+                || self.request_fingerprint != previous.request_fingerprint
+            {
+                return Err("durable mutation operation binding changed");
+            }
+            if self.revision != previous.revision + 1 {
+                return Err("durable mutation revision is not contiguous");
+            }
+            if previous.accepted_consumed && !self.accepted_consumed
+                || previous.terminal_consumed && !self.terminal_consumed
+            {
+                return Err("durable mutation consumption moved backwards");
+            }
+            if previous
+                .turn_id
+                .as_ref()
+                .is_some_and(|turn_id| self.turn_id.as_ref() != Some(turn_id))
+                || previous
+                    .accepted_anchor
+                    .as_ref()
+                    .is_some_and(|anchor| self.accepted_anchor.as_ref() != Some(anchor))
+                || previous
+                    .terminal_anchor
+                    .as_ref()
+                    .is_some_and(|anchor| self.terminal_anchor.as_ref() != Some(anchor))
+            {
+                return Err("durable mutation observed identity changed");
+            }
+            let valid_state = matches!(
+                (previous.state, self.state),
+                (OperationState::Accepted, OperationState::Accepted)
+                    | (OperationState::Accepted, OperationState::Terminal)
+                    | (
+                        OperationState::Accepted,
+                        OperationState::ReconciliationRequired
+                    )
+                    | (
+                        OperationState::ReconciliationRequired,
+                        OperationState::ReconciliationRequired
+                    )
+                    | (
+                        OperationState::ReconciliationRequired,
+                        OperationState::Terminal
+                    )
+                    | (OperationState::Terminal, OperationState::Terminal)
+            );
+            valid_state
+                .then_some(())
+                .ok_or("durable mutation state moved backwards")
+        }
+    }
+
+    impl TryFrom<OperationWire> for Operation {
+        type Error = &'static str;
+
+        fn try_from(value: OperationWire) -> Result<Self, Self::Error> {
+            let operation = Self {
+                schema_version: value.schema_version,
+                operation_identity: value.operation_identity,
+                session_id: value.session_id,
+                mutation_kind: value.mutation_kind,
+                idempotency_key: value.idempotency_key,
+                request_fingerprint: value.request_fingerprint,
+                revision: value.revision,
+                state: value.state,
+                turn_id: parse_nullable_graphical_id(value.turn_id)?,
+                accepted_anchor: parse_nullable_anchor(value.accepted_anchor)?,
+                terminal_anchor: parse_nullable_anchor(value.terminal_anchor)?,
+                accepted_consumed: value.accepted_consumed,
+                terminal_consumed: value.terminal_consumed,
+            };
+            operation.validate()?;
+            Ok(operation)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Operation {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            OperationWire::deserialize(deserializer)?
+                .try_into()
+                .map_err(serde::de::Error::custom)
+        }
+    }
+
+    impl Serialize for Operation {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            self.validate().map_err(serde::ser::Error::custom)?;
+            #[derive(Serialize)]
+            struct OperationRef<'a> {
+                schema_version: &'a str,
+                operation_identity: &'a str,
+                session_id: &'a str,
+                mutation_kind: MutationKind,
+                idempotency_key: &'a str,
+                request_fingerprint: &'a str,
+                revision: u64,
+                state: OperationState,
+                turn_id: Option<&'a str>,
+                accepted_anchor: Option<&'a TimelineAnchor>,
+                terminal_anchor: Option<&'a TimelineAnchor>,
+                accepted_consumed: bool,
+                terminal_consumed: bool,
+            }
+            OperationRef {
+                schema_version: &self.schema_version,
+                operation_identity: &self.operation_identity,
+                session_id: &self.session_id,
+                mutation_kind: self.mutation_kind,
+                idempotency_key: &self.idempotency_key,
+                request_fingerprint: &self.request_fingerprint,
+                revision: self.revision,
+                state: self.state,
+                turn_id: self.turn_id.as_deref(),
+                accepted_anchor: self.accepted_anchor.as_ref(),
+                terminal_anchor: self.terminal_anchor.as_ref(),
+                accepted_consumed: self.accepted_consumed,
+                terminal_consumed: self.terminal_consumed,
+            }
+            .serialize(serializer)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Cursor {
+        pub operation_identity: String,
+        pub revision: u64,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CursorWire {
+        operation_identity: String,
+        #[serde(deserialize_with = "deserialize_positive_safe_json_integer")]
+        revision: u64,
+    }
+
+    impl Cursor {
+        pub fn validate(&self) -> Result<(), &'static str> {
+            if !valid_sha256_identity(&self.operation_identity, OPERATION_IDENTITY_PREFIX) {
+                return Err("durable mutation cursor operation identity is invalid");
+            }
+            if self.revision == 0 || self.revision > MAX_SAFE_JSON_INTEGER {
+                return Err("durable mutation cursor revision is outside the safe integer range");
+            }
+            Ok(())
+        }
+
+        pub fn from_operation(operation: &Operation) -> Result<Self, &'static str> {
+            operation.validate()?;
+            Ok(Self {
+                operation_identity: operation.operation_identity.clone(),
+                revision: operation.revision,
+            })
+        }
+    }
+
+    impl TryFrom<CursorWire> for Cursor {
+        type Error = &'static str;
+
+        fn try_from(value: CursorWire) -> Result<Self, Self::Error> {
+            let cursor = Self {
+                operation_identity: value.operation_identity,
+                revision: value.revision,
+            };
+            cursor.validate()?;
+            Ok(cursor)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Cursor {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            CursorWire::deserialize(deserializer)?
+                .try_into()
+                .map_err(serde::de::Error::custom)
+        }
+    }
+
+    impl Serialize for Cursor {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            self.validate().map_err(serde::ser::Error::custom)?;
+            CursorWire {
+                operation_identity: self.operation_identity.clone(),
+                revision: self.revision,
+            }
+            .serialize(serializer)
+        }
+    }
+
+    fn parse_nullable_cursor(value: Value) -> Result<Option<Cursor>, &'static str> {
+        if value.is_null() {
+            Ok(None)
+        } else {
+            serde_json::from_value(value)
+                .map(Some)
+                .map_err(|_| "durable mutation cursor is invalid")
+        }
+    }
+
+    fn deserialize_durable_mutation_operations<'de, D>(
+        deserializer: D,
+    ) -> Result<Vec<Operation>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct OperationsVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for OperationsVisitor {
+            type Value = Vec<Operation>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a bounded durable mutation operation array")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut operations = Vec::with_capacity(
+                    sequence
+                        .size_hint()
+                        .unwrap_or_default()
+                        .min(MAX_PAGE_OPERATIONS),
+                );
+                while let Some(operation) = sequence.next_element::<Operation>()? {
+                    if operations.len() == MAX_PAGE_OPERATIONS {
+                        return Err(serde::de::Error::custom(
+                            "durable mutation page operation count exceeds the limit",
+                        ));
+                    }
+                    operations.push(operation);
+                }
+                Ok(operations)
+            }
+        }
+
+        deserializer.deserialize_seq(OperationsVisitor)
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ListParams {
+        pub schema_version: String,
+        pub session_id: String,
+        pub after: Option<Cursor>,
+        pub limit: u64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ListParamsWire {
+        schema_version: String,
+        session_id: String,
+        after: Value,
+        #[serde(deserialize_with = "deserialize_positive_safe_json_integer")]
+        limit: u64,
+    }
+
+    impl ListParams {
+        pub fn validate(&self) -> Result<(), &'static str> {
+            if self.schema_version != LIST_REQUEST_SCHEMA_VERSION {
+                return Err("durable mutation list request schema version is invalid");
+            }
+            if !valid_ascii_graphical(&self.session_id, MAX_ID_BYTES) {
+                return Err("durable mutation list session id is invalid");
+            }
+            if self.limit == 0 || self.limit > MAX_PAGE_OPERATIONS as u64 {
+                return Err("durable mutation list limit is invalid");
+            }
+            if let Some(after) = &self.after {
+                after.validate()?;
+            }
+            Ok(())
+        }
+    }
+
+    impl TryFrom<ListParamsWire> for ListParams {
+        type Error = &'static str;
+
+        fn try_from(value: ListParamsWire) -> Result<Self, Self::Error> {
+            let params = Self {
+                schema_version: value.schema_version,
+                session_id: value.session_id,
+                after: parse_nullable_cursor(value.after)?,
+                limit: value.limit,
+            };
+            params.validate()?;
+            Ok(params)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for ListParams {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            ListParamsWire::deserialize(deserializer)?
+                .try_into()
+                .map_err(serde::de::Error::custom)
+        }
+    }
+
+    impl Serialize for ListParams {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            self.validate().map_err(serde::ser::Error::custom)?;
+            #[derive(Serialize)]
+            struct ParamsRef<'a> {
+                schema_version: &'a str,
+                session_id: &'a str,
+                after: Option<&'a Cursor>,
+                limit: u64,
+            }
+            ParamsRef {
+                schema_version: &self.schema_version,
+                session_id: &self.session_id,
+                after: self.after.as_ref(),
+                limit: self.limit,
+            }
+            .serialize(serializer)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Page {
+        pub schema_version: String,
+        pub session_id: String,
+        pub after: Option<Cursor>,
+        pub operations: Vec<Operation>,
+        pub next_after: Option<Cursor>,
+        pub complete: bool,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PageWire {
+        schema_version: String,
+        session_id: String,
+        after: Value,
+        #[serde(deserialize_with = "deserialize_durable_mutation_operations")]
+        operations: Vec<Operation>,
+        next_after: Value,
+        complete: bool,
+    }
+
+    impl Page {
+        pub fn validate(&self) -> Result<(), &'static str> {
+            if self.schema_version != PAGE_SCHEMA_VERSION {
+                return Err("durable mutation page schema version is invalid");
+            }
+            if !valid_ascii_graphical(&self.session_id, MAX_ID_BYTES) {
+                return Err("durable mutation page session id is invalid");
+            }
+            if self.operations.len() > MAX_PAGE_OPERATIONS {
+                return Err("durable mutation page exceeds the operation limit");
+            }
+            if let Some(after) = &self.after {
+                after.validate()?;
+            }
+            let mut identities = HashSet::with_capacity(self.operations.len());
+            let mut previous_identity = self
+                .after
+                .as_ref()
+                .map(|cursor| cursor.operation_identity.as_str());
+            for operation in &self.operations {
+                operation.validate()?;
+                if operation.session_id != self.session_id {
+                    return Err("durable mutation page operation belongs to another session");
+                }
+                if previous_identity
+                    .is_some_and(|previous| operation.operation_identity.as_str() <= previous)
+                {
+                    return Err("durable mutation page operations are not strictly ordered");
+                }
+                if !identities.insert(operation.operation_identity.as_str()) {
+                    return Err("durable mutation page contains a duplicate operation");
+                }
+                previous_identity = Some(&operation.operation_identity);
+            }
+            match (self.complete, self.next_after.as_ref()) {
+                (true, None) => {}
+                (true, Some(_)) => return Err("complete durable mutation page cannot continue"),
+                (false, None) => return Err("incomplete durable mutation page requires a cursor"),
+                (false, Some(next_after)) => {
+                    next_after.validate()?;
+                    let last = self
+                        .operations
+                        .last()
+                        .ok_or("incomplete durable mutation page must contain an operation")?;
+                    if next_after.operation_identity != last.operation_identity
+                        || next_after.revision != last.revision
+                    {
+                        return Err(
+                            "durable mutation next cursor does not bind the final operation",
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        pub fn validate_for_request(&self, request: &ListParams) -> Result<(), &'static str> {
+            request.validate()?;
+            self.validate()?;
+            if self.session_id != request.session_id || self.after != request.after {
+                return Err("durable mutation page does not match the list request");
+            }
+            if self.operations.len() > request.limit as usize {
+                return Err("durable mutation page exceeds the requested limit");
+            }
+            Ok(())
+        }
+    }
+
+    impl TryFrom<PageWire> for Page {
+        type Error = &'static str;
+
+        fn try_from(value: PageWire) -> Result<Self, Self::Error> {
+            let page = Self {
+                schema_version: value.schema_version,
+                session_id: value.session_id,
+                after: parse_nullable_cursor(value.after)?,
+                operations: value.operations,
+                next_after: parse_nullable_cursor(value.next_after)?,
+                complete: value.complete,
+            };
+            page.validate()?;
+            Ok(page)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Page {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            PageWire::deserialize(deserializer)?
+                .try_into()
+                .map_err(serde::de::Error::custom)
+        }
+    }
+
+    impl Serialize for Page {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            self.validate().map_err(serde::ser::Error::custom)?;
+            #[derive(Serialize)]
+            struct PageRef<'a> {
+                schema_version: &'a str,
+                session_id: &'a str,
+                after: Option<&'a Cursor>,
+                operations: &'a [Operation],
+                next_after: Option<&'a Cursor>,
+                complete: bool,
+            }
+            PageRef {
+                schema_version: &self.schema_version,
+                session_id: &self.session_id,
+                after: self.after.as_ref(),
+                operations: &self.operations,
+                next_after: self.next_after.as_ref(),
+                complete: self.complete,
+            }
+            .serialize(serializer)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ConsumeParams {
+        pub schema_version: String,
+        pub session_id: String,
+        pub operation_identity: String,
+        pub expected_revision: u64,
+        pub target: ConsumeTarget,
+        pub confirmed_anchor: TimelineAnchor,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ConsumeParamsWire {
+        schema_version: String,
+        session_id: String,
+        operation_identity: String,
+        #[serde(deserialize_with = "deserialize_positive_safe_json_integer")]
+        expected_revision: u64,
+        target: ConsumeTarget,
+        confirmed_anchor: TimelineAnchor,
+    }
+
+    impl ConsumeParams {
+        pub fn validate(&self) -> Result<(), &'static str> {
+            if self.schema_version != CONSUME_REQUEST_SCHEMA_VERSION {
+                return Err("durable mutation consume request schema version is invalid");
+            }
+            if !valid_ascii_graphical(&self.session_id, MAX_ID_BYTES) {
+                return Err("durable mutation consume session id is invalid");
+            }
+            if !valid_sha256_identity(&self.operation_identity, OPERATION_IDENTITY_PREFIX) {
+                return Err("durable mutation consume operation identity is invalid");
+            }
+            if self.expected_revision == 0 || self.expected_revision > MAX_SAFE_JSON_INTEGER {
+                return Err("durable mutation expected revision is outside the safe integer range");
+            }
+            self.confirmed_anchor.validate()?;
+            if self.confirmed_anchor.sequence == 0 {
+                return Err("durable mutation confirmation anchor must be positive");
+            }
+            Ok(())
+        }
+    }
+
+    impl TryFrom<ConsumeParamsWire> for ConsumeParams {
+        type Error = &'static str;
+
+        fn try_from(value: ConsumeParamsWire) -> Result<Self, Self::Error> {
+            let params = Self {
+                schema_version: value.schema_version,
+                session_id: value.session_id,
+                operation_identity: value.operation_identity,
+                expected_revision: value.expected_revision,
+                target: value.target,
+                confirmed_anchor: value.confirmed_anchor,
+            };
+            params.validate()?;
+            Ok(params)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for ConsumeParams {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            ConsumeParamsWire::deserialize(deserializer)?
+                .try_into()
+                .map_err(serde::de::Error::custom)
+        }
+    }
+
+    impl Serialize for ConsumeParams {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            self.validate().map_err(serde::ser::Error::custom)?;
+            ConsumeParamsWire {
+                schema_version: self.schema_version.clone(),
+                session_id: self.session_id.clone(),
+                operation_identity: self.operation_identity.clone(),
+                expected_revision: self.expected_revision,
+                target: self.target,
+                confirmed_anchor: self.confirmed_anchor.clone(),
+            }
+            .serialize(serializer)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ConsumeResult {
+        pub schema_version: String,
+        pub session_id: String,
+        pub operation_identity: String,
+        pub expected_revision: u64,
+        pub target: ConsumeTarget,
+        pub confirmed_anchor: TimelineAnchor,
+        pub operation: Operation,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ConsumeResultWire {
+        schema_version: String,
+        session_id: String,
+        operation_identity: String,
+        #[serde(deserialize_with = "deserialize_positive_safe_json_integer")]
+        expected_revision: u64,
+        target: ConsumeTarget,
+        confirmed_anchor: TimelineAnchor,
+        operation: Operation,
+    }
+
+    impl ConsumeResult {
+        pub fn validate(&self) -> Result<(), &'static str> {
+            if self.schema_version != CONSUME_RESULT_SCHEMA_VERSION {
+                return Err("durable mutation consume result schema version is invalid");
+            }
+            if !valid_ascii_graphical(&self.session_id, MAX_ID_BYTES) {
+                return Err("durable mutation consume result session id is invalid");
+            }
+            if !valid_sha256_identity(&self.operation_identity, OPERATION_IDENTITY_PREFIX) {
+                return Err("durable mutation consume result operation identity is invalid");
+            }
+            if self.expected_revision == 0 || self.expected_revision >= MAX_SAFE_JSON_INTEGER {
+                return Err("durable mutation consume result expected revision is invalid");
+            }
+            self.confirmed_anchor.validate()?;
+            if self.confirmed_anchor.sequence == 0 {
+                return Err("durable mutation consume result confirmation anchor must be positive");
+            }
+            self.operation.validate()?;
+            if self.operation.session_id != self.session_id
+                || self.operation.operation_identity != self.operation_identity
+                || self.operation.revision != self.expected_revision + 1
+            {
+                return Err("durable mutation consume result binding is invalid");
+            }
+            match self.target {
+                ConsumeTarget::Accepted
+                    if !self.operation.accepted_consumed
+                        || self.operation.accepted_anchor.as_ref()
+                            != Some(&self.confirmed_anchor) =>
+                {
+                    Err("durable mutation accepted confirmation is invalid")
+                }
+                ConsumeTarget::Terminal
+                    if self.operation.state != OperationState::Terminal
+                        || !self.operation.terminal_consumed
+                        || self.operation.terminal_anchor.as_ref()
+                            != Some(&self.confirmed_anchor) =>
+                {
+                    Err("durable mutation terminal confirmation is invalid")
+                }
+                _ => Ok(()),
+            }
+        }
+
+        pub fn validate_for_request(&self, request: &ConsumeParams) -> Result<(), &'static str> {
+            request.validate()?;
+            self.validate()?;
+            if self.session_id != request.session_id
+                || self.operation_identity != request.operation_identity
+                || self.expected_revision != request.expected_revision
+                || self.target != request.target
+                || self.confirmed_anchor != request.confirmed_anchor
+            {
+                return Err("durable mutation consume result does not match the request");
+            }
+            Ok(())
+        }
+    }
+
+    impl TryFrom<ConsumeResultWire> for ConsumeResult {
+        type Error = &'static str;
+
+        fn try_from(value: ConsumeResultWire) -> Result<Self, Self::Error> {
+            let result = Self {
+                schema_version: value.schema_version,
+                session_id: value.session_id,
+                operation_identity: value.operation_identity,
+                expected_revision: value.expected_revision,
+                target: value.target,
+                confirmed_anchor: value.confirmed_anchor,
+                operation: value.operation,
+            };
+            result.validate()?;
+            Ok(result)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for ConsumeResult {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            ConsumeResultWire::deserialize(deserializer)?
+                .try_into()
+                .map_err(serde::de::Error::custom)
+        }
+    }
+
+    impl Serialize for ConsumeResult {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            self.validate().map_err(serde::ser::Error::custom)?;
+            ConsumeResultWire {
+                schema_version: self.schema_version.clone(),
+                session_id: self.session_id.clone(),
+                operation_identity: self.operation_identity.clone(),
+                expected_revision: self.expected_revision,
+                target: self.target,
+                confirmed_anchor: self.confirmed_anchor.clone(),
+                operation: self.operation.clone(),
+            }
+            .serialize(serializer)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+
+        const REQUEST_FINGERPRINT: &str =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        fn accepted_operation() -> Operation {
+            Operation::accepted("session-1", "gesture-550e8400", REQUEST_FINGERPRINT).unwrap()
+        }
+
+        fn anchor(sequence: u64, byte: char) -> TimelineAnchor {
+            TimelineAnchor {
+                sequence,
+                event_id: Some(format!("event:sha256:{}", byte.to_string().repeat(64))),
+            }
+        }
+
+        #[test]
+        fn operation_identity_is_stable_and_bound_to_metadata_only_inputs() {
+            let operation = accepted_operation();
+            assert_eq!(
+                operation.operation_identity,
+                operation_identity(
+                    "session-1",
+                    MutationKind::TurnStart,
+                    "gesture-550e8400",
+                    REQUEST_FINGERPRINT,
+                )
+                .unwrap()
+            );
+            assert_eq!(operation.revision, 1);
+            assert_eq!(operation.state, OperationState::Accepted);
+            assert!(serde_json::to_string(&operation)
+                .unwrap()
+                .find("prompt")
+                .is_none());
+        }
+
+        #[test]
+        fn terminal_and_reconciliation_state_invariants_fail_closed() {
+            let mut unbound_consumed = accepted_operation();
+            unbound_consumed.accepted_consumed = true;
+            assert!(unbound_consumed.validate().is_err());
+
+            let mut terminal = accepted_operation();
+            terminal.revision = 2;
+            terminal.state = OperationState::Terminal;
+            terminal.turn_id = Some("turn-1".into());
+            terminal.accepted_anchor = Some(anchor(4, 'a'));
+            terminal.terminal_anchor = Some(anchor(8, 'b'));
+            assert!(terminal.validate().is_ok());
+
+            let mut invalid = terminal.clone();
+            invalid.terminal_anchor = Some(anchor(3, 'c'));
+            assert!(invalid.validate().is_err());
+            invalid = terminal.clone();
+            invalid.state = OperationState::ReconciliationRequired;
+            assert!(invalid.validate().is_err());
+            invalid = terminal;
+            invalid.terminal_consumed = true;
+            assert!(invalid.validate().is_err());
+        }
+
+        #[test]
+        fn operation_revisions_are_contiguous_and_preserve_observed_bindings() {
+            let accepted = accepted_operation();
+            let mut reconciliation = accepted.clone();
+            reconciliation.revision += 1;
+            reconciliation.state = OperationState::ReconciliationRequired;
+            assert!(reconciliation.can_follow(&accepted).is_ok());
+
+            let mut terminal = reconciliation.clone();
+            terminal.revision += 1;
+            terminal.state = OperationState::Terminal;
+            terminal.turn_id = Some("turn-1".into());
+            terminal.accepted_anchor = Some(anchor(4, 'a'));
+            terminal.terminal_anchor = Some(anchor(8, 'b'));
+            assert!(terminal.can_follow(&reconciliation).is_ok());
+
+            let mut gap = terminal.clone();
+            gap.revision += 2;
+            assert!(gap.can_follow(&terminal).is_err());
+            let mut drift = terminal.clone();
+            drift.revision += 1;
+            drift.turn_id = Some("turn-2".into());
+            assert!(drift.can_follow(&terminal).is_err());
+            let mut backwards = terminal.clone();
+            backwards.revision += 1;
+            backwards.state = OperationState::Accepted;
+            backwards.terminal_anchor = None;
+            assert!(backwards.can_follow(&terminal).is_err());
+        }
+
+        #[test]
+        fn unknown_or_content_fields_and_forged_identity_are_rejected() {
+            let operation = serde_json::to_value(accepted_operation()).unwrap();
+            for field in ["prompt", "context", "body"] {
+                let mut invalid = operation.clone();
+                invalid[field] = json!("must-not-enter-the-ledger");
+                assert!(serde_json::from_value::<Operation>(invalid).is_err());
+            }
+            let mut forged = operation;
+            forged["operation_identity"] =
+                json!(format!("{OPERATION_IDENTITY_PREFIX}{}", "f".repeat(64)));
+            assert!(serde_json::from_value::<Operation>(forged).is_err());
+        }
+
+        #[test]
+        fn pages_require_strict_order_request_binding_and_exact_cursor() {
+            let first = accepted_operation();
+            let mut second = Operation::accepted(
+                "session-1",
+                "gesture-550e8401",
+                "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .unwrap();
+            let mut operations = vec![first, second.clone()];
+            operations
+                .sort_by(|left, right| left.operation_identity.cmp(&right.operation_identity));
+            second = operations.last().unwrap().clone();
+            let request = ListParams {
+                schema_version: LIST_REQUEST_SCHEMA_VERSION.into(),
+                session_id: "session-1".into(),
+                after: None,
+                limit: 2,
+            };
+            let page = Page {
+                schema_version: PAGE_SCHEMA_VERSION.into(),
+                session_id: "session-1".into(),
+                after: None,
+                operations,
+                next_after: Some(Cursor::from_operation(&second).unwrap()),
+                complete: false,
+            };
+            assert!(page.validate_for_request(&request).is_ok());
+
+            let mut wrong_cursor = page.clone();
+            wrong_cursor.next_after.as_mut().unwrap().revision += 1;
+            assert!(wrong_cursor.validate().is_err());
+            let mut wrong_session = page;
+            wrong_session.session_id = "session-2".into();
+            assert!(wrong_session.validate().is_err());
+
+            let oversized = json!({
+                "schema_version": PAGE_SCHEMA_VERSION,
+                "session_id": "session-1",
+                "after": null,
+                "operations": vec![serde_json::to_value(accepted_operation()).unwrap(); 101],
+                "next_after": null,
+                "complete": true,
+            });
+            assert!(serde_json::from_value::<Page>(oversized).is_err());
+        }
+
+        #[test]
+        fn consume_result_requires_revision_cas_and_ordered_consumption() {
+            let mut operation = accepted_operation();
+            operation.revision += 1;
+            operation.turn_id = Some("turn-1".into());
+            operation.accepted_anchor = Some(anchor(4, 'a'));
+            let request = ConsumeParams {
+                schema_version: CONSUME_REQUEST_SCHEMA_VERSION.into(),
+                session_id: operation.session_id.clone(),
+                operation_identity: operation.operation_identity.clone(),
+                expected_revision: operation.revision,
+                target: ConsumeTarget::Accepted,
+                confirmed_anchor: operation.accepted_anchor.clone().unwrap(),
+            };
+            operation.revision += 1;
+            operation.accepted_consumed = true;
+            let result = ConsumeResult {
+                schema_version: CONSUME_RESULT_SCHEMA_VERSION.into(),
+                session_id: operation.session_id.clone(),
+                operation_identity: operation.operation_identity.clone(),
+                expected_revision: request.expected_revision,
+                target: request.target,
+                confirmed_anchor: request.confirmed_anchor.clone(),
+                operation,
+            };
+            assert!(result.validate_for_request(&request).is_ok());
+
+            let mut stale = result;
+            stale.expected_revision += 1;
+            assert!(stale.validate_for_request(&request).is_err());
+
+            let mut wrong_anchor = request;
+            wrong_anchor.confirmed_anchor = anchor(5, 'b');
+            assert!(stale.validate_for_request(&wrong_anchor).is_err());
+        }
+    }
+}
+
 pub mod stable {
     pub mod v0_1 {
         use super::super::*;

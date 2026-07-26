@@ -161,6 +161,20 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   whose exact Proposal read cannot replace the latest cache on drift, race, or
   cross-binding failure. Genuine approval, checkpoint/apply, and rollback authority
   remain absent.
+- Durable mutation acknowledgement: stable capability
+  `session.mutation-acknowledgements` exposes Session-scoped list and exact-anchor
+  consume routes. Schema v20 stores one metadata-only `turn-start` operation keyed by
+  Session, idempotency key, and SHA-256 request fingerprint. Runtime reserves it
+  before dispatch; equivalent retries return the original operation/Turn and
+  conflicting fingerprints fail without dispatch. Accepted `turn.started` and
+  terminal Timeline anchors bind atomically with projection/Journal transactions via
+  revision CAS. Startup converts uncertain accepted rows to
+  `reconciliation-required`, which cannot redispatch. Qt consumes only after exact
+  Session/Turn/sequence/Event-ID validation, accepted before terminal; drift,
+  tampering, unavailable/read-only recovery, and cross-Session access freeze the
+  affected Session. The ledger contains no prompt, context, provider body, result,
+  permission, approval, or execution authority. Approval, file-write, Git, and
+  background-job producers remain absent.
 - Workspace filesystem: the sidecar enforces canonical project roots, denies
   sensitive paths and symlinks, honors ignore rules, preserves UTF-8/BOM and
   LF/CRLF, uses revision checks, and performs atomic user saves.
@@ -205,8 +219,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   remain at terminal, and a revision-one atomic `truncated` marker is valid. Durable
   public journaling, fixed-watermark catch-up, structured retention-gap snapshot
   recovery, live subscription, and bounded reconnect are implemented under `3.5`;
-  explicit acknowledgement and complete Windows reconnect/runtime evidence remain
-  open. Agent/Codex remains read-only.
+  durable Turn-start acknowledgement is implemented; complete Windows
+  reconnect/runtime evidence remains open. Agent/Codex remains read-only.
 - OpenSpec task `3.5` now has an end-to-end fixed-watermark catch-up slice. Workbench
   schema v16 stores exact validated `timeline-event/0.1` envelopes behind one
   compare-and-swap cursor per Session, restores Sequencer state page by page, and
@@ -258,8 +272,9 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   independent queue-saturation reachability, Qt single-flight 5-second/15-second
   liveness gating, generation-bound late-response rejection, and the Windows
   packaging workflow's Qt Runtime environment-test gate. Live subscription and
-  bounded reconnect orchestration are now implemented. Explicit acknowledgement and
-  complete Windows reconnect/runtime evidence remain open. Keep `3.5` unchecked.
+  bounded reconnect orchestration are now implemented. Durable Turn-start
+  acknowledgement is also implemented by the schema-v20 ledger slice below;
+  complete Windows reconnect/runtime evidence remains open. Keep `3.5` unchecked.
 - The Timeline snapshot recovery slice is implemented end to end. AAP types and the
   stable Schema define the
   exact null-only `timeline/snapshot` request, fixed floor/watermark, strict
@@ -1340,7 +1355,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   user-gesture ID for explicit approvals; it refuses read-only or managed-denied
   Git actions before SQLite mutation. This remains an internal foundation, not an
   AAP/Qt approval bridge or native execution grant.
-- `WorkbenchStore` schema version 15 now persists canonical projects and roots plus
+- `WorkbenchStore` schema version 20 now persists canonical projects and roots plus
   Chat/Work sessions with project binding, environment identity, new/resume/fork
   lineage, and active/archived/failed/interrupted status. Work sessions require a
   project, lineage parents must match project and mode, archive/unarchive is
@@ -1368,7 +1383,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   checkpoint and retention floor per Session so a pruned prefix plus retained tail
   can restore the exact Sequencer state without reusing public sequences.
   The normal WAL-consistent migration backup covers v12-to-v13, v13-to-v14, and
-  v14-to-v15 plus the populated v15-to-v16 migration. Final two-phase Session purge
+  v14-to-v15 plus the populated v15-to-v16 migration. Schema v19 adds the durable
+  read-only Workspace Edit Proposal graph, and schema v20 adds the metadata-only
+  `mutation_acknowledgements` ledger with a v19-to-v20 migration/backup. Final
+  two-phase Session purge
   removes the binding in the same transaction as Turns, Items, and events. No
   repository absolute path, permission,
   dedicated-worktree claim, or mutation authority enters the binding. Extensions,
@@ -2802,8 +2820,9 @@ Implemented visual baseline:
   timing failures (one missing temporary instance file, one early fixture disconnect,
   and one missing Session field); each focused rerun, the complete stdio/protocol
   reruns, and the final original full gates passed. Bounded reconnect, live
-  subscription, explicit acknowledgement, and complete Windows reconnect evidence
-  remain open; automatic pruning remains disabled.
+  subscription and bounded reconnect are implemented. Durable Turn-start
+  acknowledgement is recorded in the current slice below; complete Windows
+  reconnect/runtime evidence remains open and automatic pruning remains disabled.
 
 - The durable Codex file-change Proposal Timeline reference and Qt Changes recovery
   stage passes 27 AAP tests, 728
@@ -2874,8 +2893,8 @@ Implemented visual baseline:
   retention-gap response and fixed-head snapshot recovery are implemented end to
   end. Automatic pruning remains disabled. Subscription and complete reconnect
   orchestration were absent at that historical stage and are superseded by the live
-  subscription stage below; explicit acknowledgement and Windows recovery evidence
-  remain absent.
+  subscription stage below; durable Turn-start acknowledgement is recorded in the
+  current slice below, while Windows recovery evidence remains absent.
 
 - The AAP initialization-negotiation stage completes OpenSpec `3.3`. Rust and Qt
   implement the exact two-stage `initialize`/`initialized` state machine, numeric
@@ -2906,8 +2925,8 @@ Implemented visual baseline:
   10 threshold, 13 handshake Runtime, 12 Schema, 63 protocol, 23 stdio/Codex, all
   16 desktop CTests, strict Clippy, formatting, strict OpenSpec validation, and
   `git diff --check`. The partial fixed-watermark replay/gap slice is now recorded
-  above. Live subscription and bounded reconnect are now recorded below; explicit
-  acknowledgement and Windows evidence remain under `3.5`.
+  above. Live subscription, bounded reconnect, and durable Turn-start acknowledgement
+  are now recorded below; Windows evidence remains under `3.5`.
 
 - The Codex degradation/provider hardening stage passes 630 `aegisy-agentd`
   library tests with one ignored live fixture, 63 protocol tests, and 21 stdio/Codex
@@ -2918,9 +2937,9 @@ Implemented visual baseline:
   `git diff --check`, the focused Qt degradation/Timeline run, and the ordinary Qt
   render run pass. Fixed-watermark replay and per-Session gap catch-up are now
   partial `3.5` foundations. Live subscription and bounded reconnect are now
-  implemented; acknowledgement, Windows evidence, complete vendor capability negotiation, and
-  remaining runtime-only desktop surfaces are still absent, so OpenSpec `3.5` and
-  `7.9` remain unchecked.
+  implemented; durable Turn-start acknowledgement is now implemented, while Windows
+  evidence, complete vendor capability negotiation, and remaining runtime-only
+  desktop surfaces are still absent, so OpenSpec `3.5` and `7.9` remain unchecked.
 
 - The current Rust workspace passes formatting, full workspace tests, and strict
   workspace Clippy with the exact current counts recorded in the
@@ -3037,31 +3056,51 @@ Implemented visual baseline:
   formatting, `cmake --build build -j4`, and `git diff --check` passed. Strict
   OpenSpec validation passes after the documentation update.
 - OpenSpec `3.5` remains intentionally unchecked. Live subscription and race-free
-  subscribe/sync/activate orchestration are implemented by the stage below; explicit
-  acknowledgement and complete Windows reconnect/runtime evidence are still missing.
-  Automatic Timeline pruning remains disabled. The detailed plan is in
+  subscribe/sync/activate orchestration are implemented by the stage below; durable
+  Turn-start acknowledgement is implemented by the following ledger slice, while
+  complete Windows reconnect/runtime evidence is still missing. Automatic Timeline
+  pruning remains disabled. The detailed plan is in
   `openspec/changes/build-aegisy-agent-workbench/`.
 
-## Mutation Acknowledgement Contract Foundation (2026-07-26)
+## Durable Turn-start Mutation Acknowledgement (2026-07-26)
 
-- The stable AAP types now include a metadata-only
-  `mutation-acknowledgement/0.1` contract. `MutationRequest` binds bounded ASCII
-  `request_id`, `idempotency_key`, `session_id`, and a positive safe-integer
-  `generation`; `Acknowledgement` repeats the exact binding and exposes only the
-  monotonic `accepted -> acknowledged -> terminal` state. Repeated states are
-  idempotent, backwards transitions and binding drift fail closed, and stale
-  generation responses cannot match the request.
-- The contract is schema/type/test evidence only. It is not registered as an AAP
-  method or capability, has no durable acknowledgement ledger, does not infer
-  mutation success, and grants no mutation, approval, or execution authority.
-  Existing Agent/Codex and shipped UI remain read-only. OpenSpec `3.5`/`3.6` stay
-  unchecked until concrete mutation-shaped producers, durable consumption, and
-  reviewed Qt/recovery integration exist.
-- Verification passes the complete Rust workspace: 32 AAP type, 729
-  `aegisy-agentd` library tests with one ignored live fixture, 7 daemon-main, 10
-  context-threshold, 14 handshake Runtime, 19 handshake Schema, 67 protocol, and
-  23 stdio/Codex tests. Strict Clippy, Rust formatting, strict OpenSpec validation,
-  and `git diff --check` pass.
+- Stable AAP Schema and Rust types register the metadata-only capability
+  `session.mutation-acknowledgements`, list method
+  `session/mutation-acknowledgements`, and exact-anchor consume method
+  `mutation/acknowledgement/consume`. The durable operation identity is derived from
+  Session, `turn-start`, idempotency key, and request fingerprint; process generation
+  remains only in the transient request acknowledgement. The operation contains no
+  prompt, context, provider body, result content, permission, approval, or execution
+  authority.
+- Workbench schema v20 adds `mutation_acknowledgements` with strict Session,
+  operation, revision, Timeline anchor, consumption receipt, and state constraints.
+  Reservation commits before Turn dispatch; an equivalent key/fingerprint retry
+  returns the same operation/Turn, while a conflicting fingerprint fails without
+  dispatch. Accepted `turn.started` and terminal Timeline anchors bind atomically
+  with projection and Public Journal writes using revision CAS. Preview reservation,
+  binding, rollback, and retry use the same atomic producer boundary.
+- Terminal-anchor binding accepts the already validated terminal envelope, including
+  the durable structured Error Item required by failed Turns; the ledger stores only
+  the sequence/Event-ID anchor and never copies terminal content or authority.
+- Store startup converts accepted rows whose dispatch result is uncertain to
+  `reconciliation-required` and refuses redispatch. Session-scoped list pagination
+  returns only unconsumed rows with a strict keyset cursor. Qt validates the exact
+  Session, Turn, sequence, Event-ID, and revision anchor, consumes accepted evidence
+  before terminal evidence, and freezes only the affected Session on drift,
+  cross-Session access, malformed/tampered rows, unavailable/read-only Store, or
+  reconciliation-required state. Session purge removes the ledger atomically; v19 to
+  v20 migration preserves existing data without fabricating acknowledgements.
+- Focused verification passes 5 durable acknowledgement Store tests and all 23
+  stdio/Codex lifecycle fixtures, including provider failures, runtime denials, and
+  terminal Error Items. The complete Rust workspace passes 44 AAP tests, 758
+  `aegisy-agentd` library tests with one ignored live fixture, 7 daemon-main tests,
+  10 context-threshold tests, 21 handshake Runtime tests, 23 handshake Schema tests,
+  68 protocol tests, and 23 stdio tests. The complete desktop CTest suite passes
+  16/16; strict Clippy, Rust formatting, Schema parsing, strict OpenSpec validation,
+  and `git diff --check` also pass. Approval, file-write, Git, and background-job
+  mutation producers still have no durable acknowledgement path. OpenSpec `3.5`
+  and `3.6` remain unchecked; complete Windows reconnect/runtime evidence is still
+  required. Agent/Codex remains read-only.
 
 ## Live Timeline Subscription And Ownership Recovery (2026-07-26)
 
@@ -3111,17 +3150,19 @@ Implemented visual baseline:
   (941 passed, zero failed, one ignored). Strict workspace Clippy, Rust formatting,
   `cmake --build build -j4`, all 16 desktop CTests, JSON Schema parsing, strict
   OpenSpec validation, and `git diff --check` pass.
-- OpenSpec `3.5` remains unchecked. Explicit mutation acknowledgement and complete
-  Windows reconnect/runtime evidence remain absent. Automatic Timeline pruning stays
+- OpenSpec `3.5` remains unchecked. Durable Turn-start acknowledgement is implemented
+  by the ledger slice above; approval/file/Git/job producers and complete Windows
+  reconnect/runtime evidence remain absent. Automatic Timeline pruning stays
   disabled, and Agent/Codex remains read-only.
 
 ## Next Product Priorities
 
-1. Continue OpenSpec `3.5` with durable explicit acknowledgement, then obtain the
-   complete Windows reconnect/runtime evidence. Fixed-watermark replay, structured
+1. Continue OpenSpec `3.5` by obtaining complete Windows reconnect/runtime evidence,
+   then add reviewed acknowledgement producers for approval/file/Git/job mutations.
+   Durable Turn-start acknowledgement, fixed-watermark replay, structured
    retention-gap snapshot recovery, out-of-band heartbeat, bounded reconnect, and
    live subscribe/sync-or-snapshot/activate are implemented. Keep automatic pruning
-   disabled until the remaining acknowledgement and cross-platform gates are verified.
+   disabled until the remaining mutation-producer and cross-platform gates are verified.
 2. Validate the hardened TLS installer on a clean Windows x64 VM.
 3. Reproduce and correlate any remaining streaming disconnect with redacted logs.
 4. Continue consolidating widget-local QSS and replace remaining Qt stock icons;

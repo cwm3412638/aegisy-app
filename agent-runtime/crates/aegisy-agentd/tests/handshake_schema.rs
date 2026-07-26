@@ -1,10 +1,21 @@
+use aegisy_aap::durable_mutation_ack::{
+    ConsumeParams as DurableMutationConsumeParams, ConsumeResult as DurableMutationConsumeResult,
+    ConsumeTarget as DurableMutationConsumeTarget, ListParams as DurableMutationListParams,
+    Operation as DurableMutationOperation, Page as DurableMutationPage,
+    CAPABILITY as DURABLE_MUTATION_CAPABILITY, CONSUME_METHOD as DURABLE_MUTATION_CONSUME_METHOD,
+    CONSUME_REQUEST_SCHEMA_VERSION as DURABLE_MUTATION_CONSUME_REQUEST_SCHEMA_VERSION,
+    CONSUME_RESULT_SCHEMA_VERSION as DURABLE_MUTATION_CONSUME_RESULT_SCHEMA_VERSION,
+    LIST_METHOD as DURABLE_MUTATION_LIST_METHOD,
+    LIST_REQUEST_SCHEMA_VERSION as DURABLE_MUTATION_LIST_REQUEST_SCHEMA_VERSION,
+    PAGE_SCHEMA_VERSION as DURABLE_MUTATION_PAGE_SCHEMA_VERSION,
+};
 use aegisy_aap::mutation_ack::{Acknowledgement, MutationRequest, State};
 use aegisy_aap::stable::v0_1::{
     timeline_event_id, EventEnvelope, InitializeParams, InitializeResult, ItemUpdate,
     RuntimeHeartbeatParams, RuntimeHeartbeatResult, TimelineActivateParams, TimelineActivateResult,
-    TimelineItem, TimelineRetentionGapData, TimelineSessionSnapshotPage, TimelineSnapshotParams,
-    TimelineSubscribeParams, TimelineSubscribeResult, TimelineSubscriptionEvent,
-    TimelineSubscriptionFailure, TimelineSubscriptionRecoveryProof,
+    TimelineAnchor, TimelineItem, TimelineRetentionGapData, TimelineSessionSnapshotPage,
+    TimelineSnapshotParams, TimelineSubscribeParams, TimelineSubscribeResult,
+    TimelineSubscriptionEvent, TimelineSubscriptionFailure, TimelineSubscriptionRecoveryProof,
     TimelineSubscriptionSnapshotParams, TimelineSubscriptionSyncParams, TimelineSyncPage,
     TimelineSyncParams, TurnState,
 };
@@ -1629,6 +1640,162 @@ fn mutation_acknowledgement_metadata_schema_is_strict_and_generation_bound() {
     let mut stale = later.clone();
     stale.generation += 1;
     assert!(!stale.matches_request(&request));
+}
+
+#[test]
+fn durable_mutation_acknowledgement_schema_is_metadata_only_paged_and_revision_bound() {
+    const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    assert_eq!(
+        DURABLE_MUTATION_CAPABILITY,
+        "session.mutation-acknowledgements"
+    );
+    assert_eq!(
+        DURABLE_MUTATION_LIST_METHOD,
+        "session/mutation-acknowledgements"
+    );
+    assert_eq!(
+        DURABLE_MUTATION_CONSUME_METHOD,
+        "mutation/acknowledgement/consume"
+    );
+    assert!(schema_definition_valid(
+        "durableMutationCapability",
+        &json!(DURABLE_MUTATION_CAPABILITY)
+    ));
+
+    let operation =
+        DurableMutationOperation::accepted("session-1", "gesture-1", FINGERPRINT).unwrap();
+    let operation_json = serde_json::to_value(&operation).unwrap();
+    assert!(schema_definition_valid(
+        "durableMutationOperation",
+        &operation_json
+    ));
+
+    for field in ["prompt", "context", "body"] {
+        let mut invalid = operation_json.clone();
+        invalid[field] = json!("content-is-forbidden");
+        assert!(!schema_definition_valid(
+            "durableMutationOperation",
+            &invalid
+        ));
+        assert!(serde_json::from_value::<DurableMutationOperation>(invalid).is_err());
+    }
+    let mut invalid_terminal = operation_json.clone();
+    invalid_terminal["state"] = json!("terminal");
+    assert!(!schema_definition_valid(
+        "durableMutationOperation",
+        &invalid_terminal
+    ));
+    assert!(serde_json::from_value::<DurableMutationOperation>(invalid_terminal).is_err());
+
+    let list_params = DurableMutationListParams {
+        schema_version: DURABLE_MUTATION_LIST_REQUEST_SCHEMA_VERSION.into(),
+        session_id: "session-1".into(),
+        after: None,
+        limit: 25,
+    };
+    let list_request = json!({
+        "jsonrpc": "2.0",
+        "id": "mutation-list-1",
+        "method": DURABLE_MUTATION_LIST_METHOD,
+        "params": serde_json::to_value(&list_params).unwrap(),
+    });
+    assert!(strict_envelope_valid(&list_request));
+    assert!(schema_definition_valid(
+        "durableMutationListRequest",
+        &list_request
+    ));
+
+    let page = DurableMutationPage {
+        schema_version: DURABLE_MUTATION_PAGE_SCHEMA_VERSION.into(),
+        session_id: "session-1".into(),
+        after: None,
+        operations: vec![operation.clone()],
+        next_after: None,
+        complete: true,
+    };
+    assert!(page.validate_for_request(&list_params).is_ok());
+    let list_response = json!({
+        "jsonrpc": "2.0",
+        "id": "mutation-list-1",
+        "result": serde_json::to_value(&page).unwrap(),
+    });
+    assert!(schema_definition_valid(
+        "durableMutationListSuccessResponse",
+        &list_response
+    ));
+    let mut oversized_page = serde_json::to_value(&page).unwrap();
+    oversized_page["operations"] = json!(vec![serde_json::to_value(&operation).unwrap(); 101]);
+    assert!(!schema_definition_valid(
+        "durableMutationPage",
+        &oversized_page
+    ));
+
+    let mut consumable = operation;
+    consumable.revision += 1;
+    consumable.turn_id = Some("turn-1".into());
+    consumable.accepted_anchor = Some(TimelineAnchor {
+        sequence: 1,
+        event_id: Some(format!("event:sha256:{}", "a".repeat(64))),
+    });
+    let consume_params = DurableMutationConsumeParams {
+        schema_version: DURABLE_MUTATION_CONSUME_REQUEST_SCHEMA_VERSION.into(),
+        session_id: consumable.session_id.clone(),
+        operation_identity: consumable.operation_identity.clone(),
+        expected_revision: consumable.revision,
+        target: DurableMutationConsumeTarget::Accepted,
+        confirmed_anchor: consumable.accepted_anchor.clone().unwrap(),
+    };
+    let consume_request = json!({
+        "jsonrpc": "2.0",
+        "id": "mutation-consume-1",
+        "method": DURABLE_MUTATION_CONSUME_METHOD,
+        "params": serde_json::to_value(&consume_params).unwrap(),
+    });
+    assert!(strict_envelope_valid(&consume_request));
+    assert!(schema_definition_valid(
+        "durableMutationConsumeRequest",
+        &consume_request
+    ));
+
+    let mut consumed = consumable;
+    consumed.revision += 1;
+    consumed.accepted_consumed = true;
+    let consume_result = DurableMutationConsumeResult {
+        schema_version: DURABLE_MUTATION_CONSUME_RESULT_SCHEMA_VERSION.into(),
+        session_id: consumed.session_id.clone(),
+        operation_identity: consumed.operation_identity.clone(),
+        expected_revision: consume_params.expected_revision,
+        target: consume_params.target,
+        confirmed_anchor: consume_params.confirmed_anchor.clone(),
+        operation: consumed,
+    };
+    assert!(consume_result.validate_for_request(&consume_params).is_ok());
+    let consume_response = json!({
+        "jsonrpc": "2.0",
+        "id": "mutation-consume-1",
+        "result": serde_json::to_value(&consume_result).unwrap(),
+    });
+    assert!(schema_definition_valid(
+        "durableMutationConsumeSuccessResponse",
+        &consume_response
+    ));
+
+    let mut stale = consume_response;
+    stale["result"]["expected_revision"] = json!(consume_params.expected_revision + 1);
+    assert!(schema_definition_valid(
+        "durableMutationConsumeSuccessResponse",
+        &stale
+    ));
+    assert!(
+        serde_json::from_value::<DurableMutationConsumeResult>(stale["result"].clone()).is_err()
+    );
+
+    let mut missing_confirmation = consume_request;
+    missing_confirmation["params"]
+        .as_object_mut()
+        .unwrap()
+        .remove("confirmed_anchor");
+    assert!(!strict_envelope_valid(&missing_confirmation));
 }
 
 #[test]

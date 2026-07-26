@@ -74,6 +74,7 @@
 #include <QVBoxLayout>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
+#include <QUuid>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -1641,6 +1642,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
         m_timelineSyncAvailable = false;
         m_timelineSnapshotAvailable = false;
         m_timelineSubscriptionAvailable = false;
+        m_mutationAcknowledgementAvailable = false;
         const QJsonObject backend = result.value(QStringLiteral("backend")).toObject();
         m_runtimeRecoveryMode = backend.value(QStringLiteral("status")).toString()
             == QStringLiteral("read-only-recovery");
@@ -1694,6 +1696,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 m_timelineSnapshotAvailable = true;
             } else if (name == QStringLiteral("timeline.subscription.fixed-watermark")) {
                 m_timelineSubscriptionAvailable = true;
+            } else if (name
+                    == QStringLiteral("session.mutation-acknowledgements")) {
+                m_mutationAcknowledgementAvailable = true;
             } else if (name == QStringLiteral("workspace.edit.proposal.read-only")) {
                 m_workspaceEditProposalAvailable = true;
             }
@@ -2223,7 +2228,42 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
     });
     connect(m_runtime, &AgentRuntimeClient::requestFailed,
             this, [this](const QString &requestId, const QString &method,
-                         const QString &, int code) {
+                         const QString &message, int code) {
+        if (method == QStringLiteral("session/mutation-acknowledgements")) {
+            const DurableMutationListRequest request =
+                m_mutationListRequests.take(requestId);
+            if (request.sessionId.isEmpty()) return;
+            if (m_mutationSessionListRequests.value(request.sessionId) == requestId) {
+                m_mutationSessionListRequests.remove(request.sessionId);
+            }
+            freezeSessionForMutationReconciliation(
+                request.sessionId,
+                QStringLiteral("无法读取持久化操作确认：%1").arg(message));
+            if (request.reconnectRecovery) {
+                finishReconnectMutationRecovery(request.sessionId);
+            }
+            return;
+        }
+        if (method == QStringLiteral("mutation/acknowledgement/consume")) {
+            const DurableMutationConsumeRequest request =
+                m_mutationConsumeRequests.take(requestId);
+            if (request.sessionId.isEmpty()) return;
+            int &attempt = m_mutationConsumeRecoveryAttempts[
+                request.operationIdentity];
+            ++attempt;
+            if (attempt <= 3) {
+                beginMutationAcknowledgementRecovery(
+                    request.sessionId, {}, request.reconnectRecovery);
+            } else {
+                freezeSessionForMutationReconciliation(
+                    request.sessionId,
+                    QStringLiteral("操作确认消费连续失败（错误码 %1）").arg(code));
+                if (request.reconnectRecovery) {
+                    finishReconnectMutationRecovery(request.sessionId);
+                }
+            }
+            return;
+        }
         const bool subscriptionRecoveryFailure =
             method == QStringLiteral("timeline/subscribe")
             || method == QStringLiteral("timeline/subscription-sync")
@@ -3251,6 +3291,12 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
             this, &AgentWorkbenchWidget::handleTimelineSubscriptionEvent);
     connect(m_runtime, &AgentRuntimeClient::timelineSubscriptionFailed,
             this, &AgentWorkbenchWidget::handleTimelineSubscriptionFailure);
+    connect(m_runtime, &AgentRuntimeClient::turnStarted,
+            this, &AgentWorkbenchWidget::handleTurnStarted);
+    connect(m_runtime, &AgentRuntimeClient::mutationAcknowledgementsListed,
+            this, &AgentWorkbenchWidget::handleMutationAcknowledgementPage);
+    connect(m_runtime, &AgentRuntimeClient::mutationAcknowledgementConsumed,
+            this, &AgentWorkbenchWidget::handleMutationAcknowledgementConsumed);
     m_timelinePresenter = [this](const QJsonObject &event, const QJsonObject &item,
                                  bool recognizedEvent) {
         const QString sessionId = event.value(QStringLiteral("session_id")).toString();
@@ -4192,7 +4238,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
                 || method == QStringLiteral("timeline/subscription-sync")
                 || method == QStringLiteral("timeline/subscription-snapshot")
                 || method == QStringLiteral("timeline/subscription-activate")) return;
+        if (method == QStringLiteral("session/mutation-acknowledgements")
+                || method == QStringLiteral("mutation/acknowledgement/consume")) return;
         m_pendingPrompt.clear();
+        m_pendingTurnIdempotencyKey.clear();
         m_pendingContext = {};
         m_pendingPinnedContextSetIdentity.clear();
         m_pendingPinnedContextIds.clear();
@@ -11261,6 +11310,14 @@ void AgentWorkbenchWidget::submitPrompt()
         addNotice(QStringLiteral("请先打开项目文件夹，再开始 Work。"), true);
         return;
     }
+    if (!m_mutationAcknowledgementAvailable) {
+        m_sendButton->setText(QStringLiteral("确认能力未知"));
+        m_sendButton->setIcon(QIcon(QStringLiteral(":/icons/lucide/rotate-ccw.svg")));
+        m_sendButton->setToolTip(
+            QStringLiteral("未协商持久化操作确认能力，不能安全开始新任务"));
+        m_sendButton->setEnabled(false);
+        return;
+    }
     const QString sessionId = m_mode == QStringLiteral("work")
         ? m_workSessionId : m_chatSessionId;
     if (currentTimelineSessionFrozen()) {
@@ -11292,13 +11349,17 @@ void AgentWorkbenchWidget::submitPrompt()
     }
     m_composer->clear();
     m_sendButton->setEnabled(false);
-    ensureSessionAndSubmit(prompt, context, m_pinnedContextSetIdentity, pinnedContextIds);
+    const QString idempotencyKey = QStringLiteral("turn-%1").arg(
+        QUuid::createUuid().toString(QUuid::WithoutBraces));
+    ensureSessionAndSubmit(prompt, context, m_pinnedContextSetIdentity,
+                           pinnedContextIds, idempotencyKey);
 }
 
 void AgentWorkbenchWidget::startPendingTurnIfReady()
 {
     if (m_pendingPrompt.isEmpty() || !m_runtime || !m_runtime->isReady()
             || m_runtimeDegradationState != RuntimeDegradationState::Valid
+            || !m_mutationAcknowledgementAvailable
             || m_runtimeRecoveryMode || currentOperationStatusBlocked()) {
         return;
     }
@@ -11306,15 +11367,19 @@ void AgentWorkbenchWidget::startPendingTurnIfReady()
         ? m_workSessionId : m_chatSessionId;
     if (sessionId.isEmpty() || currentTimelineSessionFrozen()) return;
     const QString prompt = m_pendingPrompt;
+    const QString idempotencyKey = m_pendingTurnIdempotencyKey;
     const QJsonArray context = m_pendingContext;
     const QString pinnedContextSetIdentity = m_pendingPinnedContextSetIdentity;
     const QStringList pinnedContextIds = m_pendingPinnedContextIds;
+    const QString requestId = m_runtime->startTurn(
+        sessionId, prompt, context, pinnedContextSetIdentity, pinnedContextIds,
+        idempotencyKey);
+    if (requestId.isEmpty()) return;
     m_pendingPrompt.clear();
+    m_pendingTurnIdempotencyKey.clear();
     m_pendingContext = {};
     m_pendingPinnedContextSetIdentity.clear();
     m_pendingPinnedContextIds.clear();
-    m_runtime->startTurn(sessionId, prompt, context,
-                         pinnedContextSetIdentity, pinnedContextIds);
 }
 
 void AgentWorkbenchWidget::cancelActiveTurn()
@@ -11360,6 +11425,15 @@ void AgentWorkbenchWidget::updateTurnAction()
         m_sendButton->setToolTip(pending
             ? QStringLiteral("运行时能力检查完成前不能开始新任务")
             : QStringLiteral("缺少有效的运行时能力声明，不能开始新任务"));
+        m_sendButton->setEnabled(false);
+        return;
+    }
+    if (!m_mutationAcknowledgementAvailable) {
+        m_sendButton->setText(QStringLiteral("确认能力未知"));
+        m_sendButton->setIcon(
+            QIcon(QStringLiteral(":/icons/lucide/rotate-ccw.svg")));
+        m_sendButton->setToolTip(
+            QStringLiteral("未协商持久化操作确认能力，不能安全开始新任务"));
         m_sendButton->setEnabled(false);
         return;
     }
@@ -11423,8 +11497,13 @@ void AgentWorkbenchWidget::updateTurnAction()
 void AgentWorkbenchWidget::ensureSessionAndSubmit(const QString &prompt,
                                                    const QJsonArray &context,
                                                    const QString &pinnedContextSetIdentity,
-                                                   const QStringList &pinnedContextIds)
+                                                   const QStringList &pinnedContextIds,
+                                                   const QString &idempotencyKey)
 {
+    if (idempotencyKey.isEmpty()) {
+        addNotice(QStringLiteral("无法创建稳定的任务重试标识。"), true);
+        return;
+    }
     bool contextNeedsProject = !pinnedContextIds.isEmpty();
     for (const QJsonValue &value : context) {
         if (!value.toObject().value(QStringLiteral("path")).toString().isEmpty()) {
@@ -11445,7 +11524,8 @@ void AgentWorkbenchWidget::ensureSessionAndSubmit(const QString &prompt,
             return;
         }
         if (!m_runtime->startTurn(sessionId, prompt, context,
-                                  pinnedContextSetIdentity, pinnedContextIds).isEmpty()) {
+                                  pinnedContextSetIdentity, pinnedContextIds,
+                                  idempotencyKey).isEmpty()) {
             clearContextItems();
         }
         return;
@@ -11455,6 +11535,7 @@ void AgentWorkbenchWidget::ensureSessionAndSubmit(const QString &prompt,
         return;
     }
     m_pendingPrompt = prompt;
+    m_pendingTurnIdempotencyKey = idempotencyKey;
     m_pendingContext = context;
     m_pendingPinnedContextSetIdentity = pinnedContextSetIdentity;
     m_pendingPinnedContextIds = pinnedContextIds;
@@ -12796,6 +12877,7 @@ void AgentWorkbenchWidget::suspendTimelinesForDisconnect()
     m_timelineSyncAvailable = false;
     m_timelineSnapshotAvailable = false;
     m_timelineSubscriptionAvailable = false;
+    m_mutationAcknowledgementAvailable = false;
     for (auto state = m_timelineSessions.begin();
          state != m_timelineSessions.end(); ++state) {
         const bool hadSubscriptionAuthority = state->subscriptionGeneration != 0
@@ -12916,7 +12998,9 @@ void AgentWorkbenchWidget::beginRuntimeReconnectRecovery(
     }
     m_runtimeReconnectRecoveryGeneration = generation;
     m_runtimeReconnectSecondPhaseStarted = false;
+    m_runtimeReconnectMutationRecoveryStarted = false;
     m_runtimeReconnectTimelinePending.clear();
+    m_runtimeReconnectMutationSessions.clear();
     m_runtimeReconnectProposalRequests.clear();
     m_runtimeReconnectSessionReadId.clear();
     m_runtimeReconnectTerminalListId.clear();
@@ -12927,6 +13011,7 @@ void AgentWorkbenchWidget::beginRuntimeReconnectRecovery(
     m_timelineSyncAvailable = false;
     m_timelineSnapshotAvailable = false;
     m_timelineSubscriptionAvailable = false;
+    m_mutationAcknowledgementAvailable = false;
     m_workspaceEditProposalAvailable = false;
     const QJsonArray capabilities = result.value(QStringLiteral("capabilities"))
         .toObject().value(QStringLiteral("stable")).toArray();
@@ -12939,6 +13024,9 @@ void AgentWorkbenchWidget::beginRuntimeReconnectRecovery(
         } else if (capability
                 == QStringLiteral("timeline.subscription.fixed-watermark")) {
             m_timelineSubscriptionAvailable = true;
+        } else if (capability
+                == QStringLiteral("session.mutation-acknowledgements")) {
+            m_mutationAcknowledgementAvailable = true;
         } else if (capability
                 == QStringLiteral("workspace.edit.proposal.read-only")) {
             m_workspaceEditProposalAvailable = true;
@@ -12989,6 +13077,7 @@ void AgentWorkbenchWidget::beginRuntimeReconnectRecovery(
             m_runtimeReconnectTimelinePending.remove(sessionId);
         }
     }
+    m_runtimeReconnectMutationSessions = sessions;
     continueRuntimeReconnectRecovery();
 }
 
@@ -13048,6 +13137,27 @@ void AgentWorkbenchWidget::continueRuntimeReconnectRecovery()
             || !m_runtimeReconnectSessionReadId.isEmpty()) {
         return;
     }
+    if (!m_runtimeReconnectMutationRecoveryStarted) {
+        m_runtimeReconnectMutationRecoveryStarted = true;
+        const QSet<QString> sessions = m_runtimeReconnectMutationSessions;
+        if (!m_mutationAcknowledgementAvailable) {
+            for (const QString &sessionId : sessions) {
+                freezeSessionForMutationReconciliation(
+                    sessionId,
+                    QStringLiteral("新 Runtime 未协商持久化操作确认能力"));
+                m_runtimeReconnectMutationSessions.remove(sessionId);
+            }
+        } else {
+            for (const QString &sessionId : sessions) {
+                beginMutationAcknowledgementRecovery(sessionId, {}, true);
+            }
+        }
+    }
+    if (!m_runtimeReconnectMutationSessions.isEmpty()
+            || !m_mutationListRequests.isEmpty()
+            || !m_mutationConsumeRequests.isEmpty()) {
+        return;
+    }
     if (!m_runtimeReconnectSecondPhaseStarted) {
         m_runtimeReconnectSecondPhaseStarted = true;
         for (const QString &sessionId :
@@ -13074,6 +13184,7 @@ void AgentWorkbenchWidget::continueRuntimeReconnectRecovery()
     const quint64 generation = m_runtimeReconnectRecoveryGeneration;
     m_runtimeReconnectRecoveryGeneration = 0;
     m_runtimeReconnectSecondPhaseStarted = false;
+    m_runtimeReconnectMutationRecoveryStarted = false;
     m_runtimeStateUnverified = false;
     m_runtime->completeReconnectRecovery(
         generation, true, QStringLiteral("运行时连接与已跟踪工作区状态已恢复"));
@@ -13128,6 +13239,7 @@ void AgentWorkbenchWidget::commitTimelineSyncRecovery(const QString &sessionId)
     for (const TimelineStagedEvent &staged : replayEvents) {
         applyTimelineEventPresentation(staged.event, staged.item, staged.recognized);
     }
+    processSessionMutationAcknowledgements(sessionId, false);
     restoreActiveTurnFromTimeline();
     if (sessionId == currentTimelineSessionId()) {
         updateTurnAction();
@@ -13199,6 +13311,7 @@ void AgentWorkbenchWidget::commitTimelineSnapshotRecovery(const QString &session
             m_turnCancelRequestId.clear();
         }
     }
+    processSessionMutationAcknowledgements(sessionId, false);
     restoreActiveTurnFromTimeline();
     if (sessionId == currentTimelineSessionId()) {
         updateTurnAction();
@@ -13740,6 +13853,310 @@ void AgentWorkbenchWidget::handleTimelineSubscriptionActivated(
     finishRuntimeReconnectTimeline(sessionId);
 }
 
+AgentWorkbenchWidget::TimelineAnchorConfirmation
+AgentWorkbenchWidget::timelineAnchorConfirmation(
+    const QString &sessionId, const QJsonObject &anchor) const
+{
+    quint64 sequence = 0;
+    QString eventId;
+    if (!readTimelineAnchor(anchor, &sequence, &eventId) || sequence == 0) {
+        return TimelineAnchorConfirmation::Drifted;
+    }
+    const auto state = m_timelineSessions.constFind(sessionId);
+    if (state == m_timelineSessions.cend()
+            || state->recovery != TimelineRecoveryState::Active) {
+        return TimelineAnchorConfirmation::Pending;
+    }
+    if (state->projection.sequence < sequence) {
+        return TimelineAnchorConfirmation::Pending;
+    }
+    return state->projection.eventIds.value(sequence) == eventId
+        ? TimelineAnchorConfirmation::Confirmed
+        : TimelineAnchorConfirmation::Drifted;
+}
+
+bool AgentWorkbenchWidget::acceptDurableMutationOperation(
+    const QJsonObject &operation)
+{
+    const QSet<QString> keys{
+        QStringLiteral("schema_version"), QStringLiteral("operation_identity"),
+        QStringLiteral("session_id"), QStringLiteral("mutation_kind"),
+        QStringLiteral("idempotency_key"), QStringLiteral("request_fingerprint"),
+        QStringLiteral("revision"), QStringLiteral("state"),
+        QStringLiteral("turn_id"), QStringLiteral("accepted_anchor"),
+        QStringLiteral("terminal_anchor"), QStringLiteral("accepted_consumed"),
+        QStringLiteral("terminal_consumed"),
+    };
+    const QString identity = operation.value(
+        QStringLiteral("operation_identity")).toString();
+    const QString sessionId = operation.value(QStringLiteral("session_id")).toString();
+    const QString expectedIdentity =
+        AgentRuntimeClient::durableMutationOperationIdentity(
+            sessionId, operation.value(QStringLiteral("mutation_kind")).toString(),
+            operation.value(QStringLiteral("idempotency_key")).toString(),
+            operation.value(QStringLiteral("request_fingerprint")).toString());
+    if (!hasExactJsonKeys(operation, keys)
+            || operation.value(QStringLiteral("schema_version")).toString()
+                != QStringLiteral("mutation-acknowledgement-operation/0.1")
+            || identity.isEmpty() || identity != expectedIdentity
+            || !isBoundedGraphicalId(
+                operation.value(QStringLiteral("session_id")), 128)
+            || !isPositiveSafeJsonInteger(operation.value(QStringLiteral("revision")))) {
+        return false;
+    }
+    const QJsonObject previous = m_durableMutationOperations.value(identity);
+    if (!previous.isEmpty()) {
+        const quint64 previousRevision = static_cast<quint64>(
+            previous.value(QStringLiteral("revision")).toDouble());
+        const quint64 revision = static_cast<quint64>(
+            operation.value(QStringLiteral("revision")).toDouble());
+        if (revision == previousRevision) return operation == previous;
+        if (revision != previousRevision + 1) return false;
+        for (const QString &field : {
+                 QStringLiteral("operation_identity"),
+                 QStringLiteral("session_id"), QStringLiteral("mutation_kind"),
+                 QStringLiteral("idempotency_key"),
+                 QStringLiteral("request_fingerprint"),
+             }) {
+            if (operation.value(field) != previous.value(field)) return false;
+        }
+        for (const QString &field : {
+                 QStringLiteral("turn_id"), QStringLiteral("accepted_anchor"),
+                 QStringLiteral("terminal_anchor"),
+             }) {
+            if (!previous.value(field).isNull()
+                    && operation.value(field) != previous.value(field)) {
+                return false;
+            }
+        }
+        if (previous.value(QStringLiteral("accepted_consumed")).toBool()
+                && !operation.value(QStringLiteral("accepted_consumed")).toBool()) {
+            return false;
+        }
+        if (previous.value(QStringLiteral("terminal_consumed")).toBool()
+                && !operation.value(QStringLiteral("terminal_consumed")).toBool()) {
+            return false;
+        }
+        const QString previousState = previous.value(QStringLiteral("state")).toString();
+        const QString state = operation.value(QStringLiteral("state")).toString();
+        if ((previousState == QStringLiteral("terminal")
+             && state != QStringLiteral("terminal"))
+                || (previousState == QStringLiteral("reconciliation-required")
+                    && state == QStringLiteral("accepted"))) {
+            return false;
+        }
+    }
+    m_durableMutationOperations.insert(identity, operation);
+    m_durableMutationSessionOperations[sessionId].insert(identity);
+    return true;
+}
+
+void AgentWorkbenchWidget::freezeSessionForMutationReconciliation(
+    const QString &sessionId, const QString &detail)
+{
+    if (sessionId.isEmpty()) return;
+    m_mutationReconciliationSessionIds.insert(sessionId);
+    freezeTimelineSession(sessionId, false, false);
+    if (sessionId == currentTimelineSessionId()) {
+        addNotice(QStringLiteral("操作确认需要人工复核：%1").arg(detail), true);
+        updateTurnAction();
+    }
+}
+
+void AgentWorkbenchWidget::finishReconnectMutationRecovery(
+    const QString &sessionId)
+{
+    if (m_runtimeReconnectRecoveryGeneration == 0) return;
+    m_runtimeReconnectMutationSessions.remove(sessionId);
+    continueRuntimeReconnectRecovery();
+}
+
+void AgentWorkbenchWidget::beginMutationAcknowledgementRecovery(
+    const QString &sessionId, const QJsonObject &after, bool reconnectRecovery)
+{
+    if (sessionId.isEmpty()) {
+        if (reconnectRecovery) finishReconnectMutationRecovery(sessionId);
+        return;
+    }
+    if (reconnectRecovery) m_runtimeReconnectMutationSessions.insert(sessionId);
+    if (m_mutationSessionListRequests.contains(sessionId)) return;
+    if (!m_runtime || !runtimeRecoveryRequestsAllowed()
+            || !m_mutationAcknowledgementAvailable) {
+        freezeSessionForMutationReconciliation(
+            sessionId, QStringLiteral("无法读取持久化操作确认账本"));
+        if (reconnectRecovery) finishReconnectMutationRecovery(sessionId);
+        return;
+    }
+    const quint64 generation = m_runtime->processGeneration();
+    const QString requestId = m_runtime->listMutationAcknowledgements(
+        sessionId, after, 100);
+    if (requestId.isEmpty()) {
+        freezeSessionForMutationReconciliation(
+            sessionId, QStringLiteral("持久化操作确认列表请求未发送"));
+        if (reconnectRecovery) finishReconnectMutationRecovery(sessionId);
+        return;
+    }
+    m_mutationSessionListRequests.insert(sessionId, requestId);
+    m_mutationListRequests.insert(requestId, {
+        sessionId, after, generation, reconnectRecovery,
+    });
+}
+
+void AgentWorkbenchWidget::processSessionMutationAcknowledgements(
+    const QString &sessionId, bool reconnectRecovery)
+{
+    const QSet<QString> identities =
+        m_durableMutationSessionOperations.value(sessionId);
+    QStringList ordered = identities.values();
+    ordered.sort();
+    for (const QString &identity : ordered) {
+        const QJsonObject operation = m_durableMutationOperations.value(identity);
+        if (operation.isEmpty()) continue;
+        if (operation.value(QStringLiteral("state")).toString()
+                == QStringLiteral("reconciliation-required")) {
+            freezeSessionForMutationReconciliation(
+                sessionId, QStringLiteral("Runtime 无法证明已接受操作的终态"));
+            if (reconnectRecovery) finishReconnectMutationRecovery(sessionId);
+            return;
+        }
+        const bool hasConsumePending = std::any_of(
+            m_mutationConsumeRequests.cbegin(), m_mutationConsumeRequests.cend(),
+            [&identity](const DurableMutationConsumeRequest &request) {
+                return request.operationIdentity == identity;
+            });
+        if (hasConsumePending) return;
+        const bool acceptedConsumed = operation.value(
+            QStringLiteral("accepted_consumed")).toBool();
+        const bool terminalConsumed = operation.value(
+            QStringLiteral("terminal_consumed")).toBool();
+        const QString state = operation.value(QStringLiteral("state")).toString();
+        QString target;
+        QJsonObject anchor;
+        if (!acceptedConsumed) {
+            if (!operation.value(QStringLiteral("accepted_anchor")).isObject()) {
+                if (reconnectRecovery) {
+                    freezeSessionForMutationReconciliation(
+                        sessionId, QStringLiteral("已接受操作缺少 Timeline 锚点"));
+                    finishReconnectMutationRecovery(sessionId);
+                }
+                return;
+            }
+            target = QStringLiteral("accepted");
+            anchor = operation.value(QStringLiteral("accepted_anchor")).toObject();
+        } else if (state == QStringLiteral("terminal") && !terminalConsumed) {
+            target = QStringLiteral("terminal");
+            anchor = operation.value(QStringLiteral("terminal_anchor")).toObject();
+        } else {
+            continue;
+        }
+        const TimelineAnchorConfirmation confirmation =
+            timelineAnchorConfirmation(sessionId, anchor);
+        if (confirmation == TimelineAnchorConfirmation::Pending) {
+            if (reconnectRecovery) {
+                freezeSessionForMutationReconciliation(
+                    sessionId, QStringLiteral("恢复后的 Timeline 尚未覆盖操作账本锚点"));
+                finishReconnectMutationRecovery(sessionId);
+            }
+            return;
+        }
+        if (confirmation == TimelineAnchorConfirmation::Drifted) {
+            freezeSessionForMutationReconciliation(
+                sessionId, QStringLiteral("本地 Timeline 与操作账本锚点不一致"));
+            if (reconnectRecovery) finishReconnectMutationRecovery(sessionId);
+            return;
+        }
+        const quint64 revision = static_cast<quint64>(
+            operation.value(QStringLiteral("revision")).toDouble());
+        const QString requestId = m_runtime->consumeMutationAcknowledgement(
+            sessionId, identity, revision, target, anchor);
+        if (requestId.isEmpty()) {
+            freezeSessionForMutationReconciliation(
+                sessionId, QStringLiteral("操作确认消费请求未发送"));
+            if (reconnectRecovery) finishReconnectMutationRecovery(sessionId);
+            return;
+        }
+        m_mutationConsumeRequests.insert(requestId, {
+            sessionId, identity, target, anchor, revision,
+            m_runtime->processGeneration(), reconnectRecovery,
+        });
+        return;
+    }
+    if (reconnectRecovery) finishReconnectMutationRecovery(sessionId);
+}
+
+void AgentWorkbenchWidget::handleTurnStarted(
+    const QString &requestId, quint64 generation, const QJsonObject &result)
+{
+    if (!m_runtime || requestId.isEmpty() || generation == 0
+            || generation != m_runtime->processGeneration()) {
+        return;
+    }
+    const QJsonObject operation = result.value(
+        QStringLiteral("mutation_operation")).toObject();
+    const QString sessionId = operation.value(QStringLiteral("session_id")).toString();
+    if (!acceptDurableMutationOperation(operation)) {
+        freezeSessionForMutationReconciliation(
+            sessionId, QStringLiteral("turn/start 操作确认 revision 或身份不连续"));
+        return;
+    }
+    processSessionMutationAcknowledgements(sessionId, false);
+}
+
+void AgentWorkbenchWidget::handleMutationAcknowledgementPage(
+    const QString &requestId, const QJsonObject &page)
+{
+    const DurableMutationListRequest request = m_mutationListRequests.take(requestId);
+    if (request.sessionId.isEmpty()) return;
+    if (m_mutationSessionListRequests.value(request.sessionId) == requestId) {
+        m_mutationSessionListRequests.remove(request.sessionId);
+    }
+    if (!m_runtime || request.generation != m_runtime->processGeneration()) return;
+    for (const QJsonValue &value : page.value(QStringLiteral("operations")).toArray()) {
+        if (!acceptDurableMutationOperation(value.toObject())) {
+            freezeSessionForMutationReconciliation(
+                request.sessionId,
+                QStringLiteral("持久化操作确认 revision 或身份不连续"));
+            if (request.reconnectRecovery) {
+                finishReconnectMutationRecovery(request.sessionId);
+            }
+            return;
+        }
+    }
+    if (!page.value(QStringLiteral("complete")).toBool()) {
+        beginMutationAcknowledgementRecovery(
+            request.sessionId,
+            page.value(QStringLiteral("next_after")).toObject(),
+            request.reconnectRecovery);
+        return;
+    }
+    processSessionMutationAcknowledgements(
+        request.sessionId, request.reconnectRecovery);
+}
+
+void AgentWorkbenchWidget::handleMutationAcknowledgementConsumed(
+    const QString &requestId, const QJsonObject &result)
+{
+    const DurableMutationConsumeRequest request =
+        m_mutationConsumeRequests.take(requestId);
+    if (request.sessionId.isEmpty() || !m_runtime
+            || request.generation != m_runtime->processGeneration()) {
+        return;
+    }
+    const QJsonObject operation = result.value(QStringLiteral("operation")).toObject();
+    if (!acceptDurableMutationOperation(operation)) {
+        freezeSessionForMutationReconciliation(
+            request.sessionId,
+            QStringLiteral("操作确认消费后的 revision 或身份不连续"));
+        if (request.reconnectRecovery) {
+            finishReconnectMutationRecovery(request.sessionId);
+        }
+        return;
+    }
+    m_mutationConsumeRecoveryAttempts.remove(request.operationIdentity);
+    processSessionMutationAcknowledgements(
+        request.sessionId, request.reconnectRecovery);
+}
+
 void AgentWorkbenchWidget::handleLiveTimelineEvent(const QJsonObject &event,
                                                    bool subscriptionOwned)
 {
@@ -13843,6 +14260,14 @@ void AgentWorkbenchWidget::handleLiveTimelineEvent(const QJsonObject &event,
     ++m_timelineTrackedEventCount;
     publishTimelineProjection(sessionId, state.projection);
     applyTimelineEventPresentation(event, item, recognizedEvent);
+    processSessionMutationAcknowledgements(sessionId, false);
+    const QString eventName = event.value(QStringLiteral("event")).toString();
+    if (m_mutationAcknowledgementAvailable
+            && (eventName == QStringLiteral("turn.completed")
+                || eventName == QStringLiteral("turn.failed")
+                || eventName == QStringLiteral("turn.interrupted"))) {
+        beginMutationAcknowledgementRecovery(sessionId);
+    }
 }
 
 void AgentWorkbenchWidget::handleTimelineSyncPage(const QString &requestId,
