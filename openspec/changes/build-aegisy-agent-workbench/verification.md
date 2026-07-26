@@ -2037,3 +2037,17 @@ Known limitations:
   mode passes. The full render run currently fails earlier at the existing model-
   profile read-only projection assertion, before the threshold-cache assertion;
   this is not claimed as a complete render pass.
+
+## 23.6 AAP And Adapter Contributor Documentation
+
+- `docs/AAP-ADAPTER-CONTRIBUTOR-GUIDE.md` was added as the internal contributor
+  source for schema ownership, stable/experimental versioning, Rust Runtime and
+  Qt boundary rules, deterministic redacted fixtures, adapter pin/rollback, and
+  release evidence.
+- The guide references the checked-in AAP wire guide and Codex upgrade procedure,
+  lists the local verification commands, and explicitly leaves Windows installer,
+  named-pipe, ConPTY, and cross-platform evidence as external release gates.
+- Verification: Markdown links and referenced paths were reviewed against the
+  repository; `openspec validate build-aegisy-agent-workbench --strict` and
+  `git diff --check` pass. No protocol or authority behavior is changed by this
+  documentation task.

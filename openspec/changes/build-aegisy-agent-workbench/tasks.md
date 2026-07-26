@@ -875,7 +875,10 @@
 - [ ] 23.3 Write model capability and switching explanations that distinguish compatible continuation from portable session fork
 - [ ] 23.4 Write security documentation for trust, untrusted content, secrets, sandbox limits, network, extensions, and remote/background risk
 - [ ] 23.5 Write extension author guides for Skills, hooks, MCP, plugins, permissions, testing, signing, and compatibility
-- [ ] 23.6 Write AAP and adapter contributor documentation with schemas, fixtures, versioning, and release policy
+- [x] 23.6 Write AAP and adapter contributor documentation with schemas, fixtures, versioning, and release policy
+  - `docs/AAP-ADAPTER-CONTRIBUTOR-GUIDE.md` defines the repository map, stable/experimental schema rules, Runtime/Qt/adapter ownership boundary, redacted fixture workflow, version and rollback policy, local verification commands, Windows/macOS evidence gates, and authority/security review checklist. It links the normative AAP wire guide and pinned Codex upgrade procedure without claiming unavailable Windows evidence.
+  - Added `docs/AAP-ADAPTER-CONTRIBUTOR-GUIDE.md`. It documents the stable and experimental schema boundary, Rust/Qt/vendor adapter ownership, deterministic redacted fixtures, compatibility/version rules, upgrade and rollback procedure, release commands, macOS/Windows evidence gates, and security red lines. The task remains unchecked until release-owner review and platform evidence are recorded.
+  - The guide is intentionally procedural and does not promote experimental capabilities, widen the pinned Codex `0.144.5` matrix, or grant Agent/Codex mutation authority.
 - [ ] 23.7 Write troubleshooting runbooks for sidecar startup, database recovery, adapter mismatch, model catalog, terminal, Git, sandbox, and renderer crash
 - [ ] 23.8 Write privacy and diagnostic export documentation with exact local/cloud data categories
 - [ ] 23.9 Train support and release owners on recovery paths that preserve user repositories and session history

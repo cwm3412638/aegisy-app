@@ -3102,6 +3102,15 @@ Implemented visual baseline:
   and `3.6` remain unchecked; complete Windows reconnect/runtime evidence is still
   required. Agent/Codex remains read-only.
 
+## AAP Contributor Documentation (2026-07-26)
+
+- OpenSpec `23.6` is complete. `docs/AAP-ADAPTER-CONTRIBUTOR-GUIDE.md` now
+  records the schema/repository map, stable versus experimental version policy,
+  Rust Runtime/Qt/adapter ownership boundary, redacted deterministic fixture
+  workflow, adapter upgrade/rollback rules, local verification commands, and
+  macOS/Windows release evidence gates. It links the normative AAP wire guide and
+  Codex upgrade procedure and does not claim unavailable Windows evidence.
+
 ## Live Timeline Subscription And Ownership Recovery (2026-07-26)
 
 - Stable AAP Schema, Rust types, Runtime dispatch, and Qt now negotiate
