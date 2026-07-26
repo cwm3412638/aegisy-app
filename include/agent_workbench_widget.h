@@ -414,6 +414,8 @@ private:
     void loadWorkbenchLayout();
     void saveWorkbenchLayout();
     void resetWorkbenchLayout();
+    void updateResponsiveWorkbenchLayout();
+    void showCompactWorkbenchPane(const QString &pane);
 
     AgentRuntimeClient *m_runtime = nullptr;
     QButtonGroup *m_modeGroup = nullptr;
@@ -423,6 +425,13 @@ private:
     QPushButton *m_runtimeRestartButton = nullptr;
     QPushButton *m_resetLayoutButton = nullptr;
     QSplitter *m_workbenchSplitter = nullptr;
+    QWidget *m_productRail = nullptr;
+    QWidget *m_agentSurface = nullptr;
+    QWidget *m_workCanvas = nullptr;
+    QWidget *m_compactPaneBar = nullptr;
+    QButtonGroup *m_compactPaneGroup = nullptr;
+    bool m_compactWorkbench = false;
+    bool m_compactLayoutApplying = false;
     bool m_modelProfileReadOnlyAvailable = false;
     bool m_modelProfileSnapshotValid = false;
     int m_modelProfileCount = 0;

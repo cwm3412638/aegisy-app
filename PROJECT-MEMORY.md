@@ -3450,6 +3450,21 @@ Implemented visual baseline:
   build. Provider/network behavior still requires redacted live reproduction
   when investigating a remaining transport error.
 
+## Responsive Workbench Pane Navigation (2026-07-26)
+
+- The Workbench now switches to a compact single-pane layout below 900px. A
+  compact toolbar exposes Chat/Project/Workspace pane buttons and only the
+  selected surface remains visible; returning above the threshold restores all
+  three panes and the persisted splitter proportions.
+- The top toolbar uses an ignored horizontal size policy so its desktop-only
+  status/model controls cannot impose a wider minimum size than the compact
+  breakpoint. In compact mode those non-essential controls are hidden while
+  session/project content remains unchanged.
+- Compact pane selection is UI-only and is not written to Workbench durable
+  data or session content. The 900px threshold and pane visibility are covered
+  by the focused render test; accessibility, narrow-platform screenshots, and
+  cross-platform sizing evidence remain release gaps.
+
 ## Next Product Priorities
 
 1. Continue OpenSpec `3.5` by obtaining complete Windows reconnect/runtime evidence,

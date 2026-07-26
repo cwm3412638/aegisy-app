@@ -7679,14 +7679,44 @@ int main(int argc, char *argv[])
     }
 #endif
 
+    QPushButton *compactChat = workbench.findChild<QPushButton *>(
+        QStringLiteral("agentCompactPaneChatButton"));
+    QPushButton *compactProject = workbench.findChild<QPushButton *>(
+        QStringLiteral("agentCompactPaneProjectButton"));
+    QPushButton *compactCanvas = workbench.findChild<QPushButton *>(
+        QStringLiteral("agentCompactPaneCanvasButton"));
+    QWidget *compactBar = workbench.findChild<QWidget *>(QStringLiteral("agentCompactPaneBar"));
     workbench.resize(820, 620);
     application.processEvents();
-    if (!expect(splitter->widget(0)->width() >= splitter->widget(0)->minimumWidth(),
-                "product rail clipped below its minimum")
-            || !expect(splitter->widget(1)->width() >= splitter->widget(1)->minimumWidth(),
-                       "agent surface clipped below its minimum")
-            || !expect(splitter->widget(2)->width() >= splitter->widget(2)->minimumWidth(),
-                       "work canvas clipped below its minimum")) {
+    if (!expect(compactBar && compactBar->isVisible() && compactChat && compactProject
+                    && compactCanvas && !splitter->widget(0)->isVisible()
+                    && splitter->widget(1)->isVisible() && !splitter->widget(2)->isVisible(),
+                "narrow workbench did not switch to the compact chat pane")) {
+        return 1;
+    }
+    compactProject->click();
+    application.processEvents();
+    if (!expect(splitter->widget(0)->isVisible() && !splitter->widget(1)->isVisible()
+                    && !splitter->widget(2)->isVisible(),
+                "compact project pane did not replace the chat pane")) {
+        return 1;
+    }
+    compactCanvas->click();
+    application.processEvents();
+    if (!expect(!splitter->widget(0)->isVisible() && !splitter->widget(1)->isVisible()
+                    && splitter->widget(2)->isVisible(),
+                "compact workspace pane did not replace the project pane")) {
+        return 1;
+    }
+    compactChat->click();
+    application.processEvents();
+    workbench.resize(1100, 700);
+    application.processEvents();
+    if (!expect(!compactBar->isVisible()
+                    && splitter->widget(0)->width() >= splitter->widget(0)->minimumWidth()
+                    && splitter->widget(1)->width() >= splitter->widget(1)->minimumWidth()
+                    && splitter->widget(2)->width() >= splitter->widget(2)->minimumWidth(),
+                "wide workbench did not restore all primary panes")) {
         return 1;
     }
 

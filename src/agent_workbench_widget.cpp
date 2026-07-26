@@ -4769,6 +4769,9 @@ void AgentWorkbenchWidget::updateRuntimeCapabilityUi()
 
 bool AgentWorkbenchWidget::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched == this && event->type() == QEvent::Resize) {
+        updateResponsiveWorkbenchLayout();
+    }
     if (watched == m_workspaceTabs && event->type() == QEvent::Resize) {
         updateResponsiveEditorChrome();
     }
@@ -4778,6 +4781,7 @@ bool AgentWorkbenchWidget::eventFilter(QObject *watched, QEvent *event)
 void AgentWorkbenchWidget::buildUi()
 {
     setObjectName(QStringLiteral("agentWorkbench"));
+    installEventFilter(this);
     setStyleSheet(QStringLiteral("QWidget#agentWorkbench { background:#f8fafc; }"));
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -4786,6 +4790,7 @@ void AgentWorkbenchWidget::buildUi()
     auto *toolbar = new QWidget(this);
     toolbar->setObjectName(QStringLiteral("agentToolbar"));
     toolbar->setFixedHeight(54);
+    toolbar->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     toolbar->setStyleSheet(QStringLiteral(
         "QWidget#agentToolbar { background:#ffffff; border-bottom:1px solid #e4e7ec; }"));
     auto *toolbarLayout = new QHBoxLayout(toolbar);
@@ -4822,6 +4827,42 @@ void AgentWorkbenchWidget::buildUi()
     connect(m_modeGroup, QOverload<QAbstractButton *>::of(&QButtonGroup::buttonClicked),
             this, [this](QAbstractButton *button) { setMode(button->property("mode").toString()); });
     toolbarLayout->addWidget(modeFrame);
+
+    m_compactPaneBar = new QWidget(toolbar);
+    m_compactPaneBar->setObjectName(QStringLiteral("agentCompactPaneBar"));
+    auto *compactPaneLayout = new QHBoxLayout(m_compactPaneBar);
+    compactPaneLayout->setContentsMargins(2, 2, 2, 2);
+    compactPaneLayout->setSpacing(2);
+    m_compactPaneGroup = new QButtonGroup(this);
+    m_compactPaneGroup->setExclusive(true);
+    for (const auto &entry : {qMakePair(QStringLiteral("对话"), QStringLiteral("chat")),
+                              qMakePair(QStringLiteral("项目"), QStringLiteral("rail")),
+                              qMakePair(QStringLiteral("工作区"), QStringLiteral("canvas"))}) {
+        auto *button = new QPushButton(entry.first, m_compactPaneBar);
+        button->setObjectName(QStringLiteral("agentCompactPane%1Button")
+                                  .arg(entry.second == QStringLiteral("chat")
+                                           ? QStringLiteral("Chat")
+                                           : entry.second == QStringLiteral("rail")
+                                               ? QStringLiteral("Project")
+                                               : QStringLiteral("Canvas")));
+        button->setProperty("pane", entry.second);
+        button->setCheckable(true);
+        button->setFixedHeight(30);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setStyleSheet(QStringLiteral(
+            "QPushButton { background:#f2f4f7; border:none; border-radius:5px;"
+            "color:#667085; padding:0 9px; font-size:11px; }"
+            "QPushButton:hover { color:#101828; }"
+            "QPushButton:checked { background:#ffffff; color:#165DFF; font-weight:700; }"));
+        m_compactPaneGroup->addButton(button);
+        compactPaneLayout->addWidget(button);
+    }
+    connect(m_compactPaneGroup, QOverload<QAbstractButton *>::of(&QButtonGroup::buttonClicked),
+            this, [this](QAbstractButton *button) {
+        showCompactWorkbenchPane(button->property("pane").toString());
+    });
+    m_compactPaneBar->setVisible(false);
+    toolbarLayout->addWidget(m_compactPaneBar);
 
     m_projectLabel = new QLabel(QStringLiteral("未打开项目"), toolbar);
     m_projectLabel->setStyleSheet(QStringLiteral("border:none; color:#667085; font-size:11px;"));
@@ -4898,15 +4939,20 @@ void AgentWorkbenchWidget::buildUi()
     m_workbenchSplitter->setChildrenCollapsible(false);
     m_workbenchSplitter->setHandleWidth(1);
     m_workbenchSplitter->setStyleSheet(QStringLiteral("QSplitter::handle { background:#e4e7ec; }"));
-    m_workbenchSplitter->addWidget(buildProductRail());
-    m_workbenchSplitter->addWidget(buildAgentSurface());
-    m_workbenchSplitter->addWidget(buildWorkCanvas());
+    m_productRail = buildProductRail();
+    m_agentSurface = buildAgentSurface();
+    m_workCanvas = buildWorkCanvas();
+    m_workbenchSplitter->addWidget(m_productRail);
+    m_workbenchSplitter->addWidget(m_agentSurface);
+    m_workbenchSplitter->addWidget(m_workCanvas);
     m_workbenchSplitter->setStretchFactor(0, 0);
     m_workbenchSplitter->setStretchFactor(1, 0);
     m_workbenchSplitter->setStretchFactor(2, 1);
     m_workbenchSplitter->setSizes({188, 390, 520});
     connect(m_workbenchSplitter, &QSplitter::splitterMoved, this,
-            [this](int, int) { saveWorkbenchLayout(); });
+            [this](int, int) {
+        if (!m_compactWorkbench && !m_compactLayoutApplying) saveWorkbenchLayout();
+    });
     root->addWidget(m_workbenchSplitter, 1);
     loadWorkbenchLayout();
 
@@ -8588,6 +8634,55 @@ void AgentWorkbenchWidget::resetWorkbenchLayout()
     settings.remove(QStringLiteral("agent_workbench/layout/splitter_state"));
     m_workbenchSplitter->setSizes({188, 390, 520});
     saveWorkbenchLayout();
+}
+
+void AgentWorkbenchWidget::updateResponsiveWorkbenchLayout()
+{
+    if (!m_workbenchSplitter || !m_compactPaneBar) return;
+    const bool compact = width() < 900;
+    if (compact == m_compactWorkbench) return;
+
+    m_compactWorkbench = compact;
+    m_compactLayoutApplying = true;
+    m_compactPaneBar->setVisible(compact);
+    m_projectLabel->setVisible(!compact);
+    m_modelPicker->setVisible(!compact);
+    m_resetLayoutButton->setVisible(!compact);
+    m_runtimeStatus->setVisible(!compact);
+    m_runtimeCapabilityStatus->setVisible(!compact);
+    m_runtimeRestartButton->setVisible(!compact);
+    if (compact) {
+        showCompactWorkbenchPane(QStringLiteral("chat"));
+    } else {
+        m_productRail->setVisible(true);
+        m_agentSurface->setVisible(true);
+        m_workCanvas->setVisible(true);
+        loadWorkbenchLayout();
+    }
+    m_compactLayoutApplying = false;
+}
+
+void AgentWorkbenchWidget::showCompactWorkbenchPane(const QString &pane)
+{
+    if (!m_compactWorkbench || !m_workbenchSplitter) return;
+    const QString selected = pane == QStringLiteral("rail")
+        || pane == QStringLiteral("canvas") ? pane : QStringLiteral("chat");
+    m_compactLayoutApplying = true;
+    m_productRail->setVisible(selected == QStringLiteral("rail"));
+    m_agentSurface->setVisible(selected == QStringLiteral("chat"));
+    m_workCanvas->setVisible(selected == QStringLiteral("canvas"));
+    QList<int> sizes(3, 0);
+    const int activeIndex = selected == QStringLiteral("rail")
+        ? 0 : selected == QStringLiteral("canvas") ? 2 : 1;
+    sizes[activeIndex] = qMax(1, m_workbenchSplitter->width());
+    m_workbenchSplitter->setSizes(sizes);
+    if (m_compactPaneGroup) {
+        for (QAbstractButton *button : m_compactPaneGroup->buttons()) {
+            const QSignalBlocker blocker(button);
+            button->setChecked(button->property("pane").toString() == selected);
+        }
+    }
+    m_compactLayoutApplying = false;
 }
 
 void AgentWorkbenchWidget::loadEditorViewState()
