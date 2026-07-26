@@ -48,8 +48,11 @@ class AgentWorkbenchWidget : public QWidget
     friend class AgentWorkbenchWidgetTestAccess;
 
 public:
-    explicit AgentWorkbenchWidget(QWidget *parent = nullptr);
+    explicit AgentWorkbenchWidget(bool emergencyDisabled = false,
+                                  QWidget *parent = nullptr);
     ~AgentWorkbenchWidget() override;
+    void setEmergencyDisabled(bool disabled, const QString &detailCode = QString(),
+                              bool verifiedPolicy = false);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -411,6 +414,7 @@ private:
     AgentRuntimeClient *m_runtime = nullptr;
     QButtonGroup *m_modeGroup = nullptr;
     QLabel *m_runtimeStatus = nullptr;
+    QLabel *m_emergencyPolicyBanner = nullptr;
     QLabel *m_runtimeCapabilityStatus = nullptr;
     QPushButton *m_runtimeRestartButton = nullptr;
     bool m_modelProfileReadOnlyAvailable = false;
@@ -777,6 +781,8 @@ private:
     bool m_sessionListRefreshPending = false;
     bool m_sessionHistoryAppending = false;
     bool m_runtimeRecoveryMode = false;
+    bool m_emergencyDisabled = false;
+    bool m_emergencyPolicyVerified = false;
     bool m_runtimeReconnectActive = false;
     bool m_runtimeReconnectExhausted = false;
     bool m_runtimeStateUnverified = false;

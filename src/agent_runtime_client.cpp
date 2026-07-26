@@ -2343,6 +2343,15 @@ AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
         m_startupGeneration = 0;
         const bool expected = m_stopping;
         if (expected) m_stopping = false;
+        if (m_policyRestartPending) {
+            m_policyRestartPending = false;
+            clearNegotiationState();
+            m_autoReconnectSuppressed = false;
+            setReconnectState(ReconnectState::Idle, 0,
+                              QStringLiteral("正在应用工作台应急策略"));
+            QTimer::singleShot(0, this, &AgentRuntimeClient::start);
+            return;
+        }
         if (m_processTerminationPending) {
             m_processTerminationPending = false;
             clearNegotiationState();
@@ -2882,6 +2891,40 @@ void AgentRuntimeClient::start()
     launchProcess(false);
 }
 
+void AgentRuntimeClient::setEmergencyDisabled(bool disabled)
+{
+    if (m_emergencyDisabled == disabled) return;
+    m_emergencyDisabled = disabled;
+    m_reconnectTimer->stop();
+    if (m_reconnectState == ReconnectState::Waiting) {
+        setReconnectState(ReconnectState::Idle, 0,
+                          QStringLiteral("正在应用工作台应急策略"));
+    }
+    if (m_process->state() == QProcess::NotRunning) {
+        QTimer::singleShot(0, this, &AgentRuntimeClient::start);
+        return;
+    }
+    if (m_processStartedEmergency == disabled) return;
+    m_policyRestartPending = true;
+    m_stopping = true;
+    m_autoReconnectSuppressed = true;
+    setReconnectState(ReconnectState::Idle, 0,
+                      QStringLiteral("正在应用工作台应急策略"));
+    failPending(disabled
+        ? QStringLiteral("服务器应急策略已暂停新的工作台操作")
+        : QStringLiteral("工作台应急策略已更新，正在重新连接运行时"));
+    const quint64 generation = m_processGeneration;
+    if (!m_handshakeComplete || sendRequest(QStringLiteral("shutdown")).isEmpty()) {
+        m_process->terminate();
+    }
+    QTimer::singleShot(kReconnectTerminationGraceMs, this, [this, generation]() {
+        if (generation == m_processGeneration && m_policyRestartPending
+            && m_process->state() != QProcess::NotRunning) {
+            m_process->kill();
+        }
+    });
+}
+
 bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
 {
     if (m_stopping || m_autoReconnectSuppressed
@@ -2937,6 +2980,12 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
     emit connectionStateChanged(false, connectingDetail);
     QProcessEnvironment environment = sanitizedSidecarEnvironment(
         QProcessEnvironment::systemEnvironment());
+    if (m_emergencyDisabled) {
+        environment.insert(QStringLiteral("AEGISY_WORKBENCH_EMERGENCY_DISABLED"),
+                           QStringLiteral("1"));
+    } else {
+        environment.remove(QStringLiteral("AEGISY_WORKBENCH_EMERGENCY_DISABLED"));
+    }
     if (environment.value(QStringLiteral("AEGISY_WORKBENCH_DATA_ROOT")).isEmpty()) {
         const QString dataRoot = QDir(
             QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
@@ -2953,6 +3002,7 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
     m_process->setProgram(m_runtimePath);
     m_process->setArguments({});
     m_process->setProcessEnvironment(environment);
+    m_processStartedEmergency = m_emergencyDisabled;
     m_process->start();
     if (!m_process->waitForStarted(1000)) {
         if (!m_stopping && !m_autoReconnectSuppressed
@@ -4523,6 +4573,11 @@ QString AgentRuntimeClient::sendRequest(const QString &method, const QJsonObject
         emit requestFailed({}, method, QStringLiteral("本地运行时握手尚未完成"), -32003);
         return {};
     }
+    if (m_emergencyDisabled && !emergencyRequestAllowed(method)) {
+        emit requestFailed({}, method,
+                           QStringLiteral("服务器应急策略已暂停新的工作台操作"), -32153);
+        return {};
+    }
     if (m_heartbeatNegotiated && !m_heartbeatHealthy
         && !isLivenessControlMethod(method)) {
         emit requestFailed({}, method, QStringLiteral("本地运行时响应状态未知"), -1);
@@ -4570,6 +4625,85 @@ QString AgentRuntimeClient::sendRequest(const QString &method, const QJsonObject
     m_pendingMethods.insert(id, method);
     m_pendingGenerations.insert(id, m_processGeneration);
     return id;
+}
+
+bool AgentRuntimeClient::emergencyRequestAllowed(const QString &method)
+{
+    static const QSet<QString> allowed{
+        QStringLiteral("initialize"),
+        QStringLiteral("shutdown"),
+        QStringLiteral("runtime/health"),
+        QStringLiteral("runtime/degradations"),
+        QStringLiteral("runtime/projection-recovery/status"),
+        QStringLiteral("runtime/recovery/status"),
+        QStringLiteral("runtime/recovery/export"),
+        QStringLiteral("model/catalog"),
+        QStringLiteral("model/catalog-cache"),
+        QStringLiteral("model/catalog-refresh-status"),
+        QStringLiteral("model/capability-check"),
+        QStringLiteral("model/profile/list"),
+        QStringLiteral("model/profile/read"),
+        QStringLiteral("project/list"),
+        QStringLiteral("project/root-list"),
+        QStringLiteral("project/trust-review"),
+        QStringLiteral("session/list"),
+        QStringLiteral("session/search"),
+        QStringLiteral("session/read"),
+        QStringLiteral("session/delete/preview"),
+        QStringLiteral("session/deletion/status"),
+        QStringLiteral("session/export/preview"),
+        QStringLiteral("session/export"),
+        QStringLiteral("session/mutation-acknowledgements"),
+        QStringLiteral("session/background-notifications"),
+        QStringLiteral("session/background-recovery"),
+        QStringLiteral("session/recovery/status"),
+        QStringLiteral("session/compaction/checkpoint/read"),
+        QStringLiteral("timeline/sync"),
+        QStringLiteral("timeline/snapshot"),
+        QStringLiteral("timeline/subscribe"),
+        QStringLiteral("timeline/subscription-sync"),
+        QStringLiteral("timeline/subscription-snapshot"),
+        QStringLiteral("timeline/subscription-activate"),
+        QStringLiteral("operation/status"),
+        QStringLiteral("operation/probe"),
+        QStringLiteral("turn/cancel"),
+        QStringLiteral("turn/context/inspect"),
+        QStringLiteral("workspace/pinned-context/list"),
+        QStringLiteral("workspace/image/read"),
+        QStringLiteral("workspace/list"),
+        QStringLiteral("workspace/read"),
+        QStringLiteral("workspace/metadata"),
+        QStringLiteral("workspace/git-status"),
+        QStringLiteral("workspace/git/overview"),
+        QStringLiteral("workspace/git/log"),
+        QStringLiteral("workspace/git/commit"),
+        QStringLiteral("workspace/git/diff"),
+        QStringLiteral("workspace/git/context/read"),
+        QStringLiteral("workspace/search"),
+        QStringLiteral("workspace/search/cancel"),
+        QStringLiteral("workspace/index"),
+        QStringLiteral("workspace/index/cancel"),
+        QStringLiteral("workspace/repository-map"),
+        QStringLiteral("workspace/language-servers"),
+        QStringLiteral("workspace/definition"),
+        QStringLiteral("workspace/references"),
+        QStringLiteral("workspace/diagnostics"),
+        QStringLiteral("workspace/observed-diagnostics"),
+        QStringLiteral("workspace/diagnostics/raw"),
+        QStringLiteral("workspace/edit/artifact/read"),
+        QStringLiteral("workspace/edit/proposal/latest"),
+        QStringLiteral("workspace/edit/proposal/read"),
+        QStringLiteral("workspace/edit/proposal/artifact/read"),
+        QStringLiteral("terminal/list"),
+        QStringLiteral("terminal/attach"),
+        QStringLiteral("terminal/read"),
+        QStringLiteral("terminal/excerpt/read"),
+        QStringLiteral("terminal/stop-user"),
+        QStringLiteral("terminal/close-user"),
+        QStringLiteral("terminal/remove-user"),
+        QStringLiteral("artifact/read-command-output"),
+    };
+    return allowed.contains(method);
 }
 
 bool AgentRuntimeClient::sendNotification(const QString &method, const QJsonObject &params)

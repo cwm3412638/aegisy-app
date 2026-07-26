@@ -24,11 +24,13 @@
 #include "help_dialog.h"
 #include "status_badge.h"
 #include "agent_workbench_widget.h"
+#include "workbench_emergency_policy.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QDateTime>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFont>
@@ -122,6 +124,7 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
     , m_skillManager(new SkillManager(this))
     , m_runtimeStatusStore(new RuntimeStatusStore(this))
 {
+    refreshCachedWorkbenchEmergencyPolicy();
     setupUi();
     setWindowTitle(QStringLiteral("Aegisy - AI 工具连接管理"));
     resize(1280, 820);
@@ -137,6 +140,12 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
             this, &MainWindow::onCardConnectionTested);
     connect(m_apiClient, &ApiClient::authenticationExpired,
             this, &MainWindow::onAuthenticationExpired);
+    connect(m_apiClient, &ApiClient::workbenchEmergencyPolicyReceived,
+            this, &MainWindow::applyWorkbenchEmergencyPolicy);
+    connect(m_apiClient, &ApiClient::workbenchEmergencyPolicyFailed,
+            this, [this](const QString &) {
+        refreshCachedWorkbenchEmergencyPolicy();
+    });
     connect(m_toolManager, &ToolManager::installOutput,
             this, &MainWindow::onInstallOutput);
     connect(m_toolManager, &ToolManager::installFinished,
@@ -178,6 +187,13 @@ MainWindow::MainWindow(UpdateManager *updateManager, QWidget *parent)
     rebuildCards();
     setupTray();
     setupRuntimeStatusBar();
+    m_workbenchPolicyRefreshTimer = new QTimer(this);
+    m_workbenchPolicyRefreshTimer->setInterval(15 * 60 * 1000);
+    connect(m_workbenchPolicyRefreshTimer, &QTimer::timeout, this, [this]() {
+        refreshCachedWorkbenchEmergencyPolicy();
+        if (!m_authToken.isEmpty()) m_apiClient->getWorkbenchEmergencyPolicy();
+    });
+    m_workbenchPolicyRefreshTimer->start();
     updateRuntimeProfileStatus();
     if (!m_profileManager->lastError().isEmpty()) {
         logMessage(m_profileManager->lastError(), kLogError);
@@ -495,6 +511,7 @@ void MainWindow::setAuthToken(const QString &token)
 {
     m_authToken = token;
     m_apiClient->setAuthToken(token);
+    m_apiClient->getWorkbenchEmergencyPolicy();
     logMessage(QStringLiteral("正在同步账号 API Keys..."), kLogInfo);
     m_apiClient->getApiKeys();
     refreshBalance();
@@ -511,6 +528,36 @@ void MainWindow::setAuthToken(const QString &token)
             }
         });
     }
+}
+
+void MainWindow::refreshCachedWorkbenchEmergencyPolicy()
+{
+    QSettings settings;
+    const auto decision = WorkbenchEmergencyPolicy::load(
+        &settings, QByteArrayLiteral(AEGISY_UPDATE_PUBLIC_KEY),
+        QDateTime::currentMSecsSinceEpoch());
+    m_workbenchEmergencyDisabled = decision.blocksNewWork;
+    m_workbenchEmergencyPolicyVerified =
+        decision.state == WorkbenchEmergencyPolicy::State::Disabled;
+    m_workbenchEmergencyReasonCode = decision.reasonCode.isEmpty()
+        ? decision.errorCode : decision.reasonCode;
+    if (m_agentWorkbench) {
+        m_agentWorkbench->setEmergencyDisabled(
+            m_workbenchEmergencyDisabled, m_workbenchEmergencyReasonCode,
+            m_workbenchEmergencyPolicyVerified);
+    }
+}
+
+void MainWindow::applyWorkbenchEmergencyPolicy(const QJsonObject &policy)
+{
+    QSettings settings;
+    const auto result = WorkbenchEmergencyPolicy::install(
+        &settings, policy, QByteArrayLiteral(AEGISY_UPDATE_PUBLIC_KEY),
+        QDateTime::currentMSecsSinceEpoch());
+    if (!result.accepted) {
+        logMessage(QStringLiteral("工作台应急策略未通过签名、时效或序号校验"), kLogWarn);
+    }
+    refreshCachedWorkbenchEmergencyPolicy();
 }
 
 void MainWindow::refreshBalance()
@@ -1565,7 +1612,12 @@ void MainWindow::setupUi()
     m_workspaceStack->addWidget(content);
     m_workspaceStack->addWidget(gatewayPage.first);
     m_workspaceStack->addWidget(settingsPage.first);
-    m_workspaceStack->addWidget(new AgentWorkbenchWidget(m_workspaceStack));
+    m_agentWorkbench = new AgentWorkbenchWidget(
+        m_workbenchEmergencyDisabled, m_workspaceStack);
+    m_agentWorkbench->setEmergencyDisabled(
+        m_workbenchEmergencyDisabled, m_workbenchEmergencyReasonCode,
+        m_workbenchEmergencyPolicyVerified);
+    m_workspaceStack->addWidget(m_agentWorkbench);
     bodyLayout->addWidget(m_workspaceStack, 1);
     root->addWidget(body, 1);
 

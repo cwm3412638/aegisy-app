@@ -1605,11 +1605,13 @@ QString timelineItemKey(const QString &sessionId, const QString &turnId,
 }
 }
 
-AgentWorkbenchWidget::AgentWorkbenchWidget(QWidget *parent)
+AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *parent)
     : QWidget(parent)
     , m_runtime(new AgentRuntimeClient(this))
+    , m_emergencyDisabled(emergencyDisabled)
 {
     buildUi();
+    m_runtime->setEmergencyDisabled(m_emergencyDisabled);
     m_workspaceWatchTimer = new QTimer(this);
     m_workspaceWatchTimer->setSingleShot(true);
     m_workspaceWatchTimer->setInterval(1500);
@@ -4670,6 +4672,33 @@ AgentWorkbenchWidget::~AgentWorkbenchWidget()
     m_runtime->stop();
 }
 
+void AgentWorkbenchWidget::setEmergencyDisabled(bool disabled, const QString &detailCode,
+                                                bool verifiedPolicy)
+{
+    m_emergencyDisabled = disabled;
+    m_emergencyPolicyVerified = verifiedPolicy;
+    if (m_runtime) m_runtime->setEmergencyDisabled(disabled);
+    if (m_emergencyPolicyBanner) {
+        m_emergencyPolicyBanner->setVisible(disabled);
+        m_emergencyPolicyBanner->setText(verifiedPolicy
+            ? QStringLiteral("服务器签名应急策略已暂停新的 Agent 与工作台变更。"
+                             "本地会话历史、会话导出和诊断读取仍可使用。")
+            : QStringLiteral("工作台应急策略缓存缺失、损坏或已过期。"
+                             "为安全起见，新的 Agent 与工作台变更已暂停。"));
+        m_emergencyPolicyBanner->setToolTip(
+            disabled && !detailCode.isEmpty()
+                ? QStringLiteral("应急策略状态码：%1").arg(detailCode)
+                : QString());
+    }
+    if (disabled && m_runtimeRestartButton) {
+        m_runtimeRestartButton->setEnabled(false);
+    }
+    updateTurnAction();
+    updateEditorActions();
+    updateTerminalControls();
+    updateGitPinControls();
+}
+
 void AgentWorkbenchWidget::updateRuntimeCapabilityUi()
 {
     if (!m_runtimeCapabilityStatus) return;
@@ -4839,6 +4868,19 @@ void AgentWorkbenchWidget::buildUi()
     toolbarLayout->addWidget(m_runtimeRestartButton);
     root->addWidget(toolbar);
 
+    m_emergencyPolicyBanner = new QLabel(this);
+    m_emergencyPolicyBanner->setObjectName(QStringLiteral("workbenchEmergencyPolicyBanner"));
+    m_emergencyPolicyBanner->setWordWrap(true);
+    m_emergencyPolicyBanner->setStyleSheet(QStringLiteral(
+        "QLabel#workbenchEmergencyPolicyBanner { background:#fff7ed; color:#9a3412;"
+        "border-bottom:1px solid #fed7aa; padding:8px 16px; font-size:11px;"
+        "font-weight:600; }"));
+    m_emergencyPolicyBanner->setText(
+        QStringLiteral("工作台应急策略已暂停新的 Agent 与工作台变更。"
+                       "本地会话历史、会话导出和诊断读取仍可使用。"));
+    m_emergencyPolicyBanner->setVisible(m_emergencyDisabled);
+    root->addWidget(m_emergencyPolicyBanner);
+
     auto *splitter = new QSplitter(Qt::Horizontal, this);
     splitter->setChildrenCollapsible(false);
     splitter->setHandleWidth(1);
@@ -4925,6 +4967,7 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
     layout->addSpacing(6);
     layout->addWidget(makeSectionLabel(QStringLiteral("项目"), rail));
     m_projectList = new QListWidget(rail);
+    m_projectList->setObjectName(QStringLiteral("agentProjectList"));
     m_projectList->setFrameShape(QFrame::NoFrame);
     m_projectList->setMaximumHeight(180);
     m_projectList->setStyleSheet(QStringLiteral(
@@ -5259,6 +5302,7 @@ QWidget *AgentWorkbenchWidget::buildAgentSurface()
     m_emptyTimeline = new QLabel(
         QStringLiteral("从这里开始与 Aegisy Agent 对话。\nChat 默认不修改文件；Work 会绑定当前项目。"),
         m_timelineContent);
+    m_emptyTimeline->setObjectName(QStringLiteral("agentEmptyTimeline"));
     m_emptyTimeline->setAlignment(Qt::AlignCenter);
     m_emptyTimeline->setWordWrap(true);
     m_emptyTimeline->setStyleSheet(QStringLiteral("color:#98a2b3; font-size:12px; padding:24px;"));
@@ -5519,6 +5563,7 @@ QWidget *AgentWorkbenchWidget::buildWorkCanvas()
         "QHeaderView::section { background:#f9fafb; color:#667085; border:none;"
         "border-bottom:1px solid #e4e7ec; padding:6px; font-size:10px; }"));
     m_fileStatus = new QLabel(QStringLiteral("打开文件夹后显示受授权项目内容"), filesPage);
+    m_fileStatus->setObjectName(QStringLiteral("agentFileStatus"));
     m_fileStatus->setWordWrap(true);
     m_fileStatus->setStyleSheet(QStringLiteral("color:#667085; font-size:10px; padding:2px;"));
     filesLayout->addWidget(m_fileTree, 1);
@@ -11417,6 +11462,16 @@ void AgentWorkbenchWidget::updateTurnAction()
         }
         return;
     }
+    if (m_emergencyDisabled) {
+        m_sendButton->setText(QStringLiteral("应急停用"));
+        m_sendButton->setIcon(QIcon(QStringLiteral(":/icons/lucide/x.svg")));
+        m_sendButton->setToolTip(
+            m_emergencyPolicyVerified
+                ? QStringLiteral("服务器签名应急策略已暂停新的 Agent 任务")
+                : QStringLiteral("应急策略缓存无法验证，新的 Agent 任务已安全暂停"));
+        m_sendButton->setEnabled(false);
+        return;
+    }
     if (m_runtimeDegradationState != RuntimeDegradationState::Valid) {
         const bool pending = m_runtimeDegradationState == RuntimeDegradationState::Pending;
         m_sendButton->setText(pending ? QStringLiteral("能力检查中")
@@ -15408,6 +15463,10 @@ void AgentWorkbenchWidget::addNotice(const QString &text, bool error)
     if (text.isEmpty() || !m_timelineLayout) return;
     m_emptyTimeline->hide();
     auto *label = new QLabel(text, m_timelineContent);
+    label->setObjectName(error ? QStringLiteral("agentFailureNotice")
+                               : QStringLiteral("agentStatusNotice"));
+    label->setProperty("severity", error ? QStringLiteral("failure")
+                                         : QStringLiteral("status"));
     label->setWordWrap(true);
     label->setAlignment(Qt::AlignCenter);
     label->setStyleSheet(error

@@ -34,6 +34,7 @@ class QFileSystemWatcher;
 class StatusBadge;
 class QStackedWidget;
 class QTableWidget;
+class AgentWorkbenchWidget;
 
 class MainWindow : public QMainWindow
 {
@@ -104,6 +105,8 @@ private:
     void refreshDesktopPage();
     void refreshGatewayPage();
     void refreshGatewayLogs();
+    void refreshCachedWorkbenchEmergencyPolicy();
+    void applyWorkbenchEmergencyPolicy(const QJsonObject &policy);
 
     // 档案卡片
     void rebuildCards();
@@ -137,6 +140,7 @@ private:
     DesktopEnhancementManager *m_desktopEnhancementManager;
     SkillManager *m_skillManager;
     RuntimeStatusStore *m_runtimeStatusStore;
+    AgentWorkbenchWidget *m_agentWorkbench = nullptr;
 
     // UI — 顶栏
     QPushButton *m_userLabel;
@@ -207,6 +211,10 @@ private:
     QTimer *m_balanceRefreshTimer = nullptr;
     QFileSystemWatcher *m_configurationWatcher = nullptr;
     QTimer *m_configurationRefreshTimer = nullptr;
+    QTimer *m_workbenchPolicyRefreshTimer = nullptr;
+    bool m_workbenchEmergencyDisabled = false;
+    bool m_workbenchEmergencyPolicyVerified = false;
+    QString m_workbenchEmergencyReasonCode;
 
     // 当前筛选类型：0 = 全部，其余值对应 ProfileType
     int m_filterType = 0;

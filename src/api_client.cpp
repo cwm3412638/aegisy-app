@@ -277,6 +277,77 @@ void ApiClient::getApiKeyUsage(const QJsonArray &apiKeyIds)
     connect(reply, &QNetworkReply::finished, this, &ApiClient::onApiKeyUsageFinished);
 }
 
+void ApiClient::getWorkbenchEmergencyPolicy()
+{
+    if (m_authToken.isEmpty() || m_authToken.size() > 16 * 1024
+        || m_authToken.contains(QLatin1Char('\r'))
+        || m_authToken.contains(QLatin1Char('\n'))) {
+        emit workbenchEmergencyPolicyFailed(QStringLiteral("policy-auth-unavailable"));
+        return;
+    }
+    const QUrl base(m_baseUrl);
+    if (!base.isValid() || base.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0
+        || base.host().isEmpty() || !base.userInfo().isEmpty()
+        || (!base.path().isEmpty() && base.path() != QStringLiteral("/"))
+        || base.hasQuery() || !base.fragment().isEmpty()) {
+        emit workbenchEmergencyPolicyFailed(QStringLiteral("policy-origin-untrusted"));
+        return;
+    }
+    QUrl url = base;
+    url.setPath(QStringLiteral("/api/v1/client/workbench-policy"));
+    QNetworkRequest request(url);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(15000);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::ManualRedirectPolicy);
+#endif
+    request.setRawHeader("Authorization",
+                         QStringLiteral("Bearer %1").arg(m_authToken).toUtf8());
+    request.setRawHeader("Accept", "application/json");
+    request.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
+                         QNetworkRequest::AlwaysNetwork);
+    QSslConfiguration sslConfig = request.sslConfiguration();
+    sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+    request.setSslConfiguration(sslConfig);
+    QNetworkReply *reply = m_networkManager->get(request);
+    reply->setProperty("aegisyEmergencyPolicyOverflow", false);
+    connect(reply, &QNetworkReply::readyRead, this, [reply]() {
+        if (reply->bytesAvailable() > 16 * 1024) {
+            reply->setProperty("aegisyEmergencyPolicyOverflow", true);
+            reply->abort();
+        }
+    });
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        const bool overflow = reply->property("aegisyEmergencyPolicyOverflow").toBool();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QString contentType = reply->header(QNetworkRequest::ContentTypeHeader)
+            .toString().section(QLatin1Char(';'), 0, 0).trimmed().toLower();
+        const QUrl redirect = reply->attribute(
+            QNetworkRequest::RedirectionTargetAttribute).toUrl();
+        const QByteArray bytes = reply->readAll();
+        if (overflow || bytes.size() > 16 * 1024) {
+            emit workbenchEmergencyPolicyFailed(QStringLiteral("policy-response-too-large"));
+        } else if (reply->error() != QNetworkReply::NoError
+                   || status < 200 || status >= 300 || !redirect.isEmpty()) {
+            emit workbenchEmergencyPolicyFailed(QStringLiteral("policy-transport-failed"));
+        } else if (contentType != QStringLiteral("application/json")) {
+            emit workbenchEmergencyPolicyFailed(QStringLiteral("policy-response-invalid"));
+        } else {
+            QJsonParseError error;
+            const QJsonDocument document = QJsonDocument::fromJson(bytes, &error);
+            const QJsonObject response = document.isObject() ? document.object() : QJsonObject{};
+            const int code = response.value(QStringLiteral("code")).toInt(-1);
+            const QJsonObject policy = response.value(QStringLiteral("data")).toObject();
+            if (error.error != QJsonParseError::NoError || code != 0 || policy.isEmpty()) {
+                emit workbenchEmergencyPolicyFailed(QStringLiteral("policy-response-invalid"));
+            } else {
+                emit workbenchEmergencyPolicyReceived(policy);
+            }
+        }
+        reply->deleteLater();
+    });
+}
+
 void ApiClient::requestUserInfo(const QString &endpoint)
 {
     QNetworkReply *reply = get(endpoint);

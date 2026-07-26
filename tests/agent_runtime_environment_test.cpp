@@ -470,6 +470,14 @@ int runFakeRuntime(const QString &testCase)
     const QJsonDocument requestDocument = QJsonDocument::fromJson(firstLine);
     if (!requestDocument.isObject()) return 92;
     const QJsonObject request = requestDocument.object();
+    if (testCase == QStringLiteral("emergency-policy-switch")) {
+        appendLogLine(&log, QJsonDocument(QJsonObject{
+            {QStringLiteral("method"), QStringLiteral("test/emergency-environment")},
+            {QStringLiteral("enabled"),
+             qEnvironmentVariable("AEGISY_WORKBENCH_EMERGENCY_DISABLED")
+                 == QStringLiteral("1")},
+        }).toJson(QJsonDocument::Compact));
+    }
 
     if (testCase == QStringLiteral("reconnect-exhaust") && invocation > 1) {
         return 42;
@@ -1195,6 +1203,75 @@ bool logContainsMethod(const QString &path, const QString &method)
     return std::any_of(messages.cbegin(), messages.cend(), [&method](const QJsonObject &message) {
         return message.value(QStringLiteral("method")).toString() == method;
     });
+}
+
+bool runEmergencyPolicySwitchCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create emergency switch directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("emergency-policy-switch"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+    qputenv("AEGISY_WORKBENCH_DATA_ROOT", directory.path().toUtf8());
+
+    int initializedCount = 0;
+    int emergencyFailureCode = 0;
+    AgentRuntimeClient client;
+    QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                     [&initializedCount](const QJsonObject &) { ++initializedCount; });
+    QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                     [&emergencyFailureCode](const QString &, const QString &method,
+                                              const QString &, int code) {
+        if (method == QStringLiteral("session/start")) emergencyFailureCode = code;
+    });
+    client.start();
+    if (!expect(waitUntil([&]() { return initializedCount == 1 && client.isReady(); }),
+                "initial runtime did not become ready for emergency switching")) {
+        return false;
+    }
+    const quint64 normalGeneration = client.processGeneration();
+    client.setEmergencyDisabled(true);
+    if (!expect(client.startSession(QStringLiteral("chat")).isEmpty()
+                    && emergencyFailureCode == -32153,
+                "new session escaped the immediate emergency request gate")) {
+        return false;
+    }
+    if (!expect(waitUntil([&]() {
+            return initializedCount == 2 && client.isReady()
+                && client.processGeneration() > normalGeneration;
+        }), "runtime did not restart into emergency mode")) {
+        return false;
+    }
+    const quint64 emergencyGeneration = client.processGeneration();
+    if (!expect(client.emergencyDisabled(), "client lost the emergency policy state")
+        || !expect(client.startSession(QStringLiteral("chat")).isEmpty()
+                       && emergencyFailureCode == -32153,
+                   "new session escaped the emergency request gate")) {
+        return false;
+    }
+    client.setEmergencyDisabled(false);
+    if (!expect(waitUntil([&]() {
+            return initializedCount == 3 && client.isReady()
+                && client.processGeneration() > emergencyGeneration;
+        }), "runtime did not restart after a signed policy recovery")) {
+        return false;
+    }
+    client.stop();
+    waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+
+    QList<bool> observedModes;
+    for (const QJsonObject &message : readLogMessages(logPath)) {
+        if (message.value(QStringLiteral("method")).toString()
+            == QStringLiteral("test/emergency-environment")) {
+            observedModes.append(message.value(QStringLiteral("enabled")).toBool());
+        }
+    }
+    return expect(observedModes.size() == 3 && !observedModes.at(0)
+                      && observedModes.at(1) && !observedModes.at(2),
+                  "sidecar generations did not receive the exact emergency environment");
 }
 
 QList<QJsonObject> logMessagesForMethod(const QString &path, const QString &method)
@@ -2968,6 +3045,7 @@ int main(int argc, char *argv[])
     ok = runControlledTimelineSubscriptionAbandonCase() && ok;
     ok = runBoundedProcessReconnectCase() && ok;
     ok = runProcessReconnectExhaustionCase() && ok;
+    ok = runEmergencyPolicySwitchCase() && ok;
     ok = runCapabilityGateCase() && ok;
     ok = runTimelineSyncContractCase() && ok;
     ok = runTimelineSnapshotContractCase() && ok;

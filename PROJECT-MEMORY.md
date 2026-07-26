@@ -3172,7 +3172,21 @@ Implemented visual baseline:
   Windows runner evidence. Those remain operational release gates and must not be
   inferred from macOS documentation or test results.
 
-## File-Write Acknowledgement And Artifact Integrity Foundations (2026-07-26)
+## Approval, File-Write, And Artifact Integrity Foundations (2026-07-26)
+
+- OpenSpec `3.6` remains unchecked, but internal
+  `approval-acknowledgement/0.1` now binds deterministic Session/Turn/scope,
+  request requirement, fingerprint, idempotency, operation, observation, revision,
+  and time metadata. Exact request/acknowledgement retries are idempotent; binding
+  or same-revision drift conflicts; real transitions are contiguous; terminal and
+  reconciliation-required states cannot be advanced by the producer. Only denied,
+  expired, not-required, failed, or uncertain observations exist. User-decision,
+  Approval, mutation, and execution authority remain fixed false, and secret-shaped
+  or `allowed`/`approved` inputs fail closed. Eight focused tests and the complete
+  773-test library run (one ignored live fixture), strict Clippy, and formatting pass.
+- The Approval contract is not connected to an authority issuer, schema-v20 ledger,
+  AAP, Qt, Codex, or genuine user decision. Runtime denial, Provider `declined`, and
+  `approvalPolicy=never` remain distinct and must never be projected as Approval.
 
 - OpenSpec `3.6` remains unchecked, but the internal
   `file-write-acknowledgement/0.1` contract now covers a future metadata-only
@@ -3261,6 +3275,81 @@ Implemented visual baseline:
   by the ledger slice above; approval/file/Git/job producers and complete Windows
   reconnect/runtime evidence remain absent. Automatic Timeline pruning stays
   disabled, and Agent/Codex remains read-only.
+
+## Emergency Workbench Disable Foundation (2026-07-26)
+
+- After login, Qt requests authenticated HTTPS
+  `GET /api/v1/client/workbench-policy` every 15 minutes. Redirects, non-HTTPS
+  origins, unbounded authentication values, non-JSON responses, and bodies above
+  16 KiB fail with fixed content-free codes. The accepted inner contract is the
+  exact signed `aegisy-workbench-emergency-policy/0.1` field set: positive sequence,
+  issue/expiry time, disable boolean, bounded lowercase reason code, and Ed25519
+  signature under the pinned updater key. Session content, paths, prompts, provider
+  bodies, credentials, and arbitrary message fields are rejected rather than cached.
+- QSettings stores the exact signed envelope plus a sequence/policy-identity
+  high-water marker. The marker advances before envelope replacement; missing,
+  malformed, mismatched, expired, rolled-back, or conflicting cache state blocks new
+  Workbench work. A valid same-identity replay repairs an interrupted envelope, and
+  only a valid higher sequence changes policy state. Deleting both QSettings values
+  is not prevented by OS-secure storage, so adversarial anti-deletion anchoring remains
+  a release gap.
+- A disable applies at the Qt request boundary immediately and performs a bounded
+  Sidecar generation switch. Emergency startup opens only the local Preview/Store
+  backend and never Codex; missing data-root or Store-open failure becomes an
+  unavailable emergency backend rather than a Codex fallback. Rust filters advertised
+  capabilities and centrally rejects new Session, Turn, workspace mutation, portable
+  import, and Runtime restart methods with `-32153`. Reviewed read paths preserve
+  local Session history, Timeline recovery, artifacts, workspace/Git inspection,
+  and portable Session export where their capabilities exist.
+  Login, account/profile management, the legacy gateway, updates, logout, and the
+  existing Store-recovery diagnostic export remain outside the Workbench mutation gate.
+- Entering emergency mode intentionally retires the normal Sidecar generation even
+  when it owns in-memory work. The old process receives bounded graceful shutdown and
+  is killed on timeout; no interrupted Turn, terminal, or pending request is inferred
+  successful. This preserves Qt/Runtime double enforcement. Retaining same-process
+  cleanup while atomically revoking every queued mutation requires a future reviewed
+  out-of-band Runtime policy-transition contract and must not be approximated by a
+  Qt-only gate.
+- Emergency Store recovery retains the emergency flag and central `-32153` mutation
+  gate, preserves the recovery handshake marker and diagnostic capabilities, and
+  exposes only the existing recovery diagnostics. The request allowlists
+  omit retention-policy reads because the current protocol has no separate read-only
+  retention capability; advertising an unreachable read or the broader manage
+  capability would both be misleading.
+- Focused verification passes the signed-policy/cache test, ApiClient HTTPS/auth
+  rejection test, dynamic `normal -> emergency -> normal` fake-Sidecar test with an
+  immediate pre-reconnect Qt mutation denial, and three Rust emergency tests covering
+  no-data-root startup, persisted history/portable export, and corrupt-Store recovery.
+  The final combined gate passes 44 AAP tests, 774 Sidecar library tests with one ignored
+  live fixture, 7 daemon tests, 10 threshold tests, 21 Runtime tests, 23 Schema tests,
+  68 protocol tests, 23 stdio/Codex tests, strict Clippy and formatting, the complete
+  desktop build and all 19 CTests, strict OpenSpec validation, and `git diff --check`.
+- OpenSpec `22.6` remains unchecked. The production server route/signing publisher,
+  signed-package end-to-end macOS/Windows evidence, OS-secure anti-deletion anchor,
+  and a healthy-Store diagnostic bundle exporter do not exist. First install with no
+  cached policy intentionally keeps current behavior until the production control
+  plane is deployed; this absence must not be represented as a verified allow policy.
+  Detailed requirements and evidence remain under
+  `openspec/changes/build-aegisy-agent-workbench/`.
+
+## Workbench Visible-State Audit Foundation (2026-07-26)
+
+- OpenSpec `23.10` remains unchecked. The maintained
+  `docs/AEGISY-WORKBENCH-VISIBLE-STATE-MATRIX.md` inventories the current empty,
+  loading, offline, permission, conflict, failure, interrupted, and recovery
+  surfaces with stable Qt locators and exact evidence boundaries.
+- The focused render fixture now verifies the initial empty Timeline, fail-closed
+  capability loading, read-only permission state, a real external-file conflict,
+  stable status/failure notice locators with exact text and semantic severity,
+  authoritative Turn interruption, and synthetic
+  offline/reconnected Qt projections. Synthetic connection signals prove only UI
+  projection, not transport or reconnect behavior; protocol fixtures remain the
+  authority for those transitions.
+- The `AegisyAgentWorkbenchRenderTest` build and `agent_workbench_render` CTest
+  pass. Search/history/terminal pending variants, actual Monaco/xterm crash fallback,
+  complete secondary-dialog coverage, accessibility/focus/screen-reader behavior,
+  Chinese IME, high contrast, supported scaling, and clean Windows evidence remain
+  release gaps.
 
 ## Next Product Priorities
 

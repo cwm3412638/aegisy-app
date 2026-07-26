@@ -30,6 +30,7 @@ public:
     void getUsageStats(int days);
     void getUsageModels(int days);
     void getApiKeyUsage(const QJsonArray &apiKeyIds);
+    void getWorkbenchEmergencyPolicy();
     void getChannels();        // 获取渠道列表
     void getGroups();
     void changePassword(const QString &oldPassword, const QString &newPassword);
@@ -80,6 +81,8 @@ signals:
     void usageStatsReceived(const QJsonObject &stats);
     void usageModelsReceived(const QJsonArray &models);
     void apiKeyUsageReceived(const QJsonObject &usageByKey);
+    void workbenchEmergencyPolicyReceived(const QJsonObject &policy);
+    void workbenchEmergencyPolicyFailed(const QString &errorCode);
 
     // 渠道列表获取成功
     void channelsReceived(const QJsonArray &channels);

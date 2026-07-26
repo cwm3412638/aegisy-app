@@ -34,6 +34,10 @@ endif()
 # 查找 OpenSSL
 find_package(OpenSSL REQUIRED)
 
+set(AEGISY_UPDATE_PUBLIC_KEY
+    "9DkeQEQcqz6Trrcmr1XRlZHDQHyeOj3DaVA2rtS3WA0="
+    CACHE STRING "Ed25519 update and emergency-policy public key")
+
 # 源文件
 set(SOURCES
     src/main.cpp
@@ -68,6 +72,7 @@ set(SOURCES
     src/help_dialog.cpp
     src/agent_runtime_client.cpp
     src/artifact_manifest.cpp
+    src/workbench_emergency_policy.cpp
     src/agent_workbench_widget.cpp
     resources.qrc
 )
@@ -113,6 +118,7 @@ set(HEADERS
     include/help_dialog.h
     include/agent_runtime_client.h
     include/artifact_manifest.h
+    include/workbench_emergency_policy.h
     include/agent_workbench_widget.h
 )
 
@@ -122,6 +128,7 @@ file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/aegisy-version.txt"
     CONTENT "${PROJECT_VERSION}\n")
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     AEGISY_APP_VERSION="${PROJECT_VERSION}"
+    AEGISY_UPDATE_PUBLIC_KEY="${AEGISY_UPDATE_PUBLIC_KEY}"
 )
 
 # Build the trusted local Monaco bundle only when the complete host toolchain is
@@ -282,9 +289,6 @@ if(WIN32)
     set(AEGISY_WINDOWS_UPDATE_FEED_URL
         "https://aegisy.cc/desktop/windows/appcast.xml"
         CACHE STRING "WinSparkle appcast URL")
-    set(AEGISY_UPDATE_PUBLIC_KEY
-        "9DkeQEQcqz6Trrcmr1XRlZHDQHyeOj3DaVA2rtS3WA0="
-        CACHE STRING "Ed25519 update public key")
     target_compile_definitions(${PROJECT_NAME} PRIVATE
         AEGISY_WINDOWS_UPDATE_FEED_URL="${AEGISY_WINDOWS_UPDATE_FEED_URL}"
         AEGISY_UPDATE_PUBLIC_KEY="${AEGISY_UPDATE_PUBLIC_KEY}"
@@ -311,7 +315,7 @@ if(APPLE)
         "https://aegisy.cc/desktop/macos/appcast.xml"
         CACHE STRING "Sparkle appcast URL")
     set(AEGISY_SPARKLE_PUBLIC_KEY
-        "9DkeQEQcqz6Trrcmr1XRlZHDQHyeOj3DaVA2rtS3WA0="
+        "${AEGISY_UPDATE_PUBLIC_KEY}"
         CACHE STRING "Sparkle EdDSA public key")
 
     find_library(SECURITY_FRAMEWORK Security)
@@ -480,6 +484,23 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME api_client_account_and_keys
         COMMAND AegisyApiClientAccountTest)
+
+    add_executable(AegisyWorkbenchEmergencyPolicyTest
+        tests/workbench_emergency_policy_test.cpp
+        src/workbench_emergency_policy.cpp
+        include/workbench_emergency_policy.h
+    )
+    target_include_directories(AegisyWorkbenchEmergencyPolicyTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyWorkbenchEmergencyPolicyTest PRIVATE
+            Qt6::Core OpenSSL::Crypto)
+    else()
+        target_link_libraries(AegisyWorkbenchEmergencyPolicyTest PRIVATE
+            Qt5::Core OpenSSL::Crypto)
+    endif()
+    add_test(NAME workbench_emergency_policy
+        COMMAND AegisyWorkbenchEmergencyPolicyTest)
 
     add_executable(AegisyDesktopDownloaderTest
         tests/desktop_downloader_test.cpp

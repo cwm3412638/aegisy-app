@@ -181,6 +181,23 @@ int main(int argc, char **argv)
     client.setBaseUrl(server.baseUrl());
     client.setAuthToken(QStringLiteral("test-token"));
 
+    QString policyFailure;
+    QObject::connect(&client, &ApiClient::workbenchEmergencyPolicyFailed, &client,
+                     [&](const QString &code) { policyFailure = code; });
+    client.getWorkbenchEmergencyPolicy();
+    if (!require(policyFailure == QStringLiteral("policy-origin-untrusted"),
+                 "emergency policy accepted an unauthenticated HTTP origin")
+        || !require(server.method.isEmpty(),
+                    "emergency policy contacted an HTTP origin")) return 1;
+    policyFailure.clear();
+    client.setBaseUrl(QStringLiteral("https://www.aegisy.cc"));
+    client.setAuthToken(QString());
+    client.getWorkbenchEmergencyPolicy();
+    if (!require(policyFailure == QStringLiteral("policy-auth-unavailable"),
+                 "emergency policy request did not require authentication")) return 1;
+    client.setBaseUrl(server.baseUrl());
+    client.setAuthToken(QStringLiteral("test-token"));
+
     bool succeeded = false;
     if (!waitFor([&]() { client.changePassword(QStringLiteral("old-pass"), QStringLiteral("new-pass-123")); },
             [&](QEventLoop &loop) {

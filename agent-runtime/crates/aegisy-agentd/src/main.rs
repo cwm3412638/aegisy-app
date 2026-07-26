@@ -109,19 +109,28 @@ fn write_message<W: Write>(stdout: &Arc<Mutex<W>>, message: &Value) -> bool {
 
 fn main() {
     let preview = std::env::var("AEGISY_AGENT_BACKEND").as_deref() == Ok("preview");
+    let emergency_disabled =
+        std::env::var("AEGISY_WORKBENCH_EMERGENCY_DISABLED").as_deref() == Ok("1");
     let mut runtime = match std::env::var_os("AEGISY_WORKBENCH_DATA_ROOT") {
         Some(data_root) => {
             let data_root = Path::new(&data_root);
-            let result = if preview {
+            let result = if emergency_disabled {
+                Runtime::with_emergency_store(data_root)
+            } else if preview {
                 Runtime::with_store(data_root)
             } else {
                 Runtime::with_codex_and_store(data_root)
             };
             result.unwrap_or_else(|error| {
                 eprintln!("Aegisy workbench store is unavailable: {error}");
-                Runtime::unavailable(error)
+                if emergency_disabled {
+                    Runtime::emergency_unavailable(error)
+                } else {
+                    Runtime::unavailable(error)
+                }
             })
         }
+        None if emergency_disabled => Runtime::emergency(),
         None if preview => Runtime::default(),
         None => Runtime::with_codex().unwrap_or_else(|error| {
             eprintln!("Codex App Server is unavailable: {error}");

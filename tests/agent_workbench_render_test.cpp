@@ -4772,6 +4772,14 @@ int main(int argc, char *argv[])
         QStringLiteral("agentRuntimeCapabilityStatus"));
     QLabel *executionContext = workbench.findChild<QLabel *>(
         QStringLiteral("agentExecutionContextStrip"));
+    QLabel *emptyTimeline = workbench.findChild<QLabel *>(
+        QStringLiteral("agentEmptyTimeline"));
+    if (!expect(emptyTimeline && !emptyTimeline->isHidden()
+                    && emptyTimeline->text().contains(
+                        QStringLiteral("从这里开始与 Aegisy Agent 对话")),
+                "timeline empty state is missing or not stably addressable")) {
+        return 1;
+    }
 
 #ifdef AEGISY_EXPECT_AGENTD
     if (!expect(runtimeStatus
@@ -4879,6 +4887,7 @@ int main(int argc, char *argv[])
         QStringLiteral("agentEditorReplaceAll"));
     QLabel *editorPath = workbench.findChild<QLabel *>(QStringLiteral("agentEditorPath"));
     QLabel *editorMeta = workbench.findChild<QLabel *>(QStringLiteral("agentEditorMeta"));
+    QLabel *fileStatus = workbench.findChild<QLabel *>(QStringLiteral("agentFileStatus"));
     QPushButton *editorSave = workbench.findChild<QPushButton *>(
         QStringLiteral("agentEditorSaveButton"));
     QPushButton *editorReload = workbench.findChild<QPushButton *>(
@@ -4919,6 +4928,8 @@ int main(int argc, char *argv[])
         QStringLiteral("agentTerminalContextButton"));
     QAction *terminalNewForeground = workbench.findChild<QAction *>(
         QStringLiteral("agentTerminalNewForegroundAction"));
+    QListWidget *projectList = workbench.findChild<QListWidget *>(
+        QStringLiteral("agentProjectList"));
     QListWidget *sessionList = workbench.findChild<QListWidget *>(
         QStringLiteral("agentSessionList"));
     QLineEdit *sessionSearch = workbench.findChild<QLineEdit *>(
@@ -5036,7 +5047,10 @@ int main(int argc, char *argv[])
             || !expect(editorTabs && recentFiles && editorFind && editorReplace && replaceAll
                            && editorTabs->count() == 0,
                        "multi-buffer editor controls are missing")
-            || !expect(editorPath && editorMeta && editorSave && editorReload && editorSplit
+            || !expect(editorPath && editorMeta && fileStatus
+                           && fileStatus->text()
+                               == QStringLiteral("打开文件夹后显示受授权项目内容")
+                           && editorSave && editorReload && editorSplit
                            && !editorSave->isEnabled()
                            && !editorReload->isEnabled()
                            && !editorSplit->isEnabled(),
@@ -5067,7 +5081,7 @@ int main(int argc, char *argv[])
                        "read-only Git query workspace controls are missing")
             || !expect(terminalPicker && terminalStatus && terminalNew && terminalStop
                            && terminalRestart && terminalRemove && terminalContext
-                           && terminalNewForeground && sessionList && sessionSearch
+                           && terminalNewForeground && projectList && sessionList && sessionSearch
                            && sessionHistoryMore
                            && retentionSettings && importSession
                            && sessionSearch->placeholderText() == QStringLiteral("搜索会话")
@@ -5996,12 +6010,22 @@ int main(int argc, char *argv[])
                 "accepted cancellation was incorrectly presented as a terminal state")) {
         return 1;
     }
+    const int statusNoticeCountBeforeInterrupt = workbench.findChildren<QLabel *>(
+        QStringLiteral("agentStatusNotice")).size();
     runtimeClient->timelineEvent(timelineEnvelope(
         QStringLiteral("turn.interrupted"), cancelSessionId, cancelTurnId));
     application.processEvents();
-    if (!expect(sendButton->text() == QStringLiteral("发送") && sendButton->isEnabled(),
+    const QList<QLabel *> interruptionNotices = workbench.findChildren<QLabel *>(
+        QStringLiteral("agentStatusNotice"));
+    const bool interruptionVisible = interruptionNotices.size()
+            == statusNoticeCountBeforeInterrupt + 1
+        && interruptionNotices.constLast()->text() == QStringLiteral("任务已停止。")
+        && interruptionNotices.constLast()->property("severity").toString()
+            == QStringLiteral("status");
+    if (!expect(sendButton->text() == QStringLiteral("发送") && sendButton->isEnabled()
+                    && interruptionVisible,
                 qPrintable(QStringLiteral(
-                    "interrupted turn did not restore the composer action: send=%1 enabled=%2")
+                    "interrupted turn did not expose its terminal state or restore the composer: send=%1 enabled=%2")
                     .arg(sendButton->text(), sendButton->isEnabled()
                             ? QStringLiteral("true") : QStringLiteral("false"))))) {
         return 1;
@@ -7624,7 +7648,10 @@ int main(int argc, char *argv[])
     editorSave->click();
     if (!expect(waitUntil(application, [editorPath]() {
                     return editorPath->text().contains(QStringLiteral("冲突"));
-                }),
+                }) && fileStatus
+                    && fileStatus->text().contains(QStringLiteral("外部修改"))
+                    && fileStatus->text().contains(QStringLiteral("重新载入"))
+                    && !editorSave->isEnabled(),
                 "stale save did not surface an editor conflict")) {
         return 1;
     }
@@ -7674,6 +7701,31 @@ int main(int argc, char *argv[])
             qCritical() << "failed to save Agent Workbench snapshot";
             return 1;
         }
+    }
+
+    const int failureNoticeCountBeforeOffline = workbench.findChildren<QLabel *>(
+        QStringLiteral("agentFailureNotice")).size();
+    runtimeClient->connectionStateChanged(
+        false, QStringLiteral("运行时连接已断开（可见状态测试）"));
+    application.processEvents();
+    const QList<QLabel *> offlineNotices = workbench.findChildren<QLabel *>(
+        QStringLiteral("agentFailureNotice"));
+    const bool offlineNoticeVisible = offlineNotices.size()
+            == failureNoticeCountBeforeOffline + 1
+        && offlineNotices.constLast()->text()
+            == QStringLiteral("运行时连接已断开（可见状态测试）")
+        && offlineNotices.constLast()->property("severity").toString()
+            == QStringLiteral("failure");
+    if (!expect(runtimeStatus && runtimeStatus->text() == QStringLiteral("○ 运行时离线")
+                    && offlineNoticeVisible && !sendButton->isEnabled(),
+                "runtime disconnect did not expose a fail-closed offline state")) {
+        return 1;
+    }
+    runtimeClient->connectionStateChanged(true, QStringLiteral("运行时响应正常"));
+    application.processEvents();
+    if (!expect(runtimeStatus->text() == QStringLiteral("● 运行时就绪"),
+                "runtime reconnect did not clear the visible offline status")) {
+        return 1;
     }
     return 0;
 }

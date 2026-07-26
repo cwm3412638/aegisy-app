@@ -45,6 +45,7 @@ public:
     int maximumReconnectAttempts() const;
     quint64 processGeneration() const;
     QString runtimePath() const;
+    bool emergencyDisabled() const { return m_emergencyDisabled; }
 
     // The sidecar must not inherit credential-bearing desktop environment values.
     static QProcessEnvironment sanitizedSidecarEnvironment(
@@ -73,6 +74,7 @@ public:
 
     void start();
     void stop();
+    void setEmergencyDisabled(bool disabled);
     void abandonTimelineSubscriptionConnection(const QString &detail);
     bool completeReconnectRecovery(quint64 generation, bool success,
                                    const QString &detail = QString());
@@ -468,6 +470,7 @@ private:
                            const QString &detail);
     void retireResponseId(const QString &requestId);
     void removePendingRequest(const QString &requestId);
+    static bool emergencyRequestAllowed(const QString &method);
 
     QProcess *m_process = nullptr;
     QTimer *m_startupTimer = nullptr;
@@ -518,6 +521,9 @@ private:
     bool m_processTerminationPending = false;
     bool m_reconnectRecoveryPending = false;
     bool m_discardProcessOutput = false;
+    bool m_emergencyDisabled = false;
+    bool m_processStartedEmergency = false;
+    bool m_policyRestartPending = false;
     QJsonObject m_reconnectInitializeResult;
     QString m_runtimePath;
 };

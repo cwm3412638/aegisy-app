@@ -2032,11 +2032,11 @@ Known limitations:
   authoritative per-Attempt/Retry Usage, and any AAP/Qt trace read,
   audit/export, or retention surface remain absent, so tasks 20.1 and 20.2 stay
   incomplete.
-- Direct C++17 syntax checks pass for the Qt widget and render fixture, and the
-  render target now completes MOC/RCC/compile/link on this host. A focused cache
-  mode passes. The full render run currently fails earlier at the existing model-
-  profile read-only projection assertion, before the threshold-cache assertion;
-  this is not claimed as a complete render pass.
+- At that threshold-cache stage, direct C++17 syntax checks passed for the Qt widget
+  and render fixture, the render target completed MOC/RCC/compile/link, and its
+  focused cache mode passed. The then-current full render run stopped at the model-
+  profile read-only projection assertion; later complete desktop gates supersede
+  that historical host result and now pass the full render fixture.
 
 ## 23.6 AAP And Adapter Contributor Documentation
 
@@ -2108,7 +2108,28 @@ Known limitations:
   pass, or a shipped exporter. `openspec validate build-aegisy-agent-workbench
   --strict` and `git diff --check` are the required repository gates.
 
-## 3.6 File-Write Idempotency Foundation
+## 3.6 Approval And File-Write Idempotency Foundations
+
+- `agent-runtime/crates/aegisy-agentd/src/approval_ack.rs` defines the internal
+  `approval-acknowledgement/0.1` metadata contract. Scope identity binds exact
+  Session/Turn/scope; requirement identity binds that scope to the request
+  fingerprint; operation identity additionally binds the idempotency key. The
+  contract exposes no prompt, request body, command, path, content, or provider data.
+- Equivalent requests and acknowledgement objects are exact idempotent replays.
+  Binding drift or same-revision metadata drift is a stable conflict; every real
+  transition advances one revision with non-decreasing time. Requested may move
+  only to denied/expired/not-required, failed, or reconciliation-required evidence;
+  terminal and uncertain states cannot be advanced by this producer.
+- User decision, Approval, mutation, and execution authority fields are fixed false.
+  Deserialization rejects unknown fields, unsafe integers/identifiers, common secret/
+  token/JWT shapes, invalid deterministic identities, and nonexistent `allowed` or
+  `approved` enum values. Eight focused tests, 773 `aegisy-agentd` library tests
+  with one ignored live fixture, strict package/library Clippy, and formatting pass.
+- This is not a genuine Approval producer and has no authority issuer, durable
+  schema-v20 reservation/CAS/consume path, startup reconciliation, AAP capability,
+  or Qt review/freeze flow. Runtime denial, Provider `declined`, and
+  `approvalPolicy=never` must remain distinct from user Approval; task `3.6` stays
+  unchecked.
 
 - `agent-runtime/crates/aegisy-agentd/src/file_write_ack.rs` adds the internal,
   metadata-only `file-write-acknowledgement/0.1` contract. It binds the exact
@@ -2149,6 +2170,80 @@ Known limitations:
   not invoke the generator. Rust adapter-side verification, updater compatibility
   integration, signed package evidence, and Windows execution are not implemented;
   task `22.5` remains unchecked.
+
+## 22.6 Emergency Workbench Disable Foundation
+
+- Qt accepts the policy only from the authenticated HTTPS account origin, rejects
+  redirects, non-JSON and oversized responses, and emits fixed content-free failure
+  codes. The inner envelope has an exact field set and Ed25519 signature under the
+  pinned updater key; no Session, prompt, path, model body, credential, or arbitrary
+  server message can enter the policy cache or banner.
+- Policy tests cover valid disable, tamper, unknown content fields, expiry, lifetime,
+  persistence, lower-sequence rollback, same-sequence conflict, higher-sequence
+  recovery, cache-envelope rollback after restart, missing envelope, missing marker,
+  and first-open absence. The marker advances before the envelope so an interrupted
+  replacement is fail-closed.
+- Qt blocks new Workbench requests immediately and switches the Sidecar generation
+  in both disable and recovery directions. The focused fake-sidecar test observes
+  exact `normal -> emergency -> normal` environments and `-32153` for a new Session.
+  Rust starts the emergency Store without Codex, filters capabilities, rejects new
+  Session/Turn/workspace/import/restart mutations centrally, reopens existing local
+  history, and completes a real portable preview/export. Missing data-root and
+  Store-open failure paths use an unavailable emergency backend and never fall back
+  to Codex.
+- Store corruption/recovery retains the emergency flag and central `-32153` mutation
+  gate while exposing only recovery diagnostics. The Qt and Rust request allowlists
+  match except for Rust's handshake-only `initialized` notification. Unreachable
+  retention-policy read is excluded because the current protocol exposes only the
+  broader manage capability.
+- Disable intentionally retires the normal Sidecar even when it owns in-memory work,
+  using bounded graceful shutdown and kill escalation. Pending or active work is
+  never inferred successful. Keeping that generation for cleanup would leave the
+  Runtime in normal mode and reduce enforcement to Qt only; same-process cleanup plus
+  atomic queued-mutation revocation therefore remains a future protocol design, not
+  a shortcut in this foundation.
+- Focused evidence passes `workbench_emergency_policy`,
+  `api_client_account_and_keys`, `agent_runtime_environment`, and the three Rust
+  emergency tests. The environment fixture verifies the Qt mutation gate immediately
+  after policy application, before the emergency generation becomes ready. Corrupt-
+  Store recovery preserves the emergency flag, required recovery capability marker,
+  diagnostics, and central `-32153` gate without starting Codex. The final combined
+  gate passes 44 AAP tests, 774 Sidecar library
+  tests with one ignored live fixture, 7 daemon tests, 10 threshold tests, 21 Runtime
+  tests, 23 Schema tests, 68 protocol tests, and 23 stdio/Codex tests; strict Clippy
+  and Rust formatting; the complete desktop build and all 19 CTests; strict OpenSpec
+  validation; and `git diff --check`.
+- This is not production completion. The server route and signing publisher are not
+  deployed, first install without a policy intentionally preserves current behavior,
+  QSettings does not provide OS-secure anti-deletion anchoring if both cache halves
+  are removed, a healthy-Store diagnostic bundle exporter is absent, and signed
+  macOS/Windows end-to-end disable/recovery evidence has not run. Keep `22.6`
+  unchecked.
+
+## 23.10 Visible-State Review Foundation
+
+- `docs/AEGISY-WORKBENCH-VISIBLE-STATE-MATRIX.md` is the maintained inventory for
+  empty, loading, offline, permission, conflict, failure, interrupted, and recovery
+  states that currently exist in the Qt Workbench. Each row distinguishes the
+  visible variants, stable locator, exact executable evidence, and residual gaps.
+- Stable locators now cover the empty Timeline, project list, file status, and
+  status/failure notice categories. Notice assertions compare the before/after
+  instance count, newest child, exact text, and semantic severity so an earlier
+  notice cannot satisfy a later transition.
+- The render fixture proves the initial empty surface; fail-closed capability
+  loading; the read-only permission boundary; an external-file conflict with Save
+  disabled and external CRLF bytes preserved; stable failure-notice locators, exact
+  text, and semantic severity; cancellation
+  acknowledgement remaining non-terminal; authoritative interruption restoring
+  Send with a visible terminal notice; and synthetic offline/reconnected Qt status
+  projections. The synthetic connection signal is UI evidence only, not proof of a
+  transport disconnect or reconnect barrier.
+- Focused evidence passes the `AegisyAgentWorkbenchRenderTest` build and
+  `agent_workbench_render` CTest (1/1). Loading variants for search/history/terminal
+  attachment, real Monaco/xterm crash fallback, complete secondary-dialog coverage,
+  accessibility, focus order, screen readers, Chinese IME, high contrast, display
+  scaling, and clean Windows execution remain unverified. Keep `23.10` unchecked.
+
 # 1.4 Third-Party Component And License Inventory
 
 - `docs/THIRD-PARTY-COMPONENT-INVENTORY.md` inventories the exact repository

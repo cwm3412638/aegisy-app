@@ -1,3 +1,4 @@
+pub mod approval_ack;
 pub mod background_job;
 pub mod background_notification;
 pub mod background_process_observation;
@@ -495,6 +496,7 @@ pub struct Runtime {
     timeline_subscriptions: Arc<Mutex<RuntimeTimelineSubscriptionState>>,
     timeline_transport_failed: Arc<AtomicBool>,
     backend: Backend,
+    emergency_disabled: bool,
 }
 
 #[cfg(test)]
@@ -565,6 +567,222 @@ mod capability_matrix_integration_tests {
         assert!(!serde_json::to_string(snapshot)
             .unwrap()
             .contains("sensitive startup detail"));
+    }
+}
+
+#[cfg(test)]
+mod emergency_workbench_tests {
+    use super::{test_initialize_params, Runtime};
+    use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestRoot(PathBuf);
+
+    impl TestRoot {
+        fn new() -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "aegisy-emergency-workbench-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn emergency_store_starts_without_codex_and_keeps_history_export_read_only() {
+        let root = TestRoot::new();
+        let source_session_id = {
+            let mut writable = Runtime::with_store(&root.0).unwrap();
+            let initialize = writable.handle_line(
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": "warm-init",
+                    "method": "initialize",
+                    "params": test_initialize_params("emergency-warm-store")
+                })
+                .to_string(),
+            );
+            assert!(initialize[0].get("result").is_some());
+            assert!(writable
+                .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
+                .is_empty());
+            let started = writable.handle_line(
+                r#"{"jsonrpc":"2.0","id":"warm-start","method":"session/start","params":{"mode":"chat","title":"Emergency export fixture"}}"#,
+            );
+            started[0]["result"]["session"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+
+        let mut runtime = Runtime::with_emergency_store(&root.0).unwrap();
+        let initialize = runtime.handle_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": test_initialize_params("emergency-test")
+            })
+            .to_string(),
+        );
+        assert_eq!(initialize[0]["result"]["backend"]["adapter"], "preview");
+        let capabilities = initialize[0]["result"]["capabilities"]["stable"]
+            .as_array()
+            .unwrap();
+        let has = |name: &str| capabilities.iter().any(|value| value == name);
+        assert!(has("session.list"));
+        assert!(has("session.history.paginated"));
+        assert!(has("session.portable.export"));
+        assert!(has("runtime.projection-recovery.status"));
+        assert!(!has("session.chat"));
+        assert!(!has("session.work.preview"));
+        assert!(!has("workspace.save-user-text"));
+        assert!(!has("terminal.lifecycle.named"));
+        assert!(runtime
+            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
+            .is_empty());
+
+        let projects = runtime.handle_line(
+            r#"{"jsonrpc":"2.0","id":"projects","method":"project/list","params":{"limit":10}}"#,
+        );
+        assert!(projects[0].get("result").is_some());
+
+        let history = runtime.handle_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "history",
+                "method": "session/read",
+                "params": {"session_id": &source_session_id}
+            })
+            .to_string(),
+        );
+        assert_eq!(history[0]["result"]["session"]["id"], source_session_id);
+
+        let export_preview = runtime.handle_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "export-preview",
+                "method": "session/export/preview",
+                "params": {"session_id": &source_session_id}
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            export_preview[0]["result"]["schema_version"],
+            "portable-session-export-preview/0.1"
+        );
+        let export = runtime.handle_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "export",
+                "method": "session/export",
+                "params": {
+                    "session_id": &source_session_id,
+                    "package_hash": export_preview[0]["result"]["package_hash"].clone()
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            export[0]["result"]["schema_version"],
+            "portable-session-export-result/0.1"
+        );
+
+        for (id, method, params) in [
+            ("start", "session/start", json!({"mode":"chat"})),
+            (
+                "turn",
+                "turn/start",
+                json!({"session_id":"session-1","input":"x"}),
+            ),
+            (
+                "save",
+                "workspace/save-user-text",
+                json!({"project_id":"project-1","path":"a.txt","content":"x"}),
+            ),
+            ("import", "session/import", json!({"package": {}})),
+            ("restart", "runtime/restart", json!({})),
+        ] {
+            let response = runtime.handle_line(
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": method,
+                    "params": params
+                })
+                .to_string(),
+            );
+            assert_eq!(response[0]["error"]["code"], -32153, "{method}");
+        }
+    }
+
+    #[test]
+    fn emergency_without_a_data_root_never_starts_codex() {
+        let mut runtime = Runtime::emergency();
+        let initialize = runtime.handle_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": test_initialize_params("emergency-no-store")
+            })
+            .to_string(),
+        );
+        assert_eq!(initialize[0]["result"]["backend"]["status"], "unavailable");
+        assert_ne!(
+            initialize[0]["result"]["backend"]["adapter"],
+            "codex-app-server"
+        );
+    }
+
+    #[test]
+    fn emergency_store_recovery_keeps_the_central_mutation_gate() {
+        let root = TestRoot::new();
+        fs::write(
+            root.0.join("aegisy-workbench.sqlite3"),
+            b"not a sqlite database",
+        )
+        .unwrap();
+
+        let mut runtime = Runtime::with_emergency_store(&root.0).unwrap();
+        let initialize = runtime.handle_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": test_initialize_params("emergency-recovery")
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            initialize[0]["result"]["backend"]["status"],
+            "read-only-recovery"
+        );
+        assert_ne!(
+            initialize[0]["result"]["backend"]["adapter"],
+            "codex-app-server"
+        );
+        assert!(runtime
+            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
+            .is_empty());
+
+        let blocked = runtime.handle_line(
+            r#"{"jsonrpc":"2.0","id":"start","method":"session/start","params":{"mode":"chat"}}"#,
+        );
+        assert_eq!(blocked[0]["error"]["code"], -32153);
     }
 }
 
@@ -4354,6 +4572,150 @@ impl Default for Runtime {
 }
 
 impl Runtime {
+    fn emergency_request_allowed(method: &str) -> bool {
+        matches!(
+            method,
+            "initialize"
+                | "initialized"
+                | "shutdown"
+                | "runtime/health"
+                | "runtime/degradations"
+                | "runtime/projection-recovery/status"
+                | "runtime/recovery/status"
+                | "runtime/recovery/export"
+                | "model/catalog"
+                | "model/catalog-cache"
+                | "model/catalog-refresh-status"
+                | "model/capability-check"
+                | "model/profile/list"
+                | "model/profile/read"
+                | "project/list"
+                | "project/root-list"
+                | "project/trust-review"
+                | "session/list"
+                | "session/search"
+                | "session/read"
+                | "session/delete/preview"
+                | "session/deletion/status"
+                | "session/export/preview"
+                | "session/export"
+                | "session/mutation-acknowledgements"
+                | "session/background-notifications"
+                | "session/background-recovery"
+                | "session/recovery/status"
+                | "session/compaction/checkpoint/read"
+                | "timeline/sync"
+                | "timeline/snapshot"
+                | "timeline/subscribe"
+                | "timeline/subscription-sync"
+                | "timeline/subscription-snapshot"
+                | "timeline/subscription-activate"
+                | "operation/status"
+                | "operation/probe"
+                | "turn/cancel"
+                | "turn/context/inspect"
+                | "workspace/pinned-context/list"
+                | "workspace/image/read"
+                | "workspace/list"
+                | "workspace/read"
+                | "workspace/metadata"
+                | "workspace/git-status"
+                | "workspace/git/overview"
+                | "workspace/git/log"
+                | "workspace/git/commit"
+                | "workspace/git/diff"
+                | "workspace/git/context/read"
+                | "workspace/search"
+                | "workspace/search/cancel"
+                | "workspace/index"
+                | "workspace/index/cancel"
+                | "workspace/repository-map"
+                | "workspace/language-servers"
+                | "workspace/definition"
+                | "workspace/references"
+                | "workspace/diagnostics"
+                | "workspace/observed-diagnostics"
+                | "workspace/diagnostics/raw"
+                | "workspace/edit/artifact/read"
+                | "workspace/edit/proposal/latest"
+                | "workspace/edit/proposal/read"
+                | "workspace/edit/proposal/artifact/read"
+                | "terminal/list"
+                | "terminal/attach"
+                | "terminal/read"
+                | "terminal/excerpt/read"
+                | "terminal/stop-user"
+                | "terminal/close-user"
+                | "terminal/remove-user"
+                | "artifact/read-command-output"
+        )
+    }
+
+    fn emergency_capability_allowed(capability: &str) -> bool {
+        matches!(
+            capability,
+            "runtime.preview"
+                | "runtime.unavailable"
+                | "runtime.recovery.read-only"
+                | "runtime.recovery.status"
+                | "runtime.recovery.diagnostic-export"
+                | "runtime.health"
+                | "runtime.degradations"
+                | "runtime.heartbeat.out-of-band"
+                | "runtime.projection-recovery.status"
+                | "permission.read-only"
+                | "project.list"
+                | "project.roots.scoped"
+                | "project.trust-review"
+                | "session.list"
+                | "session.history.paginated"
+                | "session.workspace-binding.read-only"
+                | "session.search.branch"
+                | "session.portable.export"
+                | "session.deletion.two-phase"
+                | "session.recovery.status"
+                | "operation.reconciliation.probe"
+                | "operation.reconciliation.status"
+                | "model.catalog.read-only"
+                | "model.catalog.cache.read-only"
+                | "model.catalog.refresh.status.read-only"
+                | "model.capability-check.read-only"
+                | "model.profile.read-only"
+                | "timeline.replay.fixed-watermark"
+                | "timeline.snapshot.current"
+                | "timeline.subscription.fixed-watermark"
+                | "turn.context.inspect"
+                | "workspace.list"
+                | "workspace.read-text"
+                | "workspace.metadata"
+                | "workspace.git-status"
+                | "workspace.git-query.read-only"
+                | "workspace.git-context.read-only"
+                | "workspace.search.bounded"
+                | "workspace.search.cancel"
+                | "workspace.index.tree-sitter"
+                | "workspace.index.cancel"
+                | "workspace.repository-map.budgeted"
+                | "workspace.language-servers"
+                | "workspace.definition"
+                | "workspace.references"
+                | "workspace.diagnostics.language-server"
+                | "workspace.diagnostics.command-output"
+                | "workspace.diagnostics.observed"
+                | "workspace.diagnostics.raw-reference"
+                | "artifact.command-output.bounded"
+                | "workspace.edit.preview.read-only"
+                | "workspace.edit.proposal.read-only"
+                | "workspace.image.preview"
+                | "workspace.pinned-context.store"
+                | "terminal.excerpt.read"
+                | "session.compaction.checkpoint-review"
+                | "background-notification.outbox.read-only"
+                | "background-job.recovery.inspect"
+                | "session.mutation-acknowledgements"
+        )
+    }
+
     pub fn with_codex() -> Result<Self, String> {
         CodexAdapter::start().map(|adapter| Self::with_backend(Backend::Codex(adapter)))
     }
@@ -4527,6 +4889,14 @@ impl Runtime {
     }
 
     pub fn with_store(data_root: &Path) -> Result<Self, String> {
+        Self::with_store_mode(data_root, false)
+    }
+
+    pub fn with_emergency_store(data_root: &Path) -> Result<Self, String> {
+        Self::with_store_mode(data_root, true)
+    }
+
+    fn with_store_mode(data_root: &Path, emergency_disabled: bool) -> Result<Self, String> {
         match WorkbenchStore::open_or_recover(data_root).map_err(|cause| cause.message)? {
             WorkbenchStoreOpen::Writable(mut store) => {
                 let compaction_store =
@@ -4547,11 +4917,18 @@ impl Runtime {
                     pinned_context_store,
                     model_profile_store,
                     model_catalog_cache,
+                    emergency_disabled,
                 ))
             }
-            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => {
-                Ok(Self::with_backend(Backend::Recovery(diagnostic)))
-            }
+            WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => Ok(Self::with_backend_and_store(
+                Backend::Recovery(diagnostic),
+                None,
+                None,
+                None,
+                None,
+                None,
+                emergency_disabled,
+            )),
         }
     }
 
@@ -4577,6 +4954,7 @@ impl Runtime {
                     pinned_context_store,
                     model_profile_store,
                     model_catalog_cache,
+                    false,
                 ))
             }
             WorkbenchStoreOpen::ReadOnlyRecovery(diagnostic) => {
@@ -4589,6 +4967,22 @@ impl Runtime {
         Self::with_backend(Backend::Unavailable(error.into()))
     }
 
+    pub fn emergency() -> Self {
+        Self::emergency_unavailable("emergency mode requires a durable workbench data root")
+    }
+
+    pub fn emergency_unavailable(error: impl Into<String>) -> Self {
+        Self::with_backend_and_store(
+            Backend::Unavailable(error.into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+    }
+
     fn with_backend(backend: Backend) -> Self {
         let model_catalog_cache = if matches!(&backend, Backend::Recovery(_)) {
             None
@@ -4596,7 +4990,7 @@ impl Runtime {
             model_catalog_cache::ModelCatalogCacheStore::in_memory(MODEL_CATALOG_CACHE_STALE_MS)
                 .ok()
         };
-        Self::with_backend_and_store(backend, None, None, None, None, model_catalog_cache)
+        Self::with_backend_and_store(backend, None, None, None, None, model_catalog_cache, false)
     }
 
     fn with_backend_and_store(
@@ -4606,6 +5000,7 @@ impl Runtime {
         pinned_context_store: Option<pinned_context_store::PinnedContextStore>,
         model_profile_store: Option<model_profile_store::ModelProfileStore>,
         model_catalog_cache: Option<model_catalog_cache::ModelCatalogCacheStore>,
+        emergency_disabled: bool,
     ) -> Self {
         let projects = workbench_store
             .as_ref()
@@ -4706,6 +5101,7 @@ impl Runtime {
             )),
             timeline_transport_failed: Arc::new(AtomicBool::new(false)),
             backend,
+            emergency_disabled,
         }
     }
 
@@ -4820,6 +5216,22 @@ impl Runtime {
         }
         if let Some(duplicate) = self.control.claim_request(&request) {
             emit(duplicate);
+            return;
+        }
+
+        if self.emergency_disabled
+            && self.initialized
+            && self.client_ready
+            && !Self::emergency_request_allowed(&request.method)
+        {
+            self.emit_all(
+                self.error_for(
+                    &request,
+                    -32153,
+                    "server emergency policy disabled new workbench operations",
+                ),
+                &mut emit,
+            );
             return;
         }
 
@@ -6076,7 +6488,11 @@ impl Runtime {
             ),
             Backend::Unavailable(_) => (
                 BackendDescriptor {
-                    adapter: codex_capability_matrix::CODEX_ADAPTER.into(),
+                    adapter: if self.emergency_disabled {
+                        "aegisy-workbench-emergency".into()
+                    } else {
+                        codex_capability_matrix::CODEX_ADAPTER.into()
+                    },
                     status: "unavailable".into(),
                     version: codex_capability_matrix::CODEX_VERSION.into(),
                 },
@@ -6184,6 +6600,9 @@ impl Runtime {
             if self.model_profile_store.is_some() {
                 capabilities.push("model.profile.read-only".into());
             }
+        }
+        if self.emergency_disabled {
+            capabilities.retain(|capability| Self::emergency_capability_allowed(capability));
         }
         let declared_stable = params
             .capabilities
