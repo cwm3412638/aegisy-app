@@ -618,6 +618,12 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME artifact_manifest_verification
         COMMAND AegisyArtifactManifestTest)
+    add_test(NAME artifact_manifest_generation
+        COMMAND "${CMAKE_COMMAND}"
+                -DAEGISY_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                -DAEGISY_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DMANIFEST_VERIFIER=$<TARGET_FILE:AegisyArtifactManifestTest>
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/artifact_manifest_generator_test.cmake")
 
     if(AEGISY_MONACO_ENABLED)
         add_executable(AegisyMonacoEditorRenderTest

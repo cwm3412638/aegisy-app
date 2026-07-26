@@ -193,7 +193,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 47 of 235 checkbox tasks are complete and 188 remain
+- OpenSpec task baseline: 48 of 235 checkbox tasks are complete and 187 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
 - OpenSpec task `3.3` is complete. The stable Schema, Rust Runtime/stdio daemon, Qt
@@ -3135,6 +3135,19 @@ Implemented visual baseline:
   future implementation must re-read and re-redact sources and fail closed on
   stale preview, source loss, overflow, or uncertain classification.
 
+## Support And Release Recovery Training (2026-07-26)
+
+- OpenSpec `23.9` is complete as an operational documentation stage.
+  `docs/AEGISY-SUPPORT-AND-RELEASE-RECOVERY-TRAINING.md` defines support,
+  release-owner, and incident-commander responsibilities; repository/history
+  preservation rules; bounded evidence; sidecar, Store, Timeline, TLS, streaming,
+  renderer, Git, terminal, and sandbox recovery drills; and a data-free sign-off
+  checklist. It links the runbook, privacy export contract, and portable Session
+  format without treating any of them as mutation authority.
+- Completion records the reviewed training package, not human attendance or clean
+  Windows runner evidence. Those remain operational release gates and must not be
+  inferred from macOS documentation or test results.
+
 ## File-Write Acknowledgement And Artifact Integrity Foundations (2026-07-26)
 
 - OpenSpec `3.6` remains unchecked, but the internal
@@ -3157,6 +3170,20 @@ Implemented visual baseline:
   `agent_runtime_environment` pass. Formal manifest generation, Rust adapter
   verification, updater compatibility, signed packaging, and Windows evidence
   remain open.
+- A deterministic packaging foundation now exists at
+  `cmake/generate_artifact_manifest.cmake`. It accepts only explicit regular
+  files inside a caller-provided bundle root, requires a canonical in-root output
+  parent, rejects symlink/output/path escape and artifact replacement, records
+  relative paths, hashes final bytes with SHA-256, and emits stable
+  `aegisy-artifact-manifest/0.1` JSON without timestamps, machine paths, network
+  access, execution, or environment discovery. `artifact_manifest_generation`
+  runs the generator twice, rejects output drift and paths outside the root, and
+  proves that the production Qt verifier accepts the generated file. The focused
+  manifest CTest run passes 2/2. macOS and Windows
+  packaging do not invoke it yet because neither script currently bundles a
+  pinned Codex adapter executable; Rust adapter verification, updater
+  compatibility binding, signed release integration, and Windows evidence remain
+  required. See `docs/AEGISY-ARTIFACT-MANIFEST-PACKAGING.md`.
 
 ## Live Timeline Subscription And Ownership Recovery (2026-07-26)
 

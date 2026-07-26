@@ -50,6 +50,17 @@ QJsonObject manifest(const QByteArray &runtimeHash, const QByteArray &adapterHas
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
+    if (argc == 3) {
+        const auto generatedResult = ArtifactManifest::verifyFile(
+            QString::fromLocal8Bit(argv[1]), QString::fromLocal8Bit(argv[2]));
+        return expect(generatedResult.ok,
+                      "generated artifact manifest was rejected by the production verifier")
+            ? 0 : 1;
+    }
+    if (argc != 1) {
+        std::fprintf(stderr, "usage: AegisyArtifactManifestTest [manifest runtime]\n");
+        return 2;
+    }
     QTemporaryDir directory;
     if (!expect(directory.isValid(), "temporary directory unavailable")) return 1;
     const QString runtimePath = QDir(directory.path()).filePath(QStringLiteral("aegisy-agentd"));

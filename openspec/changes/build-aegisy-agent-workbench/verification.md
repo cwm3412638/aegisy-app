@@ -2087,6 +2087,27 @@ Known limitations:
   shipped. `openspec validate build-aegisy-agent-workbench --strict` and
   `git diff --check` are the required repository gates.
 
+## 23.9 Support And Release Recovery Training
+
+- `docs/AEGISY-SUPPORT-AND-RELEASE-RECOVERY-TRAINING.md` supplies the internal
+  curriculum and sign-off checklist for support engineers, release owners, and
+  incident commanders. It covers bounded first response, sidecar/handshake/
+  heartbeat/reconnect, Store migration and reconciliation, Session Timeline
+  retention/subscription, Windows `TLS initialization failed`, streaming decode
+  errors, renderer restart, Git, terminal, and sandbox paths.
+- The training red lines prohibit deleting repositories or Workbench history,
+  fabricating success from process liveness or a closed socket, disabling TLS or
+  permission validation, retrying ambiguous operations, and collecting secrets,
+  raw provider bodies, prompts, code, diffs, paths, terminal output, PIDs, or
+  raw stderr. It explicitly preserves the Agent/Codex read-only boundary.
+- The guide states the separate roles of the troubleshooting runbook, privacy
+  diagnostic export, and portable Session format; provides release-owner
+  evidence fields and a clean-Windows evidence boundary; and defines seven
+  disposable-fixture exercises with data-free sign-off records. Verification is
+  documentation-only: this does not claim human attendance, a Windows runner
+  pass, or a shipped exporter. `openspec validate build-aegisy-agent-workbench
+  --strict` and `git diff --check` are the required repository gates.
+
 ## 3.6 File-Write Idempotency Foundation
 
 - `agent-runtime/crates/aegisy-agentd/src/file_write_ack.rs` adds the internal,
@@ -2113,6 +2134,18 @@ Known limitations:
   suppresses launch and automatic reconnect; a missing manifest remains allowed
   only for developer-build compatibility.
 - `artifact_manifest_verification` and `agent_runtime_environment` CTests pass.
-  Formal manifest generation, Rust adapter-side verification, updater
-  compatibility integration, signed package evidence, and Windows execution are
-  not implemented; task `22.5` remains unchecked.
+- `cmake/generate_artifact_manifest.cmake` deterministically generates the same
+  contract from explicit final bundle files. It rejects missing, oversized,
+  duplicate, symlinked, or out-of-bundle artifacts; output parents outside the
+  canonical bundle; output paths that replace an artifact; invalid fixed IDs;
+  and version/path metadata outside verifier bounds. It performs no network,
+  process, environment-discovery, signing, or timestamp operation.
+- `artifact_manifest_generation` generates the fixture twice, compares exact
+  bytes/hashes, checks both artifact hashes and the pinned adapter version,
+  rejects outside artifact and output paths, and invokes the production Qt
+  verifier on the generated file. Together with `artifact_manifest_verification`,
+  the focused CTest run passes 2/2.
+- Current macOS and Windows scripts do not bundle a pinned Codex adapter and do
+  not invoke the generator. Rust adapter-side verification, updater compatibility
+  integration, signed package evidence, and Windows execution are not implemented;
+  task `22.5` remains unchecked.
