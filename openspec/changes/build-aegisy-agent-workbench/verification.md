@@ -18,6 +18,37 @@
 - Model catalog/schema and scoped-token backend review.
 - Third-party license, attribution, and redistribution review.
 
+## Product Baseline Decision Evidence (`1.3`, `1.7`, `1.8`)
+
+- `docs/adr/README.md` maps all nine current `design.md` Open Questions to one
+  versioned ADR each. The register and ADR headers agree on one accountable owner,
+  consulted owners, closed status vocabulary, and due gates. Model-catalog closure
+  includes schema, authority, signing, refresh, scoped-token, cache, and admin
+  validation tasks; local-provider and enterprise-retention behavior each require a
+  dedicated accepted follow-up OpenSpec rather than borrowing an unrelated task.
+- `design.md` links each Open Question to the matching ADR. Accepted decisions may
+  be relied upon only within their stated scope; Provisional, Proposed, and Deferred
+  entries preserve every named security/release gate and do not fabricate Codex
+  redistribution, model-catalog authority, Windows sandbox support, or a public name.
+- `docs/AEGISY-SUPPORTED-PLATFORM-MATRIX.md` distinguishes Qt 6.8 capability from
+  repository build, CI/clean-machine evidence, and Aegisy release support. It records
+  the actual macOS deployment target and Windows x64 workflow, filesystem/shell/Git
+  assumptions, display/IME/accessibility rows, unsupported targets, evidence owners,
+  and promotion requirements. A local macOS pass or Windows compile cannot promote a
+  row without the exact signed-package evidence.
+- `docs/AEGISY-WORKBENCH-FEATURE-CHANNEL-POLICY.md` defines internal/preview/beta/
+  stable maturity, local versus separately gated remote surface, and subtractive
+  emergency revocation. It specifies fail-closed authority intersection, feature
+  registry fields, promotion/rollback/persistence/audit contracts, remote denial,
+  emergency `0.1` limits, and table/property/parity/race/signed-package verification.
+  This completes policy task `1.8`, not the production rollout registry, remote
+  architecture, emergency publisher/secure anchor, or release criteria under
+  `22.6`, `22.9`, and `22.10`.
+- Verification commands: check every relative Markdown link, ensure each ADR status
+  is one of the registered values, count exactly nine Open Question ADR links, run
+  `openspec validate build-aegisy-agent-workbench --strict`, and run
+  `git diff --check`.
+
 ## Milestone Evidence
 
 Each milestone in `roadmap.md` must attach:

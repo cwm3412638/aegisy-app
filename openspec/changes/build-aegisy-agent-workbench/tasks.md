@@ -2,7 +2,16 @@
 
 - [ ] 1.1 Approve the Chat versus Work behavioral contract and mutation guarantees with product and security owners
 - [ ] 1.2 Select the public product name and define original Aegisy terminology for project, session, turn, task, runtime, and workspace
-- [ ] 1.3 Convert the seven unresolved architecture questions in `design.md` into owned ADRs with due gates
+- [x] 1.3 Convert all nine unresolved architecture questions in `design.md` into owned ADRs with due gates
+  - `docs/adr/README.md` is the architecture decision register and links one ADR
+    for every current Open Question: embedded WebEngine, Codex distribution/client
+    identity, ACP extensions, model-catalog trust, local models, Windows sandbox,
+    content retention, editor language intelligence, and public product naming.
+  - Every ADR has one accountable owner, consulted owners, a closed status value,
+    and repository gate. Proposed/deferred decisions grant no implementation
+    authority; provisional decisions retain their named release evidence. The
+    Open Questions in `design.md` link back to the exact ADRs so additions cannot
+    disappear behind the historical seven-question wording.
 - [x] 1.4 Create a third-party component and license inventory for Codex, ACP, Monaco, xterm.js, tree-sitter, language servers, and sandbox dependencies
   - `docs/THIRD-PARTY-COMPONENT-INVENTORY.md` records exact repository pins, integration status (`Bundled`, `External`, or `Planned`), license identifiers, source-of-truth files, and release obligations for Codex/AAP/ACP, Monaco/xterm/FitAddon/esbuild, every pinned Tree-sitter grammar, external language-server families, terminal/crypto/storage dependencies, the unselected OS-sandbox boundary, Sparkle/WinSparkle, Lucide, Qt, and OpenSSL.
   - The inventory explicitly separates an installed developer binary from a signed product artifact, forbids claiming ACP or an Aegisy OS sandbox before a dependency is selected, and requires a complete bundle-matched NOTICE/license set. Legal approval and redistribution review remain separate under `1.5`; signed bundle inclusion remains under `22.4`.
@@ -10,8 +19,31 @@
 - [x] 1.6 Define measurable Milestone 0 budgets for installer growth, startup, idle memory, editor latency, terminal throughput, indexing CPU, and crash recovery
   - `docs/AEGISY-MILESTONE-0-PERFORMANCE-BUDGETS.md` defines clean macOS/Windows reference classes, signed Release measurement rules, 20-run median/p95/max reporting, a bounded standard repository/Timeline/editor/terminal fixture, monotonic timing and process-tree memory/CPU accounting.
   - It sets absolute budgets for compressed/installed growth, legacy and Workbench cold/warm readiness, idle/active memory, editor open/input/save, PTY echo/throughput, initial/incremental indexing, renderer/sidecar/full-app crash recovery, plus non-waivable correctness gates and a 10% regression-review threshold. These are predeclared limits only; task `2.7` remains responsible for measured signed macOS/Windows evidence.
-- [ ] 1.7 Define supported macOS/Windows versions, CPU architectures, filesystem assumptions, shell families, Git versions, and display-scale matrix
-- [ ] 1.8 Add a workbench feature-flag policy covering internal, preview, beta, stable, remote, and emergency-disable states
+- [x] 1.7 Define supported macOS/Windows versions, CPU architectures, filesystem assumptions, shell families, Git versions, and display-scale matrix
+  - `docs/AEGISY-SUPPORTED-PLATFORM-MATRIX.md` separates upstream Qt capability,
+    repository package targets, current evidence, and release support. It records
+    the current macOS `26.0`/arm64 internal baseline and Windows x64/10 1809+
+    technical target without promoting either beyond its signed clean-machine
+    evidence.
+  - The matrix defines local APFS/NTFS assumptions, unsupported network/cloud/
+    removable/WSL filesystems, shell discovery and exclusions, a provisional Git
+    `2.31.0` floor that still requires runtime enforcement, macOS 1x/2x and Windows
+    100/125/150/200% display/IME/accessibility coverage, and exact promotion owners
+    and gates. Missing Windows, Intel macOS, ARM64 Windows, long-path, or signed
+    package evidence remains explicit rather than inherited from Qt or compilation.
+- [x] 1.8 Add a workbench feature-flag policy covering internal, preview, beta, stable, remote, and emergency-disable states
+  - `docs/AEGISY-WORKBENCH-FEATURE-CHANNEL-POLICY.md` models maturity channel,
+    execution surface, and emergency revocation as independent axes. Effective
+    authority is the fail-closed intersection of signed artifact, channel/platform,
+    server and managed policy, opt-in, AAP/model/runtime capabilities, trust,
+    permission, approval, sandbox, Store/recovery/liveness, and emergency state.
+  - Remote remains fixed unavailable pending a separate OpenSpec/security gate.
+    Emergency is monotonic and subtractive, preserves only reviewed local read/
+    cleanup/recovery paths, and cannot enable, promote, approve, retry, route, or
+    dispatch. The policy records registry, persistence, promotion, rollback,
+    content-free audit, parity/race/property tests, and the current production gaps:
+    publisher/endpoint, secure anti-deletion anchor, signed-policy identity binding
+    in Runtime, allowlist parity, and signed macOS/Windows evidence.
 
 ## 2. Milestone 0 UI Technology Spike
 

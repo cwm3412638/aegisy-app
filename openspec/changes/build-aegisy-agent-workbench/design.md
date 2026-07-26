@@ -798,21 +798,29 @@ Rollback strategy:
 ## Open Questions
 
 - Does the Qt WebEngine spike meet signed installer size, IME, accessibility,
-  startup, and memory budgets on both supported platforms?
+  startup, and memory budgets on both supported platforms? See
+  [ADR 0001](../../../docs/adr/0001-embedded-webengine-go-no-go.md).
 - Which Codex App Server versions and integration terms can Aegisy redistribute or
-  require, and which enterprise client identity requirements apply?
+  require, and which enterprise client identity requirements apply? See
+  [ADR 0002](../../../docs/adr/0002-codex-distribution-and-client-identity.md).
 - Which ACP extensions are necessary for diffs, Git graph, model capability,
-  child sessions, and background jobs, and should any be proposed upstream?
+  child sessions, and background jobs, and should any be proposed upstream? See
+  [ADR 0003](../../../docs/adr/0003-acp-extension-policy.md).
 - What exact Aegisy model-catalog schema and signing mechanism can the website
-  deliver, and which values are authoritative versus measured recommendations?
+  deliver, and which values are authoritative versus measured recommendations? See
+  [ADR 0004](../../../docs/adr/0004-model-catalog-trust-and-authority.md).
 - Should local Ollama/LM Studio models be routed through Aegisy policy or offered
-  as an explicitly unmanaged offline provider profile?
+  as an explicitly unmanaged offline provider profile? See
+  [ADR 0005](../../../docs/adr/0005-local-model-provider-policy.md).
 - Which native Windows sandbox combination provides acceptable filesystem,
-  process, and network isolation without requiring administrator privileges?
+  process, and network isolation without requiring administrator privileges? See
+  [ADR 0006](../../../docs/adr/0006-windows-native-sandbox.md).
 - What data retention defaults apply to terminal output, diffs, images, and local
-  session history, and which enterprise policy controls are required?
+  session history, and which enterprise policy controls are required? See
+  [ADR 0007](../../../docs/adr/0007-local-content-retention.md).
 - Should the first editor milestone include LSP, or is Monaco syntax plus build
-  diagnostics sufficient until the structured patch workflow stabilizes?
+  diagnostics sufficient until the structured patch workflow stabilizes? See
+  [ADR 0008](../../../docs/adr/0008-editor-language-intelligence.md).
 - What user-visible name will distinguish the product (`Aegisy Workbench`,
   `Aegisy Studio`, or another name) without implying compatibility guarantees not
-  yet delivered?
+  yet delivered? See [ADR 0009](../../../docs/adr/0009-public-product-name.md).

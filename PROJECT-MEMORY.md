@@ -193,7 +193,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 50 of 235 checkbox tasks are complete and 185 remain
+- OpenSpec task baseline: 53 of 235 checkbox tasks are complete and 182 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
 - OpenSpec task `3.3` is complete. The stable Schema, Rust Runtime/stdio daemon, Qt
@@ -3351,6 +3351,42 @@ Implemented visual baseline:
   Chinese IME, high contrast, supported scaling, and clean Windows evidence remain
   release gaps.
 
+## Product Baseline Decision Gates (2026-07-26)
+
+- OpenSpec `1.3` is complete. `docs/adr/README.md` registers all nine current
+  `design.md` Open Questions and links one owned ADR for WebEngine, Codex
+  distribution/client identity, ACP extensions, model-catalog trust, local models,
+  Windows sandbox, local-content retention, editor language intelligence, and public
+  naming. Each ADR has one accountable owner, consulted owners, a closed status, and
+  an enforceable repository or dedicated-follow-up OpenSpec gate. Proposed,
+  Provisional, and Deferred decisions grant no missing product authority. Model
+  catalog closure includes schema/authority/signing/refresh/token/cache/admin gates;
+  local providers and enterprise retention each require a dedicated accepted OpenSpec
+  before implementation or beta mutation.
+- OpenSpec `1.7` is complete as a support-policy definition.
+  `docs/AEGISY-SUPPORTED-PLATFORM-MATRIX.md` separates upstream dependency
+  capability, repository target, executed evidence, and release support. The current
+  local baseline is macOS 26.5.2 arm64, Qt 6.11.1, an arm64 artifact, and deployment
+  target 26.0. Windows is an x64/MSVC 2022/Qt 6.8.3 target with Windows 10 1809 as
+  the ConPTY technical floor, but the installer still lacks `MinVersion`, the app
+  manifest lacks `longPathAware`, and clean installer/TLS/ConPTY/Git/IME/scaling/
+  accessibility/update evidence remains absent. macOS Intel, Windows ARM64, Linux,
+  remote, network/cloud/removable filesystems, WSL/Git Bash/MSYS/Cygwin, and other
+  unverified combinations are unsupported. The external Git contract has a declared
+  `2.31.0` minimum but no Runtime version enforcement yet.
+- OpenSpec `1.8` is complete as a feature/channel policy definition.
+  `docs/AEGISY-WORKBENCH-FEATURE-CHANNEL-POLICY.md` treats internal/preview/beta/
+  stable maturity, local versus future remote surface, and emergency revocation as
+  independent axes. Effective authority is the fail-closed intersection of signed
+  artifact, channel/platform, server/managed policy, opt-in, AAP/model/runtime,
+  trust, permission, Approval, sandbox, Store/recovery/liveness, and emergency
+  state. Remote remains unavailable without a separate OpenSpec. Emergency `0.1` is
+  global and subtractive only; feature-scoped disable requires a new schema.
+  Production registry/cohort delivery, policy publisher/endpoint, secure
+  anti-deletion anchor, Runtime verification of signed policy identity, Qt/Rust
+  allowlist parity automation, and signed macOS/Windows evidence remain under
+  `22.6`, `22.9`, and `22.10` and are not implied by policy completion.
+
 ## Next Product Priorities
 
 1. Continue OpenSpec `3.5` by obtaining complete Windows reconnect/runtime evidence,
@@ -3409,3 +3445,12 @@ Implemented visual baseline:
    catalog matcher; then expose a real picker and immutable model-change event
    only after token, routing, and cross-platform evidence gates pass. The
    current Qt profile count is metadata-only and is not a picker.
+17. Before any public platform claim, deliberately select and pin the macOS Qt/
+    deployment target, add Windows installer `MinVersion` and application
+    `longPathAware` policy with clean-host tests, enforce Git `2.31.0` before
+    advertising Git capabilities, and execute the complete signed platform matrix.
+18. Implement the repository-owned feature registry and channel delivery only after
+    its signed-artifact upper bound and fail-closed intersection are testable. Finish
+    emergency production publication, secure high-water anchoring, Runtime binding
+    to the exact signed policy identity, and Qt/Rust method-classification parity;
+    keep remote fixed unavailable until its separate OpenSpec is accepted.
