@@ -9,8 +9,14 @@ agent-runtime/aap-schema/generated/**/*.ts text eol=lf
 agent-runtime/aap-schema/generated/**/*.cpp text eol=lf
 agent-runtime/aap-schema/generated/**/*.h text eol=lf
 agent-runtime/crates/aegisy-aap/src/generated_core.rs text eol=lf
+agent-runtime/crates/aegisy-aap/src/generated_transport.rs text eol=lf
+agent-runtime/crates/aegisy-aap/src/transport_json.rs text eol=lf
+agent-runtime/crates/aegisy-aap/examples/aap_transport_fixture.rs text eol=lf
+agent-runtime/aap-schema/runtime/cpp/*.h text eol=lf
+agent-runtime/aap-schema/runtime/cpp/*.cpp text eol=lf
 
 # Cross-language generation gate sources use the same line-ending contract.
 **/CMakeLists.txt text eol=lf
 *.cmake text eol=lf
 tests/aap_generated_types_test.cpp text eol=lf
+tests/aap_transport_generated_types_test.cpp text eol=lf

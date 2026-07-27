@@ -1,0 +1,46 @@
+{
+  "schema_version": "aap-transport-method-registry/0.1",
+  "schema_id": "https://aegisy.cc/schemas/aap/stable/v0.1/aap.schema.json",
+  "response_dispatch": {
+    "success": "pending-request-method",
+    "error": "pending-request-method-with-typed-error-fail-closed",
+    "unmatched": "generic-root-envelope-only"
+  },
+  "generic_payload_semantics": {
+    "result": "draft-2020-12-true-schema",
+    "error_data": "draft-2020-12-true-schema",
+    "error_code": "unbounded-mathematical-integer"
+  },
+  "unknown_method_fallbacks": [
+    {
+      "kind": "request",
+      "selection": "valid-root-request-with-method-not-listed-below",
+      "params": "object",
+      "response_dispatch": "pending-request-context",
+      "typed": false
+    },
+    {
+      "kind": "notification",
+      "selection": "valid-root-notification-with-method-not-listed-below",
+      "params": "object",
+      "response_dispatch": "none",
+      "typed": false
+    }
+  ],
+  "methods": [
+    { "method": "event", "kind": "notification", "params_definition": "timelineEvent", "request_definition": null, "success_response_definition": null, "error_response_definitions": [], "notification_definition": null },
+    { "method": "initialize", "kind": "request", "params_definition": "initializeParams", "request_definition": "initializeRequest", "success_response_definition": "initializeSuccessResponse", "error_response_definitions": ["initializeIncompatibleErrorResponse"], "notification_definition": null },
+    { "method": "initialized", "kind": "notification", "params_definition": null, "request_definition": null, "success_response_definition": null, "error_response_definitions": [], "notification_definition": "initializedNotification" },
+    { "method": "mutation/acknowledgement/consume", "kind": "request", "params_definition": "durableMutationConsumeParams", "request_definition": "durableMutationConsumeRequest", "success_response_definition": "durableMutationConsumeSuccessResponse", "error_response_definitions": [], "notification_definition": null },
+    { "method": "runtime/heartbeat", "kind": "request", "params_definition": "runtimeHeartbeatParams", "request_definition": "runtimeHeartbeatRequest", "success_response_definition": "runtimeHeartbeatSuccessResponse", "error_response_definitions": [], "notification_definition": null },
+    { "method": "session/mutation-acknowledgements", "kind": "request", "params_definition": "durableMutationListParams", "request_definition": "durableMutationListRequest", "success_response_definition": "durableMutationListSuccessResponse", "error_response_definitions": [], "notification_definition": null },
+    { "method": "timeline/snapshot", "kind": "request", "params_definition": "timelineSnapshotParams", "request_definition": "timelineSnapshotRequest", "success_response_definition": "timelineSnapshotSuccessResponse", "error_response_definitions": [], "notification_definition": null },
+    { "method": "timeline/subscribe", "kind": "request", "params_definition": "timelineSubscribeParams", "request_definition": "timelineSubscribeRequest", "success_response_definition": "timelineSubscribeSuccessResponse", "error_response_definitions": ["timelineSubscriptionRequestErrorResponse"], "notification_definition": null },
+    { "method": "timeline/subscription-activate", "kind": "request", "params_definition": "timelineActivateParams", "request_definition": "timelineSubscriptionActivateRequest", "success_response_definition": "timelineSubscriptionActivateSuccessResponse", "error_response_definitions": ["timelineSubscriptionRequestErrorResponse"], "notification_definition": null },
+    { "method": "timeline/subscription-event", "kind": "notification", "params_definition": "timelineSubscriptionEvent", "request_definition": null, "success_response_definition": null, "error_response_definitions": [], "notification_definition": "timelineSubscriptionEventNotification" },
+    { "method": "timeline/subscription-failure", "kind": "notification", "params_definition": "timelineSubscriptionLiveFailure", "request_definition": null, "success_response_definition": null, "error_response_definitions": [], "notification_definition": "timelineSubscriptionFailureNotification" },
+    { "method": "timeline/subscription-snapshot", "kind": "request", "params_definition": "timelineSubscriptionSnapshotParams", "request_definition": "timelineSubscriptionSnapshotRequest", "success_response_definition": "timelineSubscriptionSnapshotSuccessResponse", "error_response_definitions": ["timelineSubscriptionRequestErrorResponse"], "notification_definition": null },
+    { "method": "timeline/subscription-sync", "kind": "request", "params_definition": "timelineSubscriptionSyncParams", "request_definition": "timelineSubscriptionSyncRequest", "success_response_definition": "timelineSubscriptionSyncSuccessResponse", "error_response_definitions": ["timelineSubscriptionRequestErrorResponse"], "notification_definition": null },
+    { "method": "timeline/sync", "kind": "request", "params_definition": "timelineSyncParams", "request_definition": "timelineSyncRequest", "success_response_definition": "timelineSyncSuccessResponse", "error_response_definitions": ["timelineSyncRetentionGapErrorResponse"], "notification_definition": null }
+  ]
+}

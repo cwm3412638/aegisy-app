@@ -399,6 +399,50 @@ if(BUILD_TESTING)
             -DCARGO_EXECUTABLE=${CARGO_EXECUTABLE}
             -DCPP_EXECUTABLE=$<TARGET_FILE:AegisyAapGeneratedTypesTest>
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_aap_generated_types.cmake)
+    add_executable(AegisyAapTransportRuntimeTest
+        agent-runtime/aap-schema/runtime/cpp/aap_transport_runtime_test.cpp
+        agent-runtime/aap-schema/runtime/cpp/aap_transport_runtime.cpp
+        agent-runtime/aap-schema/runtime/cpp/aap_transport_runtime.h
+        agent-runtime/aap-schema/generated/cpp/aap_transport_types_generated.h
+    )
+    target_include_directories(AegisyAapTransportRuntimeTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/generated/cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/runtime/cpp)
+    add_executable(AegisyAapTransportGeneratedTypesTest
+        tests/aap_transport_generated_types_test.cpp
+        agent-runtime/aap-schema/generated/cpp/aap_transport_types_generated.cpp
+        agent-runtime/aap-schema/generated/cpp/aap_transport_types_generated.h
+        agent-runtime/aap-schema/runtime/cpp/aap_transport_runtime.cpp
+        agent-runtime/aap-schema/runtime/cpp/aap_transport_runtime.h
+    )
+    target_include_directories(AegisyAapTransportGeneratedTypesTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/generated/cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/runtime/cpp)
+    foreach(transport_target IN ITEMS
+            AegisyAapTransportRuntimeTest
+            AegisyAapTransportGeneratedTypesTest)
+        if(QT_VERSION_MAJOR EQUAL 6)
+            target_link_libraries(${transport_target} PRIVATE Qt6::Core)
+        else()
+            target_link_libraries(${transport_target} PRIVATE Qt5::Core)
+        endif()
+        if(MSVC)
+            target_compile_options(${transport_target} PRIVATE /W4 /WX)
+        else()
+            target_compile_options(${transport_target} PRIVATE -Wall -Wextra -Werror)
+        endif()
+    endforeach()
+    add_test(NAME aap_transport_runtime
+        COMMAND AegisyAapTransportRuntimeTest
+            ${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/stable/v0.1/aap.schema.json)
+    add_test(NAME aap_transport_generated_types
+        COMMAND ${CMAKE_COMMAND}
+            -DAEGISY_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -DAEGISY_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DNODE_EXECUTABLE=${NODE_EXECUTABLE}
+            -DCARGO_EXECUTABLE=${CARGO_EXECUTABLE}
+            -DCPP_EXECUTABLE=$<TARGET_FILE:AegisyAapTransportGeneratedTypesTest>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_aap_transport_generated_types.cmake)
     add_executable(AegisyProfileArchiveTest
         tests/profile_archive_test.cpp
         src/profile_archive.cpp

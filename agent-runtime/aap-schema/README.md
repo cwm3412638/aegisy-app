@@ -58,11 +58,13 @@ aggregate tree limits, cross-field identities, timestamps, token totals, and
 Workspace Git invariants remain independently enforced by typed Rust and Qt
 validators and their boundary tests.
 
-## Generated Core Types
+## Generated Types
 
-`stable/v0.1/core.schema.json` is also the single input for the partial OpenSpec
-`3.10` generation slice. The deterministic generator writes checked-in outputs
-for all three current consumers:
+The stable `0.1` schemas are the inputs for the partial OpenSpec `3.10`
+generation slices. Deterministic generators write checked-in outputs for all
+three current consumers.
+
+Core-domain outputs from `stable/v0.1/core.schema.json` are:
 
 - Rust: `../crates/aegisy-aap/src/generated_core.rs`;
 - TypeScript declarations/runtime: `generated/typescript/core_types.d.ts` and
@@ -91,14 +93,39 @@ All three validators must make the same decision for every case and reproduce it
 reviewed decision-list SHA-256; a matching positive fixture hash alone is
 insufficient.
 
+Transport outputs from `stable/v0.1/aap.schema.json` are:
+
+- Rust: `../crates/aegisy-aap/src/generated_transport.rs` plus the shared
+  lossless JSON implementation in `../crates/aegisy-aap/src/transport_json.rs`;
+- TypeScript declarations/runtime: `generated/typescript/transport_types.d.ts`
+  and `generated/typescript/transport_types.mjs`;
+- Qt/C++: `generated/cpp/aap_transport_types_generated.h` and
+  `generated/cpp/aap_transport_types_generated.cpp`, backed by the packaged
+  `runtime/cpp/aap_transport_runtime.h` and `.cpp` implementation.
+
+Transport validation preserves arbitrary-precision number lexemes and rejects
+BOM input, invalid UTF-8, duplicate decoded keys, unpaired surrogates, frames
+above 4 MiB, depth above 128, and more than 65,536 JSON nodes. The reviewed
+method registry maps root request, response, error, and notification dispatch.
+The 99-definition fixture catalog and separate 72-case parser/Schema corpus are
+validated independently by Node, generated TypeScript, Rust, and Qt/C++.
+
 Run the generator and focused cross-language gate from the repository root:
 
 ```sh
 node agent-runtime/aap-schema/scripts/generate-core-types.mjs
+node agent-runtime/aap-schema/scripts/generate-transport-types.mjs
 node agent-runtime/aap-schema/scripts/test-core-generator-inputs.mjs
+node agent-runtime/aap-schema/scripts/test-transport-generator-inputs.mjs
 node agent-runtime/aap-schema/scripts/generate-core-types.mjs --check
+node agent-runtime/aap-schema/scripts/generate-transport-types.mjs --check
+npm --prefix agent-runtime/aap-schema run generate:check
 cmake --build build --target AegisyAapGeneratedTypesTest -j4
+cmake --build build --target AegisyAapTransportRuntimeTest \
+  AegisyAapTransportGeneratedTypesTest -j4
 ctest --test-dir build -R '^aap_generated_types$' --output-on-failure
+ctest --test-dir build \
+  -R '^aap_transport_(runtime|generated_types)$' --output-on-failure
 cargo package --manifest-path agent-runtime/Cargo.toml \
   -p aegisy-aap --allow-dirty
 ```
@@ -111,10 +138,14 @@ generated-output, and gate source files to LF so a Windows checkout cannot chang
 the reviewed bytes. `BUILD_TESTING=ON` requires both Node.js and Cargo; a production
 configuration with testing disabled keeps its existing dependency behavior.
 
-This slice generates only `core.schema.json` domain definitions. Transport
-request/response/notification generation from `aap.schema.json`, migration of all
-hand-written Rust/Qt consumers, and clean Windows execution remain required before
-OpenSpec `3.10` can be checked.
+The npm package gate executes `npm pack --dry-run --json` and checks the exact
+published file inventory. The generated C++ Transport source therefore cannot be
+published without its required Runtime header and implementation, while test-only
+C++ sources remain outside the package.
+
+Core and Transport generation are implemented. Migration of all hand-written
+Rust/Qt production consumers and clean Windows Unicode-checkout execution remain
+required before OpenSpec `3.10` can be checked.
 
 ## Promotion
 

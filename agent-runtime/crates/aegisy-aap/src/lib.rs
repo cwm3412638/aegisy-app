@@ -5,6 +5,8 @@ use std::collections::HashSet;
 use std::fmt;
 
 pub mod generated_core;
+pub mod generated_transport;
+pub mod transport_json;
 
 pub const JSONRPC_VERSION: &str = "2.0";
 pub const PROTOCOL_VERSION: &str = "0.1";

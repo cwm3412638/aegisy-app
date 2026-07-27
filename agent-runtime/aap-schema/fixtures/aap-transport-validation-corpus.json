@@ -1,0 +1,440 @@
+{
+  "schema_version": "aap-transport-validation-corpus/0.1",
+  "schema_id": "https://aegisy.cc/schemas/aap/stable/v0.1/aap.schema.json",
+  "parser_profile": "exact-json-number-schema-bounded-integer-unicode-scalar-no-duplicate-keys/0.1",
+  "expected_decisions_sha256": "f0ce6bdc14c815b2b80b273126da8b20a80ec47371d39128c7e2155246f60404",
+  "cases": [
+    {
+      "name": "valid-root-initialize-request",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"id\",\"method\":\"initialize\",\"params\":{\"protocol\":{\"minimum\":\"0.1\",\"maximum\":\"0.1\",\"preferred\":\"0.1\"},\"client\":{\"name\":\"id\",\"version\":\"id\"},\"platform\":{\"os\":\"macos\",\"architecture\":\"arm64\"},\"capabilities\":{\"stable\":[\"id\"],\"experimental\":[]},\"limits\":{\"max_frame_bytes\":4194304},\"transport_security\":{\"transport\":\"stdio\",\"local\":true,\"authenticated\":false,\"encrypted\":false,\"peer_verified\":false}}}"
+    },
+    {
+      "name": "valid-root-initialized-notification",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}"
+    },
+    {
+      "name": "valid-root-heartbeat-request",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"id\",\"method\":\"runtime/heartbeat\",\"params\":{\"schema_version\":\"runtime-heartbeat-request/0.1\",\"nonce\":\"id\"}}"
+    },
+    {
+      "name": "valid-root-success-response",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"id\",\"result\":{\"protocol\":{\"minimum\":\"0.1\",\"maximum\":\"0.1\",\"selected\":\"0.1\",\"upgrade_direction\":\"none\"},\"runtime\":{\"name\":\"id\",\"version\":\"id\"},\"platform\":{\"os\":\"macos\",\"architecture\":\"arm64\"},\"backend\":{\"adapter\":\"id\",\"status\":\"ready\",\"version\":\"id\"},\"capabilities\":{\"stable\":[\"id\"],\"experimental\":[]},\"limits\":{\"max_frame_bytes\":4194304},\"transport_security\":{\"transport\":\"stdio\",\"local\":true,\"authenticated\":false,\"encrypted\":false,\"peer_verified\":false}}}"
+    },
+    {
+      "name": "valid-root-error-null-id",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}"
+    },
+    {
+      "name": "valid-root-generic-result-fraction",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"generic-result-1\",\"result\":1.5}"
+    },
+    {
+      "name": "valid-root-generic-error-unbounded-integer",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":123456789012345678901234567890,\"message\":\"future error\",\"data\":1.5}}"
+    },
+    {
+      "name": "valid-root-generic-result-huge-integer",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"generic-result-2\",\"result\":1234567890123456789012345678901234567890}"
+    },
+    {
+      "name": "valid-root-generic-result-huge-exponent",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"generic-result-3\",\"result\":1e100000}"
+    },
+    {
+      "name": "valid-root-generic-data-tiny-negative-exponent",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-1e0,\"message\":\"future error\",\"data\":-1e-100000}}"
+    },
+    {
+      "name": "invalid-root-error-code-noninteger",
+      "target": "$root",
+      "valid": false,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":1.5,\"message\":\"invalid code\"}}"
+    },
+    {
+      "name": "valid-root-generic-result-unicode-key",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"generic-result-4\",\"result\":{\"界\":\"😀\"}}"
+    },
+    {
+      "name": "invalid-root-generic-result-duplicate-key",
+      "target": "$root",
+      "valid": false,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"generic-result-5\",\"result\":{\"key\":1,\"key\":2}}"
+    },
+    {
+      "name": "invalid-root-generic-result-lone-surrogate",
+      "target": "$root",
+      "valid": false,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"generic-result-6\",\"result\":\"\\ud800\"}"
+    },
+    {
+      "name": "valid-root-event-notification",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"method\":\"event\",\"params\":{\"schema_version\":\"timeline-event/0.1\",\"event_id\":\"event:sha256:a3ea83f9fd0b70adafafe203fc62f1a82a78b42a652e82615725a858d411236a\",\"sequence\":1,\"timestamp_ms\":1784851200001,\"correlation_id\":\"turn-1\",\"session_id\":\"session-1\",\"turn_id\":\"turn-1\",\"turn_state\":\"running\",\"event\":\"turn.started\",\"item\":null,\"item_update\":null}}"
+    },
+    {
+      "name": "valid-root-subscription-failure-notification",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"method\":\"timeline/subscription-failure\",\"params\":{\"schema_version\":\"timeline-subscription-failure/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"failed\",\"stage\":\"live\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"request_identity\":null,\"reason\":\"transport\",\"retryable\":true,\"cleanup_required\":true}}"
+    },
+    {
+      "name": "valid-root-unregistered-generic-request",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"generic-1\",\"method\":\"future/read\",\"params\":{}}"
+    },
+    {
+      "name": "valid-root-unregistered-generic-notification",
+      "target": "$root",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"method\":\"future/event\",\"params\":{}}"
+    },
+    {
+      "name": "invalid-root-missing-jsonrpc",
+      "target": "$root",
+      "valid": false,
+      "value_json": "{\"id\":\"request-1\",\"method\":\"runtime/heartbeat\",\"params\":{}}"
+    },
+    {
+      "name": "invalid-root-extra-field",
+      "target": "$root",
+      "valid": false,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"request-1\",\"method\":\"future/read\",\"params\":{},\"extra\":true}"
+    },
+    {
+      "name": "invalid-root-request-null-id",
+      "target": "$root",
+      "valid": false,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"future/read\",\"params\":{}}"
+    },
+    {
+      "name": "invalid-root-success-null-id",
+      "target": "$root",
+      "valid": false,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":null,\"result\":{}}"
+    },
+    {
+      "name": "invalid-root-initialize-empty-params",
+      "target": "$root",
+      "valid": false,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"initialize-1\",\"method\":\"initialize\",\"params\":{}}"
+    },
+    {
+      "name": "invalid-root-initialized-has-id",
+      "target": "$root",
+      "valid": false,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"initialized-1\",\"method\":\"initialized\",\"params\":{}}"
+    },
+    {
+      "name": "invalid-root-event-has-id",
+      "target": "$root",
+      "valid": false,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"event-1\",\"method\":\"event\",\"params\":{\"schema_version\":\"timeline-event/0.1\",\"event_id\":\"event:sha256:a3ea83f9fd0b70adafafe203fc62f1a82a78b42a652e82615725a858d411236a\",\"sequence\":1,\"timestamp_ms\":1784851200001,\"correlation_id\":\"turn-1\",\"session_id\":\"session-1\",\"turn_id\":\"turn-1\",\"turn_state\":\"running\",\"event\":\"turn.started\",\"item\":null,\"item_update\":null}}"
+    },
+    {
+      "name": "invalid-root-heartbeat-schema-version",
+      "target": "$root",
+      "valid": false,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"id\",\"method\":\"runtime/heartbeat\",\"params\":{\"schema_version\":\"runtime-heartbeat-request/9.9\",\"nonce\":\"id\"}}"
+    },
+    {
+      "name": "invalid-root-subscription-error-null-id",
+      "target": "$root",
+      "valid": false,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32150,\"message\":\"subscription failed\",\"data\":{\"schema_version\":\"timeline-subscription-failure/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"failed\",\"stage\":\"subscribe\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"request_identity\":\"timeline-subscription-request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"reason\":\"transport\",\"retryable\":true,\"cleanup_required\":true}}}"
+    },
+    {
+      "name": "valid-ref-sibling-subscription-error",
+      "target": "timelineSubscriptionRequestErrorResponse",
+      "valid": true,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"subscribe-1\",\"error\":{\"code\":-32150,\"message\":\"subscription failed\",\"data\":{\"schema_version\":\"timeline-subscription-failure/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"failed\",\"stage\":\"subscribe\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"request_identity\":\"timeline-subscription-request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"reason\":\"transport\",\"retryable\":true,\"cleanup_required\":true}}}"
+    },
+    {
+      "name": "invalid-ref-sibling-missing-data",
+      "target": "timelineSubscriptionRequestErrorResponse",
+      "valid": false,
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"subscribe-1\",\"error\":{\"code\":-32150,\"message\":\"subscription failed\"}}"
+    },
+    {
+      "name": "valid-oneof-jsonrpc-string",
+      "target": "jsonRpcId",
+      "valid": true,
+      "value_json": "\"request-1\""
+    },
+    {
+      "name": "valid-oneof-jsonrpc-null",
+      "target": "jsonRpcId",
+      "valid": true,
+      "value_json": "null"
+    },
+    {
+      "name": "invalid-oneof-jsonrpc-number",
+      "target": "jsonRpcId",
+      "valid": false,
+      "value_json": "1"
+    },
+    {
+      "name": "valid-timeline-anchor-zero-null",
+      "target": "timelineAnchor",
+      "valid": true,
+      "value_json": "{\"sequence\":0,\"event_id\":null}"
+    },
+    {
+      "name": "valid-timeline-anchor-positive-id",
+      "target": "timelineAnchor",
+      "valid": true,
+      "value_json": "{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+    },
+    {
+      "name": "invalid-timeline-anchor-positive-null",
+      "target": "timelineAnchor",
+      "valid": false,
+      "value_json": "{\"sequence\":1,\"event_id\":null}"
+    },
+    {
+      "name": "valid-allof-positive-anchor",
+      "target": "positiveTimelineAnchor",
+      "valid": true,
+      "value_json": "{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+    },
+    {
+      "name": "invalid-allof-positive-anchor-zero",
+      "target": "positiveTimelineAnchor",
+      "valid": false,
+      "value_json": "{\"sequence\":0,\"event_id\":null}"
+    },
+    {
+      "name": "valid-if-durable-operation",
+      "target": "durableMutationOperation",
+      "valid": true,
+      "value_json": "{\"schema_version\":\"mutation-acknowledgement-operation/0.1\",\"operation_identity\":\"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_id\":\"session-1\",\"mutation_kind\":\"turn-start\",\"idempotency_key\":\"idem-1\",\"request_fingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"revision\":1,\"state\":\"accepted\",\"turn_id\":\"turn-1\",\"accepted_anchor\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"terminal_anchor\":null,\"accepted_consumed\":false,\"terminal_consumed\":false}"
+    },
+    {
+      "name": "invalid-if-durable-operation-terminal-anchor",
+      "target": "durableMutationOperation",
+      "valid": false,
+      "value_json": "{\"schema_version\":\"mutation-acknowledgement-operation/0.1\",\"operation_identity\":\"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_id\":\"session-1\",\"mutation_kind\":\"turn-start\",\"idempotency_key\":\"idem-1\",\"request_fingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"revision\":1,\"state\":\"accepted\",\"turn_id\":\"turn-1\",\"accepted_anchor\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"terminal_anchor\":{\"sequence\":2,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"accepted_consumed\":false,\"terminal_consumed\":false}"
+    },
+    {
+      "name": "valid-not-event-name",
+      "target": "timelineEventName",
+      "valid": true,
+      "value_json": "\"future.event\""
+    },
+    {
+      "name": "invalid-not-event-name",
+      "target": "timelineEventName",
+      "valid": false,
+      "value_json": "\"turn.persistence-failed\""
+    },
+    {
+      "name": "valid-anyof-string",
+      "target": "$probe:anyOf",
+      "valid": true,
+      "value_json": "\"value\""
+    },
+    {
+      "name": "valid-anyof-integer",
+      "target": "$probe:anyOf",
+      "valid": true,
+      "value_json": "1"
+    },
+    {
+      "name": "invalid-anyof-boolean",
+      "target": "$probe:anyOf",
+      "valid": false,
+      "value_json": "true"
+    },
+    {
+      "name": "valid-const-mathematical-integer-exponent",
+      "target": "$probe:constNumber",
+      "valid": true,
+      "value_json": "1e0"
+    },
+    {
+      "name": "invalid-const-number-drift",
+      "target": "$probe:constNumber",
+      "valid": false,
+      "value_json": "1.0000000000000001"
+    },
+    {
+      "name": "invalid-unique-items-equivalent-number-forms",
+      "target": "$probe:uniqueItems",
+      "valid": false,
+      "value_json": "[1,1.0,1e0]"
+    },
+    {
+      "name": "valid-unique-items-distinct-exact-numbers",
+      "target": "$probe:uniqueItems",
+      "valid": true,
+      "value_json": "[1,1.0000000000000001,1.5]"
+    },
+    {
+      "name": "valid-unicode-literal",
+      "target": "timelineItem",
+      "valid": true,
+      "value_json": "{\"id\":\"item-1\",\"kind\":\"message\",\"role\":\"agent\",\"state\":\"completed\",\"content\":\"你好😀\"}"
+    },
+    {
+      "name": "valid-unicode-escaped-pair",
+      "target": "timelineItem",
+      "valid": true,
+      "value_json": "{\"id\":\"item-1\",\"kind\":\"message\",\"role\":\"agent\",\"state\":\"completed\",\"content\":\"\\ud83d\\ude00\"}"
+    },
+    {
+      "name": "invalid-unicode-lone-high",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "\"\\ud800\""
+    },
+    {
+      "name": "invalid-unicode-lone-low",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "\"\\udc00\""
+    },
+    {
+      "name": "invalid-unicode-lone-high-key",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "{\"\\ud800\":1}"
+    },
+    {
+      "name": "invalid-unicode-reversed-pair",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "\"\\udc00\\ud800\""
+    },
+    {
+      "name": "invalid-duplicate-object-key",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "{\"key\":1,\"key\":2}"
+    },
+    {
+      "name": "invalid-duplicate-object-key-escaped-equivalent",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "{\"key\":1,\"\u006bey\":2}"
+    },
+    {
+      "name": "valid-safe-positive-boundary",
+      "target": "jsonSafeValue",
+      "valid": true,
+      "value_json": "9007199254740991"
+    },
+    {
+      "name": "valid-safe-negative-boundary",
+      "target": "jsonSafeValue",
+      "valid": true,
+      "value_json": "-9007199254740991"
+    },
+    {
+      "name": "invalid-safe-positive-overflow",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "9007199254740992"
+    },
+    {
+      "name": "invalid-safe-negative-overflow",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "-9007199254740992"
+    },
+    {
+      "name": "valid-mathematical-integer-fraction-form",
+      "target": "jsonSafeValue",
+      "valid": true,
+      "value_json": "1.0"
+    },
+    {
+      "name": "valid-mathematical-integer-exponent-form",
+      "target": "jsonSafeValue",
+      "valid": true,
+      "value_json": "1e0"
+    },
+    {
+      "name": "invalid-noninteger-number",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "1.5"
+    },
+    {
+      "name": "invalid-number-leading-zero",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "01"
+    },
+    {
+      "name": "valid-safe-positive-definition-max",
+      "target": "safePositiveInteger",
+      "valid": true,
+      "value_json": "9007199254740991"
+    },
+    {
+      "name": "valid-safe-positive-boundary-exponent-form",
+      "target": "safePositiveInteger",
+      "valid": true,
+      "value_json": "90071992547409910e-1"
+    },
+    {
+      "name": "invalid-safe-positive-overflow-exponent-form",
+      "target": "safePositiveInteger",
+      "valid": false,
+      "value_json": "90071992547409920e-1"
+    },
+    {
+      "name": "invalid-safe-positive-definition-zero",
+      "target": "safePositiveInteger",
+      "valid": false,
+      "value_json": "0"
+    },
+    {
+      "name": "valid-json-safe-unicode-object",
+      "target": "jsonSafeValue",
+      "valid": true,
+      "value_json": "  { \"unicode\" : [ -1, 0, 1, \"😀\" ] } \n"
+    },
+    {
+      "name": "invalid-json-trailing-bytes",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "1 true"
+    },
+    {
+      "name": "invalid-json-leading-bom",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "﻿null"
+    },
+    {
+      "name": "invalid-json-control-character",
+      "target": "jsonSafeValue",
+      "valid": false,
+      "value_json": "\"line\nbreak\""
+    }
+  ]
+}

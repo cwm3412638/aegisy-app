@@ -144,9 +144,34 @@
     normalized type/field/variant collisions and property-bearing open DTO shapes.
   - `BUILD_TESTING=ON` requires Node and Cargo; the Qt runner uses native Unicode
     arguments, `.gitattributes` fixes generated/gate inputs to LF, and the generated
-    Rust module is inside `aegisy-aap` for Cargo packaging. Keep `3.10` unchecked:
-    transport request/response/notification generation from `aap.schema.json`,
-    complete consumer migration, and clean Windows execution evidence are absent.
+    Rust module is inside `aegisy-aap` for Cargo packaging.
+  - Partial Transport slice: stable `aap.schema.json` now deterministically emits
+    checked-in Rust, TypeScript, and Qt/C++ request/response/notification types plus
+    raw definition/root validators. Stable `0.1` retains true-schema generic
+    `result`/`error.data` values and an unbounded mathematical integer error code,
+    so the shared parser profile preserves arbitrary-precision number lexemes and
+    rejects BOM, invalid UTF-8, duplicate decoded keys, unpaired surrogates, frames
+    above 4 MiB, depth above 128, and more than 65,536 JSON nodes. Canonical JSON
+    sorts object keys by UTF-8 bytes and normalizes numbers without a floating-point
+    round trip.
+  - A reviewed method registry covers every root dispatch condition and generic
+    fallback. The 99-definition fixture catalog has identity
+    `29644 8948085aaf1c08ed94cad5ef1e682dc041120053045e06f851cea64d4dfbe0db`;
+    the shared 72-case parser/Schema corpus has identity
+    `72 f0ce6bdc14c815b2b80b273126da8b20a80ec47371d39128c7e2155246f60404`.
+    Node oracle, generated TypeScript, Rust, and Qt/C++ reproduce these identities.
+    CMake builds the strict C++ runtime self-test and generated public-API runner
+    with warnings denied and registers both in the complete desktop gate.
+    TypeScript Transport numbers expose their declared lexical/canonical/integer
+    view only from privately branded parser values; similar or copied objects cannot
+    impersonate an arbitrary-precision number. The private package file contract
+    includes only the required `aap_transport_runtime.h`/`.cpp` production pair
+    with generated C++, and both `generate:check` and the aggregate CTest verify the
+    exact 47-file `npm pack --dry-run --json` inventory.
+  - Keep `3.10` unchecked: production Rust/Qt wire consumers still use reviewed
+    hand-written protocol paths, and clean Windows Unicode-checkout execution is
+    absent. This generation slice grants no capability, permission, Approval,
+    mutation, execution, experimental, remote, or Windows release authority.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.
   - The schema-package gate also compiles every registered `core.schema.json`

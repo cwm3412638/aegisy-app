@@ -1,0 +1,404 @@
+{
+  "schema_version": "aap-transport-fixture-catalog/0.1",
+  "schema_id": "https://aegisy.cc/schemas/aap/stable/v0.1/aap.schema.json",
+  "canonical_bytes": 29644,
+  "canonical_sha256": "8948085aaf1c08ed94cad5ef1e682dc041120053045e06f851cea64d4dfbe0db",
+  "entries": [
+    {
+      "definition": "backend",
+      "value_json": "{\"adapter\":\"id\",\"status\":\"ready\",\"version\":\"id\"}"
+    },
+    {
+      "definition": "boundedGraphicalId",
+      "value_json": "\"1\""
+    },
+    {
+      "definition": "capabilities",
+      "value_json": "{\"stable\":[\"id\"],\"experimental\":[]}"
+    },
+    {
+      "definition": "capabilityName",
+      "value_json": "\"1\""
+    },
+    {
+      "definition": "durableMutationCapability",
+      "value_json": "\"session.mutation-acknowledgements\""
+    },
+    {
+      "definition": "durableMutationConsumeParams",
+      "value_json": "{\"schema_version\":\"mutation-acknowledgement-consume-request/0.1\",\"session_id\":\"session-1\",\"operation_identity\":\"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"expected_revision\":1,\"target\":\"accepted\",\"confirmed_anchor\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}"
+    },
+    {
+      "definition": "durableMutationConsumeRequest",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"consume-1\",\"method\":\"mutation/acknowledgement/consume\",\"params\":{\"schema_version\":\"mutation-acknowledgement-consume-request/0.1\",\"session_id\":\"session-1\",\"operation_identity\":\"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"expected_revision\":1,\"target\":\"accepted\",\"confirmed_anchor\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}}"
+    },
+    {
+      "definition": "durableMutationConsumeResult",
+      "value_json": "{\"schema_version\":\"mutation-acknowledgement-consume-result/0.1\",\"session_id\":\"session-1\",\"operation_identity\":\"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"expected_revision\":1,\"target\":\"accepted\",\"confirmed_anchor\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"operation\":{\"schema_version\":\"mutation-acknowledgement-operation/0.1\",\"operation_identity\":\"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_id\":\"session-1\",\"mutation_kind\":\"turn-start\",\"idempotency_key\":\"idem-1\",\"request_fingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"revision\":2,\"state\":\"accepted\",\"turn_id\":\"turn-1\",\"accepted_anchor\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"terminal_anchor\":null,\"accepted_consumed\":true,\"terminal_consumed\":false}}"
+    },
+    {
+      "definition": "durableMutationConsumeSuccessResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"consume-1\",\"result\":{\"schema_version\":\"mutation-acknowledgement-consume-result/0.1\",\"session_id\":\"session-1\",\"operation_identity\":\"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"expected_revision\":1,\"target\":\"accepted\",\"confirmed_anchor\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"operation\":{\"schema_version\":\"mutation-acknowledgement-operation/0.1\",\"operation_identity\":\"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_id\":\"session-1\",\"mutation_kind\":\"turn-start\",\"idempotency_key\":\"idem-1\",\"request_fingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"revision\":2,\"state\":\"accepted\",\"turn_id\":\"turn-1\",\"accepted_anchor\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"terminal_anchor\":null,\"accepted_consumed\":true,\"terminal_consumed\":false}}}"
+    },
+    {
+      "definition": "durableMutationConsumeTarget",
+      "value_json": "\"accepted\""
+    },
+    {
+      "definition": "durableMutationCursor",
+      "value_json": "{\"operation_identity\":\"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"revision\":1}"
+    },
+    {
+      "definition": "durableMutationKind",
+      "value_json": "\"turn-start\""
+    },
+    {
+      "definition": "durableMutationListParams",
+      "value_json": "{\"schema_version\":\"mutation-acknowledgement-list-request/0.1\",\"session_id\":\"id\",\"after\":null,\"limit\":1}"
+    },
+    {
+      "definition": "durableMutationListRequest",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"id\",\"method\":\"session/mutation-acknowledgements\",\"params\":{\"schema_version\":\"mutation-acknowledgement-list-request/0.1\",\"session_id\":\"id\",\"after\":null,\"limit\":1}}"
+    },
+    {
+      "definition": "durableMutationListSuccessResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"list-1\",\"result\":{\"schema_version\":\"mutation-acknowledgement-page/0.1\",\"session_id\":\"session-1\",\"after\":null,\"operations\":[],\"next_after\":null,\"complete\":true}}"
+    },
+    {
+      "definition": "durableMutationOperation",
+      "value_json": "{\"schema_version\":\"mutation-acknowledgement-operation/0.1\",\"operation_identity\":\"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_id\":\"session-1\",\"mutation_kind\":\"turn-start\",\"idempotency_key\":\"idem-1\",\"request_fingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"revision\":1,\"state\":\"accepted\",\"turn_id\":\"turn-1\",\"accepted_anchor\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"terminal_anchor\":null,\"accepted_consumed\":false,\"terminal_consumed\":false}"
+    },
+    {
+      "definition": "durableMutationOperationIdentity",
+      "value_json": "\"mutation-operation:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+    },
+    {
+      "definition": "durableMutationPage",
+      "value_json": "{\"schema_version\":\"mutation-acknowledgement-page/0.1\",\"session_id\":\"session-1\",\"after\":null,\"operations\":[],\"next_after\":null,\"complete\":true}"
+    },
+    {
+      "definition": "durableMutationRequestFingerprint",
+      "value_json": "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+    },
+    {
+      "definition": "durableMutationState",
+      "value_json": "\"accepted\""
+    },
+    {
+      "definition": "identity",
+      "value_json": "{\"name\":\"id\",\"version\":\"id\"}"
+    },
+    {
+      "definition": "initializeIncompatibleData",
+      "value_json": "{\"schema_version\":\"initialize-error/0.1\",\"reason\":\"protocol-range-not-overlapping\",\"client\":{\"minimum\":\"0.1\",\"maximum\":\"0.1\"},\"runtime\":{\"minimum\":\"0.1\",\"maximum\":\"0.1\"},\"upgrade_direction\":\"client\"}"
+    },
+    {
+      "definition": "initializeIncompatibleErrorResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"id\",\"error\":{\"code\":-32003,\"message\":\"id\",\"data\":{\"schema_version\":\"initialize-error/0.1\",\"reason\":\"protocol-range-not-overlapping\",\"client\":{\"minimum\":\"0.1\",\"maximum\":\"0.1\"},\"runtime\":{\"minimum\":\"0.1\",\"maximum\":\"0.1\"},\"upgrade_direction\":\"client\"}}}"
+    },
+    {
+      "definition": "initializeParams",
+      "value_json": "{\"protocol\":{\"minimum\":\"0.1\",\"maximum\":\"0.1\",\"preferred\":\"0.1\"},\"client\":{\"name\":\"id\",\"version\":\"id\"},\"platform\":{\"os\":\"macos\",\"architecture\":\"arm64\"},\"capabilities\":{\"stable\":[\"id\"],\"experimental\":[]},\"limits\":{\"max_frame_bytes\":4194304},\"transport_security\":{\"transport\":\"stdio\",\"local\":true,\"authenticated\":false,\"encrypted\":false,\"peer_verified\":false}}"
+    },
+    {
+      "definition": "initializeRequest",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"id\",\"method\":\"initialize\",\"params\":{\"protocol\":{\"minimum\":\"0.1\",\"maximum\":\"0.1\",\"preferred\":\"0.1\"},\"client\":{\"name\":\"id\",\"version\":\"id\"},\"platform\":{\"os\":\"macos\",\"architecture\":\"arm64\"},\"capabilities\":{\"stable\":[\"id\"],\"experimental\":[]},\"limits\":{\"max_frame_bytes\":4194304},\"transport_security\":{\"transport\":\"stdio\",\"local\":true,\"authenticated\":false,\"encrypted\":false,\"peer_verified\":false}}}"
+    },
+    {
+      "definition": "initializeResult",
+      "value_json": "{\"protocol\":{\"minimum\":\"0.1\",\"maximum\":\"0.1\",\"selected\":\"0.1\",\"upgrade_direction\":\"none\"},\"runtime\":{\"name\":\"id\",\"version\":\"id\"},\"platform\":{\"os\":\"macos\",\"architecture\":\"arm64\"},\"backend\":{\"adapter\":\"id\",\"status\":\"ready\",\"version\":\"id\"},\"capabilities\":{\"stable\":[\"id\"],\"experimental\":[]},\"limits\":{\"max_frame_bytes\":4194304},\"transport_security\":{\"transport\":\"stdio\",\"local\":true,\"authenticated\":false,\"encrypted\":false,\"peer_verified\":false}}"
+    },
+    {
+      "definition": "initializeSuccessResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"id\",\"result\":{\"protocol\":{\"minimum\":\"0.1\",\"maximum\":\"0.1\",\"selected\":\"0.1\",\"upgrade_direction\":\"none\"},\"runtime\":{\"name\":\"id\",\"version\":\"id\"},\"platform\":{\"os\":\"macos\",\"architecture\":\"arm64\"},\"backend\":{\"adapter\":\"id\",\"status\":\"ready\",\"version\":\"id\"},\"capabilities\":{\"stable\":[\"id\"],\"experimental\":[]},\"limits\":{\"max_frame_bytes\":4194304},\"transport_security\":{\"transport\":\"stdio\",\"local\":true,\"authenticated\":false,\"encrypted\":false,\"peer_verified\":false}}}"
+    },
+    {
+      "definition": "initializedNotification",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}"
+    },
+    {
+      "definition": "jsonRpcError",
+      "value_json": "{\"code\":0,\"message\":\"id\"}"
+    },
+    {
+      "definition": "jsonRpcId",
+      "value_json": "\"1\""
+    },
+    {
+      "definition": "jsonRpcRequestId",
+      "value_json": "\"1\""
+    },
+    {
+      "definition": "jsonSafeValue",
+      "value_json": "1"
+    },
+    {
+      "definition": "limits",
+      "value_json": "{\"max_frame_bytes\":4194304}"
+    },
+    {
+      "definition": "mutationAcknowledgement",
+      "value_json": "{\"schema_version\":\"mutation-acknowledgement/0.1\",\"request_id\":\"id\",\"idempotency_key\":\"id\",\"session_id\":\"id\",\"generation\":1,\"state\":\"accepted\"}"
+    },
+    {
+      "definition": "mutationAcknowledgementState",
+      "value_json": "\"accepted\""
+    },
+    {
+      "definition": "mutationRequest",
+      "value_json": "{\"schema_version\":\"mutation-acknowledgement/0.1\",\"request_id\":\"id\",\"idempotency_key\":\"id\",\"session_id\":\"id\",\"generation\":1}"
+    },
+    {
+      "definition": "negotiatedProtocol",
+      "value_json": "{\"minimum\":\"0.1\",\"maximum\":\"0.1\",\"selected\":\"0.1\",\"upgrade_direction\":\"none\"}"
+    },
+    {
+      "definition": "nullableBoundedGraphicalId",
+      "value_json": "\"1\""
+    },
+    {
+      "definition": "nullableDurableMutationCursor",
+      "value_json": "null"
+    },
+    {
+      "definition": "nullableTimelineAnchor",
+      "value_json": "null"
+    },
+    {
+      "definition": "platform",
+      "value_json": "{\"os\":\"macos\",\"architecture\":\"arm64\"}"
+    },
+    {
+      "definition": "positiveTimelineAnchor",
+      "value_json": "{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+    },
+    {
+      "definition": "protocolPreference",
+      "value_json": "{\"minimum\":\"0.1\",\"maximum\":\"0.1\",\"preferred\":\"0.1\"}"
+    },
+    {
+      "definition": "protocolRange",
+      "value_json": "{\"minimum\":\"0.1\",\"maximum\":\"0.1\"}"
+    },
+    {
+      "definition": "protocolVersion",
+      "value_json": "\"0.1\""
+    },
+    {
+      "definition": "runtimeHeartbeatParams",
+      "value_json": "{\"schema_version\":\"runtime-heartbeat-request/0.1\",\"nonce\":\"id\"}"
+    },
+    {
+      "definition": "runtimeHeartbeatRequest",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"id\",\"method\":\"runtime/heartbeat\",\"params\":{\"schema_version\":\"runtime-heartbeat-request/0.1\",\"nonce\":\"id\"}}"
+    },
+    {
+      "definition": "runtimeHeartbeatResult",
+      "value_json": "{\"schema_version\":\"runtime-heartbeat/0.1\",\"nonce\":\"id\",\"state\":\"alive\"}"
+    },
+    {
+      "definition": "runtimeHeartbeatSuccessResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"id\",\"result\":{\"schema_version\":\"runtime-heartbeat/0.1\",\"nonce\":\"id\",\"state\":\"alive\"}}"
+    },
+    {
+      "definition": "safeNonNegativeInteger",
+      "value_json": "0"
+    },
+    {
+      "definition": "safePositiveInteger",
+      "value_json": "1"
+    },
+    {
+      "definition": "stdioTransportSecurity",
+      "value_json": "{\"transport\":\"stdio\",\"local\":true,\"authenticated\":false,\"encrypted\":false,\"peer_verified\":false}"
+    },
+    {
+      "definition": "timelineActivateParams",
+      "value_json": "{\"schema_version\":\"timeline-subscription-activate-request/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"source\":\"sync\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":0,\"event_id\":null},\"snapshot_identity\":null}"
+    },
+    {
+      "definition": "timelineActivateResult",
+      "value_json": "{\"schema_version\":\"timeline-subscription-active/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"active\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":0,\"event_id\":null}}"
+    },
+    {
+      "definition": "timelineAnchor",
+      "value_json": "{\"sequence\":0,\"event_id\":null}"
+    },
+    {
+      "definition": "timelineEvent",
+      "value_json": "{\"schema_version\":\"timeline-event/0.1\",\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sequence\":1,\"timestamp_ms\":1,\"correlation_id\":\"id\",\"session_id\":\"id\",\"turn_id\":\"id\",\"turn_state\":\"running\",\"event\":\"id\",\"item\":null,\"item_update\":null}"
+    },
+    {
+      "definition": "timelineEventId",
+      "value_json": "\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+    },
+    {
+      "definition": "timelineEventName",
+      "value_json": "\"id\""
+    },
+    {
+      "definition": "timelineItem",
+      "value_json": "{\"id\":\"id\",\"kind\":\"id\",\"role\":\"user\",\"state\":\"started\",\"content\":\"id\"}"
+    },
+    {
+      "definition": "timelineItemUpdate",
+      "value_json": "{\"revision\":1,\"content_mode\":\"snapshot-replacement\"}"
+    },
+    {
+      "definition": "timelineRetentionGapData",
+      "value_json": "{\"schema_version\":\"timeline-retention-gap/0.1\",\"reason\":\"requested-anchor-not-retained\",\"session_id\":\"session-1\",\"requested_after\":{\"sequence\":0,\"event_id\":null},\"requested_watermark\":null,\"retained_floor\":{\"sequence\":2,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"head\":{\"sequence\":3,\"event_id\":\"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"snapshot_required\":true,\"snapshot_available\":true,\"snapshot_capability\":\"timeline.snapshot.current\",\"snapshot_method\":\"timeline/snapshot\",\"event_history_complete\":false,\"replay_from_floor_allowed\":false}"
+    },
+    {
+      "definition": "timelineSessionSnapshotPage",
+      "value_json": "{\"schema_version\":\"timeline-session-snapshot-page/0.1\",\"session_id\":\"session-1\",\"snapshot_identity\":\"timeline-session-snapshot:sha256:93c2795bd0ed77feabfe115eaa270f732f42b076fef6a91b4ed1f29263e2bdfb\",\"floor\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":3,\"event_id\":\"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"active_turn\":{\"turn_id\":\"turn-1\",\"correlation_id\":\"turn-1\",\"state\":\"running\",\"started_event\":{\"sequence\":1,\"event_id\":\"event:sha256:1111111111111111111111111111111111111111111111111111111111111111\"},\"latest_event\":{\"sequence\":3,\"event_id\":\"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"open_item_ids\":[]},\"total_items\":2,\"total_canonical_bytes\":1170,\"after\":null,\"items\":[{\"ordinal\":1,\"item_identity\":\"timeline-session-snapshot-item:sha256:c64cd9d8d5683b2b3365cad4e18647b5b96fb97ce3b05a16cf69dccbfec24b0b\",\"turn_id\":\"turn-1\",\"correlation_id\":\"turn-1\",\"turn_state\":\"running\",\"first_event\":{\"sequence\":2,\"event_id\":\"event:sha256:2222222222222222222222222222222222222222222222222222222222222222\"},\"latest_event\":{\"sequence\":2,\"event_id\":\"event:sha256:2222222222222222222222222222222222222222222222222222222222222222\"},\"item\":{\"id\":\"item-user-1\",\"kind\":\"message\",\"role\":\"user\",\"state\":\"completed\",\"content\":\"Inspect the project.\"},\"item_update\":{\"revision\":1,\"content_mode\":\"snapshot-replacement\"}}],\"next_after\":{\"ordinal\":1,\"item_id\":\"item-user-1\",\"item_identity\":\"timeline-session-snapshot-item:sha256:c64cd9d8d5683b2b3365cad4e18647b5b96fb97ce3b05a16cf69dccbfec24b0b\"},\"complete\":false,\"page_identity\":\"timeline-session-snapshot-page:sha256:93c541f5fea427a36f71da915789dd766944be0d31a226799b8573f40d9fc5f9\"}"
+    },
+    {
+      "definition": "timelineSnapshotActiveTurn",
+      "value_json": "{\"turn_id\":\"turn-1\",\"correlation_id\":\"turn-1\",\"state\":\"running\",\"started_event\":{\"sequence\":1,\"event_id\":\"event:sha256:1111111111111111111111111111111111111111111111111111111111111111\"},\"latest_event\":{\"sequence\":3,\"event_id\":\"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"open_item_ids\":[]}"
+    },
+    {
+      "definition": "timelineSnapshotCursor",
+      "value_json": "{\"ordinal\":1,\"item_id\":\"id\",\"item_identity\":\"timeline-session-snapshot-item:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+    },
+    {
+      "definition": "timelineSnapshotId",
+      "value_json": "\"timeline-session-snapshot:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+    },
+    {
+      "definition": "timelineSnapshotItem",
+      "value_json": "{\"ordinal\":1,\"item_identity\":\"timeline-session-snapshot-item:sha256:c64cd9d8d5683b2b3365cad4e18647b5b96fb97ce3b05a16cf69dccbfec24b0b\",\"turn_id\":\"turn-1\",\"correlation_id\":\"turn-1\",\"turn_state\":\"running\",\"first_event\":{\"sequence\":2,\"event_id\":\"event:sha256:2222222222222222222222222222222222222222222222222222222222222222\"},\"latest_event\":{\"sequence\":2,\"event_id\":\"event:sha256:2222222222222222222222222222222222222222222222222222222222222222\"},\"item\":{\"id\":\"item-user-1\",\"kind\":\"message\",\"role\":\"user\",\"state\":\"completed\",\"content\":\"Inspect the project.\"},\"item_update\":{\"revision\":1,\"content_mode\":\"snapshot-replacement\"}}"
+    },
+    {
+      "definition": "timelineSnapshotItemId",
+      "value_json": "\"timeline-session-snapshot-item:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+    },
+    {
+      "definition": "timelineSnapshotPageId",
+      "value_json": "\"timeline-session-snapshot-page:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+    },
+    {
+      "definition": "timelineSnapshotParams",
+      "value_json": "{\"session_id\":\"session-1\",\"snapshot_identity\":null,\"watermark\":null,\"after\":null,\"limit\":1}"
+    },
+    {
+      "definition": "timelineSnapshotRequest",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"timeline-snapshot-1\",\"method\":\"timeline/snapshot\",\"params\":{\"session_id\":\"session-1\",\"snapshot_identity\":null,\"watermark\":null,\"after\":null,\"limit\":1}}"
+    },
+    {
+      "definition": "timelineSnapshotSuccessResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"timeline-snapshot-1\",\"result\":{\"schema_version\":\"timeline-session-snapshot-page/0.1\",\"session_id\":\"session-1\",\"snapshot_identity\":\"timeline-session-snapshot:sha256:93c2795bd0ed77feabfe115eaa270f732f42b076fef6a91b4ed1f29263e2bdfb\",\"floor\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":3,\"event_id\":\"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"active_turn\":{\"turn_id\":\"turn-1\",\"correlation_id\":\"turn-1\",\"state\":\"running\",\"started_event\":{\"sequence\":1,\"event_id\":\"event:sha256:1111111111111111111111111111111111111111111111111111111111111111\"},\"latest_event\":{\"sequence\":3,\"event_id\":\"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"open_item_ids\":[]},\"total_items\":2,\"total_canonical_bytes\":1170,\"after\":null,\"items\":[{\"ordinal\":1,\"item_identity\":\"timeline-session-snapshot-item:sha256:c64cd9d8d5683b2b3365cad4e18647b5b96fb97ce3b05a16cf69dccbfec24b0b\",\"turn_id\":\"turn-1\",\"correlation_id\":\"turn-1\",\"turn_state\":\"running\",\"first_event\":{\"sequence\":2,\"event_id\":\"event:sha256:2222222222222222222222222222222222222222222222222222222222222222\"},\"latest_event\":{\"sequence\":2,\"event_id\":\"event:sha256:2222222222222222222222222222222222222222222222222222222222222222\"},\"item\":{\"id\":\"item-user-1\",\"kind\":\"message\",\"role\":\"user\",\"state\":\"completed\",\"content\":\"Inspect the project.\"},\"item_update\":{\"revision\":1,\"content_mode\":\"snapshot-replacement\"}}],\"next_after\":{\"ordinal\":1,\"item_id\":\"item-user-1\",\"item_identity\":\"timeline-session-snapshot-item:sha256:c64cd9d8d5683b2b3365cad4e18647b5b96fb97ce3b05a16cf69dccbfec24b0b\"},\"complete\":false,\"page_identity\":\"timeline-session-snapshot-page:sha256:93c541f5fea427a36f71da915789dd766944be0d31a226799b8573f40d9fc5f9\"}}"
+    },
+    {
+      "definition": "timelineSubscribeParams",
+      "value_json": "{\"schema_version\":\"timeline-subscribe-request/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null}"
+    },
+    {
+      "definition": "timelineSubscribeRequest",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"subscribe-1\",\"method\":\"timeline/subscribe\",\"params\":{\"schema_version\":\"timeline-subscribe-request/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null}}"
+    },
+    {
+      "definition": "timelineSubscribeResult",
+      "value_json": "{\"schema_version\":\"timeline-subscribe-result/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"snapshot-required\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"next_method\":\"timeline/subscription-snapshot\"}"
+    },
+    {
+      "definition": "timelineSubscribeSuccessResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"subscribe-1\",\"result\":{\"schema_version\":\"timeline-subscribe-result/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"snapshot-required\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"next_method\":\"timeline/subscription-snapshot\"}}"
+    },
+    {
+      "definition": "timelineSubscriptionActivateRequest",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"activate-1\",\"method\":\"timeline/subscription-activate\",\"params\":{\"schema_version\":\"timeline-subscription-activate-request/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"source\":\"sync\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":0,\"event_id\":null},\"snapshot_identity\":null}}"
+    },
+    {
+      "definition": "timelineSubscriptionActivateSuccessResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"activate-1\",\"result\":{\"schema_version\":\"timeline-subscription-active/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"active\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":0,\"event_id\":null}}}"
+    },
+    {
+      "definition": "timelineSubscriptionEvent",
+      "value_json": "{\"schema_version\":\"timeline-subscription-event/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"active\",\"cursor\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"watermark\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"event\":{\"schema_version\":\"timeline-event/0.1\",\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sequence\":1,\"timestamp_ms\":1,\"correlation_id\":\"id\",\"session_id\":\"id\",\"turn_id\":\"id\",\"turn_state\":\"running\",\"event\":\"id\",\"item\":null,\"item_update\":null}}"
+    },
+    {
+      "definition": "timelineSubscriptionEventNotification",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"method\":\"timeline/subscription-event\",\"params\":{\"schema_version\":\"timeline-subscription-event/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"active\",\"cursor\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"watermark\":{\"sequence\":1,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"event\":{\"schema_version\":\"timeline-event/0.1\",\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sequence\":1,\"timestamp_ms\":1,\"correlation_id\":\"id\",\"session_id\":\"id\",\"turn_id\":\"id\",\"turn_state\":\"running\",\"event\":\"id\",\"item\":null,\"item_update\":null}}}"
+    },
+    {
+      "definition": "timelineSubscriptionFailure",
+      "value_json": "{\"schema_version\":\"timeline-subscription-failure/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"failed\",\"stage\":\"subscribe\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"request_identity\":\"timeline-subscription-request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"reason\":\"transport\",\"retryable\":true,\"cleanup_required\":true}"
+    },
+    {
+      "definition": "timelineSubscriptionFailureNotification",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"method\":\"timeline/subscription-failure\",\"params\":{\"schema_version\":\"timeline-subscription-failure/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"failed\",\"stage\":\"live\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"request_identity\":null,\"reason\":\"transport\",\"retryable\":true,\"cleanup_required\":true}}"
+    },
+    {
+      "definition": "timelineSubscriptionFailureStage",
+      "value_json": "\"subscribe\""
+    },
+    {
+      "definition": "timelineSubscriptionLiveFailure",
+      "value_json": "{\"schema_version\":\"timeline-subscription-failure/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"failed\",\"stage\":\"live\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"request_identity\":null,\"reason\":\"transport\",\"retryable\":true,\"cleanup_required\":true}"
+    },
+    {
+      "definition": "timelineSubscriptionRequestErrorResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"subscribe-1\",\"error\":{\"code\":-32150,\"message\":\"subscription failed\",\"data\":{\"schema_version\":\"timeline-subscription-failure/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"failed\",\"stage\":\"subscribe\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"request_identity\":\"timeline-subscription-request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"reason\":\"transport\",\"retryable\":true,\"cleanup_required\":true}}}"
+    },
+    {
+      "definition": "timelineSubscriptionRequestFailure",
+      "value_json": "{\"schema_version\":\"timeline-subscription-failure/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"failed\",\"stage\":\"subscribe\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"request_identity\":\"timeline-subscription-request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"reason\":\"transport\",\"retryable\":true,\"cleanup_required\":true}"
+    },
+    {
+      "definition": "timelineSubscriptionRequestIdentity",
+      "value_json": "\"timeline-subscription-request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+    },
+    {
+      "definition": "timelineSubscriptionSnapshotParams",
+      "value_json": "{\"schema_version\":\"timeline-subscription-snapshot-request/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"request\":{\"session_id\":\"session-1\",\"snapshot_identity\":\"timeline-session-snapshot:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"watermark\":{\"sequence\":0,\"event_id\":null},\"after\":{\"ordinal\":1,\"item_id\":\"item-1\",\"item_identity\":\"timeline-session-snapshot-item:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"limit\":1}}"
+    },
+    {
+      "definition": "timelineSubscriptionSnapshotRequest",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"subscription-snapshot-1\",\"method\":\"timeline/subscription-snapshot\",\"params\":{\"schema_version\":\"timeline-subscription-snapshot-request/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"request\":{\"session_id\":\"session-1\",\"snapshot_identity\":\"timeline-session-snapshot:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"watermark\":{\"sequence\":0,\"event_id\":null},\"after\":{\"ordinal\":1,\"item_id\":\"item-1\",\"item_identity\":\"timeline-session-snapshot-item:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"limit\":1}}}"
+    },
+    {
+      "definition": "timelineSubscriptionSnapshotSuccessResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"timeline-snapshot-1\",\"result\":{\"schema_version\":\"timeline-session-snapshot-page/0.1\",\"session_id\":\"session-1\",\"snapshot_identity\":\"timeline-session-snapshot:sha256:93c2795bd0ed77feabfe115eaa270f732f42b076fef6a91b4ed1f29263e2bdfb\",\"floor\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":3,\"event_id\":\"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"active_turn\":{\"turn_id\":\"turn-1\",\"correlation_id\":\"turn-1\",\"state\":\"running\",\"started_event\":{\"sequence\":1,\"event_id\":\"event:sha256:1111111111111111111111111111111111111111111111111111111111111111\"},\"latest_event\":{\"sequence\":3,\"event_id\":\"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"open_item_ids\":[]},\"total_items\":2,\"total_canonical_bytes\":1170,\"after\":null,\"items\":[{\"ordinal\":1,\"item_identity\":\"timeline-session-snapshot-item:sha256:c64cd9d8d5683b2b3365cad4e18647b5b96fb97ce3b05a16cf69dccbfec24b0b\",\"turn_id\":\"turn-1\",\"correlation_id\":\"turn-1\",\"turn_state\":\"running\",\"first_event\":{\"sequence\":2,\"event_id\":\"event:sha256:2222222222222222222222222222222222222222222222222222222222222222\"},\"latest_event\":{\"sequence\":2,\"event_id\":\"event:sha256:2222222222222222222222222222222222222222222222222222222222222222\"},\"item\":{\"id\":\"item-user-1\",\"kind\":\"message\",\"role\":\"user\",\"state\":\"completed\",\"content\":\"Inspect the project.\"},\"item_update\":{\"revision\":1,\"content_mode\":\"snapshot-replacement\"}}],\"next_after\":{\"ordinal\":1,\"item_id\":\"item-user-1\",\"item_identity\":\"timeline-session-snapshot-item:sha256:c64cd9d8d5683b2b3365cad4e18647b5b96fb97ce3b05a16cf69dccbfec24b0b\"},\"complete\":false,\"page_identity\":\"timeline-session-snapshot-page:sha256:93c541f5fea427a36f71da915789dd766944be0d31a226799b8573f40d9fc5f9\"}}"
+    },
+    {
+      "definition": "timelineSubscriptionSource",
+      "value_json": "\"sync\""
+    },
+    {
+      "definition": "timelineSubscriptionState",
+      "value_json": "\"sync-required\""
+    },
+    {
+      "definition": "timelineSubscriptionSyncParams",
+      "value_json": "{\"schema_version\":\"timeline-subscription-sync-request/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"request\":{\"session_id\":\"session-1\",\"after\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":0,\"event_id\":null},\"limit\":1}}"
+    },
+    {
+      "definition": "timelineSubscriptionSyncRequest",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"subscription-sync-1\",\"method\":\"timeline/subscription-sync\",\"params\":{\"schema_version\":\"timeline-subscription-sync-request/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"request\":{\"session_id\":\"session-1\",\"after\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":0,\"event_id\":null},\"limit\":1}}}"
+    },
+    {
+      "definition": "timelineSubscriptionSyncSuccessResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"timeline-sync-1\",\"result\":{\"schema_version\":\"timeline-sync-page/0.1\",\"session_id\":\"session-1\",\"after\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":2,\"event_id\":\"event:sha256:6cf6e2279d2c733558d9ad3b6c7f35431a850328a14f8686a4a53ba0c1f00798\"},\"events\":[{\"schema_version\":\"timeline-event/0.1\",\"event_id\":\"event:sha256:a3ea83f9fd0b70adafafe203fc62f1a82a78b42a652e82615725a858d411236a\",\"sequence\":1,\"timestamp_ms\":1784851200001,\"correlation_id\":\"turn-1\",\"session_id\":\"session-1\",\"turn_id\":\"turn-1\",\"turn_state\":\"running\",\"event\":\"turn.started\",\"item\":null,\"item_update\":null}],\"next_after\":{\"sequence\":1,\"event_id\":\"event:sha256:a3ea83f9fd0b70adafafe203fc62f1a82a78b42a652e82615725a858d411236a\"},\"complete\":false}}"
+    },
+    {
+      "definition": "timelineSyncPage",
+      "value_json": "{\"schema_version\":\"timeline-sync-page/0.1\",\"session_id\":\"session-1\",\"after\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":2,\"event_id\":\"event:sha256:6cf6e2279d2c733558d9ad3b6c7f35431a850328a14f8686a4a53ba0c1f00798\"},\"events\":[{\"schema_version\":\"timeline-event/0.1\",\"event_id\":\"event:sha256:a3ea83f9fd0b70adafafe203fc62f1a82a78b42a652e82615725a858d411236a\",\"sequence\":1,\"timestamp_ms\":1784851200001,\"correlation_id\":\"turn-1\",\"session_id\":\"session-1\",\"turn_id\":\"turn-1\",\"turn_state\":\"running\",\"event\":\"turn.started\",\"item\":null,\"item_update\":null}],\"next_after\":{\"sequence\":1,\"event_id\":\"event:sha256:a3ea83f9fd0b70adafafe203fc62f1a82a78b42a652e82615725a858d411236a\"},\"complete\":false}"
+    },
+    {
+      "definition": "timelineSyncParams",
+      "value_json": "{\"session_id\":\"session-1\",\"after\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"limit\":1}"
+    },
+    {
+      "definition": "timelineSyncRequest",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"timeline-sync-1\",\"method\":\"timeline/sync\",\"params\":{\"session_id\":\"session-1\",\"after\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"limit\":1}}"
+    },
+    {
+      "definition": "timelineSyncRetentionGapErrorResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"timeline-gap-1\",\"error\":{\"code\":-32148,\"message\":\"requested Timeline history is no longer retained\",\"data\":{\"schema_version\":\"timeline-retention-gap/0.1\",\"reason\":\"requested-anchor-not-retained\",\"session_id\":\"session-1\",\"requested_after\":{\"sequence\":0,\"event_id\":null},\"requested_watermark\":null,\"retained_floor\":{\"sequence\":2,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"head\":{\"sequence\":3,\"event_id\":\"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"snapshot_required\":true,\"snapshot_available\":true,\"snapshot_capability\":\"timeline.snapshot.current\",\"snapshot_method\":\"timeline/snapshot\",\"event_history_complete\":false,\"replay_from_floor_allowed\":false}}}"
+    },
+    {
+      "definition": "timelineSyncSuccessResponse",
+      "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"timeline-sync-1\",\"result\":{\"schema_version\":\"timeline-sync-page/0.1\",\"session_id\":\"session-1\",\"after\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":2,\"event_id\":\"event:sha256:6cf6e2279d2c733558d9ad3b6c7f35431a850328a14f8686a4a53ba0c1f00798\"},\"events\":[{\"schema_version\":\"timeline-event/0.1\",\"event_id\":\"event:sha256:a3ea83f9fd0b70adafafe203fc62f1a82a78b42a652e82615725a858d411236a\",\"sequence\":1,\"timestamp_ms\":1784851200001,\"correlation_id\":\"turn-1\",\"session_id\":\"session-1\",\"turn_id\":\"turn-1\",\"turn_state\":\"running\",\"event\":\"turn.started\",\"item\":null,\"item_update\":null}],\"next_after\":{\"sequence\":1,\"event_id\":\"event:sha256:a3ea83f9fd0b70adafafe203fc62f1a82a78b42a652e82615725a858d411236a\"},\"complete\":false}}"
+    }
+  ]
+}

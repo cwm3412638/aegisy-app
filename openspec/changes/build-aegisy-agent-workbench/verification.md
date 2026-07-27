@@ -147,10 +147,70 @@
   the packaged crate by compiling it. Strict OpenSpec validation and
   `git diff --check` also pass for this stage.
 - This evidence does not complete task `3.10`. Generation from
-  `aap.schema.json` for transport requests, responses, and notifications; migration
-  of the remaining hand-written Rust/Qt consumers; and execution from a clean
-  Windows Unicode checkout remain absent. The partial generated domain layer grants
-  no new capability, permission, mutation, Approval, or execution authority.
+  `aap.schema.json` is now covered by the Transport slice below, but migration of
+  the remaining hand-written Rust/Qt consumers and execution from a clean Windows
+  Unicode checkout remain absent. The partial generated domain layer grants no new
+  capability, permission, mutation, Approval, or execution authority.
+
+## AAP Transport Generated Types (Partial `3.10`)
+
+- `generate-transport-types.mjs` reads stable `v0.1/aap.schema.json` and emits
+  checked-in Rust, TypeScript declaration/runtime, and Qt/C++ header/source types.
+  Negative generator fixtures reject dialect/ID drift, unknown keywords and refs,
+  unsupported types, unsafe bounded integers, normalized type/field/enum collisions,
+  and by-value dependency cycles. Dependency-topological declaration ordering keeps
+  the generated C++ header independently compilable.
+- The strict raw parser profile is identical across the Node oracle, Rust, and C++:
+  4 MiB frame, depth 128, 65,536 JSON nodes, valid UTF-8 and Unicode scalars, no
+  leading BOM, no duplicate decoded keys, and exact arbitrary-precision number
+  lexemes. Mathematical integers such as `1.0` and `1e0` validate as integers.
+  Canonical JSON sorts keys by UTF-8 bytes and normalizes numbers without `double`.
+- `aap-transport-methods.json` exactly binds every stable root method condition,
+  typed request/success/error/notification definitions, response dispatch, and the
+  generic request/notification fallbacks. The materializer validates every binding
+  against the root Schema before accepting the fixture catalog.
+- All 99 definitions independently validate and serialize to fixture identity
+  `29644 8948085aaf1c08ed94cad5ef1e682dc041120053045e06f851cea64d4dfbe0db`.
+  The shared 72-case positive/negative parser and Draft 2020-12 subset corpus has
+  decision identity
+  `72 f0ce6bdc14c815b2b80b273126da8b20a80ec47371d39128c7e2155246f60404`.
+  The materializer, independent Node oracle, generated TypeScript, Rust, and
+  generated Qt/C++ public APIs reproduce the applicable identity exactly.
+  TypeScript also checks the public lexical/canonical/integer number view, canonical
+  serialization of a returned value, rejection of a structurally similar object,
+  and rejection of a copied runtime object that lacks the private parser brand.
+- CMake registers `aap_transport_runtime` and `aap_transport_generated_types`.
+  Both C++ targets compile with `/W4 /WX` or `-Wall -Wextra -Werror`; the aggregate
+  gate runs generator negative/freshness tests, oracle, materializer, and all three
+  generated-language runners. The exact Schema-package test requires both production
+  Runtime paths in `package.json.files`; the automated package-inventory gate runs
+  `npm pack --dry-run --json` and requires the exact 47-file inventory, including
+  generated C++ plus the `aap_transport_runtime.h`/`.cpp` dependency pair while
+  excluding C++ test sources. Focused commands are:
+
+  ```sh
+  npm --prefix agent-runtime/aap-schema run generate:check
+  npm --prefix agent-runtime/aap-schema run test:generator
+  npm --prefix agent-runtime/aap-schema run test:transport:oracle
+  npm --prefix agent-runtime/aap-schema run test:transport:typescript
+  cmake --build build --target AegisyAapTransportRuntimeTest \
+    AegisyAapTransportGeneratedTypesTest -j4
+  ctest --test-dir build \
+    -R '^aap_transport_(runtime|generated_types)$' --output-on-failure
+  ```
+
+- The final macOS gate passes 51 `aegisy-aap`, 785 Sidecar library with one
+  explicitly ignored live Codex fixture, 7 daemon, 10 context-threshold, 1 real
+  core-Schema Runtime, 21 handshake Runtime, 23 handshake Schema, 68 protocol,
+  12 Schema-package, and 23 stdio/Codex tests (1001 passed, zero failed, one
+  ignored). Strict Clippy and formatting, `aegisy-aap` packaging, the complete
+  desktop build and all 23 CTests, strict OpenSpec validation, and
+  `git diff --check` pass.
+- Keep `3.10` unchecked. The generated Transport layer has no production Rust/Qt
+  consumer migration yet, and a clean Windows Unicode checkout has not executed
+  the gate. Stable `0.1` remains lossless rather than silently narrowing generic
+  numbers; the slice grants no capability, permission, Approval, mutation,
+  execution, experimental, remote, or Windows release authority.
 
 ## Product Baseline Decision Evidence (`1.3`, `1.7`, `1.8`)
 

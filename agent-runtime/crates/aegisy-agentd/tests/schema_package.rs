@@ -75,9 +75,11 @@ fn schema_package_declares_isolated_stable_and_experimental_namespaces() {
     assert_eq!(
         package["scripts"],
         serde_json::json!({
-            "generate": "node scripts/generate-core-types.mjs",
-            "generate:check": "node scripts/generate-core-types.mjs --check",
-            "test:generator": "node scripts/test-core-generator-inputs.mjs"
+            "generate": "node scripts/generate-core-types.mjs && node scripts/generate-transport-types.mjs",
+            "generate:check": "node scripts/generate-core-types.mjs --check && node scripts/generate-transport-types.mjs --check && node scripts/verify-package-inventory.mjs",
+            "test:generator": "node scripts/test-core-generator-inputs.mjs && node scripts/test-transport-generator-inputs.mjs",
+            "test:transport:oracle": "node scripts/run-transport-corpus.mjs stable/v0.1/aap.schema.json fixtures/aap-transport-validation-corpus.json",
+            "test:transport:typescript": "node scripts/run-generated-transport-types.mjs fixtures/aap-transport-definitions.fixture-map.json && node scripts/run-generated-transport-types.mjs --corpus fixtures/aap-transport-validation-corpus.json"
         })
     );
     assert_eq!(
@@ -88,6 +90,8 @@ fn schema_package_declares_isolated_stable_and_experimental_namespaces() {
             "experimental",
             "fixtures",
             "generated",
+            "runtime/cpp/aap_transport_runtime.cpp",
+            "runtime/cpp/aap_transport_runtime.h",
             "scripts"
         ])
     );

@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-27
+Last updated: 2026-07-28
 
 ## Mandatory First Step
 
@@ -232,7 +232,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   994 Rust tests with one explicitly ignored live Codex fixture, strict Clippy
   and formatting, the complete desktop build and 20/20 CTests, JSON parsing,
   strict OpenSpec validation, and `git diff --check`.
-- OpenSpec task `3.10` now has a partial core-domain generation slice.
+- OpenSpec task `3.10` now has partial core-domain and Transport generation slices.
   `core.schema.json` deterministically produces checked-in Rust, TypeScript, and
   Qt/C++ types plus strict definition validators. Generation rejects unknown or
   unsupported Schema keywords, dialects, local-reference combinations, fractional
@@ -253,14 +253,44 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   fixture/corpus runners, and uses native Qt arguments for Unicode paths. Generated
   Rust lives inside `aegisy-aap`; `cargo package -p aegisy-aap --allow-dirty`
   verifies the packaged crate, and `.gitattributes` fixes gate inputs/outputs to LF.
+  Stable `aap.schema.json` now independently generates checked-in Rust, TypeScript,
+  and Qt/C++ request/response/notification types plus raw definition/root validators.
+  Stable `0.1` keeps generic `result` and `error.data` as true Schemas and
+  `jsonRpcError.code` as an unbounded mathematical integer. The shared lossless
+  parser profile therefore preserves arbitrary-precision number lexemes, accepts
+  mathematical integer forms such as `1.0`/`1e0`, and rejects a leading BOM,
+  invalid UTF-8, duplicate decoded keys, unpaired surrogates, frames above 4 MiB,
+  depth above 128, or more than 65,536 JSON nodes. Canonical JSON sorts object keys
+  by UTF-8 bytes and normalizes numbers without a floating-point round trip.
+  A reviewed method registry binds every root dispatch and generic fallback. The
+  99-definition fixture identity is
+  `29644 8948085aaf1c08ed94cad5ef1e682dc041120053045e06f851cea64d4dfbe0db`;
+  the 72-case parser/Schema decision identity is
+  `72 f0ce6bdc14c815b2b80b273126da8b20a80ec47371d39128c7e2155246f60404`.
+  Node oracle, generated TypeScript, Rust, and generated Qt/C++ reproduce the
+  applicable identities. TypeScript arbitrary-precision numbers expose the declared
+  read-only lexical/canonical/integer view only through parser-created, privately
+  branded objects; structurally similar or property-copied objects cannot be
+  canonicalized as Transport numbers. CMake compiles the standalone C++ Runtime and
+  generated public-API runner with warnings denied and registers both in CTest. The
+  private Schema package includes only the required
+  `runtime/cpp/aap_transport_runtime.h` and `.cpp` production dependency pair
+  alongside generated C++; test-only Runtime sources are not published. Both
+  `generate:check` and the aggregate CTest invoke an exact 47-file
+  `npm pack --dry-run --json` inventory gate, so generated C++ cannot be packed
+  without its Runtime dependencies.
   The final local gate passes generator negative/freshness tests, Rust formatting,
-  `994` workspace tests with one explicitly ignored live Codex fixture, strict
-  Clippy, the complete desktop build and `21/21` CTests, strict OpenSpec validation,
-  JSON parsing, Cargo packaging, and `git diff --check`.
-  Keep `3.10` unchecked: `aap.schema.json` request/response/notification generation,
-  production Rust/Qt consumer migration, and clean Windows Unicode-path execution
-  remain absent. This slice grants no capability, permission, Approval, mutation,
-  execution, experimental, remote, or Windows release authority.
+  `1001` workspace tests with one explicitly ignored live Codex fixture, strict
+  Clippy, the complete desktop build and `23/23` CTests, strict OpenSpec validation,
+  Cargo packaging, and `git diff --check`.
+  Keep `3.10` unchecked: production Rust/Qt consumers still use reviewed hand-written
+  wire paths, and clean Windows Unicode-checkout execution remains absent. The
+  `jsonschema` 0.48.5 Rust dependency also has an internal exponent-materialization
+  limit at 1,000,000; this is an implementation limit, not permission to narrow
+  stable `0.1`. A future reviewed AAP `0.2` may define JSON-safe generic integers
+  and remap current `-321xx` application errors outside the JSON-RPC reserved range.
+  These slices grant no capability, permission, Approval, mutation, execution,
+  experimental, remote, or Windows release authority.
 - OpenSpec task `3.3` is complete. The stable Schema, Rust Runtime/stdio daemon, Qt
   client, lifecycle fixtures, internal guide, design, and delta spec now share the
   structured two-stage AAP `0.1` handshake, numeric range negotiation, deterministic
@@ -3532,15 +3562,16 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Continue OpenSpec `3.5` by obtaining complete Windows reconnect/runtime evidence,
+1. Continue OpenSpec `3.10` by migrating production Rust and Qt Transport consumers
+   behind generated raw validators without changing stable `0.1` wire behavior. Run
+   the complete generator gate from a clean Windows Unicode checkout before checking
+   the task; do not narrow generic numbers or claim Windows evidence from macOS.
+2. Continue OpenSpec `3.5` by obtaining complete Windows reconnect/runtime evidence,
    then add reviewed acknowledgement producers for approval/file/Git/job mutations.
    Durable Turn-start acknowledgement, fixed-watermark replay, structured
    retention-gap snapshot recovery, out-of-band heartbeat, bounded reconnect, and
    live subscribe/sync-or-snapshot/activate are implemented. Keep automatic pruning
    disabled until the remaining mutation-producer and cross-platform gates are verified.
-2. Complete the reviewed acknowledgement producers for approval, Git, and jobs
-   after permission/approval/recovery gates; the file-write contract remains
-   internal until its AAP/Store/Qt authority path is designed.
 3. Finish OpenSpec `22.5` by generating the trusted manifest in signed packaging,
    binding Rust adapter launch and updater compatibility to the same artifact
    set, then validate it on a clean Windows runner.

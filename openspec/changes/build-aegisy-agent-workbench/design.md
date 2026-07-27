@@ -181,8 +181,8 @@ JSON Schema bounds Unicode characters. Rust and Qt typed validators continue to
 enforce UTF-8 byte lengths, aggregate tree limits, cross-field identities,
 timestamps, Usage arithmetic, and Workspace Git invariants.
 
-The partial `3.10` generation slice treats `core.schema.json` as the sole input
-for checked-in Rust, TypeScript, and Qt/C++ core domain types and strict
+The partial `3.10` core generation slice treats `core.schema.json` as the sole
+input for checked-in Rust, TypeScript, and Qt/C++ core domain types and strict
 definition-level validators. The generator audits the complete Schema AST and
 fails closed on unknown or unsupported keywords instead of silently weakening a
 rule. It also rejects normalized generated-name collisions and property-bearing
@@ -198,9 +198,46 @@ Cargo when tests are enabled, consumes Unicode fixture paths through native
 argument handling, and combines with repository LF normalization and a packaged
 `aegisy-aap` check.
 
-This remains a partial domain-generation architecture, not completion of `3.10`.
-`aap.schema.json` request/response/notification generation, migration of all
-production consumers, and clean Windows execution evidence are still required.
+The partial Transport generation slice independently treats stable
+`aap.schema.json` as the request/response/notification source. Stable `0.1`
+already declares generic `result` and `error.data` as true Schemas and
+`jsonRpcError.code` as an unbounded mathematical integer. The generator and
+validators therefore do not narrow these values to IEEE-754 or signed 64-bit
+integers. Node, Rust, and Qt/C++ share the parser profile
+`exact-json-number-schema-bounded-integer-unicode-scalar-no-duplicate-keys/0.1`:
+raw frames are limited to 4 MiB, 128 nesting levels, and 65,536 nodes; invalid
+UTF-8, a leading BOM, duplicate decoded keys, and unpaired surrogates fail before
+Schema validation; arbitrary-precision number lexemes survive parsing. Canonical
+Transport JSON sorts object keys by UTF-8 bytes and emits normalized coefficient
+plus optional decimal exponent without passing through a floating-point value.
+
+A reviewed method registry binds all stable root dispatch conditions, typed
+request/success/error definitions, and the two generic unknown-method fallbacks.
+The generated Rust/TypeScript/Qt APIs validate all 99 definitions and root
+messages. The standalone C++ runtime implements the required Draft 2020-12 subset,
+including reference siblings, composition, exact `oneOf`, negation, and conditional
+schemas. One CMake gate compares the materializer, independent Node oracle,
+generated TypeScript, Rust, and Qt/C++ fixture/corpus identities; C++ targets compile
+with warnings denied. Generated Rust items use the same repository-owned
+`#[rustfmt::skip]` stability convention as core generation, so generator bytes do
+not depend on the host rustfmt layout version.
+
+TypeScript arbitrary-precision Transport numbers are parser-created opaque values.
+Their public declaration exposes read-only lexical, canonical, and mathematical-
+integer fields plus a non-constructible brand, while the runtime uses a private
+membership registry rather than a copyable property or exported symbol. A plain
+lookalike or copied object therefore remains an ordinary JSON object or fails
+canonicalization; it cannot silently become a number. The Schema npm package
+publishes only the C++ Runtime header and implementation required by generated C++.
+An exact `npm pack --dry-run --json` inventory is part of both generation freshness
+and the aggregate CTest, not an informal release observation.
+
+This remains a partial generation architecture, not completion of `3.10`.
+Migration of production Rust/Qt wire consumers and clean Windows Unicode-checkout
+execution evidence are still required. A future AAP `0.2` may deliberately narrow
+generic integers and remap current `-321xx` application errors outside JSON-RPC's
+reserved range, but that would be a reviewed versioned contract change rather than
+a silent `0.1` generator behavior.
 
 Protocol properties:
 
