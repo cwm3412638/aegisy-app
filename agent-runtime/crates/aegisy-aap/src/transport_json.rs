@@ -577,6 +577,8 @@ mod tests {
     use super::*;
     use crate::generated_transport::{
         decode_transport_definition_raw, decode_transport_message_raw,
+        transport_validator_compile_count, validate_transport_definition,
+        validate_transport_message, TransportDecodeError, TransportSchemaError,
     };
 
     #[test]
@@ -703,5 +705,89 @@ mod tests {
         }
         decode_transport_definition_raw("unknownDefinition", b"null")
             .expect_err("unknown definition must fail");
+    }
+
+    #[test]
+    fn generated_decoder_preserves_parse_and_schema_error_classes() {
+        let cases = [
+            (
+                vec![b' '; MAX_TRANSPORT_JSON_BYTES + 1],
+                TransportJsonErrorKind::Frame,
+            ),
+            (vec![0xff], TransportJsonErrorKind::Utf8),
+            (b"01".to_vec(), TransportJsonErrorKind::Syntax),
+            (
+                format!("{}0{}", "[".repeat(129), "]".repeat(129)).into_bytes(),
+                TransportJsonErrorKind::ImplementationLimit,
+            ),
+        ];
+        for (raw, expected) in cases {
+            match decode_transport_message_raw(&raw).expect_err("parse failure") {
+                TransportDecodeError::Parse(error) => assert_eq!(error.kind(), expected),
+                TransportDecodeError::Schema(error) => {
+                    panic!("parse failure was misclassified as Schema error: {error}")
+                }
+            }
+        }
+
+        assert_eq!(
+            decode_transport_message_raw(br#"{"jsonrpc":"2.0"}"#).expect_err("invalid envelope"),
+            TransportDecodeError::Schema(TransportSchemaError::InvalidValue)
+        );
+        assert_eq!(
+            decode_transport_definition_raw("unknownDefinition", b"null")
+                .expect_err("unknown definition"),
+            TransportDecodeError::Schema(TransportSchemaError::UnknownDefinition)
+        );
+    }
+
+    #[test]
+    fn generated_validators_compile_once_and_reuse_the_cached_instances() {
+        let message = parse_transport_json(
+            br#"{"jsonrpc":"2.0","id":"cache-test","result":123456789012345678901234567890}"#,
+        )
+        .expect("valid transport message");
+        validate_transport_message(&message).expect("first root validation");
+        validate_transport_message(&message).expect("cached root validation");
+        assert_eq!(transport_validator_compile_count("$root"), 1);
+
+        let heartbeat = parse_transport_json(
+            br#"{"schema_version":"runtime-heartbeat-request/0.1","nonce":"cache-test"}"#,
+        )
+        .expect("valid heartbeat params");
+        validate_transport_definition("runtimeHeartbeatParams", &heartbeat)
+            .expect("first definition validation");
+        validate_transport_definition("runtimeHeartbeatParams", &heartbeat)
+            .expect("cached definition validation");
+        assert_eq!(
+            transport_validator_compile_count("runtimeHeartbeatParams"),
+            1
+        );
+    }
+
+    #[test]
+    fn generated_definition_validator_compiles_once_under_concurrent_first_use() {
+        const WORKERS: usize = 16;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WORKERS));
+        let workers = (0..WORKERS)
+            .map(|_| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    validate_transport_definition("nullableDurableMutationCursor", &Value::Null)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for worker in workers {
+            worker
+                .join()
+                .expect("validator worker must not panic")
+                .expect("nullable cursor must validate");
+        }
+        assert_eq!(
+            transport_validator_compile_count("nullableDurableMutationCursor"),
+            1
+        );
     }
 }

@@ -279,8 +279,17 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   `generate:check` and the aggregate CTest invoke an exact 47-file
   `npm pack --dry-run --json` inventory gate, so generated C++ cannot be packed
   without its Runtime dependencies.
+  Generated Rust Transport validation now parses the embedded Schema once and
+  caches the root plus each of the 99 definition validators independently with
+  thread-safe `OnceLock` state. Concurrent first use of one definition compiles
+  exactly once. Public non-exhaustive errors preserve parser classes and offsets
+  separately from `UnknownDefinition`, `InvalidValue`, and local
+  `ValidatorUnavailable` failures. Production consumers must treat
+  `ValidatorUnavailable` as a local fail-closed implementation fault rather than
+  reporting it to a peer as `-32600` or `-32602`; the generated dispatch and
+  production-consumer migration remain the next slice.
   The final local gate passes generator negative/freshness tests, Rust formatting,
-  `1001` workspace tests with one explicitly ignored live Codex fixture, strict
+  `1004` workspace tests with one explicitly ignored live Codex fixture, strict
   Clippy, the complete desktop build and `23/23` CTests, strict OpenSpec validation,
   Cargo packaging, and `git diff --check`.
   Keep `3.10` unchecked: production Rust/Qt consumers still use reviewed hand-written
