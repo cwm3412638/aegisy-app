@@ -576,9 +576,15 @@ fn hex_value(byte: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::generated_transport::{
-        decode_transport_definition_raw, decode_transport_message_raw,
+        decode_transport_definition_raw, decode_transport_generic_envelope_raw,
+        decode_transport_message_raw, decode_transport_request_or_notification_raw,
+        decode_transport_response_raw, transport_dispatch_test_map_schema_error,
+        transport_method_metadata, transport_typed_error_metadata,
         transport_validator_compile_count, validate_transport_definition,
-        validate_transport_message, TransportDecodeError, TransportSchemaError,
+        validate_transport_generic_envelope, validate_transport_message, TransportDecodeError,
+        TransportDispatchError, TransportMethodKind, TransportPendingRequest,
+        TransportRequestOrNotification, TransportResponse, TransportSchemaError, TRANSPORT_METHODS,
+        TRANSPORT_TYPED_ERRORS,
     };
 
     #[test]
@@ -788,6 +794,279 @@ mod tests {
         assert_eq!(
             transport_validator_compile_count("nullableDurableMutationCursor"),
             1
+        );
+    }
+
+    #[test]
+    fn generated_method_and_typed_error_metadata_is_sorted_and_lookup_safe() {
+        assert_eq!(TRANSPORT_METHODS.len(), 14);
+        assert!(TRANSPORT_METHODS
+            .windows(2)
+            .all(|pair| pair[0].method < pair[1].method));
+        assert_eq!(TRANSPORT_TYPED_ERRORS.len(), 6);
+        assert!(TRANSPORT_TYPED_ERRORS.windows(2).all(|pair| (
+            pair[0].method,
+            pair[0].schema_version
+        ) < (
+            pair[1].method,
+            pair[1].schema_version
+        )));
+
+        let initialize = transport_method_metadata("initialize").expect("initialize metadata");
+        assert_eq!(initialize.kind, TransportMethodKind::Request);
+        assert_eq!(initialize.params_definition, Some("initializeParams"));
+        assert_eq!(initialize.request_definition, Some("initializeRequest"));
+        assert_eq!(
+            initialize.success_response_definition,
+            Some("initializeSuccessResponse")
+        );
+        assert_eq!(
+            initialize.error_response_definitions,
+            &["initializeIncompatibleErrorResponse"]
+        );
+
+        let event = transport_method_metadata("event").expect("event metadata");
+        assert_eq!(event.kind, TransportMethodKind::Notification);
+        assert_eq!(event.notification_definition, None);
+        assert_eq!(event.params_definition, Some("timelineEvent"));
+        assert!(transport_method_metadata("unknown/method").is_none());
+
+        assert_eq!(
+            transport_typed_error_metadata("timeline/sync", "timeline-retention-gap/0.1")
+                .expect("retention gap metadata")
+                .response_definition,
+            "timelineSyncRetentionGapErrorResponse"
+        );
+        assert_eq!(
+            transport_typed_error_metadata(
+                "timeline/subscribe",
+                "timeline-subscription-failure/0.1"
+            )
+            .expect("subscription failure metadata")
+            .response_definition,
+            "timelineSubscriptionRequestErrorResponse"
+        );
+        assert!(
+            transport_typed_error_metadata("initialize", "timeline-retention-gap/0.1").is_none()
+        );
+        assert!(transport_typed_error_metadata("initialize", "future-error/0.1").is_none());
+    }
+
+    #[test]
+    fn generic_envelope_validation_excludes_known_method_conditions() {
+        let known_but_malformed = parse_transport_json(
+            br#"{"jsonrpc":"2.0","id":"known","method":"runtime/heartbeat","params":{}}"#,
+        )
+        .expect("valid generic request envelope");
+        validate_transport_generic_envelope(&known_but_malformed)
+            .expect("generic envelope must exclude root method conditions");
+        assert_eq!(
+            validate_transport_message(&known_but_malformed).expect_err("known wrapper must fail"),
+            TransportSchemaError::InvalidValue
+        );
+
+        for raw in [
+            br#"{"jsonrpc":"2.0","id":"unknown-request","method":"future/request","params":{}}"#
+                .as_slice(),
+            br#"{"jsonrpc":"2.0","method":"future/notification","params":{}}"#,
+            br#"{"jsonrpc":"2.0","id":"unknown-result","result":1e10000}"#,
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"future"}}"#,
+        ] {
+            decode_transport_generic_envelope_raw(raw).expect("valid generic envelope");
+        }
+
+        for raw in [
+            br#"{"jsonrpc":"2.0","id":null,"method":"future/request","params":{}}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","method":"future/request","params":null}"#,
+            br#"{"jsonrpc":"2.0","method":"invalid method","params":{}}"#,
+            br#"{"jsonrpc":"2.0","id":"ambiguous","result":{},"error":{"code":-1,"message":"bad"}}"#,
+        ] {
+            assert_eq!(
+                decode_transport_generic_envelope_raw(raw).expect_err("invalid generic envelope"),
+                TransportDecodeError::Schema(TransportSchemaError::InvalidValue)
+            );
+        }
+        assert_eq!(transport_validator_compile_count("$generic-envelope"), 1);
+    }
+
+    #[test]
+    fn generated_dispatch_never_downgrades_known_methods_or_typed_errors() {
+        let pending = |id, method| TransportPendingRequest {
+            id,
+            method,
+            typed_error_request_identity: None,
+        };
+        assert!(matches!(
+            decode_transport_request_or_notification_raw(
+                br#"{"jsonrpc":"2.0","id":"unknown","method":"future/request","params":{}}"#
+            )
+            .expect("unknown request remains forward compatible"),
+            TransportRequestOrNotification::UnknownRequest(_)
+        ));
+        assert_eq!(
+            decode_transport_request_or_notification_raw(
+                br#"{"jsonrpc":"2.0","id":"known","method":"runtime/heartbeat","params":{}}"#
+            )
+            .expect_err("known malformed request must not use generic fallback"),
+            TransportDispatchError::InvalidKnownMessage
+        );
+
+        assert!(matches!(
+            decode_transport_response_raw(
+                Some(pending("heartbeat-1", "runtime/heartbeat")),
+                br#"{"jsonrpc":"2.0","id":"heartbeat-1","result":{"schema_version":"runtime-heartbeat/0.1","nonce":"nonce-1","state":"alive"}}"#
+            )
+            .expect("known success response"),
+            TransportResponse::KnownSuccess { metadata, .. }
+                if metadata.method == "runtime/heartbeat"
+        ));
+        assert_eq!(
+            decode_transport_response_raw(
+                Some(pending("wrong-success", "initialize")),
+                br#"{"jsonrpc":"2.0","id":"wrong-success","result":{"schema_version":"runtime-heartbeat/0.1","nonce":"nonce-1","state":"alive"}}"#
+            )
+            .expect_err("known success must match the pending method"),
+            TransportDispatchError::InvalidKnownMessage
+        );
+        assert!(matches!(
+            decode_transport_response_raw(
+                Some(pending("timeline-gap-1", "timeline/sync")),
+                br#"{"jsonrpc":"2.0","id":"timeline-gap-1","error":{"code":-32148,"message":"requested Timeline history is no longer retained","data":{"schema_version":"timeline-retention-gap/0.1","reason":"requested-anchor-not-retained","session_id":"session-1","requested_after":{"sequence":0,"event_id":null},"requested_watermark":null,"retained_floor":{"sequence":2,"event_id":"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"head":{"sequence":3,"event_id":"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"snapshot_required":true,"snapshot_available":true,"snapshot_capability":"timeline.snapshot.current","snapshot_method":"timeline/snapshot","event_history_complete":false,"replay_from_floor_allowed":false}}}"#
+            )
+            .expect("known typed error"),
+            TransportResponse::KnownTypedError { metadata, .. }
+                if metadata.method == "timeline/sync"
+                    && metadata.schema_version == "timeline-retention-gap/0.1"
+        ));
+        assert_eq!(
+            decode_transport_response_raw(
+                Some(pending("gap-1", "initialize")),
+                br#"{"jsonrpc":"2.0","id":"gap-1","error":{"code":-32148,"message":"gap","data":{"schema_version":"timeline-retention-gap/0.1"}}}"#
+            )
+            .expect_err("known discriminator cannot cross pending methods"),
+            TransportDispatchError::InvalidKnownMessage
+        );
+        assert_eq!(
+            decode_transport_response_raw(
+                Some(pending("gap-1", "timeline/sync")),
+                br#"{"jsonrpc":"2.0","id":"gap-1","error":{"code":-32148,"message":"gap","data":{"schema_version":"timeline-retention-gap/0.1"}}}"#
+            )
+            .expect_err("malformed known typed error cannot use generic fallback"),
+            TransportDispatchError::InvalidKnownMessage
+        );
+        assert!(matches!(
+            decode_transport_response_raw(
+                Some(pending("future-1", "future/request")),
+                br#"{"jsonrpc":"2.0","id":"future-1","result":{"future":true}}"#
+            )
+            .expect("unknown pending method remains generic"),
+            TransportResponse::UnknownMethod(_)
+        ));
+        assert!(matches!(
+            decode_transport_response_raw(
+                Some(pending("future-error", "initialize")),
+                br#"{"jsonrpc":"2.0","id":"future-error","error":{"code":-32000,"message":"future","data":{"schema_version":"future-error/0.1"}}}"#
+            )
+            .expect("unknown discriminator remains generic"),
+            TransportResponse::GenericError(_)
+        ));
+        assert_eq!(
+            decode_transport_response_raw(
+                None,
+                br#"{"jsonrpc":"2.0","id":"gap-unmatched","error":{"code":-32148,"message":"gap","data":{"schema_version":"timeline-retention-gap/0.1"}}}"#
+            )
+            .expect_err("unmatched known typed discriminator must still validate"),
+            TransportDispatchError::InvalidKnownMessage
+        );
+    }
+
+    #[test]
+    fn response_dispatch_requires_exact_pending_id_and_typed_error_correlation() {
+        let pending = |id, method, identity| TransportPendingRequest {
+            id,
+            method,
+            typed_error_request_identity: identity,
+        };
+        for raw in [
+            br#"{"jsonrpc":"2.0","id":"heartbeat-2","result":{"schema_version":"runtime-heartbeat/0.1","nonce":"nonce-1","state":"alive"}}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"generic"}}"#,
+        ] {
+            assert!(matches!(
+                decode_transport_response_raw(
+                    Some(pending("heartbeat-1", "runtime/heartbeat", None)),
+                    raw,
+                )
+                .expect("wrong or null ID remains unmatched"),
+                TransportResponse::Unmatched(_)
+            ));
+        }
+
+        const IDENTITY: &str = "timeline-subscription-request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let valid = br#"{"jsonrpc":"2.0","id":"subscribe-1","error":{"code":-32150,"message":"subscription failed","data":{"schema_version":"timeline-subscription-failure/0.1","connection_generation":1,"session_id":"session-1","subscription_id":"subscription-1","state":"failed","stage":"subscribe","cursor":{"sequence":0,"event_id":null},"watermark":null,"request_identity":"timeline-subscription-request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reason":"transport","retryable":true,"cleanup_required":true}}}"#;
+        assert!(matches!(
+            decode_transport_response_raw(
+                Some(pending("subscribe-1", "timeline/subscribe", Some(IDENTITY))),
+                valid,
+            )
+            .expect("exact subscription failure correlation"),
+            TransportResponse::KnownTypedError { .. }
+        ));
+        assert_eq!(
+            decode_transport_response_raw(
+                Some(pending(
+                    "subscribe-1",
+                    "timeline/subscription-activate",
+                    Some(IDENTITY)
+                )),
+                valid,
+            )
+            .expect_err("stage must be method-bound"),
+            TransportDispatchError::InvalidKnownMessage
+        );
+        assert_eq!(
+            decode_transport_response_raw(
+                Some(pending(
+                    "subscribe-1",
+                    "timeline/subscribe",
+                    Some("timeline-subscription-request:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                )),
+                valid,
+            )
+            .expect_err("request identity must be exact"),
+            TransportDispatchError::InvalidKnownMessage
+        );
+        assert_eq!(
+            decode_transport_response_raw(
+                Some(pending("subscribe-1", "timeline/subscribe", None)),
+                valid,
+            )
+            .expect_err("required typed correlation cannot be omitted"),
+            TransportDispatchError::InvalidKnownMessage
+        );
+    }
+
+    #[test]
+    fn dispatch_preserves_parse_offsets_and_local_validator_faults() {
+        match decode_transport_request_or_notification_raw(b"01")
+            .expect_err("syntax error must remain a parse error")
+        {
+            TransportDispatchError::Parse(error) => {
+                assert_eq!(error.kind(), TransportJsonErrorKind::Syntax);
+                assert_eq!(error.offset(), 1);
+            }
+            error => panic!("parse error was misclassified: {error}"),
+        }
+        assert_eq!(
+            transport_dispatch_test_map_schema_error(TransportSchemaError::UnknownDefinition),
+            TransportDispatchError::ValidatorUnavailable
+        );
+        assert_eq!(
+            transport_dispatch_test_map_schema_error(TransportSchemaError::ValidatorUnavailable),
+            TransportDispatchError::ValidatorUnavailable
+        );
+        assert_eq!(
+            transport_dispatch_test_map_schema_error(TransportSchemaError::InvalidValue),
+            TransportDispatchError::InvalidKnownMessage
         );
     }
 }

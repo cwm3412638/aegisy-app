@@ -10,6 +10,8 @@ pub const TRANSPORT_SCHEMA_ID: &str = "https://aegisy.cc/schemas/aap/stable/v0.1
 #[rustfmt::skip]
 pub const TRANSPORT_SCHEMA_SHA256: &str = "0efe08cdee1849f5a15c2e5e2da0fe262d5d1ef9f758812e0934bee9b0a0e74e";
 #[rustfmt::skip]
+pub const TRANSPORT_METHOD_REGISTRY_SHA256: &str = "b90f2572b61f4e6c75548b5655cd2374b469231e282e5dd1a3e6f9f9da09953c";
+#[rustfmt::skip]
 pub const TRANSPORT_SCHEMA_JSON: &str = "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$id\":\"https://aegisy.cc/schemas/aap/stable/v0.1/aap.schema.json\",\"title\":\"Aegisy Agent Protocol 0.1\",\"type\":\"object\",\"required\":[\"jsonrpc\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcId\"},\"method\":{\"type\":\"string\",\"pattern\":\"^[A-Za-z][A-Za-z0-9.-]*(?:/[A-Za-z][A-Za-z0-9.-]*)*$\",\"minLength\":1,\"maxLength\":128},\"params\":{\"type\":\"object\"},\"result\":{},\"error\":{\"$ref\":\"#/$defs/jsonRpcError\",\"required\":[\"code\",\"message\"]}},\"oneOf\":[{\"required\":[\"id\",\"method\",\"params\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"}},\"not\":{\"anyOf\":[{\"required\":[\"result\"]},{\"required\":[\"error\"]}]}},{\"required\":[\"method\",\"params\"],\"not\":{\"anyOf\":[{\"required\":[\"id\"]},{\"required\":[\"result\"]},{\"required\":[\"error\"]}]}},{\"required\":[\"id\",\"result\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"}},\"not\":{\"anyOf\":[{\"required\":[\"method\"]},{\"required\":[\"error\"]}]}},{\"required\":[\"id\",\"error\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcId\"}},\"not\":{\"anyOf\":[{\"required\":[\"method\"]},{\"required\":[\"result\"]}]}}],\"allOf\":[{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"initialize\"}}},\"then\":{\"required\":[\"id\",\"params\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"params\":{\"$ref\":\"#/$defs/initializeParams\"}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"initialized\"}}},\"then\":{\"required\":[\"params\"],\"not\":{\"required\":[\"id\"]},\"properties\":{\"params\":{\"type\":\"object\",\"maxProperties\":0,\"additionalProperties\":false}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"runtime/heartbeat\"}}},\"then\":{\"required\":[\"id\",\"params\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"params\":{\"$ref\":\"#/$defs/runtimeHeartbeatParams\"}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"session/mutation-acknowledgements\"}}},\"then\":{\"required\":[\"id\",\"params\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"params\":{\"$ref\":\"#/$defs/durableMutationListParams\"}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"mutation/acknowledgement/consume\"}}},\"then\":{\"required\":[\"id\",\"params\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"params\":{\"$ref\":\"#/$defs/durableMutationConsumeParams\"}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"event\"}}},\"then\":{\"required\":[\"params\"],\"not\":{\"required\":[\"id\"]},\"properties\":{\"params\":{\"$ref\":\"#/$defs/timelineEvent\"}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"timeline/sync\"}}},\"then\":{\"required\":[\"id\",\"params\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"params\":{\"$ref\":\"#/$defs/timelineSyncParams\"}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"timeline/snapshot\"}}},\"then\":{\"required\":[\"id\",\"params\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"params\":{\"$ref\":\"#/$defs/timelineSnapshotParams\"}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"timeline/subscribe\"}}},\"then\":{\"required\":[\"id\",\"params\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"params\":{\"$ref\":\"#/$defs/timelineSubscribeParams\"}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"timeline/subscription-sync\"}}},\"then\":{\"required\":[\"id\",\"params\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"params\":{\"$ref\":\"#/$defs/timelineSubscriptionSyncParams\"}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"timeline/subscription-snapshot\"}}},\"then\":{\"required\":[\"id\",\"params\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"params\":{\"$ref\":\"#/$defs/timelineSubscriptionSnapshotParams\"}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"timeline/subscription-activate\"}}},\"then\":{\"required\":[\"id\",\"params\"],\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"params\":{\"$ref\":\"#/$defs/timelineActivateParams\"}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"timeline/subscription-event\"}}},\"then\":{\"required\":[\"params\"],\"not\":{\"required\":[\"id\"]},\"properties\":{\"params\":{\"$ref\":\"#/$defs/timelineSubscriptionEvent\"}}}},{\"if\":{\"required\":[\"method\"],\"properties\":{\"method\":{\"const\":\"timeline/subscription-failure\"}}},\"then\":{\"required\":[\"params\"],\"not\":{\"required\":[\"id\"]},\"properties\":{\"params\":{\"$ref\":\"#/$defs/timelineSubscriptionLiveFailure\"}}}},{\"if\":{\"required\":[\"error\"],\"properties\":{\"error\":{\"required\":[\"data\"],\"properties\":{\"data\":{\"type\":\"object\",\"required\":[\"schema_version\"],\"properties\":{\"schema_version\":{\"const\":\"timeline-subscription-failure/0.1\"}}}}}}},\"then\":{\"properties\":{\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"error\":{\"properties\":{\"data\":{\"$ref\":\"#/$defs/timelineSubscriptionRequestFailure\"}}}}}}],\"$defs\":{\"jsonRpcRequestId\":{\"type\":\"string\",\"pattern\":\"^[!-~]+$\",\"minLength\":1,\"maxLength\":128},\"jsonRpcId\":{\"oneOf\":[{\"$ref\":\"#/$defs/jsonRpcRequestId\"},{\"type\":\"null\"}]},\"jsonRpcError\":{\"type\":\"object\",\"required\":[\"code\",\"message\"],\"additionalProperties\":false,\"properties\":{\"code\":{\"type\":\"integer\"},\"message\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":2048},\"data\":{}}},\"runtimeHeartbeatParams\":{\"type\":\"object\",\"required\":[\"schema_version\",\"nonce\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"runtime-heartbeat-request/0.1\"},\"nonce\":{\"$ref\":\"#/$defs/boundedGraphicalId\"}}},\"runtimeHeartbeatResult\":{\"type\":\"object\",\"required\":[\"schema_version\",\"nonce\",\"state\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"runtime-heartbeat/0.1\"},\"nonce\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"state\":{\"const\":\"alive\"}}},\"runtimeHeartbeatRequest\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"method\":{\"const\":\"runtime/heartbeat\"},\"params\":{\"$ref\":\"#/$defs/runtimeHeartbeatParams\"}}},\"runtimeHeartbeatSuccessResponse\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"result\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"result\":{\"$ref\":\"#/$defs/runtimeHeartbeatResult\"}}},\"mutationAcknowledgementState\":{\"enum\":[\"accepted\",\"acknowledged\",\"terminal\"]},\"mutationRequest\":{\"$comment\":\"Metadata-only binding for a future mutation-shaped request. It grants no mutation or approval authority.\",\"type\":\"object\",\"required\":[\"schema_version\",\"request_id\",\"idempotency_key\",\"session_id\",\"generation\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"mutation-acknowledgement/0.1\"},\"request_id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"idempotency_key\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"generation\":{\"$ref\":\"#/$defs/safePositiveInteger\"}}},\"mutationAcknowledgement\":{\"$comment\":\"The state is an ingress/durability observation only: accepted, acknowledged, or terminal. It does not assert mutation success or grant authority.\",\"type\":\"object\",\"required\":[\"schema_version\",\"request_id\",\"idempotency_key\",\"session_id\",\"generation\",\"state\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"mutation-acknowledgement/0.1\"},\"request_id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"idempotency_key\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"generation\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"state\":{\"$ref\":\"#/$defs/mutationAcknowledgementState\"}}},\"durableMutationOperationIdentity\":{\"type\":\"string\",\"pattern\":\"^mutation-operation:sha256:[0-9a-f]{64}$\",\"minLength\":90,\"maxLength\":90},\"durableMutationRequestFingerprint\":{\"$comment\":\"SHA-256 over the mutation request under the producer's reviewed canonicalization. The request body itself is forbidden from this contract.\",\"type\":\"string\",\"pattern\":\"^[0-9a-f]{64}$\",\"minLength\":64,\"maxLength\":64},\"durableMutationKind\":{\"enum\":[\"turn-start\"]},\"durableMutationCapability\":{\"const\":\"session.mutation-acknowledgements\"},\"durableMutationState\":{\"enum\":[\"accepted\",\"terminal\",\"reconciliation-required\"]},\"durableMutationConsumeTarget\":{\"enum\":[\"accepted\",\"terminal\"]},\"nullableBoundedGraphicalId\":{\"oneOf\":[{\"$ref\":\"#/$defs/boundedGraphicalId\"},{\"type\":\"null\"}]},\"positiveTimelineAnchor\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineAnchor\"},{\"properties\":{\"sequence\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"event_id\":{\"$ref\":\"#/$defs/timelineEventId\"}}}]},\"nullableTimelineAnchor\":{\"oneOf\":[{\"$ref\":\"#/$defs/positiveTimelineAnchor\"},{\"type\":\"null\"}]},\"durableMutationOperation\":{\"$comment\":\"Metadata-only durable mutation acknowledgement. Typed peers recompute operation_identity from session_id, mutation_kind, idempotency_key, and request_fingerprint. No prompt, context, body, provider payload, result content, permission, approval, or execution authority is permitted.\",\"type\":\"object\",\"required\":[\"schema_version\",\"operation_identity\",\"session_id\",\"mutation_kind\",\"idempotency_key\",\"request_fingerprint\",\"revision\",\"state\",\"turn_id\",\"accepted_anchor\",\"terminal_anchor\",\"accepted_consumed\",\"terminal_consumed\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"mutation-acknowledgement-operation/0.1\"},\"operation_identity\":{\"$ref\":\"#/$defs/durableMutationOperationIdentity\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"mutation_kind\":{\"$ref\":\"#/$defs/durableMutationKind\"},\"idempotency_key\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"request_fingerprint\":{\"$ref\":\"#/$defs/durableMutationRequestFingerprint\"},\"revision\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"state\":{\"$ref\":\"#/$defs/durableMutationState\"},\"turn_id\":{\"$ref\":\"#/$defs/nullableBoundedGraphicalId\"},\"accepted_anchor\":{\"$ref\":\"#/$defs/nullableTimelineAnchor\"},\"terminal_anchor\":{\"$ref\":\"#/$defs/nullableTimelineAnchor\"},\"accepted_consumed\":{\"type\":\"boolean\"},\"terminal_consumed\":{\"type\":\"boolean\"}},\"allOf\":[{\"if\":{\"properties\":{\"accepted_anchor\":{\"$ref\":\"#/$defs/positiveTimelineAnchor\"}}},\"then\":{\"properties\":{\"turn_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"}}}},{\"if\":{\"properties\":{\"terminal_consumed\":{\"const\":true}}},\"then\":{\"properties\":{\"accepted_consumed\":{\"const\":true}}}},{\"if\":{\"properties\":{\"accepted_consumed\":{\"const\":true}}},\"then\":{\"properties\":{\"turn_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"accepted_anchor\":{\"$ref\":\"#/$defs/timelineAnchor\"}}}}],\"oneOf\":[{\"properties\":{\"state\":{\"const\":\"accepted\"},\"terminal_anchor\":{\"type\":\"null\"},\"terminal_consumed\":{\"const\":false}}},{\"$comment\":\"Typed peers additionally require positive accepted/terminal anchors and a terminal sequence strictly after the accepted sequence.\",\"properties\":{\"state\":{\"const\":\"terminal\"},\"turn_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"accepted_anchor\":{\"$ref\":\"#/$defs/positiveTimelineAnchor\"},\"terminal_anchor\":{\"$ref\":\"#/$defs/positiveTimelineAnchor\"}}},{\"$comment\":\"Accepted-only state found after restart is unknown and requires reconciliation; it never fabricates terminal evidence.\",\"properties\":{\"state\":{\"const\":\"reconciliation-required\"},\"terminal_anchor\":{\"type\":\"null\"},\"terminal_consumed\":{\"const\":false}}}]},\"durableMutationCursor\":{\"$comment\":\"Strict keyset cursor. Typed peers require it to equal the final operation identity and revision on an incomplete page.\",\"type\":\"object\",\"required\":[\"operation_identity\",\"revision\"],\"additionalProperties\":false,\"properties\":{\"operation_identity\":{\"$ref\":\"#/$defs/durableMutationOperationIdentity\"},\"revision\":{\"$ref\":\"#/$defs/safePositiveInteger\"}}},\"nullableDurableMutationCursor\":{\"oneOf\":[{\"$ref\":\"#/$defs/durableMutationCursor\"},{\"type\":\"null\"}]},\"durableMutationListParams\":{\"type\":\"object\",\"required\":[\"schema_version\",\"session_id\",\"after\",\"limit\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"mutation-acknowledgement-list-request/0.1\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"after\":{\"$ref\":\"#/$defs/nullableDurableMutationCursor\"},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100}}},\"durableMutationPage\":{\"$comment\":\"Typed peers require exact request echo, same-Session operations in strictly increasing identity order, no duplicates, and a next cursor equal to the final operation identity/revision.\",\"type\":\"object\",\"required\":[\"schema_version\",\"session_id\",\"after\",\"operations\",\"next_after\",\"complete\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"mutation-acknowledgement-page/0.1\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"after\":{\"$ref\":\"#/$defs/nullableDurableMutationCursor\"},\"operations\":{\"type\":\"array\",\"maxItems\":100,\"items\":{\"$ref\":\"#/$defs/durableMutationOperation\"}},\"next_after\":{\"$ref\":\"#/$defs/nullableDurableMutationCursor\"},\"complete\":{\"type\":\"boolean\"}},\"oneOf\":[{\"properties\":{\"complete\":{\"const\":true},\"next_after\":{\"type\":\"null\"}}},{\"properties\":{\"complete\":{\"const\":false},\"operations\":{\"minItems\":1},\"next_after\":{\"$ref\":\"#/$defs/durableMutationCursor\"}}}]},\"durableMutationConsumeParams\":{\"type\":\"object\",\"required\":[\"schema_version\",\"session_id\",\"operation_identity\",\"expected_revision\",\"target\",\"confirmed_anchor\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"mutation-acknowledgement-consume-request/0.1\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"operation_identity\":{\"$ref\":\"#/$defs/durableMutationOperationIdentity\"},\"expected_revision\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"target\":{\"$ref\":\"#/$defs/durableMutationConsumeTarget\"},\"confirmed_anchor\":{\"$ref\":\"#/$defs/positiveTimelineAnchor\"}}},\"durableMutationConsumeResult\":{\"$comment\":\"Typed peers require the operation to match the request, advance expected_revision by exactly one, repeat the user-confirmed Timeline anchor, and set the selected consumed flag. The anchor must equal accepted_anchor or terminal_anchor for the selected target. Terminal consumption additionally requires terminal state and accepted consumption.\",\"type\":\"object\",\"required\":[\"schema_version\",\"session_id\",\"operation_identity\",\"expected_revision\",\"target\",\"confirmed_anchor\",\"operation\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"mutation-acknowledgement-consume-result/0.1\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"operation_identity\":{\"$ref\":\"#/$defs/durableMutationOperationIdentity\"},\"expected_revision\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":9007199254740990},\"target\":{\"$ref\":\"#/$defs/durableMutationConsumeTarget\"},\"confirmed_anchor\":{\"$ref\":\"#/$defs/positiveTimelineAnchor\"},\"operation\":{\"$ref\":\"#/$defs/durableMutationOperation\"}},\"oneOf\":[{\"properties\":{\"target\":{\"const\":\"accepted\"},\"operation\":{\"properties\":{\"accepted_consumed\":{\"const\":true}}}}},{\"properties\":{\"target\":{\"const\":\"terminal\"},\"operation\":{\"properties\":{\"state\":{\"const\":\"terminal\"},\"accepted_consumed\":{\"const\":true},\"terminal_consumed\":{\"const\":true}}}}}]},\"durableMutationListRequest\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"method\":{\"const\":\"session/mutation-acknowledgements\"},\"params\":{\"$ref\":\"#/$defs/durableMutationListParams\"}}},\"durableMutationListSuccessResponse\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"result\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"result\":{\"$ref\":\"#/$defs/durableMutationPage\"}}},\"durableMutationConsumeRequest\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"method\":{\"const\":\"mutation/acknowledgement/consume\"},\"params\":{\"$ref\":\"#/$defs/durableMutationConsumeParams\"}}},\"durableMutationConsumeSuccessResponse\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"result\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"result\":{\"$ref\":\"#/$defs/durableMutationConsumeResult\"}}},\"protocolVersion\":{\"type\":\"string\",\"pattern\":\"^(?:0|[1-9][0-9]*)\\\\.(?:0|[1-9][0-9]*)$\",\"minLength\":3,\"maxLength\":16},\"protocolRange\":{\"type\":\"object\",\"required\":[\"minimum\",\"maximum\"],\"additionalProperties\":false,\"properties\":{\"minimum\":{\"$ref\":\"#/$defs/protocolVersion\"},\"maximum\":{\"$ref\":\"#/$defs/protocolVersion\"}}},\"protocolPreference\":{\"type\":\"object\",\"required\":[\"minimum\",\"maximum\",\"preferred\"],\"additionalProperties\":false,\"properties\":{\"minimum\":{\"$ref\":\"#/$defs/protocolVersion\"},\"maximum\":{\"$ref\":\"#/$defs/protocolVersion\"},\"preferred\":{\"$ref\":\"#/$defs/protocolVersion\"}}},\"negotiatedProtocol\":{\"type\":\"object\",\"required\":[\"minimum\",\"maximum\",\"selected\",\"upgrade_direction\"],\"additionalProperties\":false,\"properties\":{\"minimum\":{\"$ref\":\"#/$defs/protocolVersion\"},\"maximum\":{\"$ref\":\"#/$defs/protocolVersion\"},\"selected\":{\"$ref\":\"#/$defs/protocolVersion\"},\"upgrade_direction\":{\"const\":\"none\"}}},\"identity\":{\"type\":\"object\",\"required\":[\"name\",\"version\"],\"additionalProperties\":false,\"properties\":{\"name\":{\"type\":\"string\",\"pattern\":\"^[a-z0-9]+(?:[.-][a-z0-9]+)*$\",\"minLength\":1,\"maxLength\":64},\"version\":{\"type\":\"string\",\"pattern\":\"^[!-~]+$\",\"minLength\":1,\"maxLength\":64}}},\"platform\":{\"type\":\"object\",\"required\":[\"os\",\"architecture\"],\"additionalProperties\":false,\"properties\":{\"os\":{\"enum\":[\"macos\",\"windows\",\"linux\",\"unknown\"]},\"architecture\":{\"enum\":[\"arm64\",\"x86_64\",\"unknown\"]}}},\"capabilityName\":{\"type\":\"string\",\"pattern\":\"^[a-z0-9]+(?:[.-][a-z0-9]+)*$\",\"minLength\":1,\"maxLength\":128},\"capabilities\":{\"type\":\"object\",\"required\":[\"stable\",\"experimental\"],\"additionalProperties\":false,\"properties\":{\"stable\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":128,\"uniqueItems\":true,\"items\":{\"$ref\":\"#/$defs/capabilityName\"}},\"experimental\":{\"type\":\"array\",\"maxItems\":0}}},\"limits\":{\"type\":\"object\",\"required\":[\"max_frame_bytes\"],\"additionalProperties\":false,\"properties\":{\"max_frame_bytes\":{\"type\":\"integer\",\"const\":4194304}}},\"stdioTransportSecurity\":{\"type\":\"object\",\"required\":[\"transport\",\"local\",\"authenticated\",\"encrypted\",\"peer_verified\"],\"additionalProperties\":false,\"properties\":{\"transport\":{\"const\":\"stdio\"},\"local\":{\"const\":true},\"authenticated\":{\"const\":false},\"encrypted\":{\"const\":false},\"peer_verified\":{\"const\":false}}},\"backend\":{\"type\":\"object\",\"required\":[\"adapter\",\"status\",\"version\"],\"additionalProperties\":false,\"properties\":{\"adapter\":{\"type\":\"string\",\"pattern\":\"^[a-z0-9]+(?:[.-][a-z0-9]+)*$\",\"minLength\":1,\"maxLength\":64},\"status\":{\"enum\":[\"ready\",\"unavailable\",\"read-only-recovery\"]},\"version\":{\"type\":\"string\",\"pattern\":\"^[!-~]+$\",\"minLength\":1,\"maxLength\":64}}},\"safePositiveInteger\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":9007199254740991},\"safeNonNegativeInteger\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":9007199254740991},\"jsonSafeValue\":{\"$comment\":\"The schema enforces recursive value types and per-container bounds. Rust and Qt typed validators additionally enforce a maximum depth of 16 and 4096 total values per item.data tree because JSON Schema cannot express a shared aggregate recursive-node budget.\",\"oneOf\":[{\"type\":\"null\"},{\"type\":\"boolean\"},{\"type\":\"string\"},{\"type\":\"integer\",\"minimum\":-9007199254740991,\"maximum\":9007199254740991},{\"type\":\"array\",\"maxItems\":4096,\"items\":{\"$ref\":\"#/$defs/jsonSafeValue\"}},{\"type\":\"object\",\"maxProperties\":128,\"propertyNames\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"^[!-~]+$\"},\"additionalProperties\":{\"$ref\":\"#/$defs/jsonSafeValue\"}}]},\"boundedGraphicalId\":{\"type\":\"string\",\"pattern\":\"^[!-~]+$\",\"minLength\":1,\"maxLength\":128},\"timelineEventId\":{\"type\":\"string\",\"pattern\":\"^event:sha256:[0-9a-f]{64}$\",\"minLength\":77,\"maxLength\":77},\"timelineSnapshotId\":{\"type\":\"string\",\"pattern\":\"^timeline-session-snapshot:sha256:[0-9a-f]{64}$\",\"minLength\":97,\"maxLength\":97},\"timelineSnapshotItemId\":{\"type\":\"string\",\"pattern\":\"^timeline-session-snapshot-item:sha256:[0-9a-f]{64}$\",\"minLength\":102,\"maxLength\":102},\"timelineSnapshotPageId\":{\"type\":\"string\",\"pattern\":\"^timeline-session-snapshot-page:sha256:[0-9a-f]{64}$\",\"minLength\":102,\"maxLength\":102},\"timelineAnchor\":{\"type\":\"object\",\"required\":[\"sequence\",\"event_id\"],\"additionalProperties\":false,\"properties\":{\"sequence\":{\"$ref\":\"#/$defs/safeNonNegativeInteger\"},\"event_id\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineEventId\"},{\"type\":\"null\"}]}},\"oneOf\":[{\"properties\":{\"sequence\":{\"const\":0},\"event_id\":{\"type\":\"null\"}}},{\"properties\":{\"sequence\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"event_id\":{\"$ref\":\"#/$defs/timelineEventId\"}}}]},\"timelineEventName\":{\"type\":\"string\",\"pattern\":\"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$\",\"minLength\":1,\"maxLength\":128,\"not\":{\"const\":\"turn.persistence-failed\"}},\"timelineItem\":{\"type\":\"object\",\"required\":[\"id\",\"kind\",\"role\",\"state\",\"content\"],\"additionalProperties\":false,\"properties\":{\"id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"kind\":{\"type\":\"string\",\"pattern\":\"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$\",\"minLength\":1,\"maxLength\":64},\"role\":{\"enum\":[\"user\",\"agent\",\"system\",\"tool\"]},\"state\":{\"enum\":[\"started\",\"running\",\"delta\",\"updated\",\"completed\",\"failed\",\"interrupted\",\"truncated\",\"unavailable\"]},\"content\":{\"type\":\"string\",\"maxLength\":65536},\"data\":{\"type\":\"object\",\"maxProperties\":128,\"propertyNames\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"pattern\":\"^[!-~]+$\"},\"additionalProperties\":{\"$ref\":\"#/$defs/jsonSafeValue\"}}}},\"timelineItemUpdate\":{\"type\":\"object\",\"required\":[\"revision\",\"content_mode\"],\"additionalProperties\":false,\"properties\":{\"revision\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"content_mode\":{\"const\":\"snapshot-replacement\"}}},\"timelineEvent\":{\"type\":\"object\",\"$comment\":\"correlation_id must equal turn_id; peers enforce this cross-field invariant in typed validation\",\"required\":[\"schema_version\",\"event_id\",\"sequence\",\"timestamp_ms\",\"correlation_id\",\"session_id\",\"turn_id\",\"turn_state\",\"event\",\"item\",\"item_update\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"timeline-event/0.1\"},\"event_id\":{\"$ref\":\"#/$defs/timelineEventId\"},\"sequence\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"timestamp_ms\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"correlation_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"turn_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"turn_state\":{\"enum\":[\"running\",\"completed\",\"failed\",\"interrupted\"]},\"event\":{\"$ref\":\"#/$defs/timelineEventName\"},\"item\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"type\":\"null\"}]},\"item_update\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineItemUpdate\"},{\"type\":\"null\"}]}},\"allOf\":[{\"if\":{\"properties\":{\"item\":{\"type\":\"null\"}}},\"then\":{\"properties\":{\"item_update\":{\"type\":\"null\"}}},\"else\":{\"properties\":{\"item_update\":{\"$ref\":\"#/$defs/timelineItemUpdate\"}}}},{\"oneOf\":[{\"properties\":{\"event\":{\"const\":\"turn.started\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"type\":\"null\"}}},{\"properties\":{\"event\":{\"const\":\"turn.completed\"},\"turn_state\":{\"const\":\"completed\"},\"item\":{\"type\":\"null\"}}},{\"properties\":{\"event\":{\"const\":\"turn.failed\"},\"turn_state\":{\"const\":\"failed\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"kind\":{\"const\":\"error\"},\"role\":{\"const\":\"system\"},\"state\":{\"const\":\"completed\"}}}]}}},{\"properties\":{\"event\":{\"const\":\"turn.interrupted\"},\"turn_state\":{\"const\":\"interrupted\"},\"item\":{\"type\":\"null\"}}},{\"properties\":{\"event\":{\"const\":\"item.started\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"state\":{\"const\":\"started\"}}}]}}},{\"properties\":{\"event\":{\"const\":\"item.delta\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"state\":{\"const\":\"delta\"}}}]}}},{\"properties\":{\"event\":{\"const\":\"item.completed\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"state\":{\"const\":\"completed\"}}}]}}},{\"properties\":{\"event\":{\"const\":\"diagnostics.observed\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"kind\":{\"const\":\"diagnostic\"},\"role\":{\"const\":\"tool\"},\"state\":{\"const\":\"completed\"}}}]}}},{\"properties\":{\"event\":{\"const\":\"usage.updated\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"kind\":{\"const\":\"usage\"},\"role\":{\"const\":\"system\"},\"state\":{\"const\":\"updated\"}}}]}}},{\"properties\":{\"event\":{\"const\":\"usage.truncated\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"kind\":{\"const\":\"usage\"},\"role\":{\"const\":\"system\"},\"state\":{\"const\":\"truncated\"}}}]}}},{\"properties\":{\"event\":{\"const\":\"turn.diff.updated\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"kind\":{\"const\":\"diff\"},\"role\":{\"const\":\"tool\"},\"state\":{\"const\":\"updated\"}}}]}}},{\"properties\":{\"event\":{\"const\":\"turn.diff.truncated\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"kind\":{\"const\":\"diff\"},\"role\":{\"const\":\"tool\"},\"state\":{\"const\":\"truncated\"}}}]}}},{\"properties\":{\"event\":{\"const\":\"turn.plan.updated\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"kind\":{\"const\":\"plan\"},\"role\":{\"const\":\"agent\"},\"state\":{\"const\":\"updated\"}}}]}}},{\"properties\":{\"event\":{\"const\":\"turn.plan.truncated\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"kind\":{\"const\":\"plan\"},\"role\":{\"const\":\"agent\"},\"state\":{\"const\":\"truncated\"}}}]}}},{\"properties\":{\"event\":{\"const\":\"turn.error-observed\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"kind\":{\"const\":\"error\"},\"role\":{\"const\":\"system\"},\"state\":{\"const\":\"updated\"}}}]}}},{\"properties\":{\"event\":{\"enum\":[\"turn.error-observed.truncated\",\"turn.steering-acknowledged\",\"turn.cancellation-acknowledged\"]},\"turn_state\":{\"const\":\"running\"},\"item\":{\"type\":\"null\"}}},{\"properties\":{\"event\":{\"const\":\"turn.steering-requested\"},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"kind\":{\"const\":\"message\"},\"role\":{\"const\":\"user\"},\"state\":{\"const\":\"completed\"}}}]}}},{\"properties\":{\"event\":{\"enum\":[\"turn.steering-failed\",\"turn.cancellation-failed\"]},\"turn_state\":{\"const\":\"running\"},\"item\":{\"allOf\":[{\"$ref\":\"#/$defs/timelineItem\"},{\"properties\":{\"kind\":{\"const\":\"error\"},\"role\":{\"const\":\"system\"},\"state\":{\"const\":\"completed\"}}}]}}},{\"properties\":{\"event\":{\"not\":{\"enum\":[\"turn.started\",\"turn.completed\",\"turn.failed\",\"turn.interrupted\",\"item.started\",\"item.delta\",\"item.completed\",\"diagnostics.observed\",\"usage.updated\",\"usage.truncated\",\"turn.diff.updated\",\"turn.diff.truncated\",\"turn.plan.updated\",\"turn.plan.truncated\",\"turn.error-observed\",\"turn.error-observed.truncated\",\"turn.steering-requested\",\"turn.steering-acknowledged\",\"turn.steering-failed\",\"turn.cancellation-acknowledged\",\"turn.cancellation-failed\"]}},\"turn_state\":{\"const\":\"running\"},\"item\":{\"type\":\"null\"}}}]}]},\"timelineSubscriptionState\":{\"enum\":[\"sync-required\",\"snapshot-required\",\"active\",\"failed\"]},\"timelineSubscriptionSource\":{\"enum\":[\"sync\",\"snapshot\"]},\"timelineSubscriptionFailureStage\":{\"enum\":[\"subscribe\",\"sync\",\"snapshot\",\"activate\",\"live\"]},\"timelineSubscriptionRequestIdentity\":{\"type\":\"string\",\"pattern\":\"^timeline-subscription-request:sha256:[0-9a-f]{64}$\"},\"timelineSubscribeParams\":{\"$comment\":\"Stable wire contract for the reconnect barrier. Runtime must still negotiate and enforce a separate subscription capability before dispatch. The generation, Session, subscription, cursor, and optional fixed watermark must remain exact through every later state.\",\"type\":\"object\",\"required\":[\"schema_version\",\"connection_generation\",\"session_id\",\"subscription_id\",\"cursor\",\"watermark\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"timeline-subscribe-request/0.1\"},\"connection_generation\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"subscription_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"cursor\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"watermark\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineAnchor\"},{\"type\":\"null\"}]}}},\"timelineSubscribeResult\":{\"$comment\":\"Subscribe never grants live authority directly. It selects exactly one bounded recovery route; only a separately validated activation may enter active.\",\"type\":\"object\",\"required\":[\"schema_version\",\"connection_generation\",\"session_id\",\"subscription_id\",\"state\",\"cursor\",\"watermark\",\"next_method\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"timeline-subscribe-result/0.1\"},\"connection_generation\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"subscription_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"state\":{\"$ref\":\"#/$defs/timelineSubscriptionState\"},\"cursor\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"watermark\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineAnchor\"},{\"type\":\"null\"}]},\"next_method\":{\"enum\":[\"timeline/subscription-sync\",\"timeline/subscription-snapshot\"]}},\"oneOf\":[{\"properties\":{\"state\":{\"const\":\"sync-required\"},\"watermark\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"next_method\":{\"const\":\"timeline/subscription-sync\"}}},{\"properties\":{\"state\":{\"const\":\"snapshot-required\"},\"watermark\":{\"type\":\"null\"},\"next_method\":{\"const\":\"timeline/subscription-snapshot\"}}}]},\"timelineActivateParams\":{\"$comment\":\"Activation is legal only after complete fixed-watermark sync or complete identity-validated snapshot replacement. cursor and watermark must be the same exact anchor; typed peers additionally bind this object to the prior subscribe result.\",\"type\":\"object\",\"required\":[\"schema_version\",\"connection_generation\",\"session_id\",\"subscription_id\",\"source\",\"cursor\",\"watermark\",\"snapshot_identity\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"timeline-subscription-activate-request/0.1\"},\"connection_generation\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"subscription_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"source\":{\"$ref\":\"#/$defs/timelineSubscriptionSource\"},\"cursor\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"watermark\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"snapshot_identity\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineSnapshotId\"},{\"type\":\"null\"}]}},\"oneOf\":[{\"properties\":{\"source\":{\"const\":\"sync\"},\"snapshot_identity\":{\"type\":\"null\"}}},{\"properties\":{\"source\":{\"const\":\"snapshot\"},\"snapshot_identity\":{\"$ref\":\"#/$defs/timelineSnapshotId\"}}}]},\"timelineActivateResult\":{\"$comment\":\"Stable wire result shape. Registering this schema does not advertise a Runtime capability or create connection authority.\",\"type\":\"object\",\"required\":[\"schema_version\",\"connection_generation\",\"session_id\",\"subscription_id\",\"state\",\"cursor\",\"watermark\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"timeline-subscription-active/0.1\"},\"connection_generation\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"subscription_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"state\":{\"const\":\"active\"},\"cursor\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"watermark\":{\"$ref\":\"#/$defs/timelineAnchor\"}}},\"timelineSubscriptionEvent\":{\"$comment\":\"The nested event must be contiguous after cursor, belong to session_id, and be validated only against the active subscription for the exact current connection generation.\",\"type\":\"object\",\"required\":[\"schema_version\",\"connection_generation\",\"session_id\",\"subscription_id\",\"state\",\"cursor\",\"watermark\",\"event\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"timeline-subscription-event/0.1\"},\"connection_generation\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"subscription_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"state\":{\"const\":\"active\"},\"cursor\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"watermark\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"event\":{\"$ref\":\"#/$defs/timelineEvent\"}}},\"timelineSubscriptionFailure\":{\"$comment\":\"Every failure is terminal for this subscription attempt and requires the client to retire its pending state. It never authorizes fallback replay, activation, or live delivery.\",\"type\":\"object\",\"required\":[\"schema_version\",\"connection_generation\",\"session_id\",\"subscription_id\",\"state\",\"stage\",\"cursor\",\"watermark\",\"request_identity\",\"reason\",\"retryable\",\"cleanup_required\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"timeline-subscription-failure/0.1\"},\"connection_generation\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"subscription_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"state\":{\"const\":\"failed\"},\"stage\":{\"$ref\":\"#/$defs/timelineSubscriptionFailureStage\"},\"cursor\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"watermark\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineAnchor\"},{\"type\":\"null\"}]},\"request_identity\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineSubscriptionRequestIdentity\"},{\"type\":\"null\"}]},\"reason\":{\"type\":\"string\",\"pattern\":\"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$\",\"minLength\":1,\"maxLength\":64},\"retryable\":{\"type\":\"boolean\"},\"cleanup_required\":{\"const\":true}},\"oneOf\":[{\"properties\":{\"stage\":{\"enum\":[\"subscribe\",\"sync\",\"snapshot\",\"activate\"]},\"request_identity\":{\"$ref\":\"#/$defs/timelineSubscriptionRequestIdentity\"}}},{\"properties\":{\"stage\":{\"const\":\"live\"},\"request_identity\":{\"type\":\"null\"}}}]},\"timelineSubscriptionRequestFailure\":{\"$comment\":\"Request-stage subscription failures travel only in JSON-RPC error.data. Typed peers additionally verify the domain-separated request identity against the exact request.\",\"allOf\":[{\"$ref\":\"#/$defs/timelineSubscriptionFailure\"},{\"properties\":{\"stage\":{\"enum\":[\"subscribe\",\"sync\",\"snapshot\",\"activate\"]},\"request_identity\":{\"$ref\":\"#/$defs/timelineSubscriptionRequestIdentity\"}}}]},\"timelineSubscriptionLiveFailure\":{\"$comment\":\"Only a terminal asynchronous failure of an active subscription may use the live failure notification route.\",\"allOf\":[{\"$ref\":\"#/$defs/timelineSubscriptionFailure\"},{\"properties\":{\"stage\":{\"const\":\"live\"},\"request_identity\":{\"type\":\"null\"}}}]},\"timelineSubscriptionSyncParams\":{\"$comment\":\"Stable subscription paging wrapper. It preserves the complete legacy timelineSyncParams request while binding it to one connection generation, Session, and subscription. Typed peers require the nested Session and fixed watermark to match the subscription and compute a domain-separated identity over this complete object.\",\"type\":\"object\",\"required\":[\"schema_version\",\"connection_generation\",\"session_id\",\"subscription_id\",\"request\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"timeline-subscription-sync-request/0.1\"},\"connection_generation\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"subscription_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"request\":{\"$ref\":\"#/$defs/timelineSyncParams\",\"properties\":{\"watermark\":{\"$ref\":\"#/$defs/timelineAnchor\"}}}}},\"timelineSubscriptionSnapshotParams\":{\"$comment\":\"Stable subscription paging wrapper. It preserves the complete legacy timelineSnapshotParams request while binding it to one connection generation, Session, and subscription. Typed peers require the nested Session and recovery route to match the subscription and compute a domain-separated identity over this complete object.\",\"type\":\"object\",\"required\":[\"schema_version\",\"connection_generation\",\"session_id\",\"subscription_id\",\"request\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"timeline-subscription-snapshot-request/0.1\"},\"connection_generation\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"subscription_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"request\":{\"$ref\":\"#/$defs/timelineSnapshotParams\"}}},\"timelineSubscribeRequest\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"method\":{\"const\":\"timeline/subscribe\"},\"params\":{\"$ref\":\"#/$defs/timelineSubscribeParams\"}}},\"timelineSubscribeSuccessResponse\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"result\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"result\":{\"$ref\":\"#/$defs/timelineSubscribeResult\"}}},\"timelineSubscriptionSyncRequest\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"method\":{\"const\":\"timeline/subscription-sync\"},\"params\":{\"$ref\":\"#/$defs/timelineSubscriptionSyncParams\"}}},\"timelineSubscriptionSyncSuccessResponse\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"result\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"result\":{\"$ref\":\"#/$defs/timelineSyncPage\"}}},\"timelineSubscriptionSnapshotRequest\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"method\":{\"const\":\"timeline/subscription-snapshot\"},\"params\":{\"$ref\":\"#/$defs/timelineSubscriptionSnapshotParams\"}}},\"timelineSubscriptionSnapshotSuccessResponse\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"result\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"result\":{\"$ref\":\"#/$defs/timelineSessionSnapshotPage\"}}},\"timelineSubscriptionActivateRequest\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"method\":{\"const\":\"timeline/subscription-activate\"},\"params\":{\"$ref\":\"#/$defs/timelineActivateParams\"}}},\"timelineSubscriptionActivateSuccessResponse\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"result\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"result\":{\"$ref\":\"#/$defs/timelineActivateResult\"}}},\"timelineSubscriptionEventNotification\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"method\":{\"const\":\"timeline/subscription-event\"},\"params\":{\"$ref\":\"#/$defs/timelineSubscriptionEvent\"}}},\"timelineSubscriptionFailureNotification\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"method\":{\"const\":\"timeline/subscription-failure\"},\"params\":{\"$ref\":\"#/$defs/timelineSubscriptionLiveFailure\"}}},\"timelineSubscriptionRequestErrorResponse\":{\"$comment\":\"Subscribe, subscription-sync, subscription-snapshot, and subscription-activate failures use the ordinary JSON-RPC error envelope with exact terminal failure metadata in error.data. Live failures use only the notification route.\",\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"error\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"error\":{\"$ref\":\"#/$defs/jsonRpcError\",\"required\":[\"code\",\"message\",\"data\"],\"properties\":{\"data\":{\"$ref\":\"#/$defs/timelineSubscriptionRequestFailure\"}}}}},\"timelineSyncParams\":{\"type\":\"object\",\"$comment\":\"When watermark is present, typed peers require after <= watermark and identical Event IDs when both anchors name the same sequence.\",\"required\":[\"session_id\",\"after\",\"watermark\",\"limit\"],\"additionalProperties\":false,\"properties\":{\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"after\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"watermark\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineAnchor\"},{\"type\":\"null\"}]},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200}}},\"timelineSyncPage\":{\"type\":\"object\",\"$comment\":\"Typed peers require the response session and after anchor to equal the request, preserve a supplied watermark, validate contiguous same-Session events after the anchor, bind the final event to next_after, and set complete only after reaching the fixed watermark.\",\"required\":[\"schema_version\",\"session_id\",\"after\",\"watermark\",\"events\",\"next_after\",\"complete\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"timeline-sync-page/0.1\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"after\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"watermark\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"events\":{\"type\":\"array\",\"maxItems\":200,\"items\":{\"$ref\":\"#/$defs/timelineEvent\"}},\"next_after\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineAnchor\"},{\"type\":\"null\"}]},\"complete\":{\"type\":\"boolean\"}},\"oneOf\":[{\"properties\":{\"complete\":{\"const\":true},\"next_after\":{\"type\":\"null\"}}},{\"properties\":{\"complete\":{\"const\":false},\"events\":{\"minItems\":1},\"next_after\":{\"$ref\":\"#/$defs/timelineAnchor\"}}}]},\"timelineSyncRequest\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"method\":{\"const\":\"timeline/sync\"},\"params\":{\"$ref\":\"#/$defs/timelineSyncParams\"}}},\"timelineSyncSuccessResponse\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"result\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"result\":{\"$ref\":\"#/$defs/timelineSyncPage\"}}},\"timelineSnapshotParams\":{\"type\":\"object\",\"$comment\":\"The first request sets snapshot_identity, watermark, and after to null. Every continuation repeats the server-selected complete identity, fixed watermark, Session, and exact final-Item cursor from the previous page.\",\"required\":[\"session_id\",\"snapshot_identity\",\"watermark\",\"after\",\"limit\"],\"additionalProperties\":false,\"properties\":{\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"snapshot_identity\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineSnapshotId\"},{\"type\":\"null\"}]},\"watermark\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineAnchor\"},{\"type\":\"null\"}]},\"after\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineSnapshotCursor\"},{\"type\":\"null\"}]},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200}},\"oneOf\":[{\"properties\":{\"snapshot_identity\":{\"type\":\"null\"},\"watermark\":{\"type\":\"null\"},\"after\":{\"type\":\"null\"}}},{\"properties\":{\"snapshot_identity\":{\"$ref\":\"#/$defs/timelineSnapshotId\"},\"watermark\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"after\":{\"$ref\":\"#/$defs/timelineSnapshotCursor\"}}}]},\"timelineSnapshotCursor\":{\"type\":\"object\",\"required\":[\"ordinal\",\"item_id\",\"item_identity\"],\"additionalProperties\":false,\"properties\":{\"ordinal\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"item_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"item_identity\":{\"$ref\":\"#/$defs/timelineSnapshotItemId\"}}},\"timelineSnapshotItem\":{\"type\":\"object\",\"$comment\":\"Typed peers verify the domain-separated item_identity over every field except item_identity plus the fixed Item schema and enclosing Session.\",\"required\":[\"ordinal\",\"item_identity\",\"turn_id\",\"correlation_id\",\"turn_state\",\"first_event\",\"latest_event\",\"item\",\"item_update\"],\"additionalProperties\":false,\"properties\":{\"ordinal\":{\"$ref\":\"#/$defs/safePositiveInteger\"},\"item_identity\":{\"$ref\":\"#/$defs/timelineSnapshotItemId\"},\"turn_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"correlation_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"turn_state\":{\"enum\":[\"running\",\"completed\",\"failed\",\"interrupted\"]},\"first_event\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"latest_event\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"item\":{\"$ref\":\"#/$defs/timelineItem\"},\"item_update\":{\"$ref\":\"#/$defs/timelineItemUpdate\"}}},\"timelineSnapshotActiveTurn\":{\"type\":\"object\",\"required\":[\"turn_id\",\"correlation_id\",\"state\",\"started_event\",\"latest_event\",\"open_item_ids\"],\"additionalProperties\":false,\"properties\":{\"turn_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"correlation_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"state\":{\"const\":\"running\"},\"started_event\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"latest_event\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"open_item_ids\":{\"type\":\"array\",\"maxItems\":10000,\"items\":{\"$ref\":\"#/$defs/boundedGraphicalId\"}}}},\"timelineSessionSnapshotPage\":{\"type\":\"object\",\"$comment\":\"Typed peers verify fixed floor/watermark/totals/active Turn across pages, contiguous ordinals, every Item/page identity, exact cursor chaining, the final complete identity, and an encoded result below the reserved 4 MiB AAP frame budget.\",\"required\":[\"schema_version\",\"session_id\",\"snapshot_identity\",\"floor\",\"watermark\",\"active_turn\",\"total_items\",\"total_canonical_bytes\",\"after\",\"items\",\"next_after\",\"complete\",\"page_identity\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"timeline-session-snapshot-page/0.1\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"snapshot_identity\":{\"$ref\":\"#/$defs/timelineSnapshotId\"},\"floor\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"watermark\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"active_turn\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineSnapshotActiveTurn\"},{\"type\":\"null\"}]},\"total_items\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":10000},\"total_canonical_bytes\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":67108864},\"after\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineSnapshotCursor\"},{\"type\":\"null\"}]},\"items\":{\"type\":\"array\",\"maxItems\":200,\"items\":{\"$ref\":\"#/$defs/timelineSnapshotItem\"}},\"next_after\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineSnapshotCursor\"},{\"type\":\"null\"}]},\"complete\":{\"type\":\"boolean\"},\"page_identity\":{\"$ref\":\"#/$defs/timelineSnapshotPageId\"}},\"oneOf\":[{\"properties\":{\"complete\":{\"const\":true},\"next_after\":{\"type\":\"null\"}}},{\"properties\":{\"complete\":{\"const\":false},\"items\":{\"minItems\":1},\"next_after\":{\"$ref\":\"#/$defs/timelineSnapshotCursor\"}}}]},\"timelineSnapshotRequest\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"method\":{\"const\":\"timeline/snapshot\"},\"params\":{\"$ref\":\"#/$defs/timelineSnapshotParams\"}}},\"timelineSnapshotSuccessResponse\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"result\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"result\":{\"$ref\":\"#/$defs/timelineSessionSnapshotPage\"}}},\"timelineRetentionGapData\":{\"type\":\"object\",\"$comment\":\"A true retention gap requires snapshot replacement. The client must not resume from retained_floor or treat the internal Sequencer checkpoint as a public Session snapshot.\",\"required\":[\"schema_version\",\"reason\",\"session_id\",\"requested_after\",\"requested_watermark\",\"retained_floor\",\"head\",\"snapshot_required\",\"snapshot_available\",\"snapshot_capability\",\"snapshot_method\",\"event_history_complete\",\"replay_from_floor_allowed\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"timeline-retention-gap/0.1\"},\"reason\":{\"const\":\"requested-anchor-not-retained\"},\"session_id\":{\"$ref\":\"#/$defs/boundedGraphicalId\"},\"requested_after\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"requested_watermark\":{\"oneOf\":[{\"$ref\":\"#/$defs/timelineAnchor\"},{\"type\":\"null\"}]},\"retained_floor\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"head\":{\"$ref\":\"#/$defs/timelineAnchor\"},\"snapshot_required\":{\"const\":true},\"snapshot_available\":{\"type\":\"boolean\"},\"snapshot_capability\":{\"const\":\"timeline.snapshot.current\"},\"snapshot_method\":{\"const\":\"timeline/snapshot\"},\"event_history_complete\":{\"const\":false},\"replay_from_floor_allowed\":{\"const\":false}}},\"timelineSyncRetentionGapErrorResponse\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"error\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"data\"],\"additionalProperties\":false,\"properties\":{\"code\":{\"const\":-32148},\"message\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256},\"data\":{\"$ref\":\"#/$defs/timelineRetentionGapData\"}}}}},\"initializeParams\":{\"type\":\"object\",\"required\":[\"protocol\",\"client\",\"platform\",\"capabilities\",\"limits\",\"transport_security\"],\"additionalProperties\":false,\"properties\":{\"protocol\":{\"$ref\":\"#/$defs/protocolPreference\"},\"client\":{\"$ref\":\"#/$defs/identity\"},\"platform\":{\"$ref\":\"#/$defs/platform\"},\"capabilities\":{\"$ref\":\"#/$defs/capabilities\"},\"limits\":{\"$ref\":\"#/$defs/limits\"},\"transport_security\":{\"$ref\":\"#/$defs/stdioTransportSecurity\"}}},\"initializeResult\":{\"type\":\"object\",\"required\":[\"protocol\",\"runtime\",\"platform\",\"backend\",\"capabilities\",\"limits\",\"transport_security\"],\"additionalProperties\":false,\"properties\":{\"protocol\":{\"$ref\":\"#/$defs/negotiatedProtocol\"},\"runtime\":{\"$ref\":\"#/$defs/identity\"},\"platform\":{\"$ref\":\"#/$defs/platform\"},\"backend\":{\"$ref\":\"#/$defs/backend\"},\"capabilities\":{\"$ref\":\"#/$defs/capabilities\"},\"limits\":{\"$ref\":\"#/$defs/limits\"},\"transport_security\":{\"$ref\":\"#/$defs/stdioTransportSecurity\"}}},\"initializeRequest\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"method\":{\"const\":\"initialize\"},\"params\":{\"$ref\":\"#/$defs/initializeParams\"}}},\"initializeSuccessResponse\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"result\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"result\":{\"$ref\":\"#/$defs/initializeResult\"}}},\"initializedNotification\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"method\",\"params\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"method\":{\"const\":\"initialized\"},\"params\":{\"type\":\"object\",\"maxProperties\":0,\"additionalProperties\":false}}},\"initializeIncompatibleData\":{\"type\":\"object\",\"required\":[\"schema_version\",\"reason\",\"client\",\"runtime\",\"upgrade_direction\"],\"additionalProperties\":false,\"properties\":{\"schema_version\":{\"const\":\"initialize-error/0.1\"},\"reason\":{\"const\":\"protocol-range-not-overlapping\"},\"client\":{\"$ref\":\"#/$defs/protocolRange\"},\"runtime\":{\"$ref\":\"#/$defs/protocolRange\"},\"upgrade_direction\":{\"enum\":[\"client\",\"runtime\"]}}},\"initializeIncompatibleErrorResponse\":{\"type\":\"object\",\"required\":[\"jsonrpc\",\"id\",\"error\"],\"additionalProperties\":false,\"properties\":{\"jsonrpc\":{\"const\":\"2.0\"},\"id\":{\"$ref\":\"#/$defs/jsonRpcRequestId\"},\"error\":{\"type\":\"object\",\"required\":[\"code\",\"message\",\"data\"],\"additionalProperties\":false,\"properties\":{\"code\":{\"const\":-32003},\"message\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256},\"data\":{\"$ref\":\"#/$defs/initializeIncompatibleData\"}}}}}}}";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -971,6 +973,309 @@ pub struct DurableMutationListSuccessResponse {
 pub struct TransportMessage(pub Value);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub enum TransportMethodKind {
+    Request,
+    Notification,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub struct TransportMethodMetadata {
+    pub method: &'static str,
+    pub kind: TransportMethodKind,
+    pub params_definition: Option<&'static str>,
+    pub request_definition: Option<&'static str>,
+    pub success_response_definition: Option<&'static str>,
+    pub success_result_definition: Option<&'static str>,
+    pub error_response_definitions: &'static [&'static str],
+    pub typed_error_stage: Option<&'static str>,
+    pub notification_definition: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub struct TransportTypedErrorMetadata {
+    pub method: &'static str,
+    pub schema_version: &'static str,
+    pub response_definition: &'static str,
+}
+
+#[rustfmt::skip]
+pub const TRANSPORT_METHODS: &[TransportMethodMetadata] = &[
+    TransportMethodMetadata {
+        method: "event",
+        kind: TransportMethodKind::Notification,
+        params_definition: Some("timelineEvent"),
+        request_definition: None,
+        success_response_definition: None,
+        success_result_definition: None,
+        error_response_definitions: &[],
+        typed_error_stage: None,
+        notification_definition: None,
+    },
+    TransportMethodMetadata {
+        method: "initialize",
+        kind: TransportMethodKind::Request,
+        params_definition: Some("initializeParams"),
+        request_definition: Some("initializeRequest"),
+        success_response_definition: Some("initializeSuccessResponse"),
+        success_result_definition: Some("initializeResult"),
+        error_response_definitions: &["initializeIncompatibleErrorResponse"],
+        typed_error_stage: None,
+        notification_definition: None,
+    },
+    TransportMethodMetadata {
+        method: "initialized",
+        kind: TransportMethodKind::Notification,
+        params_definition: None,
+        request_definition: None,
+        success_response_definition: None,
+        success_result_definition: None,
+        error_response_definitions: &[],
+        typed_error_stage: None,
+        notification_definition: Some("initializedNotification"),
+    },
+    TransportMethodMetadata {
+        method: "mutation/acknowledgement/consume",
+        kind: TransportMethodKind::Request,
+        params_definition: Some("durableMutationConsumeParams"),
+        request_definition: Some("durableMutationConsumeRequest"),
+        success_response_definition: Some("durableMutationConsumeSuccessResponse"),
+        success_result_definition: Some("durableMutationConsumeResult"),
+        error_response_definitions: &[],
+        typed_error_stage: None,
+        notification_definition: None,
+    },
+    TransportMethodMetadata {
+        method: "runtime/heartbeat",
+        kind: TransportMethodKind::Request,
+        params_definition: Some("runtimeHeartbeatParams"),
+        request_definition: Some("runtimeHeartbeatRequest"),
+        success_response_definition: Some("runtimeHeartbeatSuccessResponse"),
+        success_result_definition: Some("runtimeHeartbeatResult"),
+        error_response_definitions: &[],
+        typed_error_stage: None,
+        notification_definition: None,
+    },
+    TransportMethodMetadata {
+        method: "session/mutation-acknowledgements",
+        kind: TransportMethodKind::Request,
+        params_definition: Some("durableMutationListParams"),
+        request_definition: Some("durableMutationListRequest"),
+        success_response_definition: Some("durableMutationListSuccessResponse"),
+        success_result_definition: Some("durableMutationPage"),
+        error_response_definitions: &[],
+        typed_error_stage: None,
+        notification_definition: None,
+    },
+    TransportMethodMetadata {
+        method: "timeline/snapshot",
+        kind: TransportMethodKind::Request,
+        params_definition: Some("timelineSnapshotParams"),
+        request_definition: Some("timelineSnapshotRequest"),
+        success_response_definition: Some("timelineSnapshotSuccessResponse"),
+        success_result_definition: Some("timelineSessionSnapshotPage"),
+        error_response_definitions: &[],
+        typed_error_stage: None,
+        notification_definition: None,
+    },
+    TransportMethodMetadata {
+        method: "timeline/subscribe",
+        kind: TransportMethodKind::Request,
+        params_definition: Some("timelineSubscribeParams"),
+        request_definition: Some("timelineSubscribeRequest"),
+        success_response_definition: Some("timelineSubscribeSuccessResponse"),
+        success_result_definition: Some("timelineSubscribeResult"),
+        error_response_definitions: &["timelineSubscriptionRequestErrorResponse"],
+        typed_error_stage: Some("subscribe"),
+        notification_definition: None,
+    },
+    TransportMethodMetadata {
+        method: "timeline/subscription-activate",
+        kind: TransportMethodKind::Request,
+        params_definition: Some("timelineActivateParams"),
+        request_definition: Some("timelineSubscriptionActivateRequest"),
+        success_response_definition: Some("timelineSubscriptionActivateSuccessResponse"),
+        success_result_definition: Some("timelineActivateResult"),
+        error_response_definitions: &["timelineSubscriptionRequestErrorResponse"],
+        typed_error_stage: Some("activate"),
+        notification_definition: None,
+    },
+    TransportMethodMetadata {
+        method: "timeline/subscription-event",
+        kind: TransportMethodKind::Notification,
+        params_definition: Some("timelineSubscriptionEvent"),
+        request_definition: None,
+        success_response_definition: None,
+        success_result_definition: None,
+        error_response_definitions: &[],
+        typed_error_stage: None,
+        notification_definition: Some("timelineSubscriptionEventNotification"),
+    },
+    TransportMethodMetadata {
+        method: "timeline/subscription-failure",
+        kind: TransportMethodKind::Notification,
+        params_definition: Some("timelineSubscriptionLiveFailure"),
+        request_definition: None,
+        success_response_definition: None,
+        success_result_definition: None,
+        error_response_definitions: &[],
+        typed_error_stage: None,
+        notification_definition: Some("timelineSubscriptionFailureNotification"),
+    },
+    TransportMethodMetadata {
+        method: "timeline/subscription-snapshot",
+        kind: TransportMethodKind::Request,
+        params_definition: Some("timelineSubscriptionSnapshotParams"),
+        request_definition: Some("timelineSubscriptionSnapshotRequest"),
+        success_response_definition: Some("timelineSubscriptionSnapshotSuccessResponse"),
+        success_result_definition: Some("timelineSessionSnapshotPage"),
+        error_response_definitions: &["timelineSubscriptionRequestErrorResponse"],
+        typed_error_stage: Some("snapshot"),
+        notification_definition: None,
+    },
+    TransportMethodMetadata {
+        method: "timeline/subscription-sync",
+        kind: TransportMethodKind::Request,
+        params_definition: Some("timelineSubscriptionSyncParams"),
+        request_definition: Some("timelineSubscriptionSyncRequest"),
+        success_response_definition: Some("timelineSubscriptionSyncSuccessResponse"),
+        success_result_definition: Some("timelineSyncPage"),
+        error_response_definitions: &["timelineSubscriptionRequestErrorResponse"],
+        typed_error_stage: Some("sync"),
+        notification_definition: None,
+    },
+    TransportMethodMetadata {
+        method: "timeline/sync",
+        kind: TransportMethodKind::Request,
+        params_definition: Some("timelineSyncParams"),
+        request_definition: Some("timelineSyncRequest"),
+        success_response_definition: Some("timelineSyncSuccessResponse"),
+        success_result_definition: Some("timelineSyncPage"),
+        error_response_definitions: &["timelineSyncRetentionGapErrorResponse"],
+        typed_error_stage: None,
+        notification_definition: None,
+    },
+];
+
+#[rustfmt::skip]
+pub const TRANSPORT_TYPED_ERRORS: &[TransportTypedErrorMetadata] = &[
+    TransportTypedErrorMetadata {
+        method: "initialize",
+        schema_version: "initialize-error/0.1",
+        response_definition: "initializeIncompatibleErrorResponse",
+    },
+    TransportTypedErrorMetadata {
+        method: "timeline/subscribe",
+        schema_version: "timeline-subscription-failure/0.1",
+        response_definition: "timelineSubscriptionRequestErrorResponse",
+    },
+    TransportTypedErrorMetadata {
+        method: "timeline/subscription-activate",
+        schema_version: "timeline-subscription-failure/0.1",
+        response_definition: "timelineSubscriptionRequestErrorResponse",
+    },
+    TransportTypedErrorMetadata {
+        method: "timeline/subscription-snapshot",
+        schema_version: "timeline-subscription-failure/0.1",
+        response_definition: "timelineSubscriptionRequestErrorResponse",
+    },
+    TransportTypedErrorMetadata {
+        method: "timeline/subscription-sync",
+        schema_version: "timeline-subscription-failure/0.1",
+        response_definition: "timelineSubscriptionRequestErrorResponse",
+    },
+    TransportTypedErrorMetadata {
+        method: "timeline/sync",
+        schema_version: "timeline-retention-gap/0.1",
+        response_definition: "timelineSyncRetentionGapErrorResponse",
+    },
+];
+
+#[rustfmt::skip]
+pub fn transport_method_metadata(method: &str) -> Option<&'static TransportMethodMetadata> {
+    TRANSPORT_METHODS
+        .binary_search_by(|metadata| metadata.method.cmp(method))
+        .ok()
+        .map(|index| &TRANSPORT_METHODS[index])
+}
+
+#[rustfmt::skip]
+pub fn transport_typed_error_metadata(method: &str, schema_version: &str) -> Option<&'static TransportTypedErrorMetadata> {
+    TRANSPORT_TYPED_ERRORS
+        .binary_search_by(|metadata| (metadata.method, metadata.schema_version).cmp(&(method, schema_version)))
+        .ok()
+        .map(|index| &TRANSPORT_TYPED_ERRORS[index])
+}
+
+#[rustfmt::skip]
+fn transport_typed_error_schema_version_known(schema_version: &str) -> bool {
+    const SCHEMA_VERSIONS: [&str; 3] = ["initialize-error/0.1", "timeline-retention-gap/0.1", "timeline-subscription-failure/0.1"];
+    SCHEMA_VERSIONS.binary_search(&schema_version).is_ok()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[rustfmt::skip]
+pub enum TransportRequestOrNotification {
+    Known { message: TransportMessage, metadata: &'static TransportMethodMetadata },
+    UnknownRequest(TransportMessage),
+    UnknownNotification(TransportMessage),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[rustfmt::skip]
+pub enum TransportResponse {
+    KnownSuccess { message: TransportMessage, metadata: &'static TransportMethodMetadata },
+    KnownTypedError { message: TransportMessage, metadata: &'static TransportTypedErrorMetadata },
+    GenericError(TransportMessage),
+    UnknownMethod(TransportMessage),
+    Unmatched(TransportMessage),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub struct TransportPendingRequest<'a> {
+    pub id: &'a str,
+    pub method: &'a str,
+    pub typed_error_request_identity: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[rustfmt::skip]
+pub enum TransportDispatchError {
+    Parse(crate::transport_json::TransportJsonError),
+    InvalidEnvelope,
+    InvalidKnownMessage,
+    ValidatorUnavailable,
+}
+
+impl fmt::Display for TransportDispatchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parse(error) => error.fmt(formatter),
+            Self::InvalidEnvelope => formatter.write_str("invalid generic transport envelope"),
+            Self::InvalidKnownMessage => formatter.write_str("invalid known transport message"),
+            Self::ValidatorUnavailable => {
+                formatter.write_str("generated transport dispatcher is unavailable")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TransportDispatchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Parse(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 #[rustfmt::skip]
 pub enum TransportSchemaError {
@@ -1036,6 +1341,8 @@ static TRANSPORT_SCHEMA: OnceLock<Result<Value, TransportSchemaError>> = OnceLoc
 #[rustfmt::skip]
 static TRANSPORT_ROOT_VALIDATOR: OnceLock<Result<jsonschema::Validator, TransportSchemaError>> = OnceLock::new();
 #[rustfmt::skip]
+static TRANSPORT_GENERIC_ENVELOPE_VALIDATOR: OnceLock<Result<jsonschema::Validator, TransportSchemaError>> = OnceLock::new();
+#[rustfmt::skip]
 type TransportDefinitionValidator = OnceLock<Result<jsonschema::Validator, TransportSchemaError>>;
 #[rustfmt::skip]
 static TRANSPORT_DEFINITION_VALIDATORS: OnceLock<BTreeMap<&'static str, TransportDefinitionValidator>> = OnceLock::new();
@@ -1094,6 +1401,25 @@ fn root_validator() -> Result<&'static jsonschema::Validator, TransportSchemaErr
 }
 
 #[rustfmt::skip]
+fn generic_envelope_validator() -> Result<&'static jsonschema::Validator, TransportSchemaError> {
+    TRANSPORT_GENERIC_ENVELOPE_VALIDATOR
+        .get_or_init(|| {
+            record_validator_compile("$generic-envelope");
+            let mut document = transport_schema()?
+                .clone()
+                .as_object()
+                .cloned()
+                .ok_or(TransportSchemaError::ValidatorUnavailable)?;
+            document.remove("allOf")
+                .ok_or(TransportSchemaError::ValidatorUnavailable)?;
+            jsonschema::validator_for(&Value::Object(document))
+                .map_err(|_| TransportSchemaError::ValidatorUnavailable)
+        })
+        .as_ref()
+        .map_err(|error| *error)
+}
+
+#[rustfmt::skip]
 fn definition_validator(name: &str) -> Result<&'static jsonschema::Validator, TransportSchemaError> {
     let validators = TRANSPORT_DEFINITION_VALIDATORS.get_or_init(|| {
         TRANSPORT_DEFINITION_NAMES
@@ -1122,6 +1448,11 @@ pub fn validate_transport_message(value: &Value) -> Result<(), TransportSchemaEr
 }
 
 #[rustfmt::skip]
+pub(crate) fn validate_transport_generic_envelope(value: &Value) -> Result<(), TransportSchemaError> {
+    if generic_envelope_validator()?.is_valid(value) { Ok(()) } else { Err(TransportSchemaError::InvalidValue) }
+}
+
+#[rustfmt::skip]
 pub fn decode_transport_definition_raw(name: &str, bytes: &[u8]) -> Result<Value, TransportDecodeError> {
     let value = crate::transport_json::parse_transport_json(bytes)?;
     validate_transport_definition(name, &value).map_err(TransportDecodeError::Schema)?;
@@ -1135,7 +1466,157 @@ pub fn decode_transport_message_raw(bytes: &[u8]) -> Result<TransportMessage, Tr
     Ok(TransportMessage(value))
 }
 
+#[rustfmt::skip]
+pub(crate) fn decode_transport_generic_envelope_raw(bytes: &[u8]) -> Result<TransportMessage, TransportDecodeError> {
+    let value = crate::transport_json::parse_transport_json(bytes)?;
+    validate_transport_generic_envelope(&value).map_err(TransportDecodeError::Schema)?;
+    Ok(TransportMessage(value))
+}
+
+#[rustfmt::skip]
+fn transport_error_schema_version(value: &Value) -> Option<&str> {
+    value.as_object()?
+        .get("error")?.as_object()?
+        .get("data")?.as_object()?
+        .get("schema_version")?.as_str()
+}
+
+#[rustfmt::skip]
+fn transport_dispatch_schema_error(error: TransportSchemaError, invalid: TransportDispatchError) -> TransportDispatchError {
+    match error {
+        TransportSchemaError::InvalidValue => invalid,
+        TransportSchemaError::UnknownDefinition | TransportSchemaError::ValidatorUnavailable =>
+            TransportDispatchError::ValidatorUnavailable,
+    }
+}
+
+#[rustfmt::skip]
+fn transport_dispatch_decode_error(error: TransportDecodeError) -> TransportDispatchError {
+    match error {
+        TransportDecodeError::Parse(error) => TransportDispatchError::Parse(error),
+        TransportDecodeError::Schema(error) =>
+            transport_dispatch_schema_error(error, TransportDispatchError::InvalidEnvelope),
+    }
+}
+
+#[rustfmt::skip]
+fn validate_typed_error_correlation(metadata: &TransportMethodMetadata, pending: TransportPendingRequest<'_>, value: &Value) -> Result<(), TransportDispatchError> {
+    if metadata.typed_error_stage.is_none() && pending.typed_error_request_identity.is_none() { return Ok(()); }
+    let data = value.as_object()
+        .and_then(|object| object.get("error"))
+        .and_then(Value::as_object)
+        .and_then(|error| error.get("data"))
+        .and_then(Value::as_object)
+        .ok_or(TransportDispatchError::InvalidKnownMessage)?;
+    let expected_stage = metadata.typed_error_stage.ok_or(TransportDispatchError::InvalidKnownMessage)?;
+    let expected_identity = pending.typed_error_request_identity.ok_or(TransportDispatchError::InvalidKnownMessage)?;
+    if data.get("stage").and_then(Value::as_str) != Some(expected_stage) ||
+        data.get("request_identity").and_then(Value::as_str) != Some(expected_identity) {
+        return Err(TransportDispatchError::InvalidKnownMessage);
+    }
+    Ok(())
+}
+
+#[rustfmt::skip]
+pub fn decode_transport_request_or_notification_raw(bytes: &[u8]) -> Result<TransportRequestOrNotification, TransportDispatchError> {
+    let message = decode_transport_generic_envelope_raw(bytes).map_err(transport_dispatch_decode_error)?;
+    let object = message.0.as_object().ok_or(TransportDispatchError::InvalidEnvelope)?;
+    let method = object.get("method").and_then(Value::as_str)
+        .ok_or(TransportDispatchError::InvalidEnvelope)?;
+    let is_request = object.contains_key("id");
+    match transport_method_metadata(method) {
+        Some(metadata) => {
+            let expected_request = metadata.kind == TransportMethodKind::Request;
+            if expected_request != is_request {
+                return Err(TransportDispatchError::InvalidKnownMessage);
+            }
+            let definition = if is_request { metadata.request_definition } else { metadata.notification_definition };
+            match definition {
+                Some(definition) => validate_transport_definition(definition, &message.0)
+                    .map_err(|error| transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage))?,
+                None => validate_transport_message(&message.0)
+                    .map_err(|error| transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage))?,
+            }
+            Ok(TransportRequestOrNotification::Known { message, metadata })
+        }
+        None if is_request => Ok(TransportRequestOrNotification::UnknownRequest(message)),
+        None => Ok(TransportRequestOrNotification::UnknownNotification(message)),
+    }
+}
+
+#[rustfmt::skip]
+pub fn decode_transport_response_raw(pending: Option<TransportPendingRequest<'_>>, bytes: &[u8]) -> Result<TransportResponse, TransportDispatchError> {
+    let message = decode_transport_generic_envelope_raw(bytes).map_err(transport_dispatch_decode_error)?;
+    let object = message.0.as_object().ok_or(TransportDispatchError::InvalidEnvelope)?;
+    if object.contains_key("method") {
+        return Err(TransportDispatchError::InvalidEnvelope);
+    }
+    let response_id = object.get("id").and_then(Value::as_str);
+    if pending.is_some_and(|context| response_id != Some(context.id)) {
+        if let Some(schema_version) = transport_error_schema_version(&message.0) {
+            if transport_typed_error_schema_version_known(schema_version) {
+                let error_metadata = TRANSPORT_TYPED_ERRORS.iter()
+                    .find(|metadata| metadata.schema_version == schema_version)
+                    .ok_or(TransportDispatchError::ValidatorUnavailable)?;
+                validate_transport_definition(error_metadata.response_definition, &message.0)
+                    .map_err(|error| transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage))?;
+            }
+        }
+        return Ok(TransportResponse::Unmatched(message));
+    }
+    let typed_schema_version = transport_error_schema_version(&message.0);
+    match pending.and_then(|context| transport_method_metadata(context.method)) {
+        Some(metadata) if metadata.kind == TransportMethodKind::Request => {
+            if object.contains_key("result") {
+                let definition = metadata.success_response_definition
+                    .ok_or(TransportDispatchError::ValidatorUnavailable)?;
+                validate_transport_definition(definition, &message.0)
+                    .map_err(|error| transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage))?;
+                return Ok(TransportResponse::KnownSuccess { message, metadata });
+            }
+            if let Some(schema_version) = typed_schema_version {
+                if let Some(error_metadata) = transport_typed_error_metadata(metadata.method, schema_version) {
+                    validate_transport_definition(error_metadata.response_definition, &message.0)
+                        .map_err(|error| transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage))?;
+                    validate_typed_error_correlation(metadata, pending.expect("matched pending request"), &message.0)?;
+                    return Ok(TransportResponse::KnownTypedError { message, metadata: error_metadata });
+                }
+                if transport_typed_error_schema_version_known(schema_version) {
+                    return Err(TransportDispatchError::InvalidKnownMessage);
+                }
+            }
+            Ok(TransportResponse::GenericError(message))
+        }
+        Some(_) => Err(TransportDispatchError::InvalidKnownMessage),
+        None if pending.is_some() => {
+            if typed_schema_version.is_some_and(transport_typed_error_schema_version_known) {
+                return Err(TransportDispatchError::InvalidKnownMessage);
+            }
+            Ok(TransportResponse::UnknownMethod(message))
+        }
+        None => {
+            if let Some(schema_version) = typed_schema_version {
+                if transport_typed_error_schema_version_known(schema_version) {
+                    let error_metadata = TRANSPORT_TYPED_ERRORS.iter()
+                        .find(|metadata| metadata.schema_version == schema_version)
+                        .ok_or(TransportDispatchError::ValidatorUnavailable)?;
+                    validate_transport_definition(error_metadata.response_definition, &message.0)
+                        .map_err(|error| transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage))?;
+                }
+            }
+            Ok(TransportResponse::Unmatched(message))
+        }
+    }
+}
+
 #[cfg(test)]
+#[rustfmt::skip]
+pub(crate) fn transport_dispatch_test_map_schema_error(error: TransportSchemaError) -> TransportDispatchError {
+    transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage)
+}
+
+#[cfg(test)]
+#[rustfmt::skip]
 pub(crate) fn transport_validator_compile_count(target: &str) -> usize {
     TRANSPORT_VALIDATOR_COMPILE_COUNTS
         .get()

@@ -232,6 +232,19 @@ publishes only the C++ Runtime header and implementation required by generated C
 An exact `npm pack --dry-run --json` inventory is part of both generation freshness
 and the aggregate CTest, not an informal release observation.
 
+The generated Rust Transport dispatcher is driven by the same reviewed registry.
+Generation binds each success wrapper to its result definition, derives six
+method-qualified typed-error entries, and proves that every root `allOf` condition
+is restored by method or typed-error dispatch before compiling a generic envelope
+validator. A pending response context is indivisible: exact request ID, exact method,
+and any typed-error request identity travel together. Wrong or null IDs are unmatched;
+the four subscription methods also require their static stage and exact request
+identity. Known methods and known typed discriminators fail closed rather than
+falling through, while unknown values retain forward-compatible generic handling.
+Parse kind and byte offset survive dispatch, known-wrapper failure remains distinct
+from generic-envelope failure, and unavailable generated validators are a local
+implementation fault rather than a peer JSON-RPC error.
+
 This remains a partial generation architecture, not completion of `3.10`.
 Migration of production Rust/Qt wire consumers and clean Windows Unicode-checkout
 execution evidence are still required. A future AAP `0.2` may deliberately narrow

@@ -279,6 +279,27 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   `generate:check` and the aggregate CTest invoke an exact 47-file
   `npm pack --dry-run --json` inventory gate, so generated C++ cannot be packed
   without its Runtime dependencies.
+  The reviewed Transport registry has SHA-256
+  `b90f2572b61f4e6c75548b5655cd2374b469231e282e5dd1a3e6f9f9da09953c`
+  and generates 14 exact method entries plus six method-bound typed-error entries.
+  Every request binds its request, success wrapper, and success-result definition;
+  every root `allOf` condition must be classified as method or typed-error dispatch
+  before the generic validator may remove it. Generator negative tests execute the
+  semantic candidate validator before the reviewed-hash gate, so definition swaps,
+  result drift, duplicate errors, optional or ambiguous discriminators, and
+  unclassified root conditions cannot hide behind checksum rejection.
+  Generated Rust dispatch parses each raw frame once with the lossless Transport
+  parser and distinguishes parse errors with offsets, invalid generic envelopes,
+  invalid known messages, and local validator unavailability. Known methods and
+  known typed-error discriminators cannot fall back to generic handling; unknown
+  methods and discriminators remain forward-compatible. Response dispatch consumes
+  one indivisible pending context containing the exact request ID, method, and
+  optional typed-error request identity. A wrong or null response ID is unmatched
+  and cannot retire that context. Subscription typed errors additionally require
+  the exact method-bound stage (`subscribe`, `sync`, `snapshot`, or `activate`) and
+  request identity. `UnknownDefinition` and validator compilation failure become
+  local `ValidatorUnavailable` and must never be reported to a peer as `-32600` or
+  `-32602`.
   Generated Rust Transport validation now parses the embedded Schema once and
   caches the root plus each of the 99 definition validators independently with
   thread-safe `OnceLock` state. Concurrent first use of one definition compiles
@@ -289,7 +310,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   reporting it to a peer as `-32600` or `-32602`; the generated dispatch and
   production-consumer migration remain the next slice.
   The final local gate passes generator negative/freshness tests, Rust formatting,
-  `1004` workspace tests with one explicitly ignored live Codex fixture, strict
+  `1009` workspace tests with one explicitly ignored live Codex fixture, strict
   Clippy, the complete desktop build and `23/23` CTests, strict OpenSpec validation,
   Cargo packaging, and `git diff --check`.
   Keep `3.10` unchecked: production Rust/Qt consumers still use reviewed hand-written

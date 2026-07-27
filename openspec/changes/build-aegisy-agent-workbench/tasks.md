@@ -168,6 +168,19 @@
     includes only the required `aap_transport_runtime.h`/`.cpp` production pair
     with generated C++, and both `generate:check` and the aggregate CTest verify the
     exact 47-file `npm pack --dry-run --json` inventory.
+  - Generated Transport registry/dispatch slice: the reviewed registry SHA-256 is
+    `b90f2572b61f4e6c75548b5655cd2374b469231e282e5dd1a3e6f9f9da09953c` and
+    binds 14 methods, every request success-result definition, and six method-bound
+    typed-error entries. Generation proves complete root `allOf` coverage before
+    deriving the generic envelope validator, and semantic registry mutation tests
+    run before the reviewed-hash gate. Rust request/notification dispatch preserves
+    parser kind/offset, distinguishes generic-envelope from known-message failure,
+    and keeps validator compilation failure local. Response dispatch requires one
+    exact pending `{id, method, typed_error_request_identity}` context. Wrong/null
+    IDs remain unmatched; subscription failures additionally require the static
+    method stage and exact request identity. Known methods or typed discriminators
+    cannot enter a generic fallback, while genuinely unknown values remain forward-
+    compatible.
   - Keep `3.10` unchecked: production Rust/Qt wire consumers still use reviewed
     hand-written protocol paths, and clean Windows Unicode-checkout execution is
     absent. This generation slice grants no capability, permission, Approval,

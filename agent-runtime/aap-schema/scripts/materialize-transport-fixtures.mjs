@@ -35,6 +35,10 @@ if (outputPath && [schemaPath, methodRegistryPath, fixtureCatalogPath].includes(
 const schema = readMetadataJsonStrict(schemaPath);
 const oracle = createTransportOracle(schema);
 const methodRegistry = readMetadataJsonStrict(methodRegistryPath);
+const methodRegistrySha256 = createHash("sha256").update(readFileSync(methodRegistryPath)).digest("hex");
+if (methodRegistrySha256 !== "b90f2572b61f4e6c75548b5655cd2374b469231e282e5dd1a3e6f9f9da09953c") {
+  throw new TypeError("method registry differs from the reviewed SHA-256 golden");
+}
 const catalog = readMetadataJsonStrict(fixtureCatalogPath);
 
 exactKeys(methodRegistry, ["schema_version", "schema_id", "response_dispatch", "generic_payload_semantics", "unknown_method_fallbacks", "methods"], [], "method registry");
@@ -82,12 +86,46 @@ for (const condition of schema.allOf ?? []) {
   });
 }
 
+const referenceDefinition = (node) => typeof node?.$ref === "string" && node.$ref.startsWith("#/$defs/")
+  ? node.$ref.slice(8)
+  : null;
+const hasRequired = (node, ...fields) => Array.isArray(node?.required) &&
+  fields.every((field) => node.required.includes(field));
+const schemaVersionDiscriminatorFacts = (node, seen = new Set()) => {
+  const facts = { values: new Set(), required: false };
+  if (!node || typeof node !== "object" || Array.isArray(node)) return facts;
+  if (typeof node.properties?.schema_version?.const === "string") {
+    facts.values.add(node.properties.schema_version.const);
+  }
+  facts.required = node.required?.includes("schema_version") === true;
+  const candidates = [...(node.allOf ?? [])];
+  if (typeof node.$ref === "string") candidates.push({ $ref: node.$ref });
+  for (const candidate of candidates) {
+    const reference = referenceDefinition(candidate);
+    let nested;
+    if (reference) {
+      if (seen.has(reference)) continue;
+      const nextSeen = new Set(seen);
+      nextSeen.add(reference);
+      nested = schemaVersionDiscriminatorFacts(schema.$defs[reference], nextSeen);
+    } else {
+      nested = schemaVersionDiscriminatorFacts(candidate, seen);
+    }
+    for (const value of nested.values) facts.values.add(value);
+    facts.required ||= nested.required;
+  }
+  return facts;
+};
+const typedErrorDefinitions = new Map();
+
 const registeredMethods = new Set();
 let previousMethod = "";
 for (const [index, entry] of methodRegistry.methods.entries()) {
   exactKeys(
     entry,
-    ["method", "kind", "params_definition", "request_definition", "success_response_definition", "error_response_definitions", "notification_definition"],
+    ["method", "kind", "params_definition", "request_definition", "success_response_definition",
+      "success_result_definition", "error_response_definitions", "typed_error_stage",
+      "notification_definition"],
     [],
     `method registry entry ${index}`,
   );
@@ -99,7 +137,8 @@ for (const [index, entry] of methodRegistry.methods.entries()) {
   if (!expected || entry.kind !== expected.kind || entry.params_definition !== expected.params_definition) {
     throw new TypeError(`method registry dispatch mismatch for ${entry.method}`);
   }
-  for (const field of ["request_definition", "success_response_definition", "notification_definition"]) {
+  for (const field of ["request_definition", "success_response_definition", "success_result_definition",
+    "notification_definition"]) {
     const definition = entry[field];
     if (definition !== null && (typeof definition !== "string" || !oracle.definitionNames.includes(definition))) {
       throw new TypeError(`${entry.method} has unknown ${field}`);
@@ -109,11 +148,71 @@ for (const [index, entry] of methodRegistry.methods.entries()) {
       entry.error_response_definitions.some((definition) => typeof definition !== "string" || !oracle.definitionNames.includes(definition))) {
     throw new TypeError(`${entry.method} has invalid error response definitions`);
   }
-  if (entry.kind === "request" && (entry.request_definition === null || entry.success_response_definition === null || entry.notification_definition !== null)) {
+  if (entry.typed_error_stage !== null && typeof entry.typed_error_stage !== "string") {
+    throw new TypeError(`${entry.method} has invalid typed error stage`);
+  }
+  if (entry.kind === "request" && (entry.request_definition === null || entry.success_response_definition === null || entry.success_result_definition === null || entry.notification_definition !== null)) {
     throw new TypeError(`${entry.method} request bindings are incomplete`);
   }
-  if (entry.kind === "notification" && (entry.request_definition !== null || entry.success_response_definition !== null || entry.error_response_definitions.length !== 0)) {
+  if (entry.kind === "notification" && (entry.request_definition !== null || entry.success_response_definition !== null || entry.success_result_definition !== null || entry.error_response_definitions.length !== 0)) {
     throw new TypeError(`${entry.method} notification bindings are incomplete`);
+  }
+
+  if (entry.request_definition !== null) {
+    const request = schema.$defs[entry.request_definition];
+    if (request?.type !== "object" || request?.additionalProperties !== false ||
+        !hasRequired(request, "jsonrpc", "id", "method", "params") ||
+        request?.properties?.jsonrpc?.const !== "2.0" ||
+        referenceDefinition(request?.properties?.id) !== "jsonRpcRequestId" ||
+        request?.properties?.method?.const !== entry.method ||
+        referenceDefinition(request?.properties?.params) !== entry.params_definition) {
+      throw new TypeError(`${entry.method} request definition does not bind its method and params`);
+    }
+  }
+  if (entry.success_response_definition !== null) {
+    const success = schema.$defs[entry.success_response_definition];
+    if (success?.type !== "object" || success?.additionalProperties !== false ||
+        !hasRequired(success, "jsonrpc", "id", "result") ||
+        success?.properties?.jsonrpc?.const !== "2.0" ||
+        referenceDefinition(success?.properties?.id) !== "jsonRpcRequestId" ||
+        referenceDefinition(success?.properties?.result) !== entry.success_result_definition ||
+        Object.hasOwn(success?.properties ?? {}, "method") ||
+        Object.hasOwn(success?.properties ?? {}, "error")) {
+      throw new TypeError(`${entry.method} success response definition is not a strict success envelope`);
+    }
+  }
+  if (entry.notification_definition !== null) {
+    const notification = schema.$defs[entry.notification_definition];
+    const paramsReference = referenceDefinition(notification?.properties?.params);
+    if (notification?.type !== "object" || notification?.additionalProperties !== false ||
+        !hasRequired(notification, "jsonrpc", "method", "params") ||
+        notification?.properties?.jsonrpc?.const !== "2.0" ||
+        notification?.properties?.method?.const !== entry.method ||
+        Object.hasOwn(notification?.properties ?? {}, "id") ||
+        (entry.params_definition === null ? paramsReference !== null : paramsReference !== entry.params_definition)) {
+      throw new TypeError(`${entry.method} notification definition does not bind its method and params`);
+    }
+  }
+  for (const definitionName of entry.error_response_definitions) {
+    const response = schema.$defs[definitionName];
+    const dataDefinition = referenceDefinition(response?.properties?.error?.properties?.data);
+    const discriminatorFacts = dataDefinition
+      ? schemaVersionDiscriminatorFacts(schema.$defs[dataDefinition], new Set([dataDefinition]))
+      : { values: new Set(), required: false };
+    const discriminators = [...discriminatorFacts.values];
+    if (response?.type !== "object" || response?.additionalProperties !== false ||
+        !hasRequired(response, "jsonrpc", "id", "error") ||
+        response?.properties?.jsonrpc?.const !== "2.0" ||
+        referenceDefinition(response?.properties?.id) !== "jsonRpcRequestId" ||
+        !hasRequired(response?.properties?.error, "code", "message", "data") ||
+        !discriminatorFacts.required || discriminators.length !== 1) {
+      throw new TypeError(`${entry.method} typed error definition is not a strict discriminated error envelope`);
+    }
+    const prior = typedErrorDefinitions.get(discriminators[0]);
+    if (prior && prior !== definitionName) {
+      throw new TypeError(`typed error discriminator ${discriminators[0]} is ambiguous`);
+    }
+    typedErrorDefinitions.set(discriminators[0], definitionName);
   }
 }
 if (registeredMethods.size !== schemaMethods.size || [...schemaMethods.keys()].some((method) => !registeredMethods.has(method))) {
