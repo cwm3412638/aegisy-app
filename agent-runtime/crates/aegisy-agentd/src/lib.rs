@@ -4369,15 +4369,37 @@ fn canonical_project_root(path: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+fn project_root_available(path: &Path, stored_root_identity: Option<&str>) -> bool {
+    if !path.is_dir()
+        || fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+    {
+        return false;
+    }
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    if canonical != path {
+        return false;
+    }
+    let Ok(current_root_identity) = filesystem_root_identity(&canonical) else {
+        return false;
+    };
+    stored_root_identity
+        .is_none_or(|stored| stored.starts_with("path:sha256:") || stored == current_root_identity)
+}
+
 fn project_root_value(root: &workbench_store::StoredProjectRoot) -> Value {
     let path = Path::new(&root.canonical_root);
+    let available = project_root_available(path, Some(&root.root_identity));
     json!({
         "root_id": root.root_id,
         "canonical_path": root.canonical_root,
         "root_identity": root.root_identity,
         "access": root.access,
-        "availability": if path.is_dir() { "available" } else { "unavailable" },
-        "relink_required": !path.is_dir()
+        "availability": if available { "available" } else { "unavailable" },
+        "relink_required": !available
     })
 }
 
@@ -6690,7 +6712,22 @@ impl Runtime {
         }
         let entries = if let Some(store) = self.workbench_store.as_ref() {
             match store.list_project_navigation(params.limit) {
-                Ok(entries) => entries,
+                Ok(mut entries) => {
+                    for entry in &mut entries {
+                        let available = project_root_available(
+                            Path::new(&entry.project.canonical_root),
+                            Some(&entry.project.root_identity),
+                        );
+                        entry.availability = if available {
+                            "available"
+                        } else {
+                            "unavailable"
+                        }
+                        .into();
+                        entry.relink_required = !available;
+                    }
+                    entries
+                }
                 Err(error) => return self.error_for(&request, -32113, error.message),
             }
         } else {
@@ -6701,7 +6738,26 @@ impl Runtime {
                 .take(params.limit)
                 .map(|project| {
                     let project_id = project.id.clone();
-                    let available = Path::new(&project.root).is_dir();
+                    let path = Path::new(&project.root);
+                    let current_root_identity = if path.is_dir() {
+                        filesystem_root_identity(path).ok()
+                    } else {
+                        None
+                    };
+                    let stored_root_identity = self
+                        .project_roots
+                        .get(&project_id)
+                        .and_then(|roots| roots.iter().find(|root| root.root_id == "root-1"))
+                        .map(|root| root.root_identity.clone());
+                    let available = project_root_available(path, stored_root_identity.as_deref());
+                    let root_identity = stored_root_identity
+                        .or(current_root_identity)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "path:sha256:{}",
+                                ContentHash::for_bytes(project.root.as_bytes()).sha256
+                            )
+                        });
                     let navigation = self.project_navigation.get(&project_id).cloned().unwrap_or(
                         workbench_store::StoredProjectNavigation {
                             project_id: project_id.clone(),
@@ -6713,7 +6769,7 @@ impl Runtime {
                         project: workbench_store::StoredProject {
                             project_id: project_id.clone(),
                             canonical_root: project.root,
-                            root_identity: String::new(),
+                            root_identity,
                             display_name: project.name,
                             state: if available { "active" } else { "unavailable" }.into(),
                             created_at_ms: 0,
@@ -10201,6 +10257,15 @@ impl Runtime {
                 return self.error_for(&request, -32602, format!("invalid params: {error}"))
             }
         };
+        let title = params.title.as_deref().unwrap_or("New session");
+        if title.is_empty() || title.len() > 256 || title.chars().any(char::is_control) {
+            return self.error_for(
+                &request,
+                -32602,
+                "session title must contain 1 to 256 printable UTF-8 bytes",
+            );
+        }
+        let title = title.to_owned();
         let cwd = match self.session_cwd(&params) {
             Ok(cwd) => cwd,
             Err((code, message)) => return self.error_for(&request, code, message),
@@ -10278,7 +10343,7 @@ impl Runtime {
             id: id.clone(),
             mode: params.mode,
             project_id: params.project_id.clone(),
-            title: params.title.unwrap_or_else(|| "New session".into()),
+            title,
         };
         let runtime_binding = StoredSessionRuntimeBindingCreate {
             session_id: id.clone(),
@@ -22622,6 +22687,183 @@ mod durable_runtime_tests {
             .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
             .is_empty());
         initialize[0].clone()
+    }
+
+    #[test]
+    fn in_memory_session_start_validates_the_final_title_before_dispatch() {
+        let mut runtime = Runtime::default();
+        ready(&mut runtime);
+
+        for (index, title) in [
+            String::new(),
+            "invalid\ntitle".to_owned(),
+            "a".repeat(257),
+            "界".repeat(86),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let response = runtime.handle_line(&request(
+                &format!("invalid-title-{index}"),
+                "session/start",
+                json!({"mode": "chat", "title": title}),
+            ));
+            assert_eq!(response.len(), 1);
+            assert_eq!(response[0]["error"]["code"], -32602);
+            assert_eq!(
+                response[0]["error"]["message"],
+                "session title must contain 1 to 256 printable UTF-8 bytes"
+            );
+        }
+        assert!(runtime.sessions.is_empty());
+
+        let accepted = runtime.handle_line(&request(
+            "default-title",
+            "session/start",
+            json!({"mode": "chat"}),
+        ));
+        assert_eq!(accepted[0]["result"]["session"]["id"], "session-1");
+        assert_eq!(accepted[0]["result"]["session"]["title"], "New session");
+    }
+
+    #[test]
+    fn in_memory_project_list_preserves_the_opened_root_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "aegisy-runtime-in-memory-project-list-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut runtime = Runtime::default();
+        ready(&mut runtime);
+
+        let opened = runtime.handle_line(&request(
+            "project-open",
+            "project/open",
+            json!({"root": root}),
+        ));
+        let root_identity = opened[0]["result"]["identity"]["root_identity"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!root_identity.is_empty());
+
+        let listed = runtime.handle_line(&request(
+            "project-list",
+            "project/list",
+            json!({"limit": 100}),
+        ));
+        assert_eq!(listed[0]["result"]["projects"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            listed[0]["result"]["projects"][0]["root_identity"],
+            root_identity
+        );
+        assert_eq!(
+            listed[0]["result"]["projects"][0]["availability"],
+            "available"
+        );
+        assert_eq!(listed[0]["result"]["projects"][0]["relink_required"], false);
+
+        fs::remove_dir_all(&root).unwrap();
+        let unavailable = runtime.handle_line(&request(
+            "project-list-unavailable",
+            "project/list",
+            json!({"limit": 100}),
+        ));
+        assert_eq!(
+            unavailable[0]["result"]["projects"][0]["root_identity"],
+            root_identity
+        );
+        assert_eq!(
+            unavailable[0]["result"]["projects"][0]["availability"],
+            "unavailable"
+        );
+
+        let old_root = root.with_extension("opened-root");
+        fs::create_dir_all(&root).unwrap();
+        fs::rename(&root, &old_root).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        let replaced = runtime.handle_line(&request(
+            "project-list-replaced",
+            "project/list",
+            json!({"limit": 100}),
+        ));
+        assert_eq!(
+            replaced[0]["result"]["projects"][0]["root_identity"],
+            root_identity
+        );
+        assert_eq!(
+            replaced[0]["result"]["projects"][0]["availability"],
+            "unavailable"
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(old_root).unwrap();
+    }
+
+    #[test]
+    fn durable_project_lists_detect_a_replaced_root_identity() {
+        let fixture_root = std::env::temp_dir().join(format!(
+            "aegisy-runtime-durable-project-list-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let data_root = fixture_root.join("data");
+        let project_root = fixture_root.join("project");
+        let moved_root = fixture_root.join("opened-project");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+
+        let mut runtime = Runtime::with_store(&data_root).unwrap();
+        ready(&mut runtime);
+        let opened = runtime.handle_line(&request(
+            "project-open",
+            "project/open",
+            json!({"root": project_root}),
+        ));
+        let project_id = opened[0]["result"]["project"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let root_identity = opened[0]["result"]["identity"]["root_identity"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        fs::rename(&project_root, &moved_root).unwrap();
+        fs::create_dir_all(&project_root).unwrap();
+
+        let listed = runtime.handle_line(&request(
+            "project-list-replaced",
+            "project/list",
+            json!({"limit": 100}),
+        ));
+        assert_eq!(
+            listed[0]["result"]["projects"][0]["root_identity"],
+            root_identity
+        );
+        assert_eq!(
+            listed[0]["result"]["projects"][0]["availability"],
+            "unavailable"
+        );
+        assert_eq!(listed[0]["result"]["projects"][0]["relink_required"], true);
+
+        let roots = runtime.handle_line(&request(
+            "project-root-list-replaced",
+            "project/root-list",
+            json!({"project_id": project_id}),
+        ));
+        assert_eq!(
+            roots[0]["result"]["roots"][0]["root_identity"],
+            root_identity
+        );
+        assert_eq!(
+            roots[0]["result"]["roots"][0]["availability"],
+            "unavailable"
+        );
+        assert_eq!(roots[0]["result"]["roots"][0]["relink_required"], true);
+
+        drop(runtime);
+        fs::remove_dir_all(fixture_root).unwrap();
     }
 
     #[test]

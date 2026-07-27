@@ -35,9 +35,68 @@
   Codex fixture; strict workspace Clippy and formatting checks pass. The complete
   desktop build and CTest suite pass 20/20, strict OpenSpec validation passes, and
   all package/namespace/stable Schema JSON documents pass `jq empty`.
-- Core Project/Session/Turn/etc. schemas and generated Rust/TypeScript/C++ types
-  remain required under `3.2` and `3.10`; completing the package structure does not
-  claim those artifacts.
+- The package-structure evidence alone does not claim core domain definitions or
+  generated types. Core evidence is recorded separately below; generated
+  Rust/TypeScript/C++ types remain required under `3.10`.
+
+## AAP Core Domain Schemas (`3.2`)
+
+- Stable AAP `0.1` keeps its original transport `schema/schema_id` registry entry
+  and additively registers `core.schema.json` as the `core-domains` component.
+  The core component is a `$defs` library rather than a fabricated all-domain
+  wire message.
+- The definitions cover thin Project/Session, project-root/navigation and durable
+  Session projections, separate Turn lifecycle and start acknowledgement states,
+  transport-aligned Item plus history Item, live/search/replay Runtime variants,
+  project-root Workspace Git state, non-authorizing Approval acknowledgement,
+  content-free Error, typed Usage, command-output Artifact read, and negotiated
+  Capability sets. Three-language generated types remain open under `3.10`.
+- `aap-core-domains.json` is a named positive fixture catalog. The package gate
+  compiles individual `$defs`, checks core/transport Item parity, and rejects
+  unknown fields, Chat/Work and Turn-state drift, contradictory Workspace Git
+  state, false-authority changes, Provider body/credential fields, unsafe or
+  inconsistent Usage, generic Artifact identity, duplicate/experimental
+  capabilities, and invalid identities. It also preserves every public core enum
+  value and security-relevant bound as an additive compatibility baseline,
+  cross-checks the 64-character Runtime/Backend handshake names, and requires live
+  and history Item data keys to share the exact ASCII graphical boundary. The
+  focused gate passes 12/12.
+- `core_schema_runtime` captures real Store-backed `project/open`,
+  `project/root-list`, `project/list`, Chat/Work `session/start`, `session/list`,
+  `session/search`, cold `session/read`, `turn/start`, terminal Turn projection,
+  and Timeline Items. It validates each value against its exact definition and
+  validates Timeline Items against both core and transport; the focused gate
+  passes 1/1.
+- Runtime producer fixes validate the final Session title before backend dispatch,
+  preserve non-empty filesystem identity in memory-only and Store-backed project
+  listings/root projections, reject same-path directory replacement, and enforce
+  JSON-safe integers throughout Usage reports, evidence, values, and provider
+  ingestion. Replacement fixtures keep the old filesystem object alive so inode/
+  file-index reuse cannot weaken the evidence. Focused title/project tests pass 3/3
+  and Usage tests pass 16/16. JSON Schema `maxLength` remains character-based;
+  typed UTF-8 byte and cross-field validation is still required.
+- Focused commands:
+
+  ```sh
+  jq empty agent-runtime/aap-schema/stable/namespace.json \
+    agent-runtime/aap-schema/stable/v0.1/core.schema.json \
+    agent-runtime/aap-schema/fixtures/aap-core-domains.json
+  $HOME/.cargo/bin/cargo test --manifest-path agent-runtime/Cargo.toml \
+    -p aegisy-agentd --test schema_package
+  $HOME/.cargo/bin/cargo test --manifest-path agent-runtime/Cargo.toml \
+    -p aegisy-agentd --test core_schema_runtime
+  ```
+
+- This local macOS evidence grants no Agent write, execution, Git, background,
+  user Approval, generic Artifact, experimental, dedicated-worktree, remote, or
+  Windows release authority.
+- Final local gate: 44 `aegisy-aap`, 785 `aegisy-agentd` library with one
+  explicitly ignored live Codex fixture, 7 daemon, 10 context-threshold, 1 real
+  core-Schema Runtime capture, 21 handshake Runtime, 23 handshake Schema, 68
+  protocol, 12 Schema-package, and 23 stdio/Codex tests pass (994 passed total,
+  zero failed, one ignored). Strict Clippy and Rust formatting pass; the complete
+  desktop build and all 20 CTests pass; all registered JSON documents parse;
+  strict OpenSpec validation and `git diff --check` pass.
 
 ## Product Baseline Decision Evidence (`1.3`, `1.7`, `1.8`)
 

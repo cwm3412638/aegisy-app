@@ -19,6 +19,46 @@ availability, and canonical Schema identities.
 - **WHEN** an experimental contract is proposed for stable use
 - **THEN** promotion SHALL require a reviewed new stable wire version with compatibility, authority, recovery, fixture, generated-type, Runtime, and Qt gates rather than reinterpreting an experimental URI as stable
 
+### Requirement: Core domains use strict reusable definitions
+The stable AAP package SHALL define Project, Session, Turn, Item, Runtime,
+Workspace, Approval acknowledgement, Error, Usage, Artifact-read, and Capability
+set contracts as independently compilable reusable definitions. The package
+SHALL NOT represent them as one aggregate wire message or grant behavior that no
+method currently exposes. Direct wire shapes, method-specific projections, and
+typed domain objects SHALL be documented and tested against their real producers.
+
+#### Scenario: Every core definition validates independently
+- **WHEN** the stable core component and fixture catalog are validated
+- **THEN** each named `$defs` entry SHALL compile and accept its bounded positive fixture while rejecting unknown fields, cross-domain state values, unsafe integers, and authority-bearing substitutions
+
+#### Scenario: Runtime output is checked against core definitions
+- **WHEN** the Preview/Store Runtime serves project open/root/list, Chat and Work session start/list/search/read, turn start, and Timeline Item output
+- **THEN** the exact direct value or documented field projection SHALL validate against the corresponding core definition, and every Timeline Item SHALL also validate against transport `$defs/timelineItem`
+
+#### Scenario: Chat and Work bindings cannot drift
+- **WHEN** Session values or durable projections are validated
+- **THEN** Chat SHALL have a null Project and Workspace binding, Work SHALL bind a Project and project-root Workspace, and lineage ownership SHALL remain subject to typed cross-field validation
+
+#### Scenario: Turn lifecycle is distinct from start acknowledgement
+- **WHEN** a Turn domain state or `turn/start.result.turn` value is validated
+- **THEN** lifecycle SHALL use only `running|completed|failed|interrupted`, the request acknowledgement SHALL use only `started|terminal`, and Session/correlation identities SHALL remain in their owning envelopes rather than being fabricated on Turn
+
+#### Scenario: Workspace Git state fails closed
+- **WHEN** a project-root Workspace is encoded
+- **THEN** it SHALL use only `unavailable|not-repository|repository-only|worktree`, SHALL expose a lowercase 40- or 64-character HEAD only where valid, SHALL reject contradictory branch/detached/unborn state, and SHALL keep dedicated-worktree, raw-path, and permission authority false
+
+#### Scenario: Approval and Provider Error cannot fabricate authority or content
+- **WHEN** an Approval acknowledgement or Provider Error is validated
+- **THEN** `allowed`, user-decision, mutation, execution, credential, response-body, message, and unknown-field substitutions SHALL be rejected while the current content-free metadata-only denial/error projection remains valid
+
+#### Scenario: Usage and Capability boundaries remain typed
+- **WHEN** Usage evidence or negotiated Capability sets are validated
+- **THEN** values and times SHALL stay within JSON-safe integers, metric/value/evidence and reasoning relationships SHALL fail closed on drift, stable capabilities SHALL be unique bounded names, and the AAP `0.1` experimental set SHALL remain exactly empty
+
+#### Scenario: Schema character limits do not replace typed byte limits
+- **WHEN** a string, recursive Item value, Usage report, or Workspace projection passes JSON Schema
+- **THEN** Rust and Qt SHALL still enforce normative UTF-8 byte, aggregate-tree, identity, arithmetic, and cross-field limits before accepting or emitting it
+
 ### Requirement: Runtime connections negotiate versions and capabilities
 Every AAP connection SHALL complete an initialization handshake before project,
 session, turn, workspace, terminal, tool, runtime-control, or storage methods are

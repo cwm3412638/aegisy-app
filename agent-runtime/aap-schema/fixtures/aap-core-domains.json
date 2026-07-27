@@ -1,0 +1,376 @@
+{
+  "project": {
+    "id": "project-1",
+    "root": "/redacted/project",
+    "name": "Example project"
+  },
+  "projectRoot": {
+    "root_id": "root-1",
+    "canonical_path": "/redacted/project",
+    "root_identity": "fs:unix:1:2",
+    "access": "write",
+    "availability": "available",
+    "relink_required": false
+  },
+  "projectNavigationEntry": {
+    "project_id": "project-1",
+    "id": "project-1",
+    "root": "/redacted/project",
+    "name": "Example project",
+    "state": "active",
+    "root_identity": "fs:unix:1:2",
+    "created_at_ms": 1785000000000,
+    "updated_at_ms": 1785000000001,
+    "pinned": true,
+    "last_opened_at_ms": 1785000000001,
+    "availability": "available",
+    "relink_required": false,
+    "session_count": 2,
+    "active_session_count": 1,
+    "live_session_count": 1
+  },
+  "sessionChat": {
+    "id": "session-chat",
+    "mode": "chat",
+    "project_id": null,
+    "title": "Chat session"
+  },
+  "sessionWork": {
+    "id": "session-work",
+    "mode": "work",
+    "project_id": "project-1",
+    "title": "Inspect repository"
+  },
+  "sessionProjectionChat": {
+    "session_id": "session-chat",
+    "project_id": null,
+    "mode": "chat",
+    "title": "Chat session",
+    "parent_session_id": null,
+    "lineage_kind": "new",
+    "status": "active",
+    "environment_identity": null,
+    "created_at_ms": 1785000000000,
+    "updated_at_ms": 1785000000001
+  },
+  "sessionProjectionWork": {
+    "session_id": "session-work",
+    "project_id": "project-1",
+    "mode": "work",
+    "title": "Inspect repository",
+    "parent_session_id": "session-parent",
+    "lineage_kind": "fork",
+    "status": "interrupted",
+    "environment_identity": "environment:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at_ms": 1785000000000,
+    "updated_at_ms": 1785000000001
+  },
+  "turn": {
+    "id": "turn-1",
+    "state": "running"
+  },
+  "turnStartAcknowledgement": {
+    "id": "turn-1",
+    "state": "started"
+  },
+  "item": {
+    "id": "item-1",
+    "kind": "message",
+    "role": "agent",
+    "state": "completed",
+    "content": "Bounded fixture response.",
+    "data": {
+      "visible": true,
+      "attempt": 1,
+      "labels": ["fixture"]
+    }
+  },
+  "sessionHistoryItem": {
+    "id": "item-1",
+    "kind": "message",
+    "role": "agent",
+    "state": "completed",
+    "content": "Bounded fixture response.",
+    "data": {
+      "visible": true
+    },
+    "sequence": 1,
+    "turn_id": "turn-1"
+  },
+  "runtimeIdentity": {
+    "name": "aegisy-agentd",
+    "version": "0.1.0"
+  },
+  "runtimeBackend": {
+    "adapter": "codex-app-server",
+    "status": "ready",
+    "version": "0.144.5"
+  },
+  "runtimeLiveBinding": {
+    "adapter": "codex-app-server",
+    "version": "0.144.5",
+    "provider": "aegisy",
+    "model": "model-1",
+    "permission_profile": "read-only",
+    "environment": {
+      "environment_id": "environment:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "variable_count": 4,
+      "inherited_count": 1,
+      "explicit_count": 1,
+      "masked_count": 2,
+      "path_entry_count": 3,
+      "explicit_variable_names": ["AEGISY_SESSION_ID"]
+    }
+  },
+  "runtimeSearchProjection": {
+    "adapter": "codex-app-server",
+    "adapter_version": "0.144.5",
+    "provider": "aegisy",
+    "model": null,
+    "permission_profile": "read-only"
+  },
+  "runtimeReplayProjection": {
+    "adapter": "codex-app-server",
+    "adapter_version": "0.144.5",
+    "version": "0.144.5",
+    "provider": "aegisy",
+    "model": "model-1",
+    "permission_profile": "read-only",
+    "replayed": true
+  },
+  "runtimeReplayFallback": {
+    "adapter": "durable-store-replay",
+    "version": "0.1.0",
+    "permission_profile": "read-only",
+    "replayed": true
+  },
+  "workspaceStates": [
+    {
+      "schema_version": "session-workspace-binding/0.1",
+      "session_id": "session-work",
+      "project_id": "project-1",
+      "root_id": "root-1",
+      "workspace_kind": "project-root",
+      "git_state": "unavailable",
+      "branch": null,
+      "branch_redacted": false,
+      "head_oid": null,
+      "detached": false,
+      "unborn": false,
+      "dedicated_worktree": false,
+      "captured_at_ms": 0,
+      "raw_paths_included": false,
+      "permission_granted": false
+    },
+    {
+      "schema_version": "session-workspace-binding/0.1",
+      "session_id": "session-work",
+      "project_id": "project-1",
+      "root_id": "root-1",
+      "workspace_kind": "project-root",
+      "git_state": "not-repository",
+      "branch": null,
+      "branch_redacted": false,
+      "head_oid": null,
+      "detached": false,
+      "unborn": false,
+      "dedicated_worktree": false,
+      "captured_at_ms": 1785000000000,
+      "raw_paths_included": false,
+      "permission_granted": false
+    },
+    {
+      "schema_version": "session-workspace-binding/0.1",
+      "session_id": "session-work",
+      "project_id": "project-1",
+      "root_id": "root-1",
+      "workspace_kind": "project-root",
+      "git_state": "repository-only",
+      "branch": null,
+      "branch_redacted": false,
+      "head_oid": null,
+      "detached": false,
+      "unborn": false,
+      "dedicated_worktree": false,
+      "captured_at_ms": 1785000000000,
+      "raw_paths_included": false,
+      "permission_granted": false
+    },
+    {
+      "schema_version": "session-workspace-binding/0.1",
+      "session_id": "session-work",
+      "project_id": "project-1",
+      "root_id": "root-1",
+      "workspace_kind": "project-root",
+      "git_state": "worktree",
+      "branch": "main",
+      "branch_redacted": false,
+      "head_oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "detached": false,
+      "unborn": false,
+      "dedicated_worktree": false,
+      "captured_at_ms": 1785000000000,
+      "raw_paths_included": false,
+      "permission_granted": false
+    },
+    {
+      "schema_version": "session-workspace-binding/0.1",
+      "session_id": "session-work",
+      "project_id": "project-1",
+      "root_id": "root-1",
+      "workspace_kind": "project-root",
+      "git_state": "worktree",
+      "branch": null,
+      "branch_redacted": false,
+      "head_oid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "detached": true,
+      "unborn": false,
+      "dedicated_worktree": false,
+      "captured_at_ms": 1785000000000,
+      "raw_paths_included": false,
+      "permission_granted": false
+    },
+    {
+      "schema_version": "session-workspace-binding/0.1",
+      "session_id": "session-work",
+      "project_id": "project-1",
+      "root_id": "root-1",
+      "workspace_kind": "project-root",
+      "git_state": "worktree",
+      "branch": "new-branch",
+      "branch_redacted": false,
+      "head_oid": null,
+      "detached": false,
+      "unborn": true,
+      "dedicated_worktree": false,
+      "captured_at_ms": 1785000000000,
+      "raw_paths_included": false,
+      "permission_granted": false
+    },
+    {
+      "schema_version": "session-workspace-binding/0.1",
+      "session_id": "session-work",
+      "project_id": "project-1",
+      "root_id": "root-1",
+      "workspace_kind": "project-root",
+      "git_state": "worktree",
+      "branch": null,
+      "branch_redacted": true,
+      "head_oid": "cccccccccccccccccccccccccccccccccccccccc",
+      "detached": false,
+      "unborn": false,
+      "dedicated_worktree": false,
+      "captured_at_ms": 1785000000000,
+      "raw_paths_included": false,
+      "permission_granted": false
+    }
+  ],
+  "approvalAcknowledgement": {
+    "schema_version": "approval-acknowledgement/0.1",
+    "operation_identity": "approval-operation:sha256:bfddd6d106833fce6fb655fcc3bac8d9ec2b2e8efbb9b45b2d7f7b1f21e0f319",
+    "session_id": "session-work",
+    "turn_id": "turn-1",
+    "idempotency_key": "approval-request-1",
+    "request_fingerprint": "request:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "scope": "command-execution",
+    "scope_identity": "approval-scope:sha256:36db75330ea834495aa552fc023349bf7045848de5714a4379375463eb55c370",
+    "requirement_identity": "approval-requirement:sha256:0d1d7861eb8ff0a5711aa1a068646ad943249c61dd234b0a994c53023ecbfc02",
+    "revision": 1,
+    "state": "requested",
+    "resolution": "unresolved",
+    "observation_identity": null,
+    "observed_at_ms": 1785000000000,
+    "mutation_authority": false,
+    "approval_authority": false,
+    "user_decision_observed": false,
+    "execution_authority": false
+  },
+  "error": {
+    "schema_version": "runtime-error/0.1",
+    "class": "policy",
+    "retryable": false
+  },
+  "errorProvider": {
+    "schema_version": "runtime-error/0.1",
+    "class": "transport",
+    "retryable": true,
+    "provider_error": {
+      "schema_version": "provider-error/0.1",
+      "source": "codex-app-server",
+      "kind": "response-stream-disconnected",
+      "class": "transport",
+      "http_status": 502,
+      "retryable": true,
+      "response_body_included": false,
+      "credentials_included": false
+    }
+  },
+  "providerError": {
+    "schema_version": "provider-error/0.1",
+    "source": "codex-app-server",
+    "kind": "rate-limit",
+    "class": "provider",
+    "http_status": 429,
+    "retryable": true,
+    "response_body_included": false,
+    "credentials_included": false
+  },
+  "usage": {
+    "schema_version": "usage-authority/0.1",
+    "as_of_ms": 1785000000002,
+    "entries": [
+      { "metric": "token", "authority": "unknown", "authoritative": false, "evidence": { "kind": "unknown", "missing_source": "provider-usage", "reason": "not-reported" } },
+      { "metric": "context", "authority": "unknown", "authoritative": false, "evidence": { "kind": "unknown", "missing_source": "provider-usage", "reason": "not-reported" } },
+      { "metric": "cost", "authority": "unknown", "authoritative": false, "evidence": { "kind": "unknown", "missing_source": "catalog", "reason": "unavailable" } },
+      { "metric": "reasoning", "authority": "unknown", "authoritative": false, "evidence": { "kind": "unknown", "missing_source": "provider-usage", "reason": "not-reported" } }
+    ]
+  },
+  "usageObserved": {
+    "schema_version": "usage-authority/0.1",
+    "as_of_ms": 1785000000002,
+    "entries": [
+      {
+        "metric": "token",
+        "authority": "observed",
+        "authoritative": true,
+        "value": { "kind": "token", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "cached_input_tokens": 0, "reasoning_output_tokens": 2 },
+        "evidence": { "kind": "observed", "source": "provider-response", "evidence_identity": "provider-usage:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "observed_at_ms": 1785000000001 }
+      },
+      {
+        "metric": "context",
+        "authority": "observed",
+        "authoritative": true,
+        "value": { "kind": "context", "used_tokens": 15, "window_tokens": 128000 },
+        "evidence": { "kind": "observed", "source": "provider-response", "evidence_identity": "provider-context:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "observed_at_ms": 1785000000001 }
+      },
+      { "metric": "cost", "authority": "unknown", "authoritative": false, "evidence": { "kind": "unknown", "missing_source": "catalog", "reason": "unavailable" } },
+      {
+        "metric": "reasoning",
+        "authority": "observed",
+        "authoritative": true,
+        "value": { "kind": "reasoning", "available": true, "enabled": true, "output_tokens": 2 },
+        "evidence": { "kind": "observed", "source": "provider-response", "evidence_identity": "provider-reasoning:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "observed_at_ms": 1785000000001 }
+      }
+    ]
+  },
+  "commandOutputArtifact": {
+    "reference": "command-output:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "content_type": "text/plain; charset=utf-8",
+    "item_id": "command-1",
+    "created_at_ms": 1785000000000,
+    "source_bytes": 7,
+    "redacted_count": 0,
+    "redacted": false,
+    "total_bytes": 7,
+    "retained_bytes": 7,
+    "omitted_bytes": 0,
+    "truncated": false,
+    "content": "fixture",
+    "session_id": "session-work"
+  },
+  "capabilitySet": {
+    "stable": ["permission.read-only", "session.start"],
+    "experimental": []
+  }
+}

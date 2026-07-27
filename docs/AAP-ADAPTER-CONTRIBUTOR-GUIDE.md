@@ -22,6 +22,11 @@ for changing the pinned provider adapter.
   explicitly enables it.
 - `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`: checked-in stable JSON
   Schema and method/capability vocabulary.
+- `agent-runtime/aap-schema/stable/v0.1/core.schema.json`: reusable core-domain
+  `$defs` library. It is not an aggregate wire message.
+- `agent-runtime/aap-schema/fixtures/aap-core-domains.json`: named positive
+  fixture catalog validated one definition at a time; real Runtime captures are
+  the separate producer-conformance evidence.
 - `agent-runtime/aap-schema/fixtures/`: redacted JSONL protocol evidence and
   generated Codex schema material. Fixtures must remain deterministic.
 - `agent-runtime/crates/aegisy-aap/src/lib.rs`: Rust wire types and strict
@@ -56,6 +61,16 @@ for changing the pinned provider adapter.
 6. Durable identities use the domain-separated canonical byte rules already
    documented in the protocol guide. Never hash a transport wrapper, raw secret,
    or an unbounded provider body.
+7. Classify each core definition as a direct wire shape, a method-specific
+   projection, or a typed domain object. Do not invent an all-domain message,
+   generic Artifact route, single Capability object, or user Approval that the
+   Runtime does not emit.
+8. Shared Item values must pass both core `$defs/item` and transport
+   `$defs/timelineItem`. Turn lifecycle state and `turn/start` acknowledgement
+   state are distinct contracts and must not share one enum.
+9. JSON Schema string lengths count Unicode characters. Rust and Qt remain
+   responsible for the normative UTF-8 byte limits and aggregate/cross-field
+   rules, including Usage arithmetic and Workspace Git identities.
 
 When adding a method, update all of the following in one change:
 
@@ -111,8 +126,13 @@ For a new or changed fixture:
 2. Add schema parsing and Rust protocol assertions. If Qt consumes the shape,
    add response-generation, stale-generation, malformed-response, and render
    coverage.
+   For core definitions, compile and validate `#/$defs/<name>` independently,
+   then capture the corresponding real Runtime response or documented typed
+   projection. A fixture catalog alone is insufficient.
 3. Assert deterministic identities, bounded pages, authority flags, and absence
-   of forbidden content. Do not assert only process exit status.
+   of forbidden content. Stable core additions must preserve the package gate's
+   public enum and security-bound baseline and shared transport/core boundaries.
+   Do not assert only process exit status.
 4. Run the focused test first, then the full local gates:
 
    ```sh
@@ -126,6 +146,10 @@ For a new or changed fixture:
      agent-runtime/aap-schema/stable/namespace.json \
      agent-runtime/aap-schema/experimental/namespace.json
    jq empty agent-runtime/aap-schema/stable/v0.1/aap.schema.json
+   jq empty agent-runtime/aap-schema/stable/v0.1/core.schema.json \
+     agent-runtime/aap-schema/fixtures/aap-core-domains.json
+   cargo test --manifest-path agent-runtime/Cargo.toml \
+     -p aegisy-agentd --test core_schema_runtime
    openspec validate build-aegisy-agent-workbench --strict
    git diff --check
    cmake --build build -j4

@@ -8,7 +8,14 @@
       "protocol_version": "0.1",
       "directory": "v0.1",
       "schema": "v0.1/aap.schema.json",
-      "schema_id": "https://aegisy.cc/schemas/aap/stable/v0.1/aap.schema.json"
+      "schema_id": "https://aegisy.cc/schemas/aap/stable/v0.1/aap.schema.json",
+      "components": [
+        {
+          "role": "core-domains",
+          "path": "v0.1/core.schema.json",
+          "schema_id": "https://aegisy.cc/schemas/aap/stable/v0.1/core.schema.json"
+        }
+      ]
     }
   ]
 }

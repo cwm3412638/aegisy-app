@@ -193,7 +193,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 54 of 235 checkbox tasks are complete and 181 remain
+- OpenSpec task baseline: 55 of 235 checkbox tasks are complete and 180 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
 - OpenSpec task `3.1` is complete. `agent-runtime/aap-schema` is now an explicit
@@ -203,11 +203,34 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   the experimental registry is empty and wire-unavailable. The package gate rejects
   path escape/symlinks, duplicate identities, registry/Schema drift, invalid Schema,
   and stable references to experimental. This structure grants no experimental
-  capability and does not complete core domain schemas or three-language generation
-  under `3.2` and `3.10`. The package gate passes 3/3, handshake Schema passes
+  capability and does not complete three-language generation under `3.10`. The
+  package gate passes 3/3, handshake Schema passes
   23/23, and the complete Rust workspace passes 977 tests with one explicitly
   ignored live Codex fixture plus strict Clippy and formatting. The complete
   desktop build and CTest suite pass 20/20, and strict OpenSpec validation passes.
+- OpenSpec task `3.2` is complete. Stable AAP `0.1` additively registers
+  `core.schema.json` while preserving the transport registry contract. The file
+  is a reusable definition library rather than an aggregate wire message and
+  covers thin Project/Session, durable/navigation projections, separate Turn
+  lifecycle and start acknowledgement, transport-aligned Item/history Item,
+  live/search/replay Runtime, project-root Workspace Git state, non-authorizing
+  Approval acknowledgement, content-free Error, typed Usage, command-output
+  Artifact read, and negotiated Capability sets. The fixture catalog validates
+  each definition independently, and a black-box Store Runtime fixture checks real
+  initialize/project/session/turn/Timeline output against the registered definitions.
+  The package gate preserves every public core enum and security-relevant bound as
+  an additive compatibility baseline and cross-checks shared Runtime/Backend and
+  live/history Item boundaries against transport. Runtime now validates final
+  Session titles before backend dispatch, preserves filesystem identity in memory-
+  only and Store-backed project navigation/root projections, rejects same-path
+  directory replacement, and rejects Usage values and evidence outside the JSON-
+  safe integer range. Approval/user decision,
+  Agent mutation/execution, generic Artifact, experimental, dedicated-worktree,
+  remote, and Windows release authority remain absent. Generated Rust,
+  TypeScript, and C++ types remain open under `3.10`. The final local gate passes
+  994 Rust tests with one explicitly ignored live Codex fixture, strict Clippy
+  and formatting, the complete desktop build and 20/20 CTests, JSON parsing,
+  strict OpenSpec validation, and `git diff --check`.
 - OpenSpec task `3.3` is complete. The stable Schema, Rust Runtime/stdio daemon, Qt
   client, lifecycle fixtures, internal guide, design, and delta spec now share the
   structured two-stage AAP `0.1` handshake, numeric range negotiation, deterministic
@@ -3434,7 +3457,7 @@ Implemented visual baseline:
   failed preflight cannot leave an owned Git child behind.
 - This is Runtime implementation evidence only. Windows clean-runner Git,
   signed-package, long-path, and full cross-platform release evidence remain
-  open, and the OpenSpec baseline remains 54/235 completed tasks.
+  open, and the OpenSpec baseline is 55/235 completed tasks.
 
 ## Windows Packaging Policy Foundation (2026-07-26)
 

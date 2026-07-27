@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 
 pub const SCHEMA_VERSION: &str = "usage-authority/0.1";
 const MAX_ESTIMATOR_ID_BYTES: usize = 128;
+const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageAuthorityError {
@@ -194,6 +195,7 @@ pub struct UsageAuthorityEntry {
 
 impl UsageAuthorityEntry {
     pub fn validate(&self, as_of_ms: u64) -> Result<(), UsageAuthorityError> {
+        validate_safe_integer(as_of_ms)?;
         if self.authority != self.evidence.label() {
             return Err(error(
                 "usage-authority-label-mismatch",
@@ -251,6 +253,8 @@ impl UsageAuthorityEntry {
                 derivation_input_identity,
             } => {
                 validate_identity_with_prefix(catalog_identity, "model-catalog:sha256:")?;
+                validate_safe_integer(*catalog_issued_at_ms)?;
+                validate_safe_integer(*catalog_expires_at_ms)?;
                 if *catalog_issued_at_ms > as_of_ms
                     || *catalog_expires_at_ms < as_of_ms
                     || *catalog_expires_at_ms <= *catalog_issued_at_ms
@@ -301,6 +305,8 @@ impl UsageAuthorityEntry {
                     ));
                 }
                 validate_identity(source_identity)?;
+                validate_safe_integer(*source_observed_at_ms)?;
+                validate_safe_integer(*stale_since_ms)?;
                 if *source_observed_at_ms > *stale_since_ms || *stale_since_ms > as_of_ms {
                     return Err(error(
                         "usage-authority-stale-time-invalid",
@@ -344,6 +350,7 @@ impl UsageAuthorityReport {
                 "usage authority schema version is unsupported",
             ));
         }
+        validate_safe_integer(self.as_of_ms)?;
         if self.entries.len() != 4 {
             return Err(error(
                 "usage-authority-metrics-incomplete",
@@ -500,10 +507,13 @@ pub fn from_provider_token_usage(
         }
     };
 
-    let context_window = usage
-        .get("model_context_window")
-        .and_then(Value::as_u64)
-        .filter(|window| *window > 0);
+    let context_window = match usage.get("model_context_window").and_then(Value::as_u64) {
+        Some(window) => {
+            validate_safe_integer(window)?;
+            (window > 0).then_some(window)
+        }
+        None => None,
+    };
     let context = context_window.map_or_else(
         || {
             unknown(
@@ -558,15 +568,22 @@ fn required_nonnegative_u64(
     object: &serde_json::Map<String, Value>,
     key: &str,
 ) -> Result<u64, UsageAuthorityError> {
-    object.get(key).and_then(Value::as_u64).ok_or_else(|| {
+    let value = object.get(key).and_then(Value::as_u64).ok_or_else(|| {
         error(
             "usage-authority-provider-payload-invalid",
             "provider usage breakdown contains a missing or invalid count",
         )
-    })
+    })?;
+    validate_safe_integer(value)?;
+    Ok(value)
 }
 
 fn validate_token_value(value: &TokenUsageValue) -> Result<(), UsageAuthorityError> {
+    validate_optional_safe_integer(value.input_tokens)?;
+    validate_optional_safe_integer(value.output_tokens)?;
+    validate_optional_safe_integer(value.total_tokens)?;
+    validate_optional_safe_integer(value.cached_input_tokens)?;
+    validate_optional_safe_integer(value.reasoning_output_tokens)?;
     if value.input_tokens.is_none()
         && value.output_tokens.is_none()
         && value.total_tokens.is_none()
@@ -612,6 +629,8 @@ fn validate_token_value(value: &TokenUsageValue) -> Result<(), UsageAuthorityErr
 }
 
 fn validate_context_value(value: &ContextUsageValue) -> Result<(), UsageAuthorityError> {
+    validate_optional_safe_integer(value.used_tokens)?;
+    validate_optional_safe_integer(value.window_tokens)?;
     if value.used_tokens.is_none() && value.window_tokens.is_none() {
         return Err(error(
             "usage-authority-context-empty",
@@ -628,6 +647,7 @@ fn validate_context_value(value: &ContextUsageValue) -> Result<(), UsageAuthorit
 }
 
 fn validate_cost_value(value: &CostUsageValue) -> Result<(), UsageAuthorityError> {
+    validate_safe_integer(value.amount_micros)?;
     if value.currency.len() != 3 || !value.currency.bytes().all(|byte| byte.is_ascii_uppercase()) {
         return Err(error(
             "usage-authority-currency-invalid",
@@ -638,6 +658,7 @@ fn validate_cost_value(value: &CostUsageValue) -> Result<(), UsageAuthorityError
 }
 
 fn validate_reasoning_value(value: &ReasoningUsageValue) -> Result<(), UsageAuthorityError> {
+    validate_optional_safe_integer(value.output_tokens)?;
     if value.available.is_none() && value.enabled.is_none() && value.output_tokens.is_none() {
         return Err(error(
             "usage-authority-reasoning-empty",
@@ -660,11 +681,31 @@ fn validate_reasoning_value(value: &ReasoningUsageValue) -> Result<(), UsageAuth
 }
 
 fn validate_evidence_time(value: u64, as_of_ms: u64) -> Result<(), UsageAuthorityError> {
+    validate_safe_integer(value)?;
+    validate_safe_integer(as_of_ms)?;
     if value > as_of_ms {
         return Err(error(
             "usage-authority-evidence-future",
             "usage evidence cannot be newer than its report",
         ));
+    }
+    Ok(())
+}
+
+fn validate_safe_integer(value: u64) -> Result<(), UsageAuthorityError> {
+    if value > MAX_SAFE_JSON_INTEGER {
+        Err(error(
+            "usage-authority-integer-out-of-range",
+            "usage integer is outside the JSON safe integer range",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_optional_safe_integer(value: Option<u64>) -> Result<(), UsageAuthorityError> {
+    if let Some(value) = value {
+        validate_safe_integer(value)?;
     }
     Ok(())
 }
@@ -889,6 +930,189 @@ mod tests {
             report.metadata_identity().unwrap_err().code,
             "usage-authority-metrics-incomplete"
         );
+    }
+
+    #[test]
+    fn accepts_the_json_safe_integer_boundary() {
+        validate_safe_integer(MAX_SAFE_JSON_INTEGER).unwrap();
+
+        let mut entries = valid_entries();
+        for entry in &mut entries {
+            match &mut entry.evidence {
+                AuthorityEvidence::Observed { observed_at_ms, .. }
+                | AuthorityEvidence::Estimated {
+                    estimated_at_ms: observed_at_ms,
+                    ..
+                } => *observed_at_ms = MAX_SAFE_JSON_INTEGER,
+                AuthorityEvidence::CatalogDerived {
+                    catalog_issued_at_ms,
+                    catalog_expires_at_ms,
+                    ..
+                } => {
+                    *catalog_issued_at_ms = MAX_SAFE_JSON_INTEGER - 1;
+                    *catalog_expires_at_ms = MAX_SAFE_JSON_INTEGER;
+                }
+                AuthorityEvidence::Stale { .. } | AuthorityEvidence::Unknown { .. } => {}
+            }
+        }
+        UsageAuthorityReport::new(MAX_SAFE_JSON_INTEGER, entries).unwrap();
+
+        let stale = entry(
+            UsageMetric::Cost,
+            AuthorityLabel::Stale,
+            false,
+            Some(UsageValue::Cost(CostUsageValue {
+                amount_micros: MAX_SAFE_JSON_INTEGER,
+                currency: "USD".into(),
+            })),
+            AuthorityEvidence::Stale {
+                previous_authority: AuthorityLabel::CatalogDerived,
+                source_identity: identity("cost-calculation:sha256:", 'd'),
+                source_observed_at_ms: MAX_SAFE_JSON_INTEGER - 1,
+                stale_since_ms: MAX_SAFE_JSON_INTEGER,
+                reason: StaleReason::Expired,
+            },
+        );
+        stale.validate(MAX_SAFE_JSON_INTEGER).unwrap();
+    }
+
+    #[test]
+    fn rejects_unsafe_integers_in_every_usage_value_field() {
+        let unsafe_integer = MAX_SAFE_JSON_INTEGER + 1;
+        let values = [
+            UsageValue::Token(TokenUsageValue {
+                input_tokens: Some(unsafe_integer),
+                output_tokens: None,
+                total_tokens: None,
+                cached_input_tokens: None,
+                reasoning_output_tokens: None,
+            }),
+            UsageValue::Token(TokenUsageValue {
+                input_tokens: None,
+                output_tokens: Some(unsafe_integer),
+                total_tokens: None,
+                cached_input_tokens: None,
+                reasoning_output_tokens: None,
+            }),
+            UsageValue::Token(TokenUsageValue {
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: Some(unsafe_integer),
+                cached_input_tokens: None,
+                reasoning_output_tokens: None,
+            }),
+            UsageValue::Token(TokenUsageValue {
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                cached_input_tokens: Some(unsafe_integer),
+                reasoning_output_tokens: None,
+            }),
+            UsageValue::Token(TokenUsageValue {
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                cached_input_tokens: None,
+                reasoning_output_tokens: Some(unsafe_integer),
+            }),
+            UsageValue::Context(ContextUsageValue {
+                used_tokens: Some(unsafe_integer),
+                window_tokens: None,
+            }),
+            UsageValue::Context(ContextUsageValue {
+                used_tokens: None,
+                window_tokens: Some(unsafe_integer),
+            }),
+            UsageValue::Cost(CostUsageValue {
+                amount_micros: unsafe_integer,
+                currency: "USD".into(),
+            }),
+            UsageValue::Reasoning(ReasoningUsageValue {
+                available: None,
+                enabled: None,
+                output_tokens: Some(unsafe_integer),
+            }),
+        ];
+
+        for value in values {
+            assert_eq!(
+                value.validate().unwrap_err().code,
+                "usage-authority-integer-out-of-range"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_report_and_evidence_times() {
+        let unsafe_integer = MAX_SAFE_JSON_INTEGER + 1;
+        let report = UsageAuthorityReport::new(1_000, valid_entries()).unwrap();
+        let mut encoded = serde_json::to_value(report).unwrap();
+        encoded["as_of_ms"] = json!(unsafe_integer);
+        let decoded: UsageAuthorityReport = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.metadata_identity().unwrap_err().code,
+            "usage-authority-integer-out-of-range"
+        );
+
+        let evidence = [
+            AuthorityEvidence::Observed {
+                source: ObservationSource::ProviderResponse,
+                evidence_identity: identity("provider-usage:sha256:", 'a'),
+                observed_at_ms: unsafe_integer,
+            },
+            AuthorityEvidence::CatalogDerived {
+                catalog_identity: identity("model-catalog:sha256:", 'b'),
+                catalog_issued_at_ms: unsafe_integer,
+                catalog_expires_at_ms: MAX_SAFE_JSON_INTEGER,
+                derivation_input_identity: None,
+            },
+            AuthorityEvidence::CatalogDerived {
+                catalog_identity: identity("model-catalog:sha256:", 'b'),
+                catalog_issued_at_ms: 1,
+                catalog_expires_at_ms: unsafe_integer,
+                derivation_input_identity: None,
+            },
+            AuthorityEvidence::Estimated {
+                estimator_id: "test-estimator".into(),
+                estimator_identity: identity("estimator:sha256:", 'c'),
+                estimated_at_ms: unsafe_integer,
+            },
+            AuthorityEvidence::Stale {
+                previous_authority: AuthorityLabel::Observed,
+                source_identity: identity("provider-usage:sha256:", 'a'),
+                source_observed_at_ms: unsafe_integer,
+                stale_since_ms: MAX_SAFE_JSON_INTEGER,
+                reason: StaleReason::Expired,
+            },
+            AuthorityEvidence::Stale {
+                previous_authority: AuthorityLabel::Observed,
+                source_identity: identity("provider-usage:sha256:", 'a'),
+                source_observed_at_ms: 1,
+                stale_since_ms: unsafe_integer,
+                reason: StaleReason::Expired,
+            },
+        ];
+
+        for evidence in evidence {
+            let authority = evidence.label();
+            let usage = entry(
+                UsageMetric::Context,
+                authority,
+                matches!(
+                    authority,
+                    AuthorityLabel::Observed | AuthorityLabel::CatalogDerived
+                ),
+                Some(UsageValue::Context(ContextUsageValue {
+                    used_tokens: Some(1),
+                    window_tokens: None,
+                })),
+                evidence,
+            );
+            assert_eq!(
+                usage.validate(MAX_SAFE_JSON_INTEGER).unwrap_err().code,
+                "usage-authority-integer-out-of-range"
+            );
+        }
     }
 
     #[test]
@@ -1154,5 +1378,32 @@ mod tests {
         let error =
             from_provider_token_usage(&json!({"total": {"input_tokens": 1}}), 1).unwrap_err();
         assert_eq!(error.code, "usage-authority-provider-payload-invalid");
+    }
+
+    #[test]
+    fn provider_projection_rejects_unsafe_counts_and_context_windows() {
+        let mut usage = json!({
+            "last": {"input_tokens": 1},
+            "total": {
+                "cached_input_tokens": 0,
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 2
+            },
+            "model_context_window": 128000
+        });
+        usage["total"]["input_tokens"] = json!(MAX_SAFE_JSON_INTEGER + 1);
+        assert_eq!(
+            from_provider_token_usage(&usage, 1_000).unwrap_err().code,
+            "usage-authority-integer-out-of-range"
+        );
+
+        usage["total"]["input_tokens"] = json!(1);
+        usage["model_context_window"] = json!(MAX_SAFE_JSON_INTEGER + 1);
+        assert_eq!(
+            from_provider_token_usage(&usage, 1_000).unwrap_err().code,
+            "usage-authority-integer-out-of-range"
+        );
     }
 }

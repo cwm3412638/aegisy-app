@@ -158,16 +158,30 @@ surface would share an address space with credentials and command execution.
 
 ### 4. Aegisy Agent Protocol (AAP)
 
-Define AAP as versioned JSON-RPC 2.0 with generated TypeScript, C++, and Rust
-types. It borrows proven primitives but remains Aegisy-owned:
+Define AAP as versioned JSON-RPC 2.0 with an Aegisy-owned stable Schema package.
+The `core.schema.json` component is a reusable definition library, not a message
+that aggregates every domain. Method-specific wire results select exact
+definitions or documented projections:
 
-- `Project`: trusted folder set, repository metadata, instructions, and policy.
-- `Session`: durable conversation/execution lineage bound to a project.
-- `Turn`: one user request and its terminal state.
-- `Item`: typed user, agent, reasoning-summary, plan, command, file-change,
-  approval, question, tool, diagnostic, usage, or artifact event.
-- `Runtime`: one Agent backend instance and its negotiated capabilities.
-- `Workspace`: local, sandbox, SSH, or future Aegisy-hosted execution target.
+- thin `Project` and `Session` values remain separate from `projectRoot`,
+  `projectNavigationEntry`, and durable `sessionProjection` records;
+- core `Turn` lifecycle uses `running|completed|failed|interrupted`, while the
+  `turn/start` request acknowledgement independently uses `started|terminal`;
+- core `Item` stays behaviorally aligned with transport `timelineItem`, while a
+  replayed Session history Item adds its sequence and optional Turn binding;
+- Runtime uses distinct live, search, and durable-replay projections instead of
+  one synthetic shape;
+- Workspace represents only the current project-root binding and its four Git
+  states. Dedicated worktrees, raw paths, and permission authority remain false;
+- Approval is the existing non-authorizing acknowledgement. Artifact and
+  Capability cover the current command-output read and negotiated capability
+  set rather than generic or fabricated wire objects.
+
+JSON Schema bounds Unicode characters. Rust and Qt typed validators continue to
+enforce UTF-8 byte lengths, aggregate tree limits, cross-field identities,
+timestamps, Usage arithmetic, and Workspace Git invariants. Generated
+TypeScript, C++, and Rust domain types remain the separate task `3.10`; the
+checked-in Schema definitions do not claim that generation pipeline.
 
 Protocol properties:
 

@@ -2227,12 +2227,13 @@ mod tests {
         assert_eq!(terminal_error.code, "turn-trace-time-order-invalid");
         assert_eq!(after_terminal.tool_observations.len(), 2);
 
+        const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
         let binding = binding();
         let runtime = runtime();
         let approval_policy = approval_policy(&binding, &runtime);
         let mut at_maximum = CodexTurnTraceAccumulator::started(
             binding,
-            u64::MAX,
+            MAX_SAFE_JSON_INTEGER,
             work_intent(),
             runtime,
             approval_policy,
@@ -2241,21 +2242,28 @@ mod tests {
         )
         .unwrap();
         at_maximum
-            .record_tool_observation(started_tool('6', u64::MAX))
+            .record_tool_observation(started_tool('6', MAX_SAFE_JSON_INTEGER))
             .unwrap();
         at_maximum
-            .record_persisted_usage_snapshot(usage_snapshot("item-usage-max", u64::MAX, 24))
+            .record_persisted_usage_snapshot(usage_snapshot(
+                "item-usage-max",
+                MAX_SAFE_JSON_INTEGER,
+                24,
+            ))
             .unwrap();
-        let mut completed = completed_tool('6', u64::MAX);
+        let mut completed = completed_tool('6', MAX_SAFE_JSON_INTEGER);
         let TracePayload::Tool { duration_ms, .. } = &mut completed.payload else {
             unreachable!("the helper always returns a Tool observation")
         };
         *duration_ms = Some(0);
         at_maximum.record_tool_observation(completed).unwrap();
         let trace = at_maximum
-            .finalize_completed(u64::MAX, maximal_terminal_metadata())
+            .finalize_completed(MAX_SAFE_JSON_INTEGER, maximal_terminal_metadata())
             .unwrap();
-        assert!(trace.events.iter().all(|event| event.at_ms == u64::MAX));
+        assert!(trace
+            .events
+            .iter()
+            .all(|event| event.at_ms == MAX_SAFE_JSON_INTEGER));
         assert_unique_event_ids(&trace);
         trace.validate_complete().unwrap();
     }

@@ -77,9 +77,32 @@
     missing or symlinked registry paths, duplicate namespace/version/Schema IDs,
     version-directory or `$id` drift, invalid stable JSON Schema, and any stable
     reference into experimental. Package rules and promotion requirements are
-    documented in the package README and contributor guide. Core domain schemas
-    and generated Rust/TypeScript/C++ types remain separate tasks `3.2` and `3.10`.
-- [ ] 3.2 Define Project, Session, Turn, Item, Runtime, Workspace, Approval, Error, Usage, Artifact, and Capability schemas
+    documented in the package README and contributor guide. Generated
+    Rust/TypeScript/C++ types remain the separate task `3.10`.
+- [x] 3.2 Define Project, Session, Turn, Item, Runtime, Workspace, Approval, Error, Usage, Artifact, and Capability schemas
+  - Stable `core.schema.json` is an additive reusable `$defs` library, not an
+    all-domain wire message. It separates thin and durable projections, Turn
+    lifecycle from start acknowledgement, live/search/replay Runtime shapes, and
+    the current project-root Workspace Git states. Approval remains a
+    metadata-only non-authorizing acknowledgement; Artifact and Capability match
+    the current command-output read and negotiated set rather than fabricated
+    generic methods.
+  - The named fixture catalog is validated definition by definition with strict
+    negative boundaries, and a black-box Runtime test captures real
+    project/session/turn/Timeline output and checks Item against both core and
+    transport schemas. The stable compatibility baseline preserves every public
+    core enum value and security-relevant bound while allowing additive enum values;
+    Runtime/Backend handshake shapes and live/history Item data-key bounds are
+    cross-checked against transport. Runtime validates final Session titles before
+    dispatch, preserves Project root identity across in-memory and Store-backed
+    navigation/root projections, detects same-path filesystem replacement, and
+    applies JSON-safe integer limits throughout Usage authority.
+  - The complete Rust workspace passes 994 tests with one explicitly ignored live
+    Codex fixture, strict Clippy and formatting pass, the desktop build and all
+    20 CTests pass, JSON parsing and `git diff --check` pass, and strict OpenSpec
+    validation passes. Three-language generation remains open under `3.10`, and
+    this local evidence grants no Agent mutation, experimental, remote, or
+    Windows release authority.
 - [x] 3.3 Define initialize/initialized handshake, version ranges, client identity, runtime identity, and capability negotiation
   - AAP `0.1` now uses a strict two-stage `initialize` request and exact `initialized` notification. Rust and Qt validate structured client/runtime version ranges, bounded identities, platform and stdio security facts, the stable capability intersection, an empty experimental namespace, exact read-only backend readiness, strict JSON-RPC envelopes, and the fixed 4 MiB bidirectional frame limit. Business methods fail closed until the notification is consumed and when their negotiated capability is absent; disconnects clear pending and negotiated state.
 - [x] 3.4 Define event sequence, timestamps, correlation IDs, terminal states, and item delta ordering rules
@@ -106,6 +129,11 @@
 - [ ] 3.10 Generate Rust, TypeScript, and C++ protocol types and verify byte-compatible fixture serialization
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.
+  - The schema-package gate also compiles every registered `core.schema.json`
+    definition, preserves the complete baseline of public core enum values and
+    security-relevant numeric/string bounds, and cross-checks shared Runtime,
+    Backend, live Item, and history Item boundaries against the transport Schema.
+    New enum values remain additive; removal or bound drift fails the gate.
 - [x] 3.12 Publish an internal AAP protocol guide with valid lifecycle and error/reconnect examples
   - `docs/AAP-PROTOCOL-GUIDE.md` documents the structured version-range `initialize`/`initialized` handshake, session/turn/item lifecycle, idempotency, cancellation, structured errors, degradation gating, replay/reconnect, and current read-only/security boundaries with copyable redacted examples tied to checked-in fixtures.
 
