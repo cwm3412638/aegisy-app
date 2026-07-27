@@ -1,0 +1,133 @@
+{
+  "schema_version": "aap-core-generated-corpus/0.1",
+  "expected_decisions_sha256": "4d606e318e836e001f1cf9ec69d8b5ff558cc76158ed61c9862b92e4399b94ce",
+  "cases": [
+    { "name": "valid-project", "definition": "project", "source": "project", "valid": true, "mutations": [] },
+    { "name": "valid-chat-session", "definition": "session", "source": "sessionChat", "valid": true, "mutations": [] },
+    { "name": "valid-work-session", "definition": "session", "source": "sessionWork", "valid": true, "mutations": [] },
+    { "name": "valid-runtime-live-optionals-omitted", "definition": "runtimeLiveBinding", "source": "runtimeLiveBinding", "valid": true, "mutations": [
+      { "op": "remove", "path": ["provider"] }, { "op": "remove", "path": ["model"] }, { "op": "remove", "path": ["environment"] }
+    ] },
+    { "name": "valid-item-negative-safe-integer", "definition": "item", "source": "item", "valid": true, "mutations": [
+      { "op": "set", "path": ["data", "negative"], "value": -9007199254740991 }
+    ] },
+    { "name": "valid-safe-integer-upper-bound", "definition": "projectNavigationEntry", "source": "projectNavigationEntry", "valid": true, "mutations": [
+      { "op": "set", "path": ["created_at_ms"], "value": 9007199254740991 }
+    ] },
+    { "name": "invalid-bounded-label-lone-surrogate", "definition": "boundedLabel", "source": "project", "source_path": ["name"], "valid": false, "mutations": [
+      { "op": "set", "path": [], "value": "\ud800" }
+    ] },
+    { "name": "invalid-itemdata-string-lone-surrogate", "definition": "item", "source": "item", "valid": false, "mutations": [
+      { "op": "set", "path": ["data", "surrogate"], "value": "\ud800" }
+    ] },
+    { "name": "invalid-itemdata-key-lone-surrogate", "definition": "item", "source": "item", "valid": false, "mutations": [
+      { "op": "set", "path": ["data", "\ud800"], "value": true }
+    ] },
+    { "name": "valid-itemdata-depth-limit", "definition": "item", "source": "item", "valid": true, "mutations": [
+      { "op": "set-nested-array", "path": ["data", "depth"], "depth": 16 }
+    ] },
+    { "name": "invalid-itemdata-depth-overflow", "definition": "item", "source": "item", "valid": false, "mutations": [
+      { "op": "set-nested-array", "path": ["data", "depth"], "depth": 17 }
+    ] },
+    { "name": "valid-itemdata-node-limit", "definition": "item", "source": "item", "valid": true, "mutations": [
+      { "op": "set-filled-array", "path": ["data", "nodes"], "count": 4095 }
+    ] },
+    { "name": "invalid-itemdata-node-overflow", "definition": "item", "source": "item", "valid": false, "mutations": [
+      { "op": "set-filled-array", "path": ["data", "nodes"], "count": 4096 }
+    ] },
+    { "name": "invalid-project-unknown-field", "definition": "project", "source": "project", "valid": false, "mutations": [
+      { "op": "set", "path": ["injected"], "value": true }
+    ] },
+    { "name": "invalid-project-id-pattern", "definition": "project", "source": "project", "valid": false, "mutations": [
+      { "op": "set", "path": ["id"], "value": "project with spaces" }
+    ] },
+    { "name": "invalid-project-root-condition", "definition": "projectRoot", "source": "projectRoot", "valid": false, "mutations": [
+      { "op": "set", "path": ["relink_required"], "value": true }
+    ] },
+    { "name": "invalid-chat-project-binding", "definition": "session", "source": "sessionChat", "valid": false, "mutations": [
+      { "op": "set", "path": ["project_id"], "value": "project-1" }
+    ] },
+    { "name": "invalid-work-project-binding", "definition": "session", "source": "sessionWork", "valid": false, "mutations": [
+      { "op": "set", "path": ["project_id"], "value": null }
+    ] },
+    { "name": "invalid-runtime-permission-literal", "definition": "runtimeLiveBinding", "source": "runtimeLiveBinding", "valid": false, "mutations": [
+      { "op": "set", "path": ["permission_profile"], "value": "workspace-write" }
+    ] },
+    { "name": "invalid-runtime-replay-literal", "definition": "runtimeReplayFallback", "source": "runtimeReplayFallback", "valid": false, "mutations": [
+      { "op": "set", "path": ["replayed"], "value": false }
+    ] },
+    { "name": "invalid-runtime-union-overlap-extra", "definition": "runtime", "source": "runtimeReplayFallback", "valid": false, "mutations": [
+      { "op": "set", "path": ["adapter_version"], "value": "0.1.0" }
+    ] },
+    { "name": "invalid-approval-revision-zero", "definition": "approvalAcknowledgement", "source": "approvalAcknowledgement", "valid": false, "mutations": [
+      { "op": "set", "path": ["revision"], "value": 0 }
+    ] },
+    { "name": "invalid-approval-mutation-authority", "definition": "approvalAcknowledgement", "source": "approvalAcknowledgement", "valid": false, "mutations": [
+      { "op": "set", "path": ["mutation_authority"], "value": true }
+    ] },
+    { "name": "invalid-approval-state-resolution", "definition": "approvalAcknowledgement", "source": "approvalAcknowledgement", "valid": false, "mutations": [
+      { "op": "set", "path": ["resolution"], "value": "denied" }
+    ] },
+    { "name": "invalid-provider-body-authority", "definition": "providerError", "source": "providerError", "valid": false, "mutations": [
+      { "op": "set", "path": ["response_body_included"], "value": true }
+    ] },
+    { "name": "invalid-error-provider-class-drift", "definition": "error", "source": "errorProvider", "valid": false, "mutations": [
+      { "op": "set", "path": ["class"], "value": "provider" }
+    ] },
+    { "name": "invalid-error-provider-retry-drift", "definition": "error", "source": "errorProvider", "valid": false, "mutations": [
+      { "op": "set", "path": ["retryable"], "value": false }
+    ] },
+    { "name": "invalid-usage-empty", "definition": "usage", "source": "usage", "valid": false, "mutations": [
+      { "op": "set", "path": ["entries"], "value": [] }
+    ] },
+    { "name": "invalid-usage-duplicate-metric", "definition": "usage", "source": "usage", "valid": false, "mutations": [
+      { "op": "set", "path": ["entries", 1, "metric"], "value": "token" }
+    ] },
+    { "name": "invalid-usage-unknown-value", "definition": "usage", "source": "usage", "valid": false, "mutations": [
+      { "op": "set", "path": ["entries", 0, "value"], "value": { "kind": "token", "input_tokens": 1, "output_tokens": null, "total_tokens": null, "cached_input_tokens": null, "reasoning_output_tokens": null } }
+    ] },
+    { "name": "invalid-usage-authority-evidence-drift", "definition": "usage", "source": "usageObserved", "valid": false, "mutations": [
+      { "op": "set", "path": ["entries", 0, "authority"], "value": "estimated" }
+    ] },
+    { "name": "invalid-token-value-all-null", "definition": "usageTokenValue", "source": "usageObserved", "source_path": ["entries", 0, "value"], "valid": false, "mutations": [
+      { "op": "set", "path": ["input_tokens"], "value": null },
+      { "op": "set", "path": ["output_tokens"], "value": null },
+      { "op": "set", "path": ["total_tokens"], "value": null },
+      { "op": "set", "path": ["cached_input_tokens"], "value": null },
+      { "op": "set", "path": ["reasoning_output_tokens"], "value": null }
+    ] },
+    { "name": "invalid-reasoning-contradiction", "definition": "usageReasoningValue", "source": "usageObserved", "source_path": ["entries", 3, "value"], "valid": false, "mutations": [
+      { "op": "set", "path": ["available"], "value": false }
+    ] },
+    { "name": "invalid-item-fraction", "definition": "item", "source": "item", "valid": false, "mutations": [
+      { "op": "set", "path": ["data", "fraction"], "value": 1.5 }
+    ] },
+    { "name": "invalid-item-positive-safe-overflow", "definition": "item", "source": "item", "valid": false, "mutations": [
+      { "op": "set", "path": ["data", "overflow"], "value": 9007199254740992 }
+    ] },
+    { "name": "invalid-item-negative-safe-overflow", "definition": "item", "source": "item", "valid": false, "mutations": [
+      { "op": "set", "path": ["data", "overflow"], "value": -9007199254740992 }
+    ] },
+    { "name": "invalid-item-property-name", "definition": "item", "source": "item", "valid": false, "mutations": [
+      { "op": "set", "path": ["data", "bad key"], "value": true }
+    ] },
+    { "name": "invalid-workspace-permission-authority", "definition": "workspace", "source": "workspaceStates", "source_index": 0, "valid": false, "mutations": [
+      { "op": "set", "path": ["permission_granted"], "value": true }
+    ] },
+    { "name": "invalid-workspace-git-condition", "definition": "workspace", "source": "workspaceStates", "source_index": 0, "valid": false, "mutations": [
+      { "op": "set", "path": ["branch"], "value": "main" }
+    ] },
+    { "name": "invalid-capability-duplicate", "definition": "capabilitySet", "source": "capabilitySet", "valid": false, "mutations": [
+      { "op": "set", "path": ["stable", 1], "value": "permission.read-only" }
+    ] },
+    { "name": "invalid-capability-experimental", "definition": "capabilitySet", "source": "capabilitySet", "valid": false, "mutations": [
+      { "op": "set", "path": ["experimental"], "value": ["future.feature"] }
+    ] },
+    { "name": "invalid-safe-positive-zero", "definition": "safePositiveInteger", "source": "projectNavigationEntry", "source_path": ["created_at_ms"], "valid": false, "mutations": [
+      { "op": "set", "path": [], "value": 0 }
+    ] },
+    { "name": "invalid-safe-integer-upper-overflow", "definition": "safeNonNegativeInteger", "source": "projectNavigationEntry", "source_path": ["created_at_ms"], "valid": false, "mutations": [
+      { "op": "set", "path": [], "value": 9007199254740992 }
+    ] }
+  ]
+}

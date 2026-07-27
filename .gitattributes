@@ -1,0 +1,16 @@
+# AAP schemas, fixtures, generators, and checked-in generated types must be
+# byte-stable across macOS and Windows.
+agent-runtime/aap-schema/**/*.json text eol=lf
+agent-runtime/aap-schema/**/*.jsonl text eol=lf
+agent-runtime/aap-schema/**/*.mjs text eol=lf
+agent-runtime/aap-schema/generated/**/*.rs text eol=lf
+agent-runtime/aap-schema/generated/**/*.d.ts text eol=lf
+agent-runtime/aap-schema/generated/**/*.ts text eol=lf
+agent-runtime/aap-schema/generated/**/*.cpp text eol=lf
+agent-runtime/aap-schema/generated/**/*.h text eol=lf
+agent-runtime/crates/aegisy-aap/src/generated_core.rs text eol=lf
+
+# Cross-language generation gate sources use the same line-ending contract.
+**/CMakeLists.txt text eol=lf
+*.cmake text eol=lf
+tests/aap_generated_types_test.cpp text eol=lf

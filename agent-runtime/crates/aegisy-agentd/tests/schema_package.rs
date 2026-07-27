@@ -63,6 +63,7 @@ fn schema_package_declares_isolated_stable_and_experimental_namespaces() {
             "private",
             "description",
             "license",
+            "scripts",
             "files",
             "aegisy",
         ]
@@ -72,8 +73,23 @@ fn schema_package_declares_isolated_stable_and_experimental_namespaces() {
     assert_eq!(package["private"], true);
     assert_eq!(package["license"], "UNLICENSED");
     assert_eq!(
+        package["scripts"],
+        serde_json::json!({
+            "generate": "node scripts/generate-core-types.mjs",
+            "generate:check": "node scripts/generate-core-types.mjs --check",
+            "test:generator": "node scripts/test-core-generator-inputs.mjs"
+        })
+    );
+    assert_eq!(
         package["files"],
-        serde_json::json!(["README.md", "stable", "experimental", "fixtures"])
+        serde_json::json!([
+            "README.md",
+            "stable",
+            "experimental",
+            "fixtures",
+            "generated",
+            "scripts"
+        ])
     );
 
     let aegisy = package["aegisy"]

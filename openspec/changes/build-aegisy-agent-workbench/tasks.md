@@ -127,6 +127,26 @@
 - [x] 3.9 Define stable error classes for protocol, provider, adapter, sandbox, policy, tool, storage, workspace, Git, and budget failures
   - `runtime-error/0.1` now classifies Turn failure items into `protocol`, `provider`, `adapter`, `transport`, `timeout`, `sandbox`, `policy`, `tool`, `storage`, `workspace`, `git`, and `budget`. Classification is content-free and conservative about retryability; Qt maps every class to a bounded local label. `persistence` remains a legacy display alias for `storage`. Ordinary JSON-RPC errors retain their existing numeric code/message contract.
 - [ ] 3.10 Generate Rust, TypeScript, and C++ protocol types and verify byte-compatible fixture serialization
+  - Partial core-domain slice: `core.schema.json` now deterministically generates
+    checked-in Rust, TypeScript, and Qt/C++ types plus strict definition-level
+    validators. The generator inventories the complete Schema AST and rejects
+    unknown/unsupported keywords and semantic combinations rather than emitting a
+    wider unchecked type. All three validators enforce JSON-safe integers and the
+    Item `data` limit of 16 levels and 4,096 aggregate values.
+  - The complete positive fixture catalog is bound by a reviewed definition map,
+    canonical byte count, and SHA-256. A separate shared 43-case accept/reject
+    corpus covers valid boundaries and invalid unknown fields, authority drift,
+    union/conditional drift, safe-integer overflow/fractions, Item keys, ItemData
+    depth/node limits, lone-surrogate strings and keys, Usage, Workspace, and
+    Capability constraints. Materialized cases retain raw `value_json`; Rust,
+    TypeScript, and Qt/C++ parse every case independently and the CMake gate
+    compares their fixture and decision-list identities. The generator also rejects
+    normalized type/field/variant collisions and property-bearing open DTO shapes.
+  - `BUILD_TESTING=ON` requires Node and Cargo; the Qt runner uses native Unicode
+    arguments, `.gitattributes` fixes generated/gate inputs to LF, and the generated
+    Rust module is inside `aegisy-aap` for Cargo packaging. Keep `3.10` unchecked:
+    transport request/response/notification generation from `aap.schema.json`,
+    complete consumer migration, and clean Windows execution evidence are absent.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.
   - The schema-package gate also compiles every registered `core.schema.json`

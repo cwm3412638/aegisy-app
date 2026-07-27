@@ -4,6 +4,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt;
 
+pub mod generated_core;
+
 pub const JSONRPC_VERSION: &str = "2.0";
 pub const PROTOCOL_VERSION: &str = "0.1";
 pub const RUNTIME_PROTOCOL_MINIMUM: &str = PROTOCOL_VERSION;

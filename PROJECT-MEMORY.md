@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-26
+Last updated: 2026-07-27
 
 ## Mandatory First Step
 
@@ -226,11 +226,41 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   directory replacement, and rejects Usage values and evidence outside the JSON-
   safe integer range. Approval/user decision,
   Agent mutation/execution, generic Artifact, experimental, dedicated-worktree,
-  remote, and Windows release authority remain absent. Generated Rust,
-  TypeScript, and C++ types remain open under `3.10`. The final local gate passes
+  remote, and Windows release authority remain absent. Core-domain generation is
+  now a partial `3.10` slice; transport generation and complete consumer migration
+  remain open. The final `3.2` local gate passes
   994 Rust tests with one explicitly ignored live Codex fixture, strict Clippy
   and formatting, the complete desktop build and 20/20 CTests, JSON parsing,
   strict OpenSpec validation, and `git diff --check`.
+- OpenSpec task `3.10` now has a partial core-domain generation slice.
+  `core.schema.json` deterministically produces checked-in Rust, TypeScript, and
+  Qt/C++ types plus strict definition validators. Generation rejects unknown or
+  unsupported Schema keywords, dialects, local-reference combinations, fractional
+  number shapes, unbounded integers, normalized generated-name collisions, and
+  property-bearing open objects rather than silently widening or narrowing a type.
+  Rust, TypeScript, and Qt/C++ independently enforce JSON-safe integers,
+  Unicode-scalar strings and object keys, and the recursive ItemData root limit of
+  depth 16 and 4,096 aggregate value nodes.
+  A reviewed fixture map binds the complete positive catalog to the canonical
+  identity
+  `9801 94a27009b9c2439cef5a31f3078eacd3265df24a47c75bffb0c59d75f87d7f11`.
+  A separate bounded 43-case positive/negative corpus includes exact depth and
+  node-count boundaries plus lone-surrogate DTO strings, ItemData strings, and
+  ItemData keys. Materialization preserves raw `value_json`, each runtime parses
+  each case independently, and the common decision identity is
+  `43 4d606e318e836e001f1cf9ec69d8b5ff558cc76158ed61c9862b92e4399b94ce`.
+  CMake requires Node and Cargo for test builds, compares all three independent
+  fixture/corpus runners, and uses native Qt arguments for Unicode paths. Generated
+  Rust lives inside `aegisy-aap`; `cargo package -p aegisy-aap --allow-dirty`
+  verifies the packaged crate, and `.gitattributes` fixes gate inputs/outputs to LF.
+  The final local gate passes generator negative/freshness tests, Rust formatting,
+  `994` workspace tests with one explicitly ignored live Codex fixture, strict
+  Clippy, the complete desktop build and `21/21` CTests, strict OpenSpec validation,
+  JSON parsing, Cargo packaging, and `git diff --check`.
+  Keep `3.10` unchecked: `aap.schema.json` request/response/notification generation,
+  production Rust/Qt consumer migration, and clean Windows Unicode-path execution
+  remain absent. This slice grants no capability, permission, Approval, mutation,
+  execution, experimental, remote, or Windows release authority.
 - OpenSpec task `3.3` is complete. The stable Schema, Rust Runtime/stdio daemon, Qt
   client, lifecycle fixtures, internal guide, design, and delta spec now share the
   structured two-stage AAP `0.1` handshake, numeric range negotiation, deterministic

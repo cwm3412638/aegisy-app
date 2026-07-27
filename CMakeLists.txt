@@ -361,6 +361,14 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    if(NOT NODE_EXECUTABLE)
+        message(FATAL_ERROR
+            "BUILD_TESTING requires Node.js for the aap_generated_types gate")
+    endif()
+    if(NOT CARGO_EXECUTABLE)
+        message(FATAL_ERROR
+            "BUILD_TESTING requires Cargo for the aap_generated_types gate")
+    endif()
     if(NODE_EXECUTABLE)
         add_test(NAME local_gateway_stream
             COMMAND "${NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/local_gateway_stream_test.js")
@@ -371,6 +379,26 @@ if(BUILD_TESTING)
         set_tests_properties(agent_runtime_protocol PROPERTIES
             WORKING_DIRECTORY "${AEGISY_AGENT_RUNTIME_DIR}")
     endif()
+    add_executable(AegisyAapGeneratedTypesTest
+        tests/aap_generated_types_test.cpp
+        agent-runtime/aap-schema/generated/cpp/aap_core_types_generated.cpp
+        agent-runtime/aap-schema/generated/cpp/aap_core_types_generated.h
+    )
+    target_include_directories(AegisyAapGeneratedTypesTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/generated/cpp)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyAapGeneratedTypesTest PRIVATE Qt6::Core)
+    else()
+        target_link_libraries(AegisyAapGeneratedTypesTest PRIVATE Qt5::Core)
+    endif()
+    add_test(NAME aap_generated_types
+        COMMAND ${CMAKE_COMMAND}
+            -DAEGISY_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -DAEGISY_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DNODE_EXECUTABLE=${NODE_EXECUTABLE}
+            -DCARGO_EXECUTABLE=${CARGO_EXECUTABLE}
+            -DCPP_EXECUTABLE=$<TARGET_FILE:AegisyAapGeneratedTypesTest>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_aap_generated_types.cmake)
     add_executable(AegisyProfileArchiveTest
         tests/profile_archive_test.cpp
         src/profile_archive.cpp

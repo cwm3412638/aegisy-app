@@ -4,11 +4,18 @@
   "private": true,
   "description": "Versioned Aegisy Agent Protocol wire schemas and fixtures",
   "license": "UNLICENSED",
+  "scripts": {
+    "generate": "node scripts/generate-core-types.mjs",
+    "generate:check": "node scripts/generate-core-types.mjs --check",
+    "test:generator": "node scripts/test-core-generator-inputs.mjs"
+  },
   "files": [
     "README.md",
     "stable",
     "experimental",
-    "fixtures"
+    "fixtures",
+    "generated",
+    "scripts"
   ],
   "aegisy": {
     "schema_version": "aap-schema-package/0.1",

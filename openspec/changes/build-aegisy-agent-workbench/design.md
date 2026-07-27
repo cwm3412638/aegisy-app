@@ -179,9 +179,28 @@ definitions or documented projections:
 
 JSON Schema bounds Unicode characters. Rust and Qt typed validators continue to
 enforce UTF-8 byte lengths, aggregate tree limits, cross-field identities,
-timestamps, Usage arithmetic, and Workspace Git invariants. Generated
-TypeScript, C++, and Rust domain types remain the separate task `3.10`; the
-checked-in Schema definitions do not claim that generation pipeline.
+timestamps, Usage arithmetic, and Workspace Git invariants.
+
+The partial `3.10` generation slice treats `core.schema.json` as the sole input
+for checked-in Rust, TypeScript, and Qt/C++ core domain types and strict
+definition-level validators. The generator audits the complete Schema AST and
+fails closed on unknown or unsupported keywords instead of silently weakening a
+rule. It also rejects normalized generated-name collisions and property-bearing
+open objects that its strict DTOs cannot represent. All three validators
+additionally enforce JSON-safe integers, Unicode-scalar strings and keys, and the
+Item `data` boundary of 16 levels and 4,096 aggregate values. One reviewed map
+binds the complete positive fixture catalog to its definition and canonical byte
+identity; a separate shared 43-case raw-JSON corpus binds exact accept/reject
+decisions. Each runtime parses each case independently, so malformed wire Unicode
+cannot be normalized by a different language before validation.
+The CMake gate compares independent three-language identities, requires Node and
+Cargo when tests are enabled, consumes Unicode fixture paths through native
+argument handling, and combines with repository LF normalization and a packaged
+`aegisy-aap` check.
+
+This remains a partial domain-generation architecture, not completion of `3.10`.
+`aap.schema.json` request/response/notification generation, migration of all
+production consumers, and clean Windows execution evidence are still required.
 
 Protocol properties:
 

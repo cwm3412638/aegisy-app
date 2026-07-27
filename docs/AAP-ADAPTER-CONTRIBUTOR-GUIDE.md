@@ -27,6 +27,13 @@ for changing the pinned provider adapter.
 - `agent-runtime/aap-schema/fixtures/aap-core-domains.json`: named positive
   fixture catalog validated one definition at a time; real Runtime captures are
   the separate producer-conformance evidence.
+- `agent-runtime/aap-schema/fixtures/aap-core-domains.fixture-map.json` and
+  `aap-core-generated-corpus.json`: reviewed positive-fixture byte identity and
+  shared 43-case raw-JSON accept/reject decisions for generated core validators.
+- `agent-runtime/aap-schema/scripts/generate-core-types.mjs`: deterministic
+  `core.schema.json` generator. Checked-in outputs live in
+  `generated/typescript/`, `generated/cpp/`, and
+  `agent-runtime/crates/aegisy-aap/src/generated_core.rs`.
 - `agent-runtime/aap-schema/fixtures/`: redacted JSONL protocol evidence and
   generated Codex schema material. Fixtures must remain deterministic.
 - `agent-runtime/crates/aegisy-aap/src/lib.rs`: Rust wire types and strict
@@ -71,6 +78,18 @@ for changing the pinned provider adapter.
 9. JSON Schema string lengths count Unicode characters. Rust and Qt remain
    responsible for the normative UTF-8 byte limits and aggregate/cross-field
    rules, including Usage arithmetic and Workspace Git identities.
+10. Generated validators must fail closed when the Schema uses an unknown keyword,
+    unsupported dialect, unsupported `$ref` combination, or fractional-number
+    shape. Do not approximate an unsupported rule with a wider language type.
+    Item `data` is additionally limited to 16 levels and 4,096 aggregate values
+    in Rust, TypeScript, and Qt/C++.
+11. JSON wire strings and object keys must contain only Unicode scalar values.
+    Shared corpus cases carry raw `value_json`; each runtime parses the exact case
+    independently, and parse failure counts as rejection. Never pre-parse the whole
+    corpus into candidate values in one language and pass those values to others.
+12. Generated names must be injective. Reject collisions after type, field, enum,
+    or union normalization, and reject property-bearing open objects until every
+    generated language can represent their additional fields without narrowing.
 
 When adding a method, update all of the following in one change:
 
@@ -148,8 +167,12 @@ For a new or changed fixture:
    jq empty agent-runtime/aap-schema/stable/v0.1/aap.schema.json
    jq empty agent-runtime/aap-schema/stable/v0.1/core.schema.json \
      agent-runtime/aap-schema/fixtures/aap-core-domains.json
+   node agent-runtime/aap-schema/scripts/test-core-generator-inputs.mjs
+   node agent-runtime/aap-schema/scripts/generate-core-types.mjs --check
    cargo test --manifest-path agent-runtime/Cargo.toml \
      -p aegisy-agentd --test core_schema_runtime
+   cargo package --manifest-path agent-runtime/Cargo.toml \
+     -p aegisy-aap --allow-dirty
    openspec validate build-aegisy-agent-workbench --strict
    git diff --check
    cmake --build build -j4
@@ -159,6 +182,52 @@ For a new or changed fixture:
 5. Record the exact command and result in `verification.md` and summarize the
    durable conclusion in `PROJECT-MEMORY.md`. A skipped or ignored live fixture
    remains an explicit evidence gap.
+
+## Generated Core-Type Workflow
+
+The current partial OpenSpec `3.10` pipeline generates the reusable definitions
+in `core.schema.json`; it does not yet generate transport request, response, or
+notification types from `aap.schema.json`.
+
+For every core Schema or fixture-catalog change:
+
+1. Update the fixture map deliberately. Its key/definition/array mapping and
+   canonical byte/hash golden are reviewed compatibility evidence, not values the
+   gate may refresh implicitly.
+2. Add the smallest shared corpus case that distinguishes the changed rule. Keep
+   the corpus bounded, deterministic, redacted, and ordered. Both acceptance and
+   rejection behavior matter.
+3. Run the generator, review all three language diffs, and run `--check`. The
+   Schema walk must reject every unimplemented keyword rather than dropping it.
+4. Run the CMake target and focused CTest. The gate decodes and canonically
+   reserializes the complete positive catalog independently in Rust, TypeScript,
+   and Qt/C++, then compares the byte count and SHA-256. It separately materializes
+   the shared 43-case raw-JSON corpus and compares the three decision-list
+   identities.
+5. Package `aegisy-aap`. The generated Rust module lives inside the crate so a
+   packaged crate must not depend on a source-tree-relative `include!` path.
+
+Repository-root commands:
+
+```sh
+node agent-runtime/aap-schema/scripts/test-core-generator-inputs.mjs
+node agent-runtime/aap-schema/scripts/generate-core-types.mjs --check
+cmake --build build --target AegisyAapGeneratedTypesTest -j4
+ctest --test-dir build -R '^aap_generated_types$' --output-on-failure
+cargo package --manifest-path agent-runtime/Cargo.toml \
+  -p aegisy-aap --allow-dirty
+```
+
+`.gitattributes` fixes the Schema package, generated outputs, CMake verifier, and
+C++ runner to LF. The Qt runner reads the fixture path through
+`QCoreApplication::arguments()`; clean Windows validation must use a Unicode
+checkout path and compare the same reviewed identities. A local macOS pass does
+not supply that evidence.
+
+Keep `3.10` unchecked until `aap.schema.json` transport types are generated, the
+production Rust/Qt consumers have migrated from hand-written protocol shapes, and
+the complete clean Windows gate has executed. Generated core DTOs alone do not
+change capability, permission, mutation, or execution authority.
 
 ## Versioning And Adapter Changes
 

@@ -98,6 +98,60 @@
   desktop build and all 20 CTests pass; all registered JSON documents parse;
   strict OpenSpec validation and `git diff --check` pass.
 
+## AAP Core Generated Types (Partial `3.10`)
+
+- `generate-core-types.mjs` reads the registered `core.schema.json` and emits
+  checked-in Rust, TypeScript declaration/runtime, and Qt/C++ header/source
+  artifacts. Its Schema-AST inventory rejects unknown keywords, unsupported
+  dialects and semantic combinations, unresolved references, and fractional
+  number schemas instead of generating a weaker validator.
+- Generated decoders use strict object shapes and definition-level validation.
+  Rust, TypeScript, and Qt/C++ all enforce JSON-safe integers plus the typed Item
+  `data` boundary of at most 16 levels and 4,096 aggregate values.
+- `aap-core-domains.fixture-map.json` binds every positive fixture key to its
+  definition and records the reviewed canonical catalog identity. Each language
+  independently decodes and canonically serializes the complete catalog; the CMake
+  verifier rejects any byte-count or SHA-256 difference.
+- `aap-core-generated-corpus.json` is a separate, shared 43-case accept/reject
+  corpus. It includes valid boundaries and rejection cases for unknown fields,
+  identifier and union drift, false authority, conditionals, Usage consistency,
+  Item property names/fractions/safe-integer overflow, ItemData depth/node
+  boundaries, lone-surrogate DTO strings, ItemData strings and ItemData keys,
+  Workspace state, and duplicate/experimental capabilities. The materializer is
+  bounded and exact-keyed and emits raw `value_json`; each language independently
+  parses every candidate, hashes the ordered `name`, `definition`, and
+  `accept|reject` decisions, and compares the reviewed golden.
+- CMake configures `aap_generated_types` only with explicit Node, Cargo, and the
+  Qt/C++ runner. The runner uses `QCoreApplication::arguments()` for platform-native
+  Unicode paths. `.gitattributes` fixes the Schema package, generated artifacts,
+  and verifier sources to LF. The Rust output resides in the `aegisy-aap` crate so
+  `cargo package` can verify that no source-tree-relative generated include is used.
+- Focused commands are:
+
+  ```sh
+  node agent-runtime/aap-schema/scripts/test-core-generator-inputs.mjs
+  node agent-runtime/aap-schema/scripts/generate-core-types.mjs --check
+  cmake --build build --target AegisyAapGeneratedTypesTest -j4
+  ctest --test-dir build -R '^aap_generated_types$' --output-on-failure
+  cargo package --manifest-path agent-runtime/Cargo.toml \
+    -p aegisy-aap --allow-dirty
+  ```
+
+- The focused macOS run passes the generator negative-input suite, generated-file
+  freshness check, `AegisyAapGeneratedTypesTest` build, and `aap_generated_types`
+  CTest (1/1). Rust, TypeScript, and Qt/C++ each emit the same positive fixture
+  identity, `9801 94a27009b9c2439cef5a31f3078eacd3265df24a47c75bffb0c59d75f87d7f11`,
+  and the same corpus identity,
+  `43 4d606e318e836e001f1cf9ec69d8b5ff558cc76158ed61c9862b92e4399b94ce`.
+  `cargo package -p aegisy-aap --allow-dirty` packages seven files and verifies
+  the packaged crate by compiling it. Strict OpenSpec validation and
+  `git diff --check` also pass for this stage.
+- This evidence does not complete task `3.10`. Generation from
+  `aap.schema.json` for transport requests, responses, and notifications; migration
+  of the remaining hand-written Rust/Qt consumers; and execution from a clean
+  Windows Unicode checkout remain absent. The partial generated domain layer grants
+  no new capability, permission, mutation, Approval, or execution authority.
+
 ## Product Baseline Decision Evidence (`1.3`, `1.7`, `1.8`)
 
 - `docs/adr/README.md` maps all nine current `design.md` Open Questions to one
