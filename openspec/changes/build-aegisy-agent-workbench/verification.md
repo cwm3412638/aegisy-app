@@ -199,18 +199,18 @@
     -R '^aap_transport_(runtime|generated_types)$' --output-on-failure
   ```
 
-- The final macOS gate passes 51 `aegisy-aap`, 785 Sidecar library with one
-  explicitly ignored live Codex fixture, 7 daemon, 10 context-threshold, 1 real
-  core-Schema Runtime, 21 handshake Runtime, 23 handshake Schema, 68 protocol,
-  12 Schema-package, and 23 stdio/Codex tests (1001 passed, zero failed, one
-  ignored). Strict Clippy and formatting, `aegisy-aap` packaging, the complete
-  desktop build and all 23 CTests, strict OpenSpec validation, and
-  `git diff --check` pass.
-- Keep `3.10` unchecked. The generated Transport layer has no production Rust/Qt
-  consumer migration yet, and a clean Windows Unicode checkout has not executed
-  the gate. Stable `0.1` remains lossless rather than silently narrowing generic
-  numbers; the slice grants no capability, permission, Approval, mutation,
-  execution, experimental, remote, or Windows release authority.
+- The latest macOS gate passes the generated-language fixtures, strict Clippy and
+  formatting, `aegisy-aap` packaging, the complete desktop build, and all 23 CTests
+  (including the generated Qt consumer, canonical error-code, environment, and
+  Workbench render coverage). Strict OpenSpec validation and `git diff --check` also
+  pass. A previous concurrent Cargo run hit a Git fixture timeout; the isolated
+  protocol rerun passed, and the final serial 23/23 CTest run passed.
+- Keep `3.10` unchecked. Production Rust and Qt consumers now use the generated
+  lossless Transport path, parsed dispatch, indivisible pending contexts, and safe
+  projection, but a clean Windows Unicode checkout has not executed the gate.
+  Stable `0.1` remains lossless rather than silently narrowing generic numbers; the
+  slice grants no capability, permission, Approval, mutation, execution,
+  experimental, remote, or Windows release authority.
 
 ## Product Baseline Decision Evidence (`1.3`, `1.7`, `1.8`)
 

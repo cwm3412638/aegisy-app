@@ -11,6 +11,10 @@
 #include <QSet>
 #include <QStringList>
 
+#include "aap_transport_types_generated.h"
+
+#include <variant>
+
 class QProcess;
 class QTimer;
 
@@ -440,20 +444,59 @@ signals:
     void terminalRemoved(const QString &requestId, const QJsonObject &result);
     void commandArtifactRead(const QString &requestId, const QJsonObject &artifact);
     void timelineRetentionGap(const QString &requestId, const QJsonObject &data);
+    // Compatibility signal: emitted only when the canonical wire code fits int.
     void requestFailed(const QString &requestId, const QString &method,
                        const QString &message, int code);
+    // Lossless error-code contract for production consumers.
+    void requestFailedExact(const QString &requestId, const QString &method,
+                            const QString &message, const QString &canonicalCode);
     void diagnosticMessage(const QString &message);
 
 private:
+    struct TimelineSyncValidation {
+        QJsonObject request;
+    };
+    struct TimelineSubscriptionValidation {
+        QJsonObject request;
+        QJsonObject subscriptionCursor;
+    };
+    struct TurnStartValidation {
+        QString sessionId;
+        QString idempotencyKey;
+        quint64 generation = 0;
+    };
+    struct MutationListValidation {
+        QJsonObject request;
+    };
+    struct MutationConsumeValidation {
+        QJsonObject request;
+    };
+    using PendingValidation = std::variant<
+        std::monostate,
+        TimelineSyncValidation,
+        TimelineSubscriptionValidation,
+        TurnStartValidation,
+        MutationListValidation,
+        MutationConsumeValidation>;
+    struct PendingRequestContext {
+        aegisy::aap::transport_generated::TransportPendingRequest transport;
+        quint64 processGeneration = 0;
+        PendingValidation validation;
+    };
+
     QString locateRuntime() const;
-    QString sendRequest(const QString &method, const QJsonObject &params = {});
+    QString sendRequest(const QString &method, const QJsonObject &params = {},
+                        PendingValidation validation = {});
     bool sendNotification(const QString &method, const QJsonObject &params = {});
     int writeMessage(const QJsonObject &message);
     void processStdout();
-    void processMessage(const QJsonObject &message);
+    void processMessage(
+        const aegisy::aap::transport_generated::TransportMessage &message);
     void acceptInitializeResponse(const QJsonObject &result);
     void rejectInitializeResponse(const QString &reasonCode);
     void rejectProtocolMessage(const QString &reasonCode);
+    void reportRequestFailure(const QString &requestId, const QString &method,
+                              const QString &message, int code);
     void clearNegotiationState();
     void failPending(const QString &message);
     void failOrdinaryPending(const QString &message);
@@ -479,13 +522,7 @@ private:
     QTimer *m_reconnectTimer = nullptr;
     QTimer *m_reconnectStabilityTimer = nullptr;
     QByteArray m_stdoutBuffer;
-    QHash<QString, QString> m_pendingMethods;
-    QHash<QString, quint64> m_pendingGenerations;
-    QHash<QString, QJsonObject> m_pendingTimelineSyncRequests;
-    QHash<QString, QJsonObject> m_pendingTimelineSubscriptionRequests;
-    QHash<QString, QJsonObject> m_pendingTurnRequests;
-    QHash<QString, QJsonObject> m_pendingMutationListRequests;
-    QHash<QString, QJsonObject> m_pendingMutationConsumeRequests;
+    QHash<QString, PendingRequestContext> m_pendingRequests;
     QSet<QString> m_retiredResponseIds;
     QStringList m_retiredResponseOrder;
     quint64 m_nextRequestId = 0;

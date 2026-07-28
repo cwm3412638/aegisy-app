@@ -1,9 +1,12 @@
 #include "aap_transport_runtime.h"
 
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonObject>
 
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 
 namespace {
@@ -12,9 +15,15 @@ using aegisy::aap::transport_generated::TransportJsonNumber;
 using aegisy::aap::transport_generated::TransportJsonValue;
 using aegisy::aap::transport_generated::TransportParseError;
 using aegisy::aap::transport_generated::TransportParseErrorKind;
+using aegisy::aap::transport_runtime::TransportIntegerConversion;
+using aegisy::aap::transport_runtime::TransportProjectionError;
 using aegisy::aap::transport_runtime::TransportSchemaRuntime;
+using aegisy::aap::transport_runtime::isTransportJsonMathematicalInteger;
 using aegisy::aap::transport_runtime::kMaxTransportJsonBytes;
 using aegisy::aap::transport_runtime::parseTransportJsonRaw;
+using aegisy::aap::transport_runtime::projectJsonSafeTransportValue;
+using aegisy::aap::transport_runtime::transportJsonIntegerEqualsQint64;
+using aegisy::aap::transport_runtime::transportJsonIntegerToQint64;
 
 [[noreturn]] void fail(const QString &message)
 {
@@ -83,6 +92,61 @@ QByteArray nestedArray(qsizetype depth)
     return QByteArray(depth, '[') + QByteArrayLiteral("null") + QByteArray(depth, ']');
 }
 
+TransportJsonNumber parseNumber(const QByteArray &raw)
+{
+    TransportJsonValue value;
+    QString error;
+    require(parseTransportJsonRaw(raw, &value, &error),
+            QStringLiteral("number parse failed: ") + error);
+    const auto *number = std::get_if<TransportJsonNumber>(&value.value);
+    require(number != nullptr, QStringLiteral("parsed value is not a number"));
+    return *number;
+}
+
+void expectIntegerConversion(const QByteArray &raw, qint64 expected)
+{
+    const TransportJsonNumber number = parseNumber(raw);
+    qint64 actual = expected == 0 ? 1 : 0;
+    require(isTransportJsonMathematicalInteger(number),
+            QStringLiteral("mathematical integer was not recognized: ")
+                + QString::fromLatin1(raw));
+    require(transportJsonIntegerToQint64(number, &actual)
+                == TransportIntegerConversion::Ok
+            && actual == expected
+            && transportJsonIntegerEqualsQint64(number, expected),
+            QStringLiteral("integer conversion mismatch: ") + QString::fromLatin1(raw));
+}
+
+QJsonValue projectRaw(const QByteArray &raw)
+{
+    TransportJsonValue value;
+    QString parseError;
+    require(parseTransportJsonRaw(raw, &value, &parseError),
+            QStringLiteral("projection input parse failed: ") + parseError);
+    QJsonValue projected(QStringLiteral("unchanged"));
+    TransportProjectionError projectionError = TransportProjectionError::InvalidValue;
+    require(projectJsonSafeTransportValue(value, &projected, &projectionError)
+                && projectionError == TransportProjectionError::None,
+            QStringLiteral("safe projection failed: ") + QString::fromLatin1(raw));
+    return projected;
+}
+
+void expectProjectionFailure(const QByteArray &raw,
+                             TransportProjectionError expectedError)
+{
+    TransportJsonValue value;
+    QString parseError;
+    require(parseTransportJsonRaw(raw, &value, &parseError),
+            QStringLiteral("projection input parse failed: ") + parseError);
+    const QJsonValue sentinel(QStringLiteral("unchanged"));
+    QJsonValue projected = sentinel;
+    TransportProjectionError projectionError = TransportProjectionError::None;
+    require(!projectJsonSafeTransportValue(value, &projected, &projectionError)
+                && projectionError == expectedError && projected == sentinel,
+            QStringLiteral("unsafe projection was not rejected atomically: ")
+                + QString::fromLatin1(raw));
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -128,6 +192,81 @@ int main(int argc, char **argv)
     require(aegisy::aap::transport_runtime::canonicalTransportJson(numberValue)
                 == QByteArrayLiteral("-1"),
             QStringLiteral("canonical number serialization failed"));
+
+    expectIntegerConversion(QByteArrayLiteral("-32148"), -32148);
+    expectIntegerConversion(QByteArrayLiteral("-32148.0"), -32148);
+    expectIntegerConversion(QByteArrayLiteral("-3.2148e4"), -32148);
+    expectIntegerConversion(QByteArrayLiteral("9223372036854775807"),
+                            std::numeric_limits<qint64>::max());
+    expectIntegerConversion(QByteArrayLiteral("-9223372036854775808"),
+                            std::numeric_limits<qint64>::min());
+    expectIntegerConversion(QByteArrayLiteral("0e-100000"), 0);
+
+    qint64 unchanged = 73;
+    const TransportJsonNumber positiveOverflow =
+        parseNumber(QByteArrayLiteral("9223372036854775808"));
+    require(isTransportJsonMathematicalInteger(positiveOverflow)
+                && transportJsonIntegerToQint64(positiveOverflow, &unchanged)
+                    == TransportIntegerConversion::OutOfRange
+                && unchanged == 73
+                && !transportJsonIntegerEqualsQint64(
+                    positiveOverflow, std::numeric_limits<qint64>::max()),
+            QStringLiteral("positive qint64 overflow was not rejected exactly"));
+    const TransportJsonNumber negativeOverflow =
+        parseNumber(QByteArrayLiteral("-9223372036854775809"));
+    require(transportJsonIntegerToQint64(negativeOverflow, &unchanged)
+                == TransportIntegerConversion::OutOfRange
+            && unchanged == 73,
+            QStringLiteral("negative qint64 overflow was not rejected exactly"));
+    const TransportJsonNumber hugeExponent = parseNumber(QByteArrayLiteral("1e100000"));
+    require(isTransportJsonMathematicalInteger(hugeExponent)
+                && transportJsonIntegerToQint64(hugeExponent, &unchanged)
+                    == TransportIntegerConversion::OutOfRange
+                && unchanged == 73,
+            QStringLiteral("huge integer exponent was not bounded"));
+    const TransportJsonNumber fraction = parseNumber(QByteArrayLiteral("1.5"));
+    require(!isTransportJsonMathematicalInteger(fraction)
+                && transportJsonIntegerToQint64(fraction, &unchanged)
+                    == TransportIntegerConversion::NotInteger
+                && unchanged == 73,
+            QStringLiteral("fraction was not classified separately"));
+
+    const QJsonValue safeMaximum = projectRaw(QByteArrayLiteral("9007199254740991"));
+    const QJsonValue safeMinimum = projectRaw(QByteArrayLiteral("-9007199254740991"));
+    require(safeMaximum.toVariant().toLongLong() == 9'007'199'254'740'991LL
+                && safeMinimum.toVariant().toLongLong() == -9'007'199'254'740'991LL
+                && projectRaw(QByteArrayLiteral("9.007199254740991e15")) == safeMaximum
+                && projectRaw(QByteArrayLiteral("-9007199254740991.0")) == safeMinimum,
+            QStringLiteral("JSON-safe projection boundaries were not preserved"));
+    expectProjectionFailure(QByteArrayLiteral("9007199254740992"),
+                            TransportProjectionError::NumberOutOfSafeRange);
+    expectProjectionFailure(QByteArrayLiteral("-9007199254740992"),
+                            TransportProjectionError::NumberOutOfSafeRange);
+    expectProjectionFailure(QByteArrayLiteral("1e100000"),
+                            TransportProjectionError::NumberOutOfSafeRange);
+    expectProjectionFailure(QByteArrayLiteral("1.5"),
+                            TransportProjectionError::NumberNotInteger);
+
+    const QJsonObject nestedProjection = projectRaw(QByteArrayLiteral(
+        "{\"array\":[null,true,\"text\",-9007199254740991],"
+        "\"object\":{\"maximum\":9007199254740991}}"))
+                                             .toObject();
+    const QJsonArray nestedArrayProjection =
+        nestedProjection.value(QStringLiteral("array")).toArray();
+    require(nestedArrayProjection.size() == 4
+                && nestedArrayProjection.at(0).isNull()
+                && nestedArrayProjection.at(1).toBool()
+                && nestedArrayProjection.at(2).toString() == QStringLiteral("text")
+                && nestedArrayProjection.at(3).toVariant().toLongLong()
+                    == -9'007'199'254'740'991LL
+                && nestedProjection.value(QStringLiteral("object"))
+                       .toObject()
+                       .value(QStringLiteral("maximum"))
+                       .toVariant()
+                       .toLongLong()
+                    == 9'007'199'254'740'991LL,
+            QStringLiteral("nested JSON-safe projection lost a value"));
+
     TransportJsonValue keyOrder;
     require(parseTransportJsonRaw(
                 QByteArrayLiteral("{\"\\ud800\\udc00\":1,\"\\ue000\":2}"),
@@ -140,10 +279,48 @@ int main(int argc, char **argv)
         QStringLiteral("1"), QStringLiteral("2"), true};
     require(aegisy::aap::transport_runtime::canonicalTransportJson(forgedNumber).isEmpty(),
             QStringLiteral("forged Transport number was serialized"));
+    const auto forgedNumberValue = std::get<TransportJsonNumber>(forgedNumber.value);
+    require(!isTransportJsonMathematicalInteger(forgedNumberValue)
+                && transportJsonIntegerToQint64(forgedNumberValue, &unchanged)
+                    == TransportIntegerConversion::InvalidValue
+                && unchanged == 73
+                && !transportJsonIntegerEqualsQint64(forgedNumberValue, 1),
+            QStringLiteral("forged Transport number was not rejected by integer helpers"));
+    const TransportJsonNumber forgedIntegerFlag{
+        QStringLiteral("1.5"), QStringLiteral("15e-1"), true};
+    require(transportJsonIntegerToQint64(forgedIntegerFlag, &unchanged)
+                == TransportIntegerConversion::InvalidValue
+            && unchanged == 73,
+            QStringLiteral("forged integer flag was not rejected"));
+    const QJsonValue projectionSentinel(QStringLiteral("unchanged"));
+    QJsonValue forgedProjection = projectionSentinel;
+    TransportProjectionError projectionError = TransportProjectionError::None;
+    require(!projectJsonSafeTransportValue(forgedNumber, &forgedProjection,
+                                           &projectionError)
+                && projectionError == TransportProjectionError::InvalidValue
+                && forgedProjection == projectionSentinel,
+            QStringLiteral("forged number projection changed its output"));
+    require(!projectJsonSafeTransportValue(forgedNumber, nullptr, &projectionError)
+                && projectionError == TransportProjectionError::InvalidValue,
+            QStringLiteral("null projection output was accepted"));
     TransportJsonValue forgedString;
     forgedString.value = QString(QChar(0xd800));
     require(aegisy::aap::transport_runtime::canonicalTransportJson(forgedString).isEmpty(),
             QStringLiteral("forged surrogate string was serialized"));
+    TransportJsonValue invalidNested;
+    TransportJsonValue validNestedEntry;
+    validNestedEntry.value = true;
+    TransportJsonValue::Object invalidNestedObject;
+    invalidNestedObject.insert(QStringLiteral("before"), validNestedEntry);
+    invalidNestedObject.insert(QStringLiteral("invalid"), forgedString);
+    invalidNested.value = invalidNestedObject;
+    forgedProjection = projectionSentinel;
+    projectionError = TransportProjectionError::None;
+    require(!projectJsonSafeTransportValue(invalidNested, &forgedProjection,
+                                           &projectionError)
+                && projectionError == TransportProjectionError::InvalidValue
+                && forgedProjection == projectionSentinel,
+            QStringLiteral("nested invalid projection changed its output"));
 
     expectParse(QByteArrayLiteral("\xef\xbb\xbf{}"), false);
     expectDetailedParseError(QByteArrayLiteral("\xef\xbb\xbf{}"),

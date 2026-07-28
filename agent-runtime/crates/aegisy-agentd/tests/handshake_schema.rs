@@ -493,7 +493,7 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
     );
     assert_eq!(
         definitions["backend"]["properties"]["version"]["pattern"],
-        r"^[!-~]+$"
+        r"^[!-~](?:[ -~]*[!-~])?$"
     );
     assert_eq!(definitions["capabilityName"]["maxLength"], 128);
     assert_eq!(

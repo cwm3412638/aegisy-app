@@ -1,5 +1,7 @@
 #include "aap_transport_runtime.h"
 
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QMap>
 #include <QRegularExpression>
 #include <QSet>
@@ -651,6 +653,29 @@ NumberParts numberParts(const TransportJsonNumber &number)
     return result;
 }
 
+bool validatedNumberParts(const TransportJsonNumber &number, NumberParts *output)
+{
+    const QByteArray lexical = number.lexical.toLatin1();
+    if (QString::fromLatin1(lexical) != number.lexical) {
+        return false;
+    }
+    TransportJsonValue parsed;
+    QString ignored;
+    if (!RawJsonParser(lexical).parse(&parsed, &ignored)) {
+        return false;
+    }
+    const auto *parsedNumber = std::get_if<TransportJsonNumber>(&parsed.value);
+    if (!parsedNumber || parsedNumber->lexical != number.lexical
+        || parsedNumber->canonical != number.canonical
+        || parsedNumber->integer != number.integer) {
+        return false;
+    }
+    if (output) {
+        *output = numberParts(number);
+    }
+    return true;
+}
+
 int compareNumbers(const TransportJsonNumber &leftNumber,
                    const TransportJsonNumber &rightNumber)
 {
@@ -838,19 +863,7 @@ bool auditTransportValue(const TransportJsonValue &value,
         return isUnicodeScalarString(*string);
     }
     if (const auto *number = std::get_if<TransportJsonNumber>(&value.value)) {
-        const QByteArray lexical = number->lexical.toLatin1();
-        if (QString::fromLatin1(lexical) != number->lexical) {
-            return false;
-        }
-        TransportJsonValue parsed;
-        QString ignored;
-        if (!RawJsonParser(lexical).parse(&parsed, &ignored)) {
-            return false;
-        }
-        const auto *parsedNumber = std::get_if<TransportJsonNumber>(&parsed.value);
-        return parsedNumber && parsedNumber->lexical == number->lexical
-            && parsedNumber->canonical == number->canonical
-            && parsedNumber->integer == number->integer;
+        return validatedNumberParts(*number, nullptr);
     }
     if (++depth > kMaxTransportJsonDepth) {
         return false;
@@ -869,6 +882,84 @@ bool auditTransportValue(const TransportJsonValue &value,
             return false;
         }
     }
+    return true;
+}
+
+void setProjectionError(TransportProjectionError *error,
+                        TransportProjectionError value)
+{
+    if (error) {
+        *error = value;
+    }
+}
+
+bool projectJsonSafeTransportValueUnchecked(
+    const TransportJsonValue &value,
+    QJsonValue *output,
+    TransportProjectionError *error)
+{
+    if (std::holds_alternative<std::monostate>(value.value)) {
+        *output = QJsonValue(QJsonValue::Null);
+        return true;
+    }
+    if (const auto *boolean = std::get_if<bool>(&value.value)) {
+        *output = QJsonValue(*boolean);
+        return true;
+    }
+    if (const auto *string = std::get_if<QString>(&value.value)) {
+        *output = QJsonValue(*string);
+        return true;
+    }
+    if (const auto *number = std::get_if<TransportJsonNumber>(&value.value)) {
+        qint64 integer = 0;
+        switch (transportJsonIntegerToQint64(*number, &integer)) {
+        case TransportIntegerConversion::InvalidValue:
+            setProjectionError(error, TransportProjectionError::InvalidValue);
+            return false;
+        case TransportIntegerConversion::NotInteger:
+            setProjectionError(error, TransportProjectionError::NumberNotInteger);
+            return false;
+        case TransportIntegerConversion::OutOfRange:
+            setProjectionError(error, TransportProjectionError::NumberOutOfSafeRange);
+            return false;
+        case TransportIntegerConversion::Ok:
+            break;
+        }
+        if (integer < kMinTransportJsonSafeInteger
+            || integer > kMaxTransportJsonSafeInteger) {
+            setProjectionError(error, TransportProjectionError::NumberOutOfSafeRange);
+            return false;
+        }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        *output = QJsonValue(integer);
+#else
+        *output = QJsonValue(static_cast<double>(integer));
+#endif
+        return true;
+    }
+    if (const auto *array = std::get_if<JsonArray>(&value.value)) {
+        QJsonArray projected;
+        for (const auto &entry : *array) {
+            QJsonValue child;
+            if (!projectJsonSafeTransportValueUnchecked(entry, &child, error)) {
+                return false;
+            }
+            projected.append(std::move(child));
+        }
+        *output = QJsonValue(std::move(projected));
+        return true;
+    }
+
+    QJsonObject projected;
+    const auto &object = std::get<JsonObject>(value.value);
+    for (auto it = object.cbegin(); it != object.cend(); ++it) {
+        QJsonValue child;
+        if (!projectJsonSafeTransportValueUnchecked(it.value(), &child, error)) {
+            return false;
+        }
+        projected.insert(it.key(), std::move(child));
+    }
+    *output = QJsonValue(std::move(projected));
     return true;
 }
 
@@ -1166,6 +1257,100 @@ void collectSchemaPatterns(const TransportJsonValue &node,
 }
 
 } // namespace
+
+bool isTransportJsonMathematicalInteger(const TransportJsonNumber &number)
+{
+    NumberParts parts;
+    return validatedNumberParts(number, &parts)
+        && (parts.coefficient == QByteArrayLiteral("0") || !parts.scale.negative);
+}
+
+TransportIntegerConversion transportJsonIntegerToQint64(
+    const TransportJsonNumber &number,
+    qint64 *output)
+{
+    NumberParts parts;
+    if (!validatedNumberParts(number, &parts)) {
+        return TransportIntegerConversion::InvalidValue;
+    }
+    if (parts.coefficient == QByteArrayLiteral("0")) {
+        if (output) {
+            *output = 0;
+        }
+        return TransportIntegerConversion::Ok;
+    }
+    if (parts.scale.negative) {
+        return TransportIntegerConversion::NotInteger;
+    }
+    if (parts.scale.digits.size() > 2) {
+        return TransportIntegerConversion::OutOfRange;
+    }
+    bool scaleOk = false;
+    const uint scale = parts.scale.digits.toUInt(&scaleOk);
+    if (!scaleOk || scale > 18
+        || parts.coefficient.size() + qsizetype(scale) > 19) {
+        return TransportIntegerConversion::OutOfRange;
+    }
+
+    QByteArray magnitudeDigits = parts.coefficient;
+    magnitudeDigits.append(qsizetype(scale), '0');
+    static const QByteArray positiveLimit = QByteArrayLiteral("9223372036854775807");
+    static const QByteArray negativeLimit = QByteArrayLiteral("9223372036854775808");
+    const QByteArray &limit = parts.negative ? negativeLimit : positiveLimit;
+    if (compareUnsignedDecimal(magnitudeDigits, limit) > 0) {
+        return TransportIntegerConversion::OutOfRange;
+    }
+
+    bool magnitudeOk = false;
+    const quint64 magnitude = magnitudeDigits.toULongLong(&magnitudeOk);
+    if (!magnitudeOk) {
+        return TransportIntegerConversion::OutOfRange;
+    }
+    qint64 result = 0;
+    if (parts.negative) {
+        result = magnitude == quint64(std::numeric_limits<qint64>::max()) + 1U
+            ? std::numeric_limits<qint64>::min()
+            : -static_cast<qint64>(magnitude);
+    } else {
+        result = static_cast<qint64>(magnitude);
+    }
+    if (output) {
+        *output = result;
+    }
+    return TransportIntegerConversion::Ok;
+}
+
+bool transportJsonIntegerEqualsQint64(const TransportJsonNumber &number,
+                                      qint64 expected)
+{
+    qint64 actual = 0;
+    return transportJsonIntegerToQint64(number, &actual)
+            == TransportIntegerConversion::Ok
+        && actual == expected;
+}
+
+bool projectJsonSafeTransportValue(const TransportJsonValue &value,
+                                   QJsonValue *output,
+                                   TransportProjectionError *error)
+{
+    if (!output) {
+        setProjectionError(error, TransportProjectionError::InvalidValue);
+        return false;
+    }
+    qsizetype nodes = 0;
+    if (!auditTransportValue(value, 0, &nodes)) {
+        setProjectionError(error, TransportProjectionError::InvalidValue);
+        return false;
+    }
+
+    QJsonValue projected;
+    if (!projectJsonSafeTransportValueUnchecked(value, &projected, error)) {
+        return false;
+    }
+    *output = std::move(projected);
+    setProjectionError(error, TransportProjectionError::None);
+    return true;
+}
 
 class TransportSchemaRuntime::Impl {
 public:

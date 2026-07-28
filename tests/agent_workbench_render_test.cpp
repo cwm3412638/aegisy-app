@@ -2682,9 +2682,10 @@ bool verifyTimelineGapRecovery(QApplication &application,
         workbench, sessionG, QStringLiteral("timeline-sync-g"));
     AgentWorkbenchWidgetTestAccess::setPendingPrompt(
         workbench, QStringLiteral("preserve-prompt-during-timeline-sync"));
-    runtimeClient->requestFailed(QStringLiteral("timeline-sync-g"),
-                                 QStringLiteral("timeline/sync"),
-                                 QStringLiteral("redacted"), -32160);
+    runtimeClient->requestFailedExact(QStringLiteral("timeline-sync-g"),
+                                      QStringLiteral("timeline/sync"),
+                                      QStringLiteral("redacted"),
+                                      QStringLiteral("-32160"));
     if (!expect(AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
                     workbench, sessionG) == QStringLiteral("frozen")
                     && AgentWorkbenchWidgetTestAccess::timelineSequenceForSession(
@@ -2769,9 +2770,10 @@ bool verifyTimelineGapRecovery(QApplication &application,
     const QString confirmedEventId = AgentWorkbenchWidgetTestAccess::timelineEventId(
         workbench, sessionD);
     runtimeClient->connectionStateChanged(false, QStringLiteral("runtime disconnected"));
-    runtimeClient->requestFailed(QStringLiteral("timeline-sync-d"),
-                                 QStringLiteral("timeline/sync"),
-                                 QStringLiteral("runtime disconnected"), -1);
+    runtimeClient->requestFailedExact(QStringLiteral("timeline-sync-d"),
+                                      QStringLiteral("timeline/sync"),
+                                      QStringLiteral("runtime disconnected"),
+                                      QStringLiteral("-1"));
     application.processEvents();
     QPushButton *sendButton = workbench.findChild<QPushButton *>(
         QStringLiteral("agentSendButton"));
@@ -2997,9 +2999,9 @@ bool verifyTimelineSubscriptionRecovery(QApplication &application,
         workbench, ambiguousSession, generation,
         QStringLiteral("ambiguous-subscription"), ambiguousRequest,
         timelineAnchorForEvent(completed));
-    runtimeClient->requestFailed(
+    runtimeClient->requestFailedExact(
         ambiguousRequest, QStringLiteral("timeline/subscription-sync"),
-        QStringLiteral("connection ownership unknown"), -1);
+        QStringLiteral("connection ownership unknown"), QStringLiteral("-1"));
     if (!expect(AgentWorkbenchWidgetTestAccess::timelineRecoveryState(
                     workbench, ambiguousSession) == QStringLiteral("frozen")
                     && AgentWorkbenchWidgetTestAccess::timelineRetriesOnReconnect(
@@ -4367,9 +4369,10 @@ bool verifyDurableProposalProjection(AgentWorkbenchWidget &workbench,
     }
     AgentWorkbenchWidgetTestAccess::prepareProposalRequest(
         workbench, QStringLiteral("proposal-refresh-failure"), foreground, 2);
-    runtime->requestFailed(QStringLiteral("proposal-refresh-failure"),
-                           QStringLiteral("workspace/edit/proposal/latest"),
-                           QStringLiteral("redacted"), -32115);
+    runtime->requestFailedExact(QStringLiteral("proposal-refresh-failure"),
+                                QStringLiteral("workspace/edit/proposal/latest"),
+                                QStringLiteral("redacted"),
+                                QStringLiteral("-32115"));
     if (!expect(AgentWorkbenchWidgetTestAccess::proposalUnverified(
                         workbench, foreground)
                     && AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
@@ -4598,9 +4601,10 @@ bool verifyTimelineProposalReference(AgentWorkbenchWidget &workbench,
         workbench, sessionId, QStringLiteral("project-proposal"));
     AgentWorkbenchWidgetTestAccess::prepareProposalReferenceRequest(
         workbench, QStringLiteral("timeline-reference-error"), itemId, reference, 5);
-    runtime->requestFailed(QStringLiteral("timeline-reference-error"),
-                           QStringLiteral("workspace/edit/proposal/read"),
-                           QStringLiteral("redacted"), -32149);
+    runtime->requestFailedExact(QStringLiteral("timeline-reference-error"),
+                                QStringLiteral("workspace/edit/proposal/read"),
+                                QStringLiteral("redacted"),
+                                QStringLiteral("-32149"));
     if (!expect(referenceStatus->text().contains(QStringLiteral("错误码 -32149"))
                     && AgentWorkbenchWidgetTestAccess::hasConfirmedProposal(
                         workbench, sessionId, newerLatestId),
@@ -4727,9 +4731,10 @@ int main(int argc, char *argv[])
         }
         AgentWorkbenchWidgetTestAccess::prepareRuntimeDegradationRequest(
             workbench, QStringLiteral("degradation-request"));
-        runtimeClient->requestFailed(QStringLiteral("degradation-request"),
-                                     QStringLiteral("runtime/degradations"),
-                                     QStringLiteral("bounded failure"), -32000);
+        runtimeClient->requestFailedExact(QStringLiteral("degradation-request"),
+                                          QStringLiteral("runtime/degradations"),
+                                          QStringLiteral("bounded failure"),
+                                          QStringLiteral("-32000"));
         application.processEvents();
         if (!expect(sendButton->text() == QStringLiteral("能力未知")
                         && !sendButton->isEnabled(),
@@ -5797,9 +5802,9 @@ int main(int argc, char *argv[])
                 "running Codex health did not clear the recovery action")) {
         return 1;
     }
-    runtimeClient->requestFailed({}, QStringLiteral("runtime/restart"),
-                                 QStringLiteral("Codex App Server restart failed: opaque provider payload"),
-                                 -32110);
+    runtimeClient->requestFailedExact({}, QStringLiteral("runtime/restart"),
+                                      QStringLiteral("Codex App Server restart failed: opaque provider payload"),
+                                      QStringLiteral("-32110"));
     application.processEvents();
     bool rawRestartTextVisible = runtimeStatus->toolTip().contains(
         QStringLiteral("opaque provider payload"));
@@ -6130,14 +6135,14 @@ int main(int argc, char *argv[])
     // Provider lifecycle failures must expose only a bounded operation/code state.
     const QString rawProviderFailure =
         QStringLiteral("Codex provider request failed: response body contained [REDACTED]");
-    runtimeClient->requestFailed({}, QStringLiteral("session/archive"),
-                                 rawProviderFailure, -32143);
-    runtimeClient->requestFailed({}, QStringLiteral("session/unarchive"),
-                                 QStringLiteral("Codex provider state is not loaded; opaque detail"),
-                                 -32141);
-    runtimeClient->requestFailed({}, QStringLiteral("session/fork"),
-                                 QStringLiteral("Codex provider archive was acknowledged but local persistence failed and compensation also failed"),
-                                 -32145);
+    runtimeClient->requestFailedExact({}, QStringLiteral("session/archive"),
+                                      rawProviderFailure, QStringLiteral("-32143"));
+    runtimeClient->requestFailedExact({}, QStringLiteral("session/unarchive"),
+                                      QStringLiteral("Codex provider state is not loaded; opaque detail"),
+                                      QStringLiteral("-32141"));
+    runtimeClient->requestFailedExact({}, QStringLiteral("session/fork"),
+                                      QStringLiteral("Codex provider archive was acknowledged but local persistence failed and compensation also failed"),
+                                      QStringLiteral("-32145"));
     application.processEvents();
     bool archiveFailureVisible = false;
     bool restoreFailureVisible = false;

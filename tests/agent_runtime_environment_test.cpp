@@ -335,6 +335,221 @@ QByteArray exactBoundaryTimelineNotification()
     return frame.size() == kTestMaximumFrameBytes ? frame : QByteArray{};
 }
 
+void writeRawFakeRuntimeFrame(const QByteArray &frame)
+{
+    std::cout.write(frame.constData(), std::streamsize(frame.size()));
+    std::cout.put('\n');
+    std::cout.flush();
+}
+
+QByteArray rawTransportParserViolation(const QString &testCase)
+{
+    if (testCase == QStringLiteral("transport-raw-leading-bom")) {
+        QByteArray frame("\xef\xbb\xbf", 3);
+        frame.append(
+            R"({"jsonrpc":"2.0","method":"future/notice","params":{}})");
+        return frame;
+    }
+    if (testCase == QStringLiteral("transport-raw-invalid-utf8")) {
+        QByteArray frame(
+            R"({"jsonrpc":"2.0","method":"future/notice","params":{"value":")");
+        frame.append(char(0xff));
+        frame.append(R"("}})");
+        return frame;
+    }
+    if (testCase == QStringLiteral("transport-raw-duplicate-decoded-key")) {
+        return QByteArrayLiteral(
+            R"({"jsonrpc":"2.0","method":"future/notice","params":{"a":1,"\u0061":2}})");
+    }
+    if (testCase == QStringLiteral("transport-raw-lone-surrogate")) {
+        return QByteArrayLiteral(
+            R"({"jsonrpc":"2.0","method":"future/notice","params":{"value":"\ud800"}})");
+    }
+    if (testCase == QStringLiteral("transport-raw-depth-129")) {
+        QByteArray frame = QByteArrayLiteral(
+            R"({"jsonrpc":"2.0","method":"future/notice","params":{"value":)");
+        frame.append(QByteArray(129, '['));
+        frame.append("null");
+        frame.append(QByteArray(129, ']'));
+        frame.append("}}");
+        return frame;
+    }
+    if (testCase == QStringLiteral("transport-raw-node-65537")) {
+        QByteArray frame = QByteArrayLiteral(
+            R"({"jsonrpc":"2.0","method":"future/notice","params":{"value":[)");
+        for (int index = 0; index < 65'537; ++index) {
+            if (index > 0) frame.append(',');
+            frame.append("null");
+        }
+        frame.append("]}}");
+        return frame;
+    }
+    return {};
+}
+
+QString subscriptionIdentityStage(const QString &method)
+{
+    if (method == QStringLiteral("timeline/subscribe")) {
+        return QStringLiteral("subscribe");
+    }
+    if (method == QStringLiteral("timeline/subscription-sync")) {
+        return QStringLiteral("subscription-sync");
+    }
+    if (method == QStringLiteral("timeline/subscription-snapshot")) {
+        return QStringLiteral("subscription-snapshot");
+    }
+    if (method == QStringLiteral("timeline/subscription-activate")) {
+        return QStringLiteral("activate");
+    }
+    return {};
+}
+
+QString subscriptionFailureStage(const QString &method)
+{
+    if (method == QStringLiteral("timeline/subscribe")) {
+        return QStringLiteral("subscribe");
+    }
+    if (method == QStringLiteral("timeline/subscription-sync")) {
+        return QStringLiteral("sync");
+    }
+    if (method == QStringLiteral("timeline/subscription-snapshot")) {
+        return QStringLiteral("snapshot");
+    }
+    if (method == QStringLiteral("timeline/subscription-activate")) {
+        return QStringLiteral("activate");
+    }
+    return {};
+}
+
+QJsonObject subscriptionFailureForRequest(const QString &method,
+                                          const QJsonObject &request,
+                                          const QString &drift)
+{
+    QJsonValue cursor;
+    QJsonValue watermark;
+    if (method == QStringLiteral("timeline/subscribe")
+        || method == QStringLiteral("timeline/subscription-activate")) {
+        cursor = request.value(QStringLiteral("cursor"));
+        watermark = request.value(QStringLiteral("watermark"));
+    } else if (method == QStringLiteral("timeline/subscription-sync")) {
+        const QJsonObject nested = request.value(QStringLiteral("request")).toObject();
+        cursor = nested.value(QStringLiteral("after"));
+        watermark = nested.value(QStringLiteral("watermark"));
+    } else {
+        const QJsonObject nested = request.value(QStringLiteral("request")).toObject();
+        cursor = timelineAnchor(0, QJsonValue(QJsonValue::Null));
+        watermark = nested.value(QStringLiteral("watermark"));
+    }
+    QString stage = subscriptionFailureStage(method);
+    if (drift == QStringLiteral("stage")) {
+        stage = stage == QStringLiteral("subscribe")
+            ? QStringLiteral("sync") : QStringLiteral("subscribe");
+    }
+    QString requestIdentity = AgentRuntimeClient::timelineSubscriptionRequestIdentity(
+        subscriptionIdentityStage(method), request);
+    if (drift == QStringLiteral("identity")) {
+        requestIdentity = QStringLiteral("timeline-subscription-request:sha256:")
+            + QString(64, QLatin1Char('f'));
+    }
+    return {
+        {QStringLiteral("schema_version"),
+         QStringLiteral("timeline-subscription-failure/0.1")},
+        {QStringLiteral("connection_generation"),
+         request.value(QStringLiteral("connection_generation"))},
+        {QStringLiteral("session_id"), request.value(QStringLiteral("session_id"))},
+        {QStringLiteral("subscription_id"),
+         request.value(QStringLiteral("subscription_id"))},
+        {QStringLiteral("state"), QStringLiteral("failed")},
+        {QStringLiteral("stage"), stage},
+        {QStringLiteral("cursor"), cursor},
+        {QStringLiteral("watermark"), watermark},
+        {QStringLiteral("request_identity"), requestIdentity},
+        {QStringLiteral("reason"), QStringLiteral("transport")},
+        {QStringLiteral("retryable"), true},
+        {QStringLiteral("cleanup_required"), true},
+    };
+}
+
+QString testMutationFingerprint()
+{
+    return QString(64, QLatin1Char('a'));
+}
+
+QString testMutationIdempotencyKey()
+{
+    return QStringLiteral("gesture-transport-test");
+}
+
+QString testMutationOperationIdentity(const QString &sessionId)
+{
+    return AgentRuntimeClient::durableMutationOperationIdentity(
+        sessionId, QStringLiteral("turn-start"), testMutationIdempotencyKey(),
+        testMutationFingerprint());
+}
+
+QJsonObject testMutationOperation(const QString &sessionId, int revision,
+                                  bool acceptedConsumed)
+{
+    return {
+        {QStringLiteral("schema_version"),
+         QStringLiteral("mutation-acknowledgement-operation/0.1")},
+        {QStringLiteral("operation_identity"),
+         testMutationOperationIdentity(sessionId)},
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("mutation_kind"), QStringLiteral("turn-start")},
+        {QStringLiteral("idempotency_key"), testMutationIdempotencyKey()},
+        {QStringLiteral("request_fingerprint"), testMutationFingerprint()},
+        {QStringLiteral("revision"), revision},
+        {QStringLiteral("state"), QStringLiteral("accepted")},
+        {QStringLiteral("turn_id"), QStringLiteral("turn-transport-test")},
+        {QStringLiteral("accepted_anchor"),
+         timelineAnchor(1, timelineEventId(QLatin1Char('a')))},
+        {QStringLiteral("terminal_anchor"), QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("accepted_consumed"), acceptedConsumed},
+        {QStringLiteral("terminal_consumed"), false},
+    };
+}
+
+QJsonObject mutationListResult(const QJsonObject &request, bool drift)
+{
+    return {
+        {QStringLiteral("schema_version"),
+         QStringLiteral("mutation-acknowledgement-page/0.1")},
+        {QStringLiteral("session_id"), drift
+             ? QJsonValue(QStringLiteral("session-drift"))
+             : request.value(QStringLiteral("session_id"))},
+        {QStringLiteral("after"), request.value(QStringLiteral("after"))},
+        {QStringLiteral("operations"), QJsonArray{}},
+        {QStringLiteral("next_after"), QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("complete"), true},
+    };
+}
+
+QJsonObject mutationConsumeResult(const QJsonObject &request, bool drift)
+{
+    QJsonObject confirmedAnchor = request.value(
+        QStringLiteral("confirmed_anchor")).toObject();
+    if (drift) {
+        confirmedAnchor = timelineAnchor(2, timelineEventId(QLatin1Char('b')));
+    }
+    QJsonObject operation = testMutationOperation(
+        request.value(QStringLiteral("session_id")).toString(),
+        request.value(QStringLiteral("expected_revision")).toInt() + 1, true);
+    operation.insert(QStringLiteral("accepted_anchor"), confirmedAnchor);
+    return {
+        {QStringLiteral("schema_version"),
+         QStringLiteral("mutation-acknowledgement-consume-result/0.1")},
+        {QStringLiteral("session_id"), request.value(QStringLiteral("session_id"))},
+        {QStringLiteral("operation_identity"),
+         request.value(QStringLiteral("operation_identity"))},
+        {QStringLiteral("expected_revision"),
+         request.value(QStringLiteral("expected_revision"))},
+        {QStringLiteral("target"), request.value(QStringLiteral("target"))},
+        {QStringLiteral("confirmed_anchor"), confirmedAnchor},
+        {QStringLiteral("operation"), operation},
+    };
+}
+
 bool verifyRustTimelineIdentityFixture()
 {
     const QList<QByteArray> fixtureLines{
@@ -448,14 +663,21 @@ int runFakeRuntime(const QString &testCase)
 {
     const QString logPath = qEnvironmentVariable("AEGISY_FAKE_RUNTIME_LOG");
     int priorInitializeCount = 0;
+    QString priorRuntimeHealthId;
     QFile history(logPath);
     if (history.open(QIODevice::ReadOnly)) {
         while (!history.atEnd()) {
             const QJsonDocument prior = QJsonDocument::fromJson(history.readLine());
-            if (prior.isObject()
-                && prior.object().value(QStringLiteral("method")).toString()
-                    == QStringLiteral("initialize")) {
+            if (!prior.isObject()) continue;
+            const QJsonObject priorMessage = prior.object();
+            const QString priorMethod = priorMessage.value(
+                QStringLiteral("method")).toString();
+            if (priorMethod == QStringLiteral("initialize")) {
                 ++priorInitializeCount;
+            } else if (priorMethod == QStringLiteral("runtime/health")
+                       && priorMessage.value(QStringLiteral("id")).isString()) {
+                priorRuntimeHealthId = priorMessage.value(
+                    QStringLiteral("id")).toString();
             }
         }
     }
@@ -522,6 +744,23 @@ int runFakeRuntime(const QString &testCase)
             QStringLiteral("runtime.health"),
             QStringLiteral("runtime.degradations"),
             QStringLiteral("timeline.streaming"),
+            QStringLiteral("session.mutation-acknowledgements"),
+            QStringLiteral("permission.read-only"),
+        });
+    } else if (testCase.startsWith(
+                   QStringLiteral("transport-subscription-error-"))) {
+        setStableCapabilities(QJsonArray{
+            QStringLiteral("runtime.preview"),
+            QStringLiteral("runtime.health"),
+            QStringLiteral("runtime.degradations"),
+            QStringLiteral("timeline.subscription.fixed-watermark"),
+            QStringLiteral("permission.read-only"),
+        });
+    } else if (testCase.startsWith(QStringLiteral("transport-mutation-"))) {
+        setStableCapabilities(QJsonArray{
+            QStringLiteral("runtime.preview"),
+            QStringLiteral("runtime.health"),
+            QStringLiteral("runtime.degradations"),
             QStringLiteral("session.mutation-acknowledgements"),
             QStringLiteral("permission.read-only"),
         });
@@ -743,7 +982,13 @@ int runFakeRuntime(const QString &testCase)
     bool hasCombinedFirstId = false;
     int timelineSyncRequests = 0;
     int timelineSnapshotRequests = 0;
+    int transportHealthRequests = 0;
     QJsonObject firstDelayedHeartbeat;
+    QJsonObject pendingStartupHealth;
+    QJsonObject pendingStartupDegradations;
+    QJsonObject pendingFirstSameMethodHealth;
+    QJsonObject pendingMutationList;
+    QJsonObject pendingMutationConsume;
     while (std::getline(std::cin, rawLine)) {
         const QByteArray line = QByteArray::fromStdString(rawLine);
         appendLogLine(&log, line);
@@ -821,6 +1066,20 @@ int runFakeRuntime(const QString &testCase)
             std::cout
                 << QJsonDocument(response).toJson(QJsonDocument::Compact).constData()
                 << std::endl;
+            continue;
+        }
+        if (method == QStringLiteral("initialized")
+            && testCase.startsWith(QStringLiteral("transport-raw-"))) {
+            const QByteArray violation = rawTransportParserViolation(testCase);
+            if (violation.isEmpty()) return 94;
+            writeRawFakeRuntimeFrame(violation);
+            continue;
+        }
+        if (method == QStringLiteral("initialized")
+            && testCase == QStringLiteral(
+                "transport-unmatched-malformed-typed-error")) {
+            writeRawFakeRuntimeFrame(QByteArrayLiteral(
+                R"({"jsonrpc":"2.0","id":"unmatched-malformed","error":{"code":-32150,"message":"subscription failed","data":{"schema_version":"timeline-subscription-failure/0.1"}}})"));
             continue;
         }
         if (message.value(QStringLiteral("method")).toString()
@@ -949,6 +1208,230 @@ int runFakeRuntime(const QString &testCase)
                 << std::endl;
             return 0;
         }
+        if (testCase == QStringLiteral("transport-correlation-ids")
+            && method == QStringLiteral("runtime/health")) {
+            const QJsonObject retiredResponse = response;
+            const QJsonObject unmatchedResponse{
+                {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                {QStringLiteral("id"), QStringLiteral("unmatched-response-id")},
+                {QStringLiteral("result"), QJsonObject{}},
+            };
+            const QJsonObject nullResponse{
+                {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                {QStringLiteral("id"), QJsonValue(QJsonValue::Null)},
+                {QStringLiteral("error"), QJsonObject{
+                    {QStringLiteral("code"), -32000},
+                    {QStringLiteral("message"), QStringLiteral("unmatched")},
+                }},
+            };
+            const QJsonObject correctResponse{
+                {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+                {QStringLiteral("result"), QJsonObject{}},
+            };
+            writeRawFakeRuntimeFrame(
+                QJsonDocument(retiredResponse).toJson(QJsonDocument::Compact));
+            writeRawFakeRuntimeFrame(
+                QJsonDocument(unmatchedResponse).toJson(QJsonDocument::Compact));
+            writeRawFakeRuntimeFrame(
+                QJsonDocument(nullResponse).toJson(QJsonDocument::Compact));
+            writeRawFakeRuntimeFrame(
+                QJsonDocument(correctResponse).toJson(QJsonDocument::Compact));
+            continue;
+        }
+        if (testCase == QStringLiteral("transport-huge-error-code")
+            && method == QStringLiteral("runtime/health")) {
+            QByteArray hugeError = QByteArrayLiteral(
+                R"({"jsonrpc":"2.0","id":")");
+            hugeError.append(message.value(QStringLiteral("id")).toString().toUtf8());
+            hugeError.append(QByteArrayLiteral(
+                R"(","error":{"code":123456789012345678901234567890,"message":"huge code"}})"));
+            writeRawFakeRuntimeFrame(hugeError);
+            continue;
+        }
+        if (testCase == QStringLiteral("transport-concurrent-reverse")
+            && (method == QStringLiteral("runtime/health")
+                || method == QStringLiteral("runtime/degradations"))) {
+            if (method == QStringLiteral("runtime/health")) {
+                ++transportHealthRequests;
+                if (transportHealthRequests == 1) {
+                    pendingStartupHealth = message;
+                } else if (transportHealthRequests == 2) {
+                    pendingFirstSameMethodHealth = message;
+                } else {
+                    const QJsonObject secondError{
+                        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                        {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+                        {QStringLiteral("error"), QJsonObject{
+                            {QStringLiteral("code"), -32060},
+                            {QStringLiteral("message"),
+                             QStringLiteral("second request failed")},
+                        }},
+                    };
+                    const QJsonObject firstSuccess{
+                        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                        {QStringLiteral("id"), pendingFirstSameMethodHealth.value(
+                             QStringLiteral("id"))},
+                        {QStringLiteral("result"), QJsonObject{}},
+                    };
+                    writeRawFakeRuntimeFrame(QJsonDocument(secondError).toJson(
+                        QJsonDocument::Compact));
+                    writeRawFakeRuntimeFrame(QJsonDocument(firstSuccess).toJson(
+                        QJsonDocument::Compact));
+                    pendingFirstSameMethodHealth = {};
+                }
+            } else {
+                pendingStartupDegradations = message;
+            }
+            if (!pendingStartupHealth.isEmpty()
+                && !pendingStartupDegradations.isEmpty()) {
+                const QJsonObject degradationsResponse{
+                    {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                    {QStringLiteral("id"), pendingStartupDegradations.value(
+                         QStringLiteral("id"))},
+                    {QStringLiteral("result"), QJsonObject{}},
+                };
+                const QJsonObject healthResponse{
+                    {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                    {QStringLiteral("id"), pendingStartupHealth.value(
+                         QStringLiteral("id"))},
+                    {QStringLiteral("result"), QJsonObject{}},
+                };
+                writeRawFakeRuntimeFrame(QJsonDocument(degradationsResponse).toJson(
+                    QJsonDocument::Compact));
+                writeRawFakeRuntimeFrame(QJsonDocument(healthResponse).toJson(
+                    QJsonDocument::Compact));
+                pendingStartupHealth = {};
+                pendingStartupDegradations = {};
+            }
+            continue;
+        }
+        if (testCase == QStringLiteral("transport-old-generation")
+            && method == QStringLiteral("runtime/health")) {
+            if (invocation == 1) return 44;
+            if (!priorRuntimeHealthId.isEmpty()) {
+                const QJsonObject oldResponse{
+                    {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                    {QStringLiteral("id"), priorRuntimeHealthId},
+                    {QStringLiteral("result"), QJsonObject{}},
+                };
+                writeRawFakeRuntimeFrame(QJsonDocument(oldResponse).toJson(
+                    QJsonDocument::Compact));
+            }
+            const QJsonObject currentResponse{
+                {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+                {QStringLiteral("result"), QJsonObject{}},
+            };
+            writeRawFakeRuntimeFrame(QJsonDocument(currentResponse).toJson(
+                QJsonDocument::Compact));
+            continue;
+        }
+        if (testCase.startsWith(QStringLiteral("transport-subscription-error-"))) {
+            const QString suffix = testCase.mid(
+                QStringLiteral("transport-subscription-error-").size());
+            QString targetStage;
+            for (const QString &candidate : {
+                     QStringLiteral("subscribe"), QStringLiteral("sync"),
+                     QStringLiteral("snapshot"), QStringLiteral("activate")}) {
+                if (suffix.startsWith(candidate + QLatin1Char('-'))) {
+                    targetStage = candidate;
+                    break;
+                }
+            }
+            const QHash<QString, QString> methods{
+                {QStringLiteral("subscribe"), QStringLiteral("timeline/subscribe")},
+                {QStringLiteral("sync"),
+                 QStringLiteral("timeline/subscription-sync")},
+                {QStringLiteral("snapshot"),
+                 QStringLiteral("timeline/subscription-snapshot")},
+                {QStringLiteral("activate"),
+                 QStringLiteral("timeline/subscription-activate")},
+            };
+            if (!targetStage.isEmpty() && method == methods.value(targetStage)) {
+                const QString drift = suffix.mid(targetStage.size() + 1);
+                const QJsonObject failure = subscriptionFailureForRequest(
+                    method, message.value(QStringLiteral("params")).toObject(),
+                    drift == QStringLiteral("valid") ? QString() : drift);
+                const QJsonObject errorResponse{
+                    {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                    {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+                    {QStringLiteral("error"), QJsonObject{
+                        {QStringLiteral("code"), -32150},
+                        {QStringLiteral("message"),
+                         QStringLiteral("subscription failed")},
+                        {QStringLiteral("data"), failure},
+                    }},
+                };
+                writeRawFakeRuntimeFrame(QJsonDocument(errorResponse).toJson(
+                    QJsonDocument::Compact));
+                continue;
+            }
+        }
+        if (testCase.startsWith(QStringLiteral("transport-mutation-"))) {
+            if (method == QStringLiteral("session/mutation-acknowledgements")) {
+                if (testCase == QStringLiteral("transport-mutation-reverse")) {
+                    pendingMutationList = message;
+                } else if (testCase == QStringLiteral(
+                               "transport-mutation-list-drift")) {
+                    const QJsonObject mutationResponse{
+                        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                        {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+                        {QStringLiteral("result"), mutationListResult(
+                             message.value(QStringLiteral("params")).toObject(), true)},
+                    };
+                    writeRawFakeRuntimeFrame(QJsonDocument(mutationResponse).toJson(
+                        QJsonDocument::Compact));
+                    continue;
+                }
+            } else if (method
+                       == QStringLiteral("mutation/acknowledgement/consume")) {
+                if (testCase == QStringLiteral("transport-mutation-reverse")) {
+                    pendingMutationConsume = message;
+                } else if (testCase == QStringLiteral(
+                               "transport-mutation-consume-drift")) {
+                    const QJsonObject mutationResponse{
+                        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                        {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+                        {QStringLiteral("result"), mutationConsumeResult(
+                             message.value(QStringLiteral("params")).toObject(), true)},
+                    };
+                    writeRawFakeRuntimeFrame(QJsonDocument(mutationResponse).toJson(
+                        QJsonDocument::Compact));
+                    continue;
+                }
+            }
+            if (!pendingMutationList.isEmpty() && !pendingMutationConsume.isEmpty()) {
+                const QJsonObject consumeResponse{
+                    {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                    {QStringLiteral("id"), pendingMutationConsume.value(
+                         QStringLiteral("id"))},
+                    {QStringLiteral("result"), mutationConsumeResult(
+                         pendingMutationConsume.value(QStringLiteral("params")).toObject(),
+                         false)},
+                };
+                const QJsonObject listResponse{
+                    {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                    {QStringLiteral("id"), pendingMutationList.value(
+                         QStringLiteral("id"))},
+                    {QStringLiteral("result"), mutationListResult(
+                         pendingMutationList.value(QStringLiteral("params")).toObject(),
+                         false)},
+                };
+                writeRawFakeRuntimeFrame(QJsonDocument(consumeResponse).toJson(
+                    QJsonDocument::Compact));
+                writeRawFakeRuntimeFrame(QJsonDocument(listResponse).toJson(
+                    QJsonDocument::Compact));
+                pendingMutationList = {};
+                pendingMutationConsume = {};
+                continue;
+            }
+            if (method == QStringLiteral("session/mutation-acknowledgements")
+                || method == QStringLiteral(
+                    "mutation/acknowledgement/consume")) {
+                continue;
+            }
+        }
         if (message.value(QStringLiteral("method")).toString()
                 == QStringLiteral("timeline/sync")
             && testCase.startsWith(QStringLiteral("timeline-sync-"))) {
@@ -1005,9 +1488,16 @@ int runFakeRuntime(const QString &testCase)
                     QStringLiteral("result"),
                     timelineSyncPage(message.value(QStringLiteral("params")).toObject()));
             }
-            std::cout
-                << QJsonDocument(timelineResponse).toJson(QJsonDocument::Compact).constData()
-                << std::endl;
+            QByteArray encoded = QJsonDocument(timelineResponse).toJson(
+                QJsonDocument::Compact);
+            if (testCase == QStringLiteral(
+                    "timeline-sync-retention-gap-code-decimal")) {
+                encoded.replace("\"code\":-32148", "\"code\":-32148.0");
+            } else if (testCase == QStringLiteral(
+                           "timeline-sync-retention-gap-code-exponent")) {
+                encoded.replace("\"code\":-32148", "\"code\":-3.2148e4");
+            }
+            writeRawFakeRuntimeFrame(encoded);
             continue;
         }
         if (message.value(QStringLiteral("method")).toString()
@@ -1987,6 +2477,525 @@ bool runProcessReconnectExhaustionCase()
     return expect(waitingCount == 3 && delays == QList<int>{0, 10, 20}
                       && initializes.size() == 4,
                   "reconnect backoff or attempt cap was not exact");
+}
+
+bool runTransportCorrelationIdCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "could not create Transport correlation directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("transport-correlation-ids"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool healthRead = false;
+    bool degradationsRead = false;
+    bool disconnected = false;
+    int failedRequests = 0;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::runtimeHealthRead,
+                         [&healthRead](const QJsonObject &) { healthRead = true; });
+        QObject::connect(&client, &AgentRuntimeClient::runtimeDegradationsRead,
+                         [&degradationsRead](const QString &, const QJsonObject &) {
+            degradationsRead = true;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                         [&failedRequests](const QString &, const QString &,
+                                           const QString &, int) {
+            ++failedRequests;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() {
+                return initialized && healthRead && degradationsRead;
+            }), "wrong/null/retired IDs consumed the live pending response")) {
+            return false;
+        }
+        if (!expect(client.isReady() && !disconnected && failedRequests == 0,
+                    "unmatched response IDs changed negotiated client state")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+    return true;
+}
+
+bool runTransportHugeErrorCodeCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "could not create huge error-code directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("transport-huge-error-code"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool disconnected = false;
+    QString exactRequestId;
+    QString exactCode;
+    QString compatibilityRequestId;
+    QString compatibilityMessage;
+    int compatibilityCode = -1;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailedExact,
+                         [&exactRequestId, &exactCode](
+                             const QString &requestId, const QString &method,
+                             const QString &, const QString &canonicalCode) {
+            if (method == QStringLiteral("runtime/health")) {
+                exactRequestId = requestId;
+                exactCode = canonicalCode;
+            }
+        });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                         [&compatibilityRequestId, &compatibilityMessage,
+                          &compatibilityCode](const QString &requestId,
+                                              const QString &method,
+                                              const QString &message, int code) {
+            if (method == QStringLiteral("runtime/health")) {
+                compatibilityRequestId = requestId;
+                compatibilityMessage = message;
+                compatibilityCode = code;
+            }
+        });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() {
+                return initialized && !exactRequestId.isEmpty();
+            }), "huge mathematical error code was not surfaced")) {
+            return false;
+        }
+        const bool hugeCodeValid = compatibilityRequestId.isEmpty()
+            && compatibilityMessage.isEmpty()
+            && compatibilityCode == -1
+            && exactCode == QStringLiteral("12345678901234567890123456789e1")
+            && client.isReady() && !disconnected;
+        if (!expect(hugeCodeValid,
+                    "huge error code was narrowed, mapped to a compatibility int, or disconnected")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+    return true;
+}
+
+bool runTransportConcurrentReverseCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "could not create Transport reverse-order directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("transport-concurrent-reverse"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    int healthReads = 0;
+    QString degradationCreatedId;
+    QString degradationReadId;
+    QString failedId;
+    QString failedMethod;
+    int failedCode = 0;
+    bool disconnected = false;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::runtimeHealthRead,
+                         [&healthReads](const QJsonObject &) { ++healthReads; });
+        QObject::connect(&client,
+                         &AgentRuntimeClient::runtimeDegradationRequestCreated,
+                         [&degradationCreatedId](const QString &requestId) {
+            degradationCreatedId = requestId;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::runtimeDegradationsRead,
+                         [&degradationReadId](const QString &requestId,
+                                              const QJsonObject &) {
+            degradationReadId = requestId;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                         [&failedId, &failedMethod, &failedCode](
+                             const QString &requestId, const QString &method,
+                             const QString &, int code) {
+            if (method == QStringLiteral("runtime/health")) {
+                failedId = requestId;
+                failedMethod = method;
+                failedCode = code;
+            }
+        });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() {
+                return initialized && healthReads == 1
+                    && !degradationReadId.isEmpty();
+            }), "reverse-order different-method startup responses were not correlated")) {
+            return false;
+        }
+        if (!expect(degradationReadId == degradationCreatedId,
+                    "reverse-order degradation response lost its exact request ID")) {
+            return false;
+        }
+        const QString firstHealthId = client.runtimeHealth();
+        const QString secondHealthId = client.runtimeHealth();
+        if (!expect(!firstHealthId.isEmpty() && !secondHealthId.isEmpty()
+                        && firstHealthId != secondHealthId,
+                    "same-method concurrent requests were not both admitted")) {
+            return false;
+        }
+        if (!expect(waitUntil([&]() {
+                return healthReads == 2 && failedId == secondHealthId;
+            }), "reverse-order same-method success/error responses crossed pending contexts")) {
+            return false;
+        }
+        if (!expect(failedMethod == QStringLiteral("runtime/health")
+                        && failedCode == -32060 && client.isReady() && !disconnected,
+                    "same-method reverse-order completion changed transport state")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+    return true;
+}
+
+bool runTransportOldGenerationCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "could not create old-generation Transport directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("transport-old-generation"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    int initializedCount = 0;
+    int healthReads = 0;
+    int reconnectHandshakes = 0;
+    int processFailures = 0;
+    quint64 firstGeneration = 0;
+    AgentRuntimeClient client(nullptr, 5000, 15000, {0, 10, 20});
+    QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                     [&initializedCount, &firstGeneration, &client](
+                         const QJsonObject &) {
+        ++initializedCount;
+        if (firstGeneration == 0) firstGeneration = client.processGeneration();
+    });
+    QObject::connect(&client, &AgentRuntimeClient::runtimeHealthRead,
+                     [&healthReads](const QJsonObject &) { ++healthReads; });
+    QObject::connect(&client, &AgentRuntimeClient::requestFailed,
+                     [&processFailures](const QString &, const QString &method,
+                                        const QString &, int) {
+        if (method == QStringLiteral("runtime/health")) ++processFailures;
+    });
+    QObject::connect(&client, &AgentRuntimeClient::reconnectHandshakeReady,
+                     [&client, &reconnectHandshakes](quint64 generation,
+                                                     const QJsonObject &) {
+        ++reconnectHandshakes;
+        client.completeReconnectRecovery(
+            generation, true, QStringLiteral("old-generation response test"));
+    });
+    client.start();
+    if (!expect(waitUntil([&]() {
+            return initializedCount == 2 && reconnectHandshakes == 1
+                && healthReads == 1 && client.isReady()
+                && client.processGeneration() > firstGeneration;
+        }, 5000), "old-generation response prevented current request completion")) {
+        return false;
+    }
+    const QList<QJsonObject> healthRequests = logMessagesForMethod(
+        logPath, QStringLiteral("runtime/health"));
+    const bool valid = expect(processFailures == 1,
+                              "old generation did not fail exactly its owned pending request")
+        && expect(healthReads == 1,
+                  "old-generation response was projected as a current health result")
+        && expect(healthRequests.size() == 2,
+                  "old-generation test did not issue one request per process generation");
+    client.stop();
+    waitUntil([&]() { return !client.isControlAvailable(); });
+    return valid;
+}
+
+QString subscriptionMethodForStage(const QString &stage)
+{
+    if (stage == QStringLiteral("subscribe")) return QStringLiteral("timeline/subscribe");
+    if (stage == QStringLiteral("sync")) {
+        return QStringLiteral("timeline/subscription-sync");
+    }
+    if (stage == QStringLiteral("snapshot")) {
+        return QStringLiteral("timeline/subscription-snapshot");
+    }
+    if (stage == QStringLiteral("activate")) {
+        return QStringLiteral("timeline/subscription-activate");
+    }
+    return {};
+}
+
+bool runTransportSubscriptionErrorCase(const QString &stage,
+                                       const QString &variant)
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "could not create subscription typed-error directory")) {
+        return false;
+    }
+    const QString testCase = QStringLiteral("transport-subscription-error-%1-%2")
+        .arg(stage, variant);
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool disconnected = false;
+    int typedFailures = 0;
+    QString typedFailureId;
+    QJsonObject typedFailure;
+    QString requestId;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::timelineSubscriptionFailed,
+                         [&typedFailures, &typedFailureId, &typedFailure](
+                             const QString &failedId, const QJsonObject &failure) {
+            ++typedFailures;
+            typedFailureId = failedId;
+            typedFailure = failure;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "subscription typed-error handshake timed out")) {
+            return false;
+        }
+        const quint64 generation = client.processGeneration();
+        const QJsonObject zeroAnchor = timelineAnchor(
+            0, QJsonValue(QJsonValue::Null));
+        if (stage == QStringLiteral("subscribe")) {
+            requestId = client.subscribeTimeline(
+                QStringLiteral("session-transport"), generation, 0);
+        } else if (stage == QStringLiteral("sync")) {
+            requestId = client.syncTimelineSubscription(
+                generation, QStringLiteral("session-transport"),
+                QStringLiteral("subscription-transport"), 0, QString(),
+                zeroAnchor, 100);
+        } else if (stage == QStringLiteral("snapshot")) {
+            requestId = client.snapshotTimelineSubscription(
+                generation, QStringLiteral("session-transport"),
+                QStringLiteral("subscription-transport"), zeroAnchor);
+        } else if (stage == QStringLiteral("activate")) {
+            requestId = client.activateTimelineSubscription(
+                generation, QStringLiteral("session-transport"),
+                QStringLiteral("subscription-transport"), QStringLiteral("sync"),
+                zeroAnchor, zeroAnchor);
+        }
+        if (!expect(!requestId.isEmpty(),
+                    "subscription typed-error request was not admitted")) {
+            return false;
+        }
+        if (variant == QStringLiteral("valid")) {
+            if (!expect(waitUntil([&]() { return typedFailures == 1; })
+                            && typedFailureId == requestId
+                            && typedFailure.value(QStringLiteral("stage")).toString()
+                                == subscriptionFailureStage(
+                                    subscriptionMethodForStage(stage))
+                            && client.isReady() && !disconnected,
+                        "valid subscription typed error lost request binding")) {
+                return false;
+            }
+            client.stop();
+            waitUntil([&]() {
+                return logContainsMethod(logPath, QStringLiteral("shutdown"));
+            });
+        } else if (!expect(waitUntil([&]() { return disconnected; })
+                               && typedFailures == 0 && !client.isReady(),
+                           "subscription stage/identity drift did not fail closed")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool runTransportMutationReverseCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "could not create mutation reverse-order directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("transport-mutation-reverse"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    QString listedId;
+    QString consumedId;
+    bool disconnected = false;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client,
+                         &AgentRuntimeClient::mutationAcknowledgementsListed,
+                         [&listedId](const QString &requestId, const QJsonObject &) {
+            listedId = requestId;
+        });
+        QObject::connect(&client,
+                         &AgentRuntimeClient::mutationAcknowledgementConsumed,
+                         [&consumedId](const QString &requestId, const QJsonObject &) {
+            consumedId = requestId;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "mutation reverse-order handshake timed out")) {
+            return false;
+        }
+        const QString sessionId = QStringLiteral("session-mutation-transport");
+        const QString listId = client.listMutationAcknowledgements(sessionId);
+        const QString consumeId = client.consumeMutationAcknowledgement(
+            sessionId, testMutationOperationIdentity(sessionId), 2,
+            QStringLiteral("accepted"),
+            timelineAnchor(1, timelineEventId(QLatin1Char('a'))));
+        if (!expect(!listId.isEmpty() && !consumeId.isEmpty() && listId != consumeId,
+                    "mutation list/consume requests were not concurrently admitted")) {
+            return false;
+        }
+        if (!expect(waitUntil([&]() {
+                return listedId == listId && consumedId == consumeId;
+            }), "reverse-order mutation responses crossed request contexts")) {
+            return false;
+        }
+        if (!expect(client.isReady() && !disconnected,
+                    "valid reverse-order mutation responses closed the transport")) {
+            return false;
+        }
+        client.stop();
+        waitUntil([&]() { return logContainsMethod(logPath, QStringLiteral("shutdown")); });
+    }
+    return true;
+}
+
+bool runTransportMutationDriftCase(bool consume)
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "could not create mutation echo-drift directory")) {
+        return false;
+    }
+    const QString testCase = consume
+        ? QStringLiteral("transport-mutation-consume-drift")
+        : QStringLiteral("transport-mutation-list-drift");
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool disconnected = false;
+    int acceptedSignals = 0;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        QObject::connect(&client,
+                         &AgentRuntimeClient::mutationAcknowledgementsListed,
+                         [&acceptedSignals](const QString &, const QJsonObject &) {
+            ++acceptedSignals;
+        });
+        QObject::connect(&client,
+                         &AgentRuntimeClient::mutationAcknowledgementConsumed,
+                         [&acceptedSignals](const QString &, const QJsonObject &) {
+            ++acceptedSignals;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "mutation echo-drift handshake timed out")) {
+            return false;
+        }
+        const QString sessionId = QStringLiteral("session-mutation-transport");
+        const QString requestId = consume
+            ? client.consumeMutationAcknowledgement(
+                  sessionId, testMutationOperationIdentity(sessionId), 2,
+                  QStringLiteral("accepted"),
+                  timelineAnchor(1, timelineEventId(QLatin1Char('a'))))
+            : client.listMutationAcknowledgements(sessionId);
+        if (!expect(!requestId.isEmpty(),
+                    "mutation echo-drift request was not admitted")) {
+            return false;
+        }
+        if (!expect(waitUntil([&]() { return disconnected; })
+                        && acceptedSignals == 0 && !client.isReady(),
+                    "mutation response echo drift did not fail closed")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool runRawTransportParserRejectionCase(const QString &testCase)
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "could not create raw Transport parser directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", testCase.toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+
+    bool initialized = false;
+    bool disconnected = false;
+    AgentRuntimeClient client;
+    QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                     [&initialized](const QJsonObject &) { initialized = true; });
+    QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                     [&initialized, &disconnected](bool ready, const QString &) {
+        if (initialized && !ready) disconnected = true;
+    });
+    client.start();
+    return expect(waitUntil([&]() { return initialized && disconnected; }, 5000)
+                      && !client.isReady(),
+                  "lossless Transport parser accepted a forbidden raw frame");
 }
 
 bool runOrdinaryEnvelopeCase(const QString &testCase)
@@ -3045,6 +4054,22 @@ int main(int argc, char *argv[])
     ok = runControlledTimelineSubscriptionAbandonCase() && ok;
     ok = runBoundedProcessReconnectCase() && ok;
     ok = runProcessReconnectExhaustionCase() && ok;
+    ok = runTransportCorrelationIdCase() && ok;
+    ok = runTransportHugeErrorCodeCase() && ok;
+    ok = runTransportConcurrentReverseCase() && ok;
+    ok = runTransportOldGenerationCase() && ok;
+    for (const QString &stage : {
+             QStringLiteral("subscribe"), QStringLiteral("sync"),
+             QStringLiteral("snapshot"), QStringLiteral("activate")}) {
+        for (const QString &variant : {
+                 QStringLiteral("valid"), QStringLiteral("stage"),
+                 QStringLiteral("identity")}) {
+            ok = runTransportSubscriptionErrorCase(stage, variant) && ok;
+        }
+    }
+    ok = runTransportMutationReverseCase() && ok;
+    ok = runTransportMutationDriftCase(false) && ok;
+    ok = runTransportMutationDriftCase(true) && ok;
     ok = runEmergencyPolicySwitchCase() && ok;
     ok = runCapabilityGateCase() && ok;
     ok = runTimelineSyncContractCase() && ok;
@@ -3058,6 +4083,12 @@ int main(int argc, char *argv[])
              QStringLiteral("timeline-sync-retention-gap-unnegotiated"), false) && ok;
     ok = runTimelineRetentionGapContractCase(
              QStringLiteral("timeline-sync-retention-gap-unavailable"), true, false) && ok;
+    ok = runTimelineRetentionGapContractCase(
+             QStringLiteral("timeline-sync-retention-gap-code-integer"), true) && ok;
+    ok = runTimelineRetentionGapContractCase(
+             QStringLiteral("timeline-sync-retention-gap-code-decimal"), true) && ok;
+    ok = runTimelineRetentionGapContractCase(
+             QStringLiteral("timeline-sync-retention-gap-code-exponent"), true) && ok;
     ok = runTimelineSyncDisconnectCleanupCase() && ok;
     ok = runValidTimelineNotificationCase() && ok;
     ok = runLargeGenericTimelineNotificationCase() && ok;
@@ -3068,7 +4099,6 @@ int main(int argc, char *argv[])
     ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-wrong-jsonrpc")) && ok;
     ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-missing-jsonrpc")) && ok;
     ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-wrong-id-type")) && ok;
-    ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-unknown-id")) && ok;
     ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-result-and-error")) && ok;
     ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-method-and-result")) && ok;
     ok = runOrdinaryEnvelopeCase(QStringLiteral("ordinary-nonobject-result")) && ok;
@@ -3099,6 +4129,16 @@ int main(int argc, char *argv[])
              QStringLiteral("notification-nonascii-event-identity")) && ok;
     ok = runOrdinaryEnvelopeCase(
              QStringLiteral("notification-removed-persistence-terminal")) && ok;
+    for (const QString &testCase : {
+             QStringLiteral("transport-raw-leading-bom"),
+             QStringLiteral("transport-raw-invalid-utf8"),
+             QStringLiteral("transport-raw-duplicate-decoded-key"),
+             QStringLiteral("transport-raw-lone-surrogate"),
+             QStringLiteral("transport-raw-depth-129"),
+             QStringLiteral("transport-raw-node-65537"),
+             QStringLiteral("transport-unmatched-malformed-typed-error")}) {
+        ok = runRawTransportParserRejectionCase(testCase) && ok;
+    }
     qunsetenv("AEGISY_AGENTD_PATH");
     qunsetenv("AEGISY_FAKE_RUNTIME_CASE");
     qunsetenv("AEGISY_FAKE_RUNTIME_LOG");

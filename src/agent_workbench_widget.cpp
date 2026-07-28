@@ -1469,10 +1469,45 @@ QString safeProviderLifecycleFailure(const QString &method, const QString &messa
         .arg(operation).arg(code);
 }
 
+QString safeProviderLifecycleFailure(const QString &method, const QString &message,
+                                    const QString &canonicalCode)
+{
+    const bool providerFailure = canonicalCode == QStringLiteral("-32141")
+        || canonicalCode == QStringLiteral("-32143")
+        || canonicalCode == QStringLiteral("-32145")
+        || message.contains(QStringLiteral("provider"), Qt::CaseInsensitive)
+        || message.contains(QStringLiteral("codex"), Qt::CaseInsensitive)
+        || message.contains(QStringLiteral("model"), Qt::CaseInsensitive);
+    if (!providerFailure) return message;
+    const QString operation = method == QStringLiteral("session/archive")
+        ? QStringLiteral("归档会话")
+        : method == QStringLiteral("session/unarchive")
+            ? QStringLiteral("恢复会话")
+            : method == QStringLiteral("session/fork")
+                ? QStringLiteral("创建会话分支")
+                : QStringLiteral("恢复会话");
+    return QStringLiteral("%1失败（错误码 %2；provider 详细信息已隐藏）")
+        .arg(operation, canonicalCode);
+}
+
 QString safeRuntimeRestartFailure(int code)
 {
     return QStringLiteral("Codex 重连失败（错误码 %1；运行时详细信息已隐藏，请检查安装与配置后重试）")
         .arg(code);
+}
+
+QString safeRuntimeRestartFailure(const QString &canonicalCode)
+{
+    return QStringLiteral("Codex 重连失败（错误码 %1；运行时详细信息已隐藏，请检查安装与配置后重试）")
+        .arg(canonicalCode);
+}
+
+bool isRepresentableIntErrorCode(const QString &canonicalCode)
+{
+    bool ok = false;
+    const qlonglong value = canonicalCode.toLongLong(&ok);
+    return ok && value >= std::numeric_limits<int>::min()
+        && value <= std::numeric_limits<int>::max();
 }
 
 QString boundedContextText(const QString &text, bool *truncated = nullptr)
@@ -2229,9 +2264,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
         updateTerminalControls();
         updateRecoveryUi();
     });
-    connect(m_runtime, &AgentRuntimeClient::requestFailed,
+    connect(m_runtime, &AgentRuntimeClient::requestFailedExact,
             this, [this](const QString &requestId, const QString &method,
-                         const QString &message, int code) {
+                         const QString &message, const QString &canonicalCode) {
         if (method == QStringLiteral("session/mutation-acknowledgements")) {
             const DurableMutationListRequest request =
                 m_mutationListRequests.take(requestId);
@@ -2260,7 +2295,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
             } else {
                 freezeSessionForMutationReconciliation(
                     request.sessionId,
-                    QStringLiteral("操作确认消费连续失败（错误码 %1）").arg(code));
+                    QStringLiteral("操作确认消费连续失败（错误码 %1）").arg(canonicalCode));
                 if (request.reconnectRecovery) {
                     finishReconnectMutationRecovery(request.sessionId);
                 }
@@ -2293,7 +2328,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
                 if (sessionId == currentTimelineSessionId()) {
                     addNotice(QStringLiteral(
                         "Timeline 订阅恢复失败（错误码 %1），输入已保留并等待新连接恢复。")
-                        .arg(code), true);
+                        .arg(canonicalCode), true);
                 }
                 return;
             }
@@ -2312,7 +2347,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
                 finishRuntimeReconnectTimeline(sessionId);
                 if (sessionId == currentTimelineSessionId()) {
                     addNotice(QStringLiteral("时间线同步失败（错误码 %1），当前会话保持冻结。")
-                                  .arg(code), true);
+                                  .arg(canonicalCode), true);
                 }
                 return;
             }
@@ -2328,7 +2363,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
                 finishRuntimeReconnectTimeline(sessionId);
                 if (sessionId == currentTimelineSessionId()) {
                     addNotice(QStringLiteral("时间线快照恢复失败（错误码 %1），当前会话保持冻结。")
-                                  .arg(code), true);
+                                  .arg(canonicalCode), true);
                 }
                 return;
             }
@@ -2363,7 +2398,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
             m_compactionOperation.clear();
             m_compactionSessionId.clear();
             addNotice(QStringLiteral("压缩审查操作失败（错误码 %1）；原始会话历史未改变。")
-                          .arg(code), true);
+                          .arg(canonicalCode), true);
             return;
         }
         if (method == QStringLiteral("session/background-notifications")) {
@@ -2373,7 +2408,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
                 m_backgroundNotificationMoreButton->setEnabled(
                     !m_backgroundNotificationCursor.isEmpty());
             }
-            addNotice(QStringLiteral("后台通知记录读取失败（错误码 %1）。").arg(code), true);
+            addNotice(QStringLiteral("后台通知记录读取失败（错误码 %1）。")
+                          .arg(canonicalCode), true);
             return;
         }
         if (method == QStringLiteral("session/background-recovery")) {
@@ -2383,13 +2419,14 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
                 m_backgroundRecoveryMoreButton->setEnabled(
                     !m_backgroundRecoveryCursor.isEmpty());
             }
-            addNotice(QStringLiteral("后台恢复状态读取失败（错误码 %1）。").arg(code), true);
+            addNotice(QStringLiteral("后台恢复状态读取失败（错误码 %1）。")
+                          .arg(canonicalCode), true);
             return;
         }
         if (method != QStringLiteral("runtime/restart")) return;
         m_runtimeRestartRequired = true;
         if (m_runtimeRestartButton) m_runtimeRestartButton->setText(QStringLiteral("重试 Codex"));
-        m_runtimeStatus->setToolTip(safeRuntimeRestartFailure(code));
+        m_runtimeStatus->setToolTip(safeRuntimeRestartFailure(canonicalCode));
         updateRecoveryUi();
     });
     connect(m_runtime, &AgentRuntimeClient::timelineRetentionGap,
@@ -4215,9 +4252,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
             m_workspaceWatchTimer->start();
         }
     });
-    connect(m_runtime, &AgentRuntimeClient::requestFailed,
+    connect(m_runtime, &AgentRuntimeClient::requestFailedExact,
             this, [this](const QString &requestId, const QString &method,
-                         const QString &message, int code) {
+                         const QString &message, const QString &canonicalCode) {
         if (method == QStringLiteral("runtime/degradations")
                 && (m_runtimeDegradationState != RuntimeDegradationState::Pending
                     || requestId.isEmpty()
@@ -4269,7 +4306,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
             m_pinnedContextMutationRequestId.clear();
             m_pendingPinnedIncludeId.clear();
             addNotice(QStringLiteral("更新固定上下文失败：%1").arg(message), true);
-            if (code == -32041) requestPinnedContext();
+            if (canonicalCode == QStringLiteral("-32041")) requestPinnedContext();
             rebuildContextPanel();
             updateGitPinControls();
         } else if (method == QStringLiteral("workspace/read")
@@ -4307,12 +4344,14 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
                    && (requestId.isEmpty() || requestId == m_sessionResumeRequestId)) {
             m_sessionResumeRequestId.clear();
             addNotice(QStringLiteral("恢复会话失败：%1")
-                          .arg(safeProviderLifecycleFailure(method, message, code)), true);
+                          .arg(safeProviderLifecycleFailure(method, message,
+                                                             canonicalCode)), true);
         } else if (method == QStringLiteral("session/fork")
                    && (requestId.isEmpty() || requestId == m_sessionForkRequestId)) {
             m_sessionForkRequestId.clear();
             addNotice(QStringLiteral("创建会话分支失败：%1")
-                          .arg(safeProviderLifecycleFailure(method, message, code)), true);
+                          .arg(safeProviderLifecycleFailure(method, message,
+                                                             canonicalCode)), true);
         } else if ((method == QStringLiteral("project/root-add")
                     || method == QStringLiteral("project/root-remove"))
                    && requestId == m_projectRootMutationRequestId) {
@@ -4328,7 +4367,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
                    && (requestId.isEmpty() || requestId == m_sessionMutationRequestId)) {
             m_sessionMutationRequestId.clear();
             addNotice(QStringLiteral("会话操作失败：%1")
-                          .arg(safeProviderLifecycleFailure(method, message, code)), true);
+                          .arg(safeProviderLifecycleFailure(method, message,
+                                                             canonicalCode)), true);
         } else if ((method == QStringLiteral("session/delete/preview")
                     || method == QStringLiteral("session/delete/schedule")
                     || method == QStringLiteral("session/delete/undo"))
@@ -4343,7 +4383,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
             m_portableSessionPackage = {};
             m_portableSessionPath.clear();
             if (m_importSessionButton) m_importSessionButton->setEnabled(true);
-            addNotice(QStringLiteral("会话导入/导出失败（%1）：%2").arg(code).arg(message), true);
+            addNotice(QStringLiteral("会话导入/导出失败（%1）：%2")
+                          .arg(canonicalCode).arg(message), true);
         } else if ((method == QStringLiteral("retention/policy/read")
                     || method == QStringLiteral("retention/policy/set")
                     || method == QStringLiteral("retention/policy/remove"))
@@ -4443,7 +4484,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
                             m_itemProposalStatusLabels.value(request.itemKey, nullptr)) {
                         status->setText(request.generation
                                 == m_workspaceEditProposalReferenceGeneration
-                            ? QStringLiteral("引用读取失败（错误码 %1）· 重试").arg(code)
+                            ? QStringLiteral("引用读取失败（错误码 %1）· 重试")
+                                  .arg(canonicalCode)
                             : QStringLiteral("引用请求已过期 · 重试"));
                     }
                     if (request.generation == m_workspaceEditProposalReferenceGeneration
@@ -4478,7 +4520,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
                     m_workspaceEditMoreButton->setEnabled(false);
                     m_workspaceEditSummary->setText(
                         QStringLiteral("持久化变更提案重新验证失败（错误码 %1）")
-                            .arg(code));
+                            .arg(canonicalCode));
                     m_workspaceEditSummary->setStyleSheet(QStringLiteral(
                         "color:#B42318; font-size:11px; font-weight:600;"));
                 }
@@ -4503,7 +4545,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
                 if (m_editorRestoreRequests.isEmpty()) restoreEditorGroups();
                 return;
             }
-            if (!path.isEmpty() && (code == -32033 || code == -32034)) {
+            if (!path.isEmpty() && (canonicalCode == QStringLiteral("-32033")
+                                    || canonicalCode == QStringLiteral("-32034"))) {
                 const QString metadataRequest = m_runtime->workspaceMetadata(
                     m_projectId, path, m_workspaceRootId);
                 if (!metadataRequest.isEmpty()) {
@@ -4522,7 +4565,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
             if (!path.isEmpty()) showEditorFallback(path, {}, message);
         } else if (method == QStringLiteral("workspace/save-user-text")) {
             if (requestId == m_editorSaveRequestId) m_editorSaveRequestId.clear();
-            if (code == -32042) {
+            if (canonicalCode == QStringLiteral("-32042")) {
                 m_editorConflict = true;
                 m_editorPath->setText(QStringLiteral("%1 · 保存冲突").arg(m_openEditorPath));
                 m_fileStatus->setText(QStringLiteral("文件已被外部修改，重新载入后才能保存"));
@@ -4641,9 +4684,9 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
                 || method == QStringLiteral("session/archive")
                 || method == QStringLiteral("session/unarchive");
             addNotice(method == QStringLiteral("runtime/restart")
-                          ? safeRuntimeRestartFailure(code)
+                          ? safeRuntimeRestartFailure(canonicalCode)
                           : providerLifecycleMethod
-                              ? safeProviderLifecycleFailure(method, message, code)
+                              ? safeProviderLifecycleFailure(method, message, canonicalCode)
                               : message,
                       true);
         }

@@ -267,11 +267,11 @@ local implementation fault: no peer response or request-ID claim occurs, no Runt
 or Store effect is allowed, and a mutex-backed fault gate linearizes the failure
 against active and queued dispatch.
 
-Migration of the production Qt wire consumer and clean Windows Unicode-checkout
-execution evidence are still required. Qt must use the generated lossless parser,
+The production Qt wire consumer now uses the generated lossless parser,
 method/typed-error metadata, and indivisible pending response context before
 QJsonObject projection; pre-validating and then reparsing the same bytes through
-`QJsonDocument` is not equivalent. A future AAP `0.2` may deliberately narrow
+`QJsonDocument` is not equivalent. Clean Windows Unicode-checkout execution
+evidence remains required before `3.10` can be checked. A future AAP `0.2` may deliberately narrow
 generic integers and remap current `-321xx` application errors outside JSON-RPC's
 reserved range, but that would be a reviewed versioned contract change rather than
 a silent `0.1` generator behavior.

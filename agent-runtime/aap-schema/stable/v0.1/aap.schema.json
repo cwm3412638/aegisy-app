@@ -879,7 +879,7 @@
         },
         "version": {
           "type": "string",
-          "pattern": "^[!-~]+$",
+          "pattern": "^[!-~](?:[ -~]*[!-~])?$",
           "minLength": 1,
           "maxLength": 64
         }

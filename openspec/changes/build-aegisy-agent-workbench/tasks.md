@@ -203,11 +203,11 @@
     enter a generic fallback. `AegisyAapTransport` compiles the generated/runtime
     implementation once with warnings denied and links the production application
     plus Qt consumers and focused tests to that single library.
-  - Keep `3.10` unchecked: the production Qt consumer still uses its reviewed
-    hand-written/QJsonDocument ingress and pending-response paths, and clean Windows
-    Unicode-checkout execution is absent. The Rust migration grants no capability,
-    permission, Approval, mutation, execution, experimental, remote, or Windows
-    release authority.
+  - Keep `3.10` unchecked: the production Qt consumer now uses the generated
+    lossless ingress, parsed-message dispatch, indivisible pending context, and
+    safe projection; clean Windows Unicode-checkout execution is absent. The
+    migration grants no capability, permission, Approval, mutation, execution,
+    experimental, remote, or Windows release authority.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.
   - The schema-package gate also compiles every registered `core.schema.json`

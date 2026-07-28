@@ -3,6 +3,7 @@
 #include "../../generated/cpp/aap_transport_types_generated.h"
 
 #include <QByteArray>
+#include <QJsonValue>
 #include <QString>
 
 #include <memory>
@@ -12,9 +13,26 @@ namespace aegisy::aap::transport_runtime {
 inline constexpr qsizetype kMaxTransportJsonBytes = 4 * 1024 * 1024;
 inline constexpr qsizetype kMaxTransportJsonDepth = 128;
 inline constexpr qsizetype kMaxTransportJsonNodes = 65'536;
+inline constexpr qint64 kMaxTransportJsonSafeInteger = 9'007'199'254'740'991LL;
+inline constexpr qint64 kMinTransportJsonSafeInteger = -kMaxTransportJsonSafeInteger;
 
 using transport_generated::TransportJsonValue;
+using transport_generated::TransportJsonNumber;
 using transport_generated::TransportParseError;
+
+enum class TransportIntegerConversion {
+    Ok,
+    NotInteger,
+    OutOfRange,
+    InvalidValue,
+};
+
+enum class TransportProjectionError {
+    None,
+    InvalidValue,
+    NumberNotInteger,
+    NumberOutOfSafeRange,
+};
 
 bool parseTransportJsonRaw(const QByteArray &raw,
                            TransportJsonValue *output,
@@ -24,6 +42,19 @@ bool parseTransportJsonRawDetailed(const QByteArray &raw,
                                    TransportParseError *error = nullptr);
 
 QByteArray canonicalTransportJson(const TransportJsonValue &value);
+
+bool isTransportJsonMathematicalInteger(const TransportJsonNumber &number);
+bool transportJsonIntegerEqualsQint64(const TransportJsonNumber &number,
+                                      qint64 expected);
+TransportIntegerConversion transportJsonIntegerToQint64(
+    const TransportJsonNumber &number,
+    qint64 *output);
+// Projects validated generic payloads only. JSON-RPC error.code requires exact
+// TransportJsonNumber handling and must not pass through this JSON-safe boundary.
+bool projectJsonSafeTransportValue(
+    const TransportJsonValue &value,
+    QJsonValue *output,
+    TransportProjectionError *error = nullptr);
 
 class TransportSchemaRuntime final {
 public:

@@ -1,5 +1,6 @@
 #include "agent_runtime_client.h"
 #include "artifact_manifest.h"
+#include "aap_transport_runtime.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -18,16 +19,15 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <optional>
+#include <utility>
 
 namespace {
 constexpr int kStartupTimeoutMs = 60000;
 constexpr int kMaximumFrameBytes = 4 * 1024 * 1024;
 constexpr int kMaximumIdentityBytes = 64;
-constexpr int kMaximumMethodBytes = 128;
-constexpr int kMaximumRequestIdBytes = 128;
 constexpr int kMaximumCapabilities = 128;
 constexpr int kMaximumCapabilityBytes = 128;
-constexpr int kMaximumErrorMessageBytes = 2048;
 constexpr int kMaximumRetiredResponseIds = 1024;
 constexpr int kMaximumReconnectAttempts = 3;
 constexpr int kMaximumReconnectDelayMs = 30000;
@@ -39,6 +39,46 @@ constexpr int kMaximumTimelineDataDepth = 16;
 constexpr qsizetype kMaximumTimelineDataNodes = 4096;
 constexpr qsizetype kMaximumTimelineDataObjectProperties = 128;
 constexpr qsizetype kMaximumTimelineDataArrayItems = 4096;
+
+namespace transport_generated = aegisy::aap::transport_generated;
+namespace transport_runtime = aegisy::aap::transport_runtime;
+using TransportJsonObject = transport_generated::TransportJsonValue::Object;
+
+const TransportJsonObject *transportObject(
+    const transport_generated::TransportJsonValue &value)
+{
+    return std::get_if<TransportJsonObject>(&value.value);
+}
+
+const transport_generated::TransportJsonValue *transportField(
+    const TransportJsonObject &object, const QString &name)
+{
+    const auto iterator = object.constFind(name);
+    return iterator == object.constEnd() ? nullptr : &iterator.value();
+}
+
+const QString *transportStringField(const TransportJsonObject &object,
+                                    const QString &name)
+{
+    const auto *value = transportField(object, name);
+    return value ? std::get_if<QString>(&value->value) : nullptr;
+}
+
+const transport_generated::TransportJsonNumber *transportNumberField(
+    const TransportJsonObject &object, const QString &name)
+{
+    const auto *value = transportField(object, name);
+    return value
+        ? std::get_if<transport_generated::TransportJsonNumber>(&value->value)
+        : nullptr;
+}
+
+bool projectTransportValue(const transport_generated::TransportJsonValue &value,
+                           QJsonValue *output)
+{
+    transport_runtime::TransportProjectionError ignored;
+    return transport_runtime::projectJsonSafeTransportValue(value, output, &ignored);
+}
 
 // Keep the range explicit so a later compatible AAP revision changes one reviewed
 // boundary instead of weakening response validation throughout the client.
@@ -147,49 +187,6 @@ bool hasExactKeys(const QJsonObject &object, const QStringList &keys)
     const QStringList actualKeys = object.keys();
     for (const QString &key : actualKeys) actual.insert(key);
     return actual == expected;
-}
-
-bool isCanonicalRequestId(const QJsonValue &value)
-{
-    if (!value.isString()) return false;
-    static const QRegularExpression pattern(QStringLiteral("^[1-9][0-9]*$"));
-    const QString id = value.toString();
-    return id.toUtf8().size() <= kMaximumRequestIdBytes
-        && pattern.match(id).hasMatch();
-}
-
-bool isValidErrorObject(const QJsonValue &value)
-{
-    if (!value.isObject()) return false;
-    const QJsonObject error = value.toObject();
-    const bool hasData = error.contains(QStringLiteral("data"));
-    if (!hasExactKeys(error, hasData
-            ? QStringList{QStringLiteral("code"), QStringLiteral("message"),
-                          QStringLiteral("data")}
-            : QStringList{QStringLiteral("code"), QStringLiteral("message")})) {
-        return false;
-    }
-    const QJsonValue code = error.value(QStringLiteral("code"));
-    const QJsonValue message = error.value(QStringLiteral("message"));
-    if (!code.isDouble() || code.toDouble() != std::floor(code.toDouble())
-        || code.toDouble() < std::numeric_limits<int>::min()
-        || code.toDouble() > std::numeric_limits<int>::max()
-        || !message.isString()
-        || message.toString().isEmpty()
-        || message.toString().toUtf8().size() > kMaximumErrorMessageBytes) {
-        return false;
-    }
-    return !hasData || error.value(QStringLiteral("data")).isObject();
-}
-
-bool isValidMethodName(const QJsonValue &value)
-{
-    if (!value.isString()) return false;
-    static const QRegularExpression pattern(
-        QStringLiteral("^[a-z][a-z0-9.-]*(?:/[a-z][a-z0-9.-]*)*$"));
-    const QString method = value.toString();
-    return method.toUtf8().size() <= kMaximumMethodBytes
-        && pattern.match(method).hasMatch();
 }
 
 const QStringList &declaredCapabilities()
@@ -2965,13 +2962,7 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
     if (++m_processGeneration == 0) ++m_processGeneration;
     m_discardProcessOutput = false;
     m_stdoutBuffer.clear();
-    m_pendingMethods.clear();
-    m_pendingGenerations.clear();
-    m_pendingTimelineSyncRequests.clear();
-    m_pendingTimelineSubscriptionRequests.clear();
-    m_pendingTurnRequests.clear();
-    m_pendingMutationListRequests.clear();
-    m_pendingMutationConsumeRequests.clear();
+    m_pendingRequests.clear();
     const QString connectingDetail = reconnectAttempt
         ? QStringLiteral("正在执行第 %1/%2 次运行时重连")
               .arg(m_reconnectAttempt)
@@ -3483,16 +3474,12 @@ QString AgentRuntimeClient::startTurn(const QString &sessionId, const QString &i
         params.insert(QStringLiteral("pinned_context_ids"),
                       QJsonArray::fromStringList(pinnedContextIds));
     }
-    const QString requestId = sendRequest(QStringLiteral("turn/start"), params);
-    if (!requestId.isEmpty()) {
-        m_pendingTurnRequests.insert(requestId, {
-            {QStringLiteral("request_id"), requestId},
-            {QStringLiteral("session_id"), sessionId},
-            {QStringLiteral("idempotency_key"), idempotencyKey},
-            {QStringLiteral("generation"), static_cast<double>(m_processGeneration)},
-        });
-    }
-    return requestId;
+    return sendRequest(QStringLiteral("turn/start"), params,
+                       TurnStartValidation{
+                           sessionId,
+                           idempotencyKey,
+                           m_processGeneration,
+                       });
 }
 
 QString AgentRuntimeClient::inspectTurnContext(const QString &sessionId,
@@ -3631,7 +3618,7 @@ QString AgentRuntimeClient::syncTimeline(const QString &sessionId,
         || (afterSequence == 0 ? !afterEventId.isEmpty()
                                : !isValidTimelineEventId(afterEventId))
         || !validWatermark) {
-        emit requestFailed({}, method, QStringLiteral("Timeline 同步游标无效"), -32602);
+        reportRequestFailure({}, method, QStringLiteral("Timeline 同步游标无效"), -32602);
         return {};
     }
     const QJsonObject params{
@@ -3641,9 +3628,7 @@ QString AgentRuntimeClient::syncTimeline(const QString &sessionId,
              ? QJsonValue(QJsonValue::Null) : QJsonValue(watermark)},
         {QStringLiteral("limit"), qBound(1, limit, 200)},
     };
-    const QString requestId = sendRequest(method, params);
-    if (!requestId.isEmpty()) m_pendingTimelineSyncRequests.insert(requestId, params);
-    return requestId;
+    return sendRequest(method, params, TimelineSyncValidation{params});
 }
 
 QString AgentRuntimeClient::timelineSnapshot(const QString &sessionId,
@@ -3668,7 +3653,7 @@ QString AgentRuntimeClient::timelineSnapshot(const QString &sessionId,
     if (sessionId.isEmpty() || !isBoundedTimelineIdentity(sessionId)
         || (!validInitial && !validContinuation)
         || limit < 1 || limit > 200) {
-        emit requestFailed({}, method, QStringLiteral("Timeline 快照请求无效"), -32602);
+        reportRequestFailure({}, method, QStringLiteral("Timeline 快照请求无效"), -32602);
         return {};
     }
 
@@ -3705,7 +3690,7 @@ QString AgentRuntimeClient::subscribeTimeline(const QString &sessionId,
         || (cursorSequence == 0 ? !cursorEventId.isEmpty()
                                 : !isValidTimelineEventId(cursorEventId))
         || (!watermark.isEmpty() && !isValidTimelineAnchor(watermark))) {
-        emit requestFailed({}, method, QStringLiteral("Timeline 订阅请求无效"), -32602);
+        reportRequestFailure({}, method, QStringLiteral("Timeline 订阅请求无效"), -32602);
         return {};
     }
     if (++m_nextTimelineSubscriptionId == 0) ++m_nextTimelineSubscriptionId;
@@ -3723,14 +3708,12 @@ QString AgentRuntimeClient::subscribeTimeline(const QString &sessionId,
              ? QJsonValue(QJsonValue::Null) : QJsonValue(watermark)},
     };
     if (timelineSubscriptionRequestIdentity(QStringLiteral("subscribe"), params).isEmpty()) {
-        emit requestFailed({}, method, QStringLiteral("Timeline 订阅请求无效"), -32602);
+        reportRequestFailure({}, method, QStringLiteral("Timeline 订阅请求无效"), -32602);
         return {};
     }
-    const QString requestId = sendRequest(method, params);
+    const QString requestId = sendRequest(
+        method, params, TimelineSubscriptionValidation{params, {}});
     if (requestId.isEmpty()) return {};
-    m_pendingTimelineSubscriptionRequests.insert(requestId, {
-        {QStringLiteral("request"), params},
-    });
     if (subscriptionId) *subscriptionId = createdSubscriptionId;
     return requestId;
 }
@@ -3757,7 +3740,7 @@ QString AgentRuntimeClient::syncTimelineSubscription(
         || watermark.value(QStringLiteral("sequence")).toDouble()
             < static_cast<double>(afterSequence)
         || limit < 1 || limit > 200) {
-        emit requestFailed({}, method, QStringLiteral("Timeline 订阅同步请求无效"), -32602);
+        reportRequestFailure({}, method, QStringLiteral("Timeline 订阅同步请求无效"), -32602);
         return {};
     }
     const QJsonObject nested{
@@ -3777,16 +3760,11 @@ QString AgentRuntimeClient::syncTimelineSubscription(
     };
     if (timelineSubscriptionRequestIdentity(
             QStringLiteral("subscription-sync"), params).isEmpty()) {
-        emit requestFailed({}, method, QStringLiteral("Timeline 订阅同步请求无效"), -32602);
+        reportRequestFailure({}, method, QStringLiteral("Timeline 订阅同步请求无效"), -32602);
         return {};
     }
-    const QString requestId = sendRequest(method, params);
-    if (!requestId.isEmpty()) {
-        m_pendingTimelineSubscriptionRequests.insert(requestId, {
-            {QStringLiteral("request"), params},
-        });
-    }
-    return requestId;
+    return sendRequest(
+        method, params, TimelineSubscriptionValidation{params, {}});
 }
 
 QString AgentRuntimeClient::snapshotTimelineSubscription(
@@ -3810,7 +3788,7 @@ QString AgentRuntimeClient::snapshotTimelineSubscription(
         || !isBoundedTimelineIdentity(subscriptionId)
         || !isValidTimelineAnchor(subscriptionCursor)
         || (!validInitial && !validContinuation) || limit < 1 || limit > 200) {
-        emit requestFailed({}, method, QStringLiteral("Timeline 订阅快照请求无效"), -32602);
+        reportRequestFailure({}, method, QStringLiteral("Timeline 订阅快照请求无效"), -32602);
         return {};
     }
     const QJsonObject nested{
@@ -3834,17 +3812,14 @@ QString AgentRuntimeClient::snapshotTimelineSubscription(
     };
     if (timelineSubscriptionRequestIdentity(
             QStringLiteral("subscription-snapshot"), params).isEmpty()) {
-        emit requestFailed({}, method, QStringLiteral("Timeline 订阅快照请求无效"), -32602);
+        reportRequestFailure({}, method, QStringLiteral("Timeline 订阅快照请求无效"), -32602);
         return {};
     }
-    const QString requestId = sendRequest(method, params);
-    if (!requestId.isEmpty()) {
-        m_pendingTimelineSubscriptionRequests.insert(requestId, {
-            {QStringLiteral("request"), params},
-            {QStringLiteral("subscription_cursor"), subscriptionCursor},
-        });
-    }
-    return requestId;
+    return sendRequest(method, params,
+                       TimelineSubscriptionValidation{
+                           params,
+                           subscriptionCursor,
+                       });
 }
 
 QString AgentRuntimeClient::activateTimelineSubscription(
@@ -3863,7 +3838,7 @@ QString AgentRuntimeClient::activateTimelineSubscription(
         || !isBoundedTimelineIdentity(sessionId)
         || !isBoundedTimelineIdentity(subscriptionId)
         || !isValidTimelineAnchor(cursor) || cursor != watermark || !sourceValid) {
-        emit requestFailed({}, method, QStringLiteral("Timeline 订阅激活请求无效"), -32602);
+        reportRequestFailure({}, method, QStringLiteral("Timeline 订阅激活请求无效"), -32602);
         return {};
     }
     const QJsonObject params{
@@ -3880,16 +3855,11 @@ QString AgentRuntimeClient::activateTimelineSubscription(
              ? QJsonValue(QJsonValue::Null) : QJsonValue(snapshotIdentity)},
     };
     if (timelineSubscriptionRequestIdentity(QStringLiteral("activate"), params).isEmpty()) {
-        emit requestFailed({}, method, QStringLiteral("Timeline 订阅激活请求无效"), -32602);
+        reportRequestFailure({}, method, QStringLiteral("Timeline 订阅激活请求无效"), -32602);
         return {};
     }
-    const QString requestId = sendRequest(method, params);
-    if (!requestId.isEmpty()) {
-        m_pendingTimelineSubscriptionRequests.insert(requestId, {
-            {QStringLiteral("request"), params},
-        });
-    }
-    return requestId;
+    return sendRequest(
+        method, params, TimelineSubscriptionValidation{params, {}});
 }
 
 QString AgentRuntimeClient::listMutationAcknowledgements(
@@ -3900,8 +3870,8 @@ QString AgentRuntimeClient::listMutationAcknowledgements(
     if (!isBoundedTimelineIdentity(QJsonValue(sessionId))
             || (hasAfter && !isValidDurableMutationCursor(QJsonValue(after)))
             || limit < 1 || limit > 100) {
-        emit requestFailed({}, method,
-                           QStringLiteral("持久化操作确认列表请求无效"), -32602);
+        reportRequestFailure({}, method,
+                             QStringLiteral("持久化操作确认列表请求无效"), -32602);
         return {};
     }
     const QJsonObject params{
@@ -3912,11 +3882,7 @@ QString AgentRuntimeClient::listMutationAcknowledgements(
              ? QJsonValue(after) : QJsonValue(QJsonValue::Null)},
         {QStringLiteral("limit"), limit},
     };
-    const QString requestId = sendRequest(method, params);
-    if (!requestId.isEmpty()) {
-        m_pendingMutationListRequests.insert(requestId, params);
-    }
-    return requestId;
+    return sendRequest(method, params, MutationListValidation{params});
 }
 
 QString AgentRuntimeClient::consumeMutationAcknowledgement(
@@ -3934,8 +3900,8 @@ QString AgentRuntimeClient::consumeMutationAcknowledgement(
             || (target != QStringLiteral("accepted")
                 && target != QStringLiteral("terminal"))
             || !isValidPositiveTimelineAnchor(QJsonValue(confirmedAnchor))) {
-        emit requestFailed({}, method,
-                           QStringLiteral("持久化操作确认消费请求无效"), -32602);
+        reportRequestFailure({}, method,
+                             QStringLiteral("持久化操作确认消费请求无效"), -32602);
         return {};
     }
     const QJsonObject params{
@@ -3948,11 +3914,7 @@ QString AgentRuntimeClient::consumeMutationAcknowledgement(
         {QStringLiteral("target"), target},
         {QStringLiteral("confirmed_anchor"), confirmedAnchor},
     };
-    const QString requestId = sendRequest(method, params);
-    if (!requestId.isEmpty()) {
-        m_pendingMutationConsumeRequests.insert(requestId, params);
-    }
-    return requestId;
+    return sendRequest(method, params, MutationConsumeValidation{params});
 }
 
 QString AgentRuntimeClient::backgroundNotifications(const QString &sessionId,
@@ -4563,43 +4525,62 @@ QString AgentRuntimeClient::locateRuntime() const
     return {};
 }
 
-QString AgentRuntimeClient::sendRequest(const QString &method, const QJsonObject &params)
+QString AgentRuntimeClient::sendRequest(const QString &method, const QJsonObject &params,
+                                        PendingValidation validation)
 {
     if (m_process->state() == QProcess::NotRunning) {
-        emit requestFailed({}, method, QStringLiteral("本地运行时未启动"), -1);
+        reportRequestFailure({}, method, QStringLiteral("本地运行时未启动"), -1);
         return {};
     }
     if (method != QStringLiteral("initialize") && !m_handshakeComplete) {
-        emit requestFailed({}, method, QStringLiteral("本地运行时握手尚未完成"), -32003);
+        reportRequestFailure({}, method, QStringLiteral("本地运行时握手尚未完成"), -32003);
         return {};
     }
     if (m_emergencyDisabled && !emergencyRequestAllowed(method)) {
-        emit requestFailed({}, method,
-                           QStringLiteral("服务器应急策略已暂停新的工作台操作"), -32153);
+        reportRequestFailure({}, method,
+                             QStringLiteral("服务器应急策略已暂停新的工作台操作"), -32153);
         return {};
     }
     if (m_heartbeatNegotiated && !m_heartbeatHealthy
         && !isLivenessControlMethod(method)) {
-        emit requestFailed({}, method, QStringLiteral("本地运行时响应状态未知"), -1);
+        reportRequestFailure({}, method, QStringLiteral("本地运行时响应状态未知"), -1);
         return {};
     }
     if (m_reconnectRecoveryPending && !isReconnectRecoveryMethod(method)) {
-        emit requestFailed({}, method,
-                           QStringLiteral("运行时重连恢复尚未完成"), -32003);
+        reportRequestFailure({}, method,
+                             QStringLiteral("运行时重连恢复尚未完成"), -32003);
         return {};
     }
     if (method != QStringLiteral("initialize")) {
         const QStringList required = requiredCapabilitiesForMethod(method, params);
         for (const QString &capability : required) {
             if (!m_negotiatedStableCapabilities.contains(capability)) {
-                emit requestFailed({}, method,
-                                   QStringLiteral("本地运行时未协商此操作所需能力"),
-                                   -32601);
+                reportRequestFailure({}, method,
+                                     QStringLiteral("本地运行时未协商此操作所需能力"),
+                                     -32601);
                 return {};
             }
         }
     }
     const QString id = QString::number(++m_nextRequestId);
+    PendingRequestContext pending{
+        {id, method, std::nullopt},
+        m_processGeneration,
+        std::move(validation),
+    };
+    if (const auto *subscription = std::get_if<TimelineSubscriptionValidation>(
+            &pending.validation)) {
+        const QString stage = timelineSubscriptionIdentityStageForMethod(method);
+        const QString identity = timelineSubscriptionRequestIdentity(
+            stage, subscription->request);
+        if (stage.isEmpty() || identity.isEmpty()) {
+            reportRequestFailure({}, method,
+                                 QStringLiteral("Timeline 订阅请求身份无效"), -32602);
+            return {};
+        }
+        pending.transport.typed_error_request_identity = identity;
+    }
+    m_pendingRequests.insert(id, pending);
     const int writeError = writeMessage({
         {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
         {QStringLiteral("id"), id},
@@ -4607,11 +4588,11 @@ QString AgentRuntimeClient::sendRequest(const QString &method, const QJsonObject
         {QStringLiteral("params"), params},
     });
     if (writeError != 0) {
+        removePendingRequest(id);
         const QString failureDetail = writeError == -32005
             ? QStringLiteral("请求超过 AAP 帧上限")
             : QStringLiteral("无法写入本地运行时");
-        emit requestFailed(
-            id, method, failureDetail, writeError);
+        reportRequestFailure(id, method, failureDetail, writeError);
         if (writeError == -1) {
             suppressAutomaticReconnect();
             m_discardProcessOutput = true;
@@ -4622,8 +4603,6 @@ QString AgentRuntimeClient::sendRequest(const QString &method, const QJsonObject
         }
         return {};
     }
-    m_pendingMethods.insert(id, method);
-    m_pendingGenerations.insert(id, m_processGeneration);
     return id;
 }
 
@@ -4763,9 +4742,9 @@ void AgentRuntimeClient::processStdout()
             return;
         }
         if (line.trimmed().isEmpty()) continue;
-        QJsonParseError error;
-        const QJsonDocument document = QJsonDocument::fromJson(line, &error);
-        if (error.error != QJsonParseError::NoError || !document.isObject()) {
+        transport_generated::TransportMessage message;
+        transport_generated::TransportDecodeError error;
+        if (!transport_generated::parseTransportMessageRaw(line, &message, &error)) {
             if (!m_handshakeComplete && !m_initializeRequestId.isEmpty()) {
                 rejectInitializeResponse(QStringLiteral("invalid-json"));
             } else {
@@ -4773,102 +4752,67 @@ void AgentRuntimeClient::processStdout()
             }
             return;
         }
-        processMessage(document.object());
+        processMessage(message);
     }
 }
 
-void AgentRuntimeClient::processMessage(const QJsonObject &message)
+void AgentRuntimeClient::processMessage(
+    const transport_generated::TransportMessage &message)
 {
-    if (message.value(QStringLiteral("jsonrpc")).toString() != QStringLiteral("2.0")) {
-        if (!m_handshakeComplete && !m_initializeRequestId.isEmpty()) {
-            rejectInitializeResponse(QStringLiteral("jsonrpc-version"));
-        } else {
-            rejectProtocolMessage(QStringLiteral("jsonrpc-version"));
+    const TransportJsonObject *root = transportObject(message.value);
+    const auto failDispatch = [this](const transport_generated::TransportDispatchError &error,
+                                     const QString &reason) {
+        const bool initializing = !m_handshakeComplete
+            && !m_initializeRequestId.isEmpty();
+        if (error.kind
+            == transport_generated::TransportDispatchErrorKind::ValidatorUnavailable) {
+            emit diagnosticMessage(QStringLiteral("本地 AAP Transport 校验器不可用"));
         }
-        return;
-    }
+        if (initializing) rejectInitializeResponse(reason);
+        else rejectProtocolMessage(reason);
+    };
 
-    const QJsonValue responseId = message.value(QStringLiteral("id"));
-    if (isCanonicalRequestId(responseId)
-        && m_retiredResponseIds.contains(responseId.toString())) {
-        return;
-    }
-
-    if (!m_handshakeComplete && !m_initializeRequestId.isEmpty()) {
-        const QJsonValue idValue = message.value(QStringLiteral("id"));
-        const bool hasResult = message.contains(QStringLiteral("result"));
-        const bool hasError = message.contains(QStringLiteral("error"));
-        if (!isCanonicalRequestId(idValue)
-            || idValue.toString() != m_initializeRequestId
-            || m_initializeGeneration != m_processGeneration
-            || m_pendingGenerations.value(m_initializeRequestId)
-                != m_processGeneration) {
-            rejectInitializeResponse(QStringLiteral("response-id"));
+    if (root && root->contains(QStringLiteral("method"))) {
+        transport_generated::TransportRequestOrNotification dispatched;
+        transport_generated::TransportDispatchError dispatchError;
+        if (!transport_generated::decodeTransportRequestOrNotification(
+                message, &dispatched, &dispatchError)) {
+            failDispatch(dispatchError,
+                         dispatchError.kind
+                                 == transport_generated::TransportDispatchErrorKind::ValidatorUnavailable
+                             ? QStringLiteral("validator-unavailable")
+                             : QStringLiteral("notification-shape"));
             return;
         }
-        if (hasResult == hasError
-            || !hasExactKeys(message, hasResult
-                ? QStringList{QStringLiteral("jsonrpc"), QStringLiteral("id"),
-                              QStringLiteral("result")}
-                : QStringList{QStringLiteral("jsonrpc"), QStringLiteral("id"),
-                              QStringLiteral("error")})) {
-            rejectInitializeResponse(QStringLiteral("response-shape"));
-            return;
-        }
-        if (hasError) {
-            if (!isValidErrorObject(message.value(QStringLiteral("error")))) {
-                rejectInitializeResponse(QStringLiteral("error-shape"));
-                return;
+        if (!m_handshakeComplete) {
+            if (!m_initializeRequestId.isEmpty()) {
+                rejectInitializeResponse(QStringLiteral("message-before-handshake"));
+            } else {
+                rejectProtocolMessage(QStringLiteral("message-before-handshake"));
             }
-            QString reasonCode;
-            if (!validateInitializeError(message.value(QStringLiteral("error")).toObject(),
-                                         &reasonCode)) {
-                rejectInitializeResponse(reasonCode);
-                return;
-            }
-            rejectInitializeResponse(reasonCode);
             return;
         }
-        const QJsonValue resultValue = message.value(QStringLiteral("result"));
-        if (!resultValue.isObject()) {
-            rejectInitializeResponse(QStringLiteral("result-type"));
-            return;
-        }
-        QString reasonCode;
-        QSet<QString> stableCapabilities;
-        int maximumFrameBytes = 0;
-        const QJsonObject result = resultValue.toObject();
-        if (!validateInitializeResult(result, &stableCapabilities,
-                                      &maximumFrameBytes, &reasonCode)) {
-            rejectInitializeResponse(reasonCode);
-            return;
-        }
-        retireResponseId(m_initializeRequestId);
-        removePendingRequest(m_initializeRequestId);
-        m_initializeRequestId.clear();
-        m_initializeGeneration = 0;
-        m_negotiatedStableCapabilities = stableCapabilities;
-        m_negotiatedMaximumFrameBytes = maximumFrameBytes;
-        acceptInitializeResponse(result);
-        return;
-    }
-
-    if (!m_handshakeComplete) {
-        rejectProtocolMessage(QStringLiteral("message-before-handshake"));
-        return;
-    }
-
-    if (message.contains(QStringLiteral("method"))) {
-        if (!isValidMethodName(message.value(QStringLiteral("method")))
-            || !hasExactKeys(message, {
-                QStringLiteral("jsonrpc"), QStringLiteral("method"),
-                QStringLiteral("params"),
-            })
-            || !message.value(QStringLiteral("params")).isObject()) {
+        if (dispatched.kind
+            == transport_generated::TransportRequestOrNotificationKind::UnknownRequest) {
             rejectProtocolMessage(QStringLiteral("notification-shape"));
             return;
         }
-        const QString method = message.value(QStringLiteral("method")).toString();
+        if (dispatched.kind
+            == transport_generated::TransportRequestOrNotificationKind::UnknownNotification) {
+            emit diagnosticMessage(QStringLiteral("忽略未支持的 AAP 通知"));
+            return;
+        }
+        const QString *methodField = transportStringField(*root, QStringLiteral("method"));
+        const auto *paramsField = transportField(*root, QStringLiteral("params"));
+        QJsonValue projectedParams;
+        if (!methodField || !paramsField
+            || !projectTransportValue(*paramsField, &projectedParams)
+            || !projectedParams.isObject()) {
+            rejectProtocolMessage(QStringLiteral("notification-projection"));
+            return;
+        }
+        const QString method = *methodField;
+        const QJsonObject params = projectedParams.toObject();
         if (method == QStringLiteral("event")) {
             if (m_negotiatedStableCapabilities.contains(
                     QStringLiteral("timeline.subscription.fixed-watermark"))) {
@@ -4881,7 +4825,7 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
                 rejectProtocolMessage(QStringLiteral("notification-capability"));
                 return;
             }
-            const QJsonObject event = message.value(QStringLiteral("params")).toObject();
+            const QJsonObject event = params;
             if (!isValidTimelineEventEnvelope(event)) {
                 rejectProtocolMessage(QStringLiteral("event-envelope"));
                 return;
@@ -4893,7 +4837,7 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
                 rejectProtocolMessage(QStringLiteral("notification-capability"));
                 return;
             }
-            const QJsonObject event = message.value(QStringLiteral("params")).toObject();
+            const QJsonObject event = params;
             if (!isValidTimelineSubscriptionEvent(event)) {
                 rejectProtocolMessage(QStringLiteral("timeline-subscription-event"));
                 return;
@@ -4910,7 +4854,7 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
                 rejectProtocolMessage(QStringLiteral("notification-capability"));
                 return;
             }
-            const QJsonObject failure = message.value(QStringLiteral("params")).toObject();
+            const QJsonObject failure = params;
             if (!isValidTimelineSubscriptionFailure(failure)
                 || failure.value(QStringLiteral("stage")).toString()
                     != QStringLiteral("live")) {
@@ -4929,85 +4873,214 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         return;
     }
 
-    const QJsonValue idValue = message.value(QStringLiteral("id"));
-    const bool hasResult = message.contains(QStringLiteral("result"));
-    const bool hasError = message.contains(QStringLiteral("error"));
-    if (!isCanonicalRequestId(idValue) || hasResult == hasError
-        || !hasExactKeys(message, hasResult
-            ? QStringList{QStringLiteral("jsonrpc"), QStringLiteral("id"),
-                          QStringLiteral("result")}
-            : QStringList{QStringLiteral("jsonrpc"), QStringLiteral("id"),
-                          QStringLiteral("error")})) {
-        rejectProtocolMessage(QStringLiteral("response-shape"));
+    const QString *idField = root
+        ? transportStringField(*root, QStringLiteral("id")) : nullptr;
+    const QString id = idField ? *idField : QString();
+    const auto pendingIterator = id.isEmpty()
+        ? m_pendingRequests.constEnd() : m_pendingRequests.constFind(id);
+    const bool pendingCurrent = pendingIterator != m_pendingRequests.constEnd()
+        && pendingIterator.value().processGeneration == m_processGeneration
+        && !m_retiredResponseIds.contains(id);
+    const std::optional<transport_generated::TransportPendingRequest> generatedPending =
+        pendingCurrent
+        ? std::optional<transport_generated::TransportPendingRequest>(
+              pendingIterator.value().transport)
+        : std::nullopt;
+    transport_generated::TransportResponse dispatched;
+    transport_generated::TransportDispatchError dispatchError;
+    if (!transport_generated::decodeTransportResponse(
+            generatedPending, message, &dispatched, &dispatchError)) {
+        failDispatch(dispatchError,
+                     dispatchError.kind
+                             == transport_generated::TransportDispatchErrorKind::ValidatorUnavailable
+                         ? QStringLiteral("validator-unavailable")
+                         : QStringLiteral("response-shape"));
         return;
     }
-    const QString id = idValue.toString();
-    const QString pendingMethod = m_pendingMethods.value(id);
-    if (pendingMethod.isEmpty()
-        || m_pendingGenerations.value(id) != m_processGeneration) {
+    if (dispatched.kind == transport_generated::TransportResponseKind::Unmatched) {
+        return;
+    }
+    if (!pendingCurrent) return;
+
+    const PendingRequestContext pending = pendingIterator.value();
+    const QString pendingMethod = pending.transport.method;
+    if (!m_handshakeComplete && (id != m_initializeRequestId
+            || pendingMethod != QStringLiteral("initialize")
+            || m_initializeGeneration != m_processGeneration)) {
+        rejectInitializeResponse(QStringLiteral("response-id"));
+        return;
+    }
+    if (m_handshakeComplete && pendingMethod == QStringLiteral("initialize")) {
         rejectProtocolMessage(QStringLiteral("response-correlation"));
         return;
     }
+
+    const bool hasResult = root && root->contains(QStringLiteral("result"));
+    const bool hasError = root && root->contains(QStringLiteral("error"));
+    if (hasResult == hasError) {
+        failDispatch(dispatchError, QStringLiteral("response-shape"));
+        return;
+    }
+
+    if (!m_handshakeComplete) {
+        if (hasError) {
+            const auto *errorValue = transportField(*root, QStringLiteral("error"));
+            const TransportJsonObject *errorObjectValue = errorValue
+                ? transportObject(*errorValue) : nullptr;
+            const auto *code = errorObjectValue
+                ? transportNumberField(*errorObjectValue, QStringLiteral("code")) : nullptr;
+            const QString *errorMessage = errorObjectValue
+                ? transportStringField(*errorObjectValue, QStringLiteral("message")) : nullptr;
+            QString reasonCode = QStringLiteral("runtime-rejected");
+            if (!code || !errorMessage) {
+                rejectInitializeResponse(QStringLiteral("error-shape"));
+                return;
+            }
+            if (transport_runtime::transportJsonIntegerEqualsQint64(*code, -32003)) {
+                const auto *data = transportField(*errorObjectValue,
+                                                  QStringLiteral("data"));
+                QJsonValue projectedData;
+                if (!data || !projectTransportValue(*data, &projectedData)
+                    || !projectedData.isObject()) {
+                    rejectInitializeResponse(QStringLiteral("initialize-error-data"));
+                    return;
+                }
+                const QJsonObject projectedError{
+                    {QStringLiteral("code"), -32003},
+                    {QStringLiteral("message"), *errorMessage},
+                    {QStringLiteral("data"), projectedData},
+                };
+                if (!validateInitializeError(projectedError, &reasonCode)) {
+                    rejectInitializeResponse(reasonCode);
+                    return;
+                }
+            }
+            rejectInitializeResponse(reasonCode);
+            return;
+        }
+        const auto *resultValue = transportField(*root, QStringLiteral("result"));
+        QJsonValue projectedResult;
+        if (!resultValue || !projectTransportValue(*resultValue, &projectedResult)
+            || !projectedResult.isObject()) {
+            rejectInitializeResponse(QStringLiteral("result-type"));
+            return;
+        }
+        QString reasonCode;
+        QSet<QString> stableCapabilities;
+        int maximumFrameBytes = 0;
+        const QJsonObject result = projectedResult.toObject();
+        if (!validateInitializeResult(result, &stableCapabilities,
+                                      &maximumFrameBytes, &reasonCode)) {
+            rejectInitializeResponse(reasonCode);
+            return;
+        }
+        retireResponseId(m_initializeRequestId);
+        removePendingRequest(m_initializeRequestId);
+        m_initializeRequestId.clear();
+        m_initializeGeneration = 0;
+        m_negotiatedStableCapabilities = stableCapabilities;
+        m_negotiatedMaximumFrameBytes = maximumFrameBytes;
+        acceptInitializeResponse(result);
+        return;
+    }
+
     if (hasError) {
-        if (!isValidErrorObject(message.value(QStringLiteral("error")))) {
+        const auto *errorValue = transportField(*root, QStringLiteral("error"));
+        const TransportJsonObject *errorObjectValue = errorValue
+            ? transportObject(*errorValue) : nullptr;
+        const auto *errorCode = errorObjectValue
+            ? transportNumberField(*errorObjectValue, QStringLiteral("code")) : nullptr;
+        const QString *errorMessage = errorObjectValue
+            ? transportStringField(*errorObjectValue, QStringLiteral("message")) : nullptr;
+        if (!errorObjectValue || !errorCode || !errorMessage) {
             rejectProtocolMessage(QStringLiteral("error-shape"));
             return;
         }
-        const QJsonObject error = message.value(QStringLiteral("error")).toObject();
-        const int errorCode = error.value(QStringLiteral("code")).toInt(-1);
+        const auto *dataValue = transportField(*errorObjectValue,
+                                               QStringLiteral("data"));
+        const auto emitFailure = [this, &id, &pendingMethod, errorCode, errorMessage]() {
+            const QString canonicalCode = errorCode->canonical;
+            emit requestFailedExact(id, pendingMethod, *errorMessage, canonicalCode);
+            qint64 code64 = 0;
+            const auto conversion = transport_runtime::transportJsonIntegerToQint64(
+                *errorCode, &code64);
+            if (conversion == transport_runtime::TransportIntegerConversion::Ok
+                && code64 >= std::numeric_limits<int>::min()
+                && code64 <= std::numeric_limits<int>::max()) {
+                emit requestFailed(id, pendingMethod, *errorMessage,
+                                   static_cast<int>(code64));
+            }
+        };
         const QString subscriptionIdentityStage =
             timelineSubscriptionIdentityStageForMethod(pendingMethod);
         if (!subscriptionIdentityStage.isEmpty()) {
-            const QJsonValue data = error.value(QStringLiteral("data"));
-            const QJsonObject metadata =
-                m_pendingTimelineSubscriptionRequests.value(id);
-            if (!data.isObject()
+            QJsonValue projectedData;
+            if (!dataValue || !projectTransportValue(*dataValue, &projectedData)) {
+                rejectProtocolMessage(QStringLiteral("error-data-projection"));
+                return;
+            }
+            const auto *subscription = std::get_if<TimelineSubscriptionValidation>(
+                &pending.validation);
+            const QJsonObject metadata = subscription
+                ? QJsonObject{
+                      {QStringLiteral("request"), subscription->request},
+                      {QStringLiteral("subscription_cursor"),
+                       subscription->subscriptionCursor},
+                  }
+                : QJsonObject{};
+            if (!projectedData.isObject()
                 || !isValidTimelineSubscriptionFailureForRequest(
-                    data.toObject(), pendingMethod, metadata)) {
+                    projectedData.toObject(), pendingMethod, metadata)) {
                 rejectProtocolMessage(QStringLiteral("timeline-subscription-failure"));
                 return;
             }
-            const QJsonObject failure = data.toObject();
+            const QJsonObject failure = projectedData.toObject();
             removePendingRequest(id);
             emit timelineSubscriptionFailed(id, failure);
             return;
         }
         if (pendingMethod == QStringLiteral("runtime/heartbeat")) {
-            emit requestFailed(id, pendingMethod,
-                               error.value(QStringLiteral("message")).toString(),
-                               errorCode);
+            emitFailure();
             handleHeartbeatTimeout();
             return;
         }
-        if (pendingMethod == QStringLiteral("timeline/sync") && errorCode == -32148) {
-            const QJsonValue dataValue = error.value(QStringLiteral("data"));
-            const QJsonObject request = m_pendingTimelineSyncRequests.value(id);
-            if (!dataValue.isObject()
-                || request.isEmpty()
-                || !isValidTimelineRetentionGapData(dataValue.toObject(), request)
-                || dataValue.toObject().value(QStringLiteral("snapshot_available")).toBool()
+        if (pendingMethod == QStringLiteral("timeline/sync")
+            && transport_runtime::transportJsonIntegerEqualsQint64(
+                *errorCode, -32148)) {
+            QJsonValue projectedData;
+            if (!dataValue || !projectTransportValue(*dataValue, &projectedData)) {
+                rejectProtocolMessage(QStringLiteral("error-data-projection"));
+                return;
+            }
+            const auto *sync = std::get_if<TimelineSyncValidation>(&pending.validation);
+            if (!sync || !projectedData.isObject()
+                || !isValidTimelineRetentionGapData(
+                    projectedData.toObject(), sync->request)
+                || projectedData.toObject()
+                       .value(QStringLiteral("snapshot_available")).toBool()
                     != m_negotiatedStableCapabilities.contains(
                         QStringLiteral("timeline.snapshot.current"))) {
                 rejectProtocolMessage(QStringLiteral("timeline-retention-gap"));
                 return;
             }
             removePendingRequest(id);
-            emit timelineRetentionGap(id, dataValue.toObject());
+            emit timelineRetentionGap(id, projectedData.toObject());
             return;
         }
         removePendingRequest(id);
-        emit requestFailed(id, pendingMethod,
-                           error.value(QStringLiteral("message")).toString(),
-                           errorCode);
+        emitFailure();
         return;
     }
-    const QJsonValue resultValue = message.value(QStringLiteral("result"));
-    if (!resultValue.isObject()
-        && !(pendingMethod == QStringLiteral("shutdown") && resultValue.isNull())) {
+    const auto *resultValue = transportField(*root, QStringLiteral("result"));
+    QJsonValue projectedResult;
+    if (!resultValue || !projectTransportValue(*resultValue, &projectedResult)
+        || (!projectedResult.isObject()
+            && !(pendingMethod == QStringLiteral("shutdown")
+                 && projectedResult.isNull()))) {
         rejectProtocolMessage(QStringLiteral("result-type"));
         return;
     }
-    const QJsonObject result = resultValue.toObject();
+    const QJsonObject result = projectedResult.toObject();
     if (pendingMethod == QStringLiteral("runtime/heartbeat")) {
         if (id != m_heartbeatRequestId
             || m_heartbeatGeneration != m_processGeneration
@@ -5034,13 +5107,13 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
     const QString subscriptionIdentityStage =
         timelineSubscriptionIdentityStageForMethod(pendingMethod);
     if (!subscriptionIdentityStage.isEmpty()) {
-        const QJsonObject metadata =
-            m_pendingTimelineSubscriptionRequests.value(id);
-        const QJsonObject request = metadata.value(QStringLiteral("request")).toObject();
-        if (request.isEmpty()) {
+        const auto *subscription = std::get_if<TimelineSubscriptionValidation>(
+            &pending.validation);
+        if (!subscription || subscription->request.isEmpty()) {
             rejectProtocolMessage(QStringLiteral("timeline-subscription-response"));
             return;
         }
+        const QJsonObject request = subscription->request;
         if (pendingMethod == QStringLiteral("timeline/subscribe")
             && !isValidTimelineSubscribeResult(result, request)) {
             rejectProtocolMessage(QStringLiteral("timeline-subscribe-result"));
@@ -5065,25 +5138,28 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
         return;
     }
     if (pendingMethod == QStringLiteral("turn/start")) {
-        const QJsonObject turnRequest = m_pendingTurnRequests.value(id);
-        if (turnRequest.isEmpty()
-                || turnRequest.value(QStringLiteral("generation")).toDouble()
-                    != static_cast<double>(m_processGeneration)
+        const auto *turn = std::get_if<TurnStartValidation>(&pending.validation);
+        const QJsonObject turnRequest = turn
+            ? QJsonObject{
+                  {QStringLiteral("request_id"), id},
+                  {QStringLiteral("session_id"), turn->sessionId},
+                  {QStringLiteral("idempotency_key"), turn->idempotencyKey},
+                  {QStringLiteral("generation"), static_cast<double>(turn->generation)},
+              }
+            : QJsonObject{};
+        if (!turn || turn->generation != m_processGeneration
                 || !isValidTurnStartResult(result, turnRequest)) {
             rejectProtocolMessage(QStringLiteral("turn-start-result"));
             return;
         }
-        const quint64 responseGeneration = static_cast<quint64>(
-            turnRequest.value(QStringLiteral("generation")).toDouble());
         removePendingRequest(id);
-        emit turnStarted(id, responseGeneration, result);
+        emit turnStarted(id, turn->generation, result);
         return;
     }
     if (pendingMethod
             == QStringLiteral("session/mutation-acknowledgements")) {
-        const QJsonObject listRequest = m_pendingMutationListRequests.value(id);
-        if (listRequest.isEmpty()
-                || !isValidDurableMutationPage(result, listRequest)) {
+        const auto *list = std::get_if<MutationListValidation>(&pending.validation);
+        if (!list || !isValidDurableMutationPage(result, list->request)) {
             rejectProtocolMessage(QStringLiteral("mutation-acknowledgement-page"));
             return;
         }
@@ -5093,10 +5169,10 @@ void AgentRuntimeClient::processMessage(const QJsonObject &message)
     }
     if (pendingMethod
             == QStringLiteral("mutation/acknowledgement/consume")) {
-        const QJsonObject consumeRequest =
-            m_pendingMutationConsumeRequests.value(id);
-        if (consumeRequest.isEmpty()
-                || !isValidDurableMutationConsumeResult(result, consumeRequest)) {
+        const auto *consume = std::get_if<MutationConsumeValidation>(
+            &pending.validation);
+        if (!consume
+            || !isValidDurableMutationConsumeResult(result, consume->request)) {
             rejectProtocolMessage(QStringLiteral("mutation-acknowledgement-consume"));
             return;
         }
@@ -5404,9 +5480,21 @@ void AgentRuntimeClient::rejectInitializeResponse(const QString &reasonCode)
     clearNegotiationState();
     const QString detail = QStringLiteral("运行时握手响应无效（%1）").arg(reasonCode);
     if (reconnecting) setReconnectState(ReconnectState::Exhausted, 0, detail);
-    emit requestFailed(requestId, QStringLiteral("initialize"), detail, -32003);
+    reportRequestFailure(requestId, QStringLiteral("initialize"), detail, -32003);
     emit connectionStateChanged(false, detail);
     if (m_process->state() != QProcess::NotRunning) m_process->closeWriteChannel();
+}
+
+void AgentRuntimeClient::reportRequestFailure(const QString &requestId,
+                                              const QString &method,
+                                              const QString &message,
+                                              int code)
+{
+    // The QString signal is the lossless production contract. Keep the legacy
+    // int signal only for clients that still consume it, and never synthesize
+    // an int when the wire code cannot be represented exactly.
+    emit requestFailedExact(requestId, method, message, QString::number(code));
+    emit requestFailed(requestId, method, message, code);
 }
 
 void AgentRuntimeClient::rejectProtocolMessage(const QString &reasonCode)
@@ -5459,28 +5547,22 @@ void AgentRuntimeClient::clearNegotiationState()
 
 void AgentRuntimeClient::failPending(const QString &message)
 {
-    const auto pending = m_pendingMethods;
-    m_pendingMethods.clear();
-    m_pendingGenerations.clear();
-    m_pendingTimelineSyncRequests.clear();
-    m_pendingTimelineSubscriptionRequests.clear();
-    m_pendingTurnRequests.clear();
-    m_pendingMutationListRequests.clear();
-    m_pendingMutationConsumeRequests.clear();
+    const auto pending = m_pendingRequests;
+    m_pendingRequests.clear();
     for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
         retireResponseId(it.key());
-        emit requestFailed(it.key(), it.value(), message, -1);
+        reportRequestFailure(it.key(), it.value().transport.method, message, -1);
     }
 }
 
 void AgentRuntimeClient::failOrdinaryPending(const QString &message)
 {
-    const auto pending = m_pendingMethods;
+    const auto pending = m_pendingRequests;
     for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
-        if (isLivenessControlMethod(it.value())) continue;
+        if (isLivenessControlMethod(it.value().transport.method)) continue;
         retireResponseId(it.key());
         removePendingRequest(it.key());
-        emit requestFailed(it.key(), it.value(), message, -1);
+        reportRequestFailure(it.key(), it.value().transport.method, message, -1);
     }
 }
 
@@ -5611,9 +5693,10 @@ void AgentRuntimeClient::handleHeartbeatTimeout()
         return;
     }
     bool subscriptionOwnershipUnknown = false;
-    for (auto it = m_pendingMethods.cbegin(); it != m_pendingMethods.cend(); ++it) {
-        if (m_pendingGenerations.value(it.key()) == m_processGeneration
-            && !timelineSubscriptionIdentityStageForMethod(it.value()).isEmpty()) {
+    for (auto it = m_pendingRequests.cbegin(); it != m_pendingRequests.cend(); ++it) {
+        if (it.value().processGeneration == m_processGeneration
+            && !timelineSubscriptionIdentityStageForMethod(
+                    it.value().transport.method).isEmpty()) {
             subscriptionOwnershipUnknown = true;
             break;
         }
@@ -5785,11 +5868,5 @@ void AgentRuntimeClient::retireResponseId(const QString &requestId)
 
 void AgentRuntimeClient::removePendingRequest(const QString &requestId)
 {
-    m_pendingMethods.remove(requestId);
-    m_pendingGenerations.remove(requestId);
-    m_pendingTimelineSyncRequests.remove(requestId);
-    m_pendingTimelineSubscriptionRequests.remove(requestId);
-    m_pendingTurnRequests.remove(requestId);
-    m_pendingMutationListRequests.remove(requestId);
-    m_pendingMutationConsumeRequests.remove(requestId);
+    m_pendingRequests.remove(requestId);
 }

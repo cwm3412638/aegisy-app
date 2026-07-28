@@ -3619,9 +3619,11 @@ Implemented visual baseline:
   build and `23/23` CTests, strict OpenSpec validation, and `git diff --check`.
   The render fixture's synthetic recovery Session now pre-stages its exact sync
   request instead of racing a real sidecar response; production behavior is unchanged.
-- Qt production ingress still parses with `QJsonDocument` and uses hand-written
-  response/pending dispatch. Complete generated Qt migration plus a clean Windows
-  Unicode checkout remain required, so OpenSpec `3.10` stays unchecked.
+- Qt production ingress now retains one generated lossless `TransportMessage` from
+  `processStdout()` through generated request/notification/response dispatch,
+  indivisible pending correlation, and safe Qt projection. Outgoing JSON remains
+  serialized through the existing bounded Qt writer. A clean Windows Unicode
+  checkout and execution gate remain required, so OpenSpec `3.10` stays unchecked.
 
 ## Generated Qt/C++ Transport Dispatch Foundation (2026-07-28)
 
@@ -3641,22 +3643,36 @@ Implemented visual baseline:
   copies.
 - Focused generated/runtime tests cover parsed dispatch, wrong/null IDs, known typed
   payload validation, arbitrary-precision generic values, metadata inventory, and
-  local validator failure. The production `AgentRuntimeClient` still needs unified
-  pending context, single-parse ingress, safe Qt projection, and generated dispatch
-  consumption; clean Windows Unicode-checkout evidence also remains absent. Keep
-  OpenSpec `3.10` unchecked.
+  local validator failure. The production `AgentRuntimeClient` consumes the same
+  generated dispatch and uses one pending context map plus safe Qt projection;
+  clean Windows Unicode-checkout evidence remains absent. Keep OpenSpec `3.10`
+  unchecked.
 - The final local gate passes generator freshness/negative/package-inventory checks,
   Rust formatting, all 59 `aegisy-aap` tests, package Clippy with warnings denied,
   Cargo packaging, the complete desktop build, all `23/23` CTests (including the
   complete Rust workspace test), strict OpenSpec validation, and `git diff --check`.
 
+## Qt Canonical Error-Code Boundary (2026-07-28)
+
+- `AgentRuntimeClient::requestFailedExact` is the lossless production failure
+  signal. It carries the canonical JSON-RPC mathematical-integer lexeme as a
+  `QString`, including values outside Qt `int`/JSON-safe numeric ranges. The
+  Workbench consumes this signal for all request-failure state and notice paths.
+- The legacy `requestFailed(..., int)` signal remains only as a compatibility
+  signal and is emitted when the canonical code is exactly representable as an
+  `int`. An out-of-range wire code never becomes `0`, `-1`, or another sentinel;
+  it is not emitted through the legacy signal. Local validation, handshake,
+  write, and pending-failure paths use the same exact-first reporting boundary.
+- Focused environment coverage proves a huge code remains canonical and does
+  not disconnect or trigger the compatibility signal. Workbench render coverage
+  exercises canonical failure handling and redacted provider/restart notices.
+
 ## Next Product Priorities
 
-1. Continue OpenSpec `3.10` by migrating the production Qt Transport consumer behind
-   generated lossless parsing, method/typed-error metadata, and indivisible pending
-   response contexts without changing stable `0.1` wire behavior. Run
-   the complete generator gate from a clean Windows Unicode checkout before checking
-   the task; do not narrow generic numbers or claim Windows evidence from macOS.
+1. Finish OpenSpec `3.10` by running the complete generator and desktop gate from a
+   clean Windows Unicode checkout. The Qt consumer migration, generated dispatch,
+   exact pending correlation, and safe projection are implemented without changing
+   stable `0.1` wire behavior; do not claim Windows evidence from macOS.
 2. Continue OpenSpec `3.5` by obtaining complete Windows reconnect/runtime evidence,
    then add reviewed acknowledgement producers for approval/file/Git/job mutations.
    Durable Turn-start acknowledgement, fixed-watermark replay, structured
