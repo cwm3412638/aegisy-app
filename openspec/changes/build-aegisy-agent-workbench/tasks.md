@@ -227,7 +227,18 @@
 
 ## 4. Runtime Sidecar and Authenticated IPC
 
-- [ ] 4.1 Scaffold the `aegisy-agentd` Rust workspace, formatting, lint, unit test, dependency audit, and release profile
+- [x] 4.1 Scaffold the `aegisy-agentd` Rust workspace, formatting, lint, unit test, dependency audit, and release profile
+  - `agent-runtime` is a locked two-crate Rust workspace with strict formatting,
+    workspace tests, Clippy with warnings denied, and a Thin-LTO/single-codegen-unit/
+    stripped Release profile. Repository and Windows packaging CI run the locked
+    quality and Release gates.
+  - Pinned `cargo-deny 0.19.9` checks the complete all-features graph against the
+    RustSec advisory database, the reviewed SPDX license set, crates.io-only source
+    policy, yanked/wildcard bans, and visible duplicate-version warnings. Missing or
+    wrong-version tooling and advisory-fetch failure fail closed.
+  - CMake now selects Cargo `target/release` with `--release` for a Release desktop
+    configuration, while developer Debug builds retain `target/debug`; the packaged
+    sidecar can no longer silently ignore the declared Release profile.
 - [ ] 4.2 Implement macOS Unix-socket transport with owner-only permissions and peer validation
 - [ ] 4.3 Implement Windows named-pipe transport with current-user ACL and peer validation
 - [ ] 4.4 Implement one-time host/sidecar bootstrap authentication without secrets in process arguments or ordinary logs

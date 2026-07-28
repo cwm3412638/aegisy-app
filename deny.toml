@@ -1,0 +1,44 @@
+# Dependency policy for the Aegisy Agent workspace.
+# The CI/local gate pins cargo-deny to 0.19.9; keep this file reviewed with
+# Cargo.lock and fail closed when the advisory database cannot be refreshed.
+
+[graph]
+all-features = true
+
+[advisories]
+db-urls = ["https://github.com/RustSec/advisory-db"]
+ignore = []
+yanked = "deny"
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "LGPL-2.1-or-later",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+ignore = false
+
+[bans]
+# Multiple versions are reported for review but are not silently hidden. The
+# current lockfile contains legitimate transitive API/ABI families; each
+# warning remains visible in the audit output until a compatible consolidation
+# is reviewed.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

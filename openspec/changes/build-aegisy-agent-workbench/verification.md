@@ -2666,3 +2666,35 @@ Known limitations:
   product/security owner records a time-bounded non-correctness exception.
   `openspec validate build-aegisy-agent-workbench --strict` and
   `git diff --check` are the repository gates for this documentation stage.
+
+## 4.1 Rust Workspace, Dependency Audit, And Release Profile
+
+- `agent-runtime/Cargo.toml` owns the `aegisy-aap` and `aegisy-agentd` workspace,
+  resolver v2, committed lockfile, exact direct dependency pins where required, and
+  the reviewed Release profile (`lto = "thin"`, `codegen-units = 1`, `strip = true`).
+  The local path dependency also declares its exact workspace package version, so a
+  wildcard requirement cannot bypass the dependency policy.
+- `deny.toml` and `scripts/verify-rust-dependencies.sh` pin the executable contract
+  to `cargo-deny 0.19.9`, require locked Cargo metadata, and run all four checks.
+  Advisories use the RustSec database and fail if it cannot be fetched/opened;
+  licenses are restricted to the reviewed SPDX identifiers present in the lockfile;
+  sources are restricted to crates.io with no Git allowlist; yanked and wildcard
+  dependencies are denied. Existing transitive duplicate version families remain
+  explicit warnings rather than hidden skip entries.
+- `.github/workflows/rust-quality.yml` runs formatting, locked workspace tests,
+  locked all-target Clippy with warnings denied, locked Release build, and the pinned
+  dependency audit for Rust changes. The Windows packaging workflow runs the same
+  locked quality/Release/audit gates before installer construction.
+- CMake selects Cargo `target/release` and passes `--release` for Release desktop
+  builds, including multi-configuration generators; Debug developer builds retain
+  `target/debug`. An isolated macOS Release configure/build produced an arm64
+  `agent-runtime/target/release/aegisy-agentd` and copied the byte-identical binary
+  into `AegisyClient.app/Contents/MacOS`.
+- Local verification passes the dependency audit (`advisories`, `bans`, `licenses`,
+  and `sources`), Rust formatting, strict Clippy, the locked Release workspace build,
+  and the complete locked Rust workspace suite: 1050 passed, zero failed, and one
+  explicitly ignored installed-Codex live fixture. The isolated Release desktop
+  build and serial aggregate CTest run pass all 23/23 targets, including
+  `agent_runtime_environment`. This is macOS/local evidence; tasks `4.2` through
+  `4.4` still own authenticated socket/pipe/bootstrap transport and their platform
+  evidence.

@@ -60,8 +60,13 @@ jobs:
           }
           rustup component add rustfmt clippy
           cargo fmt --all --manifest-path agent-runtime\Cargo.toml -- --check
-          cargo test --workspace --manifest-path agent-runtime\Cargo.toml
-          cargo clippy --workspace --all-targets --manifest-path agent-runtime\Cargo.toml -- -D warnings
+          cargo test --locked --workspace --manifest-path agent-runtime\Cargo.toml
+          cargo clippy --locked --workspace --all-targets --manifest-path agent-runtime\Cargo.toml -- -D warnings
+          cargo build --locked --workspace --manifest-path agent-runtime\Cargo.toml --release
+          cargo install --locked cargo-deny --version 0.19.9
+          Push-Location agent-runtime
+          cargo deny check --config ..\deny.toml
+          Pop-Location
 
       - name: Mark build as running
         shell: pwsh

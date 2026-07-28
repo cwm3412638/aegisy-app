@@ -237,8 +237,23 @@ endif()
 # developer build also compiles and places the local AAP runtime beside the app.
 find_program(CARGO_EXECUTABLE cargo HINTS "$ENV{HOME}/.cargo/bin")
 set(AEGISY_AGENT_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime")
+# Keep the sidecar profile aligned with the desktop configuration.  Multi-
+# configuration generators resolve the profile at build time so `--config
+# Release` cannot accidentally package Cargo's debug binary.
+if(CMAKE_CONFIGURATION_TYPES)
+    set(AEGISY_AGENTD_PROFILE_DIR
+        "$<IF:$<CONFIG:Release>,release,debug>")
+    set(AEGISY_AGENTD_CARGO_RELEASE_ARG
+        "$<$<CONFIG:Release>:--release>")
+elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(AEGISY_AGENTD_PROFILE_DIR "release")
+    set(AEGISY_AGENTD_CARGO_RELEASE_ARG "--release")
+else()
+    set(AEGISY_AGENTD_PROFILE_DIR "debug")
+    set(AEGISY_AGENTD_CARGO_RELEASE_ARG)
+endif()
 set(AEGISY_AGENTD_BINARY
-    "${AEGISY_AGENT_RUNTIME_DIR}/target/debug/aegisy-agentd${CMAKE_EXECUTABLE_SUFFIX}")
+    "${AEGISY_AGENT_RUNTIME_DIR}/target/${AEGISY_AGENTD_PROFILE_DIR}/aegisy-agentd${CMAKE_EXECUTABLE_SUFFIX}")
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     AEGISY_AGENTD_DEV_PATH="${AEGISY_AGENTD_BINARY}"
 )
@@ -253,8 +268,8 @@ if(CARGO_EXECUTABLE)
     endif()
     add_custom_target(aegisy_agentd ALL
         COMMAND "${CARGO_EXECUTABLE}" build -p aegisy-agentd
+            ${AEGISY_AGENTD_CARGO_RELEASE_ARG}
         WORKING_DIRECTORY "${AEGISY_AGENT_RUNTIME_DIR}"
-        BYPRODUCTS "${AEGISY_AGENTD_BINARY}"
         COMMENT "Building aegisy-agentd"
         VERBATIM
     )

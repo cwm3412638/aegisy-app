@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-28
+Last updated: 2026-07-29
 
 ## Mandatory First Step
 
@@ -193,9 +193,25 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 55 of 235 checkbox tasks are complete and 180 remain
+- OpenSpec task baseline: 56 of 235 checkbox tasks are complete and 179 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
+- OpenSpec task `4.1` is complete. `agent-runtime` is a locked two-crate Rust
+  workspace with formatting, unit/integration tests, strict all-target Clippy, and a
+  Thin-LTO/single-codegen-unit/stripped Release profile. Pinned `cargo-deny 0.19.9`
+  plus `deny.toml` fail closed on missing/wrong tooling or advisory database failure,
+  deny RustSec advisories, yanked/wildcard dependencies, unknown registries, and Git
+  sources, and restrict licenses to the reviewed SPDX set present in the lockfile.
+  Existing transitive duplicate versions remain visible warnings without skip
+  entries. Repository Rust CI and Windows packaging CI run locked quality, Release,
+  and audit gates. CMake now passes `--release` and bundles `target/release` for a
+  Release desktop configuration instead of silently packaging the debug sidecar;
+  Debug developer builds retain `target/debug`. An isolated macOS Release build
+  produced a byte-identical arm64 sidecar in the app bundle. The final gate passes
+  the dependency audit, Rust formatting, strict Clippy, locked Release build, 1050
+  Rust tests with one explicitly ignored live Codex fixture, and all 23/23 serial
+  Release CTests. Authenticated macOS socket, Windows named pipe, and one-time
+  bootstrap authentication remain tasks `4.2` through `4.4`.
 - OpenSpec task `3.1` is complete. `agent-runtime/aap-schema` is now an explicit
   private package with independent package/wire/provider versioning, one stable
   registry, and one experimental registry. Stable AAP `0.1` is additive-only and
