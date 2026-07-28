@@ -181,10 +181,22 @@
     method stage and exact request identity. Known methods or typed discriminators
     cannot enter a generic fallback, while genuinely unknown values remain forward-
     compatible.
-  - Keep `3.10` unchecked: production Rust/Qt wire consumers still use reviewed
-    hand-written protocol paths, and clean Windows Unicode-checkout execution is
-    absent. This generation slice grants no capability, permission, Approval,
-    mutation, execution, experimental, remote, or Windows release authority.
+  - Rust production-consumer migration is complete. The stdio reader parses each
+    accepted frame once through the generated lossless parser, validates the generic
+    envelope before queue admission, classifies request/notification kind, and runs
+    the generated known definition validator at the Runtime/OOB boundary without
+    changing handshake, capability, request-ID, or queue-overload precedence.
+    Generic-valid saturated frames still receive `-32004` before known kind/params
+    validation. `ValidatorUnavailable` is a local fail-closed transport fault: it
+    emits no peer error, claims no request ID, performs no Runtime/Store side effect,
+    and closes later queued dispatch through one linearized fault gate. Deterministic
+    generic/per-definition injection and real saturated-stdio fixtures cover these
+    boundaries.
+  - Keep `3.10` unchecked: the production Qt consumer still uses its reviewed
+    hand-written/QJsonDocument ingress and pending-response paths, and clean Windows
+    Unicode-checkout execution is absent. The Rust migration grants no capability,
+    permission, Approval, mutation, execution, experimental, remote, or Windows
+    release authority.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
   - The Rust protocol suite reads `agent-runtime/aap-schema/stable/v0.1/aap.schema.json`, checks its stable JSON-RPC envelope variants, and validates every checked-in lifecycle/recovery fixture. Invalid request-plus-result envelopes are rejected before they can become compatibility evidence.
   - The schema-package gate also compiles every registered `core.schema.json`

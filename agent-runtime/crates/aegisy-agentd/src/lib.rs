@@ -107,6 +107,12 @@ use aegisy_aap::stable::v0_1::{
     TIMELINE_SUBSCRIPTION_FAILURE_SCHEMA,
 };
 use aegisy_aap::{
+    generated_transport::{
+        classify_transport_request_or_notification, parse_transport_message_raw,
+        validate_transport_generic_message, validate_transport_request_or_notification_definition,
+        validate_transport_request_or_notification_kind, TransportDecodeError,
+        TransportDispatchError, TransportMessage, TransportRequestOrNotificationKind,
+    },
     Notification, Request, Response, JSONRPC_VERSION, MAX_AAP_FRAME_BYTES, PROTOCOL_VERSION,
     RUNTIME_PROTOCOL_MAXIMUM, RUNTIME_PROTOCOL_MINIMUM,
 };
@@ -350,17 +356,6 @@ fn valid_request_id(value: &Value) -> bool {
         }
         _ => false,
     }
-}
-
-fn valid_method(value: &str) -> bool {
-    if value.is_empty() || value.len() > 128 {
-        return false;
-    }
-    value.split('/').all(|segment| {
-        let mut bytes = segment.bytes();
-        bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
-            && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
-    })
 }
 
 fn oversized_frame_response() -> Value {
@@ -933,6 +928,268 @@ pub struct RuntimeControl {
     terminals: Arc<Mutex<TerminalState>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct DecodedRequestFrame {
+    request: Request,
+    message: TransportMessage,
+    kind: TransportRequestOrNotificationKind,
+    definition_validator: DefinitionValidator,
+    byte_len: usize,
+}
+
+type DefinitionValidator =
+    fn(&TransportMessage, TransportRequestOrNotificationKind) -> Result<(), TransportDispatchError>;
+type GenericValidator = fn(&TransportMessage) -> Result<(), TransportDispatchError>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RequestFrameError {
+    Parse(aegisy_aap::transport_json::TransportJsonError),
+    InvalidEnvelope { response_id: Option<Value> },
+    ValidatorUnavailable,
+}
+
+impl DecodedRequestFrame {
+    pub fn request(&self) -> &Request {
+        &self.request
+    }
+
+    pub fn kind(&self) -> TransportRequestOrNotificationKind {
+        self.kind
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.byte_len
+    }
+
+    fn prove_definition_validator_available(&self) -> Result<(), RequestFrameError> {
+        match (self.definition_validator)(&self.message, self.kind) {
+            Ok(()) | Err(TransportDispatchError::InvalidKnownMessage) => Ok(()),
+            Err(_) => Err(RequestFrameError::ValidatorUnavailable),
+        }
+    }
+
+    fn validate_known_kind(&self) -> Result<(), TransportDispatchError> {
+        validate_transport_request_or_notification_kind(&self.message, self.kind)
+    }
+}
+
+fn invalid_envelope_response_id(message: &TransportMessage) -> Option<Value> {
+    let object = message.0.as_object()?;
+    match object.get("id") {
+        Some(id) if valid_request_id(id) => Some(id.clone()),
+        Some(_) => Some(Value::Null),
+        None => None,
+    }
+}
+
+pub fn decode_request_frame(bytes: &[u8]) -> Result<DecodedRequestFrame, RequestFrameError> {
+    decode_request_frame_with_validators(
+        bytes,
+        validate_transport_generic_message,
+        validate_transport_request_or_notification_definition,
+    )
+}
+
+fn decode_request_frame_with_validators(
+    bytes: &[u8],
+    generic_validator: GenericValidator,
+    definition_validator: DefinitionValidator,
+) -> Result<DecodedRequestFrame, RequestFrameError> {
+    let message = parse_transport_message_raw(bytes).map_err(|error| match error {
+        TransportDecodeError::Parse(error) => RequestFrameError::Parse(error),
+        _ => RequestFrameError::ValidatorUnavailable,
+    })?;
+    generic_validator(&message).map_err(|error| match error {
+        TransportDispatchError::InvalidEnvelope => RequestFrameError::InvalidEnvelope {
+            response_id: invalid_envelope_response_id(&message),
+        },
+        TransportDispatchError::ValidatorUnavailable => RequestFrameError::ValidatorUnavailable,
+        _ => RequestFrameError::ValidatorUnavailable,
+    })?;
+    let kind =
+        classify_transport_request_or_notification(&message).map_err(|error| match error {
+            TransportDispatchError::Parse(_) | TransportDispatchError::InvalidEnvelope => {
+                RequestFrameError::InvalidEnvelope {
+                    response_id: invalid_envelope_response_id(&message),
+                }
+            }
+            TransportDispatchError::ValidatorUnavailable => RequestFrameError::ValidatorUnavailable,
+            TransportDispatchError::InvalidKnownMessage => RequestFrameError::ValidatorUnavailable,
+            _ => RequestFrameError::ValidatorUnavailable,
+        })?;
+    let object = message
+        .0
+        .as_object()
+        .expect("validated request or notification envelope is an object");
+    let request = Request {
+        jsonrpc: object
+            .get("jsonrpc")
+            .and_then(Value::as_str)
+            .expect("validated envelope has JSON-RPC version")
+            .to_owned(),
+        id: object.get("id").cloned(),
+        method: object
+            .get("method")
+            .and_then(Value::as_str)
+            .expect("validated request or notification has method")
+            .to_owned(),
+        params: object
+            .get("params")
+            .cloned()
+            .expect("validated request or notification has params"),
+    };
+    Ok(DecodedRequestFrame {
+        request,
+        message,
+        kind,
+        definition_validator,
+        byte_len: bytes.len(),
+    })
+}
+
+pub fn request_frame_error_response(error: &RequestFrameError) -> Option<Value> {
+    let (id, code, message) = match error {
+        RequestFrameError::Parse(_) => (Value::Null, -32700, "parse error"),
+        RequestFrameError::InvalidEnvelope {
+            response_id: Some(id),
+        } => (id.clone(), -32600, "invalid JSON-RPC request envelope"),
+        RequestFrameError::InvalidEnvelope { response_id: None } => return None,
+        RequestFrameError::ValidatorUnavailable => return None,
+    };
+    Some(
+        serde_json::to_value(Response::error(id, code, message))
+            .expect("request frame error response serialization"),
+    )
+}
+
+#[cfg(test)]
+mod generated_transport_ingress_failure_tests {
+    use super::{
+        decode_request_frame, decode_request_frame_with_validators, request_frame_error_response,
+        test_initialize_params, RequestFrameError, Runtime, RuntimeControl, TransportDispatchError,
+        TransportMessage, TransportRequestOrNotificationKind,
+    };
+    use serde_json::{json, Value};
+
+    fn validator_unavailable(
+        _message: &TransportMessage,
+        _kind: TransportRequestOrNotificationKind,
+    ) -> Result<(), TransportDispatchError> {
+        Err(TransportDispatchError::ValidatorUnavailable)
+    }
+
+    fn generic_validator_unavailable(
+        _message: &TransportMessage,
+    ) -> Result<(), TransportDispatchError> {
+        Err(TransportDispatchError::ValidatorUnavailable)
+    }
+
+    fn definition_validator_unused(
+        _message: &TransportMessage,
+        _kind: TransportRequestOrNotificationKind,
+    ) -> Result<(), TransportDispatchError> {
+        Ok(())
+    }
+
+    fn injected_frame(value: Value) -> super::DecodedRequestFrame {
+        let mut frame = decode_request_frame(value.to_string().as_bytes()).unwrap();
+        frame.definition_validator = validator_unavailable;
+        frame
+    }
+
+    #[test]
+    fn validator_unavailable_preempts_normal_policy_and_request_claim() {
+        let mut runtime = Runtime::default();
+        let frame = injected_frame(json!({
+            "jsonrpc": "2.0",
+            "id": "health-before-ready",
+            "method": "runtime/health",
+            "params": {}
+        }));
+        let mut output = Vec::new();
+        runtime.handle_frame_stream(frame, |message| output.push(message));
+
+        assert!(output.is_empty());
+        assert!(runtime.should_shutdown());
+        assert!(runtime.control.lock().request_ids.is_empty());
+    }
+
+    #[test]
+    fn generic_validator_unavailable_produces_no_frame_or_peer_response() {
+        let error = decode_request_frame_with_validators(
+            br#"{"jsonrpc":"2.0","id":"health","method":"runtime/health","params":{}}"#,
+            generic_validator_unavailable,
+            definition_validator_unused,
+        )
+        .expect_err("generic validator failure must close ingress");
+
+        assert_eq!(error, RequestFrameError::ValidatorUnavailable);
+        assert!(request_frame_error_response(&error).is_none());
+    }
+
+    #[test]
+    fn validator_unavailable_preempts_out_of_band_readiness_and_capability_gates() {
+        for protocol_ready in [false, true] {
+            let control = RuntimeControl::default();
+            control.set_protocol_ready(protocol_ready);
+            let frame = injected_frame(json!({
+                "jsonrpc": "2.0",
+                "id": if protocol_ready { "heartbeat-no-capability" } else { "heartbeat-before-ready" },
+                "method": "runtime/heartbeat",
+                "params": {
+                    "schema_version": "runtime-heartbeat-request/0.1",
+                    "nonce": "validator-failure"
+                }
+            }));
+
+            assert_eq!(
+                control.handle_out_of_band_frame(&frame),
+                Err(RequestFrameError::ValidatorUnavailable)
+            );
+            let state = control.lock();
+            assert!(state.request_ids.is_empty());
+            assert!(state.active_turn.is_none());
+            drop(state);
+            assert!(control.terminals.lock().unwrap().records.is_empty());
+        }
+    }
+
+    #[test]
+    fn validator_unavailable_on_dequeued_frame_has_no_runtime_side_effect() {
+        let mut runtime = Runtime::default();
+        let initialized = runtime.handle_line(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "initialize",
+                "method": "initialize",
+                "params": test_initialize_params("validator-failure-test")
+            })
+            .to_string(),
+        );
+        assert_eq!(initialized[0]["id"], "initialize");
+        assert!(runtime
+            .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#)
+            .is_empty());
+        let initial_next_id = runtime.next_id;
+        let initial_session_count = runtime.sessions.len();
+        let initial_request_ids = runtime.control.lock().request_ids.clone();
+        let frame = injected_frame(json!({
+            "jsonrpc": "2.0",
+            "id": "session-start",
+            "method": "session/start",
+            "params": {"mode": "chat"}
+        }));
+        let mut output = Vec::new();
+        runtime.handle_frame_stream(frame, |message| output.push(message));
+
+        assert!(output.is_empty());
+        assert!(runtime.should_shutdown());
+        assert_eq!(runtime.next_id, initial_next_id);
+        assert_eq!(runtime.sessions.len(), initial_session_count);
+        assert_eq!(runtime.control.lock().request_ids, initial_request_ids);
+    }
+}
+
 #[derive(Default)]
 struct TerminalState {
     manager: TerminalManager,
@@ -1053,66 +1310,34 @@ impl RuntimeControl {
     }
 
     pub fn reject_oversized_line(&self, line: &str) -> Option<Vec<Value>> {
+        self.reject_oversized_frame_bytes(line.len())
+    }
+
+    pub fn reject_oversized_frame(&self, frame: &DecodedRequestFrame) -> Option<Vec<Value>> {
+        self.reject_oversized_frame_bytes(frame.byte_len())
+    }
+
+    fn reject_oversized_frame_bytes(&self, byte_len: usize) -> Option<Vec<Value>> {
         let limit = self
             .lock()
             .negotiated_max_frame_bytes
             .unwrap_or(MAX_AAP_FRAME_BYTES);
-        if u64::try_from(line.len()).unwrap_or(u64::MAX) <= limit {
+        if u64::try_from(byte_len).unwrap_or(u64::MAX) <= limit {
             return None;
         }
         Some(vec![oversized_frame_response()])
     }
 
     pub fn overload_response(&self, line: &str) -> Option<Value> {
-        let envelope: Value = match serde_json::from_str(line) {
-            Ok(envelope) => envelope,
-            Err(_) => {
-                return Some(
-                    serde_json::to_value(Response::error(Value::Null, -32700, "parse error"))
-                        .expect("overload parse response serialization"),
-                )
-            }
-        };
-        let id = envelope
-            .as_object()
-            .and_then(|object| object.get("id"))
-            .cloned()?;
-        if !valid_request_id(&id) {
-            return Some(
-                serde_json::to_value(Response::error(
-                    Value::Null,
-                    -32600,
-                    "invalid JSON-RPC request envelope",
-                ))
-                .expect("overload invalid ID response serialization"),
-            );
+        match decode_request_frame(line.as_bytes()) {
+            Ok(frame) => self.overload_response_frame(&frame),
+            Err(error) => request_frame_error_response(&error),
         }
-        let request: Request = match serde_json::from_value(envelope) {
-            Ok(request) => request,
-            Err(_) => {
-                return Some(
-                    serde_json::to_value(Response::error(
-                        Value::Null,
-                        -32600,
-                        "invalid JSON-RPC request envelope",
-                    ))
-                    .expect("overload invalid envelope response serialization"),
-                )
-            }
-        };
-        if request.jsonrpc != JSONRPC_VERSION
-            || !valid_method(&request.method)
-            || !request.params.is_object()
-        {
-            return Some(
-                serde_json::to_value(Response::error(
-                    id,
-                    -32600,
-                    "invalid JSON-RPC request envelope",
-                ))
-                .expect("overload semantic envelope response serialization"),
-            );
-        }
+    }
+
+    pub fn overload_response_frame(&self, frame: &DecodedRequestFrame) -> Option<Value> {
+        let request = frame.request();
+        let id = request.id.clone()?;
         Some(
             serde_json::to_value(Response::error(id, -32004, "AAP request queue is full"))
                 .expect("overload response serialization"),
@@ -1432,59 +1657,61 @@ impl RuntimeControl {
         .expect("heartbeat response serialization")]
     }
 
-    pub fn handle_out_of_band_line(&self, line: &str) -> Option<Vec<Value>> {
+    pub fn handle_out_of_band_line(
+        &self,
+        line: &str,
+    ) -> Result<Option<Vec<Value>>, RequestFrameError> {
         if let Some(response) = self.reject_oversized_line(line) {
-            return Some(response);
+            return Ok(Some(response));
         }
-        let envelope: Value = serde_json::from_str(line).ok()?;
-        let method = envelope.get("method").and_then(Value::as_str)?;
+        match decode_request_frame(line.as_bytes()) {
+            Ok(frame) => self.handle_out_of_band_frame(&frame),
+            Err(RequestFrameError::ValidatorUnavailable) => {
+                Err(RequestFrameError::ValidatorUnavailable)
+            }
+            Err(error) => Ok(request_frame_error_response(&error).map(|response| vec![response])),
+        }
+    }
+
+    pub fn handle_out_of_band_frame(
+        &self,
+        frame: &DecodedRequestFrame,
+    ) -> Result<Option<Vec<Value>>, RequestFrameError> {
+        let method = frame.request().method.as_str();
         if !matches!(
             method,
             "runtime/heartbeat" | "turn/cancel" | "turn/steer" | "terminal/stop-user"
         ) {
-            return None;
+            return Ok(None);
         }
-        let Some(id) = envelope
-            .as_object()
-            .and_then(|object| object.get("id"))
-            .cloned()
-        else {
+        frame.prove_definition_validator_available()?;
+        let Some(_) = frame.request().id.as_ref() else {
             if method == "runtime/heartbeat" {
-                return Some(vec![serde_json::to_value(Response::error(
+                return Ok(Some(vec![serde_json::to_value(Response::error(
                     Value::Null,
                     -32600,
                     "runtime heartbeat must be a request",
                 ))
-                .expect("heartbeat notification response serialization")]);
+                .expect("heartbeat notification response serialization")]));
             }
-            return Some(Vec::new());
+            return Ok(Some(Vec::new()));
         };
-        if !valid_request_id(&id) || !envelope.get("params").is_some_and(Value::is_object) {
-            return Some(vec![serde_json::to_value(Response::error(
-                Value::Null,
-                -32600,
-                "invalid JSON-RPC request envelope",
-            ))
-            .expect("out-of-band envelope response serialization")]);
-        }
-        let request: Request = match serde_json::from_value(envelope) {
-            Ok(request) => request,
-            Err(_) => {
-                return Some(vec![serde_json::to_value(Response::error(
-                    id,
-                    -32600,
-                    "invalid JSON-RPC request envelope",
-                ))
-                .expect("out-of-band envelope response serialization")])
-            }
-        };
-        if request.jsonrpc != JSONRPC_VERSION {
-            return Some(vec![serde_json::to_value(Response::error(
-                request.id.unwrap_or(Value::Null),
-                -32600,
-                "invalid JSON-RPC version",
-            ))
-            .expect("cancel protocol response serialization")]);
+        let request = frame.request().clone();
+        if let Err(error) = frame.validate_known_kind() {
+            return match error {
+                TransportDispatchError::InvalidEnvelope => {
+                    Ok(Some(vec![serde_json::to_value(Response::error(
+                        request.id.clone().unwrap_or(Value::Null),
+                        -32600,
+                        "known AAP request or notification kind is invalid",
+                    ))
+                    .expect("out-of-band known kind response serialization")]))
+                }
+                TransportDispatchError::ValidatorUnavailable => {
+                    Err(RequestFrameError::ValidatorUnavailable)
+                }
+                _ => Err(RequestFrameError::ValidatorUnavailable),
+            };
         }
         let required = match request.method.as_str() {
             "runtime/heartbeat" => vec!["runtime.heartbeat.out-of-band"],
@@ -1503,14 +1730,14 @@ impl RuntimeControl {
             // The initialized notification is consumed by the ordered runtime
             // dispatcher. Queue an out-of-band request until that transition is
             // visible so a heartbeat cannot overtake the handshake.
-            return None;
+            return Ok(None);
         }
         if required
             .iter()
             .any(|capability| !state.negotiated_capabilities.contains(*capability))
         {
             drop(state);
-            return Some(vec![serde_json::to_value(Response::error(
+            return Ok(Some(vec![serde_json::to_value(Response::error(
                 request
                     .id
                     .clone()
@@ -1518,19 +1745,19 @@ impl RuntimeControl {
                 -32006,
                 "required capability was not negotiated",
             ))
-            .expect("out-of-band capability response serialization")]);
+            .expect("out-of-band capability response serialization")]));
         }
         drop(state);
         if let Some(duplicate) = self.claim_request(&request) {
-            return Some(vec![duplicate]);
+            return Ok(Some(vec![duplicate]));
         }
-        Some(match request.method.as_str() {
+        Ok(Some(match request.method.as_str() {
             "runtime/heartbeat" => self.heartbeat_claimed(request),
             "turn/cancel" => self.cancel_claimed(request),
             "turn/steer" => self.steer_claimed(request),
             "terminal/stop-user" => self.terminal_stop_claimed(request),
             _ => unreachable!("out-of-band method was checked above"),
-        })
+        }))
     }
 }
 
@@ -5146,6 +5373,30 @@ impl Runtime {
         } else {
             MAX_AAP_FRAME_BYTES
         };
+        if u64::try_from(line.len()).unwrap_or(u64::MAX) > frame_limit {
+            emit_raw(oversized_frame_response());
+            return;
+        }
+        match decode_request_frame(line.as_bytes()) {
+            Ok(frame) => self.handle_frame_stream(frame, emit_raw),
+            Err(RequestFrameError::ValidatorUnavailable) => self.shutdown = true,
+            Err(error) => {
+                if let Some(response) = request_frame_error_response(&error) {
+                    emit_raw(response);
+                }
+            }
+        }
+    }
+
+    pub fn handle_frame_stream<F>(&mut self, frame: DecodedRequestFrame, mut emit_raw: F)
+    where
+        F: FnMut(Value),
+    {
+        let frame_limit = if self.initialized {
+            self.negotiated_max_frame_bytes
+        } else {
+            MAX_AAP_FRAME_BYTES
+        };
         let subscription_enabled = self
             .negotiated_capabilities
             .contains("timeline.subscription.fixed-watermark");
@@ -5162,80 +5413,51 @@ impl Runtime {
                 &mut emit_raw,
             );
         };
-        if u64::try_from(line.len()).unwrap_or(u64::MAX) > frame_limit {
+        if u64::try_from(frame.byte_len()).unwrap_or(u64::MAX) > frame_limit {
             emit(oversized_frame_response());
             return;
         }
-
-        let envelope: Value = match serde_json::from_str(line) {
-            Ok(envelope) => envelope,
-            Err(error) => {
-                emit(
-                    serde_json::to_value(Response::error(
-                        Value::Null,
-                        -32700,
-                        format!("parse error: {error}"),
-                    ))
-                    .expect("response serialization"),
-                );
-                return;
-            }
-        };
-        let envelope_id = envelope.as_object().and_then(|object| object.get("id"));
-        if envelope_id.is_some_and(|id| !valid_request_id(id)) {
-            emit(
-                serde_json::to_value(Response::error(
-                    Value::Null,
-                    -32600,
-                    "invalid JSON-RPC request id",
-                ))
-                .expect("invalid request id response serialization"),
-            );
-            return;
-        }
-        let request: Request = match serde_json::from_value(envelope.clone()) {
-            Ok(request) => request,
-            Err(_) => {
-                if envelope.get("id").is_some() {
-                    emit(
-                        serde_json::to_value(Response::error(
-                            Value::Null,
-                            -32600,
-                            "invalid JSON-RPC request envelope",
-                        ))
-                        .expect("invalid request response serialization"),
-                    );
-                }
-                return;
-            }
-        };
-
-        if !valid_method(&request.method) {
-            self.emit_all(
-                self.error_for(&request, -32600, "invalid JSON-RPC method"),
-                &mut emit,
-            );
-            return;
-        }
-        if !request.params.is_object() {
-            self.emit_all(
-                self.error_for(&request, -32600, "JSON-RPC params must be an object"),
-                &mut emit,
-            );
+        let request = frame.request().clone();
+        if frame.prove_definition_validator_available().is_err() {
+            self.shutdown = true;
             return;
         }
         let is_initialized_notification = request.method == "initialized" && request.id.is_none();
         if request.id.is_none() && !is_initialized_notification {
+            if request.method == "runtime/heartbeat" {
+                self.emit_all(
+                    vec![serde_json::to_value(Response::error(
+                        Value::Null,
+                        -32600,
+                        "runtime heartbeat must be a request",
+                    ))
+                    .expect("heartbeat notification response serialization")],
+                    &mut emit,
+                );
+            }
             return;
         }
 
-        if request.jsonrpc != JSONRPC_VERSION {
-            self.emit_all(
-                self.error_for(&request, -32600, "invalid JSON-RPC version"),
-                &mut emit,
-            );
+        if let Err(error) = frame.validate_known_kind() {
+            match error {
+                TransportDispatchError::InvalidEnvelope => self.emit_all(
+                    self.error_for(
+                        &request,
+                        -32600,
+                        if request.method == "initialized" {
+                            "initialized must be a notification"
+                        } else {
+                            "known AAP request or notification kind is invalid"
+                        },
+                    ),
+                    &mut emit,
+                ),
+                TransportDispatchError::ValidatorUnavailable => self.shutdown = true,
+                _ => self.shutdown = true,
+            }
             return;
         }
+
         if let Some(duplicate) = self.control.claim_request(&request) {
             emit(duplicate);
             return;
@@ -5500,6 +5722,40 @@ impl Runtime {
             );
             return;
         }
+        if !matches!(request.method.as_str(), "initialize" | "initialized")
+            && (!self.initialized || !self.client_ready)
+        {
+            self.emit_all(
+                self.error_for(&request, -32002, "initialize handshake required"),
+                &mut emit,
+            );
+            return;
+        }
+        if self.is_recovery_mode()
+            && !matches!(
+                request.method.as_str(),
+                "initialize"
+                    | "initialized"
+                    | "shutdown"
+                    | "runtime/recovery/status"
+                    | "runtime/recovery/export"
+                    | "runtime/restart"
+                    | "runtime/health"
+                    | "runtime/degradations"
+                    | "model/catalog"
+                    | "model/catalog-cache"
+                    | "model/catalog-refresh-status"
+                    | "model/capability-check"
+                    | "model/profile/list"
+                    | "model/profile/read"
+            )
+        {
+            self.emit_all(
+                self.error_for(&request, -32120, "workbench is in read-only recovery mode"),
+                &mut emit,
+            );
+            return;
+        }
         if request.method == "turn/start" && self.initialized && self.client_ready {
             self.turn_start_stream(request, &mut emit);
             return;
@@ -5541,9 +5797,6 @@ impl Runtime {
             "model/capability-check" => self.model_capability_check(request),
             "model/profile/list" => self.model_profile_list(request),
             "model/profile/read" => self.model_profile_read(request),
-            _ if self.is_recovery_mode() => {
-                self.error_for(&request, -32120, "workbench is in read-only recovery mode")
-            }
             "project/trust-review" => self.project_trust_review(request),
             "project/trust-acknowledge" => self.project_trust_acknowledge(request),
             "project/root-list" => self.project_root_list(request),
@@ -22095,12 +22348,20 @@ mod turn_cancel_tests {
         .to_string()
     }
 
+    fn out_of_band(control: &RuntimeControl, line: &str) -> Option<Vec<Value>> {
+        control
+            .handle_out_of_band_line(line)
+            .expect("generated transport validator remains available")
+    }
+
     #[test]
     fn out_of_band_request_before_initialized_stays_on_ordered_dispatch_path() {
         let control = RuntimeControl::default();
-        assert!(control
-            .handle_out_of_band_line(&heartbeat_request("heartbeat-before-init", "nonce-1"))
-            .is_none());
+        assert!(out_of_band(
+            &control,
+            &heartbeat_request("heartbeat-before-init", "nonce-1")
+        )
+        .is_none());
     }
 
     #[test]
@@ -22110,30 +22371,28 @@ mod turn_cancel_tests {
         let cancellation = control.begin_turn("session-1");
         control.identify_turn("session-1", "turn-1");
 
-        let accepted = control
-            .handle_out_of_band_line(&cancel_request("cancel-1", "session-1", "turn-1"))
-            .unwrap();
+        let accepted =
+            out_of_band(&control, &cancel_request("cancel-1", "session-1", "turn-1")).unwrap();
         assert_eq!(accepted[0]["result"]["state"], "cancellation-requested");
         assert_eq!(accepted[0]["result"]["already_requested"], false);
         assert!(cancellation.is_requested());
 
-        let repeated = control
-            .handle_out_of_band_line(&cancel_request("cancel-2", "session-1", "turn-1"))
-            .unwrap();
+        let repeated =
+            out_of_band(&control, &cancel_request("cancel-2", "session-1", "turn-1")).unwrap();
         assert_eq!(repeated[0]["result"]["already_requested"], true);
-        let wrong_turn = control
-            .handle_out_of_band_line(&cancel_request("cancel-3", "session-1", "turn-old"))
-            .unwrap();
+        let wrong_turn = out_of_band(
+            &control,
+            &cancel_request("cancel-3", "session-1", "turn-old"),
+        )
+        .unwrap();
         assert_eq!(wrong_turn[0]["error"]["code"], -32081);
-        let duplicate = control
-            .handle_out_of_band_line(&cancel_request("cancel-3", "session-1", "turn-1"))
-            .unwrap();
+        let duplicate =
+            out_of_band(&control, &cancel_request("cancel-3", "session-1", "turn-1")).unwrap();
         assert_eq!(duplicate[0]["error"]["code"], -32001);
 
         control.finish_turn("session-1");
-        let completed = control
-            .handle_out_of_band_line(&cancel_request("cancel-4", "session-1", "turn-1"))
-            .unwrap();
+        let completed =
+            out_of_band(&control, &cancel_request("cancel-4", "session-1", "turn-1")).unwrap();
         assert_eq!(completed[0]["error"]["code"], -32080);
     }
 
@@ -22145,46 +22404,44 @@ mod turn_cancel_tests {
         let steering = control.steering_handle("session-1").unwrap();
         control.identify_turn("session-1", "turn-1");
 
-        let accepted = control
-            .handle_out_of_band_line(&steer_request(
+        let accepted = out_of_band(
+            &control,
+            &steer_request(
                 "steer-1",
                 "session-1",
                 "turn-1",
                 "focus on the failing test",
-            ))
-            .unwrap();
+            ),
+        )
+        .unwrap();
         assert_eq!(accepted[0]["result"]["state"], "steering-requested");
         assert_eq!(accepted[0]["result"]["queued"], 1);
 
-        let wrong_turn = control
-            .handle_out_of_band_line(&steer_request(
-                "steer-wrong",
-                "session-1",
-                "turn-old",
-                "wrong turn",
-            ))
-            .unwrap();
+        let wrong_turn = out_of_band(
+            &control,
+            &steer_request("steer-wrong", "session-1", "turn-old", "wrong turn"),
+        )
+        .unwrap();
         assert_eq!(wrong_turn[0]["error"]["code"], -32081);
 
         for index in 2..=TURN_STEER_QUEUE_CAPACITY {
-            let queued = control
-                .handle_out_of_band_line(&steer_request(
+            let queued = out_of_band(
+                &control,
+                &steer_request(
                     &format!("steer-{index}"),
                     "session-1",
                     "turn-1",
                     &format!("follow-up {index}"),
-                ))
-                .unwrap();
+                ),
+            )
+            .unwrap();
             assert_eq!(queued[0]["result"]["queued"], index);
         }
-        let full = control
-            .handle_out_of_band_line(&steer_request(
-                "steer-full",
-                "session-1",
-                "turn-1",
-                "one too many",
-            ))
-            .unwrap();
+        let full = out_of_band(
+            &control,
+            &steer_request("steer-full", "session-1", "turn-1", "one too many"),
+        )
+        .unwrap();
         assert_eq!(full[0]["error"]["code"], -32004);
 
         let pending = steering.drain();
@@ -22196,26 +22453,22 @@ mod turn_cancel_tests {
         );
 
         control.finish_turn("session-1");
-        let completed = control
-            .handle_out_of_band_line(&steer_request(
-                "steer-completed",
-                "session-1",
-                "turn-1",
-                "too late",
-            ))
-            .unwrap();
+        let completed = out_of_band(
+            &control,
+            &steer_request("steer-completed", "session-1", "turn-1", "too late"),
+        )
+        .unwrap();
         assert_eq!(completed[0]["error"]["code"], -32080);
     }
 
     #[test]
     fn non_cancel_requests_remain_on_the_normal_dispatch_path() {
         let runtime = ready_runtime();
-        assert!(runtime
-            .control()
-            .handle_out_of_band_line(
-                r#"{"jsonrpc":"2.0","id":"read","method":"session/read","params":{}}"#
-            )
-            .is_none());
+        assert!(out_of_band(
+            &runtime.control(),
+            r#"{"jsonrpc":"2.0","id":"read","method":"session/read","params":{}}"#,
+        )
+        .is_none());
     }
 }
 

@@ -4115,6 +4115,31 @@ fn stdio_control_heartbeats_steers_and_cancels_while_normal_dispatch_is_blocked(
     send(
         &mut stdin,
         &request(
+            "queue-invalid-initialize",
+            "initialize",
+            json!({"unexpected": true}),
+        ),
+    );
+    let invalid_initialize = receive_until(&receiver, |message| {
+        message["id"] == "queue-invalid-initialize"
+    });
+    assert_eq!(invalid_initialize["error"]["code"], -32004);
+    send(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": "queue-initialized-request",
+            "method": "initialized",
+            "params": {}
+        }),
+    );
+    let initialized_request = receive_until(&receiver, |message| {
+        message["id"] == "queue-initialized-request"
+    });
+    assert_eq!(initialized_request["error"]["code"], -32004);
+    send(
+        &mut stdin,
+        &request(
             "heartbeat-saturated",
             "runtime/heartbeat",
             json!({

@@ -246,8 +246,22 @@ from generic-envelope failure, and unavailable generated validators are a local
 implementation fault rather than a peer JSON-RPC error.
 
 This remains a partial generation architecture, not completion of `3.10`.
-Migration of production Rust/Qt wire consumers and clean Windows Unicode-checkout
-execution evidence are still required. A future AAP `0.2` may deliberately narrow
+The production Rust stdio consumer now parses each accepted frame exactly once with
+the generated lossless parser, validates the generic envelope before queue admission,
+and carries the decoded message plus generated method classification into ordinary
+and out-of-band dispatch. Known definition validation occurs only after the existing
+handshake/capability or queue-overload precedence point, so malformed repeated
+`initialize`, wrong-kind `initialized`, and saturated generic-valid requests keep
+their stable errors. A generic or per-definition `ValidatorUnavailable` failure is a
+local implementation fault: no peer response or request-ID claim occurs, no Runtime
+or Store effect is allowed, and a mutex-backed fault gate linearizes the failure
+against active and queued dispatch.
+
+Migration of the production Qt wire consumer and clean Windows Unicode-checkout
+execution evidence are still required. Qt must use the generated lossless parser,
+method/typed-error metadata, and indivisible pending response context before
+QJsonObject projection; pre-validating and then reparsing the same bytes through
+`QJsonDocument` is not equivalent. A future AAP `0.2` may deliberately narrow
 generic integers and remap current `-321xx` application errors outside JSON-RPC's
 reserved range, but that would be a reviewed versioned contract change rather than
 a silent `0.1` generator behavior.

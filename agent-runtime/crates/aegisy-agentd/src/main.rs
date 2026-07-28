@@ -1,5 +1,8 @@
 use aegisy_aap::MAX_AAP_FRAME_BYTES;
-use aegisy_agentd::Runtime;
+use aegisy_agentd::{
+    decode_request_frame, request_frame_error_response, DecodedRequestFrame, RequestFrameError,
+    Runtime,
+};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -8,6 +11,39 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 const REQUEST_QUEUE_CAPACITY: usize = 32;
+
+#[derive(Default)]
+struct TransportFaultGate {
+    failed: Mutex<bool>,
+}
+
+impl TransportFaultGate {
+    fn fail(&self) {
+        let mut failed = self
+            .failed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *failed = true;
+    }
+
+    fn dispatch<T>(&self, operation: impl FnOnce() -> T) -> Option<T> {
+        let failed = self.failed.lock().ok()?;
+        if *failed {
+            return None;
+        }
+        Some(operation())
+    }
+}
+
+fn fail_closed_on_validator_unavailable<T>(
+    result: Result<T, RequestFrameError>,
+    gate: &TransportFaultGate,
+) -> Result<T, RequestFrameError> {
+    if matches!(&result, Err(RequestFrameError::ValidatorUnavailable)) {
+        gate.fail();
+    }
+    result
+}
 
 enum FrameRead {
     Frame(Vec<u8>),
@@ -141,7 +177,12 @@ fn main() {
     let reader_control = control.clone();
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let reader_stdout = stdout.clone();
-    let (request_sender, request_receiver) = mpsc::sync_channel(REQUEST_QUEUE_CAPACITY);
+    let transport_fault_gate = Arc::new(TransportFaultGate::default());
+    let reader_transport_fault_gate = Arc::clone(&transport_fault_gate);
+    let (request_sender, request_receiver): (
+        mpsc::SyncSender<DecodedRequestFrame>,
+        mpsc::Receiver<DecodedRequestFrame>,
+    ) = mpsc::sync_channel(REQUEST_QUEUE_CAPACITY);
 
     thread::spawn(move || {
         let mut stdin = io::stdin().lock();
@@ -155,21 +196,22 @@ fn main() {
             if frame.iter().all(|byte| byte.is_ascii_whitespace()) {
                 continue;
             }
-            let line = match String::from_utf8(frame) {
-                Ok(line) => line,
-                Err(_) => {
-                    let parse_error = json!({
-                        "jsonrpc": "2.0",
-                        "id": null,
-                        "error": {"code": -32700, "message": "parse error: invalid UTF-8"}
-                    });
-                    if !write_message(&reader_stdout, &parse_error) {
-                        return;
+            let decoded = match fail_closed_on_validator_unavailable(
+                decode_request_frame(&frame),
+                &reader_transport_fault_gate,
+            ) {
+                Ok(decoded) => decoded,
+                Err(RequestFrameError::ValidatorUnavailable) => return,
+                Err(error) => {
+                    if let Some(response) = request_frame_error_response(&error) {
+                        if !write_message(&reader_stdout, &response) {
+                            return;
+                        }
                     }
                     continue;
                 }
             };
-            if let Some(messages) = reader_control.reject_oversized_line(&line) {
+            if let Some(messages) = reader_control.reject_oversized_frame(&decoded) {
                 for message in messages {
                     if !write_message(&reader_stdout, &message) {
                         return;
@@ -177,18 +219,26 @@ fn main() {
                 }
                 continue;
             }
-            if let Some(messages) = reader_control.handle_out_of_band_line(&line) {
-                for message in messages {
-                    if !write_message(&reader_stdout, &message) {
-                        return;
+            match reader_control.handle_out_of_band_frame(&decoded) {
+                Ok(Some(messages)) => {
+                    for message in messages {
+                        if !write_message(&reader_stdout, &message) {
+                            return;
+                        }
                     }
+                    continue;
                 }
-                continue;
+                Ok(None) => {}
+                Err(RequestFrameError::ValidatorUnavailable) => {
+                    reader_transport_fault_gate.fail();
+                    return;
+                }
+                Err(_) => return,
             }
-            match request_sender.try_send(line) {
+            match request_sender.try_send(decoded) {
                 Ok(()) => {}
-                Err(TrySendError::Full(line)) => {
-                    if let Some(overload) = reader_control.overload_response(&line) {
+                Err(TrySendError::Full(frame)) => {
+                    if let Some(overload) = reader_control.overload_response_frame(&frame) {
                         if !write_message(&reader_stdout, &overload) {
                             return;
                         }
@@ -199,25 +249,33 @@ fn main() {
         }
     });
 
-    while let Ok(line) = request_receiver.recv() {
-        let mut output_open = true;
-        if let Some(messages) = control.handle_out_of_band_line(&line) {
-            for message in messages {
-                if output_open {
-                    output_open = write_message(&stdout, &message);
+    while let Ok(frame) = request_receiver.recv() {
+        let Some((output_open, should_shutdown)) = transport_fault_gate.dispatch(|| {
+            let mut output_open = true;
+            match control.handle_out_of_band_frame(&frame) {
+                Ok(Some(messages)) => {
+                    for message in messages {
+                        if output_open {
+                            output_open = write_message(&stdout, &message);
+                        }
+                    }
                 }
+                Ok(None) => runtime.handle_frame_stream(frame, |message| {
+                    if output_open {
+                        output_open = write_message(&stdout, &message);
+                    }
+                }),
+                Err(RequestFrameError::ValidatorUnavailable) => return (false, true),
+                Err(_) => return (false, true),
             }
-        } else {
-            runtime.handle_line_stream(&line, |message| {
-                if output_open {
-                    output_open = write_message(&stdout, &message);
-                }
-            });
-        }
+            (output_open, runtime.should_shutdown())
+        }) else {
+            break;
+        };
         if !output_open {
             return;
         }
-        if runtime.should_shutdown() {
+        if should_shutdown {
             break;
         }
     }
@@ -225,10 +283,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{oversized_frame_error, read_bounded_frame, write_message, FrameRead};
+    use super::{
+        fail_closed_on_validator_unavailable, oversized_frame_error, read_bounded_frame,
+        write_message, FrameRead, TransportFaultGate,
+    };
     use aegisy_aap::MAX_AAP_FRAME_BYTES;
+    use aegisy_agentd::RequestFrameError;
     use std::io::{BufReader, Cursor};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::thread;
 
     #[test]
     fn bounded_reader_drains_an_oversized_frame_and_recovers_next_frame() {
@@ -254,6 +317,67 @@ mod tests {
             panic!("exact-limit frame should be retained");
         };
         assert_eq!(frame.len(), usize::try_from(MAX_AAP_FRAME_BYTES).unwrap());
+    }
+
+    #[test]
+    fn transport_fault_gate_linearizes_failure_before_later_dispatch() {
+        let gate = Arc::new(TransportFaultGate::default());
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let active_gate = Arc::clone(&gate);
+        let active = thread::spawn(move || {
+            active_gate.dispatch(|| {
+                entered_sender.send(()).unwrap();
+                release_receiver.recv().unwrap();
+            })
+        });
+        entered_receiver.recv().unwrap();
+        assert!(gate.failed.try_lock().is_err());
+
+        let fault_gate = Arc::clone(&gate);
+        let fault = thread::spawn(move || fault_gate.fail());
+        release_sender.send(()).unwrap();
+        assert!(active.join().unwrap().is_some());
+        fault.join().unwrap();
+
+        let mut later_dispatched = false;
+        assert!(gate
+            .dispatch(|| {
+                later_dispatched = true;
+            })
+            .is_none());
+        assert!(!later_dispatched);
+    }
+
+    #[test]
+    fn transport_fault_gate_blocks_dispatch_when_failure_wins() {
+        let gate = TransportFaultGate::default();
+        gate.fail();
+        let mut dispatched = false;
+        assert!(gate
+            .dispatch(|| {
+                dispatched = true;
+            })
+            .is_none());
+        assert!(!dispatched);
+    }
+
+    #[test]
+    fn validator_unavailable_fails_gate_before_queued_dispatch() {
+        let gate = TransportFaultGate::default();
+        let failure: Result<(), RequestFrameError> = Err(RequestFrameError::ValidatorUnavailable);
+        assert_eq!(
+            fail_closed_on_validator_unavailable(failure, &gate),
+            Err(RequestFrameError::ValidatorUnavailable)
+        );
+
+        let mut dispatched = false;
+        assert!(gate
+            .dispatch(|| {
+                dispatched = true;
+            })
+            .is_none());
+        assert!(!dispatched);
     }
 
     #[test]

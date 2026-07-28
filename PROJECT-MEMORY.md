@@ -307,14 +307,22 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   separately from `UnknownDefinition`, `InvalidValue`, and local
   `ValidatorUnavailable` failures. Production consumers must treat
   `ValidatorUnavailable` as a local fail-closed implementation fault rather than
-  reporting it to a peer as `-32600` or `-32602`; the generated dispatch and
-  production-consumer migration remain the next slice.
-  The final local gate passes generator negative/freshness tests, Rust formatting,
-  `1009` workspace tests with one explicitly ignored live Codex fixture, strict
-  Clippy, the complete desktop build and `23/23` CTests, strict OpenSpec validation,
-  Cargo packaging, and `git diff --check`.
-  Keep `3.10` unchecked: production Rust/Qt consumers still use reviewed hand-written
-  wire paths, and clean Windows Unicode-checkout execution remains absent. The
+  reporting it to a peer as `-32600` or `-32602`.
+  The production Rust stdio consumer now uses the generated lossless ingress path:
+  one parse, generic-envelope validation before queue admission, generated method/
+  kind classification, and generated known-definition validation at the existing
+  Runtime/OOB policy boundary. Saturated generic-valid frames retain `-32004`
+  precedence before known kind/parameter validation. Generic or per-definition
+  validator unavailability emits no peer response, claims no request ID, performs no
+  Runtime/Store side effect, and closes later queued dispatch through a linearized
+  mutex-backed transport fault gate.
+  The final Rust-ingress local gate passes generator negative/freshness tests, Rust
+  formatting, `1018` workspace tests with one explicitly ignored live Codex fixture,
+  strict Clippy, Cargo packaging, the complete desktop build and `23/23` CTests,
+  strict OpenSpec validation, and `git diff --check`.
+  Keep `3.10` unchecked: the production Qt consumer still uses its reviewed
+  hand-written/QJsonDocument wire path, and clean Windows Unicode-checkout execution
+  remains absent. The
   `jsonschema` 0.48.5 Rust dependency also has an internal exponent-materialization
   limit at 1,000,000; this is an implementation limit, not permission to narrow
   stable `0.1`. A future reviewed AAP `0.2` may define JSON-safe generic integers
@@ -3590,10 +3598,36 @@ Implemented visual baseline:
   by the focused render test; accessibility, narrow-platform screenshots, and
   cross-platform sizing evidence remain release gaps.
 
+## Rust Production Transport Ingress (2026-07-28)
+
+- Rust production stdio ingress now carries a generated `TransportMessage` from the
+  single lossless parse through queue admission and ordinary/OOB dispatch. The
+  generated generic envelope validator runs before queue classification; method kind
+  and known definition validators run at the reviewed policy boundary so the stable
+  handshake, capability, notification, request-ID, and overload error order does not
+  change.
+- Queue-full generic-valid frames keep `-32004` precedence even when a known method
+  later has invalid params or the request/notification kind is wrong. Known malformed
+  messages cannot fall back to generic handling once admitted for dispatch.
+- Generic and per-definition validator compilation failures are deterministically
+  injectable in tests. `ValidatorUnavailable` produces no peer error, claims no ID,
+  changes no Runtime/Store state, and closes future queued dispatch. One mutex-backed
+  `TransportFaultGate` removes the previous check-then-dispatch race.
+- Verification passes all `1018` Rust workspace tests with one ignored live Codex
+  fixture, strict workspace Clippy and formatting, generator negative/freshness and
+  exact 47-file package inventory gates, `aegisy-aap` Cargo packaging, the desktop
+  build and `23/23` CTests, strict OpenSpec validation, and `git diff --check`.
+  The render fixture's synthetic recovery Session now pre-stages its exact sync
+  request instead of racing a real sidecar response; production behavior is unchanged.
+- Qt production ingress still parses with `QJsonDocument` and uses hand-written
+  response/pending dispatch. Complete generated Qt migration plus a clean Windows
+  Unicode checkout remain required, so OpenSpec `3.10` stays unchecked.
+
 ## Next Product Priorities
 
-1. Continue OpenSpec `3.10` by migrating production Rust and Qt Transport consumers
-   behind generated raw validators without changing stable `0.1` wire behavior. Run
+1. Continue OpenSpec `3.10` by migrating the production Qt Transport consumer behind
+   generated lossless parsing, method/typed-error metadata, and indivisible pending
+   response contexts without changing stable `0.1` wire behavior. Run
    the complete generator gate from a clean Windows Unicode checkout before checking
    the task; do not narrow generic numbers or claim Windows evidence from macOS.
 2. Continue OpenSpec `3.5` by obtaining complete Windows reconnect/runtime evidence,

@@ -1,5 +1,8 @@
 use aegisy_aap::MAX_AAP_FRAME_BYTES;
-use aegisy_agentd::{Runtime, STABLE_CAPABILITY_REGISTRY};
+use aegisy_agentd::{
+    decode_request_frame, request_frame_error_response, RequestFrameError, Runtime,
+    STABLE_CAPABILITY_REGISTRY,
+};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -477,6 +480,97 @@ fn strict_request_envelopes_do_not_treat_invalid_ids_as_notifications() {
 }
 
 #[test]
+fn generated_transport_ingress_preserves_error_stages_and_unknown_methods() {
+    let parse = decode_request_frame(b"{broken").expect_err("invalid frame must fail");
+    let RequestFrameError::Parse(parse_error) = &parse else {
+        panic!("expected lossless parse error, got {parse:?}");
+    };
+    assert_eq!(parse_error.offset(), 1);
+    assert_eq!(
+        request_frame_error_response(&parse).unwrap()["error"]["code"],
+        -32700
+    );
+
+    let envelope = decode_request_frame(
+        br#"{"jsonrpc":"1.0","id":"bad","method":"runtime/health","params":{}}"#,
+    )
+    .expect_err("invalid envelope must fail");
+    assert_eq!(
+        envelope,
+        RequestFrameError::InvalidEnvelope {
+            response_id: Some(json!("bad")),
+        }
+    );
+    let response = request_frame_error_response(&envelope).expect("peer error response");
+    assert_eq!(response["id"], "bad");
+    assert_eq!(response["error"]["code"], -32600);
+
+    let unknown = decode_request_frame(
+        br#"{"jsonrpc":"2.0","id":"future","method":"future/inspect","params":{}}"#,
+    )
+    .expect("unknown request methods remain forward-compatible");
+    assert_eq!(unknown.request().method, "future/inspect");
+
+    let known_with_invalid_params = decode_request_frame(
+        br#"{"jsonrpc":"2.0","id":"heartbeat","method":"runtime/heartbeat","params":{"nonce":7}}"#,
+    )
+    .expect("known params validation is deferred until after runtime policy gates");
+    assert_eq!(
+        known_with_invalid_params.request().method,
+        "runtime/heartbeat"
+    );
+}
+
+#[test]
+fn generated_transport_known_validation_preserves_handshake_and_notification_priority() {
+    let mut runtime = Runtime::default();
+    let malformed_known_before_handshake = runtime.handle_line(
+        r#"{"jsonrpc":"2.0","id":"pre-ready","method":"runtime/heartbeat","params":{"nonce":7}}"#,
+    );
+    assert_eq!(malformed_known_before_handshake[0]["error"]["code"], -32002);
+
+    let initialized_request = runtime.handle_line(&request("wrong-kind", "initialized", json!({})));
+    assert_eq!(initialized_request[0]["error"]["code"], -32600);
+    assert_eq!(
+        initialized_request[0]["error"]["message"],
+        "initialized must be a notification"
+    );
+
+    let mut invalid_initialized = initialize_params(&["runtime.preview", "permission.read-only"]);
+    invalid_initialized["client"] = json!({"name": "Bad Client", "version": "1"});
+    let invalid_initialize = runtime.handle_line(&request(
+        "initialize-invalid",
+        "initialize",
+        invalid_initialized,
+    ));
+    assert_eq!(invalid_initialize[0]["error"]["code"], -32602);
+    assert_eq!(
+        invalid_initialize[0]["error"]["message"],
+        "client identity is invalid"
+    );
+
+    let valid_initialize = runtime.handle_line(&request(
+        "initialize-valid",
+        "initialize",
+        initialize_params(&["runtime.preview", "permission.read-only"]),
+    ));
+    assert!(valid_initialize[0].get("result").is_some());
+    let repeated_invalid = runtime.handle_line(&request(
+        "initialize-repeated",
+        "initialize",
+        json!({"not": "valid initialize params"}),
+    ));
+    assert_eq!(repeated_invalid[0]["error"]["code"], -32007);
+
+    assert!(runtime
+        .handle_line(r#"{"jsonrpc":"2.0","method":"initialized","params":{"unexpected":true}}"#)
+        .is_empty());
+    let still_requires_handshake =
+        runtime.handle_line(&request("still-not-ready", "runtime/health", json!({})));
+    assert_eq!(still_requires_handshake[0]["error"]["code"], -32002);
+}
+
+#[test]
 fn method_gates_require_search_structured_and_pinned_context_capabilities() {
     let mut runtime = Runtime::default();
     ready(
@@ -553,7 +647,10 @@ fn out_of_band_requests_obey_handshake_capabilities_and_the_fixed_frame_limit() 
         "terminal/stop-user",
         json!({"session_id": "missing", "terminal_id": "missing"}),
     );
-    assert!(control.handle_out_of_band_line(&stop).is_none());
+    assert!(control
+        .handle_out_of_band_line(&stop)
+        .expect("generated transport validator remains available")
+        .is_none());
 
     let params = initialize_params(&[
         "runtime.preview",
@@ -569,7 +666,10 @@ fn out_of_band_requests_obey_handshake_capabilities_and_the_fixed_frame_limit() 
     );
     runtime.handle_line(&notification("initialized", json!({})));
 
-    let retried = control.handle_out_of_band_line(&stop).unwrap();
+    let retried = control
+        .handle_out_of_band_line(&stop)
+        .expect("generated transport validator remains available")
+        .unwrap();
     assert_ne!(retried[0]["error"]["code"], -32001);
     assert_ne!(retried[0]["error"]["code"], -32002);
     assert_ne!(retried[0]["error"]["code"], -32006);
@@ -583,7 +683,10 @@ fn out_of_band_requests_obey_handshake_capabilities_and_the_fixed_frame_limit() 
             "padding": "x".repeat(usize::try_from(MAX_AAP_FRAME_BYTES).unwrap())
         }),
     );
-    let oversized_response = control.handle_out_of_band_line(&oversized_request).unwrap();
+    let oversized_response = control
+        .handle_out_of_band_line(&oversized_request)
+        .expect("generated transport validator remains available")
+        .unwrap();
     assert_eq!(oversized_response[0]["error"]["code"], -32005);
     assert!(oversized_response[0]["id"].is_null());
     let oversized_notification = notification(
@@ -596,6 +699,7 @@ fn out_of_band_requests_obey_handshake_capabilities_and_the_fixed_frame_limit() 
     );
     let oversized_response = control
         .handle_out_of_band_line(&oversized_notification)
+        .expect("generated transport validator remains available")
         .unwrap();
     assert_eq!(oversized_response[0]["error"]["code"], -32005);
     assert!(oversized_response[0]["id"].is_null());
@@ -614,11 +718,17 @@ fn heartbeat_is_strict_negotiated_and_reachable_only_on_the_ready_control_path()
 
     let mut runtime = Runtime::default();
     let control = runtime.control();
-    assert!(control.handle_out_of_band_line(&heartbeat).is_none());
+    assert!(control
+        .handle_out_of_band_line(&heartbeat)
+        .expect("generated transport validator remains available")
+        .is_none());
 
     ready(&mut runtime, &["runtime.preview", "permission.read-only"]);
     assert_eq!(
-        control.handle_out_of_band_line(&heartbeat).unwrap()[0]["error"]["code"],
+        control
+            .handle_out_of_band_line(&heartbeat)
+            .expect("generated transport validator remains available")
+            .unwrap()[0]["error"]["code"],
         -32006
     );
 
@@ -638,7 +748,10 @@ fn heartbeat_is_strict_negotiated_and_reachable_only_on_the_ready_control_path()
         .iter()
         .any(|capability| capability == "permission.read-only"));
     let control = runtime.control();
-    let response = control.handle_out_of_band_line(&heartbeat).unwrap();
+    let response = control
+        .handle_out_of_band_line(&heartbeat)
+        .expect("generated transport validator remains available")
+        .unwrap();
     assert_eq!(
         response[0],
         json!({
@@ -652,7 +765,10 @@ fn heartbeat_is_strict_negotiated_and_reachable_only_on_the_ready_control_path()
         })
     );
     assert_eq!(
-        control.handle_out_of_band_line(&heartbeat).unwrap()[0]["error"]["code"],
+        control
+            .handle_out_of_band_line(&heartbeat)
+            .expect("generated transport validator remains available")
+            .unwrap()[0]["error"]["code"],
         -32001
     );
 
@@ -693,6 +809,7 @@ fn heartbeat_is_strict_negotiated_and_reachable_only_on_the_ready_control_path()
     ] {
         let response = control
             .handle_out_of_band_line(&request(id, "runtime/heartbeat", params))
+            .expect("generated transport validator remains available")
             .unwrap();
         assert_eq!(response[0]["error"]["code"], -32602, "{response:?}");
     }
@@ -706,6 +823,7 @@ fn heartbeat_is_strict_negotiated_and_reachable_only_on_the_ready_control_path()
                 "nonce": "x".repeat(128)
             }),
         ))
+        .expect("generated transport validator remains available")
         .unwrap();
     assert_eq!(boundary[0]["result"]["nonce"], "x".repeat(128));
 
@@ -718,6 +836,7 @@ fn heartbeat_is_strict_negotiated_and_reachable_only_on_the_ready_control_path()
                     "nonce": "notification"
                 }),
             ))
+            .expect("generated transport validator remains available")
             .unwrap()[0]["error"]["code"],
         -32600
     );
@@ -732,7 +851,10 @@ fn heartbeat_is_strict_negotiated_and_reachable_only_on_the_ready_control_path()
     })
     .to_string();
     assert_eq!(
-        control.handle_out_of_band_line(&null_id).unwrap()[0]["error"]["code"],
+        control
+            .handle_out_of_band_line(&null_id)
+            .expect("generated transport validator remains available")
+            .unwrap()[0]["error"]["code"],
         -32600
     );
 }
@@ -792,7 +914,11 @@ fn terminal_stop_requires_lifecycle_platform_and_out_of_band_capabilities() {
         );
         assert_eq!(runtime.handle_line(&stop)[0]["error"]["code"], -32006);
         assert_eq!(
-            runtime.control().handle_out_of_band_line(&stop).unwrap()[0]["error"]["code"],
+            runtime
+                .control()
+                .handle_out_of_band_line(&stop)
+                .expect("generated transport validator remains available")
+                .unwrap()[0]["error"]["code"],
             -32006
         );
     }
@@ -1434,6 +1560,27 @@ fn saturated_queue_classification_preserves_strict_envelope_semantics() {
     let valid = request("overload", "runtime/health", json!({}));
     assert_eq!(
         control.overload_response(&valid).unwrap()["error"]["code"],
+        -32004
+    );
+    let invalid_known = request(
+        "heartbeat-invalid",
+        "runtime/heartbeat",
+        json!({"schema_version": "runtime-heartbeat-request/0.1", "nonce": 7}),
+    );
+    assert_eq!(
+        control.overload_response(&invalid_known).unwrap()["error"]["code"],
+        -32004
+    );
+    let known_kind_mismatch = json!({
+        "jsonrpc": "2.0",
+        "id": "initialized-request",
+        "method": "initialized",
+        "params": {}
+    });
+    assert_eq!(
+        control
+            .overload_response(&known_kind_mismatch.to_string())
+            .unwrap()["error"]["code"],
         -32004
     );
     assert!(control
