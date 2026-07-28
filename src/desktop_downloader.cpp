@@ -1,5 +1,6 @@
 #include "desktop_downloader.h"
 #include "app_theme.h"
+#include "tool_manager.h"
 
 #include <QDesktopServices>
 #include <QDir>
@@ -121,6 +122,26 @@ bool DesktopDownloader::productSupported(Product product)
     Q_UNUSED(product);
     return true;
 #endif
+}
+
+std::optional<DesktopDownloader::Product>
+DesktopDownloader::proxiedProductForTool(AiTool tool)
+{
+    Product product;
+    switch (tool) {
+    case AiTool::ClaudeCode:
+        product = Product::Claude;
+        break;
+    case AiTool::CodexCli:
+        product = Product::ChatGpt;
+        break;
+    case AiTool::GeminiCli:
+    case AiTool::OpenCode:
+        return std::nullopt;
+    default:
+        return std::nullopt;
+    }
+    return productSupported(product) ? std::optional<Product>(product) : std::nullopt;
 }
 
 QString DesktopDownloader::productSlug(Product product)

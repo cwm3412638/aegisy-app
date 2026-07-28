@@ -6,12 +6,15 @@
 #include <QString>
 #include <QStyle>
 
+#include <optional>
+
 class QNetworkAccessManager;
 class QNetworkReply;
 class QProgressBar;
 class QLabel;
 class QPushButton;
 class QTemporaryFile;
+enum class AiTool;
 
 // 通过 aegisy.cc 服务器代理下载桌面客户端安装包（国内可直连）。
 // 服务端约定：
@@ -39,6 +42,9 @@ public:
     // 当前平台是否受支持（有对应安装包）。Linux/未知平台返回 false。
     static bool platformSupported();
     static bool productSupported(Product product);
+    // 返回该工具在当前平台必须走认证代理的桌面产品。Codex CLI
+    // 对应 ChatGPT 桌面客户端；没有受支持安装包时返回空。
+    static std::optional<Product> proxiedProductForTool(AiTool tool);
     static QString requestPath(Product product);
     static bool validateInstallerParts(const QString &contentType,
                                        const QString &installerFormat,

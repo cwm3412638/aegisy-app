@@ -1,4 +1,5 @@
 #include "desktop_downloader.h"
+#include "tool_manager.h"
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -26,15 +27,38 @@ int main(int argc, char **argv)
 
     const QString claudePath = DesktopDownloader::requestPath(
         DesktopDownloader::Product::Claude);
+    const auto claudeProduct = DesktopDownloader::proxiedProductForTool(
+        AiTool::ClaudeCode);
+    const auto codexProduct = DesktopDownloader::proxiedProductForTool(
+        AiTool::CodexCli);
+    expect(!DesktopDownloader::proxiedProductForTool(AiTool::GeminiCli),
+           "Gemini must not be routed to a Claude or ChatGPT installer");
+    expect(!DesktopDownloader::proxiedProductForTool(AiTool::OpenCode),
+           "OpenCode must not be routed to a Claude or ChatGPT installer");
+    expect(!DesktopDownloader::proxiedProductForTool(static_cast<AiTool>(999)),
+           "unknown tools must fail closed instead of selecting an installer");
+    if (codexProduct) {
+        expect(DesktopDownloader::requestPath(*codexProduct).startsWith(
+                   QStringLiteral("/api/v1/desktop-downloads/chatgpt/")),
+               "Codex proxy routing must never fall back to the public download page");
+    }
     if (DesktopDownloader::platformSupported()) {
+        expect(claudeProduct
+                   && *claudeProduct == DesktopDownloader::Product::Claude,
+               "Claude Code must launch the Claude Desktop proxy downloader");
         expect(claudePath.startsWith(
                    QStringLiteral("/api/v1/desktop-downloads/claude/")),
                "desktop download must use the authenticated proxy endpoint");
     } else {
+        expect(!claudeProduct,
+               "unsupported platforms must not launch the proxy downloader");
         expect(claudePath.isEmpty(),
                "unsupported platforms must not expose a download endpoint");
     }
 #if defined(Q_OS_WIN)
+    expect(codexProduct
+               && *codexProduct == DesktopDownloader::Product::ChatGpt,
+           "Codex must launch the ChatGPT proxy downloader on Windows");
     expect(DesktopDownloader::productSupported(
                DesktopDownloader::Product::ChatGpt),
            "ChatGPT for Windows must use the authenticated proxy download");
@@ -44,10 +68,15 @@ int main(int argc, char **argv)
            "ChatGPT for Windows must target the server proxy endpoint");
 #elif defined(Q_OS_MAC)
     if (QSysInfo::currentCpuArchitecture().contains(QStringLiteral("arm"))) {
+        expect(codexProduct
+                   && *codexProduct == DesktopDownloader::Product::ChatGpt,
+               "Codex must launch the ChatGPT proxy downloader on Apple Silicon");
         expect(DesktopDownloader::productSupported(
                    DesktopDownloader::Product::ChatGpt),
                "ChatGPT must be downloadable on Apple Silicon");
     } else {
+        expect(!codexProduct,
+               "Intel macOS must keep the unsupported official-page fallback");
         expect(!DesktopDownloader::productSupported(
                    DesktopDownloader::Product::ChatGpt),
                "ChatGPT must not be offered on Intel macOS");

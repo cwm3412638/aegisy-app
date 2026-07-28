@@ -2866,6 +2866,23 @@ to Aegisy or to `127.0.0.1:43112`, then correlate the timestamp/request ID with 
 gateway or upstream logs. Retries reduce transient failures but do not make a
 truncated or invalid response contract correct.
 
+## Desktop Client Download Routing (2026-07-28)
+
+- Claude Code maps to the Claude Desktop installer and Codex CLI maps to the
+  ChatGPT Desktop installer. On supported macOS/Windows targets both mappings use
+  `DesktopDownloader` and the authenticated
+  `/api/v1/desktop-downloads/{product}/{platform}` Aegisy proxy; they do not open
+  the public download page from a download action.
+- One shared `proxiedProductForTool` policy owns the tool/product/platform decision
+  for the dashboard, environment check, and desktop-download dialog. Public-page
+  fallback remains only for tools or platforms without a supported installer, such
+  as ChatGPT on Intel macOS. The proxy still rejects redirects, missing proxy
+  attestation, HTML/JSON bodies, oversized payloads, and invalid package signatures.
+- `desktop_download_proxy_contract` covers the Codex-to-ChatGPT proxy mapping,
+  exact proxy path family, Claude mapping, unsupported tools/platforms, and installer
+  format checks. Server-side proxy/CDN and signing evidence remains governed by
+  `docs/DESKTOP-DOWNLOAD-PROXY.md` and clean platform release validation.
+
 ## UI Direction
 
 The first shared visual-system pass is implemented, but the workbench remains an

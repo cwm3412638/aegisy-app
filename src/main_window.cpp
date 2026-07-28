@@ -1462,14 +1462,13 @@ void MainWindow::setupUi()
         }
         connect(action, &QPushButton::clicked, this, [this, tool]() {
             const DesktopAppStatus state = m_toolManager->detectDesktop(tool);
-            const DesktopDownloader::Product product = tool == AiTool::ClaudeCode
-                ? DesktopDownloader::Product::Claude : DesktopDownloader::Product::ChatGpt;
-            if (!DesktopDownloader::productSupported(product)) {
+            const auto product = DesktopDownloader::proxiedProductForTool(tool);
+            if (!product) {
                 QDesktopServices::openUrl(QUrl(state.downloadUrl));
                 return;
             }
             auto *downloader = new DesktopDownloader(
-                product, state.appName, m_authToken, m_apiClient->baseUrl(), this);
+                *product, state.appName, m_authToken, m_apiClient->baseUrl(), this);
             downloader->exec();
             downloader->deleteLater();
             refreshDesktopPage();
@@ -1773,8 +1772,8 @@ void MainWindow::refreshDesktopPage()
                                        QPushButton *actionButton) {
         if (!statusLabel || !actionButton) return;
         const DesktopAppStatus state = m_toolManager->detectDesktop(tool);
-        const DesktopDownloader::Product product = tool == AiTool::ClaudeCode
-            ? DesktopDownloader::Product::Claude : DesktopDownloader::Product::ChatGpt;
+        const bool proxyDownloadable =
+            DesktopDownloader::proxiedProductForTool(tool).has_value();
         if (state.installed) {
             statusLabel->setText(QStringLiteral("已检测到本机安装"));
             statusLabel->setStyleSheet(QStringLiteral(
@@ -1783,15 +1782,15 @@ void MainWindow::refreshDesktopPage()
             actionButton->setIcon(style()->standardIcon(QStyle::SP_DialogApplyButton));
             actionButton->setEnabled(false);
         } else {
-            statusLabel->setText(DesktopDownloader::productSupported(product)
+            statusLabel->setText(proxyDownloadable
                 ? QStringLiteral("未安装 · 可通过 Aegisy 代理下载")
                 : QStringLiteral("当前平台仅支持官方下载页"));
             statusLabel->setStyleSheet(QStringLiteral(
                 "font-size:12px; color:#b54708; font-weight:700;"));
-            actionButton->setText(DesktopDownloader::productSupported(product)
+            actionButton->setText(proxyDownloadable
                 ? QStringLiteral("下载并安装") : QStringLiteral("打开下载页"));
             actionButton->setIcon(style()->standardIcon(
-                DesktopDownloader::productSupported(product)
+                proxyDownloadable
                     ? QStyle::SP_ArrowDown : QStyle::SP_BrowserReload));
             actionButton->setEnabled(true);
         }
@@ -2945,20 +2944,15 @@ void MainWindow::showEnvCheckDialog(int profileIndex)
 
     if (!desktop.installed) {
         // Gemini 无官方桌面版：保持打开网页；Claude/ChatGPT 走服务器代理下载。
-        const DesktopDownloader::Product product =
-            tool == AiTool::ClaudeCode
-                ? DesktopDownloader::Product::Claude
-                : DesktopDownloader::Product::ChatGpt;
-        const bool proxyDownloadable =
-            (tool == AiTool::ClaudeCode || tool == AiTool::CodexCli)
-            && DesktopDownloader::productSupported(product);
-        if (proxyDownloadable) {
+        const auto product = DesktopDownloader::proxiedProductForTool(tool);
+        if (product) {
             auto *button = new QPushButton(QStringLiteral("下载并安装"), &dialog);
             button->setFixedHeight(34);
             button->setStyleSheet(AppTheme::primaryButtonStyle());
             const QString appName = desktop.appName;
             const QString token = m_authToken;
-            connect(button, &QPushButton::clicked, &dialog, [this, product, appName, token]() {
+            connect(button, &QPushButton::clicked, &dialog,
+                    [this, product = *product, appName, token]() {
                 auto *dl = new DesktopDownloader(
                     product, appName, token, m_apiClient->baseUrl(), this);
                 dl->exec();
@@ -3157,19 +3151,16 @@ void MainWindow::onDesktopDownloadClicked()
             continue;
         }
 
-        const DesktopDownloader::Product product =
-            tool == AiTool::ClaudeCode
-                ? DesktopDownloader::Product::Claude
-                : DesktopDownloader::Product::ChatGpt;
-        const bool proxyDownloadable = DesktopDownloader::productSupported(product);
-        if (proxyDownloadable) {
+        const auto product = DesktopDownloader::proxiedProductForTool(tool);
+        if (product) {
             auto *button = new QPushButton(QStringLiteral("下载并安装"), &dialog);
             button->setIcon(style()->standardIcon(QStyle::SP_ArrowDown));
             button->setFixedHeight(34);
             button->setStyleSheet(AppTheme::primaryButtonStyle());
             const QString appName = desktop.appName;
             const QString token = m_authToken;
-            connect(button, &QPushButton::clicked, &dialog, [this, product, appName, token]() {
+            connect(button, &QPushButton::clicked, &dialog,
+                    [this, product = *product, appName, token]() {
                 auto *dl = new DesktopDownloader(
                     product, appName, token, m_apiClient->baseUrl(), this);
                 dl->exec();
