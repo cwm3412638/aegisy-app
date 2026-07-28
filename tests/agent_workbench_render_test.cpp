@@ -34,6 +34,7 @@
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QStandardPaths>
+#include <QVBoxLayout>
 #include <algorithm>
 #include <iterator>
 
@@ -149,6 +150,78 @@ public:
             widget.m_workspaceEditProposalArtifactGeneration,
             widget.m_workspaceEditProposalArtifactBytes,
         });
+    }
+
+    static void prepareCommandArtifactWorkflow(
+        AgentWorkbenchWidget &widget, const QString &requestId,
+        const QString &sessionId, const QString &itemId,
+        const QString &reference)
+    {
+        widget.invalidateCommandArtifactWorkflow();
+        widget.m_pinnedContextAvailable = true;
+        auto *dialog = new QDialog(&widget);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        auto *layout = new QVBoxLayout(dialog);
+        auto *status = new QLabel(QStringLiteral("正在读取首个安全分页…"), dialog);
+        status->setObjectName(QStringLiteral("commandArtifactStatus"));
+        auto *preview = new QPlainTextEdit(dialog);
+        preview->setObjectName(QStringLiteral("commandArtifactPreview"));
+        preview->setReadOnly(true);
+        auto *loadMore = new QPushButton(QStringLiteral("加载更多"), dialog);
+        loadMore->setObjectName(QStringLiteral("commandArtifactLoadMoreButton"));
+        loadMore->setEnabled(false);
+        auto *pin = new QPushButton(QStringLiteral("固定完整输出"), dialog);
+        pin->setObjectName(QStringLiteral("commandArtifactPinButton"));
+        pin->setEnabled(false);
+        layout->addWidget(status);
+        layout->addWidget(preview);
+        layout->addWidget(loadMore);
+        layout->addWidget(pin);
+        dialog->show();
+        const quint64 generation = ++widget.m_commandArtifactWorkflowGeneration;
+        AgentWorkbenchWidget::CommandArtifactWorkflow workflow;
+        workflow.state = AgentWorkbenchWidget::CommandArtifactWorkflowState::LoadingFirst;
+        workflow.generation = generation;
+        workflow.processGeneration = widget.m_runtime->processGeneration();
+        workflow.requestId = requestId;
+        workflow.sessionId = sessionId;
+        workflow.itemId = itemId;
+        workflow.reference = reference;
+        workflow.itemKey = itemId;
+        workflow.dialog = dialog;
+        workflow.status = status;
+        workflow.preview = preview;
+        workflow.loadMore = loadMore;
+        workflow.pin = pin;
+        widget.m_commandArtifactWorkflow = workflow;
+        widget.m_commandArtifactPageRequests.insert(requestId, {
+            generation, workflow.processGeneration, 0, {},
+        });
+    }
+
+    static void prepareCommandArtifactContinuation(
+        AgentWorkbenchWidget &widget, const QString &requestId,
+        const QJsonObject &cursor)
+    {
+        auto &workflow = widget.m_commandArtifactWorkflow;
+        workflow.state = AgentWorkbenchWidget::CommandArtifactWorkflowState::LoadingNext;
+        workflow.requestId = requestId;
+        widget.m_commandArtifactPageRequests.insert(requestId, {
+            workflow.generation, workflow.processGeneration,
+            workflow.accumulated.size(), cursor,
+        });
+    }
+
+    static void deliverCommandArtifactPage(AgentWorkbenchWidget &widget,
+                                           const QString &requestId,
+                                           const QJsonObject &page)
+    {
+        widget.handleCommandArtifactPage(requestId, page);
+    }
+
+    static void invalidateCommandArtifactWorkflow(AgentWorkbenchWidget &widget)
+    {
+        widget.invalidateCommandArtifactWorkflow();
     }
 
     static QByteArray proposalArtifactBytes(const AgentWorkbenchWidget &widget)
@@ -5870,6 +5943,8 @@ int main(int argc, char *argv[])
     if (!expect(commandArtifactButton && !commandArtifactButton->isHidden()
                     && commandArtifactButton->property("artifactReference").toString()
                         .startsWith(QStringLiteral("command-output:sha256:"))
+                    && commandArtifactButton->property("artifactItemId").toString()
+                        == QStringLiteral("command-render-fixture")
                     && commandContent && commandContent->textFormat() == Qt::PlainText
                     && commandContent->text().contains(QStringLiteral("<unsafe>")),
                 "structured command timeline did not expose a plain-text artifact action")) {
@@ -7151,57 +7226,195 @@ int main(int argc, char *argv[])
                 "structured context was not sent through AAP with authoritative file data")) {
         return 1;
     }
-    const QByteArray artifactContent("complete command artifact\n");
+    const QByteArray artifactContent = QByteArray(65534, 'a')
+        + QStringLiteral("中tail\n").toUtf8();
+    const QString artifactItemId = QStringLiteral("command.\"slash/\\:render");
+    const auto artifactPageResponse = [&](const QString &sessionId,
+                                          const QByteArray &source,
+                                          qsizetype offset) {
+        const QString sha256 = QString::fromLatin1(QCryptographicHash::hash(
+            source, QCryptographicHash::Sha256).toHex());
+        const QString reference = QStringLiteral("command-output:sha256:") + sha256;
+        const QString mediaType = QStringLiteral("text/plain; charset=utf-8");
+        constexpr qsizetype pageSize = 64 * 1024;
+        qsizetype end = qMin(source.size(), offset + pageSize);
+        while (end > offset
+                && QString::fromUtf8(source.first(end)).toUtf8() != source.first(end)) {
+            --end;
+        }
+        const QByteArray inlineBytes = source.mid(offset, end - offset);
+        qsizetype previewEnd = qMin(source.size(), pageSize);
+        while (previewEnd > 0
+                && QString::fromUtf8(source.first(previewEnd)).toUtf8()
+                    != source.first(previewEnd)) {
+            --previewEnd;
+        }
+        QJsonObject limits{
+            {QStringLiteral("schema_version"),
+             QStringLiteral("content-inline-limits/0.1")},
+            {QStringLiteral("max_item_bytes"), pageSize},
+            {QStringLiteral("max_total_bytes"), pageSize},
+        };
+        limits.insert(QStringLiteral("identity"),
+                      AgentRuntimeClient::contentInlineLimitsIdentity(limits));
+        QJsonObject preview{
+            {QStringLiteral("schema_version"), QStringLiteral("content-preview/0.1")},
+            {QStringLiteral("reference"), reference},
+            {QStringLiteral("sha256"), sha256},
+            {QStringLiteral("media_type"), mediaType},
+            {QStringLiteral("content_bytes"), source.size()},
+            {QStringLiteral("preview_bytes"), previewEnd},
+            {QStringLiteral("truncated"), previewEnd < source.size()},
+            {QStringLiteral("line_count"), source.isEmpty() ? 0 : 1},
+            {QStringLiteral("width"), QJsonValue(QJsonValue::Null)},
+            {QStringLiteral("height"), QJsonValue(QJsonValue::Null)},
+        };
+        preview.insert(QStringLiteral("identity"),
+                       AgentRuntimeClient::contentPreviewIdentity(preview));
+        const QJsonObject content{
+            {QStringLiteral("schema_version"), QStringLiteral("content-reference/0.1")},
+            {QStringLiteral("reference"), reference},
+            {QStringLiteral("sha256"), sha256},
+            {QStringLiteral("bytes"), source.size()},
+            {QStringLiteral("media_type"), mediaType},
+            {QStringLiteral("preview"), preview},
+        };
+        QJsonObject response{
+            {QStringLiteral("schema_version"),
+             QStringLiteral("command-output-artifact-page/0.1")},
+            {QStringLiteral("session_id"), sessionId},
+            {QStringLiteral("item_id"), artifactItemId},
+            {QStringLiteral("created_at_ms"), 1'700'000'000'123.0},
+            {QStringLiteral("content_reference"), content},
+            {QStringLiteral("source_bytes"), source.size()},
+            {QStringLiteral("redacted_count"), 0},
+            {QStringLiteral("redacted"), false},
+            {QStringLiteral("total_bytes"), source.size()},
+            {QStringLiteral("retained_bytes"), source.size()},
+            {QStringLiteral("omitted_bytes"), 0},
+            {QStringLiteral("truncated"), false},
+            {QStringLiteral("read_only"), true},
+        };
+        response.insert(QStringLiteral("binding_identity"),
+            AgentRuntimeClient::commandArtifactPageBindingIdentity(response));
+        const QString binding = response.value(
+            QStringLiteral("binding_identity")).toString();
+        QJsonValue nextCursor(QJsonValue::Null);
+        if (end < source.size()) {
+            QJsonObject cursor{
+                {QStringLiteral("schema_version"),
+                 QStringLiteral("content-reference-cursor/0.1")},
+                {QStringLiteral("reference"), reference},
+                {QStringLiteral("sha256"), sha256},
+                {QStringLiteral("bytes"), source.size()},
+                {QStringLiteral("media_type"), mediaType},
+                {QStringLiteral("offset"), end},
+                {QStringLiteral("page_size"), pageSize},
+                {QStringLiteral("limits"), limits},
+                {QStringLiteral("binding_identity"), binding},
+            };
+            cursor.insert(QStringLiteral("identity"),
+                AgentRuntimeClient::contentReferenceCursorIdentity(cursor));
+            nextCursor = cursor;
+        }
+        QJsonObject page{
+            {QStringLiteral("schema_version"), QStringLiteral("content-reference-page/0.1")},
+            {QStringLiteral("reference"), reference},
+            {QStringLiteral("sha256"), sha256},
+            {QStringLiteral("bytes"), source.size()},
+            {QStringLiteral("media_type"), mediaType},
+            {QStringLiteral("offset"), offset},
+            {QStringLiteral("page_size"), pageSize},
+            {QStringLiteral("page_bytes"), inlineBytes.size()},
+            {QStringLiteral("inline"), QString::fromUtf8(inlineBytes)},
+            {QStringLiteral("inline_truncated"), false},
+            {QStringLiteral("limits"), limits},
+            {QStringLiteral("binding_identity"), binding},
+            {QStringLiteral("next_cursor"), nextCursor},
+        };
+        page.insert(QStringLiteral("identity"),
+                    AgentRuntimeClient::contentReferencePageIdentity(page));
+        response.insert(QStringLiteral("page"), page);
+        return response;
+    };
     const QString artifactSha = QString::fromLatin1(QCryptographicHash::hash(
         artifactContent, QCryptographicHash::Sha256).toHex());
-    const QString artifactReference = QStringLiteral("command-output:sha256:%1")
-        .arg(artifactSha);
-    const auto artifactResponse = [&](const QString &sessionId) {
-        return QJsonObject{
-            {QStringLiteral("session_id"), sessionId},
-            {QStringLiteral("reference"), artifactReference},
-            {QStringLiteral("sha256"), artifactSha},
-            {QStringLiteral("content_type"), QStringLiteral("text/plain; charset=utf-8")},
-            {QStringLiteral("item_id"), QStringLiteral("command-render-fixture")},
-            {QStringLiteral("total_bytes"), artifactContent.size()},
-            {QStringLiteral("retained_bytes"), artifactContent.size()},
-            {QStringLiteral("omitted_bytes"), 0},
-            {QStringLiteral("content"), QString::fromUtf8(artifactContent)},
-        };
-    };
-    runtime->commandArtifactRead(
-        QStringLiteral("artifact-current-session"), artifactResponse(previewSessionId));
-    QPushButton *artifactPin = nullptr;
-    if (!expect(waitUntil(application, [&workbench, &artifactPin]() {
-                    artifactPin = workbench.findChild<QPushButton *>(
-                        QStringLiteral("commandArtifactPinButton"));
-                    return artifactPin && artifactPin->isVisible();
-                })
-                    && artifactPin->isEnabled()
-                    && artifactPin->toolTip().contains(QStringLiteral("不会自动发送")),
-                "current Work command artifact did not expose an explicit pin action")) {
+    const QString artifactReference = QStringLiteral("command-output:sha256:")
+        + artifactSha;
+    const QJsonObject artifactFirst = artifactPageResponse(
+        previewSessionId, artifactContent, 0);
+    AgentWorkbenchWidgetTestAccess::prepareCommandArtifactWorkflow(
+        workbench, QStringLiteral("artifact-first-page"), previewSessionId,
+        artifactItemId, artifactReference);
+    AgentWorkbenchWidgetTestAccess::deliverCommandArtifactPage(
+        workbench, QStringLiteral("artifact-first-page"), artifactFirst);
+    auto *artifactPin = workbench.findChild<QPushButton *>(
+        QStringLiteral("commandArtifactPinButton"));
+    auto *artifactLoadMore = workbench.findChild<QPushButton *>(
+        QStringLiteral("commandArtifactLoadMoreButton"));
+    auto *artifactPreview = workbench.findChild<QPlainTextEdit *>(
+        QStringLiteral("commandArtifactPreview"));
+    const QJsonObject artifactCursor = artifactFirst.value(QStringLiteral("page"))
+        .toObject().value(QStringLiteral("next_cursor")).toObject();
+    if (!expect(artifactPin && artifactLoadMore && artifactPreview
+                    && !artifactPin->isEnabled() && artifactLoadMore->isEnabled()
+                    && !artifactCursor.isEmpty()
+                    && artifactPreview->toPlainText().toUtf8()
+                        == artifactContent.first(
+                            artifactCursor.value(QStringLiteral("offset")).toInt()),
+                "partial command Artifact page did not keep Pin disabled and Load More enabled")) {
+        return 1;
+    }
+    AgentWorkbenchWidgetTestAccess::prepareCommandArtifactContinuation(
+        workbench, QStringLiteral("artifact-last-page"), artifactCursor);
+    AgentWorkbenchWidgetTestAccess::deliverCommandArtifactPage(
+        workbench, QStringLiteral("artifact-last-page"), artifactPageResponse(
+            previewSessionId, artifactContent,
+            artifactCursor.value(QStringLiteral("offset")).toInt()));
+    if (!expect(artifactPin->isEnabled() && !artifactLoadMore->isEnabled()
+                    && artifactPin->toolTip().contains(QStringLiteral("不会自动发送"))
+                    && artifactPreview->toPlainText().toUtf8() == artifactContent,
+                "complete command Artifact did not pass length/SHA and enable explicit Pin")) {
         return 1;
     }
     if (QDialog *dialog = qobject_cast<QDialog *>(artifactPin->window())) dialog->close();
     application.processEvents();
-    runtime->commandArtifactRead(
-        QStringLiteral("artifact-other-session"), artifactResponse(
-            QStringLiteral("session-other-render-fixture")));
-    artifactPin = nullptr;
-    if (!expect(waitUntil(application, [&workbench, &artifactPin]() {
-                    const QList<QPushButton *> buttons = workbench.findChildren<QPushButton *>(
-                        QStringLiteral("commandArtifactPinButton"));
-                    auto visible = std::find_if(buttons.cbegin(), buttons.cend(),
-                        [](QPushButton *button) { return button->isVisible(); });
-                    artifactPin = visible == buttons.cend() ? nullptr : *visible;
-                    return artifactPin != nullptr;
-                })
-                    && !artifactPin->isEnabled()
+
+    const QByteArray otherArtifact("other session artifact\n");
+    const QString otherSha = QString::fromLatin1(QCryptographicHash::hash(
+        otherArtifact, QCryptographicHash::Sha256).toHex());
+    const QString otherReference = QStringLiteral("command-output:sha256:") + otherSha;
+    AgentWorkbenchWidgetTestAccess::prepareCommandArtifactWorkflow(
+        workbench, QStringLiteral("artifact-other-session"),
+        QStringLiteral("session-other-render-fixture"), artifactItemId, otherReference);
+    AgentWorkbenchWidgetTestAccess::deliverCommandArtifactPage(
+        workbench, QStringLiteral("artifact-other-session"), artifactPageResponse(
+            QStringLiteral("session-other-render-fixture"), otherArtifact, 0));
+    artifactPin = workbench.findChild<QPushButton *>(
+        QStringLiteral("commandArtifactPinButton"));
+    if (!expect(artifactPin && !artifactPin->isEnabled()
                     && artifactPin->toolTip().contains(QStringLiteral("当前 Work 会话")),
-                "cross-session command artifact pinning did not fail closed")) {
+                "cross-session command Artifact pinning did not fail closed")) {
         return 1;
     }
     if (QDialog *dialog = qobject_cast<QDialog *>(artifactPin->window())) dialog->close();
+    application.processEvents();
+
+    AgentWorkbenchWidgetTestAccess::prepareCommandArtifactWorkflow(
+        workbench, QStringLiteral("artifact-late-page"), previewSessionId,
+        artifactItemId, artifactReference);
+    AgentWorkbenchWidgetTestAccess::invalidateCommandArtifactWorkflow(workbench);
+    application.processEvents();
+    AgentWorkbenchWidgetTestAccess::deliverCommandArtifactPage(
+        workbench, QStringLiteral("artifact-late-page"), artifactFirst);
+    const QList<QLabel *> lateArtifactStatuses = workbench.findChildren<QLabel *>(
+        QStringLiteral("commandArtifactStatus"));
+    if (!expect(std::none_of(lateArtifactStatuses.cbegin(),
+                            lateArtifactStatuses.cend(),
+                            [](QLabel *label) { return label->isVisible(); }),
+                "invalidated command Artifact workflow accepted a late page")) {
+        return 1;
+    }
     fileTree->setCurrentItem(editableItem);
     fileContextAction->trigger();
     if (!expect(waitUntil(application, [contextInspect]() {

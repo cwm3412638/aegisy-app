@@ -624,9 +624,15 @@ Content references and bounded pages (`3.8`, partial):
   unsigned length framing, exact UTF-8, numeric big-endian, and boolean bytes for
   independent Qt reproduction. A marker-collision fixture proves retained source text cannot create a
   second canonical omission marker. The restart fixture uses a legal `.`/`:` Item ID
-  and verifies its deterministic event operation mapping and exact durable lookup. Qt
-  paging, remaining content domains, generated protocol types, and clean
-  Windows execution remain absent; keep `3.8` unchecked.
+  and verifies its deterministic event operation mapping and exact durable lookup.
+  Qt now reproduces the command binding plus preview/limit/cursor/page identities,
+  rejects unknown fields and Session/Item/reference or window drift, and emits a
+  first request with negotiated ceilings while continuations carry only the exact
+  cursor. The Workbench uses the wire Item ID, freezes metadata across pages,
+  accumulates raw UTF-8 bytes under Runtime/workflow generations, makes late
+  responses inert, and enables explicit Pin only after terminal length, SHA-256,
+  and canonical omission-marker uniqueness/head-tail boundary verification. Generic paging for the remaining content domains, generated
+  protocol types, and clean Windows execution remain absent; keep `3.8` unchecked.
 - The final backend gate passes `1050` Rust tests with one explicitly ignored live
   Codex fixture plus strict workspace Clippy and formatting. Three earlier complete
   runs failed only the large PTY correctness fixture's five-second wait under full
@@ -638,9 +644,22 @@ Content references and bounded pages (`3.8`, partial):
   `agent_runtime_protocol` and `aap_generated_types`; exact isolated reruns pass in
   67.32s and 8.55s, giving successful execution evidence for all 23 targets. This is
   recorded as 21 aggregate plus two exact reruns rather than one uninterrupted
-  aggregate success. The main worktree already contains the next uncommitted Qt paging slice. This is
-  local macOS evidence and cannot satisfy Qt paging, remaining content domains,
-  generated protocol types, clean Windows, or live-provider gates.
+  aggregate success.
+- The Qt command-output paging gate adds fixed cross-language identities, strict
+  first/continuation response validation, actual request-shape evidence, correlated
+  valid-response signal routing, malformed response protocol closure, canonical
+  truncated/missing/duplicate/moved omission-marker cases, and render coverage for punctuation Item IDs, a UTF-8
+  scalar split at 64 KiB, Partial/Load More, terminal Pin, cross-Session rejection,
+  and invalidated late responses. The complete desktop build passes. The aggregate
+  serial aggregate CTest run passes 22 targets while `agent_workbench_render`
+  misses its language-server stop lifecycle state; its exact rerun passes in 7.74
+  seconds, so this is recorded as 22 aggregate plus one exact rerun rather than
+  23/23. The full
+  Rust workspace test passes in 276.66 seconds, strict Clippy and formatting pass,
+  generator freshness/negative and the 47-file inventory pass, `aegisy-aap` packages,
+  strict OpenSpec passes, and `git diff --check` passes. This is local macOS evidence
+  and cannot close the remaining content domains, generated protocol types, clean
+  Windows, or live-provider gates.
 
 - Workbench schema v15 adds a dedicated `public_timeline_events` journal and one
   `public_timeline_cursors` source/cursor row per Session. Session insertion registers
@@ -2190,10 +2209,10 @@ Known limitations:
   matching file, selection, and diagnostic pins stale locally; terminal
   restart/removal marks matching terminal-excerpt pins stale. None of these local
   indicators rewrite durable metadata; the sidecar reread remains authoritative.
-  The command-output Artifact dialog now receives an additive originating
-  `session_id` from `artifact/read-command-output` and exposes an explicit
+  The command-output Artifact dialog now consumes Session/Item/reference-bound
+  pages from `artifact/read-command-output-page` and exposes an explicit
   `固定完整输出` control only for the active project-bound Work session after
-  client-side UTF-8/reference/SHA-256 validation. The control assembles a
+  client-side UTF-8/reference/SHA-256 plus canonical truncation-marker validation. The control assembles a
   session-owned metadata-only `artifact` descriptor (`metadata.item_id`, priority
   700, retained UTF-8 byte count) and submits it through the existing CAS path;
   it remains disabled for cross-session, recovery, deletion, reconciliation-blocked,
@@ -2201,7 +2220,8 @@ Known limitations:
   current-session enabled and cross-session disabled states. A real command
   Artifact click-to-persist fixture is still pending because the render runtime
   has no command producer; durable Artifact Blob reload and turn assembly remain
-  covered by the protocol fixture.
+  covered by the protocol fixture. The legacy whole-artifact client API remains
+  compatible but has no Workbench caller.
 - `pinned-context-store/0.1` persists metadata-only sets using private immutable
   content-addressed objects and atomic project-pointer replacement. Store fixtures
   cover reopen/update, idempotency, absence of a content body field, retained old

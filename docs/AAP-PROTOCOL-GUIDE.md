@@ -1202,7 +1202,7 @@ shape to evade detection across pages. Cursor drift, cross-Session or cross-Item
 hash-consistent owner rebinding, missing/corrupt durable Blob, unknown parameters,
 and unsafe source content fail closed. This route is read-only and does not grant
 generic Blob, filesystem, mutation, Approval, or execution authority. The legacy
-whole-artifact method remains available for current Qt compatibility and chooses a
+whole-artifact method remains available for compatibility callers and chooses a
 stable owner by creation time plus Item ID when identical references exist.
 
 Capability `turn.context.pinned-selected` indicates that `turn/start` and

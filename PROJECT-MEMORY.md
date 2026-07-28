@@ -1062,13 +1062,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   terminal restart/removal marks matching terminal-excerpt pins stale by terminal
   identity. These local indicators never rewrite the durable descriptor or hash;
   sidecar reread/authority remains the final gate at inspect/start.
-  `artifact/read-command-output` now returns the originating `session_id` as an
-  additive, content-free binding field. The Qt read-only Artifact dialog exposes
-  an explicit `固定完整输出` action only when the response is valid UTF-8 text
-  whose reference/hash agree and whose session is the active project-bound Work
-  session; it saves a session-owned artifact descriptor through the existing
-  pinned-context CAS with `metadata.item_id`, priority 700, and the retained
-  content byte count. The action never sends the Artifact implicitly. Cross-
+  `artifact/read-command-output-page` now binds the originating Session, wire Item,
+  content reference, immutable Artifact metadata, and bounded UTF-8 page window.
+  The Qt read-only Artifact dialog exposes an explicit `固定完整输出` action only
+  after every page, the terminal byte count/SHA-256, and any canonical truncation
+  marker boundary are validated for the active project-bound Work session; it saves
+  a session-owned artifact descriptor through the existing pinned-context CAS with
+  `metadata.item_id`, priority 700, and the retained content byte count. The action
+  never sends the Artifact implicitly. Cross-
   session, recovery, deletion, reconciliation-blocked, busy-mutation, invalid
   hash, and unsupported-media states remain disabled/fail closed.
   The Structure diagnostics surface now exposes explicit `固定选中诊断`. Qt first
@@ -2726,7 +2727,9 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
   an explicit omission marker. Small output stays inline unless it is the raw
   authority for accepted command diagnostics, in which case a session-scoped
   artifact is forced.
-- `artifact/read-command-output` is session-scoped. The live cache retains at most
+- The legacy `artifact/read-command-output` read remains session-scoped for
+  compatibility. Production Qt uses the Session/Item/reference-bound
+  `artifact/read-command-output-page` route. The live cache retains at most
   64 artifacts and 16 MiB per session and clears at runtime shutdown. With the Qt
   host's default platform data root (or an explicit override), a completed command
   artifact and its
@@ -2742,14 +2745,13 @@ missing Windows SDK headers. Do not claim Windows runtime evidence until the
   a synchronous queue of 16 messages. Queue saturation applies pipe backpressure;
   oversized frames are fully drained then fail with a content-free transport error.
   Codex stderr is drained with a fixed 8 KiB buffer and is not copied into logs.
-- Qt retrieves a completed artifact through a button bound to its originating
-  session and SHA-256 reference, renders it as read-only plain text, and never adds
-  it to model context implicitly. The read-only Artifact dialog now also exposes
-  an explicit `固定完整输出` action. That control requires the additive response
-  `session_id` to match the active project-bound Work session, rechecks
-  UTF-8/reference/SHA-256 identity, and persists only a metadata descriptor through
-  the existing pinned-context CAS; it remains disabled for cross-session or
-  blocked/recovery states. Task `14.6` is complete; the remaining Artifact pin
+- Qt retrieves a completed artifact through paged requests bound to the originating
+  Session, wire Item, reference, and Runtime generation, renders accumulated UTF-8
+  as read-only plain text, and never adds it to model context implicitly. The
+  read-only dialog exposes an explicit `固定完整输出` action only after terminal
+  length, SHA-256, and canonical truncation-marker validation. It persists only a
+  metadata descriptor through the existing pinned-context CAS and remains disabled
+  for cross-session or blocked/recovery states. Task `14.6` is complete; the remaining Artifact pin
   lifecycle and non-file pin classes remain under OpenSpec `17.3`.
 
 ## Cancellation Boundary
@@ -3780,7 +3782,7 @@ Implemented visual baseline:
   detection across pages. Hash-consistent owner rebinding, cross-Session or cross-Item
   use, purged/missing/corrupt content, unknown params, limit drift, cursor substitution,
   and scalar-splitting pages fail closed. The legacy whole-artifact route remains for
-  Qt compatibility and uses a deterministic creation-time/Item-ID owner selection.
+  compatibility callers and uses a deterministic creation-time/Item-ID owner selection.
 - The command page binding hashes the UTF-8 bytes
   `command-output-artifact-page-binding\0` followed by the exact
   `schema_version`, Session, reference, SHA-256, MIME, Item, creation/source/redaction,
@@ -3811,8 +3813,27 @@ Implemented visual baseline:
   renegotiation/tamper, Session and Item isolation, durable semantic tampering, and
   Store reload after Runtime restart. This grants no generic Blob/filesystem,
   mutation, Approval, or execution authority. OpenSpec `3.8` remains unchecked until
-  Qt paging, remaining content domains, generated types, and cross-platform evidence
-  are complete.
+  the remaining content domains, generated types, and cross-platform evidence are
+  complete.
+- Qt now consumes `artifact/read-command-output-page` in production and independently
+  reproduces the command binding plus preview, inline-limit, cursor, and page
+  identities. It requires exact fields and JSON-safe integers, binds every response
+  to the requested Session/wire Item/reference, rejects limit renegotiation and
+  metadata/window drift, and closes the protocol on an invalid known response. At
+  terminal assembly it also requires exactly one omission marker at the fixed
+  UTF-8-safe head/tail boundary whenever truncation is declared. Fixed
+  Rust/Qt vectors cover the simple and quote/slash/backslash Item bindings plus the
+  legacy unbound limit/cursor/page identities. The compatible whole-artifact client
+  method remains available but has no Workbench product caller.
+- The Workbench command Artifact dialog is one generation-bound workflow. It carries
+  the exact wire Item ID rather than the presentation key, accumulates raw UTF-8 bytes
+  without inserting line breaks, freezes immutable metadata across continuation
+  pages, and keeps Pin disabled until the terminal byte count and complete SHA-256
+  match. Load More is available only for a validated partial page. Dialog close,
+  Session/project/mode changes, Runtime loss or generation replacement, Timeline
+  Snapshot replacement, emergency disable, and a replacement workflow invalidate all
+  owned requests; unowned or late responses are inert. The preview remains read-only
+  and explicit Pin never automatically sends content to the model.
 - The final backend command-output paging gate passes `1050` Rust tests with one
   explicitly ignored live Codex fixture, strict workspace Clippy and formatting.
   Three earlier complete runs exposed only the large PTY correctness fixture's
@@ -3826,8 +3847,20 @@ Implemented visual baseline:
   `aap_generated_types`; exact isolated reruns passed in 67.32s and 8.55s, so every
   one of the 23 desktop targets has successful execution evidence. This is recorded
   as 21 aggregate plus two exact reruns, not as one uninterrupted aggregate success.
-  The main worktree already contains the next uncommitted Qt paging slice. This is macOS/local evidence only and cannot close Qt paging, remaining
-  content domains, generated protocol types, clean Windows, or live-provider gates.
+  The final Qt paging slice adds fixed identity and request-shape tests, malformed
+  response protocol closure, a correlated valid-response signal, empty-page and
+  canonical truncation-marker validation, and render coverage for legal
+  punctuation Item IDs, a UTF-8 scalar split at 64 KiB, Partial/Load More, terminal
+  Pin, cross-Session rejection, and invalidated late responses. The complete desktop
+  build passes. The latest serial aggregate CTest run passes 22 targets while
+  `agent_workbench_render` misses its language-server stop lifecycle state; its
+  exact rerun passes in 7.74 seconds, so record 22 aggregate plus one exact rerun,
+  not 23/23. The full Rust workspace test passes in 276.66 seconds; strict Clippy and
+  formatting, generator freshness/negative and exact 47-file inventory,
+  `aegisy-aap` packaging, strict OpenSpec, and `git diff --check` pass. This is
+  macOS/local evidence only and cannot close remaining content domains, generated
+  protocol types, clean Windows, or live-provider gates. Keep OpenSpec `3.8`
+  unchecked.
 
 ## Next Product Priorities
 

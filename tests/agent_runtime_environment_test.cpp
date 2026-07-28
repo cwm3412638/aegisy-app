@@ -1,6 +1,7 @@
 #include "agent_runtime_client.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
@@ -659,6 +660,85 @@ bool verifyRustTimelineSnapshotIdentityFixture()
                    "Qt Timeline snapshot page identity diverged from Rust fixture");
 }
 
+QJsonObject validSinglePageCommandArtifactResult(const QJsonObject &request)
+{
+    const QByteArray source("abcdef");
+    const QString sha256 = QString::fromLatin1(QCryptographicHash::hash(
+        source, QCryptographicHash::Sha256).toHex());
+    const QString reference = QStringLiteral("command-output:sha256:") + sha256;
+    const QString mediaType = QStringLiteral("text/plain; charset=utf-8");
+    const int pageSize = request.value(QStringLiteral("limit")).toInt();
+    QJsonObject limits{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("content-inline-limits/0.1")},
+        {QStringLiteral("max_item_bytes"), pageSize},
+        {QStringLiteral("max_total_bytes"),
+         request.value(QStringLiteral("max_total_inline_bytes"))},
+    };
+    limits.insert(QStringLiteral("identity"),
+                  AgentRuntimeClient::contentInlineLimitsIdentity(limits));
+    QJsonObject preview{
+        {QStringLiteral("schema_version"), QStringLiteral("content-preview/0.1")},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("sha256"), sha256},
+        {QStringLiteral("media_type"), mediaType},
+        {QStringLiteral("content_bytes"), source.size()},
+        {QStringLiteral("preview_bytes"), source.size()},
+        {QStringLiteral("truncated"), false},
+        {QStringLiteral("line_count"), 1},
+        {QStringLiteral("width"), QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("height"), QJsonValue(QJsonValue::Null)},
+    };
+    preview.insert(QStringLiteral("identity"),
+                   AgentRuntimeClient::contentPreviewIdentity(preview));
+    const QJsonObject content{
+        {QStringLiteral("schema_version"), QStringLiteral("content-reference/0.1")},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("sha256"), sha256},
+        {QStringLiteral("bytes"), source.size()},
+        {QStringLiteral("media_type"), mediaType},
+        {QStringLiteral("preview"), preview},
+    };
+    QJsonObject result{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("command-output-artifact-page/0.1")},
+        {QStringLiteral("session_id"), request.value(QStringLiteral("session_id"))},
+        {QStringLiteral("item_id"), request.value(QStringLiteral("item_id"))},
+        {QStringLiteral("created_at_ms"), 1'700'000'000'123.0},
+        {QStringLiteral("content_reference"), content},
+        {QStringLiteral("source_bytes"), source.size()},
+        {QStringLiteral("redacted_count"), 0},
+        {QStringLiteral("redacted"), false},
+        {QStringLiteral("total_bytes"), source.size()},
+        {QStringLiteral("retained_bytes"), source.size()},
+        {QStringLiteral("omitted_bytes"), 0},
+        {QStringLiteral("truncated"), false},
+        {QStringLiteral("read_only"), true},
+    };
+    result.insert(QStringLiteral("binding_identity"),
+                  AgentRuntimeClient::commandArtifactPageBindingIdentity(result));
+    QJsonObject page{
+        {QStringLiteral("schema_version"), QStringLiteral("content-reference-page/0.1")},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("sha256"), sha256},
+        {QStringLiteral("bytes"), source.size()},
+        {QStringLiteral("media_type"), mediaType},
+        {QStringLiteral("offset"), 0},
+        {QStringLiteral("page_size"), pageSize},
+        {QStringLiteral("page_bytes"), source.size()},
+        {QStringLiteral("inline"), QString::fromUtf8(source)},
+        {QStringLiteral("inline_truncated"), false},
+        {QStringLiteral("limits"), limits},
+        {QStringLiteral("binding_identity"),
+         result.value(QStringLiteral("binding_identity"))},
+        {QStringLiteral("next_cursor"), QJsonValue(QJsonValue::Null)},
+    };
+    page.insert(QStringLiteral("identity"),
+                AgentRuntimeClient::contentReferencePageIdentity(page));
+    result.insert(QStringLiteral("page"), page);
+    return result;
+}
+
 int runFakeRuntime(const QString &testCase)
 {
     const QString logPath = qEnvironmentVariable("AEGISY_FAKE_RUNTIME_LOG");
@@ -768,6 +848,12 @@ int runFakeRuntime(const QString &testCase)
         QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
                                       .value(QStringLiteral("stable")).toArray();
         capabilities.append(QStringLiteral("session.list"));
+        setStableCapabilities(capabilities);
+    } else if (testCase == QStringLiteral("command-artifact-request-shape")
+               || testCase == QStringLiteral("command-artifact-valid-response")) {
+        QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
+                                      .value(QStringLiteral("stable")).toArray();
+        capabilities.append(QStringLiteral("artifact.command-output.bounded"));
         setStableCapabilities(capabilities);
     } else if (testCase == QStringLiteral("valid-outbound-frame")) {
         QJsonArray capabilities = result.value(QStringLiteral("capabilities")).toObject()
@@ -1207,6 +1293,18 @@ int runFakeRuntime(const QString &testCase)
                 << QJsonDocument(shutdownResponse).toJson(QJsonDocument::Compact).constData()
                 << std::endl;
             return 0;
+        }
+        if (testCase == QStringLiteral("command-artifact-valid-response")
+            && method == QStringLiteral("artifact/read-command-output-page")) {
+            const QJsonObject pageResponse{
+                {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                {QStringLiteral("id"), message.value(QStringLiteral("id"))},
+                {QStringLiteral("result"), validSinglePageCommandArtifactResult(
+                    message.value(QStringLiteral("params")).toObject())},
+            };
+            writeRawFakeRuntimeFrame(QJsonDocument(pageResponse).toJson(
+                QJsonDocument::Compact));
+            continue;
         }
         if (testCase == QStringLiteral("transport-correlation-ids")
             && method == QStringLiteral("runtime/health")) {
@@ -3861,6 +3959,169 @@ bool runOutboundFrameLimitCase()
                   "oversized outbound frame reached the runtime");
 }
 
+bool runCommandArtifactRequestShapeCase(bool continuation)
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(), "could not create command-page request directory")) {
+        return false;
+    }
+    const QString logPath = directory.filePath(QStringLiteral("runtime-input.jsonl"));
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("command-artifact-request-shape"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG", logPath.toUtf8());
+    bool initialized = false;
+    const QJsonObject cursor{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("content-reference-cursor/0.1")},
+        {QStringLiteral("reference"), QStringLiteral("command-output:sha256:")
+            + QString(64, QLatin1Char('a'))},
+        {QStringLiteral("sha256"), QString(64, QLatin1Char('a'))},
+        {QStringLiteral("bytes"), 7},
+        {QStringLiteral("media_type"),
+         QStringLiteral("text/plain; charset=utf-8")},
+        {QStringLiteral("offset"), 4},
+        {QStringLiteral("page_size"), 4},
+        {QStringLiteral("limits"), QJsonObject{
+            {QStringLiteral("schema_version"),
+             QStringLiteral("content-inline-limits/0.1")},
+            {QStringLiteral("max_item_bytes"), 4},
+            {QStringLiteral("max_total_bytes"), 8},
+            {QStringLiteral("identity"), QStringLiteral(
+                "content-inline-limits:sha256:") + QString(64, QLatin1Char('b'))},
+        }},
+        {QStringLiteral("binding_identity"), QStringLiteral(
+            "content-reference-binding:sha256:") + QString(64, QLatin1Char('c'))},
+        {QStringLiteral("identity"), QStringLiteral(
+            "content-reference-cursor:sha256:") + QString(64, QLatin1Char('d'))},
+    };
+    bool pageRead = false;
+    bool disconnected = false;
+    {
+        AgentRuntimeClient client;
+        QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                         [&initialized](const QJsonObject &) { initialized = true; });
+        QObject::connect(&client, &AgentRuntimeClient::commandArtifactPageRead,
+                         [&pageRead](const QString &, const QJsonObject &) {
+            pageRead = true;
+        });
+        QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                         [&initialized, &disconnected](bool ready, const QString &) {
+            if (initialized && !ready) disconnected = true;
+        });
+        client.start();
+        if (!expect(waitUntil([&]() { return initialized; }),
+                    "command-page request handshake timed out")) {
+            return false;
+        }
+        const QString requestId = client.readCommandArtifactPage(
+            QStringLiteral("session-shape"), QStringLiteral("command.\"slash/\\:1"),
+            QStringLiteral("command-output:sha256:")
+                + QString(64, QLatin1Char('a')),
+            continuation ? cursor : QJsonObject{});
+        if (!expect(!requestId.isEmpty()
+                        && waitUntil([&]() {
+                            return logContainsMethod(
+                                logPath,
+                                QStringLiteral("artifact/read-command-output-page"));
+                        }),
+                    "command-page request did not reach the fake Runtime")) {
+            return false;
+        }
+        if (!expect(waitUntil([&]() { return disconnected; }) && !pageRead,
+                    "malformed command-page response did not close the protocol")) {
+            return false;
+        }
+        client.stop();
+    }
+    QFile log(logPath);
+    if (!expect(log.open(QIODevice::ReadOnly),
+                "command-page request log could not be opened")) {
+        return false;
+    }
+    QJsonObject params;
+    while (!log.atEnd()) {
+        const QJsonDocument document = QJsonDocument::fromJson(log.readLine());
+        if (!document.isObject()) continue;
+        const QJsonObject message = document.object();
+        if (message.value(QStringLiteral("method")).toString()
+                == QStringLiteral("artifact/read-command-output-page")) {
+            params = message.value(QStringLiteral("params")).toObject();
+        }
+    }
+    const QStringList parameterKeys = params.keys();
+    const QSet<QString> keys(parameterKeys.cbegin(), parameterKeys.cend());
+    const QSet<QString> expected = continuation
+        ? QSet<QString>{QStringLiteral("session_id"), QStringLiteral("item_id"),
+                        QStringLiteral("reference"), QStringLiteral("cursor")}
+        : QSet<QString>{QStringLiteral("session_id"), QStringLiteral("item_id"),
+                        QStringLiteral("reference"), QStringLiteral("limit"),
+                        QStringLiteral("max_total_inline_bytes")};
+    return expect(keys == expected,
+                  "command-page request fields did not match first/continuation contract")
+        && expect(params.value(QStringLiteral("item_id")).toString()
+                      == QStringLiteral("command.\"slash/\\:1"),
+                  "command-page request did not preserve the exact wire Item ID")
+        && expect(continuation
+                ? params.value(QStringLiteral("cursor")) == QJsonValue(cursor)
+                : params.value(QStringLiteral("limit")).toInt() == 64 * 1024
+                    && params.value(QStringLiteral("max_total_inline_bytes")).toInt()
+                        == 64 * 1024,
+                  "command-page request renegotiated or omitted its limits/cursor");
+}
+
+bool runCommandArtifactSuccessRoutingCase()
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "could not create valid command-page runtime directory")) {
+        return false;
+    }
+    qputenv("AEGISY_AGENTD_PATH", QCoreApplication::applicationFilePath().toUtf8());
+    qputenv("AEGISY_FAKE_RUNTIME_CASE", QByteArray("command-artifact-valid-response"));
+    qputenv("AEGISY_FAKE_RUNTIME_LOG",
+            directory.filePath(QStringLiteral("runtime-input.jsonl")).toUtf8());
+    bool initialized = false;
+    bool disconnected = false;
+    QString receivedRequestId;
+    QJsonObject received;
+    AgentRuntimeClient client;
+    QObject::connect(&client, &AgentRuntimeClient::runtimeInitialized,
+                     [&initialized](const QJsonObject &) { initialized = true; });
+    QObject::connect(&client, &AgentRuntimeClient::commandArtifactPageRead,
+                     [&receivedRequestId, &received](const QString &requestId,
+                                                     const QJsonObject &result) {
+        receivedRequestId = requestId;
+        received = result;
+    });
+    QObject::connect(&client, &AgentRuntimeClient::connectionStateChanged,
+                     [&initialized, &disconnected](bool ready, const QString &) {
+        if (initialized && !ready) disconnected = true;
+    });
+    client.start();
+    if (!expect(waitUntil([&]() { return initialized; }),
+                "valid command-page handshake timed out")) {
+        return false;
+    }
+    const QString requestId = client.readCommandArtifactPage(
+        QStringLiteral("session-page"), QStringLiteral("command.route:1"),
+        QStringLiteral("command-output:sha256:")
+            + QStringLiteral(
+                "bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721"));
+    const bool routed = expect(!requestId.isEmpty()
+                    && waitUntil([&]() { return !receivedRequestId.isEmpty(); }),
+                "valid command-page response was not routed")
+        && expect(receivedRequestId == requestId,
+                  "valid command-page response lost pending request correlation")
+        && expect(received.value(QStringLiteral("page")).toObject()
+                      .value(QStringLiteral("inline")).toString()
+                      == QStringLiteral("abcdef"),
+                  "valid command-page response changed its inline bytes")
+        && expect(!disconnected,
+                  "valid command-page response closed the protocol");
+    client.stop();
+    return routed;
+}
+
 bool workspaceEditProposalPageIdentityMatchesRustFixture()
 {
     const QString digest = QStringLiteral(
@@ -3940,6 +4201,447 @@ bool workspaceEditProposalPreviewIdentityMatchesRustFixture()
                   "Proposal preview identity omitted aggregate count binding");
 }
 
+QJsonObject commandArtifactBindingFixture(const QString &itemId)
+{
+    const QString sha256 = QStringLiteral(
+        "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03");
+    return {
+        {QStringLiteral("session_id"), QStringLiteral("session-vector-1")},
+        {QStringLiteral("item_id"), itemId},
+        {QStringLiteral("created_at_ms"), 1'700'000'000'123.0},
+        {QStringLiteral("content_reference"), QJsonObject{
+            {QStringLiteral("reference"),
+             QStringLiteral("command-output:sha256:") + sha256},
+            {QStringLiteral("sha256"), sha256},
+            {QStringLiteral("media_type"),
+             QStringLiteral("text/plain; charset=utf-8")},
+        }},
+        {QStringLiteral("source_bytes"), 6},
+        {QStringLiteral("redacted_count"), 0},
+        {QStringLiteral("redacted"), false},
+        {QStringLiteral("total_bytes"), 6},
+        {QStringLiteral("retained_bytes"), 6},
+        {QStringLiteral("omitted_bytes"), 0},
+        {QStringLiteral("truncated"), false},
+    };
+}
+
+bool commandArtifactIdentitiesMatchRustFixtures()
+{
+    const QJsonObject simple = commandArtifactBindingFixture(
+        QStringLiteral("command.item:1"));
+    const QJsonObject punctuation = commandArtifactBindingFixture(
+        QStringLiteral("command.\"slash/\\:1"));
+    const QString simpleExpected = QStringLiteral(
+        "content-reference-binding:sha256:"
+        "d6a8d1c07d2e2a8d0817b50a191e02a0ac677eddacd17bceaeb6c5f67f24216f");
+    const QString punctuationExpected = QStringLiteral(
+        "content-reference-binding:sha256:"
+        "a0b5b2ca29247112b19796e03fafed08972eef39e3f4cd8bb769a7906f8b78a3");
+
+    const QString sha256 = QStringLiteral(
+        "bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721");
+    QJsonObject limits{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("content-inline-limits/0.1")},
+        {QStringLiteral("max_item_bytes"), 4},
+        {QStringLiteral("max_total_bytes"), 8},
+        {QStringLiteral("identity"), QStringLiteral(
+            "content-inline-limits:sha256:"
+            "2093b1974c59acb69989ef3cab60a4b77098bb5d801a891ac90b89b1de97f8fc")},
+    };
+    QJsonObject cursor{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("content-reference-cursor/0.1")},
+        {QStringLiteral("reference"), QStringLiteral("content:sha256:") + sha256},
+        {QStringLiteral("sha256"), sha256},
+        {QStringLiteral("bytes"), 6},
+        {QStringLiteral("media_type"),
+         QStringLiteral("text/plain; charset=utf-8")},
+        {QStringLiteral("offset"), 4},
+        {QStringLiteral("page_size"), 4},
+        {QStringLiteral("limits"), limits},
+        {QStringLiteral("identity"), QStringLiteral(
+            "content-reference-cursor:sha256:"
+            "87116127b2d7a8dfdb11b79f20a80cec89360c2ed1d0ede2c810e39cd634f029")},
+    };
+    QJsonObject page{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("content-reference-page/0.1")},
+        {QStringLiteral("reference"), QStringLiteral("content:sha256:") + sha256},
+        {QStringLiteral("sha256"), sha256},
+        {QStringLiteral("bytes"), 6},
+        {QStringLiteral("media_type"),
+         QStringLiteral("text/plain; charset=utf-8")},
+        {QStringLiteral("offset"), 0},
+        {QStringLiteral("page_size"), 4},
+        {QStringLiteral("page_bytes"), 4},
+        {QStringLiteral("inline"), QStringLiteral("abcd")},
+        {QStringLiteral("inline_truncated"), false},
+        {QStringLiteral("limits"), limits},
+        {QStringLiteral("next_cursor"), cursor},
+        {QStringLiteral("identity"), QStringLiteral(
+            "content-reference-page:sha256:"
+            "5085fcde4966cde1054d75976ff16a37335ed5333e374c1bbfdb4cae9e0e48e1")},
+    };
+    return expect(AgentRuntimeClient::commandArtifactPageBindingIdentity(simple)
+                      == simpleExpected,
+                  "Qt command Artifact binding diverged from the Rust fixture")
+        && expect(AgentRuntimeClient::commandArtifactPageBindingIdentity(punctuation)
+                      == punctuationExpected,
+                  "Qt command Artifact binding escaped a legal Item ID differently")
+        && expect(AgentRuntimeClient::contentInlineLimitsIdentity(limits)
+                      == limits.value(QStringLiteral("identity")).toString(),
+                  "Qt inline limits identity diverged from the Rust fixture")
+        && expect(AgentRuntimeClient::contentReferenceCursorIdentity(cursor)
+                      == cursor.value(QStringLiteral("identity")).toString(),
+                  "Qt content cursor identity diverged from the Rust fixture")
+        && expect(AgentRuntimeClient::contentReferencePageIdentity(page)
+                      == page.value(QStringLiteral("identity")).toString(),
+                  "Qt content page identity diverged from the Rust fixture");
+}
+
+QJsonObject validCommandArtifactFirstPage(QJsonObject *request,
+                                          QJsonObject *continuationRequest = nullptr)
+{
+    const QByteArray source("abcdef");
+    const QString sha256 = QString::fromLatin1(QCryptographicHash::hash(
+        source, QCryptographicHash::Sha256).toHex());
+    const QString reference = QStringLiteral("command-output:sha256:") + sha256;
+    const QString mediaType = QStringLiteral("text/plain; charset=utf-8");
+    QJsonObject limits{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("content-inline-limits/0.1")},
+        {QStringLiteral("max_item_bytes"), 4},
+        {QStringLiteral("max_total_bytes"), 8},
+    };
+    limits.insert(QStringLiteral("identity"),
+                  AgentRuntimeClient::contentInlineLimitsIdentity(limits));
+    QJsonObject preview{
+        {QStringLiteral("schema_version"), QStringLiteral("content-preview/0.1")},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("sha256"), sha256},
+        {QStringLiteral("media_type"), mediaType},
+        {QStringLiteral("content_bytes"), 6},
+        {QStringLiteral("preview_bytes"), 6},
+        {QStringLiteral("truncated"), false},
+        {QStringLiteral("line_count"), 1},
+        {QStringLiteral("width"), QJsonValue(QJsonValue::Null)},
+        {QStringLiteral("height"), QJsonValue(QJsonValue::Null)},
+    };
+    preview.insert(QStringLiteral("identity"),
+                   AgentRuntimeClient::contentPreviewIdentity(preview));
+    const QJsonObject content{
+        {QStringLiteral("schema_version"), QStringLiteral("content-reference/0.1")},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("sha256"), sha256},
+        {QStringLiteral("bytes"), 6},
+        {QStringLiteral("media_type"), mediaType},
+        {QStringLiteral("preview"), preview},
+    };
+    QJsonObject result{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("command-output-artifact-page/0.1")},
+        {QStringLiteral("session_id"), QStringLiteral("session-page")},
+        {QStringLiteral("item_id"), QStringLiteral("command.\"slash/\\:1")},
+        {QStringLiteral("created_at_ms"), 1'700'000'000'123.0},
+        {QStringLiteral("content_reference"), content},
+        {QStringLiteral("source_bytes"), 6},
+        {QStringLiteral("redacted_count"), 0},
+        {QStringLiteral("redacted"), false},
+        {QStringLiteral("total_bytes"), 6},
+        {QStringLiteral("retained_bytes"), 6},
+        {QStringLiteral("omitted_bytes"), 0},
+        {QStringLiteral("truncated"), false},
+        {QStringLiteral("read_only"), true},
+    };
+    result.insert(QStringLiteral("binding_identity"),
+                  AgentRuntimeClient::commandArtifactPageBindingIdentity(result));
+    const QString binding = result.value(QStringLiteral("binding_identity")).toString();
+    QJsonObject cursor{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("content-reference-cursor/0.1")},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("sha256"), sha256},
+        {QStringLiteral("bytes"), 6},
+        {QStringLiteral("media_type"), mediaType},
+        {QStringLiteral("offset"), 4},
+        {QStringLiteral("page_size"), 4},
+        {QStringLiteral("limits"), limits},
+        {QStringLiteral("binding_identity"), binding},
+    };
+    cursor.insert(QStringLiteral("identity"),
+                  AgentRuntimeClient::contentReferenceCursorIdentity(cursor));
+    QJsonObject page{
+        {QStringLiteral("schema_version"), QStringLiteral("content-reference-page/0.1")},
+        {QStringLiteral("reference"), reference},
+        {QStringLiteral("sha256"), sha256},
+        {QStringLiteral("bytes"), 6},
+        {QStringLiteral("media_type"), mediaType},
+        {QStringLiteral("offset"), 0},
+        {QStringLiteral("page_size"), 4},
+        {QStringLiteral("page_bytes"), 4},
+        {QStringLiteral("inline"), QStringLiteral("abcd")},
+        {QStringLiteral("inline_truncated"), false},
+        {QStringLiteral("limits"), limits},
+        {QStringLiteral("binding_identity"), binding},
+        {QStringLiteral("next_cursor"), cursor},
+    };
+    page.insert(QStringLiteral("identity"),
+                AgentRuntimeClient::contentReferencePageIdentity(page));
+    result.insert(QStringLiteral("page"), page);
+    if (request) {
+        *request = {
+            {QStringLiteral("session_id"), QStringLiteral("session-page")},
+            {QStringLiteral("item_id"), QStringLiteral("command.\"slash/\\:1")},
+            {QStringLiteral("reference"), reference},
+            {QStringLiteral("limit"), 4},
+            {QStringLiteral("max_total_inline_bytes"), 8},
+        };
+    }
+    if (continuationRequest) {
+        *continuationRequest = {
+            {QStringLiteral("session_id"), QStringLiteral("session-page")},
+            {QStringLiteral("item_id"), QStringLiteral("command.\"slash/\\:1")},
+            {QStringLiteral("reference"), reference},
+            {QStringLiteral("cursor"), cursor},
+        };
+    }
+    return result;
+}
+
+bool commandArtifactPageValidationIsStrict()
+{
+    QJsonObject firstRequest;
+    QJsonObject continuationRequest;
+    const QJsonObject first = validCommandArtifactFirstPage(
+        &firstRequest, &continuationRequest);
+    if (!expect(AgentRuntimeClient::isValidCommandArtifactPage(first, firstRequest),
+                "Qt rejected a valid command Artifact first page")) {
+        return false;
+    }
+
+    QJsonObject second = first;
+    QJsonObject secondPage = second.value(QStringLiteral("page")).toObject();
+    secondPage.insert(QStringLiteral("offset"), 4);
+    secondPage.insert(QStringLiteral("page_bytes"), 2);
+    secondPage.insert(QStringLiteral("inline"), QStringLiteral("ef"));
+    secondPage.insert(QStringLiteral("next_cursor"), QJsonValue(QJsonValue::Null));
+    secondPage.insert(QStringLiteral("identity"),
+                      AgentRuntimeClient::contentReferencePageIdentity(secondPage));
+    second.insert(QStringLiteral("page"), secondPage);
+    if (!expect(AgentRuntimeClient::isValidCommandArtifactPage(
+                    second, continuationRequest),
+                "Qt rejected a valid command Artifact continuation")) {
+        return false;
+    }
+
+    const QString emptySha = QStringLiteral(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    const QString emptyReference = QStringLiteral("command-output:sha256:") + emptySha;
+    QJsonObject empty = first;
+    QJsonObject emptyContent = empty.value(QStringLiteral("content_reference")).toObject();
+    QJsonObject emptyPreview = emptyContent.value(QStringLiteral("preview")).toObject();
+    emptyPreview.insert(QStringLiteral("reference"), emptyReference);
+    emptyPreview.insert(QStringLiteral("sha256"), emptySha);
+    emptyPreview.insert(QStringLiteral("content_bytes"), 0);
+    emptyPreview.insert(QStringLiteral("preview_bytes"), 0);
+    emptyPreview.insert(QStringLiteral("line_count"), 0);
+    emptyPreview.insert(QStringLiteral("identity"),
+                        AgentRuntimeClient::contentPreviewIdentity(emptyPreview));
+    emptyContent.insert(QStringLiteral("reference"), emptyReference);
+    emptyContent.insert(QStringLiteral("sha256"), emptySha);
+    emptyContent.insert(QStringLiteral("bytes"), 0);
+    emptyContent.insert(QStringLiteral("preview"), emptyPreview);
+    empty.insert(QStringLiteral("content_reference"), emptyContent);
+    empty.insert(QStringLiteral("source_bytes"), 0);
+    empty.insert(QStringLiteral("total_bytes"), 0);
+    empty.insert(QStringLiteral("retained_bytes"), 0);
+    empty.insert(QStringLiteral("binding_identity"),
+                 AgentRuntimeClient::commandArtifactPageBindingIdentity(empty));
+    QJsonObject emptyPage = empty.value(QStringLiteral("page")).toObject();
+    emptyPage.insert(QStringLiteral("reference"), emptyReference);
+    emptyPage.insert(QStringLiteral("sha256"), emptySha);
+    emptyPage.insert(QStringLiteral("bytes"), 0);
+    emptyPage.insert(QStringLiteral("page_bytes"), 0);
+    emptyPage.insert(QStringLiteral("inline"), QString());
+    emptyPage.insert(QStringLiteral("binding_identity"),
+                     empty.value(QStringLiteral("binding_identity")));
+    emptyPage.insert(QStringLiteral("next_cursor"), QJsonValue(QJsonValue::Null));
+    emptyPage.insert(QStringLiteral("identity"),
+                     AgentRuntimeClient::contentReferencePageIdentity(emptyPage));
+    empty.insert(QStringLiteral("page"), emptyPage);
+    QJsonObject emptyRequest = firstRequest;
+    emptyRequest.insert(QStringLiteral("reference"), emptyReference);
+    if (!expect(AgentRuntimeClient::isValidCommandArtifactPage(empty, emptyRequest),
+                "Qt rejected a valid empty command Artifact page")) {
+        return false;
+    }
+
+    QJsonObject unknown = first;
+    unknown.insert(QStringLiteral("future_authority"), true);
+    QJsonObject wrongSession = first;
+    wrongSession.insert(QStringLiteral("session_id"), QStringLiteral("session-other"));
+    QJsonObject wrongItem = first;
+    wrongItem.insert(QStringLiteral("item_id"), QStringLiteral("command-other"));
+    QJsonObject wrongReference = first;
+    QJsonObject wrongReferenceContent = wrongReference.value(
+        QStringLiteral("content_reference")).toObject();
+    wrongReferenceContent.insert(QStringLiteral("reference"),
+        QStringLiteral("command-output:sha256:") + QString(64, QLatin1Char('0')));
+    wrongReference.insert(QStringLiteral("content_reference"), wrongReferenceContent);
+    QJsonObject wrongBinding = first;
+    wrongBinding.insert(QStringLiteral("binding_identity"),
+        QStringLiteral("content-reference-binding:sha256:")
+            + QString(64, QLatin1Char('0')));
+    QJsonObject wrongPreview = first;
+    QJsonObject wrongPreviewContent = wrongPreview.value(
+        QStringLiteral("content_reference")).toObject();
+    QJsonObject wrongPreviewValue = wrongPreviewContent.value(
+        QStringLiteral("preview")).toObject();
+    wrongPreviewValue.insert(QStringLiteral("identity"),
+        QStringLiteral("content-preview:sha256:") + QString(64, QLatin1Char('0')));
+    wrongPreviewContent.insert(QStringLiteral("preview"), wrongPreviewValue);
+    wrongPreview.insert(QStringLiteral("content_reference"), wrongPreviewContent);
+    QJsonObject unknownLimit = first;
+    QJsonObject unknownLimitPage = unknownLimit.value(QStringLiteral("page")).toObject();
+    QJsonObject unknownLimits = unknownLimitPage.value(QStringLiteral("limits")).toObject();
+    unknownLimits.insert(QStringLiteral("future_limit"), 1);
+    unknownLimitPage.insert(QStringLiteral("limits"), unknownLimits);
+    unknownLimit.insert(QStringLiteral("page"), unknownLimitPage);
+    QJsonObject wrongPageIdentity = first;
+    QJsonObject wrongIdentityPage = wrongPageIdentity.value(
+        QStringLiteral("page")).toObject();
+    wrongIdentityPage.insert(QStringLiteral("identity"),
+        QStringLiteral("content-reference-page:sha256:")
+            + QString(64, QLatin1Char('0')));
+    wrongPageIdentity.insert(QStringLiteral("page"), wrongIdentityPage);
+    QJsonObject unsafeInteger = first;
+    unsafeInteger.insert(QStringLiteral("total_bytes"),
+                         9'007'199'254'740'992.0);
+    QJsonObject fractionalOffset = first;
+    QJsonObject fractionalPage = fractionalOffset.value(
+        QStringLiteral("page")).toObject();
+    fractionalPage.insert(QStringLiteral("offset"), 0.5);
+    fractionalOffset.insert(QStringLiteral("page"), fractionalPage);
+    QJsonObject writable = first;
+    writable.insert(QStringLiteral("read_only"), false);
+    QJsonObject badTerminal = second;
+    QJsonObject badTerminalPage = secondPage;
+    badTerminalPage.insert(QStringLiteral("page_bytes"), 1);
+    badTerminalPage.insert(QStringLiteral("inline"), QStringLiteral("e"));
+    badTerminalPage.insert(QStringLiteral("identity"),
+        AgentRuntimeClient::contentReferencePageIdentity(badTerminalPage));
+    badTerminal.insert(QStringLiteral("page"), badTerminalPage);
+    QJsonObject renegotiatedRequest = continuationRequest;
+    renegotiatedRequest.insert(QStringLiteral("limit"), 4);
+    QJsonObject forgedCursorRequest = continuationRequest;
+    QJsonObject forgedCursor = forgedCursorRequest.value(
+        QStringLiteral("cursor")).toObject();
+    forgedCursor.insert(QStringLiteral("identity"),
+        QStringLiteral("content-reference-cursor:sha256:")
+            + QString(64, QLatin1Char('0')));
+    forgedCursorRequest.insert(QStringLiteral("cursor"), forgedCursor);
+    return expect(!AgentRuntimeClient::isValidCommandArtifactPage(unknown, firstRequest),
+                  "Qt accepted an unknown command Artifact page field")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(
+                      wrongSession, firstRequest),
+                  "Qt accepted a cross-Session command Artifact page")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(wrongItem, firstRequest),
+                  "Qt accepted a cross-Item command Artifact page")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(
+                      wrongReference, firstRequest),
+                  "Qt accepted a substituted command Artifact reference")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(wrongBinding, firstRequest),
+                  "Qt accepted command Artifact binding drift")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(
+                      wrongPreview, firstRequest),
+                  "Qt accepted command Artifact preview identity drift")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(
+                      unknownLimit, firstRequest),
+                  "Qt accepted an unknown inline-limit field")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(
+                      wrongPageIdentity, firstRequest),
+                  "Qt accepted command Artifact page identity drift")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(
+                      unsafeInteger, firstRequest),
+                  "Qt accepted an unsafe command Artifact integer")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(
+                      fractionalOffset, firstRequest),
+                  "Qt accepted a fractional command Artifact offset")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(
+                      writable, firstRequest),
+                  "Qt accepted writable command Artifact authority")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(
+                      badTerminal, continuationRequest),
+                  "Qt accepted a non-terminal page without a cursor")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(
+                      second, renegotiatedRequest),
+                  "Qt accepted continuation limit renegotiation")
+        && expect(!AgentRuntimeClient::isValidCommandArtifactPage(
+                      second, forgedCursorRequest),
+                  "Qt accepted a substituted continuation cursor identity");
+}
+
+QJsonObject completeCommandArtifactMetadata(const QByteArray &content,
+                                            quint64 retainedBytes,
+                                            quint64 omittedBytes)
+{
+    const QString sha256 = QString::fromLatin1(QCryptographicHash::hash(
+        content, QCryptographicHash::Sha256).toHex());
+    return {
+        {QStringLiteral("content_reference"), QJsonObject{
+            {QStringLiteral("reference"),
+             QStringLiteral("command-output:sha256:") + sha256},
+            {QStringLiteral("sha256"), sha256},
+            {QStringLiteral("bytes"), static_cast<double>(content.size())},
+        }},
+        {QStringLiteral("total_bytes"),
+         static_cast<double>(retainedBytes + omittedBytes)},
+        {QStringLiteral("retained_bytes"), static_cast<double>(retainedBytes)},
+        {QStringLiteral("omitted_bytes"), static_cast<double>(omittedBytes)},
+        {QStringLiteral("truncated"), omittedBytes > 0},
+    };
+}
+
+bool commandArtifactCompleteContentValidationIsStrict()
+{
+    constexpr qsizetype headBytes = 1024 * 1024;
+    constexpr qsizetype tailBytes = 1024 * 1024;
+    constexpr quint64 omittedBytes = 137;
+    const QByteArray marker = QStringLiteral(
+        "\n[Aegisy omitted %1 command output bytes]\n")
+                                  .arg(omittedBytes).toUtf8();
+    const QByteArray valid = QByteArray(headBytes, 'h') + marker
+        + QByteArray(tailBytes, 't');
+    const quint64 retainedBytes = headBytes + tailBytes;
+    if (!expect(AgentRuntimeClient::isValidCompleteCommandArtifact(
+                    completeCommandArtifactMetadata(
+                        valid, retainedBytes, omittedBytes), valid),
+                "Qt rejected a canonical truncated command Artifact")) {
+        return false;
+    }
+
+    QByteArray missing = valid;
+    missing.replace(headBytes, marker.size(), QByteArray(marker.size(), 'x'));
+    QByteArray duplicate = valid;
+    duplicate.replace(0, marker.size(), marker);
+    const QByteArray moved = marker + QByteArray(headBytes, 'h')
+        + QByteArray(tailBytes, 't');
+    return expect(!AgentRuntimeClient::isValidCompleteCommandArtifact(
+                      completeCommandArtifactMetadata(
+                          missing, retainedBytes, omittedBytes), missing),
+                  "Qt accepted a truncated Artifact without its omission marker")
+        && expect(!AgentRuntimeClient::isValidCompleteCommandArtifact(
+                      completeCommandArtifactMetadata(
+                          duplicate, retainedBytes, omittedBytes), duplicate),
+                  "Qt accepted duplicate command Artifact omission markers")
+        && expect(!AgentRuntimeClient::isValidCompleteCommandArtifact(
+                      completeCommandArtifactMetadata(
+                          moved, retainedBytes, omittedBytes), moved),
+                  "Qt accepted a command Artifact omission marker outside its boundary");
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -4003,6 +4705,12 @@ int main(int argc, char *argv[])
                 "Qt accepted an invalid durable mutation fingerprint") && ok;
     ok = workspaceEditProposalPreviewIdentityMatchesRustFixture() && ok;
     ok = workspaceEditProposalPageIdentityMatchesRustFixture() && ok;
+    ok = commandArtifactIdentitiesMatchRustFixtures() && ok;
+    ok = commandArtifactPageValidationIsStrict() && ok;
+    ok = commandArtifactCompleteContentValidationIsStrict() && ok;
+    ok = runCommandArtifactRequestShapeCase(false) && ok;
+    ok = runCommandArtifactRequestShapeCase(true) && ok;
+    ok = runCommandArtifactSuccessRoutingCase() && ok;
     ok = runHandshakeCase(QStringLiteral("valid-preview"), true) && ok;
     ok = runHandshakeCase(QStringLiteral("turn-start-ack"), true) && ok;
     ok = runHandshakeCase(QStringLiteral("valid-codex"), true) && ok;

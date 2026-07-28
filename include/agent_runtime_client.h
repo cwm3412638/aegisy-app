@@ -75,6 +75,15 @@ public:
                                                     const QString &requestFingerprint);
     static QString workspaceEditProposalPreviewIdentity(const QJsonObject &proposal);
     static QString workspaceEditProposalArtifactPageIdentity(const QJsonObject &page);
+    static QString commandArtifactPageBindingIdentity(const QJsonObject &result);
+    static QString contentPreviewIdentity(const QJsonObject &preview);
+    static QString contentInlineLimitsIdentity(const QJsonObject &limits);
+    static QString contentReferenceCursorIdentity(const QJsonObject &cursor);
+    static QString contentReferencePageIdentity(const QJsonObject &page);
+    static bool isValidCommandArtifactPage(const QJsonObject &result,
+                                           const QJsonObject &request);
+    static bool isValidCompleteCommandArtifact(const QJsonObject &result,
+                                               const QByteArray &content);
 
     void start();
     void stop();
@@ -311,6 +320,9 @@ public:
                                 int rows = 0, int cols = 0);
     QString removeUserTerminal(const QString &sessionId, const QString &terminalId);
     QString readCommandArtifact(const QString &sessionId, const QString &reference);
+    QString readCommandArtifactPage(const QString &sessionId, const QString &itemId,
+                                    const QString &reference,
+                                    const QJsonObject &cursor = {});
 
 signals:
     void connectionStateChanged(bool ready, const QString &detail);
@@ -443,6 +455,7 @@ signals:
     void terminalRestarted(const QString &requestId, const QJsonObject &terminal);
     void terminalRemoved(const QString &requestId, const QJsonObject &result);
     void commandArtifactRead(const QString &requestId, const QJsonObject &artifact);
+    void commandArtifactPageRead(const QString &requestId, const QJsonObject &page);
     void timelineRetentionGap(const QString &requestId, const QJsonObject &data);
     // Compatibility signal: emitted only when the canonical wire code fits int.
     void requestFailed(const QString &requestId, const QString &method,
@@ -471,13 +484,17 @@ private:
     struct MutationConsumeValidation {
         QJsonObject request;
     };
+    struct CommandArtifactPageValidation {
+        QJsonObject request;
+    };
     using PendingValidation = std::variant<
         std::monostate,
         TimelineSyncValidation,
         TimelineSubscriptionValidation,
         TurnStartValidation,
         MutationListValidation,
-        MutationConsumeValidation>;
+        MutationConsumeValidation,
+        CommandArtifactPageValidation>;
     struct PendingRequestContext {
         aegisy::aap::transport_generated::TransportPendingRequest transport;
         quint64 processGeneration = 0;

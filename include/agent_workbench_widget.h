@@ -6,6 +6,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
+#include <QPointer>
 #include <QSet>
 #include <QStringList>
 #include <QWidget>
@@ -142,6 +143,40 @@ private:
         quint64 generation = 0;
         bool reconnectRecovery = false;
     };
+    enum class CommandArtifactWorkflowState {
+        Idle,
+        LoadingFirst,
+        Partial,
+        LoadingNext,
+        Complete,
+        Failed,
+    };
+    struct CommandArtifactPageRequest {
+        quint64 workflowGeneration = 0;
+        quint64 processGeneration = 0;
+        qsizetype expectedOffset = 0;
+        QJsonObject cursor;
+    };
+    struct CommandArtifactWorkflow {
+        CommandArtifactWorkflowState state = CommandArtifactWorkflowState::Idle;
+        quint64 generation = 0;
+        quint64 processGeneration = 0;
+        QString requestId;
+        QString sessionId;
+        QString itemId;
+        QString reference;
+        QString itemKey;
+        QByteArray accumulated;
+        QJsonObject nextCursor;
+        QJsonObject frozenMetadata;
+        QJsonObject completeArtifact;
+        QPointer<QDialog> dialog;
+        QPointer<QLabel> status;
+        QPointer<QPlainTextEdit> preview;
+        QPointer<QPushButton> loadMore;
+        QPointer<QPushButton> pin;
+        QPointer<QPushButton> originButton;
+    };
 
     void buildUi();
     QWidget *buildProductRail();
@@ -208,6 +243,16 @@ private:
     void pinEditorSelectionContext();
     bool canPinCommandArtifact(const QJsonObject &artifact, QString *reason = nullptr) const;
     void pinCommandArtifact(const QJsonObject &artifact);
+    void beginCommandArtifactWorkflow(const QString &itemKey, const QString &itemId,
+                                      const QString &sessionId,
+                                      const QString &reference,
+                                      QPushButton *originButton);
+    void requestNextCommandArtifactPage();
+    void handleCommandArtifactPage(const QString &requestId,
+                                   const QJsonObject &result);
+    void failCommandArtifactWorkflow(const QString &requestId,
+                                     const QString &message);
+    void invalidateCommandArtifactWorkflow(bool closeDialog = true);
     void finishPinnedFileRead(const QJsonObject &file);
     void pinImageContext();
     void finishPinnedImageImport(const QJsonObject &image);
@@ -595,7 +640,9 @@ private:
         m_timelineSubscriptionActivationRequester;
     std::function<void(const QString &)> m_timelineSubscriptionConnectionAbandoner;
     std::function<void(const QJsonObject &, const QJsonObject &, bool)> m_timelinePresenter;
-    QHash<QString, QString> m_commandArtifactRequests;
+    quint64 m_commandArtifactWorkflowGeneration = 0;
+    CommandArtifactWorkflow m_commandArtifactWorkflow;
+    QHash<QString, CommandArtifactPageRequest> m_commandArtifactPageRequests;
     QHash<QString, QTreeWidgetItem *> m_treeItems;
     QHash<QString, QString> m_workspaceListRequests;
     QHash<QString, QString> m_workspaceReadRequests;

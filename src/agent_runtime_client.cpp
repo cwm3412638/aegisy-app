@@ -189,6 +189,96 @@ bool hasExactKeys(const QJsonObject &object, const QStringList &keys)
     return actual == expected;
 }
 
+QByteArray unsignedBigEndian(quint64 value)
+{
+    QByteArray bytes;
+    bytes.reserve(8);
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        bytes.append(static_cast<char>((value >> shift) & 0xff));
+    }
+    return bytes;
+}
+
+void appendLengthFramed(QByteArray *target, const QByteArray &component)
+{
+    if (!target) return;
+    target->append(unsignedBigEndian(static_cast<quint64>(component.size())));
+    target->append(component);
+}
+
+QString lengthFramedIdentity(const QByteArray &prefix,
+                             const QList<QByteArray> &components)
+{
+    QByteArray material = prefix;
+    material.append('\0');
+    for (const QByteArray &component : components) {
+        appendLengthFramed(&material, component);
+    }
+    return QString::fromLatin1(prefix)
+        + QString::fromLatin1(QCryptographicHash::hash(
+            material, QCryptographicHash::Sha256).toHex());
+}
+
+bool readUnsignedSafeJsonInteger(const QJsonValue &value, quint64 *number = nullptr)
+{
+    if (!value.isDouble()) return false;
+    const double raw = value.toDouble();
+    if (!std::isfinite(raw) || raw < 0.0 || raw > kMaximumSafeJsonInteger
+            || std::floor(raw) != raw) {
+        return false;
+    }
+    if (number) *number = static_cast<quint64>(raw);
+    return true;
+}
+
+bool isLowerHexSha256(const QString &value)
+{
+    return value.size() == 64
+        && std::all_of(value.cbegin(), value.cend(), [](QChar character) {
+            return (character >= QLatin1Char('0') && character <= QLatin1Char('9'))
+                || (character >= QLatin1Char('a') && character <= QLatin1Char('f'));
+        });
+}
+
+bool isSha256Identity(const QString &value, const QString &prefix)
+{
+    return value.startsWith(prefix)
+        && isLowerHexSha256(value.mid(prefix.size()));
+}
+
+bool isUnicodeScalarString(const QString &value)
+{
+    for (qsizetype index = 0; index < value.size(); ++index) {
+        const QChar character = value.at(index);
+        if (character.isHighSurrogate()) {
+            if (index + 1 >= value.size() || !value.at(index + 1).isLowSurrogate()) {
+                return false;
+            }
+            ++index;
+        } else if (character.isLowSurrogate()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool isAsciiGraphicalId(const QJsonValue &value, qsizetype maximumBytes)
+{
+    if (!value.isString()) return false;
+    const QString text = value.toString();
+    if (text.isEmpty() || text.size() > maximumBytes) return false;
+    return std::all_of(text.cbegin(), text.cend(), [](QChar character) {
+        const ushort code = character.unicode();
+        return code >= 0x21 && code <= 0x7e;
+    });
+}
+
+bool isCommandOutputReference(const QString &reference, const QString &sha256)
+{
+    return isLowerHexSha256(sha256)
+        && reference == QStringLiteral("command-output:sha256:") + sha256;
+}
+
 const QStringList &declaredCapabilities()
 {
     static const QStringList capabilities = {
@@ -2102,6 +2192,7 @@ QStringList requiredCapabilitiesForMethod(const QString &method,
         {QStringLiteral("terminal/remove-user"), QStringLiteral("terminal.lifecycle.named")},
         {QStringLiteral("terminal/excerpt/read"), QStringLiteral("terminal.excerpt.read")},
         {QStringLiteral("artifact/read-command-output"), QStringLiteral("artifact.command-output.bounded")},
+        {QStringLiteral("artifact/read-command-output-page"), QStringLiteral("artifact.command-output.bounded")},
     };
 
     if (method == QStringLiteral("shutdown")) return {};
@@ -2801,6 +2892,576 @@ QString AgentRuntimeClient::workspaceEditProposalArtifactPageIdentity(
     return QStringLiteral("workspace-edit-proposal-artifact-page:sha256:%1")
         .arg(QString::fromLatin1(
             QCryptographicHash::hash(input, QCryptographicHash::Sha256).toHex()));
+}
+
+QString AgentRuntimeClient::commandArtifactPageBindingIdentity(
+    const QJsonObject &result)
+{
+    const QJsonObject content = result.value(QStringLiteral("content_reference")).toObject();
+    quint64 createdAt = 0;
+    quint64 sourceBytes = 0;
+    quint64 redactedCount = 0;
+    quint64 totalBytes = 0;
+    quint64 retainedBytes = 0;
+    quint64 omittedBytes = 0;
+    if (!result.value(QStringLiteral("session_id")).isString()
+            || !content.value(QStringLiteral("reference")).isString()
+            || !content.value(QStringLiteral("sha256")).isString()
+            || !content.value(QStringLiteral("media_type")).isString()
+            || !result.value(QStringLiteral("item_id")).isString()
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("created_at_ms")), &createdAt)
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("source_bytes")), &sourceBytes)
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("redacted_count")), &redactedCount)
+            || !result.value(QStringLiteral("redacted")).isBool()
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("total_bytes")), &totalBytes)
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("retained_bytes")), &retainedBytes)
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("omitted_bytes")), &omittedBytes)
+            || !result.value(QStringLiteral("truncated")).isBool()) {
+        return {};
+    }
+    QByteArray material = QByteArrayLiteral("command-output-artifact-page-binding\0");
+    const QList<QByteArray> components{
+        QByteArrayLiteral("command-output-artifact-page-binding/0.1"),
+        result.value(QStringLiteral("session_id")).toString().toUtf8(),
+        content.value(QStringLiteral("reference")).toString().toUtf8(),
+        content.value(QStringLiteral("sha256")).toString().toUtf8(),
+        content.value(QStringLiteral("media_type")).toString().toUtf8(),
+        result.value(QStringLiteral("item_id")).toString().toUtf8(),
+        unsignedBigEndian(createdAt),
+        unsignedBigEndian(sourceBytes),
+        unsignedBigEndian(redactedCount),
+        QByteArray(1, static_cast<char>(result.value(
+            QStringLiteral("redacted")).toBool())),
+        unsignedBigEndian(totalBytes),
+        unsignedBigEndian(retainedBytes),
+        unsignedBigEndian(omittedBytes),
+        QByteArray(1, static_cast<char>(result.value(
+            QStringLiteral("truncated")).toBool())),
+    };
+    for (const QByteArray &component : components) {
+        appendLengthFramed(&material, component);
+    }
+    return QStringLiteral("content-reference-binding:sha256:")
+        + QString::fromLatin1(QCryptographicHash::hash(
+            material, QCryptographicHash::Sha256).toHex());
+}
+
+QString AgentRuntimeClient::contentPreviewIdentity(const QJsonObject &preview)
+{
+    quint64 contentBytes = 0;
+    quint64 previewBytes = 0;
+    quint64 lineCount = std::numeric_limits<quint64>::max();
+    quint64 width = std::numeric_limits<quint64>::max();
+    quint64 height = std::numeric_limits<quint64>::max();
+    const auto optionalInteger = [](const QJsonValue &value, quint64 *number) {
+        return value.isNull() || readUnsignedSafeJsonInteger(value, number);
+    };
+    if (!preview.value(QStringLiteral("reference")).isString()
+            || !preview.value(QStringLiteral("sha256")).isString()
+            || !preview.value(QStringLiteral("media_type")).isString()
+            || !readUnsignedSafeJsonInteger(
+                preview.value(QStringLiteral("content_bytes")), &contentBytes)
+            || !readUnsignedSafeJsonInteger(
+                preview.value(QStringLiteral("preview_bytes")), &previewBytes)
+            || !preview.value(QStringLiteral("truncated")).isBool()
+            || !optionalInteger(preview.value(QStringLiteral("line_count")), &lineCount)
+            || !optionalInteger(preview.value(QStringLiteral("width")), &width)
+            || !optionalInteger(preview.value(QStringLiteral("height")), &height)) {
+        return {};
+    }
+    return lengthFramedIdentity(
+        QByteArrayLiteral("content-preview:sha256:"), {
+            preview.value(QStringLiteral("reference")).toString().toUtf8(),
+            preview.value(QStringLiteral("sha256")).toString().toUtf8(),
+            preview.value(QStringLiteral("media_type")).toString().toUtf8(),
+            unsignedBigEndian(contentBytes),
+            unsignedBigEndian(previewBytes),
+            QByteArray(1, static_cast<char>(preview.value(
+                QStringLiteral("truncated")).toBool())),
+            unsignedBigEndian(lineCount),
+            unsignedBigEndian(width),
+            unsignedBigEndian(height),
+        });
+}
+
+QString AgentRuntimeClient::contentInlineLimitsIdentity(const QJsonObject &limits)
+{
+    quint64 maxItemBytes = 0;
+    quint64 maxTotalBytes = 0;
+    if (!readUnsignedSafeJsonInteger(
+            limits.value(QStringLiteral("max_item_bytes")), &maxItemBytes)
+            || !readUnsignedSafeJsonInteger(
+                limits.value(QStringLiteral("max_total_bytes")), &maxTotalBytes)) {
+        return {};
+    }
+    return lengthFramedIdentity(
+        QByteArrayLiteral("content-inline-limits:sha256:"), {
+            QByteArrayLiteral("content-inline-limits/0.1"),
+            unsignedBigEndian(maxItemBytes),
+            unsignedBigEndian(maxTotalBytes),
+        });
+}
+
+QString AgentRuntimeClient::contentReferenceCursorIdentity(const QJsonObject &cursor)
+{
+    quint64 bytes = 0;
+    quint64 offset = 0;
+    quint64 pageSize = 0;
+    const QJsonObject limits = cursor.value(QStringLiteral("limits")).toObject();
+    if (!cursor.value(QStringLiteral("reference")).isString()
+            || !cursor.value(QStringLiteral("sha256")).isString()
+            || !cursor.value(QStringLiteral("media_type")).isString()
+            || !readUnsignedSafeJsonInteger(cursor.value(QStringLiteral("bytes")), &bytes)
+            || !readUnsignedSafeJsonInteger(cursor.value(QStringLiteral("offset")), &offset)
+            || !readUnsignedSafeJsonInteger(
+                cursor.value(QStringLiteral("page_size")), &pageSize)
+            || !limits.value(QStringLiteral("identity")).isString()
+            || (cursor.contains(QStringLiteral("binding_identity"))
+                && !cursor.value(QStringLiteral("binding_identity")).isString())) {
+        return {};
+    }
+    QList<QByteArray> components{
+        cursor.value(QStringLiteral("reference")).toString().toUtf8(),
+        cursor.value(QStringLiteral("sha256")).toString().toUtf8(),
+        unsignedBigEndian(bytes),
+        cursor.value(QStringLiteral("media_type")).toString().toUtf8(),
+        unsignedBigEndian(offset),
+        unsignedBigEndian(pageSize),
+        limits.value(QStringLiteral("identity")).toString().toUtf8(),
+    };
+    if (cursor.contains(QStringLiteral("binding_identity"))) {
+        components.append(cursor.value(QStringLiteral("binding_identity")).toString().toUtf8());
+    }
+    return lengthFramedIdentity(
+        QByteArrayLiteral("content-reference-cursor:sha256:"), components);
+}
+
+QString AgentRuntimeClient::contentReferencePageIdentity(const QJsonObject &page)
+{
+    quint64 bytes = 0;
+    quint64 offset = 0;
+    quint64 pageSize = 0;
+    quint64 pageBytes = 0;
+    const QJsonObject limits = page.value(QStringLiteral("limits")).toObject();
+    const QJsonValue inlineValue = page.value(QStringLiteral("inline"));
+    const QJsonValue nextCursor = page.value(QStringLiteral("next_cursor"));
+    if (!page.value(QStringLiteral("reference")).isString()
+            || !page.value(QStringLiteral("sha256")).isString()
+            || !page.value(QStringLiteral("media_type")).isString()
+            || !readUnsignedSafeJsonInteger(page.value(QStringLiteral("bytes")), &bytes)
+            || !readUnsignedSafeJsonInteger(page.value(QStringLiteral("offset")), &offset)
+            || !readUnsignedSafeJsonInteger(
+                page.value(QStringLiteral("page_size")), &pageSize)
+            || !readUnsignedSafeJsonInteger(
+                page.value(QStringLiteral("page_bytes")), &pageBytes)
+            || (!inlineValue.isNull() && !inlineValue.isString())
+            || !page.value(QStringLiteral("inline_truncated")).isBool()
+            || !limits.value(QStringLiteral("identity")).isString()
+            || (!nextCursor.isNull() && !nextCursor.isObject())
+            || (page.contains(QStringLiteral("binding_identity"))
+                && !page.value(QStringLiteral("binding_identity")).isString())) {
+        return {};
+    }
+    const QByteArray inlineBytes = inlineValue.isString()
+        ? inlineValue.toString().toUtf8() : QByteArray{};
+    const QByteArray inlineHash = QCryptographicHash::hash(
+        inlineBytes, QCryptographicHash::Sha256);
+    const QByteArray nextIdentity = nextCursor.isObject()
+        ? nextCursor.toObject().value(QStringLiteral("identity")).toString().toUtf8()
+        : QByteArrayLiteral("none");
+    QList<QByteArray> components{
+        page.value(QStringLiteral("reference")).toString().toUtf8(),
+        page.value(QStringLiteral("sha256")).toString().toUtf8(),
+        unsignedBigEndian(bytes),
+        page.value(QStringLiteral("media_type")).toString().toUtf8(),
+        unsignedBigEndian(offset),
+        unsignedBigEndian(pageSize),
+        unsignedBigEndian(pageBytes),
+        inlineHash,
+        QByteArray(1, static_cast<char>(page.value(
+            QStringLiteral("inline_truncated")).toBool())),
+        limits.value(QStringLiteral("identity")).toString().toUtf8(),
+    };
+    if (page.contains(QStringLiteral("binding_identity"))) {
+        components.append(page.value(QStringLiteral("binding_identity")).toString().toUtf8());
+    }
+    components.append(nextIdentity);
+    return lengthFramedIdentity(
+        QByteArrayLiteral("content-reference-page:sha256:"), components);
+}
+
+bool AgentRuntimeClient::isValidCommandArtifactPage(
+    const QJsonObject &result, const QJsonObject &request)
+{
+    constexpr quint64 kMaximumContentBytes = 16 * 1024 * 1024;
+    constexpr quint64 kMaximumInlineItemBytes = 64 * 1024;
+    constexpr quint64 kMaximumInlineTotalBytes = 256 * 1024;
+    constexpr quint64 kMaximumPreviewLines = 1'000'000;
+    constexpr quint64 kMaximumRetainedCommandBytes = 2 * 1024 * 1024;
+    const QString mediaType = QStringLiteral("text/plain; charset=utf-8");
+    const bool continuation = request.contains(QStringLiteral("cursor"));
+    const QStringList firstRequestKeys{
+        QStringLiteral("session_id"), QStringLiteral("item_id"),
+        QStringLiteral("reference"), QStringLiteral("limit"),
+        QStringLiteral("max_total_inline_bytes"),
+    };
+    const QStringList continuationRequestKeys{
+        QStringLiteral("session_id"), QStringLiteral("item_id"),
+        QStringLiteral("reference"), QStringLiteral("cursor"),
+    };
+    if (!hasExactKeys(request, continuation ? continuationRequestKeys : firstRequestKeys)
+            || !isAsciiGraphicalId(request.value(QStringLiteral("session_id")), 128)
+            || !isAsciiGraphicalId(request.value(QStringLiteral("item_id")), 128)
+            || !request.value(QStringLiteral("reference")).isString()) {
+        return false;
+    }
+    if (!hasExactKeys(result, {
+            QStringLiteral("schema_version"), QStringLiteral("session_id"),
+            QStringLiteral("item_id"), QStringLiteral("binding_identity"),
+            QStringLiteral("created_at_ms"), QStringLiteral("content_reference"),
+            QStringLiteral("page"), QStringLiteral("source_bytes"),
+            QStringLiteral("redacted_count"), QStringLiteral("redacted"),
+            QStringLiteral("total_bytes"), QStringLiteral("retained_bytes"),
+            QStringLiteral("omitted_bytes"), QStringLiteral("truncated"),
+            QStringLiteral("read_only"),
+        })
+        || result.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("command-output-artifact-page/0.1")
+        || result.value(QStringLiteral("session_id"))
+            != request.value(QStringLiteral("session_id"))
+        || result.value(QStringLiteral("item_id"))
+            != request.value(QStringLiteral("item_id"))
+        || !result.value(QStringLiteral("binding_identity")).isString()
+        || !result.value(QStringLiteral("read_only")).isBool()
+        || !result.value(QStringLiteral("read_only")).toBool()
+        || !result.value(QStringLiteral("redacted")).isBool()
+        || !result.value(QStringLiteral("truncated")).isBool()
+        || !result.value(QStringLiteral("content_reference")).isObject()
+        || !result.value(QStringLiteral("page")).isObject()) {
+        return false;
+    }
+
+    quint64 createdAt = 0;
+    quint64 sourceBytes = 0;
+    quint64 redactedCount = 0;
+    quint64 totalBytes = 0;
+    quint64 retainedBytes = 0;
+    quint64 omittedBytes = 0;
+    if (!readUnsignedSafeJsonInteger(
+            result.value(QStringLiteral("created_at_ms")), &createdAt)
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("source_bytes")), &sourceBytes)
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("redacted_count")), &redactedCount)
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("total_bytes")), &totalBytes)
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("retained_bytes")), &retainedBytes)
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("omitted_bytes")), &omittedBytes)
+            || retainedBytes > kMaximumRetainedCommandBytes
+            || totalBytes != retainedBytes + omittedBytes
+            || result.value(QStringLiteral("redacted")).toBool()
+                != (redactedCount > 0)
+            || result.value(QStringLiteral("truncated")).toBool()
+                != (omittedBytes > 0)) {
+        return false;
+    }
+    Q_UNUSED(createdAt);
+    Q_UNUSED(sourceBytes);
+
+    const QJsonObject content = result.value(QStringLiteral("content_reference")).toObject();
+    if (!hasExactKeys(content, {
+            QStringLiteral("schema_version"), QStringLiteral("reference"),
+            QStringLiteral("sha256"), QStringLiteral("bytes"),
+            QStringLiteral("media_type"), QStringLiteral("preview"),
+        })
+        || content.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("content-reference/0.1")
+        || !content.value(QStringLiteral("reference")).isString()
+        || !content.value(QStringLiteral("sha256")).isString()
+        || !content.value(QStringLiteral("media_type")).isString()
+        || !content.value(QStringLiteral("preview")).isObject()) {
+        return false;
+    }
+    quint64 contentBytes = 0;
+    const QString reference = content.value(QStringLiteral("reference")).toString();
+    const QString sha256 = content.value(QStringLiteral("sha256")).toString();
+    if (!readUnsignedSafeJsonInteger(
+            content.value(QStringLiteral("bytes")), &contentBytes)
+            || contentBytes > kMaximumContentBytes
+            || content.value(QStringLiteral("media_type")).toString() != mediaType
+            || request.value(QStringLiteral("reference")).toString() != reference
+            || !isCommandOutputReference(reference, sha256)) {
+        return false;
+    }
+    const quint64 omissionMarkerBytes = omittedBytes > 0
+        ? static_cast<quint64>(QStringLiteral(
+            "\n[Aegisy omitted %1 command output bytes]\n")
+                .arg(omittedBytes).toUtf8().size())
+        : 0;
+    if (contentBytes != retainedBytes + omissionMarkerBytes) return false;
+
+    const QJsonObject preview = content.value(QStringLiteral("preview")).toObject();
+    quint64 previewContentBytes = 0;
+    quint64 previewBytes = 0;
+    quint64 lineCount = 0;
+    if (!hasExactKeys(preview, {
+            QStringLiteral("schema_version"), QStringLiteral("identity"),
+            QStringLiteral("reference"), QStringLiteral("sha256"),
+            QStringLiteral("media_type"), QStringLiteral("content_bytes"),
+            QStringLiteral("preview_bytes"), QStringLiteral("truncated"),
+            QStringLiteral("line_count"), QStringLiteral("width"),
+            QStringLiteral("height"),
+        })
+        || preview.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("content-preview/0.1")
+        || preview.value(QStringLiteral("reference")).toString() != reference
+        || preview.value(QStringLiteral("sha256")).toString() != sha256
+        || preview.value(QStringLiteral("media_type")).toString() != mediaType
+        || !readUnsignedSafeJsonInteger(
+            preview.value(QStringLiteral("content_bytes")), &previewContentBytes)
+        || !readUnsignedSafeJsonInteger(
+            preview.value(QStringLiteral("preview_bytes")), &previewBytes)
+        || !readUnsignedSafeJsonInteger(
+            preview.value(QStringLiteral("line_count")), &lineCount)
+        || !preview.value(QStringLiteral("truncated")).isBool()
+        || !preview.value(QStringLiteral("width")).isNull()
+        || !preview.value(QStringLiteral("height")).isNull()
+        || previewContentBytes != contentBytes
+        || previewBytes > contentBytes || previewBytes > kMaximumInlineItemBytes
+        || preview.value(QStringLiteral("truncated")).toBool()
+            != (previewBytes < contentBytes)
+        || lineCount > kMaximumPreviewLines || lineCount > contentBytes + 1
+        || !isSha256Identity(preview.value(QStringLiteral("identity")).toString(),
+                            QStringLiteral("content-preview:sha256:"))
+        || preview.value(QStringLiteral("identity")).toString()
+            != contentPreviewIdentity(preview)) {
+        return false;
+    }
+
+    const QJsonObject page = result.value(QStringLiteral("page")).toObject();
+    const QJsonObject limits = page.value(QStringLiteral("limits")).toObject();
+    if (!hasExactKeys(limits, {
+            QStringLiteral("schema_version"), QStringLiteral("max_item_bytes"),
+            QStringLiteral("max_total_bytes"), QStringLiteral("identity"),
+        })
+        || limits.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("content-inline-limits/0.1")) {
+        return false;
+    }
+    quint64 maxItemBytes = 0;
+    quint64 maxTotalBytes = 0;
+    if (!readUnsignedSafeJsonInteger(
+            limits.value(QStringLiteral("max_item_bytes")), &maxItemBytes)
+        || !readUnsignedSafeJsonInteger(
+            limits.value(QStringLiteral("max_total_bytes")), &maxTotalBytes)
+        || maxItemBytes == 0 || maxItemBytes > kMaximumInlineItemBytes
+        || maxTotalBytes == 0 || maxTotalBytes > kMaximumInlineTotalBytes
+        || maxItemBytes > maxTotalBytes
+        || limits.value(QStringLiteral("identity")).toString()
+            != contentInlineLimitsIdentity(limits)) {
+        return false;
+    }
+
+    if (!hasExactKeys(page, {
+            QStringLiteral("schema_version"), QStringLiteral("reference"),
+            QStringLiteral("sha256"), QStringLiteral("bytes"),
+            QStringLiteral("media_type"), QStringLiteral("offset"),
+            QStringLiteral("page_size"), QStringLiteral("page_bytes"),
+            QStringLiteral("inline"), QStringLiteral("inline_truncated"),
+            QStringLiteral("limits"), QStringLiteral("binding_identity"),
+            QStringLiteral("next_cursor"), QStringLiteral("identity"),
+        })
+        || page.value(QStringLiteral("schema_version")).toString()
+            != QStringLiteral("content-reference-page/0.1")
+        || page.value(QStringLiteral("reference")).toString() != reference
+        || page.value(QStringLiteral("sha256")).toString() != sha256
+        || page.value(QStringLiteral("media_type")).toString() != mediaType
+        || page.value(QStringLiteral("bytes")) != content.value(QStringLiteral("bytes"))
+        || page.value(QStringLiteral("limits")) != QJsonValue(limits)
+        || !page.value(QStringLiteral("inline")).isString()
+        || !isUnicodeScalarString(page.value(QStringLiteral("inline")).toString())
+        || !page.value(QStringLiteral("inline_truncated")).isBool()
+        || page.value(QStringLiteral("inline_truncated")).toBool()
+        || !page.value(QStringLiteral("binding_identity")).isString()
+        || page.value(QStringLiteral("binding_identity"))
+            != result.value(QStringLiteral("binding_identity"))) {
+        return false;
+    }
+    quint64 pageContentBytes = 0;
+    quint64 offset = 0;
+    quint64 pageSize = 0;
+    quint64 pageBytes = 0;
+    const quint64 inlineBytes = static_cast<quint64>(
+        page.value(QStringLiteral("inline")).toString().toUtf8().size());
+    if (!readUnsignedSafeJsonInteger(page.value(QStringLiteral("bytes")), &pageContentBytes)
+        || !readUnsignedSafeJsonInteger(page.value(QStringLiteral("offset")), &offset)
+        || !readUnsignedSafeJsonInteger(page.value(QStringLiteral("page_size")), &pageSize)
+        || !readUnsignedSafeJsonInteger(page.value(QStringLiteral("page_bytes")), &pageBytes)
+        || pageContentBytes != contentBytes || pageSize == 0
+        || pageSize > kMaximumInlineItemBytes || pageSize > maxItemBytes
+        || pageBytes > pageSize || pageBytes > contentBytes - qMin(offset, contentBytes)
+        || offset > contentBytes || (contentBytes > 0 && pageBytes == 0)
+        || inlineBytes != pageBytes
+        || page.value(QStringLiteral("identity")).toString()
+            != contentReferencePageIdentity(page)) {
+        return false;
+    }
+
+    const QString binding = commandArtifactPageBindingIdentity(result);
+    if (binding.isEmpty()
+            || result.value(QStringLiteral("binding_identity")).toString() != binding) {
+        return false;
+    }
+
+    const QJsonValue nextValue = page.value(QStringLiteral("next_cursor"));
+    if (nextValue.isObject()) {
+        const QJsonObject cursor = nextValue.toObject();
+        if (!hasExactKeys(cursor, {
+                QStringLiteral("schema_version"), QStringLiteral("reference"),
+                QStringLiteral("sha256"), QStringLiteral("bytes"),
+                QStringLiteral("media_type"), QStringLiteral("offset"),
+                QStringLiteral("page_size"), QStringLiteral("limits"),
+                QStringLiteral("binding_identity"), QStringLiteral("identity"),
+            })
+            || cursor.value(QStringLiteral("schema_version")).toString()
+                != QStringLiteral("content-reference-cursor/0.1")
+            || cursor.value(QStringLiteral("reference")).toString() != reference
+            || cursor.value(QStringLiteral("sha256")).toString() != sha256
+            || cursor.value(QStringLiteral("bytes")) != page.value(QStringLiteral("bytes"))
+            || cursor.value(QStringLiteral("media_type")).toString() != mediaType
+            || cursor.value(QStringLiteral("offset")).toDouble()
+                != static_cast<double>(offset + pageBytes)
+            || cursor.value(QStringLiteral("page_size"))
+                != page.value(QStringLiteral("page_size"))
+            || cursor.value(QStringLiteral("limits")) != page.value(QStringLiteral("limits"))
+            || cursor.value(QStringLiteral("binding_identity"))
+                != result.value(QStringLiteral("binding_identity"))
+            || cursor.value(QStringLiteral("identity")).toString()
+                != contentReferenceCursorIdentity(cursor)
+            || offset + pageBytes >= contentBytes) {
+            return false;
+        }
+    } else if (!nextValue.isNull() || offset + pageBytes != contentBytes) {
+        return false;
+    }
+
+    if (continuation) {
+        const QJsonObject requestedCursor = request.value(QStringLiteral("cursor")).toObject();
+        const QJsonObject requestedLimits = requestedCursor.value(
+            QStringLiteral("limits")).toObject();
+        if (!request.value(QStringLiteral("cursor")).isObject()
+            || !hasExactKeys(requestedCursor, {
+                QStringLiteral("schema_version"), QStringLiteral("reference"),
+                QStringLiteral("sha256"), QStringLiteral("bytes"),
+                QStringLiteral("media_type"), QStringLiteral("offset"),
+                QStringLiteral("page_size"), QStringLiteral("limits"),
+                QStringLiteral("binding_identity"), QStringLiteral("identity"),
+            })
+            || requestedCursor.value(QStringLiteral("schema_version")).toString()
+                != QStringLiteral("content-reference-cursor/0.1")
+            || !hasExactKeys(requestedLimits, {
+                QStringLiteral("schema_version"), QStringLiteral("max_item_bytes"),
+                QStringLiteral("max_total_bytes"), QStringLiteral("identity"),
+            })
+            || requestedLimits.value(QStringLiteral("schema_version")).toString()
+                != QStringLiteral("content-inline-limits/0.1")
+            || requestedLimits.value(QStringLiteral("identity")).toString()
+                != contentInlineLimitsIdentity(requestedLimits)
+            || requestedCursor.value(QStringLiteral("identity")).toString()
+                != contentReferenceCursorIdentity(requestedCursor)
+            || requestedCursor.value(QStringLiteral("reference")).toString() != reference
+            || requestedCursor.value(QStringLiteral("sha256")).toString() != sha256
+            || requestedCursor.value(QStringLiteral("bytes"))
+                != content.value(QStringLiteral("bytes"))
+            || requestedCursor.value(QStringLiteral("media_type")).toString() != mediaType
+            || requestedCursor.value(QStringLiteral("binding_identity")).toString() != binding
+            || requestedCursor.value(QStringLiteral("limits")) != page.value(QStringLiteral("limits"))
+            || requestedCursor.value(QStringLiteral("offset")) != page.value(QStringLiteral("offset"))
+            || requestedCursor.value(QStringLiteral("page_size"))
+                != page.value(QStringLiteral("page_size"))) {
+            return false;
+        }
+    } else {
+        quint64 requestedItem = 0;
+        quint64 requestedTotal = 0;
+        if (!readUnsignedSafeJsonInteger(
+                request.value(QStringLiteral("limit")), &requestedItem)
+            || !readUnsignedSafeJsonInteger(
+                request.value(QStringLiteral("max_total_inline_bytes")), &requestedTotal)
+            || requestedItem == 0 || requestedTotal == 0) {
+            return false;
+        }
+        const quint64 expectedTotal = qMin(requestedTotal, kMaximumInlineTotalBytes);
+        const quint64 expectedItem = qMin(qMin(requestedItem, kMaximumInlineItemBytes),
+                                          expectedTotal);
+        if (offset != 0 || maxItemBytes != expectedItem
+                || maxTotalBytes != expectedTotal || pageSize != expectedItem) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool AgentRuntimeClient::isValidCompleteCommandArtifact(
+    const QJsonObject &result, const QByteArray &content)
+{
+    constexpr qsizetype kArtifactHeadLimit = 1024 * 1024;
+    constexpr qsizetype kArtifactTailLimit = 1024 * 1024;
+    const QJsonObject reference = result.value(
+        QStringLiteral("content_reference")).toObject();
+    quint64 contentBytes = 0;
+    quint64 totalBytes = 0;
+    quint64 retainedBytes = 0;
+    quint64 omittedBytes = 0;
+    if (!readUnsignedSafeJsonInteger(reference.value(QStringLiteral("bytes")),
+                                     &contentBytes)
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("total_bytes")), &totalBytes)
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("retained_bytes")), &retainedBytes)
+            || !readUnsignedSafeJsonInteger(
+                result.value(QStringLiteral("omitted_bytes")), &omittedBytes)
+            || !result.value(QStringLiteral("truncated")).isBool()
+            || !reference.value(QStringLiteral("sha256")).isString()
+            || static_cast<quint64>(content.size()) != contentBytes
+            || totalBytes != retainedBytes + omittedBytes
+            || result.value(QStringLiteral("truncated")).toBool()
+                != (omittedBytes > 0)) {
+        return false;
+    }
+    const QString sha256 = QString::fromLatin1(QCryptographicHash::hash(
+        content, QCryptographicHash::Sha256).toHex());
+    if (reference.value(QStringLiteral("sha256")).toString() != sha256
+            || reference.value(QStringLiteral("reference")).toString()
+                != QStringLiteral("command-output:sha256:") + sha256) {
+        return false;
+    }
+    if (omittedBytes == 0) {
+        return static_cast<quint64>(content.size()) == retainedBytes;
+    }
+
+    const QByteArray marker = QStringLiteral(
+        "\n[Aegisy omitted %1 command output bytes]\n")
+                                  .arg(omittedBytes).toUtf8();
+    const qsizetype markerOffset = content.indexOf(marker);
+    if (markerOffset < 0 || markerOffset != content.lastIndexOf(marker)) return false;
+    const qsizetype tailBytes = content.size() - markerOffset - marker.size();
+    return markerOffset >= kArtifactHeadLimit - 3
+        && markerOffset <= kArtifactHeadLimit
+        && tailBytes >= kArtifactTailLimit - 3
+        && tailBytes <= kArtifactTailLimit
+        && retainedBytes
+            == static_cast<quint64>(markerOffset + tailBytes)
+        && contentBytes
+            == retainedBytes + static_cast<quint64>(marker.size());
 }
 
 bool AgentRuntimeClient::isReady() const
@@ -4499,6 +5160,26 @@ QString AgentRuntimeClient::readCommandArtifact(const QString &sessionId,
     });
 }
 
+QString AgentRuntimeClient::readCommandArtifactPage(const QString &sessionId,
+                                                    const QString &itemId,
+                                                    const QString &reference,
+                                                    const QJsonObject &cursor)
+{
+    QJsonObject params{
+        {QStringLiteral("session_id"), sessionId},
+        {QStringLiteral("item_id"), itemId},
+        {QStringLiteral("reference"), reference},
+    };
+    if (cursor.isEmpty()) {
+        params.insert(QStringLiteral("limit"), 64 * 1024);
+        params.insert(QStringLiteral("max_total_inline_bytes"), 64 * 1024);
+    } else {
+        params.insert(QStringLiteral("cursor"), cursor);
+    }
+    return sendRequest(QStringLiteral("artifact/read-command-output-page"), params,
+                       CommandArtifactPageValidation{params});
+}
+
 QString AgentRuntimeClient::locateRuntime() const
 {
     const QString executableName =
@@ -4681,6 +5362,7 @@ bool AgentRuntimeClient::emergencyRequestAllowed(const QString &method)
         QStringLiteral("terminal/close-user"),
         QStringLiteral("terminal/remove-user"),
         QStringLiteral("artifact/read-command-output"),
+        QStringLiteral("artifact/read-command-output-page"),
     };
     return allowed.contains(method);
 }
@@ -5178,6 +5860,17 @@ void AgentRuntimeClient::processMessage(
         }
         removePendingRequest(id);
         emit mutationAcknowledgementConsumed(id, result);
+        return;
+    }
+    if (pendingMethod == QStringLiteral("artifact/read-command-output-page")) {
+        const auto *page = std::get_if<CommandArtifactPageValidation>(
+            &pending.validation);
+        if (!page || !isValidCommandArtifactPage(result, page->request)) {
+            rejectProtocolMessage(QStringLiteral("command-artifact-page"));
+            return;
+        }
+        removePendingRequest(id);
+        emit commandArtifactPageRead(id, result);
         return;
     }
     removePendingRequest(id);

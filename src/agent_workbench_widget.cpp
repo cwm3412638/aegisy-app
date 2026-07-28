@@ -1675,6 +1675,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
 
     connect(m_runtime, &AgentRuntimeClient::runtimeInitialized,
             this, [this](const QJsonObject &result) {
+        invalidateCommandArtifactWorkflow();
         m_unknownTimelineEventCounts.clear();
         m_unknownTimelineEventOverflowCount = 0;
         m_timelineSyncAvailable = false;
@@ -2142,6 +2143,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
             : ready ? QStringLiteral("color:#067647; font-size:11px; font-weight:600;")
                   : QStringLiteral("color:#b54708; font-size:11px; font-weight:600;"));
         if (!ready) {
+            invalidateCommandArtifactWorkflow();
             // Transport loss is not an authoritative Turn terminal. Keep the
             // confirmed identity until replay or a snapshot proves its state.
             if (m_turnRunning) m_activeTurnControlUnverified = true;
@@ -2239,6 +2241,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
         // terminal state. Preserve confirmed UI and keep only out-of-band cleanup
         // controls available until the same connection proves liveness again.
         if (!healthy && m_runtime->isControlAvailable()) {
+            invalidateCommandArtifactWorkflow();
             markRuntimeBackedStateUnverified();
             m_runtimeStatus->setText(QStringLiteral("◇ 运行时状态未知"));
             m_runtimeStatus->setToolTip(detail);
@@ -2479,6 +2482,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
     });
     connect(m_runtime, &AgentRuntimeClient::projectOpened,
             this, [this](const QString &, const QJsonObject &project) {
+        invalidateCommandArtifactWorkflow();
         m_projectId = project.value(QStringLiteral("id")).toString();
         m_projectRoot = project.value(QStringLiteral("root")).toString();
         m_workspaceRootId = QStringLiteral("root-1");
@@ -3228,6 +3232,7 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
         storeSessionWorkspaceBinding(
             id, snapshot.value(QStringLiteral("workspace")).toObject());
         if (!appendingHistory) {
+            invalidateCommandArtifactWorkflow();
             while (m_timelineLayout && m_timelineLayout->count() > 2) {
                 QLayoutItem *item = m_timelineLayout->takeAt(1);
                 if (item->widget()) item->widget()->deleteLater();
@@ -3240,7 +3245,6 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
             m_itemKinds.clear();
             m_itemRoles.clear();
             m_itemStates.clear();
-            m_commandArtifactRequests.clear();
             m_emptyTimeline->show();
             m_sessionHistoryId = id;
         }
@@ -4140,57 +4144,8 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
         m_workspaceEditOffset = parsedNextOffset;
         m_workspaceEditMoreButton->setEnabled(!nextOffset.isNull());
     });
-    connect(m_runtime, &AgentRuntimeClient::commandArtifactRead,
-            this, [this](const QString &requestId, const QJsonObject &artifact) {
-        const QString itemId = m_commandArtifactRequests.take(requestId);
-        if (QPushButton *button = m_itemArtifactButtons.value(itemId, nullptr)) {
-            button->setEnabled(true);
-        }
-        auto *dialog = new QDialog(this);
-        dialog->setAttribute(Qt::WA_DeleteOnClose);
-        dialog->setWindowTitle(QStringLiteral("命令输出 Artifact"));
-        dialog->resize(760, 520);
-        auto *layout = new QVBoxLayout(dialog);
-        layout->setContentsMargins(14, 14, 14, 14);
-        layout->setSpacing(8);
-        auto *metadata = new QLabel(dialog);
-        metadata->setTextFormat(Qt::PlainText);
-        metadata->setText(QStringLiteral(
-            "%1 字节 · 保留 %2 · 省略 %3 · SHA-256 %4")
-            .arg(artifact.value(QStringLiteral("total_bytes")).toVariant().toULongLong())
-            .arg(artifact.value(QStringLiteral("retained_bytes")).toInt())
-            .arg(artifact.value(QStringLiteral("omitted_bytes")).toVariant().toULongLong())
-            .arg(artifact.value(QStringLiteral("sha256")).toString().left(16)));
-        metadata->setStyleSheet(QStringLiteral("color:#667085; font-size:10px;"));
-        layout->addWidget(metadata);
-        auto *content = new QPlainTextEdit(dialog);
-        content->setObjectName(QStringLiteral("commandArtifactPreview"));
-        content->setReadOnly(true);
-        content->setLineWrapMode(QPlainTextEdit::NoWrap);
-        content->setPlainText(artifact.value(QStringLiteral("content")).toString());
-        content->setStyleSheet(QStringLiteral(
-            "QPlainTextEdit { background:#101828; color:#d0d5dd; border:none;"
-            "padding:10px; font-family:Menlo,Consolas,monospace; font-size:10px; }"));
-        layout->addWidget(content, 1);
-        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
-        auto *pin = buttons->addButton(
-            QStringLiteral("固定完整输出"), QDialogButtonBox::ActionRole);
-        pin->setObjectName(QStringLiteral("commandArtifactPinButton"));
-        pin->setIcon(QIcon(QStringLiteral(":/icons/lucide/paperclip.svg")));
-        QString pinReason;
-        pin->setEnabled(canPinCommandArtifact(artifact, &pinReason));
-        pin->setToolTip(pinReason.isEmpty()
-            ? QStringLiteral("将完整命令输出固定到当前 Work 会话；不会自动发送")
-            : pinReason);
-        connect(pin, &QPushButton::clicked, dialog, [this, artifact, pin]() {
-            pin->setEnabled(false);
-            pin->setText(QStringLiteral("正在固定"));
-            pinCommandArtifact(artifact);
-        });
-        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
-        layout->addWidget(buttons);
-        dialog->show();
-    });
+    connect(m_runtime, &AgentRuntimeClient::commandArtifactPageRead,
+            this, &AgentWorkbenchWidget::handleCommandArtifactPage);
     connect(m_runtime, &AgentRuntimeClient::workspaceChanged,
             this, [this](const QString &, const QJsonObject &result) {
         applyPinnedContextInvalidation(result);
@@ -4255,6 +4210,10 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
     connect(m_runtime, &AgentRuntimeClient::requestFailedExact,
             this, [this](const QString &requestId, const QString &method,
                          const QString &message, const QString &canonicalCode) {
+        if (method == QStringLiteral("artifact/read-command-output-page")) {
+            failCommandArtifactWorkflow(requestId, message);
+            return;
+        }
         if (method == QStringLiteral("runtime/degradations")
                 && (m_runtimeDegradationState != RuntimeDegradationState::Pending
                     || requestId.isEmpty()
@@ -4453,11 +4412,6 @@ AgentWorkbenchWidget::AgentWorkbenchWidget(bool emergencyDisabled, QWidget *pare
             if (method == QStringLiteral("terminal/restart-user")) requestTerminalList();
             updateTerminalControls();
             if (reconnectList || reconnectAttach) continueRuntimeReconnectRecovery();
-        } else if (method == QStringLiteral("artifact/read-command-output")) {
-            const QString itemId = m_commandArtifactRequests.take(requestId);
-            if (QPushButton *button = m_itemArtifactButtons.value(itemId, nullptr)) {
-                button->setEnabled(true);
-            }
         } else if (method == QStringLiteral("workspace/edit/preview")) {
             m_workspaceEditSummary->setText(
                 QStringLiteral("变更预览失败：%1").arg(message));
@@ -4720,6 +4674,7 @@ AgentWorkbenchWidget::~AgentWorkbenchWidget()
 void AgentWorkbenchWidget::setEmergencyDisabled(bool disabled, const QString &detailCode,
                                                 bool verifiedPolicy)
 {
+    if (disabled) invalidateCommandArtifactWorkflow();
     m_emergencyDisabled = disabled;
     m_emergencyPolicyVerified = verifiedPolicy;
     if (m_runtime) m_runtime->setEmergencyDisabled(disabled);
@@ -5025,6 +4980,7 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
         "font-size:12px; font-weight:700; text-align:left; padding:0 10px; }"
         "QPushButton:hover { background:#0F46C6; }"));
     connect(newTask, &QPushButton::clicked, this, [this]() {
+        invalidateCommandArtifactWorkflow();
         if (m_mode == QStringLiteral("work")) m_workSessionId.clear();
         else {
             m_chatSessionId.clear();
@@ -5043,7 +4999,6 @@ QWidget *AgentWorkbenchWidget::buildProductRail()
         m_itemKinds.clear();
         m_itemRoles.clear();
         m_itemStates.clear();
-        m_commandArtifactRequests.clear();
         while (m_timelineLayout && m_timelineLayout->count() > 2) {
             QLayoutItem *item = m_timelineLayout->takeAt(1);
             if (item->widget()) item->widget()->deleteLater();
@@ -9470,6 +9425,7 @@ void AgentWorkbenchWidget::setMode(const QString &mode)
         }
         return;
     }
+    invalidateCommandArtifactWorkflow();
     m_mode = mode;
     requestModelCapabilityCheck();
     updateContextStrip();
@@ -11405,6 +11361,7 @@ void AgentWorkbenchWidget::loadSessionFromList(QListWidgetItem *item)
         addNotice(QStringLiteral("该 Work 会话属于其他项目，请先打开对应文件夹。"), true);
         return;
     }
+    invalidateCommandArtifactWorkflow();
     for (QAbstractButton *button : m_modeGroup->buttons()) {
         if (button->property("mode").toString() == mode) button->setChecked(true);
     }
@@ -12289,6 +12246,300 @@ bool AgentWorkbenchWidget::canPinCommandArtifact(const QJsonObject &artifact,
     }
     if (reason) reason->clear();
     return true;
+}
+
+void AgentWorkbenchWidget::beginCommandArtifactWorkflow(
+    const QString &itemKey, const QString &itemId, const QString &sessionId,
+    const QString &reference, QPushButton *originButton)
+{
+    if (!m_runtime || !m_runtime->isReady() || itemId.isEmpty()
+            || sessionId.isEmpty() || reference.isEmpty()) {
+        return;
+    }
+    invalidateCommandArtifactWorkflow();
+    CommandArtifactWorkflow workflow;
+    workflow.state = CommandArtifactWorkflowState::LoadingFirst;
+    workflow.generation = ++m_commandArtifactWorkflowGeneration;
+    workflow.processGeneration = m_runtime->processGeneration();
+    workflow.sessionId = sessionId;
+    workflow.itemId = itemId;
+    workflow.reference = reference;
+    workflow.itemKey = itemKey;
+    workflow.originButton = originButton;
+
+    auto *dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QStringLiteral("命令输出 Artifact"));
+    dialog->resize(760, 520);
+    auto *layout = new QVBoxLayout(dialog);
+    layout->setContentsMargins(14, 14, 14, 14);
+    layout->setSpacing(8);
+    auto *status = new QLabel(QStringLiteral("正在读取首个安全分页…"), dialog);
+    status->setObjectName(QStringLiteral("commandArtifactStatus"));
+    status->setTextFormat(Qt::PlainText);
+    status->setStyleSheet(QStringLiteral("color:#667085; font-size:10px;"));
+    layout->addWidget(status);
+    auto *preview = new QPlainTextEdit(dialog);
+    preview->setObjectName(QStringLiteral("commandArtifactPreview"));
+    preview->setReadOnly(true);
+    preview->setLineWrapMode(QPlainTextEdit::NoWrap);
+    preview->setStyleSheet(QStringLiteral(
+        "QPlainTextEdit { background:#101828; color:#d0d5dd; border:none;"
+        "padding:10px; font-family:Menlo,Consolas,monospace; font-size:10px; }"));
+    layout->addWidget(preview, 1);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+    auto *loadMore = buttons->addButton(
+        QStringLiteral("加载更多"), QDialogButtonBox::ActionRole);
+    loadMore->setObjectName(QStringLiteral("commandArtifactLoadMoreButton"));
+    loadMore->setIcon(QIcon(QStringLiteral(":/icons/lucide/chevron-down.svg")));
+    loadMore->setEnabled(false);
+    auto *pin = buttons->addButton(
+        QStringLiteral("固定完整输出"), QDialogButtonBox::ActionRole);
+    pin->setObjectName(QStringLiteral("commandArtifactPinButton"));
+    pin->setIcon(QIcon(QStringLiteral(":/icons/lucide/paperclip.svg")));
+    pin->setEnabled(false);
+    pin->setToolTip(QStringLiteral("完整分页、长度和 SHA-256 验证通过后可固定"));
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    workflow.dialog = dialog;
+    workflow.status = status;
+    workflow.preview = preview;
+    workflow.loadMore = loadMore;
+    workflow.pin = pin;
+    m_commandArtifactWorkflow = workflow;
+    if (originButton) originButton->setEnabled(false);
+    const quint64 generation = workflow.generation;
+    connect(loadMore, &QPushButton::clicked, this, [this, generation]() {
+        if (m_commandArtifactWorkflow.generation == generation) {
+            requestNextCommandArtifactPage();
+        }
+    });
+    connect(pin, &QPushButton::clicked, this, [this, generation]() {
+        if (m_commandArtifactWorkflow.generation != generation
+                || m_commandArtifactWorkflow.state
+                    != CommandArtifactWorkflowState::Complete
+                || m_commandArtifactWorkflow.completeArtifact.isEmpty()) {
+            return;
+        }
+        m_commandArtifactWorkflow.pin->setEnabled(false);
+        m_commandArtifactWorkflow.pin->setText(QStringLiteral("正在固定"));
+        pinCommandArtifact(m_commandArtifactWorkflow.completeArtifact);
+    });
+    connect(dialog, &QDialog::finished, this, [this, generation](int) {
+        if (m_commandArtifactWorkflow.generation == generation) {
+            invalidateCommandArtifactWorkflow(false);
+        }
+    });
+    dialog->show();
+
+    const QString requestId = m_runtime->readCommandArtifactPage(
+        sessionId, itemId, reference);
+    if (requestId.isEmpty()) {
+        failCommandArtifactWorkflow({}, QStringLiteral("当前连接无法发送分页读取请求"));
+        return;
+    }
+    m_commandArtifactWorkflow.requestId = requestId;
+    m_commandArtifactPageRequests.insert(requestId, CommandArtifactPageRequest{
+        generation, workflow.processGeneration, 0, {},
+    });
+}
+
+void AgentWorkbenchWidget::requestNextCommandArtifactPage()
+{
+    CommandArtifactWorkflow &workflow = m_commandArtifactWorkflow;
+    if (!m_runtime || !m_runtime->isReady()
+            || workflow.state != CommandArtifactWorkflowState::Partial
+            || workflow.nextCursor.isEmpty() || !workflow.dialog
+            || workflow.processGeneration != m_runtime->processGeneration()) {
+        return;
+    }
+    workflow.state = CommandArtifactWorkflowState::LoadingNext;
+    if (workflow.loadMore) workflow.loadMore->setEnabled(false);
+    if (workflow.status) {
+        workflow.status->setText(QStringLiteral("正在读取下一页…"));
+    }
+    const QJsonObject cursor = workflow.nextCursor;
+    const QString requestId = m_runtime->readCommandArtifactPage(
+        workflow.sessionId, workflow.itemId, workflow.reference, cursor);
+    if (requestId.isEmpty()) {
+        failCommandArtifactWorkflow({}, QStringLiteral("当前连接无法发送续页请求"));
+        return;
+    }
+    workflow.requestId = requestId;
+    m_commandArtifactPageRequests.insert(requestId, CommandArtifactPageRequest{
+        workflow.generation, workflow.processGeneration,
+        workflow.accumulated.size(), cursor,
+    });
+}
+
+void AgentWorkbenchWidget::handleCommandArtifactPage(
+    const QString &requestId, const QJsonObject &result)
+{
+    const auto requestIt = m_commandArtifactPageRequests.find(requestId);
+    if (requestIt == m_commandArtifactPageRequests.end()) return;
+    const CommandArtifactPageRequest request = requestIt.value();
+    m_commandArtifactPageRequests.erase(requestIt);
+    CommandArtifactWorkflow &workflow = m_commandArtifactWorkflow;
+    if (!m_runtime || workflow.generation == 0
+            || request.workflowGeneration != workflow.generation
+            || request.processGeneration != workflow.processGeneration
+            || workflow.processGeneration != m_runtime->processGeneration()
+            || workflow.requestId != requestId || !workflow.dialog
+            || result.value(QStringLiteral("session_id")).toString() != workflow.sessionId
+            || result.value(QStringLiteral("item_id")).toString() != workflow.itemId) {
+        return;
+    }
+    workflow.requestId.clear();
+    QJsonObject metadata = result;
+    const QJsonObject page = metadata.take(QStringLiteral("page")).toObject();
+    const QJsonObject content = result.value(QStringLiteral("content_reference")).toObject();
+    const QString resultReference = content.value(QStringLiteral("reference")).toString();
+    const QJsonObject requestCursor = request.cursor;
+    const quint64 offset = page.value(QStringLiteral("offset")).toVariant().toULongLong();
+    if (resultReference != workflow.reference
+            || offset != static_cast<quint64>(request.expectedOffset)
+            || (!requestCursor.isEmpty()
+                && page.value(QStringLiteral("offset"))
+                    != requestCursor.value(QStringLiteral("offset")))) {
+        failCommandArtifactWorkflow({}, QStringLiteral("分页与当前工作流的字节窗口不一致"));
+        return;
+    }
+    if (workflow.frozenMetadata.isEmpty()) {
+        workflow.frozenMetadata = metadata;
+    } else if (workflow.frozenMetadata != metadata) {
+        failCommandArtifactWorkflow({}, QStringLiteral("续页 Artifact 元数据发生漂移"));
+        return;
+    }
+    const QByteArray pageBytes = page.value(QStringLiteral("inline")).toString().toUtf8();
+    QByteArray accumulated = workflow.accumulated;
+    accumulated.append(pageBytes);
+    const QString decoded = QString::fromUtf8(accumulated);
+    if (decoded.toUtf8() != accumulated) {
+        failCommandArtifactWorkflow({}, QStringLiteral("累计分页不是严格 UTF-8"));
+        return;
+    }
+    const quint64 expectedBytes = content.value(
+        QStringLiteral("bytes")).toVariant().toULongLong();
+    if (static_cast<quint64>(accumulated.size()) > expectedBytes) {
+        failCommandArtifactWorkflow({}, QStringLiteral("累计分页超过声明的 Artifact 长度"));
+        return;
+    }
+    workflow.accumulated = accumulated;
+    workflow.nextCursor = page.value(QStringLiteral("next_cursor")).isObject()
+        ? page.value(QStringLiteral("next_cursor")).toObject() : QJsonObject{};
+    if (workflow.preview) workflow.preview->setPlainText(decoded);
+    if (!workflow.nextCursor.isEmpty()) {
+        workflow.state = CommandArtifactWorkflowState::Partial;
+        if (workflow.status) {
+            workflow.status->setText(QStringLiteral("已安全加载 %1 / %2 字节")
+                .arg(workflow.accumulated.size()).arg(expectedBytes));
+        }
+        if (workflow.loadMore) workflow.loadMore->setEnabled(true);
+        if (workflow.pin) workflow.pin->setEnabled(false);
+        return;
+    }
+
+    const QString expectedSha = content.value(QStringLiteral("sha256")).toString();
+    const QString actualSha = QString::fromLatin1(QCryptographicHash::hash(
+        workflow.accumulated, QCryptographicHash::Sha256).toHex());
+    if (static_cast<quint64>(workflow.accumulated.size()) != expectedBytes
+            || actualSha != expectedSha
+            || workflow.reference
+                != QStringLiteral("command-output:sha256:") + expectedSha
+            || !AgentRuntimeClient::isValidCompleteCommandArtifact(
+                result, workflow.accumulated)) {
+        failCommandArtifactWorkflow({}, QStringLiteral(
+            "完整 Artifact 长度、SHA-256 或截断边界校验失败"));
+        return;
+    }
+    workflow.completeArtifact = {
+        {QStringLiteral("session_id"), workflow.sessionId},
+        {QStringLiteral("reference"), workflow.reference},
+        {QStringLiteral("sha256"), expectedSha},
+        {QStringLiteral("content_type"),
+         content.value(QStringLiteral("media_type"))},
+        {QStringLiteral("item_id"), workflow.itemId},
+        {QStringLiteral("created_at_ms"),
+         result.value(QStringLiteral("created_at_ms"))},
+        {QStringLiteral("source_bytes"), result.value(QStringLiteral("source_bytes"))},
+        {QStringLiteral("redacted_count"),
+         result.value(QStringLiteral("redacted_count"))},
+        {QStringLiteral("redacted"), result.value(QStringLiteral("redacted"))},
+        {QStringLiteral("total_bytes"), result.value(QStringLiteral("total_bytes"))},
+        {QStringLiteral("retained_bytes"),
+         result.value(QStringLiteral("retained_bytes"))},
+        {QStringLiteral("omitted_bytes"), result.value(QStringLiteral("omitted_bytes"))},
+        {QStringLiteral("truncated"), result.value(QStringLiteral("truncated"))},
+        {QStringLiteral("content"), decoded},
+    };
+    QString pinReason;
+    const bool canPin = canPinCommandArtifact(workflow.completeArtifact, &pinReason);
+    workflow.state = CommandArtifactWorkflowState::Complete;
+    if (workflow.status) {
+        workflow.status->setText(QStringLiteral(
+            "完整性已验证 · %1 字节 · SHA-256 %2")
+            .arg(expectedBytes).arg(expectedSha.left(16)));
+        workflow.status->setStyleSheet(QStringLiteral(
+            "color:#067647; font-size:10px; font-weight:600;"));
+    }
+    if (workflow.loadMore) workflow.loadMore->setEnabled(false);
+    if (workflow.pin) {
+        workflow.pin->setEnabled(canPin);
+        workflow.pin->setToolTip(pinReason.isEmpty()
+            ? QStringLiteral("将完整命令输出固定到当前 Work 会话；不会自动发送")
+            : pinReason);
+    }
+}
+
+void AgentWorkbenchWidget::failCommandArtifactWorkflow(
+    const QString &requestId, const QString &message)
+{
+    if (!requestId.isEmpty()) {
+        const auto requestIt = m_commandArtifactPageRequests.find(requestId);
+        if (requestIt == m_commandArtifactPageRequests.end()) return;
+        if (requestIt->workflowGeneration != m_commandArtifactWorkflow.generation) {
+            m_commandArtifactPageRequests.erase(requestIt);
+            return;
+        }
+        m_commandArtifactPageRequests.erase(requestIt);
+    }
+    CommandArtifactWorkflow &workflow = m_commandArtifactWorkflow;
+    if (workflow.generation == 0) return;
+    workflow.requestId.clear();
+    workflow.nextCursor = {};
+    workflow.completeArtifact = {};
+    workflow.state = CommandArtifactWorkflowState::Failed;
+    if (workflow.status) {
+        workflow.status->setText(QStringLiteral("分页读取失败：%1").arg(message));
+        workflow.status->setStyleSheet(QStringLiteral(
+            "color:#B42318; font-size:10px; font-weight:600;"));
+    }
+    if (workflow.loadMore) workflow.loadMore->setEnabled(false);
+    if (workflow.pin) {
+        workflow.pin->setEnabled(false);
+        workflow.pin->setToolTip(QStringLiteral("分页未完整验证，不能固定"));
+    }
+    if (workflow.originButton) workflow.originButton->setEnabled(true);
+}
+
+void AgentWorkbenchWidget::invalidateCommandArtifactWorkflow(bool closeDialog)
+{
+    const quint64 generation = m_commandArtifactWorkflow.generation;
+    QPointer<QDialog> dialog = m_commandArtifactWorkflow.dialog;
+    QPointer<QPushButton> originButton = m_commandArtifactWorkflow.originButton;
+    for (auto request = m_commandArtifactPageRequests.begin();
+         request != m_commandArtifactPageRequests.end();) {
+        if (request->workflowGeneration == generation) {
+            request = m_commandArtifactPageRequests.erase(request);
+        } else {
+            ++request;
+        }
+    }
+    m_commandArtifactWorkflow = {};
+    ++m_commandArtifactWorkflowGeneration;
+    if (originButton) originButton->setEnabled(true);
+    if (closeDialog && dialog) dialog->close();
 }
 
 void AgentWorkbenchWidget::pinCommandArtifact(const QJsonObject &artifact)
@@ -13515,6 +13766,7 @@ void AgentWorkbenchWidget::commitTimelineSnapshotRecovery(const QString &session
     state->retryOnReconnect = false;
     publishTimelineProjection(sessionId, state->projection);
     if (sessionId == currentTimelineSessionId()) {
+        invalidateCommandArtifactWorkflow();
         while (m_timelineLayout && m_timelineLayout->count() > 2) {
             QLayoutItem *layoutItem = m_timelineLayout->takeAt(1);
             if (layoutItem->widget()) layoutItem->widget()->deleteLater();
@@ -15473,6 +15725,7 @@ void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend
         if (QPushButton *button = m_itemArtifactButtons.value(key, nullptr)) {
             button->setProperty("artifactReference", artifactReference);
             button->setProperty("artifactSession", artifactSession);
+            button->setProperty("artifactItemId", id);
             button->setVisible(!artifactReference.isEmpty() && !artifactSession.isEmpty());
         }
         return;
@@ -15554,6 +15807,7 @@ void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend
         artifactButton->setVisible(!artifactReference.isEmpty() && !artifactSession.isEmpty());
         artifactButton->setProperty("artifactReference", artifactReference);
         artifactButton->setProperty("artifactSession", artifactSession);
+        artifactButton->setProperty("artifactItemId", id);
         artifactButton->setStyleSheet(QStringLiteral(
             "QPushButton { background:#ffffff; color:#344054; border:1px solid #d0d5dd;"
             "border-radius:5px; padding:2px 8px; font-size:9px; text-align:left; }"
@@ -15562,12 +15816,10 @@ void AgentWorkbenchWidget::addTimelineItem(const QJsonObject &item, bool prepend
                 [this, artifactButton, key]() {
             const QString reference = artifactButton->property("artifactReference").toString();
             const QString sessionId = artifactButton->property("artifactSession").toString();
-            if (reference.isEmpty() || sessionId.isEmpty()) return;
-            const QString requestId = m_runtime->readCommandArtifact(sessionId, reference);
-            if (!requestId.isEmpty()) {
-                artifactButton->setEnabled(false);
-                m_commandArtifactRequests.insert(requestId, key);
-            }
+            const QString itemId = artifactButton->property("artifactItemId").toString();
+            if (reference.isEmpty() || sessionId.isEmpty() || itemId.isEmpty()) return;
+            beginCommandArtifactWorkflow(
+                key, itemId, sessionId, reference, artifactButton);
         });
         layout->addWidget(artifactButton);
         m_itemArtifactButtons.insert(key, artifactButton);
