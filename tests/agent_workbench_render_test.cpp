@@ -5513,6 +5513,9 @@ int main(int argc, char *argv[])
         QStringLiteral("degradation-restored-before-recovery"),
         validCodexRuntimeDegradationSnapshot());
     application.processEvents();
+    AgentWorkbenchWidgetTestAccess::prepareTimelineSync(
+        workbench, QStringLiteral("session-recovery-render"),
+        QStringLiteral("render-sync-session-recovery-render"));
     runtimeClient->sessionStarted(QStringLiteral("recovery-render-session"), QJsonObject{
         {QStringLiteral("id"), QStringLiteral("session-recovery-render")},
         {QStringLiteral("mode"), QStringLiteral("chat")},
