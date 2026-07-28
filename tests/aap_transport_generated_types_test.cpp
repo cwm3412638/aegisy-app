@@ -7,13 +7,26 @@
 #include <QRegularExpression>
 #include <QSet>
 
+#include <algorithm>
 #include <iostream>
 #include <memory>
+#include <utility>
 
 namespace {
 
 using aegisy::aap::transport_generated::TransportJsonNumber;
 using aegisy::aap::transport_generated::TransportJsonValue;
+using aegisy::aap::transport_generated::TransportDecodeError;
+using aegisy::aap::transport_generated::TransportDispatchError;
+using aegisy::aap::transport_generated::TransportDispatchErrorKind;
+using aegisy::aap::transport_generated::TransportMethodKind;
+using aegisy::aap::transport_generated::TransportParseErrorKind;
+using aegisy::aap::transport_generated::TransportPendingRequest;
+using aegisy::aap::transport_generated::TransportRequestOrNotification;
+using aegisy::aap::transport_generated::TransportRequestOrNotificationKind;
+using aegisy::aap::transport_generated::TransportResponse;
+using aegisy::aap::transport_generated::TransportResponseKind;
+using aegisy::aap::transport_generated::TransportSchemaError;
 using aegisy::aap::transport_runtime::TransportSchemaRuntime;
 using JsonArray = TransportJsonValue::Array;
 using JsonObject = TransportJsonValue::Object;
@@ -293,11 +306,225 @@ int emitCorpusIdentity(const QString &path)
     return 0;
 }
 
+int verifyGeneratedDispatch()
+{
+    using namespace aegisy::aap::transport_generated;
+    const auto &methods = transportMethods();
+    const auto &typedErrors = transportTypedErrors();
+    if (methods.size() != 14 || typedErrors.size() != 6
+        || !std::is_sorted(methods.cbegin(), methods.cend(),
+            [](const auto &left, const auto &right) { return left.method < right.method; })
+        || !std::is_sorted(typedErrors.cbegin(), typedErrors.cend(),
+            [](const auto &left, const auto &right) {
+                return std::pair<QString, QString>{left.method, left.schema_version}
+                    < std::pair<QString, QString>{right.method, right.schema_version};
+            })) {
+        return fail(QStringLiteral("generated transport metadata is incomplete or unsorted"), 30);
+    }
+    const auto *initialize = transportMethodMetadata(QStringLiteral("initialize"));
+    const auto *event = transportMethodMetadata(QStringLiteral("event"));
+    const auto *retention = transportTypedErrorMetadata(
+        QStringLiteral("timeline/sync"), QStringLiteral("timeline-retention-gap/0.1"));
+    if (!initialize || initialize->kind != TransportMethodKind::Request
+        || initialize->success_response_definition
+            != QStringLiteral("initializeSuccessResponse")
+        || !event || event->kind != TransportMethodKind::Notification
+        || !retention
+        || retention->response_definition
+            != QStringLiteral("timelineSyncRetentionGapErrorResponse")
+        || transportMethodMetadata(QStringLiteral("future/request"))
+        || transportTypedErrorMetadata(QStringLiteral("initialize"),
+                                       QStringLiteral("timeline-retention-gap/0.1"))) {
+        return fail(QStringLiteral("generated transport metadata lookup is invalid"), 31);
+    }
+
+    TransportRequestOrNotification requestOrNotification;
+    TransportDispatchError dispatchError;
+    if (decodeTransportRequestOrNotificationRaw(
+            QByteArrayLiteral("01"), &requestOrNotification, &dispatchError)
+        || dispatchError.kind != TransportDispatchErrorKind::Parse
+        || dispatchError.parse.kind != TransportParseErrorKind::Syntax
+        || dispatchError.parse.offset != 1) {
+        return fail(QStringLiteral("dispatch did not preserve parse kind and offset"), 32);
+    }
+    if (decodeTransportRequestOrNotificationRaw(
+            QByteArrayLiteral("{\"jsonrpc\":\"2.0\"}"),
+            &requestOrNotification, &dispatchError)
+        || dispatchError.kind != TransportDispatchErrorKind::InvalidEnvelope) {
+        return fail(QStringLiteral("invalid generic envelope was misclassified"), 33);
+    }
+    if (!decodeTransportRequestOrNotificationRaw(
+            QByteArrayLiteral("{\"jsonrpc\":\"2.0\",\"id\":\"future-1\",\"method\":\"future/request\",\"params\":{}}"),
+            &requestOrNotification, &dispatchError)
+        || requestOrNotification.kind != TransportRequestOrNotificationKind::UnknownRequest
+        || requestOrNotification.metadata) {
+        return fail(QStringLiteral("unknown request lost generic compatibility"), 34);
+    }
+    if (!decodeTransportRequestOrNotificationRaw(
+            QByteArrayLiteral("{\"jsonrpc\":\"2.0\",\"method\":\"future/notification\",\"params\":{}}"),
+            &requestOrNotification, &dispatchError)
+        || requestOrNotification.kind
+            != TransportRequestOrNotificationKind::UnknownNotification) {
+        return fail(QStringLiteral("unknown notification lost generic compatibility"), 35);
+    }
+    if (decodeTransportRequestOrNotificationRaw(
+            QByteArrayLiteral("{\"jsonrpc\":\"2.0\",\"id\":\"known\",\"method\":\"runtime/heartbeat\",\"params\":{}}"),
+            &requestOrNotification, &dispatchError)
+        || dispatchError.kind != TransportDispatchErrorKind::InvalidKnownMessage) {
+        return fail(QStringLiteral("known malformed request used generic fallback"), 36);
+    }
+
+    TransportDecodeError decodeError;
+    TransportJsonValue value;
+    if (decodeTransportDefinitionRaw(QStringLiteral("unknownDefinition"),
+                                     QByteArrayLiteral("null"), &value, &decodeError)
+        || decodeError.kind != TransportDecodeError::Kind::Schema
+        || decodeError.schema != TransportSchemaError::UnknownDefinition) {
+        return fail(QStringLiteral("unknown definition error was not preserved"), 37);
+    }
+    if (decodeTransportRequestOrNotificationRaw(
+            QByteArrayLiteral("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{},\"id\":\"wrong-kind\"}"),
+            &requestOrNotification, &dispatchError)
+        || dispatchError.kind != TransportDispatchErrorKind::InvalidEnvelope) {
+        return fail(QStringLiteral("known method envelope kind was not enforced"), 38);
+    }
+    if (decodeTransportRequestOrNotificationRaw(
+            QByteArrayLiteral("{\"jsonrpc\":\"2.0\",\"id\":\"known\",\"method\":\"runtime/heartbeat\",\"params\":{}}"),
+            nullptr, &dispatchError)
+        || dispatchError.kind != TransportDispatchErrorKind::ValidatorUnavailable) {
+        return fail(QStringLiteral("local dispatch output fault was not classified locally"), 39);
+    }
+
+    const auto pending = [](const QString &id, const QString &method,
+                            std::optional<QString> identity = std::nullopt) {
+        return std::optional<TransportPendingRequest>(
+            TransportPendingRequest{id, method, std::move(identity)});
+    };
+    TransportResponse response;
+    if (!decodeTransportResponseRaw(
+            pending(QStringLiteral("heartbeat-1"), QStringLiteral("runtime/heartbeat")),
+            QByteArrayLiteral("{\"jsonrpc\":\"2.0\",\"id\":\"heartbeat-1\",\"result\":{\"schema_version\":\"runtime-heartbeat/0.1\",\"nonce\":\"nonce-1\",\"state\":\"alive\"}}"),
+            &response, &dispatchError)
+        || response.kind != TransportResponseKind::KnownSuccess
+        || !response.method_metadata
+        || response.method_metadata->method != QStringLiteral("runtime/heartbeat")) {
+        return fail(QStringLiteral("known success response dispatch failed"), 40);
+    }
+    if (decodeTransportResponseRaw(
+            pending(QStringLiteral("wrong-success"), QStringLiteral("initialize")),
+            QByteArrayLiteral("{\"jsonrpc\":\"2.0\",\"id\":\"wrong-success\",\"result\":{\"schema_version\":\"runtime-heartbeat/0.1\",\"nonce\":\"nonce-1\",\"state\":\"alive\"}}"),
+            &response, &dispatchError)
+        || dispatchError.kind != TransportDispatchErrorKind::InvalidKnownMessage) {
+        return fail(QStringLiteral("known success wrapper used generic fallback"), 41);
+    }
+    if (!decodeTransportResponseRaw(
+            pending(QStringLiteral("future-result"), QStringLiteral("future/request")),
+            QByteArrayLiteral("{\"jsonrpc\":\"2.0\",\"id\":\"future-result\",\"result\":1e10000}"),
+            &response, &dispatchError)
+        || response.kind != TransportResponseKind::UnknownMethod
+        || canonicalTransportJson(response.message.value)
+            != QByteArrayLiteral("{\"id\":\"future-result\",\"jsonrpc\":\"2.0\",\"result\":1e10000}")) {
+        return fail(QStringLiteral("generic arbitrary-precision result was narrowed"), 42);
+    }
+    if (!decodeTransportResponseRaw(
+            pending(QStringLiteral("future-error"), QStringLiteral("initialize")),
+            QByteArrayLiteral("{\"jsonrpc\":\"2.0\",\"id\":\"future-error\",\"error\":{\"code\":123456789012345678901234567890,\"message\":\"future\",\"data\":{\"schema_version\":\"future-error/0.1\"}}}"),
+            &response, &dispatchError)
+        || response.kind != TransportResponseKind::GenericError) {
+        return fail(QStringLiteral("generic arbitrary-precision error was rejected"), 43);
+    }
+    if (!decodeTransportResponseRaw(
+            pending(QStringLiteral("future-error"), QStringLiteral("initialize")),
+            QByteArrayLiteral("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32000,\"message\":\"future\"}}"),
+            &response, &dispatchError)
+        || response.kind != TransportResponseKind::Unmatched) {
+        return fail(QStringLiteral("generic null response ID did not remain unmatched"), 51);
+    }
+
+    const QByteArray retentionGap = QByteArrayLiteral(
+        "{\"jsonrpc\":\"2.0\",\"id\":\"timeline-gap-1\",\"error\":{\"code\":-32148,\"message\":\"requested Timeline history is no longer retained\",\"data\":{\"schema_version\":\"timeline-retention-gap/0.1\",\"reason\":\"requested-anchor-not-retained\",\"session_id\":\"session-1\",\"requested_after\":{\"sequence\":0,\"event_id\":null},\"requested_watermark\":null,\"retained_floor\":{\"sequence\":2,\"event_id\":\"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"head\":{\"sequence\":3,\"event_id\":\"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"snapshot_required\":true,\"snapshot_available\":true,\"snapshot_capability\":\"timeline.snapshot.current\",\"snapshot_method\":\"timeline/snapshot\",\"event_history_complete\":false,\"replay_from_floor_allowed\":false}}}");
+    if (!decodeTransportResponseRaw(
+            pending(QStringLiteral("timeline-gap-1"), QStringLiteral("timeline/sync")),
+            retentionGap, &response, &dispatchError)
+        || response.kind != TransportResponseKind::KnownTypedError
+        || !response.typed_error_metadata
+        || response.typed_error_metadata->method != QStringLiteral("timeline/sync")) {
+        return fail(QStringLiteral("known retention-gap dispatch failed"), 44);
+    }
+    QByteArray wrongGapId = retentionGap;
+    wrongGapId.replace("timeline-gap-1", "timeline-gap-2");
+    if (!decodeTransportResponseRaw(
+            pending(QStringLiteral("timeline-gap-1"), QStringLiteral("timeline/sync")),
+            wrongGapId, &response, &dispatchError)
+        || response.kind != TransportResponseKind::Unmatched) {
+        return fail(QStringLiteral("wrong response ID did not remain unmatched"), 45);
+    }
+    QByteArray nullGapId = retentionGap;
+    nullGapId.replace("\"timeline-gap-1\"", "null");
+    if (!decodeTransportResponseRaw(
+            pending(QStringLiteral("timeline-gap-1"), QStringLiteral("timeline/sync")),
+            nullGapId, &response, &dispatchError)
+        || response.kind != TransportResponseKind::Unmatched) {
+        return fail(QStringLiteral("known typed error with null ID was not unmatched"), 46);
+    }
+    TransportMessage parsedGap;
+    TransportDecodeError parsedGapError;
+    if (!parseTransportMessageRaw(retentionGap, &parsedGap, &parsedGapError)
+        || !decodeTransportResponse(
+            pending(QStringLiteral("timeline-gap-1"), QStringLiteral("timeline/sync")),
+            parsedGap, &response, &dispatchError)
+        || response.kind != TransportResponseKind::KnownTypedError) {
+        return fail(QStringLiteral("parsed response dispatch failed"), 53);
+    }
+    if (decodeTransportResponseRaw(
+            pending(QStringLiteral("timeline-gap-1"), QStringLiteral("initialize")),
+            retentionGap, &response, &dispatchError)
+        || dispatchError.kind != TransportDispatchErrorKind::InvalidKnownMessage) {
+        return fail(QStringLiteral("known typed error crossed pending methods"), 47);
+    }
+    if (decodeTransportResponseRaw(
+            pending(QStringLiteral("timeline-gap-1"), QStringLiteral("timeline/sync")),
+            QByteArrayLiteral("{\"jsonrpc\":\"2.0\",\"id\":\"other-id\",\"error\":{\"code\":-32148,\"message\":\"gap\",\"data\":{\"schema_version\":\"timeline-retention-gap/0.1\"}}}"),
+            &response, &dispatchError)
+        || dispatchError.kind != TransportDispatchErrorKind::InvalidKnownMessage) {
+        return fail(QStringLiteral("unmatched known typed error escaped validation"), 52);
+    }
+
+    const QString subscriptionIdentity = QStringLiteral(
+        "timeline-subscription-request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const QByteArray subscriptionFailure = QByteArrayLiteral(
+        "{\"jsonrpc\":\"2.0\",\"id\":\"subscribe-1\",\"error\":{\"code\":-32150,\"message\":\"subscription failed\",\"data\":{\"schema_version\":\"timeline-subscription-failure/0.1\",\"connection_generation\":1,\"session_id\":\"session-1\",\"subscription_id\":\"subscription-1\",\"state\":\"failed\",\"stage\":\"subscribe\",\"cursor\":{\"sequence\":0,\"event_id\":null},\"watermark\":null,\"request_identity\":\"timeline-subscription-request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"reason\":\"transport\",\"retryable\":true,\"cleanup_required\":true}}}");
+    if (!decodeTransportResponseRaw(
+            pending(QStringLiteral("subscribe-1"), QStringLiteral("timeline/subscribe"),
+                    subscriptionIdentity),
+            subscriptionFailure, &response, &dispatchError)
+        || response.kind != TransportResponseKind::KnownTypedError) {
+        return fail(QStringLiteral("subscription typed-error correlation failed"), 48);
+    }
+    if (decodeTransportResponseRaw(
+            pending(QStringLiteral("subscribe-1"),
+                    QStringLiteral("timeline/subscription-activate"), subscriptionIdentity),
+            subscriptionFailure, &response, &dispatchError)
+        || dispatchError.kind != TransportDispatchErrorKind::InvalidKnownMessage) {
+        return fail(QStringLiteral("subscription stage was not method-bound"), 49);
+    }
+    if (decodeTransportResponseRaw(
+            pending(QStringLiteral("subscribe-1"), QStringLiteral("timeline/subscribe"),
+                    QStringLiteral("timeline-subscription-request:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")),
+            subscriptionFailure, &response, &dispatchError)
+        || dispatchError.kind != TransportDispatchErrorKind::InvalidKnownMessage) {
+        return fail(QStringLiteral("subscription request identity was not exact"), 50);
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
 {
     QCoreApplication application(argc, argv);
+    const int dispatchResult = verifyGeneratedDispatch();
+    if (dispatchResult != 0) return dispatchResult;
     const QStringList arguments = QCoreApplication::arguments();
     if (arguments.size() == 2) {
         return emitFixtureIdentity(arguments.at(1));

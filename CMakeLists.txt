@@ -38,6 +38,31 @@ set(AEGISY_UPDATE_PUBLIC_KEY
     "9DkeQEQcqz6Trrcmr1XRlZHDQHyeOj3DaVA2rtS3WA0="
     CACHE STRING "Ed25519 update and emergency-policy public key")
 
+set(AEGISY_AAP_TRANSPORT_GENERATED_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/generated/cpp")
+set(AEGISY_AAP_TRANSPORT_RUNTIME_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/runtime/cpp")
+add_library(AegisyAapTransport STATIC
+    ${AEGISY_AAP_TRANSPORT_GENERATED_DIR}/aap_transport_types_generated.cpp
+    ${AEGISY_AAP_TRANSPORT_GENERATED_DIR}/aap_transport_types_generated.h
+    ${AEGISY_AAP_TRANSPORT_RUNTIME_DIR}/aap_transport_runtime.cpp
+    ${AEGISY_AAP_TRANSPORT_RUNTIME_DIR}/aap_transport_runtime.h
+)
+target_include_directories(AegisyAapTransport PUBLIC
+    ${AEGISY_AAP_TRANSPORT_GENERATED_DIR}
+    ${AEGISY_AAP_TRANSPORT_RUNTIME_DIR}
+)
+if(QT_VERSION_MAJOR EQUAL 6)
+    target_link_libraries(AegisyAapTransport PUBLIC Qt6::Core)
+else()
+    target_link_libraries(AegisyAapTransport PUBLIC Qt5::Core)
+endif()
+if(MSVC)
+    target_compile_options(AegisyAapTransport PRIVATE /W4 /WX)
+else()
+    target_compile_options(AegisyAapTransport PRIVATE -Wall -Wextra -Werror)
+endif()
+
 # 源文件
 set(SOURCES
     src/main.cpp
@@ -276,6 +301,7 @@ else()
         OpenSSL::Crypto
     )
 endif()
+target_link_libraries(${PROJECT_NAME} PRIVATE AegisyAapTransport)
 
 # Windows 特定
 if(WIN32)
@@ -401,26 +427,14 @@ if(BUILD_TESTING)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_aap_generated_types.cmake)
     add_executable(AegisyAapTransportRuntimeTest
         agent-runtime/aap-schema/runtime/cpp/aap_transport_runtime_test.cpp
-        agent-runtime/aap-schema/runtime/cpp/aap_transport_runtime.cpp
-        agent-runtime/aap-schema/runtime/cpp/aap_transport_runtime.h
-        agent-runtime/aap-schema/generated/cpp/aap_transport_types_generated.h
     )
-    target_include_directories(AegisyAapTransportRuntimeTest PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/generated/cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/runtime/cpp)
     add_executable(AegisyAapTransportGeneratedTypesTest
         tests/aap_transport_generated_types_test.cpp
-        agent-runtime/aap-schema/generated/cpp/aap_transport_types_generated.cpp
-        agent-runtime/aap-schema/generated/cpp/aap_transport_types_generated.h
-        agent-runtime/aap-schema/runtime/cpp/aap_transport_runtime.cpp
-        agent-runtime/aap-schema/runtime/cpp/aap_transport_runtime.h
     )
-    target_include_directories(AegisyAapTransportGeneratedTypesTest PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/generated/cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/runtime/cpp)
     foreach(transport_target IN ITEMS
             AegisyAapTransportRuntimeTest
             AegisyAapTransportGeneratedTypesTest)
+        target_link_libraries(${transport_target} PRIVATE AegisyAapTransport)
         if(QT_VERSION_MAJOR EQUAL 6)
             target_link_libraries(${transport_target} PRIVATE Qt6::Core)
         else()
@@ -674,10 +688,10 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
     if(QT_VERSION_MAJOR EQUAL 6)
         target_link_libraries(AegisyAgentWorkbenchRenderTest PRIVATE
-            Qt6::Core Qt6::Widgets)
+            Qt6::Core Qt6::Widgets AegisyAapTransport)
     else()
         target_link_libraries(AegisyAgentWorkbenchRenderTest PRIVATE
-            Qt5::Core Qt5::Widgets)
+            Qt5::Core Qt5::Widgets AegisyAapTransport)
     endif()
     add_test(NAME agent_workbench_render COMMAND AegisyAgentWorkbenchRenderTest)
     set_tests_properties(agent_workbench_render PROPERTIES
@@ -697,9 +711,11 @@ if(BUILD_TESTING)
     target_include_directories(AegisyAgentRuntimeEnvironmentTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
     if(QT_VERSION_MAJOR EQUAL 6)
-        target_link_libraries(AegisyAgentRuntimeEnvironmentTest PRIVATE Qt6::Core)
+        target_link_libraries(AegisyAgentRuntimeEnvironmentTest PRIVATE
+            Qt6::Core AegisyAapTransport)
     else()
-        target_link_libraries(AegisyAgentRuntimeEnvironmentTest PRIVATE Qt5::Core)
+        target_link_libraries(AegisyAgentRuntimeEnvironmentTest PRIVATE
+            Qt5::Core AegisyAapTransport)
     endif()
     add_test(NAME agent_runtime_environment
         COMMAND AegisyAgentRuntimeEnvironmentTest)
@@ -761,6 +777,7 @@ if(BUILD_TESTING)
             Qt6::Widgets
             Qt6::WebChannel
             Qt6::WebEngineWidgets
+            AegisyAapTransport
         )
         add_dependencies(AegisyMonacoEditorRenderTest
             aegisy_agentd

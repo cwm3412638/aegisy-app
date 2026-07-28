@@ -3623,6 +3623,33 @@ Implemented visual baseline:
   response/pending dispatch. Complete generated Qt migration plus a clean Windows
   Unicode checkout remain required, so OpenSpec `3.10` stays unchecked.
 
+## Generated Qt/C++ Transport Dispatch Foundation (2026-07-28)
+
+- Generated C++ now exposes parsed-message request/notification and response
+  dispatch overloads. Raw convenience APIs perform one lossless parse and delegate
+  to those overloads, allowing the production Qt consumer to retain one authoritative
+  `TransportMessage` through envelope, method, typed-error, and pending correlation
+  validation.
+- Wrong or null response IDs never match or retire a pending request. A known typed
+  error with an unmatched ID is validated against a private DOM clone whose ID is
+  replaced only for Schema validation; a valid payload remains `Unmatched`, while a
+  malformed known payload remains `InvalidKnownMessage` and cannot fall back to a
+  generic error.
+- CMake builds generated C++ plus the standalone Schema runtime exactly once in the
+  warnings-denied `AegisyAapTransport` static library. The desktop application and
+  relevant Qt tests link that production implementation instead of compiling private
+  copies.
+- Focused generated/runtime tests cover parsed dispatch, wrong/null IDs, known typed
+  payload validation, arbitrary-precision generic values, metadata inventory, and
+  local validator failure. The production `AgentRuntimeClient` still needs unified
+  pending context, single-parse ingress, safe Qt projection, and generated dispatch
+  consumption; clean Windows Unicode-checkout evidence also remains absent. Keep
+  OpenSpec `3.10` unchecked.
+- The final local gate passes generator freshness/negative/package-inventory checks,
+  Rust formatting, all 59 `aegisy-aap` tests, package Clippy with warnings denied,
+  Cargo packaging, the complete desktop build, all `23/23` CTests (including the
+  complete Rust workspace test), strict OpenSpec validation, and `git diff --check`.
+
 ## Next Product Priorities
 
 1. Continue OpenSpec `3.10` by migrating the production Qt Transport consumer behind

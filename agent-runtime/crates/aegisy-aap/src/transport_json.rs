@@ -1000,6 +1000,22 @@ mod tests {
                 TransportResponse::Unmatched(_)
             ));
         }
+        assert!(matches!(
+            decode_transport_response_raw(
+                Some(pending("timeline-gap-1", "timeline/sync", None)),
+                br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32148,"message":"requested Timeline history is no longer retained","data":{"schema_version":"timeline-retention-gap/0.1","reason":"requested-anchor-not-retained","session_id":"session-1","requested_after":{"sequence":0,"event_id":null},"requested_watermark":null,"retained_floor":{"sequence":2,"event_id":"event:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"head":{"sequence":3,"event_id":"event:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"snapshot_required":true,"snapshot_available":true,"snapshot_capability":"timeline.snapshot.current","snapshot_method":"timeline/snapshot","event_history_complete":false,"replay_from_floor_allowed":false}}}"#,
+            )
+            .expect("known typed error with null ID remains unmatched after payload validation"),
+            TransportResponse::Unmatched(_)
+        ));
+        assert_eq!(
+            decode_transport_response_raw(
+                Some(pending("timeline-gap-1", "timeline/sync", None)),
+                br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32148,"message":"gap","data":{"schema_version":"timeline-retention-gap/0.1"}}}"#,
+            )
+            .expect_err("unmatched known typed error payload must still validate"),
+            TransportDispatchError::InvalidKnownMessage
+        );
 
         const IDENTITY: &str = "timeline-subscription-request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let valid = br#"{"jsonrpc":"2.0","id":"subscribe-1","error":{"code":-32150,"message":"subscription failed","data":{"schema_version":"timeline-subscription-failure/0.1","connection_generation":1,"session_id":"session-1","subscription_id":"subscription-1","state":"failed","stage":"subscribe","cursor":{"sequence":0,"event_id":null},"watermark":null,"request_identity":"timeline-subscription-request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","reason":"transport","retryable":true,"cleanup_required":true}}}"#;

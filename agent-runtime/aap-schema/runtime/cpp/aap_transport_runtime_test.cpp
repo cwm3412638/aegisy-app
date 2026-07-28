@@ -10,6 +10,8 @@ namespace {
 
 using aegisy::aap::transport_generated::TransportJsonNumber;
 using aegisy::aap::transport_generated::TransportJsonValue;
+using aegisy::aap::transport_generated::TransportParseError;
+using aegisy::aap::transport_generated::TransportParseErrorKind;
 using aegisy::aap::transport_runtime::TransportSchemaRuntime;
 using aegisy::aap::transport_runtime::kMaxTransportJsonBytes;
 using aegisy::aap::transport_runtime::parseTransportJsonRaw;
@@ -34,6 +36,21 @@ void expectParse(const QByteArray &raw, bool expected)
     const bool accepted = parseTransportJsonRaw(raw, &value, &error);
     if (accepted != expected) {
         fail(QStringLiteral("parse expectation failed: ") + error);
+    }
+}
+
+void expectDetailedParseError(const QByteArray &raw,
+                              TransportParseErrorKind kind,
+                              qsizetype offset)
+{
+    TransportJsonValue value;
+    TransportParseError error;
+    const bool accepted =
+        aegisy::aap::transport_runtime::parseTransportJsonRawDetailed(
+            raw, &value, &error);
+    if (accepted || error.kind != kind || error.offset != offset
+        || error.message.isEmpty()) {
+        fail(QStringLiteral("detailed parse error mismatch"));
     }
 }
 
@@ -129,6 +146,12 @@ int main(int argc, char **argv)
             QStringLiteral("forged surrogate string was serialized"));
 
     expectParse(QByteArrayLiteral("\xef\xbb\xbf{}"), false);
+    expectDetailedParseError(QByteArrayLiteral("\xef\xbb\xbf{}"),
+                             TransportParseErrorKind::Syntax, 0);
+    expectDetailedParseError(QByteArray("\xff", 1),
+                             TransportParseErrorKind::Utf8, 0);
+    expectDetailedParseError(QByteArrayLiteral("01"),
+                             TransportParseErrorKind::Syntax, 1);
     expectParse(QByteArray("\xed\xa0\x80", 3), false);
     expectParse(QByteArray("\"\xc0\xaf\"", 4), false);
     expectParse(QByteArray("\"\xf4\x90\x80\x80\"", 6), false);
@@ -142,6 +165,8 @@ int main(int argc, char **argv)
             QStringLiteral("embedded U+FEFF was not preserved"));
     expectParse(nestedArray(128), true);
     expectParse(nestedArray(129), false);
+    expectDetailedParseError(nestedArray(129),
+                             TransportParseErrorKind::ImplementationLimit, 128);
 
     QByteArray exactFrame(kMaxTransportJsonBytes - 2, 'a');
     exactFrame.prepend('"');
@@ -149,6 +174,8 @@ int main(int argc, char **argv)
     expectParse(exactFrame, true);
     exactFrame.insert(1, 'a');
     expectParse(exactFrame, false);
+    expectDetailedParseError(exactFrame, TransportParseErrorKind::Frame,
+                             exactFrame.size());
 
     QByteArray exactNodes = "[";
     exactNodes.reserve(5 * 65'535 + 1);

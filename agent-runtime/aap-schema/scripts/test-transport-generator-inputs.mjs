@@ -51,6 +51,11 @@ try {
   unknownKeyword.$defs.initializeParams.properties.client.format = "uuid";
   expectRejected("unknown-keyword", unknownKeyword, "unsupported keyword format");
 
+  const freshnessDrift = clone(schema);
+  freshnessDrift.$defs.runtimeHeartbeatResult.$comment =
+    "Semantically permitted documentation drift must still regenerate every language output.";
+  expectRejected("generated-freshness-drift", freshnessDrift, "generated output is stale");
+
   const unknownReference = clone(schema);
   unknownReference.$defs.initializeParams.properties.client.$ref = "#/$defs/missingType";
   expectRejected("unknown-reference", unknownReference, "uses an unsupported reference");
@@ -215,6 +220,21 @@ try {
   );
   expectRegistryRejected("duplicate-error-definitions", duplicateErrors,
     "error response definitions must be known, unique, and sorted");
+
+  const typedStageDrift = clone(methodRegistry);
+  typedStageDrift.methods[7].typed_error_stage = "activate";
+  expectRegistryRejected("typed-error-stage-drift", typedStageDrift,
+    "timeline/subscribe typed error stage is invalid");
+
+  const methodKindDrift = clone(methodRegistry);
+  methodKindDrift.methods[0].kind = "request";
+  expectRegistryRejected("method-kind-drift", methodKindDrift,
+    "transport method registry dispatch mismatch for event");
+
+  const unknownSuccessDefinition = clone(methodRegistry);
+  unknownSuccessDefinition.methods[4].success_response_definition = "futureSuccessResponse";
+  expectRegistryRejected("unknown-success-definition", unknownSuccessDefinition,
+    "runtime/heartbeat has unknown success_response_definition");
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true });
 }

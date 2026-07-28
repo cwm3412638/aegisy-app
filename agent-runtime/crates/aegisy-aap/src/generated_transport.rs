@@ -1521,6 +1521,19 @@ fn transport_dispatch_decode_error(error: TransportDecodeError) -> TransportDisp
 }
 
 #[rustfmt::skip]
+fn validate_known_typed_error_for_unmatched(message: &TransportMessage, schema_version: &str) -> Result<(), TransportDispatchError> {
+    let error_metadata = TRANSPORT_TYPED_ERRORS.iter()
+        .find(|metadata| metadata.schema_version == schema_version)
+        .ok_or(TransportDispatchError::ValidatorUnavailable)?;
+    let mut validation_value = message.0.clone();
+    validation_value.as_object_mut()
+        .ok_or(TransportDispatchError::InvalidEnvelope)?
+        .insert("id".to_owned(), Value::String("unmatched".to_owned()));
+    validate_transport_definition(error_metadata.response_definition, &validation_value)
+        .map_err(|error| transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage))
+}
+
+#[rustfmt::skip]
 fn validate_typed_error_correlation(metadata: &TransportMethodMetadata, pending: TransportPendingRequest<'_>, value: &Value) -> Result<(), TransportDispatchError> {
     if metadata.typed_error_stage.is_none() && pending.typed_error_request_identity.is_none() { return Ok(()); }
     let data = value.as_object()
@@ -1620,11 +1633,7 @@ pub fn decode_transport_response_raw(pending: Option<TransportPendingRequest<'_>
     if pending.is_some_and(|context| response_id != Some(context.id)) {
         if let Some(schema_version) = transport_error_schema_version(&message.0) {
             if transport_typed_error_schema_version_known(schema_version) {
-                let error_metadata = TRANSPORT_TYPED_ERRORS.iter()
-                    .find(|metadata| metadata.schema_version == schema_version)
-                    .ok_or(TransportDispatchError::ValidatorUnavailable)?;
-                validate_transport_definition(error_metadata.response_definition, &message.0)
-                    .map_err(|error| transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage))?;
+                validate_known_typed_error_for_unmatched(&message, schema_version)?;
             }
         }
         return Ok(TransportResponse::Unmatched(message));
@@ -1662,11 +1671,7 @@ pub fn decode_transport_response_raw(pending: Option<TransportPendingRequest<'_>
         None => {
             if let Some(schema_version) = typed_schema_version {
                 if transport_typed_error_schema_version_known(schema_version) {
-                    let error_metadata = TRANSPORT_TYPED_ERRORS.iter()
-                        .find(|metadata| metadata.schema_version == schema_version)
-                        .ok_or(TransportDispatchError::ValidatorUnavailable)?;
-                    validate_transport_definition(error_metadata.response_definition, &message.0)
-                        .map_err(|error| transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage))?;
+                    validate_known_typed_error_for_unmatched(&message, schema_version)?;
                 }
             }
             Ok(TransportResponse::Unmatched(message))

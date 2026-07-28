@@ -15,6 +15,8 @@ namespace aegisy::aap::transport_runtime {
 namespace {
 
 using transport_generated::TransportJsonNumber;
+using transport_generated::TransportParseError;
+using transport_generated::TransportParseErrorKind;
 
 using JsonArray = TransportJsonValue::Array;
 using JsonObject = TransportJsonValue::Object;
@@ -210,8 +212,14 @@ bool isContinuation(unsigned char byte)
     return (byte & 0xc0U) == 0x80U;
 }
 
-bool isStrictUtf8(const QByteArray &raw)
+bool isStrictUtf8(const QByteArray &raw, qsizetype *invalidOffset = nullptr)
 {
+    const auto fail = [invalidOffset](qsizetype offset) {
+        if (invalidOffset) {
+            *invalidOffset = offset;
+        }
+        return false;
+    };
     qsizetype index = 0;
     while (index < raw.size()) {
         const auto first = static_cast<unsigned char>(raw.at(index));
@@ -222,14 +230,14 @@ bool isStrictUtf8(const QByteArray &raw)
         if (first >= 0xc2U && first <= 0xdfU) {
             if (index + 1 >= raw.size()
                 || !isContinuation(static_cast<unsigned char>(raw.at(index + 1)))) {
-                return false;
+                return fail(index);
             }
             index += 2;
             continue;
         }
         if (first >= 0xe0U && first <= 0xefU) {
             if (index + 2 >= raw.size()) {
-                return false;
+                return fail(index);
             }
             const auto second = static_cast<unsigned char>(raw.at(index + 1));
             const auto third = static_cast<unsigned char>(raw.at(index + 2));
@@ -237,14 +245,14 @@ bool isStrictUtf8(const QByteArray &raw)
                 || (first == 0xe0U ? second < 0xa0U || second > 0xbfU
                                    : first == 0xedU ? second < 0x80U || second > 0x9fU
                                                     : !isContinuation(second))) {
-                return false;
+                return fail(index);
             }
             index += 3;
             continue;
         }
         if (first >= 0xf0U && first <= 0xf4U) {
             if (index + 3 >= raw.size()) {
-                return false;
+                return fail(index);
             }
             const auto second = static_cast<unsigned char>(raw.at(index + 1));
             const auto third = static_cast<unsigned char>(raw.at(index + 2));
@@ -253,12 +261,12 @@ bool isStrictUtf8(const QByteArray &raw)
                 || (first == 0xf0U ? second < 0x90U || second > 0xbfU
                                    : first == 0xf4U ? second < 0x80U || second > 0x8fU
                                                     : !isContinuation(second))) {
-                return false;
+                return fail(index);
             }
             index += 4;
             continue;
         }
-        return false;
+        return fail(index);
     }
     return true;
 }
@@ -298,6 +306,11 @@ public:
             return false;
         }
         return true;
+    }
+
+    qsizetype offset() const
+    {
+        return index_;
     }
 
 private:
@@ -1444,6 +1457,36 @@ bool parseTransportJsonRaw(const QByteArray &raw,
     return RawJsonParser(raw).parse(output, error);
 }
 
+bool parseTransportJsonRawDetailed(const QByteArray &raw,
+                                   TransportJsonValue *output,
+                                   TransportParseError *error)
+{
+    QString message;
+    RawJsonParser parser(raw);
+    if (parser.parse(output, &message)) {
+        return true;
+    }
+    if (error) {
+        error->message = message;
+        error->offset = parser.offset();
+        if (raw.size() > kMaxTransportJsonBytes) {
+            error->kind = TransportParseErrorKind::Frame;
+            error->offset = raw.size();
+        } else if (message == QStringLiteral("raw JSON is not strict UTF-8")) {
+            error->kind = TransportParseErrorKind::Utf8;
+            qsizetype invalidOffset = 0;
+            isStrictUtf8(raw, &invalidOffset);
+            error->offset = invalidOffset;
+        } else if (message.contains(QStringLiteral("parser depth limit"))
+                   || message.contains(QStringLiteral("parser node limit"))) {
+            error->kind = TransportParseErrorKind::ImplementationLimit;
+        } else {
+            error->kind = TransportParseErrorKind::Syntax;
+        }
+    }
+    return false;
+}
+
 QByteArray canonicalTransportJson(const TransportJsonValue &value)
 {
     qsizetype nodes = 0;
@@ -1516,6 +1559,13 @@ bool TransportSchemaRuntime::validateDefinitionRaw(const QString &definition,
     return true;
 }
 
+bool TransportSchemaRuntime::validateDefinition(const QString &definition,
+                                                const TransportJsonValue &value,
+                                                QString *error) const
+{
+    return impl_->validateDefinition(definition, value, error);
+}
+
 bool TransportSchemaRuntime::validateRootRaw(const QByteArray &raw,
                                               TransportJsonValue *output,
                                               QString *error) const
@@ -1529,6 +1579,12 @@ bool TransportSchemaRuntime::validateRootRaw(const QByteArray &raw,
         *output = std::move(value);
     }
     return true;
+}
+
+bool TransportSchemaRuntime::validateRoot(const TransportJsonValue &value,
+                                          QString *error) const
+{
+    return impl_->validateRoot(value, error);
 }
 
 } // namespace aegisy::aap::transport_runtime

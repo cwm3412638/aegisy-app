@@ -245,6 +245,16 @@ Parse kind and byte offset survive dispatch, known-wrapper failure remains disti
 from generic-envelope failure, and unavailable generated validators are a local
 implementation fault rather than a peer JSON-RPC error.
 
+The generated Qt/C++ surface provides the same parsed-message dispatch boundary.
+Its raw helpers perform one lossless parse and delegate to overloads that accept the
+already parsed `TransportMessage`. When a known typed error has a wrong or null ID,
+the dispatcher validates a private clone with a legal placeholder ID so the typed
+payload remains fail-closed without changing correlation semantics: a valid payload
+is still unmatched and cannot retire pending state, while a malformed payload is an
+invalid known message. The production build owns generated C++ and its Schema runtime
+through one warnings-denied `AegisyAapTransport` library shared by the application
+and tests.
+
 This remains a partial generation architecture, not completion of `3.10`.
 The production Rust stdio consumer now parses each accepted frame exactly once with
 the generated lossless parser, validates the generic envelope before queue admission,

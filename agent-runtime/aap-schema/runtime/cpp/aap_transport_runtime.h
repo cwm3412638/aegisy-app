@@ -14,10 +14,14 @@ inline constexpr qsizetype kMaxTransportJsonDepth = 128;
 inline constexpr qsizetype kMaxTransportJsonNodes = 65'536;
 
 using transport_generated::TransportJsonValue;
+using transport_generated::TransportParseError;
 
 bool parseTransportJsonRaw(const QByteArray &raw,
                            TransportJsonValue *output,
                            QString *error = nullptr);
+bool parseTransportJsonRawDetailed(const QByteArray &raw,
+                                   TransportJsonValue *output,
+                                   TransportParseError *error = nullptr);
 
 QByteArray canonicalTransportJson(const TransportJsonValue &value);
 
@@ -38,9 +42,14 @@ public:
                                const QByteArray &raw,
                                TransportJsonValue *output = nullptr,
                                QString *error = nullptr) const;
+    bool validateDefinition(const QString &definition,
+                            const TransportJsonValue &value,
+                            QString *error = nullptr) const;
     bool validateRootRaw(const QByteArray &raw,
                          TransportJsonValue *output = nullptr,
                          QString *error = nullptr) const;
+    bool validateRoot(const TransportJsonValue &value,
+                      QString *error = nullptr) const;
 
 private:
     class Impl;

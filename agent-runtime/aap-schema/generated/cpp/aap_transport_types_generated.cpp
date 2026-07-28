@@ -2,6 +2,7 @@
 #include "aap_transport_types_generated.h"
 #include "aap_transport_runtime.h"
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 
@@ -17,24 +18,510 @@ const transport_runtime::TransportSchemaRuntime *transportRuntime(QString *error
     if (!runtime && error) *error = initializationError;
     return runtime.get();
 }
+
+const transport_runtime::TransportSchemaRuntime *genericTransportRuntime(QString *error)
+{
+    static QString initializationError;
+    static const std::unique_ptr<transport_runtime::TransportSchemaRuntime> runtime =
+        transport_runtime::TransportSchemaRuntime::fromRawSchema(
+            QByteArrayLiteral(R"AAPSCHEMA({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://aegisy.cc/schemas/aap/stable/v0.1/aap.schema.json","title":"Aegisy Agent Protocol 0.1","type":"object","required":["jsonrpc"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcId"},"method":{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9.-]*(?:/[A-Za-z][A-Za-z0-9.-]*)*$","minLength":1,"maxLength":128},"params":{"type":"object"},"result":{},"error":{"$ref":"#/$defs/jsonRpcError","required":["code","message"]}},"oneOf":[{"required":["id","method","params"],"properties":{"id":{"$ref":"#/$defs/jsonRpcRequestId"}},"not":{"anyOf":[{"required":["result"]},{"required":["error"]}]}},{"required":["method","params"],"not":{"anyOf":[{"required":["id"]},{"required":["result"]},{"required":["error"]}]}},{"required":["id","result"],"properties":{"id":{"$ref":"#/$defs/jsonRpcRequestId"}},"not":{"anyOf":[{"required":["method"]},{"required":["error"]}]}},{"required":["id","error"],"properties":{"id":{"$ref":"#/$defs/jsonRpcId"}},"not":{"anyOf":[{"required":["method"]},{"required":["result"]}]}}],"$defs":{"jsonRpcRequestId":{"type":"string","pattern":"^[!-~]+$","minLength":1,"maxLength":128},"jsonRpcId":{"oneOf":[{"$ref":"#/$defs/jsonRpcRequestId"},{"type":"null"}]},"jsonRpcError":{"type":"object","required":["code","message"],"additionalProperties":false,"properties":{"code":{"type":"integer"},"message":{"type":"string","minLength":1,"maxLength":2048},"data":{}}},"runtimeHeartbeatParams":{"type":"object","required":["schema_version","nonce"],"additionalProperties":false,"properties":{"schema_version":{"const":"runtime-heartbeat-request/0.1"},"nonce":{"$ref":"#/$defs/boundedGraphicalId"}}},"runtimeHeartbeatResult":{"type":"object","required":["schema_version","nonce","state"],"additionalProperties":false,"properties":{"schema_version":{"const":"runtime-heartbeat/0.1"},"nonce":{"$ref":"#/$defs/boundedGraphicalId"},"state":{"const":"alive"}}},"runtimeHeartbeatRequest":{"type":"object","required":["jsonrpc","id","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"method":{"const":"runtime/heartbeat"},"params":{"$ref":"#/$defs/runtimeHeartbeatParams"}}},"runtimeHeartbeatSuccessResponse":{"type":"object","required":["jsonrpc","id","result"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"result":{"$ref":"#/$defs/runtimeHeartbeatResult"}}},"mutationAcknowledgementState":{"enum":["accepted","acknowledged","terminal"]},"mutationRequest":{"$comment":"Metadata-only binding for a future mutation-shaped request. It grants no mutation or approval authority.","type":"object","required":["schema_version","request_id","idempotency_key","session_id","generation"],"additionalProperties":false,"properties":{"schema_version":{"const":"mutation-acknowledgement/0.1"},"request_id":{"$ref":"#/$defs/jsonRpcRequestId"},"idempotency_key":{"$ref":"#/$defs/boundedGraphicalId"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"generation":{"$ref":"#/$defs/safePositiveInteger"}}},"mutationAcknowledgement":{"$comment":"The state is an ingress/durability observation only: accepted, acknowledged, or terminal. It does not assert mutation success or grant authority.","type":"object","required":["schema_version","request_id","idempotency_key","session_id","generation","state"],"additionalProperties":false,"properties":{"schema_version":{"const":"mutation-acknowledgement/0.1"},"request_id":{"$ref":"#/$defs/jsonRpcRequestId"},"idempotency_key":{"$ref":"#/$defs/boundedGraphicalId"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"generation":{"$ref":"#/$defs/safePositiveInteger"},"state":{"$ref":"#/$defs/mutationAcknowledgementState"}}},"durableMutationOperationIdentity":{"type":"string","pattern":"^mutation-operation:sha256:[0-9a-f]{64}$","minLength":90,"maxLength":90},"durableMutationRequestFingerprint":{"$comment":"SHA-256 over the mutation request under the producer's reviewed canonicalization. The request body itself is forbidden from this contract.","type":"string","pattern":"^[0-9a-f]{64}$","minLength":64,"maxLength":64},"durableMutationKind":{"enum":["turn-start"]},"durableMutationCapability":{"const":"session.mutation-acknowledgements"},"durableMutationState":{"enum":["accepted","terminal","reconciliation-required"]},"durableMutationConsumeTarget":{"enum":["accepted","terminal"]},"nullableBoundedGraphicalId":{"oneOf":[{"$ref":"#/$defs/boundedGraphicalId"},{"type":"null"}]},"positiveTimelineAnchor":{"allOf":[{"$ref":"#/$defs/timelineAnchor"},{"properties":{"sequence":{"$ref":"#/$defs/safePositiveInteger"},"event_id":{"$ref":"#/$defs/timelineEventId"}}}]},"nullableTimelineAnchor":{"oneOf":[{"$ref":"#/$defs/positiveTimelineAnchor"},{"type":"null"}]},"durableMutationOperation":{"$comment":"Metadata-only durable mutation acknowledgement. Typed peers recompute operation_identity from session_id, mutation_kind, idempotency_key, and request_fingerprint. No prompt, context, body, provider payload, result content, permission, approval, or execution authority is permitted.","type":"object","required":["schema_version","operation_identity","session_id","mutation_kind","idempotency_key","request_fingerprint","revision","state","turn_id","accepted_anchor","terminal_anchor","accepted_consumed","terminal_consumed"],"additionalProperties":false,"properties":{"schema_version":{"const":"mutation-acknowledgement-operation/0.1"},"operation_identity":{"$ref":"#/$defs/durableMutationOperationIdentity"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"mutation_kind":{"$ref":"#/$defs/durableMutationKind"},"idempotency_key":{"$ref":"#/$defs/boundedGraphicalId"},"request_fingerprint":{"$ref":"#/$defs/durableMutationRequestFingerprint"},"revision":{"$ref":"#/$defs/safePositiveInteger"},"state":{"$ref":"#/$defs/durableMutationState"},"turn_id":{"$ref":"#/$defs/nullableBoundedGraphicalId"},"accepted_anchor":{"$ref":"#/$defs/nullableTimelineAnchor"},"terminal_anchor":{"$ref":"#/$defs/nullableTimelineAnchor"},"accepted_consumed":{"type":"boolean"},"terminal_consumed":{"type":"boolean"}},"allOf":[{"if":{"properties":{"accepted_anchor":{"$ref":"#/$defs/positiveTimelineAnchor"}}},"then":{"properties":{"turn_id":{"$ref":"#/$defs/boundedGraphicalId"}}}},{"if":{"properties":{"terminal_consumed":{"const":true}}},"then":{"properties":{"accepted_consumed":{"const":true}}}},{"if":{"properties":{"accepted_consumed":{"const":true}}},"then":{"properties":{"turn_id":{"$ref":"#/$defs/boundedGraphicalId"},"accepted_anchor":{"$ref":"#/$defs/timelineAnchor"}}}}],"oneOf":[{"properties":{"state":{"const":"accepted"},"terminal_anchor":{"type":"null"},"terminal_consumed":{"const":false}}},{"$comment":"Typed peers additionally require positive accepted/terminal anchors and a terminal sequence strictly after the accepted sequence.","properties":{"state":{"const":"terminal"},"turn_id":{"$ref":"#/$defs/boundedGraphicalId"},"accepted_anchor":{"$ref":"#/$defs/positiveTimelineAnchor"},"terminal_anchor":{"$ref":"#/$defs/positiveTimelineAnchor"}}},{"$comment":"Accepted-only state found after restart is unknown and requires reconciliation; it never fabricates terminal evidence.","properties":{"state":{"const":"reconciliation-required"},"terminal_anchor":{"type":"null"},"terminal_consumed":{"const":false}}}]},"durableMutationCursor":{"$comment":"Strict keyset cursor. Typed peers require it to equal the final operation identity and revision on an incomplete page.","type":"object","required":["operation_identity","revision"],"additionalProperties":false,"properties":{"operation_identity":{"$ref":"#/$defs/durableMutationOperationIdentity"},"revision":{"$ref":"#/$defs/safePositiveInteger"}}},"nullableDurableMutationCursor":{"oneOf":[{"$ref":"#/$defs/durableMutationCursor"},{"type":"null"}]},"durableMutationListParams":{"type":"object","required":["schema_version","session_id","after","limit"],"additionalProperties":false,"properties":{"schema_version":{"const":"mutation-acknowledgement-list-request/0.1"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"after":{"$ref":"#/$defs/nullableDurableMutationCursor"},"limit":{"type":"integer","minimum":1,"maximum":100}}},"durableMutationPage":{"$comment":"Typed peers require exact request echo, same-Session operations in strictly increasing identity order, no duplicates, and a next cursor equal to the final operation identity/revision.","type":"object","required":["schema_version","session_id","after","operations","next_after","complete"],"additionalProperties":false,"properties":{"schema_version":{"const":"mutation-acknowledgement-page/0.1"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"after":{"$ref":"#/$defs/nullableDurableMutationCursor"},"operations":{"type":"array","maxItems":100,"items":{"$ref":"#/$defs/durableMutationOperation"}},"next_after":{"$ref":"#/$defs/nullableDurableMutationCursor"},"complete":{"type":"boolean"}},"oneOf":[{"properties":{"complete":{"const":true},"next_after":{"type":"null"}}},{"properties":{"complete":{"const":false},"operations":{"minItems":1},"next_after":{"$ref":"#/$defs/durableMutationCursor"}}}]},"durableMutationConsumeParams":{"type":"object","required":["schema_version","session_id","operation_identity","expected_revision","target","confirmed_anchor"],"additionalProperties":false,"properties":{"schema_version":{"const":"mutation-acknowledgement-consume-request/0.1"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"operation_identity":{"$ref":"#/$defs/durableMutationOperationIdentity"},"expected_revision":{"$ref":"#/$defs/safePositiveInteger"},"target":{"$ref":"#/$defs/durableMutationConsumeTarget"},"confirmed_anchor":{"$ref":"#/$defs/positiveTimelineAnchor"}}},"durableMutationConsumeResult":{"$comment":"Typed peers require the operation to match the request, advance expected_revision by exactly one, repeat the user-confirmed Timeline anchor, and set the selected consumed flag. The anchor must equal accepted_anchor or terminal_anchor for the selected target. Terminal consumption additionally requires terminal state and accepted consumption.","type":"object","required":["schema_version","session_id","operation_identity","expected_revision","target","confirmed_anchor","operation"],"additionalProperties":false,"properties":{"schema_version":{"const":"mutation-acknowledgement-consume-result/0.1"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"operation_identity":{"$ref":"#/$defs/durableMutationOperationIdentity"},"expected_revision":{"type":"integer","minimum":1,"maximum":9007199254740990},"target":{"$ref":"#/$defs/durableMutationConsumeTarget"},"confirmed_anchor":{"$ref":"#/$defs/positiveTimelineAnchor"},"operation":{"$ref":"#/$defs/durableMutationOperation"}},"oneOf":[{"properties":{"target":{"const":"accepted"},"operation":{"properties":{"accepted_consumed":{"const":true}}}}},{"properties":{"target":{"const":"terminal"},"operation":{"properties":{"state":{"const":"terminal"},"accepted_consumed":{"const":true},"terminal_consumed":{"const":true}}}}}]},"durableMutationListRequest":{"type":"object","required":["jsonrpc","id","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"method":{"const":"session/mutation-acknowledgements"},"params":{"$ref":"#/$defs/durableMutationListParams"}}},"durableMutationListSuccessResponse":{"type":"object","required":["jsonrpc","id","result"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"result":{"$ref":"#/$defs/durableMutationPage"}}},"durableMutationConsumeRequest":{"type":"object","required":["jsonrpc","id","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"method":{"const":"mutation/acknowledgement/consume"},"params":{"$ref":"#/$defs/durableMutationConsumeParams"}}},"durableMutationConsumeSuccessResponse":{"type":"object","required":["jsonrpc","id","result"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"result":{"$ref":"#/$defs/durableMutationConsumeResult"}}},"protocolVersion":{"type":"string","pattern":"^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$","minLength":3,"maxLength":16},"protocolRange":{"type":"object","required":["minimum","maximum"],"additionalProperties":false,"properties":{"minimum":{"$ref":"#/$defs/protocolVersion"},"maximum":{"$ref":"#/$defs/protocolVersion"}}},"protocolPreference":{"type":"object","required":["minimum","maximum","preferred"],"additionalProperties":false,"properties":{"minimum":{"$ref":"#/$defs/protocolVersion"},"maximum":{"$ref":"#/$defs/protocolVersion"},"preferred":{"$ref":"#/$defs/protocolVersion"}}},"negotiatedProtocol":{"type":"object","required":["minimum","maximum","selected","upgrade_direction"],"additionalProperties":false,"properties":{"minimum":{"$ref":"#/$defs/protocolVersion"},"maximum":{"$ref":"#/$defs/protocolVersion"},"selected":{"$ref":"#/$defs/protocolVersion"},"upgrade_direction":{"const":"none"}}},"identity":{"type":"object","required":["name","version"],"additionalProperties":false,"properties":{"name":{"type":"string","pattern":"^[a-z0-9]+(?:[.-][a-z0-9]+)*$","minLength":1,"maxLength":64},"version":{"type":"string","pattern":"^[!-~]+$","minLength":1,"maxLength":64}}},"platform":{"type":"object","required":["os","architecture"],"additionalProperties":false,"properties":{"os":{"enum":["macos","windows","linux","unknown"]},"architecture":{"enum":["arm64","x86_64","unknown"]}}},"capabilityName":{"type":"string","pattern":"^[a-z0-9]+(?:[.-][a-z0-9]+)*$","minLength":1,"maxLength":128},"capabilities":{"type":"object","required":["stable","experimental"],"additionalProperties":false,"properties":{"stable":{"type":"array","minItems":1,"maxItems":128,"uniqueItems":true,"items":{"$ref":"#/$defs/capabilityName"}},"experimental":{"type":"array","maxItems":0}}},"limits":{"type":"object","required":["max_frame_bytes"],"additionalProperties":false,"properties":{"max_frame_bytes":{"type":"integer","const":4194304}}},"stdioTransportSecurity":{"type":"object","required":["transport","local","authenticated","encrypted","peer_verified"],"additionalProperties":false,"properties":{"transport":{"const":"stdio"},"local":{"const":true},"authenticated":{"const":false},"encrypted":{"const":false},"peer_verified":{"const":false}}},"backend":{"type":"object","required":["adapter","status","version"],"additionalProperties":false,"properties":{"adapter":{"type":"string","pattern":"^[a-z0-9]+(?:[.-][a-z0-9]+)*$","minLength":1,"maxLength":64},"status":{"enum":["ready","unavailable","read-only-recovery"]},"version":{"type":"string","pattern":"^[!-~]+$","minLength":1,"maxLength":64}}},"safePositiveInteger":{"type":"integer","minimum":1,"maximum":9007199254740991},"safeNonNegativeInteger":{"type":"integer","minimum":0,"maximum":9007199254740991},"jsonSafeValue":{"$comment":"The schema enforces recursive value types and per-container bounds. Rust and Qt typed validators additionally enforce a maximum depth of 16 and 4096 total values per item.data tree because JSON Schema cannot express a shared aggregate recursive-node budget.","oneOf":[{"type":"null"},{"type":"boolean"},{"type":"string"},{"type":"integer","minimum":-9007199254740991,"maximum":9007199254740991},{"type":"array","maxItems":4096,"items":{"$ref":"#/$defs/jsonSafeValue"}},{"type":"object","maxProperties":128,"propertyNames":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[!-~]+$"},"additionalProperties":{"$ref":"#/$defs/jsonSafeValue"}}]},"boundedGraphicalId":{"type":"string","pattern":"^[!-~]+$","minLength":1,"maxLength":128},"timelineEventId":{"type":"string","pattern":"^event:sha256:[0-9a-f]{64}$","minLength":77,"maxLength":77},"timelineSnapshotId":{"type":"string","pattern":"^timeline-session-snapshot:sha256:[0-9a-f]{64}$","minLength":97,"maxLength":97},"timelineSnapshotItemId":{"type":"string","pattern":"^timeline-session-snapshot-item:sha256:[0-9a-f]{64}$","minLength":102,"maxLength":102},"timelineSnapshotPageId":{"type":"string","pattern":"^timeline-session-snapshot-page:sha256:[0-9a-f]{64}$","minLength":102,"maxLength":102},"timelineAnchor":{"type":"object","required":["sequence","event_id"],"additionalProperties":false,"properties":{"sequence":{"$ref":"#/$defs/safeNonNegativeInteger"},"event_id":{"oneOf":[{"$ref":"#/$defs/timelineEventId"},{"type":"null"}]}},"oneOf":[{"properties":{"sequence":{"const":0},"event_id":{"type":"null"}}},{"properties":{"sequence":{"$ref":"#/$defs/safePositiveInteger"},"event_id":{"$ref":"#/$defs/timelineEventId"}}}]},"timelineEventName":{"type":"string","pattern":"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$","minLength":1,"maxLength":128,"not":{"const":"turn.persistence-failed"}},"timelineItem":{"type":"object","required":["id","kind","role","state","content"],"additionalProperties":false,"properties":{"id":{"$ref":"#/$defs/boundedGraphicalId"},"kind":{"type":"string","pattern":"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$","minLength":1,"maxLength":64},"role":{"enum":["user","agent","system","tool"]},"state":{"enum":["started","running","delta","updated","completed","failed","interrupted","truncated","unavailable"]},"content":{"type":"string","maxLength":65536},"data":{"type":"object","maxProperties":128,"propertyNames":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[!-~]+$"},"additionalProperties":{"$ref":"#/$defs/jsonSafeValue"}}}},"timelineItemUpdate":{"type":"object","required":["revision","content_mode"],"additionalProperties":false,"properties":{"revision":{"$ref":"#/$defs/safePositiveInteger"},"content_mode":{"const":"snapshot-replacement"}}},"timelineEvent":{"type":"object","$comment":"correlation_id must equal turn_id; peers enforce this cross-field invariant in typed validation","required":["schema_version","event_id","sequence","timestamp_ms","correlation_id","session_id","turn_id","turn_state","event","item","item_update"],"additionalProperties":false,"properties":{"schema_version":{"const":"timeline-event/0.1"},"event_id":{"$ref":"#/$defs/timelineEventId"},"sequence":{"$ref":"#/$defs/safePositiveInteger"},"timestamp_ms":{"$ref":"#/$defs/safePositiveInteger"},"correlation_id":{"$ref":"#/$defs/boundedGraphicalId"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"turn_id":{"$ref":"#/$defs/boundedGraphicalId"},"turn_state":{"enum":["running","completed","failed","interrupted"]},"event":{"$ref":"#/$defs/timelineEventName"},"item":{"oneOf":[{"$ref":"#/$defs/timelineItem"},{"type":"null"}]},"item_update":{"oneOf":[{"$ref":"#/$defs/timelineItemUpdate"},{"type":"null"}]}},"allOf":[{"if":{"properties":{"item":{"type":"null"}}},"then":{"properties":{"item_update":{"type":"null"}}},"else":{"properties":{"item_update":{"$ref":"#/$defs/timelineItemUpdate"}}}},{"oneOf":[{"properties":{"event":{"const":"turn.started"},"turn_state":{"const":"running"},"item":{"type":"null"}}},{"properties":{"event":{"const":"turn.completed"},"turn_state":{"const":"completed"},"item":{"type":"null"}}},{"properties":{"event":{"const":"turn.failed"},"turn_state":{"const":"failed"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"kind":{"const":"error"},"role":{"const":"system"},"state":{"const":"completed"}}}]}}},{"properties":{"event":{"const":"turn.interrupted"},"turn_state":{"const":"interrupted"},"item":{"type":"null"}}},{"properties":{"event":{"const":"item.started"},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"state":{"const":"started"}}}]}}},{"properties":{"event":{"const":"item.delta"},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"state":{"const":"delta"}}}]}}},{"properties":{"event":{"const":"item.completed"},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"state":{"const":"completed"}}}]}}},{"properties":{"event":{"const":"diagnostics.observed"},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"kind":{"const":"diagnostic"},"role":{"const":"tool"},"state":{"const":"completed"}}}]}}},{"properties":{"event":{"const":"usage.updated"},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"kind":{"const":"usage"},"role":{"const":"system"},"state":{"const":"updated"}}}]}}},{"properties":{"event":{"const":"usage.truncated"},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"kind":{"const":"usage"},"role":{"const":"system"},"state":{"const":"truncated"}}}]}}},{"properties":{"event":{"const":"turn.diff.updated"},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"kind":{"const":"diff"},"role":{"const":"tool"},"state":{"const":"updated"}}}]}}},{"properties":{"event":{"const":"turn.diff.truncated"},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"kind":{"const":"diff"},"role":{"const":"tool"},"state":{"const":"truncated"}}}]}}},{"properties":{"event":{"const":"turn.plan.updated"},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"kind":{"const":"plan"},"role":{"const":"agent"},"state":{"const":"updated"}}}]}}},{"properties":{"event":{"const":"turn.plan.truncated"},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"kind":{"const":"plan"},"role":{"const":"agent"},"state":{"const":"truncated"}}}]}}},{"properties":{"event":{"const":"turn.error-observed"},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"kind":{"const":"error"},"role":{"const":"system"},"state":{"const":"updated"}}}]}}},{"properties":{"event":{"enum":["turn.error-observed.truncated","turn.steering-acknowledged","turn.cancellation-acknowledged"]},"turn_state":{"const":"running"},"item":{"type":"null"}}},{"properties":{"event":{"const":"turn.steering-requested"},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"kind":{"const":"message"},"role":{"const":"user"},"state":{"const":"completed"}}}]}}},{"properties":{"event":{"enum":["turn.steering-failed","turn.cancellation-failed"]},"turn_state":{"const":"running"},"item":{"allOf":[{"$ref":"#/$defs/timelineItem"},{"properties":{"kind":{"const":"error"},"role":{"const":"system"},"state":{"const":"completed"}}}]}}},{"properties":{"event":{"not":{"enum":["turn.started","turn.completed","turn.failed","turn.interrupted","item.started","item.delta","item.completed","diagnostics.observed","usage.updated","usage.truncated","turn.diff.updated","turn.diff.truncated","turn.plan.updated","turn.plan.truncated","turn.error-observed","turn.error-observed.truncated","turn.steering-requested","turn.steering-acknowledged","turn.steering-failed","turn.cancellation-acknowledged","turn.cancellation-failed"]}},"turn_state":{"const":"running"},"item":{"type":"null"}}}]}]},"timelineSubscriptionState":{"enum":["sync-required","snapshot-required","active","failed"]},"timelineSubscriptionSource":{"enum":["sync","snapshot"]},"timelineSubscriptionFailureStage":{"enum":["subscribe","sync","snapshot","activate","live"]},"timelineSubscriptionRequestIdentity":{"type":"string","pattern":"^timeline-subscription-request:sha256:[0-9a-f]{64}$"},"timelineSubscribeParams":{"$comment":"Stable wire contract for the reconnect barrier. Runtime must still negotiate and enforce a separate subscription capability before dispatch. The generation, Session, subscription, cursor, and optional fixed watermark must remain exact through every later state.","type":"object","required":["schema_version","connection_generation","session_id","subscription_id","cursor","watermark"],"additionalProperties":false,"properties":{"schema_version":{"const":"timeline-subscribe-request/0.1"},"connection_generation":{"$ref":"#/$defs/safePositiveInteger"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"subscription_id":{"$ref":"#/$defs/boundedGraphicalId"},"cursor":{"$ref":"#/$defs/timelineAnchor"},"watermark":{"oneOf":[{"$ref":"#/$defs/timelineAnchor"},{"type":"null"}]}}},"timelineSubscribeResult":{"$comment":"Subscribe never grants live authority directly. It selects exactly one bounded recovery route; only a separately validated activation may enter active.","type":"object","required":["schema_version","connection_generation","session_id","subscription_id","state","cursor","watermark","next_method"],"additionalProperties":false,"properties":{"schema_version":{"const":"timeline-subscribe-result/0.1"},"connection_generation":{"$ref":"#/$defs/safePositiveInteger"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"subscription_id":{"$ref":"#/$defs/boundedGraphicalId"},"state":{"$ref":"#/$defs/timelineSubscriptionState"},"cursor":{"$ref":"#/$defs/timelineAnchor"},"watermark":{"oneOf":[{"$ref":"#/$defs/timelineAnchor"},{"type":"null"}]},"next_method":{"enum":["timeline/subscription-sync","timeline/subscription-snapshot"]}},"oneOf":[{"properties":{"state":{"const":"sync-required"},"watermark":{"$ref":"#/$defs/timelineAnchor"},"next_method":{"const":"timeline/subscription-sync"}}},{"properties":{"state":{"const":"snapshot-required"},"watermark":{"type":"null"},"next_method":{"const":"timeline/subscription-snapshot"}}}]},"timelineActivateParams":{"$comment":"Activation is legal only after complete fixed-watermark sync or complete identity-validated snapshot replacement. cursor and watermark must be the same exact anchor; typed peers additionally bind this object to the prior subscribe result.","type":"object","required":["schema_version","connection_generation","session_id","subscription_id","source","cursor","watermark","snapshot_identity"],"additionalProperties":false,"properties":{"schema_version":{"const":"timeline-subscription-activate-request/0.1"},"connection_generation":{"$ref":"#/$defs/safePositiveInteger"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"subscription_id":{"$ref":"#/$defs/boundedGraphicalId"},"source":{"$ref":"#/$defs/timelineSubscriptionSource"},"cursor":{"$ref":"#/$defs/timelineAnchor"},"watermark":{"$ref":"#/$defs/timelineAnchor"},"snapshot_identity":{"oneOf":[{"$ref":"#/$defs/timelineSnapshotId"},{"type":"null"}]}},"oneOf":[{"properties":{"source":{"const":"sync"},"snapshot_identity":{"type":"null"}}},{"properties":{"source":{"const":"snapshot"},"snapshot_identity":{"$ref":"#/$defs/timelineSnapshotId"}}}]},"timelineActivateResult":{"$comment":"Stable wire result shape. Registering this schema does not advertise a Runtime capability or create connection authority.","type":"object","required":["schema_version","connection_generation","session_id","subscription_id","state","cursor","watermark"],"additionalProperties":false,"properties":{"schema_version":{"const":"timeline-subscription-active/0.1"},"connection_generation":{"$ref":"#/$defs/safePositiveInteger"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"subscription_id":{"$ref":"#/$defs/boundedGraphicalId"},"state":{"const":"active"},"cursor":{"$ref":"#/$defs/timelineAnchor"},"watermark":{"$ref":"#/$defs/timelineAnchor"}}},"timelineSubscriptionEvent":{"$comment":"The nested event must be contiguous after cursor, belong to session_id, and be validated only against the active subscription for the exact current connection generation.","type":"object","required":["schema_version","connection_generation","session_id","subscription_id","state","cursor","watermark","event"],"additionalProperties":false,"properties":{"schema_version":{"const":"timeline-subscription-event/0.1"},"connection_generation":{"$ref":"#/$defs/safePositiveInteger"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"subscription_id":{"$ref":"#/$defs/boundedGraphicalId"},"state":{"const":"active"},"cursor":{"$ref":"#/$defs/timelineAnchor"},"watermark":{"$ref":"#/$defs/timelineAnchor"},"event":{"$ref":"#/$defs/timelineEvent"}}},"timelineSubscriptionFailure":{"$comment":"Every failure is terminal for this subscription attempt and requires the client to retire its pending state. It never authorizes fallback replay, activation, or live delivery.","type":"object","required":["schema_version","connection_generation","session_id","subscription_id","state","stage","cursor","watermark","request_identity","reason","retryable","cleanup_required"],"additionalProperties":false,"properties":{"schema_version":{"const":"timeline-subscription-failure/0.1"},"connection_generation":{"$ref":"#/$defs/safePositiveInteger"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"subscription_id":{"$ref":"#/$defs/boundedGraphicalId"},"state":{"const":"failed"},"stage":{"$ref":"#/$defs/timelineSubscriptionFailureStage"},"cursor":{"$ref":"#/$defs/timelineAnchor"},"watermark":{"oneOf":[{"$ref":"#/$defs/timelineAnchor"},{"type":"null"}]},"request_identity":{"oneOf":[{"$ref":"#/$defs/timelineSubscriptionRequestIdentity"},{"type":"null"}]},"reason":{"type":"string","pattern":"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$","minLength":1,"maxLength":64},"retryable":{"type":"boolean"},"cleanup_required":{"const":true}},"oneOf":[{"properties":{"stage":{"enum":["subscribe","sync","snapshot","activate"]},"request_identity":{"$ref":"#/$defs/timelineSubscriptionRequestIdentity"}}},{"properties":{"stage":{"const":"live"},"request_identity":{"type":"null"}}}]},"timelineSubscriptionRequestFailure":{"$comment":"Request-stage subscription failures travel only in JSON-RPC error.data. Typed peers additionally verify the domain-separated request identity against the exact request.","allOf":[{"$ref":"#/$defs/timelineSubscriptionFailure"},{"properties":{"stage":{"enum":["subscribe","sync","snapshot","activate"]},"request_identity":{"$ref":"#/$defs/timelineSubscriptionRequestIdentity"}}}]},"timelineSubscriptionLiveFailure":{"$comment":"Only a terminal asynchronous failure of an active subscription may use the live failure notification route.","allOf":[{"$ref":"#/$defs/timelineSubscriptionFailure"},{"properties":{"stage":{"const":"live"},"request_identity":{"type":"null"}}}]},"timelineSubscriptionSyncParams":{"$comment":"Stable subscription paging wrapper. It preserves the complete legacy timelineSyncParams request while binding it to one connection generation, Session, and subscription. Typed peers require the nested Session and fixed watermark to match the subscription and compute a domain-separated identity over this complete object.","type":"object","required":["schema_version","connection_generation","session_id","subscription_id","request"],"additionalProperties":false,"properties":{"schema_version":{"const":"timeline-subscription-sync-request/0.1"},"connection_generation":{"$ref":"#/$defs/safePositiveInteger"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"subscription_id":{"$ref":"#/$defs/boundedGraphicalId"},"request":{"$ref":"#/$defs/timelineSyncParams","properties":{"watermark":{"$ref":"#/$defs/timelineAnchor"}}}}},"timelineSubscriptionSnapshotParams":{"$comment":"Stable subscription paging wrapper. It preserves the complete legacy timelineSnapshotParams request while binding it to one connection generation, Session, and subscription. Typed peers require the nested Session and recovery route to match the subscription and compute a domain-separated identity over this complete object.","type":"object","required":["schema_version","connection_generation","session_id","subscription_id","request"],"additionalProperties":false,"properties":{"schema_version":{"const":"timeline-subscription-snapshot-request/0.1"},"connection_generation":{"$ref":"#/$defs/safePositiveInteger"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"subscription_id":{"$ref":"#/$defs/boundedGraphicalId"},"request":{"$ref":"#/$defs/timelineSnapshotParams"}}},"timelineSubscribeRequest":{"type":"object","required":["jsonrpc","id","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"method":{"const":"timeline/subscribe"},"params":{"$ref":"#/$defs/timelineSubscribeParams"}}},"timelineSubscribeSuccessResponse":{"type":"object","required":["jsonrpc","id","result"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"result":{"$ref":"#/$defs/timelineSubscribeResult"}}},"timelineSubscriptionSyncRequest":{"type":"object","required":["jsonrpc","id","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"method":{"const":"timeline/subscription-sync"},"params":{"$ref":"#/$defs/timelineSubscriptionSyncParams"}}},"timelineSubscriptionSyncSuccessResponse":{"type":"object","required":["jsonrpc","id","result"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"result":{"$ref":"#/$defs/timelineSyncPage"}}},"timelineSubscriptionSnapshotRequest":{"type":"object","required":["jsonrpc","id","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"method":{"const":"timeline/subscription-snapshot"},"params":{"$ref":"#/$defs/timelineSubscriptionSnapshotParams"}}},"timelineSubscriptionSnapshotSuccessResponse":{"type":"object","required":["jsonrpc","id","result"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"result":{"$ref":"#/$defs/timelineSessionSnapshotPage"}}},"timelineSubscriptionActivateRequest":{"type":"object","required":["jsonrpc","id","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"method":{"const":"timeline/subscription-activate"},"params":{"$ref":"#/$defs/timelineActivateParams"}}},"timelineSubscriptionActivateSuccessResponse":{"type":"object","required":["jsonrpc","id","result"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"result":{"$ref":"#/$defs/timelineActivateResult"}}},"timelineSubscriptionEventNotification":{"type":"object","required":["jsonrpc","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"method":{"const":"timeline/subscription-event"},"params":{"$ref":"#/$defs/timelineSubscriptionEvent"}}},"timelineSubscriptionFailureNotification":{"type":"object","required":["jsonrpc","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"method":{"const":"timeline/subscription-failure"},"params":{"$ref":"#/$defs/timelineSubscriptionLiveFailure"}}},"timelineSubscriptionRequestErrorResponse":{"$comment":"Subscribe, subscription-sync, subscription-snapshot, and subscription-activate failures use the ordinary JSON-RPC error envelope with exact terminal failure metadata in error.data. Live failures use only the notification route.","type":"object","required":["jsonrpc","id","error"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"error":{"$ref":"#/$defs/jsonRpcError","required":["code","message","data"],"properties":{"data":{"$ref":"#/$defs/timelineSubscriptionRequestFailure"}}}}},"timelineSyncParams":{"type":"object","$comment":"When watermark is present, typed peers require after <= watermark and identical Event IDs when both anchors name the same sequence.","required":["session_id","after","watermark","limit"],"additionalProperties":false,"properties":{"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"after":{"$ref":"#/$defs/timelineAnchor"},"watermark":{"oneOf":[{"$ref":"#/$defs/timelineAnchor"},{"type":"null"}]},"limit":{"type":"integer","minimum":1,"maximum":200}}},"timelineSyncPage":{"type":"object","$comment":"Typed peers require the response session and after anchor to equal the request, preserve a supplied watermark, validate contiguous same-Session events after the anchor, bind the final event to next_after, and set complete only after reaching the fixed watermark.","required":["schema_version","session_id","after","watermark","events","next_after","complete"],"additionalProperties":false,"properties":{"schema_version":{"const":"timeline-sync-page/0.1"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"after":{"$ref":"#/$defs/timelineAnchor"},"watermark":{"$ref":"#/$defs/timelineAnchor"},"events":{"type":"array","maxItems":200,"items":{"$ref":"#/$defs/timelineEvent"}},"next_after":{"oneOf":[{"$ref":"#/$defs/timelineAnchor"},{"type":"null"}]},"complete":{"type":"boolean"}},"oneOf":[{"properties":{"complete":{"const":true},"next_after":{"type":"null"}}},{"properties":{"complete":{"const":false},"events":{"minItems":1},"next_after":{"$ref":"#/$defs/timelineAnchor"}}}]},"timelineSyncRequest":{"type":"object","required":["jsonrpc","id","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"method":{"const":"timeline/sync"},"params":{"$ref":"#/$defs/timelineSyncParams"}}},"timelineSyncSuccessResponse":{"type":"object","required":["jsonrpc","id","result"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"result":{"$ref":"#/$defs/timelineSyncPage"}}},"timelineSnapshotParams":{"type":"object","$comment":"The first request sets snapshot_identity, watermark, and after to null. Every continuation repeats the server-selected complete identity, fixed watermark, Session, and exact final-Item cursor from the previous page.","required":["session_id","snapshot_identity","watermark","after","limit"],"additionalProperties":false,"properties":{"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"snapshot_identity":{"oneOf":[{"$ref":"#/$defs/timelineSnapshotId"},{"type":"null"}]},"watermark":{"oneOf":[{"$ref":"#/$defs/timelineAnchor"},{"type":"null"}]},"after":{"oneOf":[{"$ref":"#/$defs/timelineSnapshotCursor"},{"type":"null"}]},"limit":{"type":"integer","minimum":1,"maximum":200}},"oneOf":[{"properties":{"snapshot_identity":{"type":"null"},"watermark":{"type":"null"},"after":{"type":"null"}}},{"properties":{"snapshot_identity":{"$ref":"#/$defs/timelineSnapshotId"},"watermark":{"$ref":"#/$defs/timelineAnchor"},"after":{"$ref":"#/$defs/timelineSnapshotCursor"}}}]},"timelineSnapshotCursor":{"type":"object","required":["ordinal","item_id","item_identity"],"additionalProperties":false,"properties":{"ordinal":{"$ref":"#/$defs/safePositiveInteger"},"item_id":{"$ref":"#/$defs/boundedGraphicalId"},"item_identity":{"$ref":"#/$defs/timelineSnapshotItemId"}}},"timelineSnapshotItem":{"type":"object","$comment":"Typed peers verify the domain-separated item_identity over every field except item_identity plus the fixed Item schema and enclosing Session.","required":["ordinal","item_identity","turn_id","correlation_id","turn_state","first_event","latest_event","item","item_update"],"additionalProperties":false,"properties":{"ordinal":{"$ref":"#/$defs/safePositiveInteger"},"item_identity":{"$ref":"#/$defs/timelineSnapshotItemId"},"turn_id":{"$ref":"#/$defs/boundedGraphicalId"},"correlation_id":{"$ref":"#/$defs/boundedGraphicalId"},"turn_state":{"enum":["running","completed","failed","interrupted"]},"first_event":{"$ref":"#/$defs/timelineAnchor"},"latest_event":{"$ref":"#/$defs/timelineAnchor"},"item":{"$ref":"#/$defs/timelineItem"},"item_update":{"$ref":"#/$defs/timelineItemUpdate"}}},"timelineSnapshotActiveTurn":{"type":"object","required":["turn_id","correlation_id","state","started_event","latest_event","open_item_ids"],"additionalProperties":false,"properties":{"turn_id":{"$ref":"#/$defs/boundedGraphicalId"},"correlation_id":{"$ref":"#/$defs/boundedGraphicalId"},"state":{"const":"running"},"started_event":{"$ref":"#/$defs/timelineAnchor"},"latest_event":{"$ref":"#/$defs/timelineAnchor"},"open_item_ids":{"type":"array","maxItems":10000,"items":{"$ref":"#/$defs/boundedGraphicalId"}}}},"timelineSessionSnapshotPage":{"type":"object","$comment":"Typed peers verify fixed floor/watermark/totals/active Turn across pages, contiguous ordinals, every Item/page identity, exact cursor chaining, the final complete identity, and an encoded result below the reserved 4 MiB AAP frame budget.","required":["schema_version","session_id","snapshot_identity","floor","watermark","active_turn","total_items","total_canonical_bytes","after","items","next_after","complete","page_identity"],"additionalProperties":false,"properties":{"schema_version":{"const":"timeline-session-snapshot-page/0.1"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"snapshot_identity":{"$ref":"#/$defs/timelineSnapshotId"},"floor":{"$ref":"#/$defs/timelineAnchor"},"watermark":{"$ref":"#/$defs/timelineAnchor"},"active_turn":{"oneOf":[{"$ref":"#/$defs/timelineSnapshotActiveTurn"},{"type":"null"}]},"total_items":{"type":"integer","minimum":0,"maximum":10000},"total_canonical_bytes":{"type":"integer","minimum":0,"maximum":67108864},"after":{"oneOf":[{"$ref":"#/$defs/timelineSnapshotCursor"},{"type":"null"}]},"items":{"type":"array","maxItems":200,"items":{"$ref":"#/$defs/timelineSnapshotItem"}},"next_after":{"oneOf":[{"$ref":"#/$defs/timelineSnapshotCursor"},{"type":"null"}]},"complete":{"type":"boolean"},"page_identity":{"$ref":"#/$defs/timelineSnapshotPageId"}},"oneOf":[{"properties":{"complete":{"const":true},"next_after":{"type":"null"}}},{"properties":{"complete":{"const":false},"items":{"minItems":1},"next_after":{"$ref":"#/$defs/timelineSnapshotCursor"}}}]},"timelineSnapshotRequest":{"type":"object","required":["jsonrpc","id","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"method":{"const":"timeline/snapshot"},"params":{"$ref":"#/$defs/timelineSnapshotParams"}}},"timelineSnapshotSuccessResponse":{"type":"object","required":["jsonrpc","id","result"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"result":{"$ref":"#/$defs/timelineSessionSnapshotPage"}}},"timelineRetentionGapData":{"type":"object","$comment":"A true retention gap requires snapshot replacement. The client must not resume from retained_floor or treat the internal Sequencer checkpoint as a public Session snapshot.","required":["schema_version","reason","session_id","requested_after","requested_watermark","retained_floor","head","snapshot_required","snapshot_available","snapshot_capability","snapshot_method","event_history_complete","replay_from_floor_allowed"],"additionalProperties":false,"properties":{"schema_version":{"const":"timeline-retention-gap/0.1"},"reason":{"const":"requested-anchor-not-retained"},"session_id":{"$ref":"#/$defs/boundedGraphicalId"},"requested_after":{"$ref":"#/$defs/timelineAnchor"},"requested_watermark":{"oneOf":[{"$ref":"#/$defs/timelineAnchor"},{"type":"null"}]},"retained_floor":{"$ref":"#/$defs/timelineAnchor"},"head":{"$ref":"#/$defs/timelineAnchor"},"snapshot_required":{"const":true},"snapshot_available":{"type":"boolean"},"snapshot_capability":{"const":"timeline.snapshot.current"},"snapshot_method":{"const":"timeline/snapshot"},"event_history_complete":{"const":false},"replay_from_floor_allowed":{"const":false}}},"timelineSyncRetentionGapErrorResponse":{"type":"object","required":["jsonrpc","id","error"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"error":{"type":"object","required":["code","message","data"],"additionalProperties":false,"properties":{"code":{"const":-32148},"message":{"type":"string","minLength":1,"maxLength":256},"data":{"$ref":"#/$defs/timelineRetentionGapData"}}}}},"initializeParams":{"type":"object","required":["protocol","client","platform","capabilities","limits","transport_security"],"additionalProperties":false,"properties":{"protocol":{"$ref":"#/$defs/protocolPreference"},"client":{"$ref":"#/$defs/identity"},"platform":{"$ref":"#/$defs/platform"},"capabilities":{"$ref":"#/$defs/capabilities"},"limits":{"$ref":"#/$defs/limits"},"transport_security":{"$ref":"#/$defs/stdioTransportSecurity"}}},"initializeResult":{"type":"object","required":["protocol","runtime","platform","backend","capabilities","limits","transport_security"],"additionalProperties":false,"properties":{"protocol":{"$ref":"#/$defs/negotiatedProtocol"},"runtime":{"$ref":"#/$defs/identity"},"platform":{"$ref":"#/$defs/platform"},"backend":{"$ref":"#/$defs/backend"},"capabilities":{"$ref":"#/$defs/capabilities"},"limits":{"$ref":"#/$defs/limits"},"transport_security":{"$ref":"#/$defs/stdioTransportSecurity"}}},"initializeRequest":{"type":"object","required":["jsonrpc","id","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"method":{"const":"initialize"},"params":{"$ref":"#/$defs/initializeParams"}}},"initializeSuccessResponse":{"type":"object","required":["jsonrpc","id","result"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"result":{"$ref":"#/$defs/initializeResult"}}},"initializedNotification":{"type":"object","required":["jsonrpc","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"method":{"const":"initialized"},"params":{"type":"object","maxProperties":0,"additionalProperties":false}}},"initializeIncompatibleData":{"type":"object","required":["schema_version","reason","client","runtime","upgrade_direction"],"additionalProperties":false,"properties":{"schema_version":{"const":"initialize-error/0.1"},"reason":{"const":"protocol-range-not-overlapping"},"client":{"$ref":"#/$defs/protocolRange"},"runtime":{"$ref":"#/$defs/protocolRange"},"upgrade_direction":{"enum":["client","runtime"]}}},"initializeIncompatibleErrorResponse":{"type":"object","required":["jsonrpc","id","error"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"id":{"$ref":"#/$defs/jsonRpcRequestId"},"error":{"type":"object","required":["code","message","data"],"additionalProperties":false,"properties":{"code":{"const":-32003},"message":{"type":"string","minLength":1,"maxLength":256},"data":{"$ref":"#/$defs/initializeIncompatibleData"}}}}}}})AAPSCHEMA"),
+            &initializationError);
+    if (!runtime && error) *error = initializationError;
+    return runtime.get();
+}
+
+const QStringList &transportDefinitionNames()
+{
+    static const QStringList names{QStringLiteral("backend"), QStringLiteral("boundedGraphicalId"), QStringLiteral("capabilities"), QStringLiteral("capabilityName"), QStringLiteral("durableMutationCapability"), QStringLiteral("durableMutationConsumeParams"), QStringLiteral("durableMutationConsumeRequest"), QStringLiteral("durableMutationConsumeResult"), QStringLiteral("durableMutationConsumeSuccessResponse"), QStringLiteral("durableMutationConsumeTarget"), QStringLiteral("durableMutationCursor"), QStringLiteral("durableMutationKind"), QStringLiteral("durableMutationListParams"), QStringLiteral("durableMutationListRequest"), QStringLiteral("durableMutationListSuccessResponse"), QStringLiteral("durableMutationOperation"), QStringLiteral("durableMutationOperationIdentity"), QStringLiteral("durableMutationPage"), QStringLiteral("durableMutationRequestFingerprint"), QStringLiteral("durableMutationState"), QStringLiteral("identity"), QStringLiteral("initializeIncompatibleData"), QStringLiteral("initializeIncompatibleErrorResponse"), QStringLiteral("initializeParams"), QStringLiteral("initializeRequest"), QStringLiteral("initializeResult"), QStringLiteral("initializeSuccessResponse"), QStringLiteral("initializedNotification"), QStringLiteral("jsonRpcError"), QStringLiteral("jsonRpcId"), QStringLiteral("jsonRpcRequestId"), QStringLiteral("jsonSafeValue"), QStringLiteral("limits"), QStringLiteral("mutationAcknowledgement"), QStringLiteral("mutationAcknowledgementState"), QStringLiteral("mutationRequest"), QStringLiteral("negotiatedProtocol"), QStringLiteral("nullableBoundedGraphicalId"), QStringLiteral("nullableDurableMutationCursor"), QStringLiteral("nullableTimelineAnchor"), QStringLiteral("platform"), QStringLiteral("positiveTimelineAnchor"), QStringLiteral("protocolPreference"), QStringLiteral("protocolRange"), QStringLiteral("protocolVersion"), QStringLiteral("runtimeHeartbeatParams"), QStringLiteral("runtimeHeartbeatRequest"), QStringLiteral("runtimeHeartbeatResult"), QStringLiteral("runtimeHeartbeatSuccessResponse"), QStringLiteral("safeNonNegativeInteger"), QStringLiteral("safePositiveInteger"), QStringLiteral("stdioTransportSecurity"), QStringLiteral("timelineActivateParams"), QStringLiteral("timelineActivateResult"), QStringLiteral("timelineAnchor"), QStringLiteral("timelineEvent"), QStringLiteral("timelineEventId"), QStringLiteral("timelineEventName"), QStringLiteral("timelineItem"), QStringLiteral("timelineItemUpdate"), QStringLiteral("timelineRetentionGapData"), QStringLiteral("timelineSessionSnapshotPage"), QStringLiteral("timelineSnapshotActiveTurn"), QStringLiteral("timelineSnapshotCursor"), QStringLiteral("timelineSnapshotId"), QStringLiteral("timelineSnapshotItem"), QStringLiteral("timelineSnapshotItemId"), QStringLiteral("timelineSnapshotPageId"), QStringLiteral("timelineSnapshotParams"), QStringLiteral("timelineSnapshotRequest"), QStringLiteral("timelineSnapshotSuccessResponse"), QStringLiteral("timelineSubscribeParams"), QStringLiteral("timelineSubscribeRequest"), QStringLiteral("timelineSubscribeResult"), QStringLiteral("timelineSubscribeSuccessResponse"), QStringLiteral("timelineSubscriptionActivateRequest"), QStringLiteral("timelineSubscriptionActivateSuccessResponse"), QStringLiteral("timelineSubscriptionEvent"), QStringLiteral("timelineSubscriptionEventNotification"), QStringLiteral("timelineSubscriptionFailure"), QStringLiteral("timelineSubscriptionFailureNotification"), QStringLiteral("timelineSubscriptionFailureStage"), QStringLiteral("timelineSubscriptionLiveFailure"), QStringLiteral("timelineSubscriptionRequestErrorResponse"), QStringLiteral("timelineSubscriptionRequestFailure"), QStringLiteral("timelineSubscriptionRequestIdentity"), QStringLiteral("timelineSubscriptionSnapshotParams"), QStringLiteral("timelineSubscriptionSnapshotRequest"), QStringLiteral("timelineSubscriptionSnapshotSuccessResponse"), QStringLiteral("timelineSubscriptionSource"), QStringLiteral("timelineSubscriptionState"), QStringLiteral("timelineSubscriptionSyncParams"), QStringLiteral("timelineSubscriptionSyncRequest"), QStringLiteral("timelineSubscriptionSyncSuccessResponse"), QStringLiteral("timelineSyncPage"), QStringLiteral("timelineSyncParams"), QStringLiteral("timelineSyncRequest"), QStringLiteral("timelineSyncRetentionGapErrorResponse"), QStringLiteral("timelineSyncSuccessResponse")};
+    return names;
+}
+
+const QStringList &typedErrorSchemaVersions()
+{
+    static const QStringList versions{QStringLiteral("initialize-error/0.1"), QStringLiteral("timeline-retention-gap/0.1"), QStringLiteral("timeline-subscription-failure/0.1")};
+    return versions;
+}
+
+const TransportJsonValue::Object *asObject(const TransportJsonValue &value)
+{
+    return std::get_if<TransportJsonValue::Object>(&value.value);
+}
+
+const QString *stringField(const TransportJsonValue::Object &object, const QString &key)
+{
+    const auto iterator = object.constFind(key);
+    return iterator == object.constEnd() ? nullptr : std::get_if<QString>(&iterator->value);
+}
+
+const QString *transportErrorSchemaVersion(const TransportMessage &message)
+{
+    const auto *root = asObject(message.value);
+    if (!root) return nullptr;
+    const auto error = root->constFind(QStringLiteral("error"));
+    const auto *errorObject = error == root->constEnd() ? nullptr : asObject(error.value());
+    if (!errorObject) return nullptr;
+    const auto data = errorObject->constFind(QStringLiteral("data"));
+    const auto *dataObject = data == errorObject->constEnd() ? nullptr : asObject(data.value());
+    return dataObject ? stringField(*dataObject, QStringLiteral("schema_version")) : nullptr;
+}
+
+void setDecodeParseError(TransportDecodeError *error, const TransportParseError &parse)
+{
+    if (!error) return;
+    error->kind = TransportDecodeError::Kind::Parse;
+    error->parse = parse;
+    error->message = parse.message;
+}
+
+void setDecodeSchemaError(TransportDecodeError *error, TransportSchemaError schema,
+                          const QString &message)
+{
+    if (!error) return;
+    error->kind = TransportDecodeError::Kind::Schema;
+    error->schema = schema;
+    error->message = message;
+}
+
+void setDispatchError(TransportDispatchError *error, TransportDispatchErrorKind kind,
+                      const QString &message)
+{
+    if (!error) return;
+    error->kind = kind;
+    error->message = message;
+}
+
+bool mapSchemaDispatchError(TransportSchemaError schema,
+                            TransportDispatchErrorKind invalid,
+                            TransportDispatchError *error)
+{
+    const bool unavailable = schema == TransportSchemaError::UnknownDefinition
+        || schema == TransportSchemaError::ValidatorUnavailable;
+    setDispatchError(error,
+                     unavailable ? TransportDispatchErrorKind::ValidatorUnavailable : invalid,
+                     unavailable ? QStringLiteral("generated transport validator is unavailable")
+                                 : QStringLiteral("transport message does not match its generated schema"));
+    return false;
+}
+
+bool parseForDispatch(const QByteArray &raw, TransportMessage *message,
+                      TransportDispatchError *error)
+{
+    TransportDecodeError decodeError;
+    if (parseTransportMessageRaw(raw, message, &decodeError)) return true;
+    if (decodeError.kind == TransportDecodeError::Kind::Parse) {
+        if (error) {
+            error->kind = TransportDispatchErrorKind::Parse;
+            error->parse = decodeError.parse;
+            error->message = decodeError.message;
+        }
+    } else {
+        mapSchemaDispatchError(decodeError.schema,
+                               TransportDispatchErrorKind::InvalidEnvelope, error);
+    }
+    return false;
+}
+
+bool validateKnownTypedErrorForUnmatched(const TransportMessage &message,
+                                         const QString &schemaVersion,
+                                         TransportDispatchError *error)
+{
+    const auto iterator = std::find_if(transportTypedErrors().cbegin(),
+                                       transportTypedErrors().cend(),
+        [&schemaVersion](const TransportTypedErrorMetadata &metadata) {
+            return metadata.schema_version == schemaVersion;
+        });
+    if (iterator == transportTypedErrors().cend()) {
+        setDispatchError(error, TransportDispatchErrorKind::ValidatorUnavailable,
+                         QStringLiteral("generated typed-error metadata is unavailable"));
+        return false;
+    }
+    TransportJsonValue validationValue = message.value;
+    auto *validationObject = std::get_if<TransportJsonValue::Object>(&validationValue.value);
+    if (!validationObject) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidEnvelope,
+                         QStringLiteral("transport response envelope is invalid"));
+        return false;
+    }
+    (*validationObject)[QStringLiteral("id")].value = QStringLiteral("unmatched");
+    TransportSchemaError schemaError;
+    if (!validateTransportDefinition(iterator->response_definition, validationValue, &schemaError)) {
+        return mapSchemaDispatchError(schemaError,
+                                      TransportDispatchErrorKind::InvalidKnownMessage, error);
+    }
+    return true;
+}
+
+bool validateTypedErrorCorrelation(const TransportMethodMetadata &metadata,
+                                   const TransportPendingRequest &pending,
+                                   const TransportMessage &message,
+                                   TransportDispatchError *error)
+{
+    if (metadata.typed_error_stage.isEmpty()
+        && !pending.typed_error_request_identity.has_value()) return true;
+    const auto *root = asObject(message.value);
+    const auto errorIt = root ? root->constFind(QStringLiteral("error"))
+                              : TransportJsonValue::Object::const_iterator{};
+    const auto *errorObject = root && errorIt != root->constEnd() ? asObject(errorIt.value()) : nullptr;
+    const auto dataIt = errorObject ? errorObject->constFind(QStringLiteral("data"))
+                                    : TransportJsonValue::Object::const_iterator{};
+    const auto *dataObject = errorObject && dataIt != errorObject->constEnd()
+        ? asObject(dataIt.value()) : nullptr;
+    const QString *stage = dataObject ? stringField(*dataObject, QStringLiteral("stage")) : nullptr;
+    const QString *identity = dataObject
+        ? stringField(*dataObject, QStringLiteral("request_identity")) : nullptr;
+    if (!dataObject || metadata.typed_error_stage.isEmpty()
+        || !pending.typed_error_request_identity.has_value()
+        || !stage || *stage != metadata.typed_error_stage
+        || !identity || *identity != *pending.typed_error_request_identity) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidKnownMessage,
+                         QStringLiteral("typed transport error correlation is invalid"));
+        return false;
+    }
+    return true;
+}
 } // namespace
+
+const QList<TransportMethodMetadata> &transportMethods()
+{
+    static const QList<TransportMethodMetadata> methods{
+        {QStringLiteral("event"), TransportMethodKind::Notification, QStringLiteral("timelineEvent"), QString{}, QString{}, QString{}, {}, QString{}, QString{}},
+        {QStringLiteral("initialize"), TransportMethodKind::Request, QStringLiteral("initializeParams"), QStringLiteral("initializeRequest"), QStringLiteral("initializeSuccessResponse"), QStringLiteral("initializeResult"), {QStringLiteral("initializeIncompatibleErrorResponse")}, QString{}, QString{}},
+        {QStringLiteral("initialized"), TransportMethodKind::Notification, QString{}, QString{}, QString{}, QString{}, {}, QString{}, QStringLiteral("initializedNotification")},
+        {QStringLiteral("mutation/acknowledgement/consume"), TransportMethodKind::Request, QStringLiteral("durableMutationConsumeParams"), QStringLiteral("durableMutationConsumeRequest"), QStringLiteral("durableMutationConsumeSuccessResponse"), QStringLiteral("durableMutationConsumeResult"), {}, QString{}, QString{}},
+        {QStringLiteral("runtime/heartbeat"), TransportMethodKind::Request, QStringLiteral("runtimeHeartbeatParams"), QStringLiteral("runtimeHeartbeatRequest"), QStringLiteral("runtimeHeartbeatSuccessResponse"), QStringLiteral("runtimeHeartbeatResult"), {}, QString{}, QString{}},
+        {QStringLiteral("session/mutation-acknowledgements"), TransportMethodKind::Request, QStringLiteral("durableMutationListParams"), QStringLiteral("durableMutationListRequest"), QStringLiteral("durableMutationListSuccessResponse"), QStringLiteral("durableMutationPage"), {}, QString{}, QString{}},
+        {QStringLiteral("timeline/snapshot"), TransportMethodKind::Request, QStringLiteral("timelineSnapshotParams"), QStringLiteral("timelineSnapshotRequest"), QStringLiteral("timelineSnapshotSuccessResponse"), QStringLiteral("timelineSessionSnapshotPage"), {}, QString{}, QString{}},
+        {QStringLiteral("timeline/subscribe"), TransportMethodKind::Request, QStringLiteral("timelineSubscribeParams"), QStringLiteral("timelineSubscribeRequest"), QStringLiteral("timelineSubscribeSuccessResponse"), QStringLiteral("timelineSubscribeResult"), {QStringLiteral("timelineSubscriptionRequestErrorResponse")}, QStringLiteral("subscribe"), QString{}},
+        {QStringLiteral("timeline/subscription-activate"), TransportMethodKind::Request, QStringLiteral("timelineActivateParams"), QStringLiteral("timelineSubscriptionActivateRequest"), QStringLiteral("timelineSubscriptionActivateSuccessResponse"), QStringLiteral("timelineActivateResult"), {QStringLiteral("timelineSubscriptionRequestErrorResponse")}, QStringLiteral("activate"), QString{}},
+        {QStringLiteral("timeline/subscription-event"), TransportMethodKind::Notification, QStringLiteral("timelineSubscriptionEvent"), QString{}, QString{}, QString{}, {}, QString{}, QStringLiteral("timelineSubscriptionEventNotification")},
+        {QStringLiteral("timeline/subscription-failure"), TransportMethodKind::Notification, QStringLiteral("timelineSubscriptionLiveFailure"), QString{}, QString{}, QString{}, {}, QString{}, QStringLiteral("timelineSubscriptionFailureNotification")},
+        {QStringLiteral("timeline/subscription-snapshot"), TransportMethodKind::Request, QStringLiteral("timelineSubscriptionSnapshotParams"), QStringLiteral("timelineSubscriptionSnapshotRequest"), QStringLiteral("timelineSubscriptionSnapshotSuccessResponse"), QStringLiteral("timelineSessionSnapshotPage"), {QStringLiteral("timelineSubscriptionRequestErrorResponse")}, QStringLiteral("snapshot"), QString{}},
+        {QStringLiteral("timeline/subscription-sync"), TransportMethodKind::Request, QStringLiteral("timelineSubscriptionSyncParams"), QStringLiteral("timelineSubscriptionSyncRequest"), QStringLiteral("timelineSubscriptionSyncSuccessResponse"), QStringLiteral("timelineSyncPage"), {QStringLiteral("timelineSubscriptionRequestErrorResponse")}, QStringLiteral("sync"), QString{}},
+        {QStringLiteral("timeline/sync"), TransportMethodKind::Request, QStringLiteral("timelineSyncParams"), QStringLiteral("timelineSyncRequest"), QStringLiteral("timelineSyncSuccessResponse"), QStringLiteral("timelineSyncPage"), {QStringLiteral("timelineSyncRetentionGapErrorResponse")}, QString{}, QString{}}
+    };
+    return methods;
+}
+
+const QList<TransportTypedErrorMetadata> &transportTypedErrors()
+{
+    static const QList<TransportTypedErrorMetadata> errors{
+        {QStringLiteral("initialize"), QStringLiteral("initialize-error/0.1"), QStringLiteral("initializeIncompatibleErrorResponse")},
+        {QStringLiteral("timeline/subscribe"), QStringLiteral("timeline-subscription-failure/0.1"), QStringLiteral("timelineSubscriptionRequestErrorResponse")},
+        {QStringLiteral("timeline/subscription-activate"), QStringLiteral("timeline-subscription-failure/0.1"), QStringLiteral("timelineSubscriptionRequestErrorResponse")},
+        {QStringLiteral("timeline/subscription-snapshot"), QStringLiteral("timeline-subscription-failure/0.1"), QStringLiteral("timelineSubscriptionRequestErrorResponse")},
+        {QStringLiteral("timeline/subscription-sync"), QStringLiteral("timeline-subscription-failure/0.1"), QStringLiteral("timelineSubscriptionRequestErrorResponse")},
+        {QStringLiteral("timeline/sync"), QStringLiteral("timeline-retention-gap/0.1"), QStringLiteral("timelineSyncRetentionGapErrorResponse")}
+    };
+    return errors;
+}
+
+const TransportMethodMetadata *transportMethodMetadata(const QString &method)
+{
+    const auto &methods = transportMethods();
+    const auto iterator = std::lower_bound(methods.cbegin(), methods.cend(), method,
+        [](const TransportMethodMetadata &metadata, const QString &candidate) {
+            return metadata.method < candidate;
+        });
+    return iterator != methods.cend() && iterator->method == method ? &*iterator : nullptr;
+}
+
+const TransportTypedErrorMetadata *transportTypedErrorMetadata(
+    const QString &method, const QString &schemaVersion)
+{
+    const auto &errors = transportTypedErrors();
+    const auto candidate = std::pair<QString, QString>{method, schemaVersion};
+    const auto iterator = std::lower_bound(errors.cbegin(), errors.cend(), candidate,
+        [](const TransportTypedErrorMetadata &metadata,
+           const std::pair<QString, QString> &value) {
+            return std::pair<QString, QString>{metadata.method, metadata.schema_version} < value;
+        });
+    return iterator != errors.cend()
+            && iterator->method == method && iterator->schema_version == schemaVersion
+        ? &*iterator : nullptr;
+}
+
+bool parseTransportMessageRaw(const QByteArray &raw, TransportMessage *output,
+                              TransportDecodeError *error)
+{
+    if (!output) {
+        setDecodeSchemaError(error, TransportSchemaError::ValidatorUnavailable,
+                             QStringLiteral("transport message output is required"));
+        return false;
+    }
+    TransportParseError parseError;
+    if (!transport_runtime::parseTransportJsonRawDetailed(raw, &output->value, &parseError)) {
+        setDecodeParseError(error, parseError);
+        return false;
+    }
+    return true;
+}
+
+bool validateTransportDefinition(const QString &name, const TransportJsonValue &value,
+                                 TransportSchemaError *error)
+{
+    if (!transportDefinitionNames().contains(name)) {
+        if (error) *error = TransportSchemaError::UnknownDefinition;
+        return false;
+    }
+    QString detail;
+    const auto *runtime = transportRuntime(&detail);
+    if (!runtime) {
+        if (error) *error = TransportSchemaError::ValidatorUnavailable;
+        return false;
+    }
+    if (!runtime->validateDefinition(name, value, &detail)) {
+        if (error) *error = TransportSchemaError::InvalidValue;
+        return false;
+    }
+    return true;
+}
+
+bool validateTransportMessage(const TransportMessage &message, TransportSchemaError *error)
+{
+    QString detail;
+    const auto *runtime = transportRuntime(&detail);
+    if (!runtime) {
+        if (error) *error = TransportSchemaError::ValidatorUnavailable;
+        return false;
+    }
+    if (!runtime->validateRoot(message.value, &detail)) {
+        if (error) *error = TransportSchemaError::InvalidValue;
+        return false;
+    }
+    return true;
+}
+
+bool decodeTransportDefinitionRaw(const QString &name, const QByteArray &raw,
+                                  TransportJsonValue *output, TransportDecodeError *error)
+{
+    TransportMessage message;
+    if (!parseTransportMessageRaw(raw, &message, error)) return false;
+    TransportSchemaError schemaError;
+    if (!validateTransportDefinition(name, message.value, &schemaError)) {
+        setDecodeSchemaError(error, schemaError,
+            schemaError == TransportSchemaError::UnknownDefinition
+                ? QStringLiteral("unknown generated transport definition")
+                : schemaError == TransportSchemaError::ValidatorUnavailable
+                    ? QStringLiteral("generated transport validator is unavailable")
+                    : QStringLiteral("value does not match generated transport definition"));
+        return false;
+    }
+    if (output) *output = std::move(message.value);
+    return true;
+}
+
+bool decodeTransportMessageRaw(const QByteArray &raw, TransportMessage *output,
+                               TransportDecodeError *error)
+{
+    TransportMessage message;
+    if (!parseTransportMessageRaw(raw, &message, error)) return false;
+    TransportSchemaError schemaError;
+    if (!validateTransportMessage(message, &schemaError)) {
+        setDecodeSchemaError(error, schemaError,
+                             QStringLiteral("message does not match generated transport schema"));
+        return false;
+    }
+    if (output) *output = std::move(message);
+    return true;
+}
+
+bool validateTransportGenericMessage(const TransportMessage &message,
+                                     TransportDispatchError *error)
+{
+    QString detail;
+    const auto *runtime = genericTransportRuntime(&detail);
+    if (!runtime) {
+        setDispatchError(error, TransportDispatchErrorKind::ValidatorUnavailable,
+                         QStringLiteral("generated generic transport validator is unavailable"));
+        return false;
+    }
+    if (!runtime->validateRoot(message.value, &detail)) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidEnvelope,
+                         QStringLiteral("invalid generic transport envelope"));
+        return false;
+    }
+    return true;
+}
+
+bool decodeTransportRequestOrNotificationRaw(const QByteArray &raw,
+                                             TransportRequestOrNotification *output,
+                                             TransportDispatchError *error)
+{
+    TransportMessage message;
+    return parseForDispatch(raw, &message, error)
+        && decodeTransportRequestOrNotification(message, output, error);
+}
+
+bool decodeTransportRequestOrNotification(const TransportMessage &message,
+                                           TransportRequestOrNotification *output,
+                                           TransportDispatchError *error)
+{
+    if (!output) {
+        setDispatchError(error, TransportDispatchErrorKind::ValidatorUnavailable,
+                         QStringLiteral("transport dispatch output is required"));
+        return false;
+    }
+    if (!validateTransportGenericMessage(message, error)) return false;
+    const auto *object = asObject(message.value);
+    const QString *method = object ? stringField(*object, QStringLiteral("method")) : nullptr;
+    if (!object || !method) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidEnvelope,
+                         QStringLiteral("transport request or notification has no method"));
+        return false;
+    }
+    const bool request = object->contains(QStringLiteral("id"));
+    const auto *metadata = transportMethodMetadata(*method);
+    if (!metadata) {
+        output->kind = request ? TransportRequestOrNotificationKind::UnknownRequest
+                               : TransportRequestOrNotificationKind::UnknownNotification;
+        output->message = message;
+        output->metadata = nullptr;
+        return true;
+    }
+    if ((metadata->kind == TransportMethodKind::Request) != request) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidEnvelope,
+                         QStringLiteral("known transport method has the wrong envelope kind"));
+        return false;
+    }
+    TransportSchemaError schemaError;
+    const QString definition = request ? metadata->request_definition
+                                       : metadata->notification_definition;
+    const bool valid = definition.isEmpty()
+        ? validateTransportMessage(message, &schemaError)
+        : validateTransportDefinition(definition, message.value, &schemaError);
+    if (!valid) {
+        return mapSchemaDispatchError(schemaError,
+                                      TransportDispatchErrorKind::InvalidKnownMessage, error);
+    }
+    output->kind = TransportRequestOrNotificationKind::Known;
+    output->message = message;
+    output->metadata = metadata;
+    return true;
+}
+
+bool decodeTransportResponseRaw(const std::optional<TransportPendingRequest> &pending,
+                                const QByteArray &raw, TransportResponse *output,
+                                TransportDispatchError *error)
+{
+    TransportMessage message;
+    return parseForDispatch(raw, &message, error)
+        && decodeTransportResponse(pending, message, output, error);
+}
+
+bool decodeTransportResponse(const std::optional<TransportPendingRequest> &pending,
+                             const TransportMessage &message,
+                             TransportResponse *output,
+                             TransportDispatchError *error)
+{
+    if (!output) {
+        setDispatchError(error, TransportDispatchErrorKind::ValidatorUnavailable,
+                         QStringLiteral("transport response output is required"));
+        return false;
+    }
+    if (!validateTransportGenericMessage(message, error)) return false;
+    const auto *object = asObject(message.value);
+    if (!object || object->contains(QStringLiteral("method"))) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidEnvelope,
+                         QStringLiteral("transport response envelope is invalid"));
+        return false;
+    }
+    const QString *responseId = stringField(*object, QStringLiteral("id"));
+    const QString *typedSchema = transportErrorSchemaVersion(message);
+    const bool typedKnown = typedSchema && typedErrorSchemaVersions().contains(*typedSchema);
+    if (pending.has_value() && (!responseId || *responseId != pending->id)) {
+        if (typedKnown && !validateKnownTypedErrorForUnmatched(message, *typedSchema, error)) {
+            return false;
+        }
+        output->kind = TransportResponseKind::Unmatched;
+        output->message = message;
+        return true;
+    }
+    const TransportMethodMetadata *metadata = pending.has_value()
+        ? transportMethodMetadata(pending->method) : nullptr;
+    if (metadata && metadata->kind != TransportMethodKind::Request) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidKnownMessage,
+                         QStringLiteral("pending transport method is not a request"));
+        return false;
+    }
+    if (metadata) {
+        TransportSchemaError schemaError;
+        if (object->contains(QStringLiteral("result"))) {
+            if (metadata->success_response_definition.isEmpty()) {
+                setDispatchError(error, TransportDispatchErrorKind::ValidatorUnavailable,
+                                 QStringLiteral("generated success metadata is unavailable"));
+                return false;
+            }
+            if (!validateTransportDefinition(metadata->success_response_definition,
+                                             message.value, &schemaError)) {
+                return mapSchemaDispatchError(schemaError,
+                    TransportDispatchErrorKind::InvalidKnownMessage, error);
+            }
+            output->kind = TransportResponseKind::KnownSuccess;
+            output->message = message;
+            output->method_metadata = metadata;
+            return true;
+        }
+        if (typedSchema) {
+            const auto *typedMetadata = transportTypedErrorMetadata(metadata->method, *typedSchema);
+            if (typedMetadata) {
+                if (!validateTransportDefinition(typedMetadata->response_definition,
+                                                 message.value, &schemaError)) {
+                    return mapSchemaDispatchError(schemaError,
+                        TransportDispatchErrorKind::InvalidKnownMessage, error);
+                }
+                if (!validateTypedErrorCorrelation(*metadata, *pending, message, error)) {
+                    return false;
+                }
+                output->kind = TransportResponseKind::KnownTypedError;
+                output->message = message;
+                output->typed_error_metadata = typedMetadata;
+                return true;
+            }
+            if (typedKnown) {
+                setDispatchError(error, TransportDispatchErrorKind::InvalidKnownMessage,
+                                 QStringLiteral("known typed error belongs to another method"));
+                return false;
+            }
+        }
+        output->kind = TransportResponseKind::GenericError;
+        output->message = message;
+        output->method_metadata = metadata;
+        return true;
+    }
+    if (pending.has_value()) {
+        if (typedKnown) {
+            setDispatchError(error, TransportDispatchErrorKind::InvalidKnownMessage,
+                             QStringLiteral("known typed error cannot use unknown-method fallback"));
+            return false;
+        }
+        output->kind = TransportResponseKind::UnknownMethod;
+        output->message = message;
+        return true;
+    }
+    if (typedKnown && !validateKnownTypedErrorForUnmatched(message, *typedSchema, error)) {
+        return false;
+    }
+    output->kind = TransportResponseKind::Unmatched;
+    output->message = message;
+    return true;
+}
 
 bool validateTransportDefinitionRaw(const QString &name, const QByteArray &raw,
                                     TransportJsonValue *output, QString *error)
 {
-    const auto *runtime = transportRuntime(error);
-    return runtime && runtime->validateDefinitionRaw(name, raw, output, error);
+    TransportDecodeError structured;
+    const bool valid = decodeTransportDefinitionRaw(name, raw, output, &structured);
+    if (!valid && error) *error = structured.message;
+    return valid;
 }
 
 bool validateTransportMessageRaw(const QByteArray &raw, TransportMessage *output,
                                  QString *error)
 {
-    const auto *runtime = transportRuntime(error);
-    if (!runtime) return false;
-    TransportJsonValue value;
-    if (!runtime->validateRootRaw(raw, &value, error)) return false;
-    if (output) output->value = std::move(value);
-    return true;
+    TransportDecodeError structured;
+    const bool valid = decodeTransportMessageRaw(raw, output, &structured);
+    if (!valid && error) *error = structured.message;
+    return valid;
 }
 
 QByteArray canonicalTransportJson(const TransportJsonValue &value)

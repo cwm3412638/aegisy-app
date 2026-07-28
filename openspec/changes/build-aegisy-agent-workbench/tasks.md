@@ -192,6 +192,17 @@
     and closes later queued dispatch through one linearized fault gate. Deterministic
     generic/per-definition injection and real saturated-stdio fixtures cover these
     boundaries.
+  - Generated Qt/C++ dispatch foundation is complete. The generated API exposes
+    parsed-message request/notification and response overloads, so a production
+    consumer can carry one lossless `TransportMessage` from ingress through generic,
+    known-message, and pending-response validation without reparsing bytes. Raw
+    convenience overloads parse once and delegate to the parsed overloads. Known
+    typed errors with a wrong or null ID still validate their complete typed payload
+    against a validation-only clone with a legal placeholder ID, then remain
+    `Unmatched`; malformed typed payloads remain `InvalidKnownMessage` and cannot
+    enter a generic fallback. `AegisyAapTransport` compiles the generated/runtime
+    implementation once with warnings denied and links the production application
+    plus Qt consumers and focused tests to that single library.
   - Keep `3.10` unchecked: the production Qt consumer still uses its reviewed
     hand-written/QJsonDocument ingress and pending-response paths, and clean Windows
     Unicode-checkout execution is absent. The Rust migration grants no capability,

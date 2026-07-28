@@ -376,6 +376,8 @@ for (const [index, condition] of schema.allOf.entries()) {
 if (consumedRootConditionIndexes.size !== schema.allOf.length) {
   throw new Error("transport root allOf dispatch coverage is incomplete");
 }
+const genericEnvelopeSchema = structuredClone(schema);
+delete genericEnvelopeSchema.allOf;
 
 const pascal = (value) => value
   .replace(/[^A-Za-z0-9]+(.)?/g, (_match, next) => next ? next.toUpperCase() : "")
@@ -991,6 +993,18 @@ const renderRust = () => {
     "    }",
     "}",
     "",
+    "fn validate_known_typed_error_for_unmatched(message: &TransportMessage, schema_version: &str) -> Result<(), TransportDispatchError> {",
+    "    let error_metadata = TRANSPORT_TYPED_ERRORS.iter()",
+    "        .find(|metadata| metadata.schema_version == schema_version)",
+    "        .ok_or(TransportDispatchError::ValidatorUnavailable)?;",
+    "    let mut validation_value = message.0.clone();",
+    "    validation_value.as_object_mut()",
+    "        .ok_or(TransportDispatchError::InvalidEnvelope)?",
+    "        .insert(\"id\".to_owned(), Value::String(\"unmatched\".to_owned()));",
+    "    validate_transport_definition(error_metadata.response_definition, &validation_value)",
+    "        .map_err(|error| transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage))",
+    "}",
+    "",
     "fn validate_typed_error_correlation(metadata: &TransportMethodMetadata, pending: TransportPendingRequest<'_>, value: &Value) -> Result<(), TransportDispatchError> {",
     "    if metadata.typed_error_stage.is_none() && pending.typed_error_request_identity.is_none() { return Ok(()); }",
     "    let data = value.as_object()",
@@ -1084,11 +1098,7 @@ const renderRust = () => {
     "    if pending.is_some_and(|context| response_id != Some(context.id)) {",
     "        if let Some(schema_version) = transport_error_schema_version(&message.0) {",
     "            if transport_typed_error_schema_version_known(schema_version) {",
-    "                let error_metadata = TRANSPORT_TYPED_ERRORS.iter()",
-    "                    .find(|metadata| metadata.schema_version == schema_version)",
-    "                    .ok_or(TransportDispatchError::ValidatorUnavailable)?;",
-    "                validate_transport_definition(error_metadata.response_definition, &message.0)",
-    "                    .map_err(|error| transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage))?;",
+    "                validate_known_typed_error_for_unmatched(&message, schema_version)?;",
     "            }",
     "        }",
     "        return Ok(TransportResponse::Unmatched(message));",
@@ -1126,11 +1136,7 @@ const renderRust = () => {
     "        None => {",
     "            if let Some(schema_version) = typed_schema_version {",
     "                if transport_typed_error_schema_version_known(schema_version) {",
-    "                    let error_metadata = TRANSPORT_TYPED_ERRORS.iter()",
-    "                        .find(|metadata| metadata.schema_version == schema_version)",
-    "                        .ok_or(TransportDispatchError::ValidatorUnavailable)?;",
-    "                    validate_transport_definition(error_metadata.response_definition, &message.0)",
-    "                        .map_err(|error| transport_dispatch_schema_error(error, TransportDispatchError::InvalidKnownMessage))?;",
+    "                    validate_known_typed_error_for_unmatched(&message, schema_version)?;",
     "                }",
     "            }",
     "            Ok(TransportResponse::Unmatched(message))",
@@ -1249,6 +1255,7 @@ const renderCppHeader = () => {
     "#include <QList>",
     "#include <QMap>",
     "#include <QString>",
+    "#include <QStringList>",
     "#include <QVariant>",
     "#include <optional>",
     "#include <variant>",
@@ -1259,6 +1266,12 @@ const renderCppHeader = () => {
     "    using Array = QList<TransportJsonValue>;",
     "    using Object = QMap<QString, TransportJsonValue>;",
     "    std::variant<std::monostate, bool, QString, TransportJsonNumber, Array, Object> value;",
+    "};",
+    "enum class TransportParseErrorKind { Frame, Utf8, Syntax, ImplementationLimit };",
+    "struct TransportParseError {",
+    "    TransportParseErrorKind kind = TransportParseErrorKind::Syntax;",
+    "    qsizetype offset = 0;",
+    "    QString message;",
     "};",
     "",
   ];
@@ -1281,6 +1294,72 @@ const renderCppHeader = () => {
   }
   out.push(
     "struct TransportMessage { TransportJsonValue value; };",
+    "enum class TransportMethodKind { Request, Notification };",
+    "struct TransportMethodMetadata {",
+    "    QString method;",
+    "    TransportMethodKind kind = TransportMethodKind::Request;",
+    "    QString params_definition;",
+    "    QString request_definition;",
+    "    QString success_response_definition;",
+    "    QString success_result_definition;",
+    "    QStringList error_response_definitions;",
+    "    QString typed_error_stage;",
+    "    QString notification_definition;",
+    "};",
+    "struct TransportTypedErrorMetadata {",
+    "    QString method;",
+    "    QString schema_version;",
+    "    QString response_definition;",
+    "};",
+    "const QList<TransportMethodMetadata> &transportMethods();",
+    "const QList<TransportTypedErrorMetadata> &transportTypedErrors();",
+    "const TransportMethodMetadata *transportMethodMetadata(const QString &method);",
+    "const TransportTypedErrorMetadata *transportTypedErrorMetadata(const QString &method, const QString &schemaVersion);",
+    "",
+    "enum class TransportSchemaError { UnknownDefinition, InvalidValue, ValidatorUnavailable };",
+    "struct TransportDecodeError {",
+    "    enum class Kind { Parse, Schema };",
+    "    Kind kind = Kind::Parse;",
+    "    TransportParseError parse;",
+    "    TransportSchemaError schema = TransportSchemaError::InvalidValue;",
+    "    QString message;",
+    "};",
+    "enum class TransportDispatchErrorKind { Parse, InvalidEnvelope, InvalidKnownMessage, ValidatorUnavailable };",
+    "struct TransportDispatchError {",
+    "    TransportDispatchErrorKind kind = TransportDispatchErrorKind::InvalidEnvelope;",
+    "    TransportParseError parse;",
+    "    QString message;",
+    "};",
+    "enum class TransportRequestOrNotificationKind { Known, UnknownRequest, UnknownNotification };",
+    "struct TransportRequestOrNotification {",
+    "    TransportRequestOrNotificationKind kind = TransportRequestOrNotificationKind::UnknownNotification;",
+    "    TransportMessage message;",
+    "    const TransportMethodMetadata *metadata = nullptr;",
+    "};",
+    "struct TransportPendingRequest {",
+    "    QString id;",
+    "    QString method;",
+    "    std::optional<QString> typed_error_request_identity;",
+    "};",
+    "enum class TransportResponseKind { KnownSuccess, KnownTypedError, GenericError, UnknownMethod, Unmatched };",
+    "struct TransportResponse {",
+    "    TransportResponseKind kind = TransportResponseKind::Unmatched;",
+    "    TransportMessage message;",
+    "    const TransportMethodMetadata *method_metadata = nullptr;",
+    "    const TransportTypedErrorMetadata *typed_error_metadata = nullptr;",
+    "};",
+    "",
+    "bool decodeTransportDefinitionRaw(const QString &name, const QByteArray &raw, TransportJsonValue *output, TransportDecodeError *error = nullptr);",
+    "bool decodeTransportMessageRaw(const QByteArray &raw, TransportMessage *output, TransportDecodeError *error = nullptr);",
+    "bool parseTransportMessageRaw(const QByteArray &raw, TransportMessage *output, TransportDecodeError *error = nullptr);",
+    "bool validateTransportDefinition(const QString &name, const TransportJsonValue &value, TransportSchemaError *error = nullptr);",
+    "bool validateTransportMessage(const TransportMessage &message, TransportSchemaError *error = nullptr);",
+    "bool validateTransportGenericMessage(const TransportMessage &message, TransportDispatchError *error = nullptr);",
+    "bool decodeTransportRequestOrNotification(const TransportMessage &message, TransportRequestOrNotification *output, TransportDispatchError *error = nullptr);",
+    "bool decodeTransportRequestOrNotificationRaw(const QByteArray &raw, TransportRequestOrNotification *output, TransportDispatchError *error = nullptr);",
+    "bool decodeTransportResponse(const std::optional<TransportPendingRequest> &pending, const TransportMessage &message, TransportResponse *output, TransportDispatchError *error = nullptr);",
+    "bool decodeTransportResponseRaw(const std::optional<TransportPendingRequest> &pending, const QByteArray &raw, TransportResponse *output, TransportDispatchError *error = nullptr);",
+    "",
     "bool validateTransportDefinitionRaw(const QString &name, const QByteArray &raw, TransportJsonValue *output = nullptr, QString *error = nullptr);",
     "bool validateTransportMessageRaw(const QByteArray &raw, TransportMessage *output = nullptr, QString *error = nullptr);",
     "QByteArray canonicalTransportJson(const TransportJsonValue &value);",
@@ -1291,10 +1370,14 @@ const renderCppHeader = () => {
   return `${out.join("\n").replace(/\n+$/u, "")}\n`;
 };
 
+const cppQString = (value) => value === null ? "QString{}" : `QStringLiteral(${JSON.stringify(value)})`;
+const cppStringList = (values) => `{${values.map((value) => cppQString(value)).join(", ")}}`;
+
 const renderCppSource = () => `// @generated by agent-runtime/aap-schema/scripts/generate-transport-types.mjs; do not edit.
 #include "aap_transport_types_generated.h"
 #include "aap_transport_runtime.h"
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 
@@ -1310,24 +1393,492 @@ const transport_runtime::TransportSchemaRuntime *transportRuntime(QString *error
     if (!runtime && error) *error = initializationError;
     return runtime.get();
 }
+
+const transport_runtime::TransportSchemaRuntime *genericTransportRuntime(QString *error)
+{
+    static QString initializationError;
+    static const std::unique_ptr<transport_runtime::TransportSchemaRuntime> runtime =
+        transport_runtime::TransportSchemaRuntime::fromRawSchema(
+            QByteArrayLiteral(R"AAPSCHEMA(${JSON.stringify(genericEnvelopeSchema)})AAPSCHEMA"),
+            &initializationError);
+    if (!runtime && error) *error = initializationError;
+    return runtime.get();
+}
+
+const QStringList &transportDefinitionNames()
+{
+    static const QStringList names{${Object.keys(definitions).sort(compare).map((name) => cppQString(name)).join(", ")}};
+    return names;
+}
+
+const QStringList &typedErrorSchemaVersions()
+{
+    static const QStringList versions{${typedErrorSchemaVersions.map((version) => cppQString(version)).join(", ")}};
+    return versions;
+}
+
+const TransportJsonValue::Object *asObject(const TransportJsonValue &value)
+{
+    return std::get_if<TransportJsonValue::Object>(&value.value);
+}
+
+const QString *stringField(const TransportJsonValue::Object &object, const QString &key)
+{
+    const auto iterator = object.constFind(key);
+    return iterator == object.constEnd() ? nullptr : std::get_if<QString>(&iterator->value);
+}
+
+const QString *transportErrorSchemaVersion(const TransportMessage &message)
+{
+    const auto *root = asObject(message.value);
+    if (!root) return nullptr;
+    const auto error = root->constFind(QStringLiteral("error"));
+    const auto *errorObject = error == root->constEnd() ? nullptr : asObject(error.value());
+    if (!errorObject) return nullptr;
+    const auto data = errorObject->constFind(QStringLiteral("data"));
+    const auto *dataObject = data == errorObject->constEnd() ? nullptr : asObject(data.value());
+    return dataObject ? stringField(*dataObject, QStringLiteral("schema_version")) : nullptr;
+}
+
+void setDecodeParseError(TransportDecodeError *error, const TransportParseError &parse)
+{
+    if (!error) return;
+    error->kind = TransportDecodeError::Kind::Parse;
+    error->parse = parse;
+    error->message = parse.message;
+}
+
+void setDecodeSchemaError(TransportDecodeError *error, TransportSchemaError schema,
+                          const QString &message)
+{
+    if (!error) return;
+    error->kind = TransportDecodeError::Kind::Schema;
+    error->schema = schema;
+    error->message = message;
+}
+
+void setDispatchError(TransportDispatchError *error, TransportDispatchErrorKind kind,
+                      const QString &message)
+{
+    if (!error) return;
+    error->kind = kind;
+    error->message = message;
+}
+
+bool mapSchemaDispatchError(TransportSchemaError schema,
+                            TransportDispatchErrorKind invalid,
+                            TransportDispatchError *error)
+{
+    const bool unavailable = schema == TransportSchemaError::UnknownDefinition
+        || schema == TransportSchemaError::ValidatorUnavailable;
+    setDispatchError(error,
+                     unavailable ? TransportDispatchErrorKind::ValidatorUnavailable : invalid,
+                     unavailable ? QStringLiteral("generated transport validator is unavailable")
+                                 : QStringLiteral("transport message does not match its generated schema"));
+    return false;
+}
+
+bool parseForDispatch(const QByteArray &raw, TransportMessage *message,
+                      TransportDispatchError *error)
+{
+    TransportDecodeError decodeError;
+    if (parseTransportMessageRaw(raw, message, &decodeError)) return true;
+    if (decodeError.kind == TransportDecodeError::Kind::Parse) {
+        if (error) {
+            error->kind = TransportDispatchErrorKind::Parse;
+            error->parse = decodeError.parse;
+            error->message = decodeError.message;
+        }
+    } else {
+        mapSchemaDispatchError(decodeError.schema,
+                               TransportDispatchErrorKind::InvalidEnvelope, error);
+    }
+    return false;
+}
+
+bool validateKnownTypedErrorForUnmatched(const TransportMessage &message,
+                                         const QString &schemaVersion,
+                                         TransportDispatchError *error)
+{
+    const auto iterator = std::find_if(transportTypedErrors().cbegin(),
+                                       transportTypedErrors().cend(),
+        [&schemaVersion](const TransportTypedErrorMetadata &metadata) {
+            return metadata.schema_version == schemaVersion;
+        });
+    if (iterator == transportTypedErrors().cend()) {
+        setDispatchError(error, TransportDispatchErrorKind::ValidatorUnavailable,
+                         QStringLiteral("generated typed-error metadata is unavailable"));
+        return false;
+    }
+    TransportJsonValue validationValue = message.value;
+    auto *validationObject = std::get_if<TransportJsonValue::Object>(&validationValue.value);
+    if (!validationObject) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidEnvelope,
+                         QStringLiteral("transport response envelope is invalid"));
+        return false;
+    }
+    (*validationObject)[QStringLiteral("id")].value = QStringLiteral("unmatched");
+    TransportSchemaError schemaError;
+    if (!validateTransportDefinition(iterator->response_definition, validationValue, &schemaError)) {
+        return mapSchemaDispatchError(schemaError,
+                                      TransportDispatchErrorKind::InvalidKnownMessage, error);
+    }
+    return true;
+}
+
+bool validateTypedErrorCorrelation(const TransportMethodMetadata &metadata,
+                                   const TransportPendingRequest &pending,
+                                   const TransportMessage &message,
+                                   TransportDispatchError *error)
+{
+    if (metadata.typed_error_stage.isEmpty()
+        && !pending.typed_error_request_identity.has_value()) return true;
+    const auto *root = asObject(message.value);
+    const auto errorIt = root ? root->constFind(QStringLiteral("error"))
+                              : TransportJsonValue::Object::const_iterator{};
+    const auto *errorObject = root && errorIt != root->constEnd() ? asObject(errorIt.value()) : nullptr;
+    const auto dataIt = errorObject ? errorObject->constFind(QStringLiteral("data"))
+                                    : TransportJsonValue::Object::const_iterator{};
+    const auto *dataObject = errorObject && dataIt != errorObject->constEnd()
+        ? asObject(dataIt.value()) : nullptr;
+    const QString *stage = dataObject ? stringField(*dataObject, QStringLiteral("stage")) : nullptr;
+    const QString *identity = dataObject
+        ? stringField(*dataObject, QStringLiteral("request_identity")) : nullptr;
+    if (!dataObject || metadata.typed_error_stage.isEmpty()
+        || !pending.typed_error_request_identity.has_value()
+        || !stage || *stage != metadata.typed_error_stage
+        || !identity || *identity != *pending.typed_error_request_identity) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidKnownMessage,
+                         QStringLiteral("typed transport error correlation is invalid"));
+        return false;
+    }
+    return true;
+}
 } // namespace
+
+const QList<TransportMethodMetadata> &transportMethods()
+{
+    static const QList<TransportMethodMetadata> methods{
+${methodRegistry.methods.map((entry) => `        {${cppQString(entry.method)}, TransportMethodKind::${entry.kind === "request" ? "Request" : "Notification"}, ${cppQString(entry.params_definition)}, ${cppQString(entry.request_definition)}, ${cppQString(entry.success_response_definition)}, ${cppQString(entry.success_result_definition)}, ${cppStringList(entry.error_response_definitions)}, ${cppQString(entry.typed_error_stage)}, ${cppQString(entry.notification_definition)}}`).join(",\n")}
+    };
+    return methods;
+}
+
+const QList<TransportTypedErrorMetadata> &transportTypedErrors()
+{
+    static const QList<TransportTypedErrorMetadata> errors{
+${typedErrorMetadata.map((entry) => `        {${cppQString(entry.method)}, ${cppQString(entry.schema_version)}, ${cppQString(entry.response_definition)}}`).join(",\n")}
+    };
+    return errors;
+}
+
+const TransportMethodMetadata *transportMethodMetadata(const QString &method)
+{
+    const auto &methods = transportMethods();
+    const auto iterator = std::lower_bound(methods.cbegin(), methods.cend(), method,
+        [](const TransportMethodMetadata &metadata, const QString &candidate) {
+            return metadata.method < candidate;
+        });
+    return iterator != methods.cend() && iterator->method == method ? &*iterator : nullptr;
+}
+
+const TransportTypedErrorMetadata *transportTypedErrorMetadata(
+    const QString &method, const QString &schemaVersion)
+{
+    const auto &errors = transportTypedErrors();
+    const auto candidate = std::pair<QString, QString>{method, schemaVersion};
+    const auto iterator = std::lower_bound(errors.cbegin(), errors.cend(), candidate,
+        [](const TransportTypedErrorMetadata &metadata,
+           const std::pair<QString, QString> &value) {
+            return std::pair<QString, QString>{metadata.method, metadata.schema_version} < value;
+        });
+    return iterator != errors.cend()
+            && iterator->method == method && iterator->schema_version == schemaVersion
+        ? &*iterator : nullptr;
+}
+
+bool parseTransportMessageRaw(const QByteArray &raw, TransportMessage *output,
+                              TransportDecodeError *error)
+{
+    if (!output) {
+        setDecodeSchemaError(error, TransportSchemaError::ValidatorUnavailable,
+                             QStringLiteral("transport message output is required"));
+        return false;
+    }
+    TransportParseError parseError;
+    if (!transport_runtime::parseTransportJsonRawDetailed(raw, &output->value, &parseError)) {
+        setDecodeParseError(error, parseError);
+        return false;
+    }
+    return true;
+}
+
+bool validateTransportDefinition(const QString &name, const TransportJsonValue &value,
+                                 TransportSchemaError *error)
+{
+    if (!transportDefinitionNames().contains(name)) {
+        if (error) *error = TransportSchemaError::UnknownDefinition;
+        return false;
+    }
+    QString detail;
+    const auto *runtime = transportRuntime(&detail);
+    if (!runtime) {
+        if (error) *error = TransportSchemaError::ValidatorUnavailable;
+        return false;
+    }
+    if (!runtime->validateDefinition(name, value, &detail)) {
+        if (error) *error = TransportSchemaError::InvalidValue;
+        return false;
+    }
+    return true;
+}
+
+bool validateTransportMessage(const TransportMessage &message, TransportSchemaError *error)
+{
+    QString detail;
+    const auto *runtime = transportRuntime(&detail);
+    if (!runtime) {
+        if (error) *error = TransportSchemaError::ValidatorUnavailable;
+        return false;
+    }
+    if (!runtime->validateRoot(message.value, &detail)) {
+        if (error) *error = TransportSchemaError::InvalidValue;
+        return false;
+    }
+    return true;
+}
+
+bool decodeTransportDefinitionRaw(const QString &name, const QByteArray &raw,
+                                  TransportJsonValue *output, TransportDecodeError *error)
+{
+    TransportMessage message;
+    if (!parseTransportMessageRaw(raw, &message, error)) return false;
+    TransportSchemaError schemaError;
+    if (!validateTransportDefinition(name, message.value, &schemaError)) {
+        setDecodeSchemaError(error, schemaError,
+            schemaError == TransportSchemaError::UnknownDefinition
+                ? QStringLiteral("unknown generated transport definition")
+                : schemaError == TransportSchemaError::ValidatorUnavailable
+                    ? QStringLiteral("generated transport validator is unavailable")
+                    : QStringLiteral("value does not match generated transport definition"));
+        return false;
+    }
+    if (output) *output = std::move(message.value);
+    return true;
+}
+
+bool decodeTransportMessageRaw(const QByteArray &raw, TransportMessage *output,
+                               TransportDecodeError *error)
+{
+    TransportMessage message;
+    if (!parseTransportMessageRaw(raw, &message, error)) return false;
+    TransportSchemaError schemaError;
+    if (!validateTransportMessage(message, &schemaError)) {
+        setDecodeSchemaError(error, schemaError,
+                             QStringLiteral("message does not match generated transport schema"));
+        return false;
+    }
+    if (output) *output = std::move(message);
+    return true;
+}
+
+bool validateTransportGenericMessage(const TransportMessage &message,
+                                     TransportDispatchError *error)
+{
+    QString detail;
+    const auto *runtime = genericTransportRuntime(&detail);
+    if (!runtime) {
+        setDispatchError(error, TransportDispatchErrorKind::ValidatorUnavailable,
+                         QStringLiteral("generated generic transport validator is unavailable"));
+        return false;
+    }
+    if (!runtime->validateRoot(message.value, &detail)) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidEnvelope,
+                         QStringLiteral("invalid generic transport envelope"));
+        return false;
+    }
+    return true;
+}
+
+bool decodeTransportRequestOrNotificationRaw(const QByteArray &raw,
+                                             TransportRequestOrNotification *output,
+                                             TransportDispatchError *error)
+{
+    TransportMessage message;
+    return parseForDispatch(raw, &message, error)
+        && decodeTransportRequestOrNotification(message, output, error);
+}
+
+bool decodeTransportRequestOrNotification(const TransportMessage &message,
+                                           TransportRequestOrNotification *output,
+                                           TransportDispatchError *error)
+{
+    if (!output) {
+        setDispatchError(error, TransportDispatchErrorKind::ValidatorUnavailable,
+                         QStringLiteral("transport dispatch output is required"));
+        return false;
+    }
+    if (!validateTransportGenericMessage(message, error)) return false;
+    const auto *object = asObject(message.value);
+    const QString *method = object ? stringField(*object, QStringLiteral("method")) : nullptr;
+    if (!object || !method) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidEnvelope,
+                         QStringLiteral("transport request or notification has no method"));
+        return false;
+    }
+    const bool request = object->contains(QStringLiteral("id"));
+    const auto *metadata = transportMethodMetadata(*method);
+    if (!metadata) {
+        output->kind = request ? TransportRequestOrNotificationKind::UnknownRequest
+                               : TransportRequestOrNotificationKind::UnknownNotification;
+        output->message = message;
+        output->metadata = nullptr;
+        return true;
+    }
+    if ((metadata->kind == TransportMethodKind::Request) != request) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidEnvelope,
+                         QStringLiteral("known transport method has the wrong envelope kind"));
+        return false;
+    }
+    TransportSchemaError schemaError;
+    const QString definition = request ? metadata->request_definition
+                                       : metadata->notification_definition;
+    const bool valid = definition.isEmpty()
+        ? validateTransportMessage(message, &schemaError)
+        : validateTransportDefinition(definition, message.value, &schemaError);
+    if (!valid) {
+        return mapSchemaDispatchError(schemaError,
+                                      TransportDispatchErrorKind::InvalidKnownMessage, error);
+    }
+    output->kind = TransportRequestOrNotificationKind::Known;
+    output->message = message;
+    output->metadata = metadata;
+    return true;
+}
+
+bool decodeTransportResponseRaw(const std::optional<TransportPendingRequest> &pending,
+                                const QByteArray &raw, TransportResponse *output,
+                                TransportDispatchError *error)
+{
+    TransportMessage message;
+    return parseForDispatch(raw, &message, error)
+        && decodeTransportResponse(pending, message, output, error);
+}
+
+bool decodeTransportResponse(const std::optional<TransportPendingRequest> &pending,
+                             const TransportMessage &message,
+                             TransportResponse *output,
+                             TransportDispatchError *error)
+{
+    if (!output) {
+        setDispatchError(error, TransportDispatchErrorKind::ValidatorUnavailable,
+                         QStringLiteral("transport response output is required"));
+        return false;
+    }
+    if (!validateTransportGenericMessage(message, error)) return false;
+    const auto *object = asObject(message.value);
+    if (!object || object->contains(QStringLiteral("method"))) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidEnvelope,
+                         QStringLiteral("transport response envelope is invalid"));
+        return false;
+    }
+    const QString *responseId = stringField(*object, QStringLiteral("id"));
+    const QString *typedSchema = transportErrorSchemaVersion(message);
+    const bool typedKnown = typedSchema && typedErrorSchemaVersions().contains(*typedSchema);
+    if (pending.has_value() && (!responseId || *responseId != pending->id)) {
+        if (typedKnown && !validateKnownTypedErrorForUnmatched(message, *typedSchema, error)) {
+            return false;
+        }
+        output->kind = TransportResponseKind::Unmatched;
+        output->message = message;
+        return true;
+    }
+    const TransportMethodMetadata *metadata = pending.has_value()
+        ? transportMethodMetadata(pending->method) : nullptr;
+    if (metadata && metadata->kind != TransportMethodKind::Request) {
+        setDispatchError(error, TransportDispatchErrorKind::InvalidKnownMessage,
+                         QStringLiteral("pending transport method is not a request"));
+        return false;
+    }
+    if (metadata) {
+        TransportSchemaError schemaError;
+        if (object->contains(QStringLiteral("result"))) {
+            if (metadata->success_response_definition.isEmpty()) {
+                setDispatchError(error, TransportDispatchErrorKind::ValidatorUnavailable,
+                                 QStringLiteral("generated success metadata is unavailable"));
+                return false;
+            }
+            if (!validateTransportDefinition(metadata->success_response_definition,
+                                             message.value, &schemaError)) {
+                return mapSchemaDispatchError(schemaError,
+                    TransportDispatchErrorKind::InvalidKnownMessage, error);
+            }
+            output->kind = TransportResponseKind::KnownSuccess;
+            output->message = message;
+            output->method_metadata = metadata;
+            return true;
+        }
+        if (typedSchema) {
+            const auto *typedMetadata = transportTypedErrorMetadata(metadata->method, *typedSchema);
+            if (typedMetadata) {
+                if (!validateTransportDefinition(typedMetadata->response_definition,
+                                                 message.value, &schemaError)) {
+                    return mapSchemaDispatchError(schemaError,
+                        TransportDispatchErrorKind::InvalidKnownMessage, error);
+                }
+                if (!validateTypedErrorCorrelation(*metadata, *pending, message, error)) {
+                    return false;
+                }
+                output->kind = TransportResponseKind::KnownTypedError;
+                output->message = message;
+                output->typed_error_metadata = typedMetadata;
+                return true;
+            }
+            if (typedKnown) {
+                setDispatchError(error, TransportDispatchErrorKind::InvalidKnownMessage,
+                                 QStringLiteral("known typed error belongs to another method"));
+                return false;
+            }
+        }
+        output->kind = TransportResponseKind::GenericError;
+        output->message = message;
+        output->method_metadata = metadata;
+        return true;
+    }
+    if (pending.has_value()) {
+        if (typedKnown) {
+            setDispatchError(error, TransportDispatchErrorKind::InvalidKnownMessage,
+                             QStringLiteral("known typed error cannot use unknown-method fallback"));
+            return false;
+        }
+        output->kind = TransportResponseKind::UnknownMethod;
+        output->message = message;
+        return true;
+    }
+    if (typedKnown && !validateKnownTypedErrorForUnmatched(message, *typedSchema, error)) {
+        return false;
+    }
+    output->kind = TransportResponseKind::Unmatched;
+    output->message = message;
+    return true;
+}
 
 bool validateTransportDefinitionRaw(const QString &name, const QByteArray &raw,
                                     TransportJsonValue *output, QString *error)
 {
-    const auto *runtime = transportRuntime(error);
-    return runtime && runtime->validateDefinitionRaw(name, raw, output, error);
+    TransportDecodeError structured;
+    const bool valid = decodeTransportDefinitionRaw(name, raw, output, &structured);
+    if (!valid && error) *error = structured.message;
+    return valid;
 }
 
 bool validateTransportMessageRaw(const QByteArray &raw, TransportMessage *output,
                                  QString *error)
 {
-    const auto *runtime = transportRuntime(error);
-    if (!runtime) return false;
-    TransportJsonValue value;
-    if (!runtime->validateRootRaw(raw, &value, error)) return false;
-    if (output) output->value = std::move(value);
-    return true;
+    TransportDecodeError structured;
+    const bool valid = decodeTransportMessageRaw(raw, output, &structured);
+    if (!valid && error) *error = structured.message;
+    return valid;
 }
 
 QByteArray canonicalTransportJson(const TransportJsonValue &value)

@@ -4,6 +4,7 @@
 #include <QList>
 #include <QMap>
 #include <QString>
+#include <QStringList>
 #include <QVariant>
 #include <optional>
 #include <variant>
@@ -14,6 +15,12 @@ struct TransportJsonValue {
     using Array = QList<TransportJsonValue>;
     using Object = QMap<QString, TransportJsonValue>;
     std::variant<std::monostate, bool, QString, TransportJsonNumber, Array, Object> value;
+};
+enum class TransportParseErrorKind { Frame, Utf8, Syntax, ImplementationLimit };
+struct TransportParseError {
+    TransportParseErrorKind kind = TransportParseErrorKind::Syntax;
+    qsizetype offset = 0;
+    QString message;
 };
 
 struct Identity;
@@ -717,6 +724,72 @@ struct DurableMutationListSuccessResponse {
 };
 
 struct TransportMessage { TransportJsonValue value; };
+enum class TransportMethodKind { Request, Notification };
+struct TransportMethodMetadata {
+    QString method;
+    TransportMethodKind kind = TransportMethodKind::Request;
+    QString params_definition;
+    QString request_definition;
+    QString success_response_definition;
+    QString success_result_definition;
+    QStringList error_response_definitions;
+    QString typed_error_stage;
+    QString notification_definition;
+};
+struct TransportTypedErrorMetadata {
+    QString method;
+    QString schema_version;
+    QString response_definition;
+};
+const QList<TransportMethodMetadata> &transportMethods();
+const QList<TransportTypedErrorMetadata> &transportTypedErrors();
+const TransportMethodMetadata *transportMethodMetadata(const QString &method);
+const TransportTypedErrorMetadata *transportTypedErrorMetadata(const QString &method, const QString &schemaVersion);
+
+enum class TransportSchemaError { UnknownDefinition, InvalidValue, ValidatorUnavailable };
+struct TransportDecodeError {
+    enum class Kind { Parse, Schema };
+    Kind kind = Kind::Parse;
+    TransportParseError parse;
+    TransportSchemaError schema = TransportSchemaError::InvalidValue;
+    QString message;
+};
+enum class TransportDispatchErrorKind { Parse, InvalidEnvelope, InvalidKnownMessage, ValidatorUnavailable };
+struct TransportDispatchError {
+    TransportDispatchErrorKind kind = TransportDispatchErrorKind::InvalidEnvelope;
+    TransportParseError parse;
+    QString message;
+};
+enum class TransportRequestOrNotificationKind { Known, UnknownRequest, UnknownNotification };
+struct TransportRequestOrNotification {
+    TransportRequestOrNotificationKind kind = TransportRequestOrNotificationKind::UnknownNotification;
+    TransportMessage message;
+    const TransportMethodMetadata *metadata = nullptr;
+};
+struct TransportPendingRequest {
+    QString id;
+    QString method;
+    std::optional<QString> typed_error_request_identity;
+};
+enum class TransportResponseKind { KnownSuccess, KnownTypedError, GenericError, UnknownMethod, Unmatched };
+struct TransportResponse {
+    TransportResponseKind kind = TransportResponseKind::Unmatched;
+    TransportMessage message;
+    const TransportMethodMetadata *method_metadata = nullptr;
+    const TransportTypedErrorMetadata *typed_error_metadata = nullptr;
+};
+
+bool decodeTransportDefinitionRaw(const QString &name, const QByteArray &raw, TransportJsonValue *output, TransportDecodeError *error = nullptr);
+bool decodeTransportMessageRaw(const QByteArray &raw, TransportMessage *output, TransportDecodeError *error = nullptr);
+bool parseTransportMessageRaw(const QByteArray &raw, TransportMessage *output, TransportDecodeError *error = nullptr);
+bool validateTransportDefinition(const QString &name, const TransportJsonValue &value, TransportSchemaError *error = nullptr);
+bool validateTransportMessage(const TransportMessage &message, TransportSchemaError *error = nullptr);
+bool validateTransportGenericMessage(const TransportMessage &message, TransportDispatchError *error = nullptr);
+bool decodeTransportRequestOrNotification(const TransportMessage &message, TransportRequestOrNotification *output, TransportDispatchError *error = nullptr);
+bool decodeTransportRequestOrNotificationRaw(const QByteArray &raw, TransportRequestOrNotification *output, TransportDispatchError *error = nullptr);
+bool decodeTransportResponse(const std::optional<TransportPendingRequest> &pending, const TransportMessage &message, TransportResponse *output, TransportDispatchError *error = nullptr);
+bool decodeTransportResponseRaw(const std::optional<TransportPendingRequest> &pending, const QByteArray &raw, TransportResponse *output, TransportDispatchError *error = nullptr);
+
 bool validateTransportDefinitionRaw(const QString &name, const QByteArray &raw, TransportJsonValue *output = nullptr, QString *error = nullptr);
 bool validateTransportMessageRaw(const QByteArray &raw, TransportMessage *output = nullptr, QString *error = nullptr);
 QByteArray canonicalTransportJson(const TransportJsonValue &value);
