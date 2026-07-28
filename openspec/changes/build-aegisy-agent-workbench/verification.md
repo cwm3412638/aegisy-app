@@ -549,6 +549,26 @@ Metadata-only mutation and server-request contracts (`3.6`/`3.7`, partial):
   prove a usable approval, credential refresh, elicitation UI, or mutation path;
   tasks `3.6` and `3.7` remain unchecked.
 
+Content references and bounded pages (`3.8`, partial):
+
+- `content_reference.rs` defines strict metadata contracts for content
+  references, previews, negotiated inline limits, cursors, and pages. A content
+  reference binds one of the reviewed artifact/blob/command/diagnostic/image/
+  workspace-edit domains to a lowercase SHA-256 and bounded byte count plus an
+  allowlisted MIME type. Preview metadata binds the exact reference and records
+  only bounded truncation, line-count, or image-dimension facts.
+- Local and peer inline budgets intersect by minimum and never widen authority.
+  Page windows are byte-bounded, carry an exact next cursor until the terminal
+  page, and derive identities from the reference, window, negotiated limits,
+  inline digest, and cursor. Text-only inline previews reject common credential
+  shapes; binary/image pages remain reference-only. Four focused tests cover
+  reference/MIME/hash bounds, preview binding and dimensions, limit intersection
+  plus cursor/page identity, and strict unknown/secret rejection.
+- This is a read-only foundation. It does not read or write Blob/filesystem
+  content, create an AAP method, grant artifact authority, or replace the existing
+  Store transaction and artifact-page gates. Task `3.8` remains unchecked until
+  those producers, persistence, generated types, and Qt/AAP evidence are wired.
+
 - Workbench schema v15 adds a dedicated `public_timeline_events` journal and one
   `public_timeline_cursors` source/cursor row per Session. Session insertion registers
   the empty cursor idempotently; event insertion and cursor advancement use the same

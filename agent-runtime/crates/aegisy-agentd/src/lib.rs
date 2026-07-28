@@ -16,6 +16,7 @@ mod command_action;
 mod command_artifact;
 mod command_diagnostics;
 mod command_output;
+pub mod content_reference;
 mod context_budget;
 pub mod context_threshold;
 pub mod credential_refresh;

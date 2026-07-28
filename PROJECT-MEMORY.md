@@ -3698,6 +3698,28 @@ Implemented visual baseline:
   or genuine user Approval. Do not advertise these foundations as usable
   mutation, credential refresh, or elicitation functionality.
 
+## Content Reference Foundation (2026-07-28)
+
+- OpenSpec `3.8` remains unchecked. `agent-runtime/crates/aegisy-agentd/src/content_reference.rs`
+  defines strict metadata-only `content-reference/0.1`, `content-preview/0.1`,
+  `content-inline-limits/0.1`, `content-reference-cursor/0.1`, and
+  `content-reference-page/0.1` contracts. References bind reviewed artifact/blob,
+  command, diagnostic, image, and workspace-edit domains to lowercase SHA-256,
+  bounded byte counts, and an allowlisted MIME type. Preview metadata binds the
+  exact reference and records only bounded truncation, text line count, or image
+  dimensions. Four focused tests cover identity/MIME/hash bounds, preview binding,
+  negotiated limit intersection, cursor/page identities, unknown fields, and
+  secret-shaped inline rejection.
+- Inline budgets intersect by minimum and cannot widen either side. Byte-window
+  pages carry exact continuation cursors until the terminal page; page identities
+  bind the reference, window, limits, inline digest, and continuation. Binary and
+  image pages remain reference-only, while text previews are bounded and redacted
+  at the contract boundary.
+- This foundation does not read/write Blob or filesystem content, add an AAP route,
+  grant artifact authority, or replace existing Store transaction and artifact-page
+  gates. Do not advertise `3.8` as complete until producers, persistence, generated
+  types, and Qt/AAP evidence are connected.
+
 ## Next Product Priorities
 
 1. Finish OpenSpec `3.10` by running the complete generator and desktop gate from a
