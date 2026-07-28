@@ -96,12 +96,20 @@ accepted.
 - **WHEN** the current Qt host connects to its child sidecar over stdio
 - **THEN** both peers SHALL report `transport: stdio`, `local: true`, and `authenticated`, `encrypted`, and `peer_verified` as false and SHALL NOT treat that channel as the authenticated socket or named-pipe target
 
+#### Scenario: Verified macOS Unix socket security is reported truthfully
+- **WHEN** the Qt host explicitly selects the macOS Unix-domain-socket transport and both peers have verified the current UID and exact supervised parent/child PID before any AAP frame is processed
+- **THEN** both peers SHALL report `transport: unix-domain-socket`, `local: true`, `peer_verified: true`, and `authenticated` and `encrypted` as false, SHALL reject any mismatched declaration, and SHALL NOT treat peer verification as the one-time bootstrap authentication owned by task `4.4`
+
+#### Scenario: Unix socket bytes arrive outside the verified process generation
+- **WHEN** socket bytes arrive before peer verification, after disconnect, or from a process generation other than the currently supervised generation
+- **THEN** the Qt host SHALL NOT decode or dispatch them as AAP, SHALL clear the peer proof on failure, and SHALL require a new verified connection and complete two-stage handshake
+
 #### Scenario: AAP frame reaches the transport limit
 - **WHEN** either peer would send or receives a newline-delimited JSON frame larger than the exact AAP 0.1 `max_frame_bytes` value of 4 MiB
 - **THEN** it SHALL refuse the write or drain and reject the input with bounded content-free behavior, SHALL NOT allocate an unbounded frame, and SHALL preserve framing for a later valid message when the transport remains usable
 
 #### Scenario: Negotiated connection is lost
-- **WHEN** stdio disconnects, the runtime exits, initialization fails, or either peer rejects malformed protocol input
+- **WHEN** stdio or the verified local socket disconnects, the runtime exits, initialization fails, or either peer rejects malformed protocol input
 - **THEN** the client SHALL clear ready state, capabilities, and negotiated limits, SHALL fail pending requests, and SHALL require a complete new two-stage handshake before sending more business requests
 
 #### Scenario: Read-only backend is ready

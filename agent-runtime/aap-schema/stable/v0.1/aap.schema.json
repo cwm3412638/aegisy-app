@@ -863,6 +863,31 @@
         "peer_verified": { "const": false }
       }
     },
+    "unixSocketTransportSecurity": {
+      "$comment": "macOS AF_UNIX with owner-only endpoint permissions and mutual peer UID/PID verification. Bootstrap authentication is a separate capability and remains false.",
+      "type": "object",
+      "required": [
+        "transport",
+        "local",
+        "authenticated",
+        "encrypted",
+        "peer_verified"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "transport": { "const": "unix-domain-socket" },
+        "local": { "const": true },
+        "authenticated": { "const": false },
+        "encrypted": { "const": false },
+        "peer_verified": { "const": true }
+      }
+    },
+    "transportSecurity": {
+      "oneOf": [
+        { "$ref": "#/$defs/stdioTransportSecurity" },
+        { "$ref": "#/$defs/unixSocketTransportSecurity" }
+      ]
+    },
     "backend": {
       "type": "object",
       "required": ["adapter", "status", "version"],
@@ -2216,7 +2241,7 @@
         "platform": { "$ref": "#/$defs/platform" },
         "capabilities": { "$ref": "#/$defs/capabilities" },
         "limits": { "$ref": "#/$defs/limits" },
-        "transport_security": { "$ref": "#/$defs/stdioTransportSecurity" }
+        "transport_security": { "$ref": "#/$defs/transportSecurity" }
       }
     },
     "initializeResult": {
@@ -2238,7 +2263,7 @@
         "backend": { "$ref": "#/$defs/backend" },
         "capabilities": { "$ref": "#/$defs/capabilities" },
         "limits": { "$ref": "#/$defs/limits" },
-        "transport_security": { "$ref": "#/$defs/stdioTransportSecurity" }
+        "transport_security": { "$ref": "#/$defs/transportSecurity" }
       }
     },
     "initializeRequest": {

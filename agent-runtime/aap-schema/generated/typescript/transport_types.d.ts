@@ -93,6 +93,14 @@ export type TimelineSubscriptionSource = "sync" | "snapshot";
 
 export type TimelineSubscriptionState = "sync-required" | "snapshot-required" | "active" | "failed";
 
+export interface UnixSocketTransportSecurity {
+  "authenticated": boolean;
+  "encrypted": boolean;
+  "local": boolean;
+  "peer_verified": boolean;
+  "transport": string;
+}
+
 export interface Backend {
   "adapter": string;
   "status": BackendStatus;
@@ -201,6 +209,8 @@ export interface TimelineSubscriptionRequestErrorResponse {
   "jsonrpc": string;
 }
 
+export type TransportSecurity = StdioTransportSecurity | UnixSocketTransportSecurity;
+
 export interface InitializeIncompatibleData {
   "client": ProtocolRange;
   "reason": string;
@@ -215,7 +225,7 @@ export interface InitializeParams {
   "limits": Limits;
   "platform": Platform;
   "protocol": ProtocolPreference;
-  "transport_security": StdioTransportSecurity;
+  "transport_security": TransportSecurity;
 }
 
 export interface InitializeResult {
@@ -225,7 +235,7 @@ export interface InitializeResult {
   "platform": Platform;
   "protocol": NegotiatedProtocol;
   "runtime": Identity;
-  "transport_security": StdioTransportSecurity;
+  "transport_security": TransportSecurity;
 }
 
 export type NullableDurableMutationCursor = DurableMutationCursor | null;

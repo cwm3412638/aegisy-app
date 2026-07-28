@@ -107,7 +107,11 @@ Transport validation preserves arbitrary-precision number lexemes and rejects
 BOM input, invalid UTF-8, duplicate decoded keys, unpaired surrogates, frames
 above 4 MiB, depth above 128, and more than 65,536 JSON nodes. The reviewed
 method registry maps root request, response, error, and notification dispatch.
-The 99-definition fixture catalog and separate 72-case parser/Schema corpus are
+The handshake transport-security union preserves truthful unauthenticated stdio
+and adds the owner-only macOS Unix-socket facts; `peer_verified: true` remains
+distinct from bootstrap `authenticated: true`, which is not available in AAP
+`0.1` yet.
+The 101-definition fixture catalog and separate 72-case parser/Schema corpus are
 validated independently by Node, generated TypeScript, Rust, and Qt/C++.
 
 Run the generator and focused cross-language gate from the repository root:

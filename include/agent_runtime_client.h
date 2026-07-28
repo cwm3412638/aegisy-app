@@ -16,6 +16,7 @@
 #include <variant>
 
 class QProcess;
+class QLocalSocket;
 class QTimer;
 
 class AgentRuntimeClient : public QObject
@@ -23,6 +24,11 @@ class AgentRuntimeClient : public QObject
     Q_OBJECT
 
 public:
+    enum class TransportMode {
+        Stdio,
+        VerifiedUnixSocket,
+    };
+
     enum class ReconnectState {
         Idle,
         Waiting,
@@ -36,7 +42,8 @@ public:
                                 int heartbeatDeadlineMs = 15000,
                                 QList<int> reconnectBackoffMs = {
                                     0, 500, 2000,
-                                });
+                                },
+                                TransportMode transportMode = TransportMode::Stdio);
     ~AgentRuntimeClient() override;
 
     bool isReady() const;
@@ -507,6 +514,19 @@ private:
     bool sendNotification(const QString &method, const QJsonObject &params = {});
     int writeMessage(const QJsonObject &message);
     void processStdout();
+    void processSocketInput();
+    void processTransportBytes(const QByteArray &bytes);
+    bool usesVerifiedUnixSocket() const;
+    bool prepareUnixSocketEndpoint();
+    void cleanupUnixSocketEndpoint();
+    void scheduleUnixSocketConnect(quint64 generation);
+    void connectUnixSocket(quint64 generation);
+    bool verifyUnixSocketPeer() const;
+    void handleUnixSocketDisconnected();
+    void terminateOwnedProcessGeneration(quint64 generation);
+    void sendInitializeRequest();
+    void closeTransportWrite();
+    QJsonObject expectedTransportSecurity() const;
     void processMessage(
         const aegisy::aap::transport_generated::TransportMessage &message);
     void acceptInitializeResponse(const QJsonObject &result);
@@ -533,12 +553,22 @@ private:
     static bool emergencyRequestAllowed(const QString &method);
 
     QProcess *m_process = nullptr;
+    QLocalSocket *m_localSocket = nullptr;
+    TransportMode m_transportMode = TransportMode::Stdio;
     QTimer *m_startupTimer = nullptr;
     QTimer *m_heartbeatIntervalTimer = nullptr;
     QTimer *m_heartbeatDeadlineTimer = nullptr;
     QTimer *m_reconnectTimer = nullptr;
     QTimer *m_reconnectStabilityTimer = nullptr;
     QByteArray m_stdoutBuffer;
+    QString m_unixSocketDirectory;
+    QString m_unixSocketPath;
+    quint64 m_unixSocketDirectoryDevice = 0;
+    quint64 m_unixSocketDirectoryInode = 0;
+    quint64 m_unixSocketDevice = 0;
+    quint64 m_unixSocketInode = 0;
+    bool m_unixSocketIdentityCaptured = false;
+    int m_unixSocketCleanupRetryCount = 0;
     QHash<QString, PendingRequestContext> m_pendingRequests;
     QSet<QString> m_retiredResponseIds;
     QStringList m_retiredResponseOrder;
@@ -563,6 +593,10 @@ private:
     int m_reconnectAttempt = 0;
     int m_heartbeatRecoveryAttempt = 0;
     ReconnectState m_reconnectState = ReconnectState::Idle;
+    quint64 m_unixSocketConnectGeneration = 0;
+    quint64 m_unixSocketDisconnectGeneration = 0;
+    quint64 m_unixSocketPeerVerifiedGeneration = 0;
+    quint64 m_ownedTerminationGeneration = 0;
     bool m_ready = false;
     bool m_heartbeatNegotiated = false;
     bool m_heartbeatHealthy = false;

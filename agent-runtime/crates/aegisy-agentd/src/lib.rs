@@ -39,6 +39,8 @@ pub mod git_worktree_lifecycle;
 mod image_context;
 mod instruction_discovery;
 mod language_server;
+#[cfg(target_os = "macos")]
+pub mod macos_unix_socket;
 mod model_catalog;
 pub mod model_catalog_cache;
 pub mod model_catalog_refresh;
@@ -464,6 +466,7 @@ impl RuntimeTimelineSubscriptionState {
 pub struct Runtime {
     initialized: bool,
     client_ready: bool,
+    transport_security: TransportSecurity,
     negotiated_capabilities: BTreeSet<String>,
     negotiated_max_frame_bytes: u64,
     shutdown: bool,
@@ -5466,6 +5469,13 @@ impl Runtime {
         Self {
             initialized: false,
             client_ready: false,
+            transport_security: TransportSecurity {
+                transport: "stdio".into(),
+                local: true,
+                authenticated: false,
+                encrypted: false,
+                peer_verified: false,
+            },
             negotiated_capabilities: BTreeSet::new(),
             negotiated_max_frame_bytes: MAX_AAP_FRAME_BYTES,
             shutdown: false,
@@ -5511,6 +5521,24 @@ impl Runtime {
 
     pub fn control(&self) -> RuntimeControl {
         self.control.clone()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn bind_verified_unix_socket_transport(
+        &mut self,
+        _stream: &macos_unix_socket::VerifiedUnixStream,
+    ) -> Result<(), &'static str> {
+        if self.initialized || self.client_ready {
+            return Err("runtime transport is already initialized");
+        }
+        self.transport_security = TransportSecurity {
+            transport: "unix-domain-socket".into(),
+            local: true,
+            authenticated: false,
+            encrypted: false,
+            peer_verified: true,
+        };
+        Ok(())
     }
 
     pub fn handle_line_stream<F>(&mut self, line: &str, mut emit_raw: F)
@@ -6802,16 +6830,11 @@ impl Runtime {
                 "AAP 0.1 frame limit must be exactly 4 MiB",
             );
         }
-        if params.transport_security.transport != "stdio"
-            || !params.transport_security.local
-            || params.transport_security.authenticated
-            || params.transport_security.encrypted
-            || params.transport_security.peer_verified
-        {
+        if params.transport_security != self.transport_security {
             return self.error_for(
                 &request,
                 -32602,
-                "client transport security declaration does not match stdio",
+                "client transport security declaration does not match the verified connection",
             );
         }
         let Some(client_minimum) = parse_protocol_version(&params.protocol.minimum) else {
@@ -7084,13 +7107,7 @@ impl Runtime {
             limits: ProtocolLimits {
                 max_frame_bytes: negotiated_max_frame_bytes,
             },
-            transport_security: TransportSecurity {
-                transport: "stdio".into(),
-                local: true,
-                authenticated: false,
-                encrypted: false,
-                peer_verified: false,
-            },
+            transport_security: self.transport_security.clone(),
         };
         self.initialized = true;
         self.negotiated_capabilities = negotiated_capabilities;

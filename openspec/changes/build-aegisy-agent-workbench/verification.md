@@ -169,8 +169,8 @@
   typed request/success/error/notification definitions, response dispatch, and the
   generic request/notification fallbacks. The materializer validates every binding
   against the root Schema before accepting the fixture catalog.
-- All 99 definitions independently validate and serialize to fixture identity
-  `29644 8948085aaf1c08ed94cad5ef1e682dc041120053045e06f851cea64d4dfbe0db`.
+- All 101 definitions independently validate and serialize to fixture identity
+  `29903 d2961275431323f968bd18c4d8c2535cb8b05bda003ff0dea97f6e73be124757`.
   The shared 72-case positive/negative parser and Draft 2020-12 subset corpus has
   decision identity
   `72 f0ce6bdc14c815b2b80b273126da8b20a80ec47371d39128c7e2155246f60404`.
@@ -2695,6 +2695,48 @@ Known limitations:
   and the complete locked Rust workspace suite: 1050 passed, zero failed, and one
   explicitly ignored installed-Codex live fixture. The isolated Release desktop
   build and serial aggregate CTest run pass all 23/23 targets, including
-  `agent_runtime_environment`. This is macOS/local evidence; tasks `4.2` through
-  `4.4` still own authenticated socket/pipe/bootstrap transport and their platform
-  evidence.
+  `agent_runtime_environment`. This was the `4.1` workspace/release evidence; the
+  next section records completed macOS peer validation, while `4.3` and `4.4` still
+  own Windows named-pipe and bootstrap-authentication evidence.
+
+## 4.2 macOS Owner-Only Unix Socket And Peer Validation
+
+- The explicitly selected Qt socket mode launches the same bundled sidecar with a
+  fresh private endpoint path and never falls back to stdio after endpoint, peer,
+  handshake, or disconnect failure. Stdio remains the default until bootstrap
+  authentication is implemented.
+- Rust opens the private parent and endpoint directories with no-follow descriptor
+  operations, rejects extended ACLs and existing or drifting objects, creates exact
+  `0700`/`0600` permissions, bounds accept time, and checks that `getppid()` remains
+  the expected Qt parent before accept, after accept, and after same-UID/exact-PID
+  peer verification. The accepted stream is restored to blocking mode before the
+  existing bounded reader is used.
+- Qt independently verifies the same UID and exact `QProcess` PID, records a
+  generation-scoped peer proof, and refuses socket ingress, writes, or initialize
+  without it. Endpoint-invalid, peer-mismatch, and unexpected-disconnect paths use
+  generation-owned terminate/kill/reap handling and do not replace a specific
+  security failure with a generic disconnect message.
+- Rust and Qt bind cleanup to device/inode/UID identities. Random quarantine closes
+  check/use races; replacement objects remain untouched. If process termination
+  interrupts the sidecar after it quarantines its own socket, Qt removes only the
+  exact recorded socket identity before removing the exact endpoint directory.
+- Generated Rust, TypeScript, and Qt/C++ transport-security types use a strict union.
+  Real Schema validation accepts only truthful stdio or verified Unix request/result
+  facts and rejects Unix `peer_verified: false`, Unix `authenticated: true`, stdio
+  `peer_verified: true`, and unknown transports. The verified socket still reports
+  `authenticated: false` and grants no additional authority.
+- Local macOS verification passed:
+  - `npm --prefix agent-runtime/aap-schema run generate:check` including all 47
+    package files.
+  - Rust formatting, locked workspace tests (`1062 passed`, zero failed, one
+    explicitly ignored installed-Codex live fixture), all-target strict Clippy, and
+    locked Thin-LTO Release build.
+  - Focused Rust macOS socket tests (`11/11`) and handshake Schema tests (`24/24`).
+  - Real Qt-to-Rust `agent_runtime_macos_socket`, including successful initialization,
+    exact security facts, wrong-PID rejection, forced process cleanup, and endpoint
+    cleanup; the binary passed 20 consecutive repetitions.
+  - Complete Debug desktop build and all `24/24` CTests, strict OpenSpec validation,
+    and `git diff --check`.
+- This is local macOS evidence, not signed-package evidence. Windows named-pipe
+  ACL/peer validation remains `4.3`; one-time bootstrap authentication remains
+  `4.4`; `authenticated` MUST stay false until that proof exists.

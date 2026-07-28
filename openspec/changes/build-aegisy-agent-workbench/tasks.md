@@ -162,8 +162,8 @@
     sorts object keys by UTF-8 bytes and normalizes numbers without a floating-point
     round trip.
   - A reviewed method registry covers every root dispatch condition and generic
-    fallback. The 99-definition fixture catalog has identity
-    `29644 8948085aaf1c08ed94cad5ef1e682dc041120053045e06f851cea64d4dfbe0db`;
+    fallback. The 101-definition fixture catalog has identity
+    `29903 d2961275431323f968bd18c4d8c2535cb8b05bda003ff0dea97f6e73be124757`;
     the shared 72-case parser/Schema corpus has identity
     `72 f0ce6bdc14c815b2b80b273126da8b20a80ec47371d39128c7e2155246f60404`.
     Node oracle, generated TypeScript, Rust, and Qt/C++ reproduce these identities.
@@ -239,7 +239,26 @@
   - CMake now selects Cargo `target/release` with `--release` for a Release desktop
     configuration, while developer Debug builds retain `target/debug`; the packaged
     sidecar can no longer silently ignore the declared Release profile.
-- [ ] 4.2 Implement macOS Unix-socket transport with owner-only permissions and peer validation
+- [x] 4.2 Implement macOS Unix-socket transport with owner-only permissions and peer validation
+  - Qt can explicitly select a per-launch macOS Unix-domain socket while stdio
+    remains the default. The sidecar creates an owner-only `0700` directory and
+    `0600` socket through anchored directory descriptors, rejects extended ACLs,
+    symlinks, pre-existing endpoints, path escapes, and identity drift, and accepts
+    exactly one same-UID peer whose PID is still the supervising Qt parent.
+  - Qt independently verifies the same UID and exact supervised sidecar PID before
+    assigning a generation-scoped peer-verification proof. Socket ingress, writes,
+    and `initialize` require that proof; security failure never falls back to stdio
+    and uses generation-owned terminate/kill/reap cleanup without replacing the
+    first specific failure reason.
+  - Socket and directory cleanup use device/inode/owner identity plus random
+    quarantine. Replacement objects are preserved, while Qt can safely finish a
+    sidecar-owned quarantined socket interrupted by process termination. The strict
+    handshake union reports `peer_verified: true` but keeps `authenticated` and
+    `encrypted` false until `4.4`.
+  - Verification covers 11 Rust socket tests, the complete 24-case handshake Schema
+    suite, real Qt-to-Rust socket initialization and wrong-PID rejection, 20 repeated
+    socket E2E runs, the 1062-test Rust workspace, strict Clippy, locked Release
+    build, and all 24 desktop CTests on macOS.
 - [ ] 4.3 Implement Windows named-pipe transport with current-user ACL and peer validation
 - [ ] 4.4 Implement one-time host/sidecar bootstrap authentication without secrets in process arguments or ordinary logs
 - [ ] 4.5 Implement bounded ingress, per-client outbound queues, overload errors, heartbeat, and graceful shutdown

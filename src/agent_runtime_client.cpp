@@ -5,9 +5,11 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonValue>
+#include <QLocalSocket>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
@@ -15,12 +17,21 @@
 #include <QStandardPaths>
 #include <QSysInfo>
 #include <QTimer>
+#include <QUuid>
 
+#include <cerrno>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <optional>
 #include <utility>
+
+#if defined(Q_OS_MACOS)
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
+#endif
 
 namespace {
 constexpr int kStartupTimeoutMs = 60000;
@@ -179,6 +190,68 @@ QJsonObject stdioTransportSecurity()
         {QStringLiteral("peer_verified"), false},
     };
 }
+
+QJsonObject verifiedUnixSocketTransportSecurity()
+{
+    return {
+        {QStringLiteral("transport"), QStringLiteral("unix-domain-socket")},
+        {QStringLiteral("local"), true},
+        {QStringLiteral("authenticated"), false},
+        {QStringLiteral("encrypted"), false},
+        {QStringLiteral("peer_verified"), true},
+    };
+}
+
+#if defined(Q_OS_MACOS)
+enum class UnixEndpointState {
+    NotReady,
+    Ready,
+    Invalid,
+};
+
+struct UnixEndpointIdentity {
+    quint64 directoryDevice = 0;
+    quint64 directoryInode = 0;
+    quint64 socketDevice = 0;
+    quint64 socketInode = 0;
+};
+
+UnixEndpointState inspectUnixEndpoint(const QString &directoryPath,
+                                      const QString &socketPath,
+                                      UnixEndpointIdentity *identity = nullptr)
+{
+    struct stat directoryStatus {};
+    const QByteArray directory = QFile::encodeName(directoryPath);
+    if (::lstat(directory.constData(), &directoryStatus) != 0) {
+        return errno == ENOENT ? UnixEndpointState::NotReady
+                              : UnixEndpointState::Invalid;
+    }
+    if (!S_ISDIR(directoryStatus.st_mode)
+        || directoryStatus.st_uid != ::geteuid()
+        || (directoryStatus.st_mode & 0777) != 0700) {
+        return UnixEndpointState::Invalid;
+    }
+
+    struct stat socketStatus {};
+    const QByteArray socket = QFile::encodeName(socketPath);
+    if (::lstat(socket.constData(), &socketStatus) != 0) {
+        return errno == ENOENT ? UnixEndpointState::NotReady
+                              : UnixEndpointState::Invalid;
+    }
+    if (!S_ISSOCK(socketStatus.st_mode)
+        || socketStatus.st_uid != ::geteuid()
+        || (socketStatus.st_mode & 0777) != 0600) {
+        return UnixEndpointState::Invalid;
+    }
+    if (identity) {
+        identity->directoryDevice = quint64(directoryStatus.st_dev);
+        identity->directoryInode = quint64(directoryStatus.st_ino);
+        identity->socketDevice = quint64(socketStatus.st_dev);
+        identity->socketInode = quint64(socketStatus.st_ino);
+    }
+    return UnixEndpointState::Ready;
+}
+#endif
 
 bool hasExactKeys(const QJsonObject &object, const QStringList &keys)
 {
@@ -1798,6 +1871,7 @@ bool isValidTurnStartResult(const QJsonObject &result,
 }
 
 bool validateInitializeResult(const QJsonObject &result,
+                              const QJsonObject &expectedSecurity,
                               QSet<QString> *stableCapabilities,
                               int *maximumFrameBytes,
                               QString *reasonCode)
@@ -1918,7 +1992,7 @@ bool validateInitializeResult(const QJsonObject &result,
 
     const QJsonValue securityValue = result.value(QStringLiteral("transport_security"));
     if (!securityValue.isObject()
-        || securityValue.toObject() != stdioTransportSecurity()) {
+        || securityValue.toObject() != expectedSecurity) {
         return fail("transport-security");
     }
 
@@ -2332,9 +2406,12 @@ bool sensitiveSidecarEnvironmentName(const QString &name)
 AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
                                        int heartbeatIntervalMs,
                                        int heartbeatDeadlineMs,
-                                       QList<int> reconnectBackoffMs)
+                                       QList<int> reconnectBackoffMs,
+                                       TransportMode transportMode)
     : QObject(parent)
     , m_process(new QProcess(this))
+    , m_localSocket(new QLocalSocket(this))
+    , m_transportMode(transportMode)
     , m_startupTimer(new QTimer(this))
     , m_heartbeatIntervalTimer(new QTimer(this))
     , m_heartbeatDeadlineTimer(new QTimer(this))
@@ -2369,7 +2446,7 @@ AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
             emit connectionStateChanged(false, detail);
             m_processTerminationPending = true;
             const quint64 generation = m_processGeneration;
-            m_process->closeWriteChannel();
+            closeTransportWrite();
             m_process->terminate();
             QTimer::singleShot(kReconnectTerminationGraceMs, this,
                                [this, generation]() {
@@ -2401,6 +2478,53 @@ AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
     });
     connect(m_process, &QProcess::readyReadStandardOutput,
             this, &AgentRuntimeClient::processStdout);
+    connect(m_localSocket, &QLocalSocket::readyRead,
+            this, &AgentRuntimeClient::processSocketInput);
+    connect(m_localSocket, &QLocalSocket::connected, this, [this]() {
+        if (!usesVerifiedUnixSocket()
+            || m_unixSocketConnectGeneration != m_processGeneration
+            || m_process->state() == QProcess::NotRunning) {
+            m_localSocket->abort();
+            return;
+        }
+        if (!verifyUnixSocketPeer()) {
+            const QString detail = QStringLiteral(
+                "Unix 运行时对端校验失败（unix-socket-peer-mismatch）");
+            suppressAutomaticReconnect();
+            clearNegotiationState();
+            failPending(detail);
+            emit connectionStateChanged(false, detail);
+            m_localSocket->abort();
+            terminateOwnedProcessGeneration(m_processGeneration);
+            return;
+        }
+        m_unixSocketPeerVerifiedGeneration = m_processGeneration;
+        sendInitializeRequest();
+    });
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    connect(m_localSocket, &QLocalSocket::errorOccurred, this,
+            [this](QLocalSocket::LocalSocketError error) {
+#else
+    connect(m_localSocket,
+            QOverload<QLocalSocket::LocalSocketError>::of(&QLocalSocket::error), this,
+            [this](QLocalSocket::LocalSocketError error) {
+#endif
+        if (!usesVerifiedUnixSocket()
+            || m_unixSocketConnectGeneration != m_processGeneration
+            || m_stopping || m_autoReconnectSuppressed) {
+            return;
+        }
+        if ((error == QLocalSocket::ServerNotFoundError
+             || error == QLocalSocket::ConnectionRefusedError)
+            && m_startupTimer->isActive()
+            && m_process->state() != QProcess::NotRunning) {
+            scheduleUnixSocketConnect(m_processGeneration);
+            return;
+        }
+        handleUnixSocketDisconnected();
+    });
+    connect(m_localSocket, &QLocalSocket::disconnected,
+            this, &AgentRuntimeClient::handleUnixSocketDisconnected);
     connect(m_process, &QProcess::readyReadStandardError, this, [this]() {
         const QString output = QString::fromUtf8(m_process->readAllStandardError()).trimmed();
         if (!output.isEmpty()) emit diagnosticMessage(output);
@@ -2429,6 +2553,15 @@ AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
             this, [this](int exitCode, QProcess::ExitStatus status) {
         m_startupTimer->stop();
         m_startupGeneration = 0;
+        m_unixSocketConnectGeneration = 0;
+        m_unixSocketPeerVerifiedGeneration = 0;
+        const bool ownedTermination =
+            m_ownedTerminationGeneration == m_processGeneration;
+        m_ownedTerminationGeneration = 0;
+        if (m_localSocket->state() != QLocalSocket::UnconnectedState) {
+            m_localSocket->abort();
+        }
+        cleanupUnixSocketEndpoint();
         const bool expected = m_stopping;
         if (expected) m_stopping = false;
         if (m_policyRestartPending) {
@@ -2467,13 +2600,13 @@ AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
             if (m_reconnectState != ReconnectState::Exhausted) {
                 setReconnectState(ReconnectState::Idle, 0, detail);
             }
-            emit connectionStateChanged(false, detail);
+            if (!ownedTermination) emit connectionStateChanged(false, detail);
             return;
         }
         if (m_reconnectState != ReconnectState::Waiting) {
             scheduleReconnect(detail);
         }
-        emit connectionStateChanged(false, detail);
+        if (!ownedTermination) emit connectionStateChanged(false, detail);
     });
 }
 
@@ -2482,6 +2615,14 @@ AgentRuntimeClient::~AgentRuntimeClient()
     stop();
     if (m_process->state() != QProcess::NotRunning) {
         m_process->waitForFinished(500);
+    }
+    if (m_process->state() != QProcess::NotRunning) {
+        m_process->kill();
+        m_process->waitForFinished(500);
+    }
+    m_localSocket->abort();
+    if (m_process->state() == QProcess::NotRunning) {
+        cleanupUnixSocketEndpoint();
     }
 }
 
@@ -3518,6 +3659,298 @@ QString AgentRuntimeClient::runtimePath() const
     return m_runtimePath;
 }
 
+bool AgentRuntimeClient::usesVerifiedUnixSocket() const
+{
+    return m_transportMode == TransportMode::VerifiedUnixSocket;
+}
+
+QJsonObject AgentRuntimeClient::expectedTransportSecurity() const
+{
+    return usesVerifiedUnixSocket() ? verifiedUnixSocketTransportSecurity()
+                                    : stdioTransportSecurity();
+}
+
+bool AgentRuntimeClient::prepareUnixSocketEndpoint()
+{
+#if defined(Q_OS_MACOS)
+    const QString base = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    struct stat baseStatus {};
+    const QByteArray encodedBase = QFile::encodeName(base);
+    if (base.isEmpty() || ::lstat(encodedBase.constData(), &baseStatus) != 0
+        || !S_ISDIR(baseStatus.st_mode) || baseStatus.st_uid != ::geteuid()
+        || (baseStatus.st_mode & 0777) != 0700) {
+        return false;
+    }
+    QString suffix = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    suffix.remove(QLatin1Char('-'));
+    suffix = suffix.left(16).toLower();
+    const QString directory = QDir(base).absoluteFilePath(
+        QStringLiteral("aegisy-agent-%1").arg(suffix));
+    const QString socket = QDir(directory).absoluteFilePath(QStringLiteral("agent.sock"));
+    struct sockaddr_un address {};
+    const QByteArray encodedSocket = QFile::encodeName(socket);
+    if (encodedSocket.isEmpty()
+        || encodedSocket.size() >= qsizetype(sizeof(address.sun_path))
+        || QFileInfo::exists(directory)) {
+        return false;
+    }
+    m_unixSocketDirectory = directory;
+    m_unixSocketPath = socket;
+    m_unixSocketDirectoryDevice = 0;
+    m_unixSocketDirectoryInode = 0;
+    m_unixSocketDevice = 0;
+    m_unixSocketInode = 0;
+    m_unixSocketIdentityCaptured = false;
+    m_unixSocketCleanupRetryCount = 0;
+    return true;
+#else
+    return false;
+#endif
+}
+
+void AgentRuntimeClient::cleanupUnixSocketEndpoint()
+{
+#if defined(Q_OS_MACOS)
+    if (!m_unixSocketDirectory.isEmpty()) {
+        const QByteArray directory = QFile::encodeName(m_unixSocketDirectory);
+        const QByteArray socket = QFile::encodeName(m_unixSocketPath);
+        struct stat directoryStatus {};
+        const int directoryResult = ::lstat(directory.constData(), &directoryStatus);
+        const bool directoryMatches = directoryResult == 0
+            && m_unixSocketIdentityCaptured
+            && S_ISDIR(directoryStatus.st_mode)
+            && directoryStatus.st_uid == ::geteuid()
+            && (directoryStatus.st_mode & 0777) == 0700
+            && quint64(directoryStatus.st_dev) == m_unixSocketDirectoryDevice
+            && quint64(directoryStatus.st_ino) == m_unixSocketDirectoryInode;
+        if (directoryMatches) {
+            struct stat socketStatus {};
+            bool socketRemovedOrMissing = false;
+            if (::lstat(socket.constData(), &socketStatus) == 0) {
+                if (S_ISSOCK(socketStatus.st_mode)
+                    && socketStatus.st_uid == ::geteuid()
+                    && (socketStatus.st_mode & 0777) == 0600
+                    && quint64(socketStatus.st_dev) == m_unixSocketDevice
+                    && quint64(socketStatus.st_ino) == m_unixSocketInode) {
+                    socketRemovedOrMissing = ::unlink(socket.constData()) == 0;
+                }
+            } else if (errno == ENOENT) {
+                socketRemovedOrMissing = true;
+                const QFileInfoList quarantinedEntries = QDir(m_unixSocketDirectory)
+                    .entryInfoList(QDir::AllEntries | QDir::Hidden | QDir::System
+                                       | QDir::NoDotAndDotDot,
+                                   QDir::Name);
+                for (const QFileInfo &entry : quarantinedEntries) {
+                    if (!entry.fileName().startsWith(
+                            QStringLiteral(".aegisy-socket-"))) {
+                        continue;
+                    }
+                    const QByteArray candidate = QFile::encodeName(
+                        entry.absoluteFilePath());
+                    struct stat candidateStatus {};
+                    if (::lstat(candidate.constData(), &candidateStatus) != 0) {
+                        if (errno == ENOENT) continue;
+                        socketRemovedOrMissing = false;
+                        break;
+                    }
+                    if (!S_ISSOCK(candidateStatus.st_mode)
+                        || candidateStatus.st_uid != ::geteuid()
+                        || (candidateStatus.st_mode & 0777) != 0600
+                        || quint64(candidateStatus.st_dev) != m_unixSocketDevice
+                        || quint64(candidateStatus.st_ino) != m_unixSocketInode) {
+                        socketRemovedOrMissing = false;
+                        break;
+                    }
+                    if (::unlink(candidate.constData()) != 0 && errno != ENOENT) {
+                        socketRemovedOrMissing = false;
+                        break;
+                    }
+                }
+            }
+            if (socketRemovedOrMissing) {
+                if (::rmdir(directory.constData()) != 0) {
+                    const int removeError = errno;
+                    constexpr int maximumCleanupRetries = 25;
+                    if (m_unixSocketCleanupRetryCount < maximumCleanupRetries) {
+                        ++m_unixSocketCleanupRetryCount;
+                        const QString expectedDirectory = m_unixSocketDirectory;
+                        const quint64 expectedDevice = m_unixSocketDirectoryDevice;
+                        const quint64 expectedInode = m_unixSocketDirectoryInode;
+                        QTimer::singleShot(20, this,
+                                           [this, expectedDirectory,
+                                            expectedDevice, expectedInode]() {
+                            if (m_unixSocketDirectory == expectedDirectory
+                                && m_unixSocketDirectoryDevice == expectedDevice
+                                && m_unixSocketDirectoryInode == expectedInode) {
+                                cleanupUnixSocketEndpoint();
+                            }
+                        });
+                        return;
+                    }
+                    emit diagnosticMessage(QStringLiteral(
+                        "Unix 运行时端点清理失败（unix-socket-cleanup-directory-failed:%1）")
+                            .arg(removeError));
+                }
+            } else {
+                emit diagnosticMessage(QStringLiteral(
+                    "Unix 运行时端点清理保留身份不符对象（unix-socket-cleanup-mismatch）"));
+            }
+        } else if (directoryResult == 0) {
+            emit diagnosticMessage(QStringLiteral(
+                "Unix 运行时端点清理保留身份不符对象（unix-socket-cleanup-mismatch）"));
+        }
+    }
+#endif
+    m_unixSocketDirectory.clear();
+    m_unixSocketPath.clear();
+    m_unixSocketDirectoryDevice = 0;
+    m_unixSocketDirectoryInode = 0;
+    m_unixSocketDevice = 0;
+    m_unixSocketInode = 0;
+    m_unixSocketIdentityCaptured = false;
+    m_unixSocketCleanupRetryCount = 0;
+}
+
+void AgentRuntimeClient::scheduleUnixSocketConnect(quint64 generation)
+{
+    if (!usesVerifiedUnixSocket() || generation == 0
+        || generation != m_processGeneration || !m_startupTimer->isActive()
+        || m_process->state() == QProcess::NotRunning) {
+        return;
+    }
+    m_unixSocketConnectGeneration = generation;
+    QTimer::singleShot(20, this, [this, generation]() {
+        connectUnixSocket(generation);
+    });
+}
+
+void AgentRuntimeClient::connectUnixSocket(quint64 generation)
+{
+#if defined(Q_OS_MACOS)
+    if (!usesVerifiedUnixSocket() || generation == 0
+        || generation != m_processGeneration
+        || generation != m_unixSocketConnectGeneration
+        || !m_startupTimer->isActive()
+        || m_process->state() == QProcess::NotRunning
+        || m_localSocket->state() == QLocalSocket::ConnectedState
+        || m_localSocket->state() == QLocalSocket::ConnectingState) {
+        return;
+    }
+    UnixEndpointIdentity identity;
+    const UnixEndpointState state = inspectUnixEndpoint(
+        m_unixSocketDirectory, m_unixSocketPath, &identity);
+    if (state == UnixEndpointState::NotReady) {
+        scheduleUnixSocketConnect(generation);
+        return;
+    }
+    if (state == UnixEndpointState::Invalid) {
+        const QString detail = QStringLiteral(
+            "Unix 运行时端点校验失败（unix-socket-endpoint-invalid）");
+        suppressAutomaticReconnect();
+        clearNegotiationState();
+        failPending(detail);
+        setReconnectState(ReconnectState::Exhausted, 0, detail);
+        emit connectionStateChanged(false, detail);
+        terminateOwnedProcessGeneration(generation);
+        return;
+    }
+    m_unixSocketDirectoryDevice = identity.directoryDevice;
+    m_unixSocketDirectoryInode = identity.directoryInode;
+    m_unixSocketDevice = identity.socketDevice;
+    m_unixSocketInode = identity.socketInode;
+    m_unixSocketIdentityCaptured = true;
+    m_localSocket->abort();
+    m_localSocket->connectToServer(m_unixSocketPath, QIODevice::ReadWrite);
+#else
+    Q_UNUSED(generation)
+#endif
+}
+
+bool AgentRuntimeClient::verifyUnixSocketPeer() const
+{
+#if defined(Q_OS_MACOS)
+    if (!usesVerifiedUnixSocket()
+        || m_localSocket->state() != QLocalSocket::ConnectedState
+        || m_process->state() == QProcess::NotRunning) {
+        return false;
+    }
+    const qintptr descriptor = m_localSocket->socketDescriptor();
+    if (descriptor < 0) return false;
+    uid_t uid = 0;
+    gid_t gid = 0;
+    if (::getpeereid(int(descriptor), &uid, &gid) != 0 || uid != ::geteuid()) {
+        return false;
+    }
+    pid_t pid = 0;
+    socklen_t length = sizeof(pid);
+    if (::getsockopt(int(descriptor), SOL_LOCAL, LOCAL_PEERPID,
+                     &pid, &length) != 0
+        || length != sizeof(pid)
+        || pid != pid_t(m_process->processId())) {
+        return false;
+    }
+    return true;
+#else
+    return false;
+#endif
+}
+
+void AgentRuntimeClient::handleUnixSocketDisconnected()
+{
+    m_unixSocketPeerVerifiedGeneration = 0;
+    if (!usesVerifiedUnixSocket() || m_stopping
+        || m_autoReconnectSuppressed || m_processTerminationPending
+        || m_process->state() == QProcess::NotRunning
+        || m_unixSocketConnectGeneration != m_processGeneration) {
+        return;
+    }
+    if (!m_handshakeComplete && m_initializeRequestId.isEmpty()
+        && m_startupTimer->isActive() && !m_autoReconnectSuppressed) {
+        scheduleUnixSocketConnect(m_processGeneration);
+        return;
+    }
+    if (m_unixSocketDisconnectGeneration == m_processGeneration) return;
+    m_unixSocketDisconnectGeneration = m_processGeneration;
+    const QString detail = QStringLiteral("Unix 运行时连接已断开");
+    clearNegotiationState();
+    failPending(detail);
+    emit connectionStateChanged(false, detail);
+    terminateOwnedProcessGeneration(m_processGeneration);
+}
+
+void AgentRuntimeClient::terminateOwnedProcessGeneration(quint64 generation)
+{
+    if (generation == 0 || generation != m_processGeneration) {
+        return;
+    }
+    m_unixSocketPeerVerifiedGeneration = 0;
+    m_ownedTerminationGeneration = generation;
+    if (m_process->state() == QProcess::NotRunning) {
+        cleanupUnixSocketEndpoint();
+        return;
+    }
+    closeTransportWrite();
+    m_process->terminate();
+    QTimer::singleShot(kReconnectTerminationGraceMs, this, [this, generation]() {
+        if (generation == m_processGeneration
+            && m_ownedTerminationGeneration == generation
+            && m_process->state() != QProcess::NotRunning) {
+            m_process->kill();
+        }
+    });
+}
+
+void AgentRuntimeClient::closeTransportWrite()
+{
+    if (usesVerifiedUnixSocket()) {
+        if (m_localSocket->state() != QLocalSocket::UnconnectedState) {
+            m_localSocket->disconnectFromServer();
+        }
+        return;
+    }
+    if (m_process->state() != QProcess::NotRunning) m_process->closeWriteChannel();
+}
+
 QProcessEnvironment AgentRuntimeClient::sanitizedSidecarEnvironment(
     const QProcessEnvironment &environment)
 {
@@ -3621,6 +4054,28 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
     clearNegotiationState();
     m_processTerminationPending = false;
     if (++m_processGeneration == 0) ++m_processGeneration;
+    m_unixSocketConnectGeneration = 0;
+    m_unixSocketDisconnectGeneration = 0;
+    m_unixSocketPeerVerifiedGeneration = 0;
+    m_ownedTerminationGeneration = 0;
+    m_localSocket->abort();
+    cleanupUnixSocketEndpoint();
+    if (usesVerifiedUnixSocket() && !m_unixSocketDirectory.isEmpty()) {
+        const QString detail = QStringLiteral(
+            "旧 Unix 运行时端点仍在安全清理中（unix-socket-cleanup-pending）");
+        m_autoReconnectSuppressed = true;
+        setReconnectState(ReconnectState::Exhausted, 0, detail);
+        emit connectionStateChanged(false, detail);
+        return false;
+    }
+    if (usesVerifiedUnixSocket() && !prepareUnixSocketEndpoint()) {
+        const QString detail = QStringLiteral(
+            "无法创建安全的 Unix 运行时端点（unix-socket-path-unavailable）");
+        m_autoReconnectSuppressed = true;
+        setReconnectState(ReconnectState::Exhausted, 0, detail);
+        emit connectionStateChanged(false, detail);
+        return false;
+    }
     m_discardProcessOutput = false;
     m_stdoutBuffer.clear();
     m_pendingRequests.clear();
@@ -3632,6 +4087,11 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
     emit connectionStateChanged(false, connectingDetail);
     QProcessEnvironment environment = sanitizedSidecarEnvironment(
         QProcessEnvironment::systemEnvironment());
+    environment.remove(QStringLiteral("AEGISY_AGENTD_UNIX_SOCKET_DIR"));
+    if (usesVerifiedUnixSocket()) {
+        environment.insert(QStringLiteral("AEGISY_AGENTD_UNIX_SOCKET_DIR"),
+                           m_unixSocketDirectory);
+    }
     if (m_emergencyDisabled) {
         environment.insert(QStringLiteral("AEGISY_WORKBENCH_EMERGENCY_DISABLED"),
                            QStringLiteral("1"));
@@ -3667,7 +4127,23 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
     }
     m_startupTimer->start(kStartupTimeoutMs);
     m_startupGeneration = m_processGeneration;
+    if (usesVerifiedUnixSocket()) {
+        scheduleUnixSocketConnect(m_processGeneration);
+    } else {
+        sendInitializeRequest();
+    }
+    return !m_initializeRequestId.isEmpty() || usesVerifiedUnixSocket();
+}
 
+void AgentRuntimeClient::sendInitializeRequest()
+{
+    if (m_process->state() == QProcess::NotRunning
+        || (usesVerifiedUnixSocket()
+            && (m_localSocket->state() != QLocalSocket::ConnectedState
+                || m_unixSocketPeerVerifiedGeneration != m_processGeneration))
+        || !m_initializeRequestId.isEmpty()) {
+        return;
+    }
     const QJsonObject params{
         {QStringLiteral("protocol"), QJsonObject{
             {QStringLiteral("minimum"), kMinimumProtocolVersion},
@@ -3686,15 +4162,13 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
         {QStringLiteral("limits"), QJsonObject{
             {QStringLiteral("max_frame_bytes"), kMaximumFrameBytes},
         }},
-        {QStringLiteral("transport_security"), stdioTransportSecurity()},
+        {QStringLiteral("transport_security"), expectedTransportSecurity()},
     };
     m_initializeRequestId = sendRequest(QStringLiteral("initialize"), params);
     m_initializeGeneration = m_processGeneration;
     if (m_initializeRequestId.isEmpty()) {
         handleRetryableProcessFailure(QStringLiteral("无法发送运行时握手请求"));
-        return false;
     }
-    return true;
 }
 
 void AgentRuntimeClient::stop()
@@ -3724,6 +4198,13 @@ void AgentRuntimeClient::stop()
     } else {
         m_process->terminate();
     }
+    const quint64 generation = m_processGeneration;
+    QTimer::singleShot(kReconnectTerminationGraceMs, this, [this, generation]() {
+        if (generation == m_processGeneration && m_stopping
+            && m_process->state() != QProcess::NotRunning) {
+            m_process->kill();
+        }
+    });
 }
 
 bool AgentRuntimeClient::completeReconnectRecovery(quint64 generation,
@@ -5383,17 +5864,38 @@ int AgentRuntimeClient::writeMessage(const QJsonObject &message)
         ? m_negotiatedMaximumFrameBytes : kMaximumFrameBytes;
     if (maximumFrameBytes <= 0 || frame.size() > maximumFrameBytes) return -32005;
     frame.append('\n');
-    return m_process->write(frame) == frame.size() ? 0 : -1;
+    const qint64 written = usesVerifiedUnixSocket()
+        ? (m_localSocket->state() == QLocalSocket::ConnectedState
+               && m_unixSocketPeerVerifiedGeneration == m_processGeneration
+               ? m_localSocket->write(frame) : -1)
+        : m_process->write(frame);
+    return written == frame.size() ? 0 : -1;
 }
 
 void AgentRuntimeClient::processStdout()
 {
+    const QByteArray bytes = m_process->readAllStandardOutput();
+    if (usesVerifiedUnixSocket()) return;
+    processTransportBytes(bytes);
+}
+
+void AgentRuntimeClient::processSocketInput()
+{
+    if (!usesVerifiedUnixSocket()
+        || m_unixSocketPeerVerifiedGeneration != m_processGeneration) {
+        m_localSocket->readAll();
+        return;
+    }
+    processTransportBytes(m_localSocket->readAll());
+}
+
+void AgentRuntimeClient::processTransportBytes(const QByteArray &bytes)
+{
     if (m_discardProcessOutput) {
-        m_process->readAllStandardOutput();
         m_stdoutBuffer.clear();
         return;
     }
-    m_stdoutBuffer.append(m_process->readAllStandardOutput());
+    m_stdoutBuffer.append(bytes);
     while (true) {
         const int maximumFrameBytes = m_handshakeComplete
             ? m_negotiatedMaximumFrameBytes : kMaximumFrameBytes;
@@ -5651,7 +6153,7 @@ void AgentRuntimeClient::processMessage(
         QSet<QString> stableCapabilities;
         int maximumFrameBytes = 0;
         const QJsonObject result = projectedResult.toObject();
-        if (!validateInitializeResult(result, &stableCapabilities,
+        if (!validateInitializeResult(result, expectedTransportSecurity(), &stableCapabilities,
                                       &maximumFrameBytes, &reasonCode)) {
             rejectInitializeResponse(reasonCode);
             return;
@@ -6175,7 +6677,7 @@ void AgentRuntimeClient::rejectInitializeResponse(const QString &reasonCode)
     if (reconnecting) setReconnectState(ReconnectState::Exhausted, 0, detail);
     reportRequestFailure(requestId, QStringLiteral("initialize"), detail, -32003);
     emit connectionStateChanged(false, detail);
-    if (m_process->state() != QProcess::NotRunning) m_process->closeWriteChannel();
+    closeTransportWrite();
 }
 
 void AgentRuntimeClient::reportRequestFailure(const QString &requestId,
@@ -6201,7 +6703,7 @@ void AgentRuntimeClient::rejectProtocolMessage(const QString &reasonCode)
     if (reconnecting) setReconnectState(ReconnectState::Exhausted, 0, detail);
     failPending(detail);
     emit connectionStateChanged(false, detail);
-    if (m_process->state() != QProcess::NotRunning) m_process->closeWriteChannel();
+    closeTransportWrite();
 }
 
 void AgentRuntimeClient::clearNegotiationState()
@@ -6233,6 +6735,7 @@ void AgentRuntimeClient::clearNegotiationState()
     m_reconnectInitializeResult = {};
     m_negotiatedStableCapabilities.clear();
     m_negotiatedMaximumFrameBytes = 0;
+    m_unixSocketPeerVerifiedGeneration = 0;
     if (livenessWasKnown) {
         emit runtimeLivenessChanged(false, QStringLiteral("运行时连接不可用"));
     }
@@ -6305,7 +6808,7 @@ void AgentRuntimeClient::abandonAmbiguousTimelineSubscriptionConnection(
         return;
     }
 
-    m_process->closeWriteChannel();
+    closeTransportWrite();
     m_process->terminate();
     QTimer::singleShot(kReconnectTerminationGraceMs, this,
                        [this, generation, canReconnect]() {

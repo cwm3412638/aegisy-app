@@ -49,9 +49,11 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   ASCII graphical strings. Both peers enforce the 4 MiB boundary before writing;
   physical oversized input is drained without body parsing or echo, oversized
   responses become same-ID `-32005`, and an oversized notification closes the
-  transport instead of being dropped. The current stdio transport is local but not
-  authenticated, encrypted, or peer-verified; authenticated socket/pipe transport
-  remains under OpenSpec `4.2` through `4.4`.
+  transport instead of being dropped. The default stdio transport is local but not
+  authenticated, encrypted, or peer-verified. The optional macOS Unix socket from
+  `4.2` is owner-only and peer-verified but deliberately still unauthenticated;
+  Windows named-pipe peer validation and one-time channel authentication remain
+  under OpenSpec `4.3` and `4.4`.
   Negotiated `runtime.heartbeat.out-of-band` now proves only local Runtime connection
   liveness through the independent stdio control reader. Qt sends one nonce-bound
   heartbeat every five seconds with a 15-second deadline. Expiry enters a separate
@@ -193,7 +195,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 
 ## Current Workbench Status
 
-- OpenSpec task baseline: 56 of 235 checkbox tasks are complete and 179 remain
+- OpenSpec task baseline: 57 of 235 checkbox tasks are complete and 178 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
 - OpenSpec task `4.1` is complete. `agent-runtime` is a locked two-crate Rust
@@ -210,8 +212,29 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   produced a byte-identical arm64 sidecar in the app bundle. The final gate passes
   the dependency audit, Rust formatting, strict Clippy, locked Release build, 1050
   Rust tests with one explicitly ignored live Codex fixture, and all 23/23 serial
-  Release CTests. Authenticated macOS socket, Windows named pipe, and one-time
-  bootstrap authentication remain tasks `4.2` through `4.4`.
+  Release CTests. Windows named pipe and one-time bootstrap authentication remain
+  tasks `4.3` and `4.4`; the completed `4.2` socket is peer-verified but is not an
+  authenticated channel.
+- OpenSpec task `4.2` is complete. macOS now has an explicitly selected per-launch
+  Unix-domain-socket transport; stdio remains the default. The Rust sidecar opens
+  private parent/endpoint directories through no-follow descriptors, rejects
+  extended ACLs, creates `0700`/`0600` objects, bounds accept time, revalidates its
+  supervising parent around same-UID/exact-PID peer verification, and constructs no
+  Runtime, Store, or Codex adapter before that boundary. Qt independently verifies
+  the exact sidecar UID/PID and binds the proof to one process generation; socket
+  ingress, writes, and initialize require that proof. Selected-socket failure never
+  falls back to stdio. Security failures share a generation-owned terminate/kill/
+  reap path and retain the first specific error. Rust and Qt cleanup are identity-
+  bound and quarantine-based: recorded launch objects can be removed, including a
+  matching sidecar quarantine interrupted by termination, while replacement or
+  uncertain objects are preserved. The strict handshake union reports
+  `transport: unix-domain-socket`, `local: true`, `peer_verified: true`, and keeps
+  `authenticated`/`encrypted` false until `4.4`. Local evidence passes 11 focused
+  Rust socket tests, all 24 handshake Schema tests, real Qt-to-Rust initialization
+  and wrong-PID rejection, 20 repeated socket E2E runs, 1062 Rust tests with one
+  explicit installed-Codex live fixture ignored, strict Clippy, locked Release
+  build, and all 24/24 desktop CTests. This is macOS evidence only and grants no
+  Agent/Codex mutation authority.
 - OpenSpec task `3.1` is complete. `agent-runtime/aap-schema` is now an explicit
   private package with independent package/wire/provider versioning, one stable
   registry, and one experimental registry. Stable AAP `0.1` is additive-only and
@@ -279,8 +302,8 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   depth above 128, or more than 65,536 JSON nodes. Canonical JSON sorts object keys
   by UTF-8 bytes and normalizes numbers without a floating-point round trip.
   A reviewed method registry binds every root dispatch and generic fallback. The
-  99-definition fixture identity is
-  `29644 8948085aaf1c08ed94cad5ef1e682dc041120053045e06f851cea64d4dfbe0db`;
+  101-definition fixture identity is
+  `29903 d2961275431323f968bd18c4d8c2535cb8b05bda003ff0dea97f6e73be124757`;
   the 72-case parser/Schema decision identity is
   `72 f0ce6bdc14c815b2b80b273126da8b20a80ec47371d39128c7e2155246f60404`.
   Node oracle, generated TypeScript, Rust, and generated Qt/C++ reproduce the
@@ -317,7 +340,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   local `ValidatorUnavailable` and must never be reported to a peer as `-32600` or
   `-32602`.
   Generated Rust Transport validation now parses the embedded Schema once and
-  caches the root plus each of the 99 definition validators independently with
+  caches the root plus each of the 101 definition validators independently with
   thread-safe `OnceLock` state. Concurrent first use of one definition compiles
   exactly once. Public non-exhaustive errors preserve parser classes and offsets
   separately from `UnknownDefinition`, `InvalidValue`, and local
@@ -351,7 +374,7 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   stable capability intersection, per-method capability enforcement, fixed 4 MiB
   bidirectional frame limit, strict envelope/ID/params rules, and fail-closed
   disconnect cleanup. This does not complete event replay, authenticated IPC, or
-  Agent mutation authority; tasks `3.5` and `4.2` through `4.4` remain open.
+  Agent mutation authority; tasks `3.5`, `4.3`, and `4.4` remain open.
 - OpenSpec task `3.4` is complete. Stable `timeline-event/0.1` envelopes now use
   Session-local contiguous positive sequences, non-decreasing positive millisecond
   timestamps, exact Turn correlation, explicit terminal states, and contiguous Item

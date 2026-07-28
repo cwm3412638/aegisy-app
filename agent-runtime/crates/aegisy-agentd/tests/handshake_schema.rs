@@ -520,6 +520,41 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
             false
         );
     }
+    assert_eq!(
+        definitions["unixSocketTransportSecurity"]["properties"]["transport"]["const"],
+        "unix-domain-socket"
+    );
+    assert_eq!(
+        definitions["unixSocketTransportSecurity"]["properties"]["local"]["const"],
+        true
+    );
+    assert_eq!(
+        definitions["unixSocketTransportSecurity"]["properties"]["authenticated"]["const"],
+        false
+    );
+    assert_eq!(
+        definitions["unixSocketTransportSecurity"]["properties"]["encrypted"]["const"],
+        false
+    );
+    assert_eq!(
+        definitions["unixSocketTransportSecurity"]["properties"]["peer_verified"]["const"],
+        true
+    );
+    assert_eq!(
+        definitions["transportSecurity"]["oneOf"],
+        json!([
+            {"$ref": "#/$defs/stdioTransportSecurity"},
+            {"$ref": "#/$defs/unixSocketTransportSecurity"}
+        ])
+    );
+    assert_eq!(
+        definitions["initializeParams"]["properties"]["transport_security"]["$ref"],
+        "#/$defs/transportSecurity"
+    );
+    assert_eq!(
+        definitions["initializeResult"]["properties"]["transport_security"]["$ref"],
+        "#/$defs/transportSecurity"
+    );
 }
 
 #[test]
@@ -540,6 +575,77 @@ fn protocol_version_schema_shape_allows_future_major_without_leading_zeroes() {
     assert!(!valid_protocol_version_shape("01.0"));
     assert!(!valid_protocol_version_shape("1.00"));
     assert!(!valid_protocol_version_shape("1"));
+}
+
+#[test]
+fn transport_security_union_accepts_only_truthful_stdio_or_verified_unix_socket_facts() {
+    let messages = fixture_messages("aap-initialize-compatible.jsonl");
+    let stdio_params = messages[0]["params"].clone();
+    let stdio_result = messages[1]["result"].clone();
+    assert!(schema_definition_valid("initializeParams", &stdio_params));
+    assert!(schema_definition_valid("initializeResult", &stdio_result));
+
+    let unix_security = json!({
+        "transport": "unix-domain-socket",
+        "local": true,
+        "authenticated": false,
+        "encrypted": false,
+        "peer_verified": true
+    });
+    let mut unix_request = messages[0].clone();
+    unix_request["params"]["transport_security"] = unix_security.clone();
+    let mut unix_response = messages[1].clone();
+    unix_response["result"]["transport_security"] = unix_security;
+    assert!(strict_envelope_valid(&unix_request));
+    assert!(strict_envelope_valid(&unix_response));
+    assert!(schema_definition_valid(
+        "initializeParams",
+        &unix_request["params"]
+    ));
+    assert!(schema_definition_valid(
+        "initializeResult",
+        &unix_response["result"]
+    ));
+
+    let invalid_security = [
+        json!({
+            "transport": "unix-domain-socket",
+            "local": true,
+            "authenticated": false,
+            "encrypted": false,
+            "peer_verified": false
+        }),
+        json!({
+            "transport": "unix-domain-socket",
+            "local": true,
+            "authenticated": true,
+            "encrypted": false,
+            "peer_verified": true
+        }),
+        json!({
+            "transport": "stdio",
+            "local": true,
+            "authenticated": false,
+            "encrypted": false,
+            "peer_verified": true
+        }),
+        json!({
+            "transport": "unknown",
+            "local": true,
+            "authenticated": false,
+            "encrypted": false,
+            "peer_verified": false
+        }),
+    ];
+    for security in invalid_security {
+        let mut params = stdio_params.clone();
+        params["transport_security"] = security.clone();
+        assert!(!schema_definition_valid("initializeParams", &params));
+
+        let mut result = stdio_result.clone();
+        result["transport_security"] = security;
+        assert!(!schema_definition_valid("initializeResult", &result));
+    }
 }
 
 #[test]

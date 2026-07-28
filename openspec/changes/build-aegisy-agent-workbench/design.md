@@ -135,12 +135,37 @@ through an inherited handle, and connect over a user-local transport:
 - Named pipe on Windows.
 
 Tasks `4.2` through `4.4` own those socket/pipe, peer-validation, ACL, and
-bootstrap-authentication guarantees. During the current task `3.3` milestone,
-Qt launches the sidecar as a child and communicates over newline-delimited stdio.
-That transport truthfully negotiates `local: true` with `authenticated`,
-`encrypted`, and `peer_verified` all `false`. Stdio also remains appropriate for
-controlled fixtures and runtime-adapter child processes; it is not evidence that
-the authenticated production IPC target is complete.
+bootstrap-authentication guarantees. Task `4.2` adds a production-shaped macOS
+Unix-domain-socket path behind an explicit Qt transport mode. The sidecar creates
+a fresh per-launch endpoint directory with mode `0700`, binds an `agent.sock`
+socket with mode `0600`, and records the directory and socket device/inode/owner
+identities before accepting one peer. Parent and endpoint directories are opened
+through owner-only, no-follow descriptors; extended ACLs, symlinks, path escapes,
+pre-existing objects, and identity drift fail closed. Both peers use macOS `getpeereid`; the
+sidecar also requires the peer PID to be its Qt parent, while Qt requires the
+server PID to be the exact supervised `QProcess`. Peer verification completes
+before Runtime/Store/Codex construction or any AAP frame processing, and failure
+does not fall back to stdio. The accept loop is bounded, rechecks that the
+supervising parent is unchanged before and after peer verification, and restores
+the accepted stream to blocking mode before handing it to the existing bounded AAP
+reader. After the first verified accept, the listener path is unlinked.
+
+Qt binds the peer proof to one process generation; socket ingress, writes, and the
+initialize request require the proof. Endpoint-invalid, peer-mismatch, and
+unexpected-disconnect paths share a generation-owned terminate/kill/reap path and
+preserve the first specific failure. Rust and Qt cleanup use device/inode/owner
+identity and random quarantine. Replacement objects are preserved, while Qt may
+finish removing a matching sidecar quarantine if termination interrupted cleanup;
+unknown or mismatched entries are never deleted.
+
+The verified socket truthfully negotiates `transport: unix-domain-socket`,
+`local: true`, `peer_verified: true`, and `authenticated`/`encrypted` as false.
+Same-UID and exact-PID verification narrows the local peer but is not the one-time
+bootstrap authentication owned by `4.4`; it supplies no replay resistance and
+does not complete the authenticated production IPC target. Until that bootstrap
+is implemented, Qt keeps stdio as its default mode. Stdio continues to negotiate
+`local: true` with `authenticated`, `encrypted`, and `peer_verified` all false and
+remains appropriate for controlled fixtures and runtime-adapter child processes.
 
 The sidecar owns Agent threads, terminals, filesystem operations, Git, sandbox
 policy, MCP processes, provider/runtime adapters, event persistence, context
@@ -213,7 +238,7 @@ plus optional decimal exponent without passing through a floating-point value.
 
 A reviewed method registry binds all stable root dispatch conditions, typed
 request/success/error definitions, and the two generic unknown-method fallbacks.
-The generated Rust/TypeScript/Qt APIs validate all 99 definitions and root
+The generated Rust/TypeScript/Qt APIs validate all 101 definitions and root
 messages. The standalone C++ runtime implements the required Draft 2020-12 subset,
 including reference siblings, composition, exact `oneOf`, negation, and conditional
 schemas. One CMake gate compares the materializer, independent Node oracle,

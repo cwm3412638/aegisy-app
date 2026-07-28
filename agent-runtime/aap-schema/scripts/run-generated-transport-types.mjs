@@ -80,7 +80,7 @@ const emitFixtures = (path) => {
   exactKeys(catalog, ["schema_version", "schema_id", "canonical_bytes", "canonical_sha256", "entries"], "fixture catalog");
   if (catalog.schema_version !== "aap-transport-fixture-catalog/0.1" ||
       catalog.schema_id !== TRANSPORT_SCHEMA_ID || !Array.isArray(catalog.entries) ||
-      catalog.entries.length !== 99) {
+      catalog.entries.length !== 101) {
     throw new TypeError("fixture catalog identity or coverage is invalid");
   }
   let canonical = `${catalog.schema_version}\n${catalog.schema_id}\n`;

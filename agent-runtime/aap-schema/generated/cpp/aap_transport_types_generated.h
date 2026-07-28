@@ -28,6 +28,7 @@ struct InitializedNotificationParams;
 struct JsonRpcError;
 struct Limits;
 struct StdioTransportSecurity;
+struct UnixSocketTransportSecurity;
 struct Backend;
 struct Capabilities;
 struct DurableMutationCursor;
@@ -45,6 +46,7 @@ struct TimelineItem;
 struct TimelineItemUpdate;
 struct TimelineSnapshotCursor;
 struct TimelineSubscriptionRequestErrorResponse;
+struct TransportSecurity;
 struct InitializeIncompatibleData;
 struct InitializeParams;
 struct InitializeResult;
@@ -186,6 +188,14 @@ enum class TimelineSubscriptionSource { Sync, Snapshot };
 
 enum class TimelineSubscriptionState { SyncRequired, SnapshotRequired, Active, Failed };
 
+struct UnixSocketTransportSecurity {
+    bool authenticated;
+    bool encrypted;
+    bool local;
+    bool peer_verified;
+    QString transport;
+};
+
 struct Backend {
     QString adapter;
     BackendStatus status;
@@ -294,6 +304,8 @@ struct TimelineSubscriptionRequestErrorResponse {
     QString jsonrpc;
 };
 
+struct TransportSecurity { std::variant<StdioTransportSecurity, UnixSocketTransportSecurity> value; };
+
 struct InitializeIncompatibleData {
     ProtocolRange client;
     QString reason;
@@ -308,7 +320,7 @@ struct InitializeParams {
     Limits limits;
     Platform platform;
     ProtocolPreference protocol;
-    StdioTransportSecurity transport_security;
+    TransportSecurity transport_security;
 };
 
 struct InitializeResult {
@@ -318,7 +330,7 @@ struct InitializeResult {
     Platform platform;
     NegotiatedProtocol protocol;
     Identity runtime;
-    StdioTransportSecurity transport_security;
+    TransportSecurity transport_security;
 };
 
 using NullableDurableMutationCursor = std::optional<DurableMutationCursor>;

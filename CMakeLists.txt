@@ -703,10 +703,10 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
     if(QT_VERSION_MAJOR EQUAL 6)
         target_link_libraries(AegisyAgentWorkbenchRenderTest PRIVATE
-            Qt6::Core Qt6::Widgets AegisyAapTransport)
+            Qt6::Core Qt6::Widgets Qt6::Network AegisyAapTransport)
     else()
         target_link_libraries(AegisyAgentWorkbenchRenderTest PRIVATE
-            Qt5::Core Qt5::Widgets AegisyAapTransport)
+            Qt5::Core Qt5::Widgets Qt5::Network AegisyAapTransport)
     endif()
     add_test(NAME agent_workbench_render COMMAND AegisyAgentWorkbenchRenderTest)
     set_tests_properties(agent_workbench_render PROPERTIES
@@ -727,13 +727,42 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
     if(QT_VERSION_MAJOR EQUAL 6)
         target_link_libraries(AegisyAgentRuntimeEnvironmentTest PRIVATE
-            Qt6::Core AegisyAapTransport)
+            Qt6::Core Qt6::Network AegisyAapTransport)
     else()
         target_link_libraries(AegisyAgentRuntimeEnvironmentTest PRIVATE
-            Qt5::Core AegisyAapTransport)
+            Qt5::Core Qt5::Network AegisyAapTransport)
     endif()
     add_test(NAME agent_runtime_environment
         COMMAND AegisyAgentRuntimeEnvironmentTest)
+
+    if(APPLE AND CARGO_EXECUTABLE)
+        add_executable(AegisyAgentRuntimeMacosSocketTest
+            tests/agent_runtime_macos_socket_test.cpp
+            src/agent_runtime_client.cpp
+            src/artifact_manifest.cpp
+            include/agent_runtime_client.h
+            include/artifact_manifest.h
+        )
+        target_compile_definitions(AegisyAgentRuntimeMacosSocketTest PRIVATE
+            AEGISY_APP_VERSION="${PROJECT_VERSION}"
+            AEGISY_AGENTD_DEV_PATH="${AEGISY_AGENTD_BINARY}"
+            AEGISY_EXPECT_AGENTD=1
+        )
+        target_include_directories(AegisyAgentRuntimeMacosSocketTest PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        if(QT_VERSION_MAJOR EQUAL 6)
+            target_link_libraries(AegisyAgentRuntimeMacosSocketTest PRIVATE
+                Qt6::Core Qt6::Network AegisyAapTransport)
+        else()
+            target_link_libraries(AegisyAgentRuntimeMacosSocketTest PRIVATE
+                Qt5::Core Qt5::Network AegisyAapTransport)
+        endif()
+        add_dependencies(AegisyAgentRuntimeMacosSocketTest aegisy_agentd)
+        add_test(NAME agent_runtime_macos_socket
+            COMMAND AegisyAgentRuntimeMacosSocketTest)
+        set_tests_properties(agent_runtime_macos_socket PROPERTIES
+            ENVIRONMENT "AEGISY_AGENT_BACKEND=preview")
+    endif()
 
     add_executable(AegisyArtifactManifestTest
         tests/artifact_manifest_test.cpp
@@ -790,6 +819,7 @@ if(BUILD_TESTING)
         target_link_libraries(AegisyMonacoEditorRenderTest PRIVATE
             Qt6::Core
             Qt6::Widgets
+            Qt6::Network
             Qt6::WebChannel
             Qt6::WebEngineWidgets
             AegisyAapTransport

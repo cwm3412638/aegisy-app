@@ -4,7 +4,7 @@ use aegisy_agentd::{
     Runtime,
 };
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::sync::mpsc::TrySendError;
 use std::sync::{mpsc, Arc, Mutex};
@@ -143,11 +143,11 @@ fn write_message<W: Write>(stdout: &Arc<Mutex<W>>, message: &Value) -> bool {
     stdout.write_all(&encoded).is_ok() && stdout.flush().is_ok()
 }
 
-fn main() {
+fn create_runtime() -> Runtime {
     let preview = std::env::var("AEGISY_AGENT_BACKEND").as_deref() == Ok("preview");
     let emergency_disabled =
         std::env::var("AEGISY_WORKBENCH_EMERGENCY_DISABLED").as_deref() == Ok("1");
-    let mut runtime = match std::env::var_os("AEGISY_WORKBENCH_DATA_ROOT") {
+    match std::env::var_os("AEGISY_WORKBENCH_DATA_ROOT") {
         Some(data_root) => {
             let data_root = Path::new(&data_root);
             let result = if emergency_disabled {
@@ -172,11 +172,18 @@ fn main() {
             eprintln!("Codex App Server is unavailable: {error}");
             Runtime::unavailable(error)
         }),
-    };
+    }
+}
+
+fn serve_connection<R, W>(mut runtime: Runtime, reader: R, writer: W)
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
     let control = runtime.control();
     let reader_control = control.clone();
-    let stdout = Arc::new(Mutex::new(io::stdout()));
-    let reader_stdout = stdout.clone();
+    let output = Arc::new(Mutex::new(writer));
+    let reader_output = output.clone();
     let transport_fault_gate = Arc::new(TransportFaultGate::default());
     let reader_transport_fault_gate = Arc::clone(&transport_fault_gate);
     let (request_sender, request_receiver): (
@@ -185,10 +192,10 @@ fn main() {
     ) = mpsc::sync_channel(REQUEST_QUEUE_CAPACITY);
 
     thread::spawn(move || {
-        let mut stdin = io::stdin().lock();
-        while let Ok(Some(frame)) = read_bounded_frame(&mut stdin) {
+        let mut input = BufReader::new(reader);
+        while let Ok(Some(frame)) = read_bounded_frame(&mut input) {
             let FrameRead::Frame(frame) = frame else {
-                if !write_message(&reader_stdout, &oversized_frame_error()) {
+                if !write_message(&reader_output, &oversized_frame_error()) {
                     return;
                 }
                 continue;
@@ -204,7 +211,7 @@ fn main() {
                 Err(RequestFrameError::ValidatorUnavailable) => return,
                 Err(error) => {
                     if let Some(response) = request_frame_error_response(&error) {
-                        if !write_message(&reader_stdout, &response) {
+                        if !write_message(&reader_output, &response) {
                             return;
                         }
                     }
@@ -213,7 +220,7 @@ fn main() {
             };
             if let Some(messages) = reader_control.reject_oversized_frame(&decoded) {
                 for message in messages {
-                    if !write_message(&reader_stdout, &message) {
+                    if !write_message(&reader_output, &message) {
                         return;
                     }
                 }
@@ -222,7 +229,7 @@ fn main() {
             match reader_control.handle_out_of_band_frame(&decoded) {
                 Ok(Some(messages)) => {
                     for message in messages {
-                        if !write_message(&reader_stdout, &message) {
+                        if !write_message(&reader_output, &message) {
                             return;
                         }
                     }
@@ -239,7 +246,7 @@ fn main() {
                 Ok(()) => {}
                 Err(TrySendError::Full(frame)) => {
                     if let Some(overload) = reader_control.overload_response_frame(&frame) {
-                        if !write_message(&reader_stdout, &overload) {
+                        if !write_message(&reader_output, &overload) {
                             return;
                         }
                     }
@@ -256,13 +263,13 @@ fn main() {
                 Ok(Some(messages)) => {
                     for message in messages {
                         if output_open {
-                            output_open = write_message(&stdout, &message);
+                            output_open = write_message(&output, &message);
                         }
                     }
                 }
                 Ok(None) => runtime.handle_frame_stream(frame, |message| {
                     if output_open {
-                        output_open = write_message(&stdout, &message);
+                        output_open = write_message(&output, &message);
                     }
                 }),
                 Err(RequestFrameError::ValidatorUnavailable) => return (false, true),
@@ -279,6 +286,49 @@ fn main() {
             break;
         }
     }
+}
+
+fn main() {
+    #[cfg(target_os = "macos")]
+    if let Some(directory) = std::env::var_os("AEGISY_AGENTD_UNIX_SOCKET_DIR") {
+        use aegisy_agentd::macos_unix_socket::OwnerOnlyUnixListener;
+
+        let listener = match OwnerOnlyUnixListener::bind_fresh(Path::new(&directory), unsafe {
+            libc::getppid()
+        }) {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("Aegisy Unix transport unavailable: {}", error.code());
+                return;
+            }
+        };
+        let stream = match listener.accept_one() {
+            Ok(stream) => stream,
+            Err(error) => {
+                eprintln!("Aegisy Unix transport rejected: {}", error.code());
+                return;
+            }
+        };
+        let reader = match stream.try_clone() {
+            Ok(reader) => reader,
+            Err(_) => {
+                eprintln!("Aegisy Unix transport unavailable: unix-socket-clone-failed");
+                return;
+            }
+        };
+        let mut runtime = create_runtime();
+        if runtime
+            .bind_verified_unix_socket_transport(&stream)
+            .is_err()
+        {
+            eprintln!("Aegisy Unix transport unavailable: unix-socket-runtime-bind-failed");
+            return;
+        }
+        serve_connection(runtime, reader, stream);
+        return;
+    }
+
+    serve_connection(create_runtime(), io::stdin(), io::stdout());
 }
 
 #[cfg(test)]

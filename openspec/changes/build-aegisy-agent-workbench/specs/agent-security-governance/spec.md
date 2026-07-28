@@ -82,6 +82,14 @@ and SHALL minimize exposed local transport surface.
 - **WHEN** authentication or peer identity validation fails
 - **THEN** the sidecar SHALL close the connection before exposing project, session, credential, or tool methods
 
+#### Scenario: macOS peer identity is verified before bootstrap authentication exists
+- **WHEN** the owner-only Unix socket verifies the current UID and exact supervised Qt/sidecar PID but no one-time bootstrap proof has been exchanged
+- **THEN** the connection SHALL report `peer_verified: true` and `authenticated: false`, SHALL expose no additional authority, and SHALL NOT satisfy the authenticated-channel release gate
+
+#### Scenario: macOS endpoint or peer identity becomes uncertain
+- **WHEN** endpoint ownership, permissions, extended ACL, device/inode identity, supervising parent, peer UID/PID, or generation binding cannot be proven
+- **THEN** the host and sidecar SHALL process no AAP frame, SHALL NOT fall back to stdio, SHALL terminate and reap the owned process generation, and SHALL preserve any replacement object whose identity is not the recorded launch object
+
 #### Scenario: Browser-originated request reaches runtime transport
 - **WHEN** a web page attempts direct socket or WebSocket access
 - **THEN** origin and authentication checks SHALL reject it; embedded workbench content SHALL communicate only through the constrained host bridge

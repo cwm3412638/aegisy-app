@@ -170,7 +170,7 @@ int emitFixtureIdentity(const QString &path)
         || schemaId != QString::fromLatin1(kSchemaId)
         || !stringField(catalog, QStringLiteral("canonical_sha256"), &expectedHash)
         || !integerField(catalog, QStringLiteral("canonical_bytes"), &expectedBytes)
-        || expectedBytes <= 0 || !entries || entries->size() != 99) {
+        || expectedBytes <= 0 || !entries || entries->size() != 101) {
         return fail(QStringLiteral("fixture identity or coverage is invalid"), 5);
     }
 

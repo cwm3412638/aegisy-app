@@ -1,8 +1,8 @@
 {
   "schema_version": "aap-transport-fixture-catalog/0.1",
   "schema_id": "https://aegisy.cc/schemas/aap/stable/v0.1/aap.schema.json",
-  "canonical_bytes": 29644,
-  "canonical_sha256": "8948085aaf1c08ed94cad5ef1e682dc041120053045e06f851cea64d4dfbe0db",
+  "canonical_bytes": 29903,
+  "canonical_sha256": "d2961275431323f968bd18c4d8c2535cb8b05bda003ff0dea97f6e73be124757",
   "entries": [
     {
       "definition": "backend",
@@ -399,6 +399,14 @@
     {
       "definition": "timelineSyncSuccessResponse",
       "value_json": "{\"jsonrpc\":\"2.0\",\"id\":\"timeline-sync-1\",\"result\":{\"schema_version\":\"timeline-sync-page/0.1\",\"session_id\":\"session-1\",\"after\":{\"sequence\":0,\"event_id\":null},\"watermark\":{\"sequence\":2,\"event_id\":\"event:sha256:6cf6e2279d2c733558d9ad3b6c7f35431a850328a14f8686a4a53ba0c1f00798\"},\"events\":[{\"schema_version\":\"timeline-event/0.1\",\"event_id\":\"event:sha256:a3ea83f9fd0b70adafafe203fc62f1a82a78b42a652e82615725a858d411236a\",\"sequence\":1,\"timestamp_ms\":1784851200001,\"correlation_id\":\"turn-1\",\"session_id\":\"session-1\",\"turn_id\":\"turn-1\",\"turn_state\":\"running\",\"event\":\"turn.started\",\"item\":null,\"item_update\":null}],\"next_after\":{\"sequence\":1,\"event_id\":\"event:sha256:a3ea83f9fd0b70adafafe203fc62f1a82a78b42a652e82615725a858d411236a\"},\"complete\":false}}"
+    },
+    {
+      "definition": "transportSecurity",
+      "value_json": "{\"transport\":\"stdio\",\"local\":true,\"authenticated\":false,\"encrypted\":false,\"peer_verified\":false}"
+    },
+    {
+      "definition": "unixSocketTransportSecurity",
+      "value_json": "{\"transport\":\"unix-domain-socket\",\"local\":true,\"authenticated\":false,\"encrypted\":false,\"peer_verified\":true}"
     }
   ]
 }
