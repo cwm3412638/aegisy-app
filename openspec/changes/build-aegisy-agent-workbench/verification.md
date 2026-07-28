@@ -543,10 +543,19 @@ Metadata-only mutation and server-request contracts (`3.6`/`3.7`, partial):
   and answers; exact retries, derived request/operation identities, contiguous
   lifecycle, terminal/uncertain handling, and fixed-false decision/permission/
   execution/mutation authority are covered by five focused tests.
+- `structured_user_input.rs` defines metadata-only `structured-user-input/0.1`.
+  It binds an ordered, bounded set of opaque question/option identities and kinds
+  to one Session/Turn/request/idempotency fingerprint, without retaining prompt,
+  label, option value, answer, or form content. Cancellation has an independently
+  recomputable operation-bound identity, exact replay, and explicit completion
+  race semantics; invalid identity substitution, unknown/secret-shaped fields,
+  bounds/duplicate drift, non-contiguous revision/time, terminal advance, uncertain
+  recovery, and any decision/authority claim fail closed. Five focused tests pass.
 - These modules are internal foundations only. They are not connected to the
   schema-v20 ledger, AAP routes, Qt, Store, Codex server-request handling,
   secure storage, Git execution, or a user Approval issuer. Their tests do not
-  prove a usable approval, credential refresh, elicitation UI, or mutation path;
+  prove a usable question/answer flow, approval, credential refresh, elicitation
+  UI, or mutation path;
   tasks `3.6` and `3.7` remain unchecked.
 
 Content references and bounded pages (`3.8`, partial):

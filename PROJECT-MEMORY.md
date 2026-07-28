@@ -3710,10 +3710,21 @@ Implemented visual baseline:
   five focused tests cover exact replay, lifecycle, drift, secret, unknown-field,
   and fixed-false decision/permission/execution/mutation authority checks. It is
   not a server-request UI, approval path, AAP method, or extension execution grant.
-- All three modules are deliberately not connected to the schema-v20 ledger,
+- `structured_user_input.rs` defines internal metadata-only
+  `structured-user-input/0.1`. It binds at most 16 ordered opaque questions, 16
+  options per question, and 128 options total to exact Session/Turn/request and
+  idempotency identities. Cancellation stores its bounded idempotency key and
+  recomputes the operation-bound identity; cancellation/completion races,
+  contiguous revisions, monotonic time, terminal and reconciliation behavior are
+  strict. Prompt, label, option value, answer, and form content are absent, and
+  decision/permission/execution/mutation authority are fixed false. Five focused
+  tests cover bounds, drift, strict wire input, cancellation binding, races, and
+  fail-closed authority/uncertainty behavior. It is not a usable question UI or
+  answer channel.
+- All four modules are deliberately not connected to the schema-v20 ledger,
   AAP, Qt, Workbench Store, Codex server requests, secure storage, Git execution,
   or genuine user Approval. Do not advertise these foundations as usable
-  mutation, credential refresh, or elicitation functionality.
+  mutation, structured-input, credential refresh, or elicitation functionality.
 
 ## Content Reference Foundation (2026-07-28)
 
