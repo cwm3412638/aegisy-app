@@ -523,6 +523,21 @@ Durable Turn-start acknowledgement (`3.5`/`3.6`, partial):
 
 Metadata-only mutation and server-request contracts (`3.6`/`3.7`, partial):
 
+- `mutation_reservation.rs` projects the existing approval, file-write,
+  Git-mutation, and background-job request contracts into strict content-free
+  `mutation-reservation-draft/0.1` records. Domain-separated identities bind the
+  source schema/kind/operation/scope plus Session/project/root/Turn, idempotency,
+  and normalized request fingerprint. Retry classification uses the intended
+  Session/kind/idempotency uniqueness tuple: exact validated equality replays,
+  binding drift conflicts, and different keys or kinds are unrelated. Three
+  focused tests cover all four source kinds, retry classification, strict wire
+  round-trip, authority forgery, unknown fields, scope drift, and secret shapes.
+- Every reservation draft fixes schema-v20 compatibility, Turn-anchor
+  compatibility, persistence, dispatch, mutation, Approval, and execution to
+  false. The current table admits only `turn-start`; these drafts are not Store
+  rows and cannot be used as evidence of reservation or dispatch. A schema
+  migration with durable source binding, kind-specific anchors, transaction/
+  recovery rules, AAP, and Qt consumers is still absent, so `3.6` stays unchecked.
 - `git_mutation_ack.rs` defines `git-mutation-acknowledgement/0.1` without
   executing Git or granting authority. Operation identity is domain-separated and
   binds Session/project/root, mutation kind, idempotency key, request fingerprint,

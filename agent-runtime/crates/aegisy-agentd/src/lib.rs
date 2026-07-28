@@ -46,6 +46,7 @@ pub mod model_catalog_signature;
 pub mod model_catalog_trust_store;
 pub mod model_profile;
 pub mod model_profile_store;
+pub mod mutation_reservation;
 pub mod non_git_checkpoint;
 mod operation_probe;
 pub mod operation_reconciliation;

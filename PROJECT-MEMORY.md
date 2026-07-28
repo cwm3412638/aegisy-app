@@ -3697,6 +3697,21 @@ Implemented visual baseline:
   require opaque evidence, and mutation/approval/execution authority are fixed
   false. The module has three focused tests and is not connected to Git, Store,
   AAP, Qt, or an approval issuer.
+- `mutation_reservation.rs` defines internal
+  `mutation-reservation-draft/0.1` as the reviewed bridge from existing approval,
+  file-write, Git-mutation, and background-job request metadata toward a future
+  ledger. It binds source and scope identities, normalizes fingerprints, and
+  classifies exact replay, same Session/kind/idempotency conflict, and unrelated
+  requests. Every record fixes schema-v20/Turn-anchor compatibility, persistence,
+  dispatch, mutation, Approval, and execution authority to false. Three focused
+  tests cover all four source contracts, retry classification, strict round-trip,
+  drift, secret shapes, and forged authority.
+- Do not insert these drafts into the current schema-v20 table: its database
+  constraint admits only `mutation_kind = 'turn-start'` and its transitions require
+  Turn Timeline anchors. Approval/file/Git/job persistence needs a reviewed schema
+  migration, durable source-record binding, per-kind anchors, atomic Store
+  transactions, startup reconciliation, AAP methods, and Qt consumption before any
+  producer or dispatch path can be enabled.
 - OpenSpec `3.7` remains unchecked. `credential_refresh.rs` defines an internal
   `credential-refresh-request/0.1` contract that carries only provider/profile
   and one-way secure-storage identities. It never carries credential values,
