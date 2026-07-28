@@ -1145,6 +1145,35 @@ only a matching active project-bound Work session may submit a metadata-only
 and is disabled for cross-session, recovery/deletion/reconciliation-blocked,
 busy-mutation, invalid-identity, or unsupported-media states.
 
+`artifact/read-command-output-page` is the bounded paging companion under the same
+`artifact.command-output.bounded` capability. The first request supplies the exact
+Session/Item/reference and may narrow `limit` plus `max_total_inline_bytes`. Runtime
+intersects those values with its 64 KiB item and 256 KiB aggregate ceilings and
+returns `command-output-artifact-page/0.1` containing a strict `content_reference`
+and `page`. `max_total_inline_bytes` is the aggregate budget for all inline items in
+one response, not a lifetime budget across the page sequence; because this response
+contains one inline item, its page size is capped by both negotiated item and
+aggregate limits. A non-terminal page includes the complete `next_cursor`;
+continuation requests send that cursor with the same Session/Item/reference and must
+omit new limits. The cursor binds reference, SHA-256, byte count, MIME type, offset,
+page size, negotiated limits, and a binding identity derived from the Session, Item,
+and complete immutable command-Artifact metadata. The response returns the bounded
+`created_at_ms` needed to independently reproduce that binding. In-memory lookup is exact by
+`(item_id, reference)` and durable lookup is exact by Session/Item/reference, so two
+Items with identical output remain independently bound across Runtime restart.
+Runtime re-derives the durable Blob-reference identity and revalidates owner, MIME,
+exact metadata shape, truncation/redaction arithmetic, UTF-8, and content hash. A
+truncated Artifact must contain exactly one omission marker at the canonical
+head/tail boundary. The complete Artifact is hash/length/secret-scanned before any
+slice is selected; pages then split only on UTF-8 scalar boundaries. This permits a
+complete `[REDACTED]` placeholder to cross a page boundary without allowing a secret
+shape to evade detection across pages. Cursor drift, cross-Session or cross-Item use,
+hash-consistent owner rebinding, missing/corrupt durable Blob, unknown parameters,
+and unsafe source content fail closed. This route is read-only and does not grant
+generic Blob, filesystem, mutation, Approval, or execution authority. The legacy
+whole-artifact method remains available for current Qt compatibility and chooses a
+stable owner by creation time plus Item ID when identical references exist.
+
 Capability `turn.context.pinned-selected` indicates that `turn/start` and
 `turn/context/inspect` accept `pinned_context_set_identity` together with an
 explicit `pinned_context_ids` list. The runtime never sends all persisted pins

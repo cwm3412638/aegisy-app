@@ -3762,6 +3762,38 @@ Implemented visual baseline:
   grant artifact authority, or replace existing Store transaction and artifact-page
   gates. Do not advertise `3.8` as complete until producers, persistence, generated
   types, and Qt/AAP evidence are connected.
+- `artifact/read-command-output-page` is the first production connection to this
+  contract. It reuses `artifact.command-output.bounded`; first and continuation
+  requests require the exact Session/Item/reference. In-memory lookup is keyed by
+  `(item_id, reference)` and durable lookup by Session/Item/reference, so identical
+  output from multiple Items remains independently bound after Runtime restart. It returns
+  `command-output-artifact-page/0.1` with the strict reference/preview plus one
+  UTF-8-safe inline page. First-page limits intersect caller/local item and aggregate
+  ceilings; the aggregate limit applies to all inline items in one response, the
+  single page is capped by both limits, and continuations cannot renegotiate. Cursor
+  binding includes Session, Item, and complete immutable Artifact metadata, and the
+  response exposes bounded `created_at_ms` for independent client recomputation. Durable
+  reference identity, owner/MIME/exact metadata/redaction/truncation/content integrity,
+  and the unique omission marker at its canonical head/tail boundary are independently
+  revalidated. The complete Artifact is hash/length/secret-scanned before slicing, so
+  `[REDACTED]` placeholders may cross pages while unredacted secret shapes cannot evade
+  detection across pages. Hash-consistent owner rebinding, cross-Session or cross-Item
+  use, purged/missing/corrupt content, unknown params, limit drift, cursor substitution,
+  and scalar-splitting pages fail closed. The legacy whole-artifact route remains for
+  Qt compatibility and uses a deterministic creation-time/Item-ID owner selection.
+- Focused command-artifact tests plus explicit redaction and owner-rebinding tests cover
+  compatible legacy reads, empty and UTF-8 pages, terminal cursors, continuation
+  renegotiation/tamper, Session and Item isolation, durable semantic tampering, and
+  Store reload after Runtime restart. This grants no generic Blob/filesystem,
+  mutation, Approval, or execution authority. OpenSpec `3.8` remains unchecked until
+  Qt paging, remaining content domains, generated types, and cross-platform evidence
+  are complete.
+- The final local command-output paging gate passes `1043` Rust tests with one
+  explicitly ignored live Codex fixture, strict workspace Clippy and formatting,
+  the complete desktop build and all `23/23` CTests, strict OpenSpec validation,
+  and `git diff --check`. This is macOS/local evidence only and cannot close Qt
+  paging, remaining content domains, generated protocol types, clean Windows, or
+  live-provider gates.
 
 ## Next Product Priorities
 

@@ -3252,27 +3252,67 @@ impl WorkbenchStore {
         content_reference: &str,
         accessed_at_ms: u64,
     ) -> Result<DurableBlobRead, WorkbenchStoreError> {
+        self.read_durable_blob_for_session_binding_read_only(
+            session_id,
+            content_reference,
+            None,
+            accessed_at_ms,
+        )
+    }
+
+    pub fn read_durable_blob_for_session_item_read_only(
+        &self,
+        session_id: &str,
+        item_id: &str,
+        content_reference: &str,
+        accessed_at_ms: u64,
+    ) -> Result<DurableBlobRead, WorkbenchStoreError> {
+        validate_identifier(item_id, "durable blob Item ID")?;
+        self.read_durable_blob_for_session_binding_read_only(
+            session_id,
+            content_reference,
+            Some(item_id),
+            accessed_at_ms,
+        )
+    }
+
+    fn read_durable_blob_for_session_binding_read_only(
+        &self,
+        session_id: &str,
+        content_reference: &str,
+        item_id: Option<&str>,
+        accessed_at_ms: u64,
+    ) -> Result<DurableBlobRead, WorkbenchStoreError> {
         validate_identifier(session_id, "durable blob session ID")?;
         self.ensure_session_readable(session_id)?;
         validate_content_reference(content_reference, None)?;
-        let reference_id: String = self
-            .connection
-            .query_row(
+        let accessed_at_ms = to_i64(accessed_at_ms, "durable blob access time")?;
+        let reference_id: String = match item_id {
+            Some(item_id) => self.connection.query_row(
+                "SELECT reference_id FROM durable_blob_references
+                 WHERE session_id = ?1 AND content_reference = ?2
+                   AND owner_kind = 'item' AND owner_id = ?3
+                   AND (state = 'active' OR retain_until_ms >= ?4)
+                 ORDER BY CASE state WHEN 'active' THEN 0 ELSE 1 END,
+                          created_at_ms DESC, owner_id DESC, reference_id DESC
+                 LIMIT 1",
+                params![session_id, content_reference, item_id, accessed_at_ms],
+                |row| row.get(0),
+            ),
+            None => self.connection.query_row(
                 "SELECT reference_id FROM durable_blob_references
                  WHERE session_id = ?1 AND content_reference = ?2
                    AND (state = 'active' OR retain_until_ms >= ?3)
-                 ORDER BY CASE state WHEN 'active' THEN 0 ELSE 1 END, created_at_ms DESC
+                 ORDER BY CASE state WHEN 'active' THEN 0 ELSE 1 END,
+                          created_at_ms DESC, owner_id DESC, reference_id DESC
                  LIMIT 1",
-                params![
-                    session_id,
-                    content_reference,
-                    to_i64(accessed_at_ms, "durable blob access time")?
-                ],
+                params![session_id, content_reference, accessed_at_ms],
                 |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| error("cannot locate durable blob reference"))?
-            .ok_or_else(|| error("durable blob reference is unavailable for session"))?;
+            ),
+        }
+        .optional()
+        .map_err(|_| error("cannot locate durable blob reference"))?
+        .ok_or_else(|| error("durable blob reference is unavailable for session"))?;
         let reference = load_durable_blob_reference(&self.connection, &reference_id)?;
         let content = self
             .blob_files
@@ -3292,6 +3332,30 @@ impl WorkbenchStore {
             content_reference,
             accessed_at_ms,
         )?;
+        self.finish_durable_blob_read(read, accessed_at_ms)
+    }
+
+    pub fn read_durable_blob_for_session_item(
+        &mut self,
+        session_id: &str,
+        item_id: &str,
+        content_reference: &str,
+        accessed_at_ms: u64,
+    ) -> Result<DurableBlobRead, WorkbenchStoreError> {
+        let read = self.read_durable_blob_for_session_item_read_only(
+            session_id,
+            item_id,
+            content_reference,
+            accessed_at_ms,
+        )?;
+        self.finish_durable_blob_read(read, accessed_at_ms)
+    }
+
+    fn finish_durable_blob_read(
+        &mut self,
+        read: DurableBlobRead,
+        accessed_at_ms: u64,
+    ) -> Result<DurableBlobRead, WorkbenchStoreError> {
         let reference_id = read.reference.reference_id.clone();
         let reference = read.reference;
         let content = read.content;
@@ -22006,6 +22070,17 @@ fn load_durable_blob_reference(
             "durable blob reference metadata integrity check failed",
         ));
     }
+    if reference_id
+        != durable_blob_reference_id(
+            session_id.as_deref(),
+            project_id.as_deref(),
+            &owner_kind,
+            &owner_id,
+            &content_reference,
+        )
+    {
+        return Err(error("durable blob reference binding identity is invalid"));
+    }
     let metadata = serde_json::from_str(&metadata_json)
         .map_err(|_| error("durable blob reference metadata JSON is invalid"))?;
     if payload_contains_secret_key(&metadata) {
@@ -36974,6 +37049,117 @@ mod tests {
         assert!(scan.consistent, "{:?}", scan.issues);
         assert_eq!(scan.checked_objects, 1);
         assert_eq!(scan.checked_references, 1);
+    }
+
+    #[test]
+    fn durable_blob_reference_rejects_hash_consistent_owner_rebinding_after_restart() {
+        let root = Root::new("durable-blob-owner-rebinding");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_blob_owners(&mut store, &root);
+
+        let source_item_id = "command-source";
+        let target_item_id = "command-target";
+        let content = b"session A command output\n";
+        let mut blob = blob_request("blob-session-a", source_item_id, content, 2_000);
+        blob.owner_kind = "item".into();
+        blob.owner_id = source_item_id.into();
+        blob.metadata = json!({
+            "item_id": source_item_id,
+            "source_bytes": content.len(),
+            "redacted_count": 0,
+            "redacted": false,
+            "total_bytes": content.len(),
+            "retained_bytes": content.len(),
+            "omitted_bytes": 0,
+            "truncated": false
+        });
+        blob.reference_id = durable_blob_reference_id(
+            blob.session_id.as_deref(),
+            blob.project_id.as_deref(),
+            &blob.owner_kind,
+            &blob.owner_id,
+            &blob.content_reference,
+        );
+        let content_reference = blob.content_reference.clone();
+        let original_reference_id = blob.reference_id.clone();
+        store
+            .append_item_with_durable_blob(
+                StoredItemAppend {
+                    session_id: "blob-session-a".into(),
+                    turn_id: None,
+                    item_id: source_item_id.into(),
+                    item_kind: "command".into(),
+                    role: "tool".into(),
+                    state: "completed".into(),
+                    payload: json!({"artifact": {"reference": &content_reference}}),
+                    created_at_ms: 2_000,
+                },
+                blob,
+            )
+            .unwrap();
+        store
+            .append_item(StoredItemAppend {
+                session_id: "blob-session-b".into(),
+                turn_id: None,
+                item_id: target_item_id.into(),
+                item_kind: "command".into(),
+                role: "tool".into(),
+                state: "completed".into(),
+                payload: json!({"artifact": {"reference": &content_reference}}),
+                created_at_ms: 2_100,
+            })
+            .unwrap();
+
+        let rebound_metadata = json!({
+            "item_id": target_item_id,
+            "source_bytes": content.len(),
+            "redacted_count": 0,
+            "redacted": false,
+            "total_bytes": content.len(),
+            "retained_bytes": content.len(),
+            "omitted_bytes": 0,
+            "truncated": false
+        });
+        let rebound_json = serde_json::to_string(&rebound_metadata).unwrap();
+        let rebound_hash = ContentHash::for_bytes(rebound_json.as_bytes());
+        store
+            .connection
+            .execute(
+                "UPDATE durable_blob_references
+                 SET session_id = ?1, owner_id = ?2, metadata_json = ?3,
+                     metadata_sha256 = ?4, metadata_bytes = ?5
+                 WHERE reference_id = ?6",
+                params![
+                    "blob-session-b",
+                    target_item_id,
+                    rebound_json,
+                    rebound_hash.sha256,
+                    to_i64(rebound_hash.bytes, "test metadata bytes").unwrap(),
+                    original_reference_id
+                ],
+            )
+            .unwrap();
+
+        assert!(store
+            .read_durable_blob_for_session_item_read_only(
+                "blob-session-b",
+                target_item_id,
+                &content_reference,
+                3_000,
+            )
+            .is_err());
+        drop(store);
+
+        if let Ok(reopened) = WorkbenchStore::open(&root.path) {
+            assert!(reopened
+                .read_durable_blob_for_session_item_read_only(
+                    "blob-session-b",
+                    target_item_id,
+                    &content_reference,
+                    3_100,
+                )
+                .is_err());
+        }
     }
 
     #[test]

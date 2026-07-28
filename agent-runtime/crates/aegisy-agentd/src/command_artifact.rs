@@ -6,6 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_SESSION_ARTIFACTS: usize = 64;
 const MAX_SESSION_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
+const MAX_ITEM_ID_BYTES: usize = 128;
+const CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CommandOutputArtifact {
@@ -24,6 +27,76 @@ pub struct CommandOutputArtifact {
     pub content: String,
 }
 
+impl CommandOutputArtifact {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let hash_valid = self.sha256.len() == 64
+            && self
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        let retained_bytes = u64::try_from(self.retained_bytes)
+            .map_err(|_| "command output artifact retained byte count is invalid")?;
+        if !hash_valid
+            || self.reference != format!("command-output:sha256:{}", self.sha256)
+            || self.content_type != CONTENT_TYPE
+            || self.item_id.is_empty()
+            || self.item_id.len() > MAX_ITEM_ID_BYTES
+            || !self.item_id.bytes().all(|byte| byte.is_ascii_graphic())
+            || self.created_at_ms > MAX_SAFE_JSON_INTEGER
+            || self.source_bytes > MAX_SAFE_JSON_INTEGER
+            || self.redacted_count > MAX_SAFE_JSON_INTEGER
+            || self.total_bytes > MAX_SAFE_JSON_INTEGER
+            || retained_bytes > MAX_SAFE_JSON_INTEGER
+            || retained_bytes
+                > (crate::command_output::ARTIFACT_HEAD_LIMIT
+                    + crate::command_output::ARTIFACT_TAIL_LIMIT) as u64
+            || self.omitted_bytes > MAX_SAFE_JSON_INTEGER
+            || self.redacted != (self.redacted_count > 0)
+            || sha256_hex(self.content.as_bytes()) != self.sha256
+        {
+            return Err("command output artifact identity or metadata is invalid");
+        }
+        if self.total_bytes != retained_bytes.saturating_add(self.omitted_bytes)
+            || self.truncated != (self.omitted_bytes > 0)
+        {
+            return Err("command output artifact truncation metadata is invalid");
+        }
+        if self.truncated {
+            let marker = format!(
+                "\n[Aegisy omitted {} command output bytes]\n",
+                self.omitted_bytes
+            );
+            let marker_positions = self
+                .content
+                .match_indices(&marker)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let Some(&head_bytes) = marker_positions.first() else {
+                return Err("command output artifact omission marker is invalid");
+            };
+            let tail_bytes = self
+                .content
+                .len()
+                .saturating_sub(head_bytes.saturating_add(marker.len()));
+            if self.content.len() != self.retained_bytes.saturating_add(marker.len())
+                || marker_positions.len() != 1
+                || !(crate::command_output::ARTIFACT_HEAD_LIMIT.saturating_sub(3)
+                    ..=crate::command_output::ARTIFACT_HEAD_LIMIT)
+                    .contains(&head_bytes)
+                || !(crate::command_output::ARTIFACT_TAIL_LIMIT.saturating_sub(3)
+                    ..=crate::command_output::ARTIFACT_TAIL_LIMIT)
+                    .contains(&tail_bytes)
+                || self.retained_bytes != head_bytes.saturating_add(tail_bytes)
+            {
+                return Err("command output artifact omission marker is invalid");
+            }
+        } else if self.content.len() != self.retained_bytes {
+            return Err("command output artifact retained byte count is invalid");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 pub struct CommandArtifactStore {
     sessions: HashMap<String, SessionArtifacts>,
@@ -31,8 +104,8 @@ pub struct CommandArtifactStore {
 
 #[derive(Default)]
 struct SessionArtifacts {
-    artifacts: HashMap<String, CommandOutputArtifact>,
-    order: VecDeque<String>,
+    artifacts: HashMap<(String, String), CommandOutputArtifact>,
+    order: VecDeque<(String, String)>,
     bytes: usize,
 }
 
@@ -94,7 +167,7 @@ impl CommandArtifactStore {
         let artifact = CommandOutputArtifact {
             reference: reference.clone(),
             sha256,
-            content_type: "text/plain; charset=utf-8".into(),
+            content_type: CONTENT_TYPE.into(),
             item_id: item_id.into(),
             created_at_ms: now_ms(),
             source_bytes,
@@ -106,13 +179,15 @@ impl CommandArtifactStore {
             truncated: capture.truncated,
             content: capture.content,
         };
+        debug_assert!(artifact.validate().is_ok());
         let session = self.sessions.entry(session_id.into()).or_default();
-        if let Some(existing) = session.artifacts.get(&reference) {
+        let key = (item_id.to_owned(), reference);
+        if let Some(existing) = session.artifacts.get(&key) {
             return Some(existing.clone());
         }
         session.bytes = session.bytes.saturating_add(artifact.content.len());
-        session.order.push_back(reference.clone());
-        session.artifacts.insert(reference, artifact.clone());
+        session.order.push_back(key.clone());
+        session.artifacts.insert(key, artifact.clone());
         while session.artifacts.len() > MAX_SESSION_ARTIFACTS
             || session.bytes > MAX_SESSION_ARTIFACT_BYTES
         {
@@ -130,7 +205,26 @@ impl CommandArtifactStore {
         self.sessions
             .get(session_id)?
             .artifacts
-            .get(reference)
+            .values()
+            .filter(|artifact| artifact.reference == reference)
+            .max_by(|left, right| {
+                left.created_at_ms
+                    .cmp(&right.created_at_ms)
+                    .then_with(|| left.item_id.cmp(&right.item_id))
+            })
+            .cloned()
+    }
+
+    pub fn read_for_item(
+        &self,
+        session_id: &str,
+        item_id: &str,
+        reference: &str,
+    ) -> Option<CommandOutputArtifact> {
+        self.sessions
+            .get(session_id)?
+            .artifacts
+            .get(&(item_id.to_owned(), reference.to_owned()))
             .cloned()
     }
 
@@ -167,6 +261,7 @@ mod tests {
         let artifact = store
             .record("session-1", "command-1", &output, 3 * 1024 * 1024, 0)
             .unwrap();
+        assert!(artifact.validate().is_ok());
         assert!(artifact.reference.starts_with("command-output:sha256:"));
         assert_eq!(artifact.sha256.len(), 64);
         assert!(artifact.truncated);
@@ -181,6 +276,50 @@ mod tests {
             .record("session-1", "command-1", &output, 3 * 1024 * 1024, 0)
             .unwrap();
         assert_eq!(duplicate.reference, artifact.reference);
+
+        let second_item = store
+            .record("session-1", "command-2", &output, 3 * 1024 * 1024, 0)
+            .unwrap();
+        assert_eq!(second_item.reference, artifact.reference);
+        assert_eq!(second_item.item_id, "command-2");
+        assert_eq!(
+            store
+                .read_for_item("session-1", "command-1", &artifact.reference)
+                .unwrap()
+                .item_id,
+            "command-1"
+        );
+        assert_eq!(
+            store
+                .read("session-1", &artifact.reference)
+                .unwrap()
+                .item_id,
+            "command-2"
+        );
+
+        let mut bad_owner = artifact.clone();
+        bad_owner.item_id = "item with spaces".into();
+        assert!(bad_owner.validate().is_err());
+        let mut bad_arithmetic = artifact.clone();
+        bad_arithmetic.omitted_bytes += 1;
+        assert!(bad_arithmetic.validate().is_err());
+        let mut bad_redaction = artifact.clone();
+        bad_redaction.redacted = true;
+        assert!(bad_redaction.validate().is_err());
+
+        let mut moved_marker = artifact;
+        let marker = format!(
+            "\n[Aegisy omitted {} command output bytes]\n",
+            moved_marker.omitted_bytes
+        );
+        moved_marker.content = format!(
+            "{}{}",
+            marker,
+            moved_marker.content.replacen(&marker, "", 1)
+        );
+        moved_marker.sha256 = sha256_hex(moved_marker.content.as_bytes());
+        moved_marker.reference = format!("command-output:sha256:{}", moved_marker.sha256);
+        assert!(moved_marker.validate().is_err());
     }
 
     #[test]

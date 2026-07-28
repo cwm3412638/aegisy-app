@@ -37,6 +37,7 @@ const CONTENT_REFERENCE_PREFIXES: &[&str] = &[
 ];
 const PREVIEW_IDENTITY_PREFIX: &str = "content-preview:sha256:";
 const LIMITS_IDENTITY_PREFIX: &str = "content-inline-limits:sha256:";
+const BINDING_IDENTITY_PREFIX: &str = "content-reference-binding:sha256:";
 const CURSOR_IDENTITY_PREFIX: &str = "content-reference-cursor:sha256:";
 const PAGE_IDENTITY_PREFIX: &str = "content-reference-page:sha256:";
 
@@ -81,6 +82,31 @@ fn valid_lower_hex(value: &str) -> bool {
     valid_hex(value) && value.bytes().all(|byte| !byte.is_ascii_uppercase())
 }
 
+fn redacted_placeholder(value: &str) -> bool {
+    let value = value.trim_start();
+    let Some(remainder) = value.strip_prefix("[redacted]") else {
+        return false;
+    };
+    remainder
+        .chars()
+        .all(|character| character.is_whitespace() || ",;\"'})]".contains(character))
+}
+
+fn contains_unredacted_value(value: &str, needle: &str) -> bool {
+    let mut remainder = value;
+    while let Some(index) = remainder.find(needle) {
+        let candidate = &remainder[index + needle.len()..];
+        let field_value = candidate
+            .split_once(['\r', '\n'])
+            .map_or(candidate, |(line, _)| line);
+        if !field_value.trim().is_empty() && !redacted_placeholder(field_value) {
+            return true;
+        }
+        remainder = candidate;
+    }
+    false
+}
+
 fn secret_value_shaped(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     let jwt = value.split('.').collect::<Vec<_>>();
@@ -91,14 +117,14 @@ fn secret_value_shaped(value: &str) -> bool {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         }))
-        || lower.contains("api_key=")
-        || lower.contains("api-key=")
-        || lower.contains("access_token=")
-        || lower.contains("access-token=")
-        || lower.contains("refresh_token=")
-        || lower.contains("refresh-token=")
-        || lower.contains("authorization: bearer")
-        || lower.contains("authorization=bearer")
+        || contains_unredacted_value(&lower, "api_key=")
+        || contains_unredacted_value(&lower, "api-key=")
+        || contains_unredacted_value(&lower, "access_token=")
+        || contains_unredacted_value(&lower, "access-token=")
+        || contains_unredacted_value(&lower, "refresh_token=")
+        || contains_unredacted_value(&lower, "refresh-token=")
+        || contains_unredacted_value(&lower, "authorization: bearer")
+        || contains_unredacted_value(&lower, "authorization=bearer")
         || value
             .split(|character: char| {
                 !character.is_ascii_alphanumeric() && character != '_' && character != '-'
@@ -225,9 +251,10 @@ impl InlineSizeLimits {
         peer_item_bytes: u64,
         peer_total_bytes: u64,
     ) -> Result<Self, ContentReferenceError> {
+        let max_total_bytes = local_total_bytes.min(peer_total_bytes);
         Self::new(
-            local_item_bytes.min(peer_item_bytes),
-            local_total_bytes.min(peer_total_bytes),
+            local_item_bytes.min(peer_item_bytes).min(max_total_bytes),
+            max_total_bytes,
         )
     }
 
@@ -550,8 +577,111 @@ impl ContentReference {
         page_bytes: u64,
         inline: Option<String>,
     ) -> Result<ContentPage, ContentReferenceError> {
+        self.page_with_binding(limits, offset, page_size, page_bytes, inline, None)
+    }
+
+    pub fn page_with_binding(
+        &self,
+        limits: InlineSizeLimits,
+        offset: u64,
+        page_size: u64,
+        page_bytes: u64,
+        inline: Option<String>,
+        binding_identity: Option<String>,
+    ) -> Result<ContentPage, ContentReferenceError> {
+        self.page_with_binding_internal(
+            limits,
+            offset,
+            page_size,
+            page_bytes,
+            inline,
+            binding_identity,
+            true,
+        )
+    }
+
+    pub fn page_text_with_binding(
+        &self,
+        limits: InlineSizeLimits,
+        offset: u64,
+        page_size: u64,
+        full_text: &str,
+        binding_identity: Option<String>,
+    ) -> Result<ContentPage, ContentReferenceError> {
         self.validate()?;
         limits.validate()?;
+        let full_text_hash = format!("{:x}", Sha256::digest(full_text.as_bytes()));
+        if !is_text_media_type(&self.media_type)
+            || full_text.len() as u64 != self.bytes
+            || full_text_hash != self.sha256
+            || secret_value_shaped(full_text)
+        {
+            return Err(error(
+                "content-page-source-invalid",
+                "content page source is invalid or contains an unsafe secret shape",
+            ));
+        }
+        let start = usize::try_from(offset).map_err(|_| {
+            error(
+                "content-page-window-invalid",
+                "content page offset is outside its byte bounds",
+            )
+        })?;
+        let page_size_usize = usize::try_from(page_size).map_err(|_| {
+            error(
+                "content-page-window-invalid",
+                "content page size is outside its byte bounds",
+            )
+        })?;
+        if start > full_text.len() || !full_text.is_char_boundary(start) {
+            return Err(error(
+                "content-page-window-invalid",
+                "content page offset is not a UTF-8 boundary",
+            ));
+        }
+        let mut end = start.saturating_add(page_size_usize).min(full_text.len());
+        while end > start && !full_text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start && start < full_text.len() {
+            return Err(error(
+                "content-page-scalar-limit-invalid",
+                "content page size cannot contain the next UTF-8 scalar",
+            ));
+        }
+        self.page_with_binding_internal(
+            limits,
+            offset,
+            page_size,
+            (end - start) as u64,
+            Some(full_text[start..end].to_owned()),
+            binding_identity,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn page_with_binding_internal(
+        &self,
+        limits: InlineSizeLimits,
+        offset: u64,
+        page_size: u64,
+        page_bytes: u64,
+        inline: Option<String>,
+        binding_identity: Option<String>,
+        reject_inline_secret_shape: bool,
+    ) -> Result<ContentPage, ContentReferenceError> {
+        self.validate()?;
+        limits.validate()?;
+        if binding_identity
+            .as_deref()
+            .is_some_and(|identity| !valid_sha_identity(identity, BINDING_IDENTITY_PREFIX))
+        {
+            return Err(error(
+                "content-page-binding-invalid",
+                "content page binding identity is invalid",
+            ));
+        }
         if page_size == 0
             || page_size > MAX_PAGE_BYTES
             || page_size > limits.max_item_bytes
@@ -569,9 +699,10 @@ impl ContentReference {
         if inline_bytes > page_bytes
             || !limits.allows(inline_bytes, inline_bytes)
             || (!is_text_media_type(&self.media_type) && inline.is_some())
-            || inline
-                .as_ref()
-                .is_some_and(|value| secret_value_shaped(value))
+            || (reject_inline_secret_shape
+                && inline
+                    .as_ref()
+                    .is_some_and(|value| secret_value_shaped(value)))
         {
             return Err(error(
                 "content-page-inline-invalid",
@@ -588,6 +719,7 @@ impl ContentReference {
             offset: next_offset,
             page_size,
             limits: limits.clone(),
+            binding_identity: binding_identity.clone(),
             identity: String::new(),
         });
         let next_cursor = next_cursor.map(|mut cursor| {
@@ -606,6 +738,7 @@ impl ContentReference {
             inline,
             inline_truncated: inline_bytes < page_bytes,
             limits,
+            binding_identity,
             next_cursor,
             identity: String::new(),
         };
@@ -627,6 +760,8 @@ pub struct ContentPageCursor {
     pub offset: u64,
     pub page_size: u64,
     pub limits: InlineSizeLimits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_identity: Option<String>,
     pub identity: String,
 }
 
@@ -641,6 +776,8 @@ struct ContentPageCursorWire {
     offset: u64,
     page_size: u64,
     limits: InlineSizeLimits,
+    #[serde(default)]
+    binding_identity: Option<String>,
     identity: String,
 }
 
@@ -657,6 +794,7 @@ impl TryFrom<ContentPageCursorWire> for ContentPageCursor {
             offset: wire.offset,
             page_size: wire.page_size,
             limits: wire.limits,
+            binding_identity: wire.binding_identity,
             identity: wire.identity,
         };
         cursor
@@ -678,6 +816,10 @@ impl ContentPageCursor {
                 &self.offset.to_be_bytes(),
                 &self.page_size.to_be_bytes(),
                 self.limits.identity.as_bytes(),
+                self.binding_identity
+                    .as_deref()
+                    .unwrap_or("none")
+                    .as_bytes(),
             ],
         )
     }
@@ -690,6 +832,10 @@ impl ContentPageCursor {
             || self.page_size == 0
             || self.page_size > MAX_PAGE_BYTES
             || self.page_size > self.limits.max_item_bytes
+            || self
+                .binding_identity
+                .as_deref()
+                .is_some_and(|identity| !valid_sha_identity(identity, BINDING_IDENTITY_PREFIX))
             || self.identity != self.derived_identity()
         {
             return Err(error(
@@ -733,6 +879,8 @@ pub struct ContentPage {
     pub inline: Option<String>,
     pub inline_truncated: bool,
     pub limits: InlineSizeLimits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_identity: Option<String>,
     pub next_cursor: Option<ContentPageCursor>,
     pub identity: String,
 }
@@ -751,6 +899,8 @@ struct ContentPageWire {
     inline: Option<String>,
     inline_truncated: bool,
     limits: InlineSizeLimits,
+    #[serde(default)]
+    binding_identity: Option<String>,
     next_cursor: Option<ContentPageCursor>,
     identity: String,
 }
@@ -771,6 +921,7 @@ impl TryFrom<ContentPageWire> for ContentPage {
             inline: wire.inline,
             inline_truncated: wire.inline_truncated,
             limits: wire.limits,
+            binding_identity: wire.binding_identity,
             next_cursor: wire.next_cursor,
             identity: wire.identity,
         };
@@ -802,6 +953,10 @@ impl ContentPage {
                 &inline_hash,
                 &[u8::from(self.inline_truncated)],
                 self.limits.identity.as_bytes(),
+                self.binding_identity
+                    .as_deref()
+                    .unwrap_or("none")
+                    .as_bytes(),
                 next_identity.as_bytes(),
             ],
         )
@@ -818,6 +973,10 @@ impl ContentPage {
             || self.page_bytes > self.page_size
             || self.page_bytes > self.bytes.saturating_sub(self.offset)
             || (self.bytes > 0 && self.page_bytes == 0)
+            || self
+                .binding_identity
+                .as_deref()
+                .is_some_and(|identity| !valid_sha_identity(identity, BINDING_IDENTITY_PREFIX))
             || self.identity != self.derived_identity()
         {
             return Err(error(
@@ -838,10 +997,6 @@ impl ContentPage {
             || !self.limits.allows(inline_bytes, inline_bytes)
             || self.inline_truncated != (inline_bytes < self.page_bytes)
             || (!is_text_media_type(&self.media_type) && self.inline.is_some())
-            || self
-                .inline
-                .as_ref()
-                .is_some_and(|value| secret_value_shaped(value))
         {
             return Err(error(
                 "content-page-inline-invalid",
@@ -860,6 +1015,7 @@ impl ContentPage {
             }) || cursor.offset != self.offset.saturating_add(self.page_bytes)
                 || cursor.page_size != self.page_size
                 || cursor.limits != self.limits
+                || cursor.binding_identity != self.binding_identity
             {
                 return Err(error(
                     "content-page-cursor-invalid",
@@ -978,6 +1134,10 @@ mod tests {
         assert_eq!(negotiated.max_total_bytes, 128 * 1024);
         assert!(negotiated.allows(32 * 1024, 128 * 1024));
         assert!(!negotiated.allows(32 * 1024 + 1, 1));
+        let total_below_item =
+            InlineSizeLimits::negotiate(64 * 1024, 256 * 1024, 64 * 1024, 4 * 1024).unwrap();
+        assert_eq!(total_below_item.max_item_bytes, 4 * 1024);
+        assert_eq!(total_below_item.max_total_bytes, 4 * 1024);
 
         let first = content
             .page(
@@ -1003,6 +1163,29 @@ mod tests {
             .unwrap();
         assert_ne!(first.identity, second.identity);
         assert_eq!(second.offset, 32 * 1024);
+
+        let binding = format!("content-reference-binding:sha256:{}", sha('c'));
+        let scoped = content
+            .page_with_binding(
+                limits(),
+                0,
+                4,
+                4,
+                Some("safe".into()),
+                Some(binding.clone()),
+            )
+            .unwrap();
+        assert_eq!(scoped.binding_identity.as_deref(), Some(binding.as_str()));
+        assert_eq!(
+            scoped
+                .next_cursor
+                .as_ref()
+                .and_then(|cursor| cursor.binding_identity.as_deref()),
+            Some(binding.as_str())
+        );
+        let mut drifted = scoped;
+        drifted.binding_identity = Some(format!("content-reference-binding:sha256:{}", sha('d')));
+        assert!(drifted.validate().is_err());
     }
 
     #[test]
@@ -1025,5 +1208,62 @@ mod tests {
         assert!(serde_json::from_value::<ContentPage>(encoded.clone()).is_err());
         encoded["provider_body"] = json!("must not persist");
         assert!(serde_json::from_value::<ContentPage>(encoded).is_err());
+
+        let safe_redacted = "API_KEY=[REDACTED]\nAuthorization: Bearer [REDACTED]".to_owned();
+        let redacted = content
+            .page(
+                limits(),
+                0,
+                safe_redacted.len() as u64,
+                safe_redacted.len() as u64,
+                Some(safe_redacted),
+            )
+            .unwrap();
+        assert!(redacted.validate().is_ok());
+
+        for leaked in [
+            "API_KEY=[REDACTED],actual-secret",
+            "Authorization: Bearer [REDACTED] actual-secret",
+        ] {
+            assert!(content
+                .page(
+                    limits(),
+                    0,
+                    leaked.len() as u64,
+                    leaked.len() as u64,
+                    Some(leaked.into()),
+                )
+                .is_err());
+        }
+
+        let safe_full = "API_KEY=[REDACTED]\nAuthorization: Bearer [REDACTED]";
+        let safe_hash = format!("{:x}", Sha256::digest(safe_full.as_bytes()));
+        let safe_reference = ContentReference::new(
+            format!("content:sha256:{safe_hash}"),
+            safe_hash,
+            safe_full.len() as u64,
+            "text/plain; charset=utf-8",
+            None,
+        )
+        .unwrap();
+        let split_placeholder = safe_reference
+            .page_text_with_binding(limits(), 0, 10, safe_full, None)
+            .unwrap();
+        assert_eq!(split_placeholder.inline.as_deref(), Some("API_KEY=[R"));
+        assert!(split_placeholder.validate().is_ok());
+
+        let unsafe_full = "API_KEY=actual-secret-value";
+        let unsafe_hash = format!("{:x}", Sha256::digest(unsafe_full.as_bytes()));
+        let unsafe_reference = ContentReference::new(
+            format!("content:sha256:{unsafe_hash}"),
+            unsafe_hash,
+            unsafe_full.len() as u64,
+            "text/plain; charset=utf-8",
+            None,
+        )
+        .unwrap();
+        assert!(unsafe_reference
+            .page_text_with_binding(limits(), 0, 8, unsafe_full, None)
+            .is_err());
     }
 }

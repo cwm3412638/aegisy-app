@@ -592,6 +592,39 @@ Content references and bounded pages (`3.8`, partial):
   content, create an AAP method, grant artifact authority, or replace the existing
   Store transaction and artifact-page gates. Task `3.8` remains unchecked until
   those producers, persistence, generated types, and Qt/AAP evidence are wired.
+- `artifact/read-command-output-page` is the first production AAP/Store consumer
+  of these contracts. First and continuation requests carry the exact
+  Session/Item/reference. In-memory lookup is keyed by `(item_id, reference)` and
+  durable lookup by Session/Item/reference, so identical output from two Items stays
+  independently bound before and after Runtime restart. The load path re-derives the
+  durable reference identity, rechecks kind/owner/metadata/UTF-8/integrity, constructs
+  the strict content reference and bounded text preview, and returns one UTF-8-safe
+  inline page. The first request intersects caller and local
+  item/aggregate limits. The aggregate limit is per response, the one inline page is
+  capped by both negotiated limits, and a continuation carries the complete derived
+  cursor without renegotiation. Its binding identity includes the Session, Item, and
+  complete immutable Artifact metadata; bounded `created_at_ms` is returned so a
+  consumer can independently reproduce it. The durable read path independently checks
+  owner, MIME, exact metadata keys, redaction/truncation arithmetic, UTF-8, byte count,
+  content hash, and the unique omission marker at its canonical head/tail boundary.
+  The complete Artifact is hash/length/secret-scanned before slicing, so a complete
+  `[REDACTED]` placeholder may cross pages while an unredacted secret cannot evade
+  detection across pages. Hash-consistent owner rebinding, cross-Session or cross-Item
+  cursors, unknown parameters, invalid/tampered cursors, unsupported limits,
+  missing/corrupt durable content, and scalar-splitting limits fail closed. The route reuses
+  `artifact.command-output.bounded` and grants no mutation, Approval, execution,
+  filesystem, or generic Blob authority.
+- Focused command-artifact tests plus the explicit redaction and durable owner-rebinding
+  tests cover empty output, UTF-8 boundaries, terminal cursor, continuation
+  renegotiation rejection, cursor substitution and owner isolation, durable semantic
+  tampering, Runtime restart/Store reload, and the legacy whole-artifact path's stable
+  creation-time/Item-ID selection. Qt paging, remaining content domains, generated protocol types, and clean
+  Windows execution remain absent; keep `3.8` unchecked.
+- The final local gate passes `1043` Rust tests with one explicitly ignored live
+  Codex fixture, strict workspace Clippy and formatting, the complete desktop build
+  and all `23/23` CTests, strict OpenSpec validation, and `git diff --check`. This is
+  local macOS evidence and cannot satisfy Qt paging, remaining content domains,
+  generated protocol types, clean Windows, or live-provider gates.
 
 - Workbench schema v15 adds a dedicated `public_timeline_events` journal and one
   `public_timeline_cursors` source/cursor row per Session. Session insertion registers

@@ -177,16 +177,17 @@ use turn_trace_producer::{
 use usage_authority::from_provider_token_usage;
 use workbench_store::{
     durable_blob_reference_id, workspace_edit_proposal_timeline_projection,
-    BackgroundNotificationCursor, DurableBlobKind, DurableBlobWrite, MutationLedgerBinding,
-    PortableSessionImportCommand, PortableSessionPackage, PreviewMutationLedgerBinding,
-    PreviewTurnCommit, ReserveTurnStartMutation, RetentionPolicy, SessionDeletionScope,
-    SessionProjectionConsistency, SessionSearchRequest, StoredDurableMutationAcknowledgement,
-    StoredItem, StoredItemAppend, StoredProjectCreate, StoredProjectNavigationEntry,
-    StoredProjectTrustAcknowledge, StoredProjectTrustAcknowledgement, StoredSessionCreate,
-    StoredSessionLineage, StoredSessionMode, StoredSessionRuntimeBindingCreate,
-    StoredSessionWorkspaceBinding, StoredSessionWorkspaceBindingCreate, StoredTurnCreate,
-    StoredWorkspaceEditProposal, TurnStartMutationReservation, WorkbenchRecoveryDiagnostic,
-    WorkbenchStore, WorkbenchStoreOpen, WorkspaceEditProposalArtifactWrite,
+    BackgroundNotificationCursor, DurableBlobKind, DurableBlobRead, DurableBlobWrite,
+    MutationLedgerBinding, PortableSessionImportCommand, PortableSessionPackage,
+    PreviewMutationLedgerBinding, PreviewTurnCommit, ReserveTurnStartMutation, RetentionPolicy,
+    SessionDeletionScope, SessionProjectionConsistency, SessionSearchRequest,
+    StoredDurableMutationAcknowledgement, StoredItem, StoredItemAppend, StoredProjectCreate,
+    StoredProjectNavigationEntry, StoredProjectTrustAcknowledge, StoredProjectTrustAcknowledgement,
+    StoredSessionCreate, StoredSessionLineage, StoredSessionMode,
+    StoredSessionRuntimeBindingCreate, StoredSessionWorkspaceBinding,
+    StoredSessionWorkspaceBindingCreate, StoredTurnCreate, StoredWorkspaceEditProposal,
+    TurnStartMutationReservation, WorkbenchRecoveryDiagnostic, WorkbenchStore, WorkbenchStoreOpen,
+    WorkspaceEditProposalArtifactWrite,
 };
 use workspace::{
     collect_search_candidates, list_directory, path_metadata, read_text_file, search_workspace,
@@ -2639,6 +2640,153 @@ struct CommandArtifactParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandArtifactPageParams {
+    session_id: String,
+    item_id: String,
+    reference: String,
+    #[serde(default)]
+    cursor: Option<content_reference::ContentPageCursor>,
+    #[serde(default)]
+    limit: Option<u64>,
+    #[serde(default)]
+    max_total_inline_bytes: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct CommandArtifactPageBindingMaterial<'a> {
+    schema_version: &'a str,
+    session_id: &'a str,
+    reference: &'a str,
+    sha256: &'a str,
+    content_type: &'a str,
+    item_id: &'a str,
+    created_at_ms: u64,
+    source_bytes: u64,
+    redacted_count: u64,
+    redacted: bool,
+    total_bytes: u64,
+    retained_bytes: usize,
+    omitted_bytes: u64,
+    truncated: bool,
+}
+
+fn command_artifact_page_binding_identity(
+    session_id: &str,
+    artifact: &command_artifact::CommandOutputArtifact,
+) -> String {
+    let material = CommandArtifactPageBindingMaterial {
+        schema_version: "command-output-artifact-page-binding/0.1",
+        session_id,
+        reference: &artifact.reference,
+        sha256: &artifact.sha256,
+        content_type: &artifact.content_type,
+        item_id: &artifact.item_id,
+        created_at_ms: artifact.created_at_ms,
+        source_bytes: artifact.source_bytes,
+        redacted_count: artifact.redacted_count,
+        redacted: artifact.redacted,
+        total_bytes: artifact.total_bytes,
+        retained_bytes: artifact.retained_bytes,
+        omitted_bytes: artifact.omitted_bytes,
+        truncated: artifact.truncated,
+    };
+    let mut bytes = b"command-output-artifact-page-binding\0".to_vec();
+    bytes.extend(serde_json::to_vec(&material).expect("command artifact binding serialization"));
+    format!(
+        "content-reference-binding:sha256:{}",
+        ContentHash::for_bytes(&bytes).sha256
+    )
+}
+
+fn command_artifact_from_durable(
+    expected_session_id: &str,
+    expected_item_id: Option<&str>,
+    expected_reference: &str,
+    durable: DurableBlobRead,
+) -> Result<command_artifact::CommandOutputArtifact, &'static str> {
+    let reference = durable.reference;
+    if reference.content_reference != expected_reference
+        || reference.session_id.as_deref() != Some(expected_session_id)
+        || reference.kind != DurableBlobKind::CommandOutput
+        || reference.media_type != "text/plain; charset=utf-8"
+        || reference.owner_kind != "item"
+        || !matches!(reference.state.as_str(), "active" | "released")
+        || reference.content_hash.bytes != durable.content.len() as u64
+    {
+        return Err("command output artifact durable binding is invalid");
+    }
+    let Some(metadata) = reference.metadata.as_object() else {
+        return Err("command output artifact metadata is invalid");
+    };
+    const METADATA_KEYS: [&str; 8] = [
+        "item_id",
+        "source_bytes",
+        "redacted_count",
+        "redacted",
+        "total_bytes",
+        "retained_bytes",
+        "omitted_bytes",
+        "truncated",
+    ];
+    if metadata.len() != METADATA_KEYS.len()
+        || METADATA_KEYS.iter().any(|key| !metadata.contains_key(*key))
+    {
+        return Err("command output artifact metadata is invalid");
+    }
+    let item_id = metadata
+        .get("item_id")
+        .and_then(Value::as_str)
+        .ok_or("command output artifact metadata is invalid")?
+        .to_owned();
+    if reference.owner_id != item_id {
+        return Err("command output artifact owner is invalid");
+    }
+    if expected_item_id.is_some_and(|expected| expected != item_id) {
+        return Err("command output artifact Item binding is invalid");
+    }
+    let numeric = |key: &str| metadata.get(key).and_then(Value::as_u64);
+    let source_bytes =
+        numeric("source_bytes").ok_or("command output artifact metadata is invalid")?;
+    let redacted_count =
+        numeric("redacted_count").ok_or("command output artifact metadata is invalid")?;
+    let total_bytes =
+        numeric("total_bytes").ok_or("command output artifact metadata is invalid")?;
+    let retained_bytes = numeric("retained_bytes")
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or("command output artifact metadata is invalid")?;
+    let omitted_bytes =
+        numeric("omitted_bytes").ok_or("command output artifact metadata is invalid")?;
+    let redacted = metadata
+        .get("redacted")
+        .and_then(Value::as_bool)
+        .ok_or("command output artifact metadata is invalid")?;
+    let truncated = metadata
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .ok_or("command output artifact metadata is invalid")?;
+    let content = String::from_utf8(durable.content)
+        .map_err(|_| "command output artifact encoding is invalid")?;
+    let artifact = command_artifact::CommandOutputArtifact {
+        reference: reference.content_reference,
+        sha256: reference.content_hash.sha256,
+        content_type: reference.media_type,
+        item_id,
+        created_at_ms: reference.created_at_ms,
+        source_bytes,
+        redacted_count,
+        redacted,
+        total_bytes,
+        retained_bytes,
+        omitted_bytes,
+        truncated,
+        content,
+    };
+    artifact.validate()?;
+    Ok(artifact)
+}
+
+#[derive(Debug, Deserialize)]
 struct WorkspaceEditPreviewParams {
     session_id: String,
     edit: Value,
@@ -4903,6 +5051,7 @@ impl Runtime {
                 | "terminal/close-user"
                 | "terminal/remove-user"
                 | "artifact/read-command-output"
+                | "artifact/read-command-output-page"
         )
     }
 
@@ -5627,6 +5776,7 @@ impl Runtime {
                     | "terminal/close-user"
                     | "terminal/remove-user"
                     | "artifact/read-command-output"
+                    | "artifact/read-command-output-page"
                     | "workspace/edit/artifact/read"
                     | "workspace/edit/proposal/latest"
                     | "workspace/edit/proposal/read"
@@ -5675,6 +5825,7 @@ impl Runtime {
                 | "terminal/close-user"
                 | "terminal/remove-user"
                 | "artifact/read-command-output"
+                | "artifact/read-command-output-page"
                 | "workspace/edit/artifact/read"
                 | "workspace/edit/proposal/latest"
                 | "workspace/edit/proposal/read"
@@ -5894,6 +6045,7 @@ impl Runtime {
             "workspace/observed-diagnostics" => self.workspace_observed_diagnostics(request),
             "workspace/diagnostics/raw" => self.workspace_diagnostic_raw(request),
             "artifact/read-command-output" => self.command_artifact_read(request),
+            "artifact/read-command-output-page" => self.command_artifact_page_read(request),
             "workspace/edit/preview" => self.workspace_edit_preview(request),
             "workspace/edit/artifact/read" => self.workspace_edit_artifact_read(request),
             "workspace/edit/proposal/latest" => self.workspace_edit_proposal_latest(request),
@@ -6108,7 +6260,9 @@ impl Runtime {
             "workspace/diagnostics" => "workspace.diagnostics.language-server",
             "workspace/observed-diagnostics" => "workspace.diagnostics.observed",
             "workspace/diagnostics/raw" => "workspace.diagnostics.raw-reference",
-            "artifact/read-command-output" => "artifact.command-output.bounded",
+            "artifact/read-command-output" | "artifact/read-command-output-page" => {
+                "artifact.command-output.bounded"
+            }
             "workspace/edit/preview" | "workspace/edit/artifact/read" => {
                 "workspace.edit.preview.read-only"
             }
@@ -18036,139 +18190,9 @@ impl Runtime {
                 return self.error_for(&request, -32602, format!("invalid params: {cause}"))
             }
         };
-        if self
-            .workbench_store
-            .as_ref()
-            .and_then(|store| store.session_deletion_for_session(&params.session_id).ok())
-            .flatten()
-            .is_some_and(|receipt| receipt.state == "purged")
-        {
-            return self.error_for(&request, -32023, "session not found");
-        }
-        let session_exists = self.sessions.contains_key(&params.session_id)
-            || self
-                .workbench_store
-                .as_ref()
-                .is_some_and(|store| store.load_session(&params.session_id).is_ok());
-        if !session_exists {
-            return self.error_for(&request, -32023, "session not found");
-        }
-        if !params.reference.starts_with("command-output:sha256:")
-            || params.reference.len() != "command-output:sha256:".len() + 64
-        {
-            return self.error_for(&request, -32079, "invalid command output reference");
-        }
-        let artifact = if let Some(artifact) = self
-            .command_artifacts
-            .read(&params.session_id, &params.reference)
-        {
-            artifact
-        } else {
-            let Some(store) = self.workbench_store.as_mut() else {
-                return self.error_for(&request, -32079, "command output artifact not found");
-            };
-            let durable = match store.read_durable_blob_for_session(
-                &params.session_id,
-                &params.reference,
-                now_ms(),
-            ) {
-                Ok(durable) => durable,
-                Err(_) => {
-                    return self.error_for(
-                        &request,
-                        -32079,
-                        "command output artifact not found or failed integrity verification",
-                    )
-                }
-            };
-            if durable.reference.kind != DurableBlobKind::CommandOutput {
-                return self.error_for(&request, -32079, "command output artifact kind is invalid");
-            }
-            let metadata = &durable.reference.metadata;
-            let Some(item_id) = metadata.get("item_id").and_then(Value::as_str) else {
-                return self.error_for(
-                    &request,
-                    -32079,
-                    "command output artifact metadata is invalid",
-                );
-            };
-            let numeric = |key: &str| metadata.get(key).and_then(Value::as_u64);
-            let Some(source_bytes) = numeric("source_bytes") else {
-                return self.error_for(
-                    &request,
-                    -32079,
-                    "command output artifact metadata is invalid",
-                );
-            };
-            let Some(redacted_count) = numeric("redacted_count") else {
-                return self.error_for(
-                    &request,
-                    -32079,
-                    "command output artifact metadata is invalid",
-                );
-            };
-            let Some(total_bytes) = numeric("total_bytes") else {
-                return self.error_for(
-                    &request,
-                    -32079,
-                    "command output artifact metadata is invalid",
-                );
-            };
-            let Some(retained_bytes) =
-                numeric("retained_bytes").and_then(|value| usize::try_from(value).ok())
-            else {
-                return self.error_for(
-                    &request,
-                    -32079,
-                    "command output artifact metadata is invalid",
-                );
-            };
-            let Some(omitted_bytes) = numeric("omitted_bytes") else {
-                return self.error_for(
-                    &request,
-                    -32079,
-                    "command output artifact metadata is invalid",
-                );
-            };
-            let Some(redacted) = metadata.get("redacted").and_then(Value::as_bool) else {
-                return self.error_for(
-                    &request,
-                    -32079,
-                    "command output artifact metadata is invalid",
-                );
-            };
-            let Some(truncated) = metadata.get("truncated").and_then(Value::as_bool) else {
-                return self.error_for(
-                    &request,
-                    -32079,
-                    "command output artifact metadata is invalid",
-                );
-            };
-            let content = match String::from_utf8(durable.content) {
-                Ok(content) => content,
-                Err(_) => {
-                    return self.error_for(
-                        &request,
-                        -32079,
-                        "command output artifact encoding is invalid",
-                    )
-                }
-            };
-            command_artifact::CommandOutputArtifact {
-                reference: durable.reference.content_reference,
-                sha256: durable.reference.content_hash.sha256,
-                content_type: durable.reference.media_type,
-                item_id: item_id.into(),
-                created_at_ms: durable.reference.created_at_ms,
-                source_bytes,
-                redacted_count,
-                redacted,
-                total_bytes,
-                retained_bytes,
-                omitted_bytes,
-                truncated,
-                content,
-            }
+        let artifact = match self.load_command_artifact(&params.session_id, &params.reference) {
+            Ok(artifact) => artifact,
+            Err((code, message)) => return self.error_for(&request, code, message),
         };
         let mut result =
             serde_json::to_value(artifact).expect("command output artifact serialization");
@@ -18177,6 +18201,244 @@ impl Runtime {
             .expect("command output artifact serializes as an object")
             .insert("session_id".into(), Value::String(params.session_id));
         self.success_for(&request, result)
+    }
+
+    fn command_artifact_page_read(&mut self, request: Request) -> Vec<Value> {
+        let params: CommandArtifactPageParams = match serde_json::from_value(request.params.clone())
+        {
+            Ok(params) => params,
+            Err(cause) => {
+                return self.error_for(&request, -32602, format!("invalid params: {cause}"))
+            }
+        };
+        if params.cursor.is_some()
+            && (params.limit.is_some() || params.max_total_inline_bytes.is_some())
+        {
+            return self.error_for(
+                &request,
+                -32602,
+                "cursor continuation cannot renegotiate inline limits",
+            );
+        }
+        let artifact = match self.load_command_artifact_for_item(
+            &params.session_id,
+            &params.item_id,
+            &params.reference,
+        ) {
+            Ok(artifact) => artifact,
+            Err((code, message)) => return self.error_for(&request, code, message),
+        };
+        let content_bytes = match u64::try_from(artifact.content.len()) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return self.error_for(&request, -32079, "command output artifact is too large")
+            }
+        };
+        let mut preview_end = artifact
+            .content
+            .len()
+            .min(content_reference::MAX_PREVIEW_BYTES as usize);
+        while preview_end > 0 && !artifact.content.is_char_boundary(preview_end) {
+            preview_end -= 1;
+        }
+        let preview_lines = artifact.content[..preview_end].lines().count() as u64;
+        let content = match content_reference::ContentReference::new(
+            artifact.reference.clone(),
+            artifact.sha256.clone(),
+            content_bytes,
+            artifact.content_type.clone(),
+            None,
+        )
+        .and_then(|content| {
+            content.with_preview(
+                preview_end as u64,
+                preview_end < artifact.content.len(),
+                Some(preview_lines),
+                None,
+                None,
+            )
+        }) {
+            Ok(content) => content,
+            Err(_) => {
+                return self.error_for(
+                    &request,
+                    -32079,
+                    "command output content reference is invalid",
+                )
+            }
+        };
+        let binding_identity =
+            command_artifact_page_binding_identity(&params.session_id, &artifact);
+        let (offset, page_size, limits) = if let Some(cursor) = params.cursor {
+            if !cursor.matches(&content)
+                || cursor.binding_identity.as_deref() != Some(binding_identity.as_str())
+            {
+                return self.error_for(&request, -32602, "command output cursor is invalid");
+            }
+            (cursor.offset, cursor.page_size, cursor.limits)
+        } else {
+            let requested_item = params.limit.unwrap_or(content_reference::MAX_PAGE_BYTES);
+            let requested_total = params
+                .max_total_inline_bytes
+                .unwrap_or(content_reference::MAX_INLINE_TOTAL_BYTES);
+            let limits = match content_reference::InlineSizeLimits::negotiate(
+                content_reference::MAX_INLINE_ITEM_BYTES,
+                content_reference::MAX_INLINE_TOTAL_BYTES,
+                requested_item,
+                requested_total,
+            ) {
+                Ok(limits) => limits,
+                Err(_) => {
+                    return self.error_for(
+                        &request,
+                        -32602,
+                        "command output inline limits are invalid",
+                    )
+                }
+            };
+            (0, limits.max_item_bytes, limits)
+        };
+        let page = match content.page_text_with_binding(
+            limits,
+            offset,
+            page_size,
+            &artifact.content,
+            Some(binding_identity.clone()),
+        ) {
+            Ok(page) => page,
+            Err(cause)
+                if matches!(
+                    cause.code,
+                    "content-page-window-invalid" | "content-page-scalar-limit-invalid"
+                ) =>
+            {
+                return self.error_for(&request, -32602, cause.message)
+            }
+            Err(cause) => return self.error_for(&request, -32079, cause.message),
+        };
+        self.success_for(
+            &request,
+            json!({
+                "schema_version": "command-output-artifact-page/0.1",
+                "session_id": params.session_id,
+                "item_id": artifact.item_id,
+                "binding_identity": binding_identity,
+                "created_at_ms": artifact.created_at_ms,
+                "content_reference": content,
+                "page": page,
+                "source_bytes": artifact.source_bytes,
+                "redacted_count": artifact.redacted_count,
+                "redacted": artifact.redacted,
+                "total_bytes": artifact.total_bytes,
+                "retained_bytes": artifact.retained_bytes,
+                "omitted_bytes": artifact.omitted_bytes,
+                "truncated": artifact.truncated,
+                "read_only": true
+            }),
+        )
+    }
+
+    fn validate_command_artifact_scope(
+        &self,
+        session_id: &str,
+        reference: &str,
+    ) -> Result<(), (i64, &'static str)> {
+        if self
+            .workbench_store
+            .as_ref()
+            .and_then(|store| store.session_deletion_for_session(session_id).ok())
+            .flatten()
+            .is_some_and(|receipt| receipt.state == "purged")
+        {
+            return Err((-32023, "session not found"));
+        }
+        let session_exists = self.sessions.contains_key(session_id)
+            || self
+                .workbench_store
+                .as_ref()
+                .is_some_and(|store| store.load_session(session_id).is_ok());
+        if !session_exists {
+            return Err((-32023, "session not found"));
+        }
+        if !reference.starts_with("command-output:sha256:")
+            || reference.len() != "command-output:sha256:".len() + 64
+            || !reference["command-output:sha256:".len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err((-32079, "invalid command output reference"));
+        }
+        Ok(())
+    }
+
+    fn load_command_artifact_for_item(
+        &mut self,
+        session_id: &str,
+        item_id: &str,
+        reference: &str,
+    ) -> Result<command_artifact::CommandOutputArtifact, (i64, &'static str)> {
+        if item_id.is_empty()
+            || item_id.len() > 128
+            || !item_id.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err((-32602, "invalid command output Item ID"));
+        }
+        self.validate_command_artifact_scope(session_id, reference)?;
+        if let Some(artifact) = self
+            .command_artifacts
+            .read_for_item(session_id, item_id, reference)
+        {
+            artifact.validate().map_err(|_| {
+                (
+                    -32079,
+                    "command output artifact failed integrity verification",
+                )
+            })?;
+            return Ok(artifact);
+        }
+        let Some(store) = self.workbench_store.as_mut() else {
+            return Err((-32079, "command output artifact not found"));
+        };
+        let durable = store
+            .read_durable_blob_for_session_item(session_id, item_id, reference, now_ms())
+            .map_err(|_| {
+                (
+                    -32079,
+                    "command output artifact not found or failed integrity verification",
+                )
+            })?;
+        command_artifact_from_durable(session_id, Some(item_id), reference, durable)
+            .map_err(|message| (-32079, message))
+    }
+
+    fn load_command_artifact(
+        &mut self,
+        session_id: &str,
+        reference: &str,
+    ) -> Result<command_artifact::CommandOutputArtifact, (i64, &'static str)> {
+        self.validate_command_artifact_scope(session_id, reference)?;
+        if let Some(artifact) = self.command_artifacts.read(session_id, reference) {
+            artifact.validate().map_err(|_| {
+                (
+                    -32079,
+                    "command output artifact failed integrity verification",
+                )
+            })?;
+            return Ok(artifact);
+        }
+        let Some(store) = self.workbench_store.as_mut() else {
+            return Err((-32079, "command output artifact not found"));
+        };
+        let durable = store
+            .read_durable_blob_for_session(session_id, reference, now_ms())
+            .map_err(|_| {
+                (
+                    -32079,
+                    "command output artifact not found or failed integrity verification",
+                )
+            })?;
+        command_artifact_from_durable(session_id, None, reference, durable)
+            .map_err(|message| (-32079, message))
     }
 
     fn record_command_diagnostics(
@@ -22669,12 +22931,487 @@ mod command_timeline_tests {
             read[0]["result"]["content_type"],
             "text/plain; charset=utf-8"
         );
+        let legacy_extra = runtime.command_artifact_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-read-compatible-extra")),
+            method: "artifact/read-command-output".into(),
+            params: json!({
+                "session_id": "session-1",
+                "reference": artifact.reference,
+                "compatible_extra": true
+            }),
+        });
+        assert_eq!(legacy_extra[0]["result"]["reference"], artifact.reference);
         let denied = runtime.command_artifact_read(request("session-2", &artifact.reference));
         assert_eq!(denied[0]["error"]["code"], -32079);
         let invalid = runtime.command_artifact_read(request("session-1", "bad-reference"));
         assert_eq!(invalid[0]["error"]["code"], -32079);
         let missing = runtime.command_artifact_read(request("missing", &artifact.reference));
         assert_eq!(missing[0]["error"]["code"], -32023);
+
+        let first_page = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-1")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-1",
+                "reference": artifact.reference,
+                "limit": 1024,
+                "max_total_inline_bytes": 4096
+            }),
+        });
+        assert_eq!(
+            first_page[0]["result"]["schema_version"],
+            "command-output-artifact-page/0.1"
+        );
+        assert_eq!(
+            first_page[0]["result"]["created_at_ms"],
+            artifact.created_at_ms
+        );
+        assert_eq!(first_page[0]["result"]["session_id"], "session-1");
+        assert_eq!(
+            first_page[0]["result"]["page"]["binding_identity"],
+            first_page[0]["result"]["binding_identity"]
+        );
+        assert_eq!(
+            first_page[0]["result"]["content_reference"]["reference"],
+            artifact.reference
+        );
+        assert_eq!(first_page[0]["result"]["page"]["offset"], 0);
+        assert_eq!(
+            first_page[0]["result"]["page"]["inline"]
+                .as_str()
+                .unwrap()
+                .len(),
+            1024
+        );
+        let cursor = first_page[0]["result"]["page"]["next_cursor"].clone();
+        assert_eq!(cursor["offset"], 1024);
+        assert_eq!(
+            cursor["binding_identity"],
+            first_page[0]["result"]["binding_identity"]
+        );
+
+        let renegotiated = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-renegotiated")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-1",
+                "reference": artifact.reference,
+                "cursor": cursor,
+                "limit": 2048
+            }),
+        });
+        assert_eq!(renegotiated[0]["error"]["code"], -32602);
+
+        let second_page = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-2")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-1",
+                "reference": artifact.reference,
+                "cursor": cursor
+            }),
+        });
+        assert_eq!(second_page[0]["result"]["page"]["offset"], 1024);
+        assert_eq!(
+            second_page[0]["result"]["page"]["limits"]["max_item_bytes"],
+            1024
+        );
+
+        let mut tampered_cursor = second_page[0]["result"]["page"]["next_cursor"].clone();
+        tampered_cursor["identity"] = json!(format!(
+            "content-reference-cursor:sha256:{}",
+            "f".repeat(64)
+        ));
+        let tampered = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-tampered")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-1",
+                "reference": artifact.reference,
+                "cursor": tampered_cursor
+            }),
+        });
+        assert_eq!(tampered[0]["error"]["code"], -32602);
+
+        let cross_session_page = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-cross-session")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-2",
+                "item_id": "command-1",
+                "reference": artifact.reference,
+                "limit": 1024
+            }),
+        });
+        assert_eq!(cross_session_page[0]["error"]["code"], -32079);
+
+        let duplicate = runtime
+            .command_artifacts
+            .record("session-2", "command-2", &output, 3 * 1024 * 1024, 0)
+            .unwrap();
+        assert_eq!(duplicate.reference, artifact.reference);
+        let cross_owner_cursor = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-cross-owner-cursor")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-2",
+                "item_id": "command-2",
+                "reference": artifact.reference,
+                "cursor": second_page[0]["result"]["page"]["next_cursor"]
+            }),
+        });
+        assert_eq!(cross_owner_cursor[0]["error"]["code"], -32602);
+
+        let same_session_duplicate = runtime
+            .command_artifacts
+            .record("session-1", "command-3", &output, 3 * 1024 * 1024, 0)
+            .unwrap();
+        assert_eq!(same_session_duplicate.reference, artifact.reference);
+        let cross_item_cursor = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-cross-item-cursor")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-3",
+                "reference": artifact.reference,
+                "cursor": second_page[0]["result"]["page"]["next_cursor"]
+            }),
+        });
+        assert_eq!(cross_item_cursor[0]["error"]["code"], -32602);
+        let same_session_first = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-same-session-second-item")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-3",
+                "reference": artifact.reference,
+                "limit": 1024
+            }),
+        });
+        assert_eq!(same_session_first[0]["result"]["item_id"], "command-3");
+
+        let total_below_item = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-total-below-item")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-1",
+                "reference": artifact.reference,
+                "limit": 1024,
+                "max_total_inline_bytes": 100
+            }),
+        });
+        assert_eq!(
+            total_below_item[0]["result"]["page"]["limits"]["max_item_bytes"],
+            100
+        );
+        assert_eq!(
+            total_below_item[0]["result"]["page"]["inline"]
+                .as_str()
+                .unwrap()
+                .len(),
+            100
+        );
+
+        let unknown_params = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-unknown-params")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-1",
+                "reference": artifact.reference,
+                "unknown": true
+            }),
+        });
+        assert_eq!(unknown_params[0]["error"]["code"], -32602);
+
+        let empty_capture = command_output::CommandOutputCapture::default();
+        let empty_artifact = runtime.command_artifacts.record_diagnostic_source(
+            "session-1",
+            "command-empty",
+            &empty_capture,
+            0,
+            0,
+        );
+        let empty_page = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-empty")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-empty",
+                "reference": empty_artifact.reference,
+                "limit": 64
+            }),
+        });
+        assert_eq!(empty_page[0]["result"]["page"]["inline"], "");
+        assert_eq!(empty_page[0]["result"]["page"]["page_bytes"], 0);
+        assert!(empty_page[0]["result"]["page"]["next_cursor"].is_null());
+
+        let mut utf8_capture = command_output::CommandOutputCapture::default();
+        utf8_capture.append("a😀b");
+        let utf8_artifact = runtime.command_artifacts.record_diagnostic_source(
+            "session-1",
+            "command-utf8",
+            &utf8_capture,
+            6,
+            0,
+        );
+        let utf8_first = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-utf8-first")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-utf8",
+                "reference": utf8_artifact.reference,
+                "limit": 5,
+                "max_total_inline_bytes": 64
+            }),
+        });
+        assert_eq!(utf8_first[0]["result"]["page"]["inline"], "a😀");
+        assert_eq!(utf8_first[0]["result"]["page"]["page_bytes"], 5);
+        let utf8_cursor = utf8_first[0]["result"]["page"]["next_cursor"].clone();
+        let utf8_last = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-utf8-last")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-utf8",
+                "reference": utf8_artifact.reference,
+                "cursor": utf8_cursor
+            }),
+        });
+        assert_eq!(utf8_last[0]["result"]["page"]["inline"], "b");
+        assert!(utf8_last[0]["result"]["page"]["next_cursor"].is_null());
+
+        let tiny_first = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-utf8-tiny-first")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-utf8",
+                "reference": utf8_artifact.reference,
+                "limit": 2
+            }),
+        });
+        assert_eq!(tiny_first[0]["result"]["page"]["inline"], "a");
+        let tiny_cursor = tiny_first[0]["result"]["page"]["next_cursor"].clone();
+        let tiny_continuation = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-utf8-tiny-continuation")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-utf8",
+                "reference": utf8_artifact.reference,
+                "cursor": tiny_cursor
+            }),
+        });
+        assert_eq!(tiny_continuation[0]["error"]["code"], -32602);
+
+        let total_renegotiated = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-total-renegotiated")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-1",
+                "reference": artifact.reference,
+                "cursor": second_page[0]["result"]["page"]["next_cursor"],
+                "max_total_inline_bytes": 2048
+            }),
+        });
+        assert_eq!(total_renegotiated[0]["error"]["code"], -32602);
+
+        let mut split_redacted_capture = command_output::CommandOutputCapture::default();
+        split_redacted_capture.append("API_KEY=[REDACTED]");
+        let split_redacted_artifact = runtime.command_artifacts.record_diagnostic_source(
+            "session-1",
+            "command-split-redacted",
+            &split_redacted_capture,
+            18,
+            1,
+        );
+        let split_redacted_page = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-split-redacted")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-split-redacted",
+                "reference": split_redacted_artifact.reference,
+                "limit": 10
+            }),
+        });
+        assert_eq!(
+            split_redacted_page[0]["result"]["page"]["inline"],
+            "API_KEY=[R"
+        );
+
+        let mut split_secret_capture = command_output::CommandOutputCapture::default();
+        split_secret_capture.append("API_KEY=actual-secret-value");
+        let split_secret_artifact = runtime.command_artifacts.record_diagnostic_source(
+            "session-1",
+            "command-split-secret",
+            &split_secret_capture,
+            27,
+            0,
+        );
+        let split_secret_page = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-page-split-secret")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-1",
+                "item_id": "command-split-secret",
+                "reference": split_secret_artifact.reference,
+                "limit": 8
+            }),
+        });
+        assert_eq!(split_secret_page[0]["error"]["code"], -32079);
+    }
+
+    #[test]
+    fn command_artifact_durable_conversion_rejects_semantic_tampering() {
+        fn durable(content: &[u8]) -> DurableBlobRead {
+            let content_hash = ContentHash::for_bytes(content);
+            let reference = format!("command-output:sha256:{}", content_hash.sha256);
+            DurableBlobRead {
+                reference: workbench_store::StoredDurableBlobReference {
+                    reference_id: format!("blob-reference:sha256:{}", "a".repeat(64)),
+                    content_reference: reference,
+                    content_hash,
+                    session_id: Some("session-durable".into()),
+                    project_id: None,
+                    kind: DurableBlobKind::CommandOutput,
+                    media_type: "text/plain; charset=utf-8".into(),
+                    owner_kind: "item".into(),
+                    owner_id: "command-durable".into(),
+                    metadata: json!({
+                        "item_id": "command-durable",
+                        "source_bytes": content.len(),
+                        "redacted_count": 0,
+                        "redacted": false,
+                        "total_bytes": content.len(),
+                        "retained_bytes": content.len(),
+                        "omitted_bytes": 0,
+                        "truncated": false
+                    }),
+                    state: "active".into(),
+                    created_at_ms: 100,
+                    last_accessed_at_ms: 100,
+                    retain_until_ms: 200,
+                    released_at_ms: None,
+                },
+                content: content.to_vec(),
+            }
+        }
+
+        let valid = durable(b"durable command output\n");
+        let reference = valid.reference.content_reference.clone();
+        assert!(command_artifact_from_durable(
+            "session-durable",
+            Some("command-durable"),
+            &reference,
+            valid.clone()
+        )
+        .is_ok());
+
+        assert!(command_artifact_from_durable(
+            "session-durable",
+            Some("other-item"),
+            &reference,
+            valid.clone()
+        )
+        .is_err());
+
+        let mut bad_owner_kind = valid.clone();
+        bad_owner_kind.reference.owner_kind = "session".into();
+        assert!(command_artifact_from_durable(
+            "session-durable",
+            Some("command-durable"),
+            &reference,
+            bad_owner_kind
+        )
+        .is_err());
+
+        let mut bad_owner_id = valid.clone();
+        bad_owner_id.reference.owner_id = "other-item".into();
+        assert!(command_artifact_from_durable(
+            "session-durable",
+            Some("command-durable"),
+            &reference,
+            bad_owner_id
+        )
+        .is_err());
+
+        let mut bad_media_type = valid.clone();
+        bad_media_type.reference.media_type = "application/json".into();
+        assert!(command_artifact_from_durable(
+            "session-durable",
+            Some("command-durable"),
+            &reference,
+            bad_media_type
+        )
+        .is_err());
+
+        let mut extra_metadata = valid.clone();
+        extra_metadata.reference.metadata["provider_body"] = json!("forbidden");
+        assert!(command_artifact_from_durable(
+            "session-durable",
+            Some("command-durable"),
+            &reference,
+            extra_metadata
+        )
+        .is_err());
+
+        let mut bad_arithmetic = valid.clone();
+        bad_arithmetic.reference.metadata["omitted_bytes"] = json!(1);
+        assert!(command_artifact_from_durable(
+            "session-durable",
+            Some("command-durable"),
+            &reference,
+            bad_arithmetic
+        )
+        .is_err());
+
+        let mut bad_redaction = valid.clone();
+        bad_redaction.reference.metadata["redacted"] = json!(true);
+        assert!(command_artifact_from_durable(
+            "session-durable",
+            Some("command-durable"),
+            &reference,
+            bad_redaction
+        )
+        .is_err());
+
+        let mut bad_content = valid;
+        bad_content.content[0] = b'D';
+        assert!(command_artifact_from_durable(
+            "session-durable",
+            Some("command-durable"),
+            &reference,
+            bad_content
+        )
+        .is_err());
     }
 
     #[test]
@@ -22781,6 +23518,26 @@ mod command_timeline_tests {
             response[0]["result"]["source_bytes"],
             command.redactor.source_bytes()
         );
+
+        let page = runtime.command_artifact_page_read(Request {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(json!("artifact-secret-page")),
+            method: "artifact/read-command-output-page".into(),
+            params: json!({
+                "session_id": "session-secret",
+                "item_id": "command-secret",
+                "reference": artifact.reference,
+                "limit": 64 * 1024
+            }),
+        });
+        assert_eq!(
+            page[0]["result"]["schema_version"],
+            "command-output-artifact-page/0.1"
+        );
+        let page_serialized = serde_json::to_string(&page).unwrap();
+        assert!(!page_serialized.contains(first_secret));
+        assert!(!page_serialized.contains(second_secret));
+        assert!(page_serialized.contains("[REDACTED]"));
     }
 
     #[test]
@@ -23720,6 +24477,43 @@ mod durable_runtime_tests {
                 None,
             )
             .unwrap();
+        let second_artifact = runtime.command_artifacts.record_diagnostic_source(
+            &session_id,
+            "command-restart-2",
+            &output,
+            23,
+            0,
+        );
+        assert_eq!(second_artifact.reference, artifact.reference);
+        let second_item = TimelineItem {
+            id: "command-restart-2".into(),
+            kind: "command".into(),
+            role: "tool".into(),
+            state: "completed".into(),
+            content: "Command completed again".into(),
+            data: Some(json!({
+                "artifact": {"reference": second_artifact.reference}
+            })),
+        };
+        let second_append = StoredItemAppend {
+            session_id: session_id.clone(),
+            turn_id: None,
+            item_id: second_item.id.clone(),
+            item_kind: second_item.kind.clone(),
+            role: second_item.role.clone(),
+            state: second_item.state.clone(),
+            payload: json!({ "content": second_item.content, "data": second_item.data }),
+            created_at_ms: now_ms(),
+        };
+        runtime
+            .persist_item_with_command_artifact(
+                &session_id,
+                second_append,
+                &second_item,
+                Some(&second_artifact),
+                None,
+            )
+            .unwrap();
         let reference = artifact.reference.clone();
         drop(runtime);
 
@@ -23732,7 +24526,46 @@ mod durable_runtime_tests {
         ));
         assert_eq!(read[0]["result"]["content"], "durable command output\n");
         assert_eq!(read[0]["result"]["session_id"], session_id);
-        assert_eq!(read[0]["result"]["item_id"], "command-restart");
+        assert_eq!(read[0]["result"]["item_id"], "command-restart-2");
+        let page = restarted.handle_line(&request(
+            "artifact-page",
+            "artifact/read-command-output-page",
+            json!({
+                "session_id": &session_id,
+                "item_id": "command-restart",
+                "reference": &reference,
+                "limit": 64,
+                "max_total_inline_bytes": 256
+            }),
+        ));
+        assert_eq!(
+            page[0]["result"]["schema_version"],
+            "command-output-artifact-page/0.1"
+        );
+        assert_eq!(
+            page[0]["result"]["content_reference"]["reference"],
+            reference
+        );
+        assert_eq!(
+            page[0]["result"]["page"]["inline"],
+            "durable command output\n"
+        );
+        assert!(page[0]["result"]["page"]["next_cursor"].is_null());
+        let second_page = restarted.handle_line(&request(
+            "artifact-page-second-item",
+            "artifact/read-command-output-page",
+            json!({
+                "session_id": &session_id,
+                "item_id": "command-restart-2",
+                "reference": &reference,
+                "limit": 64
+            }),
+        ));
+        assert_eq!(second_page[0]["result"]["item_id"], "command-restart-2");
+        assert_eq!(
+            second_page[0]["result"]["page"]["inline"],
+            "durable command output\n"
+        );
         let denied = restarted.handle_line(&request(
             "artifact-cross-session",
             "artifact/read-command-output",
@@ -23747,7 +24580,7 @@ mod durable_runtime_tests {
         assert_eq!(replay[0]["result"]["consistency"]["consistent"], true);
         assert_eq!(
             replay[0]["result"]["consistency"]["checked_blob_references"],
-            1
+            2
         );
 
         let _ = fs::remove_dir_all(root);
