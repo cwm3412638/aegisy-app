@@ -521,6 +521,34 @@ Durable Turn-start acknowledgement (`3.5`/`3.6`, partial):
   Git, and job mutation producers remain absent, and complete Windows
   reconnect/runtime evidence remains open; keep `3.5` and `3.6` unchecked.
 
+Metadata-only mutation and server-request contracts (`3.6`/`3.7`, partial):
+
+- `git_mutation_ack.rs` defines `git-mutation-acknowledgement/0.1` without
+  executing Git or granting authority. Operation identity is domain-separated and
+  binds Session/project/root, mutation kind, idempotency key, request fingerprint,
+  and immutable plan identity. Exact retries are replayable, same-key binding drift
+  is a conflict, and unrelated keys do not collide. Accepted/Committed/Failed/
+  ReconciliationRequired transitions enforce contiguous revision and monotonic
+  observation time; uncertain and terminal states cannot be advanced by the
+  producer, and terminal states require opaque observation evidence. Three focused
+  tests cover retry disposition, lifecycle/reconciliation, and strict wire/secret/
+  authority rejection.
+- `credential_refresh.rs` defines `credential-refresh-request/0.1` with only
+  provider/profile and one-way secure-storage identities. Credential values,
+  tokens, network access, refresh authority, and secure-storage APIs are absent.
+  Four focused tests cover deterministic bindings, strict metadata serialization,
+  lifecycle/reconciliation, and secret-shaped/unknown/authority rejection.
+- `extension_elicitation.rs` defines `extension-elicitation/0.1` as a bounded,
+  content-free metadata contract. It excludes prompts, forms, URLs, arguments,
+  and answers; exact retries, derived request/operation identities, contiguous
+  lifecycle, terminal/uncertain handling, and fixed-false decision/permission/
+  execution/mutation authority are covered by five focused tests.
+- These modules are internal foundations only. They are not connected to the
+  schema-v20 ledger, AAP routes, Qt, Store, Codex server-request handling,
+  secure storage, Git execution, or a user Approval issuer. Their tests do not
+  prove a usable approval, credential refresh, elicitation UI, or mutation path;
+  tasks `3.6` and `3.7` remain unchecked.
+
 - Workbench schema v15 adds a dedicated `public_timeline_events` journal and one
   `public_timeline_cursors` source/cursor row per Session. Session insertion registers
   the empty cursor idempotently; event insertion and cursor advancement use the same

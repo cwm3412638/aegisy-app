@@ -3667,6 +3667,37 @@ Implemented visual baseline:
   not disconnect or trigger the compatibility signal. Workbench render coverage
   exercises canonical failure handling and redacted provider/restart notices.
 
+## Metadata-Only Mutation And Server-Request Contracts (2026-07-28)
+
+- OpenSpec `3.6` remains unchecked. `agent-runtime/crates/aegisy-agentd/src/git_mutation_ack.rs`
+  now defines internal `git-mutation-acknowledgement/0.1` metadata semantics for
+  future Git producers. Session/project/root, mutation kind, idempotency key,
+  request fingerprint, and immutable plan identity derive a domain-separated
+  operation identity. Exact retries are replayable, same-key drift is a conflict,
+  and unrelated keys remain distinct. Accepted/Committed/Failed/
+  ReconciliationRequired revisions are contiguous and time-monotonic; uncertain
+  and terminal states cannot be advanced by the producer, terminal observations
+  require opaque evidence, and mutation/approval/execution authority are fixed
+  false. The module has three focused tests and is not connected to Git, Store,
+  AAP, Qt, or an approval issuer.
+- OpenSpec `3.7` remains unchecked. `credential_refresh.rs` defines an internal
+  `credential-refresh-request/0.1` contract that carries only provider/profile
+  and one-way secure-storage identities. It never carries credential values,
+  tokens, network or refresh authority, or secure-storage API access. Four focused
+  tests cover identity/retry, strict metadata round-trip, lifecycle/reconciliation,
+  and secret/unknown/authority rejection.
+- `extension_elicitation.rs` defines internal `extension-elicitation/0.1`
+  metadata semantics. It binds Session/Turn/request/extension identities and
+  idempotency but excludes prompts, forms, URLs, arguments, and answers. Requested,
+  non-decision terminal, failed, and reconciliation-required states are strict;
+  five focused tests cover exact replay, lifecycle, drift, secret, unknown-field,
+  and fixed-false decision/permission/execution/mutation authority checks. It is
+  not a server-request UI, approval path, AAP method, or extension execution grant.
+- All three modules are deliberately not connected to the schema-v20 ledger,
+  AAP, Qt, Workbench Store, Codex server requests, secure storage, Git execution,
+  or genuine user Approval. Do not advertise these foundations as usable
+  mutation, credential refresh, or elicitation functionality.
+
 ## Next Product Priorities
 
 1. Finish OpenSpec `3.10` by running the complete generator and desktop gate from a
