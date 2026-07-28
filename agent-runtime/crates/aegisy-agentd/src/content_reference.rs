@@ -743,7 +743,11 @@ impl ContentReference {
             identity: String::new(),
         };
         page.identity = page.derived_identity();
-        page.validate()?;
+        if reject_inline_secret_shape {
+            page.validate()?;
+        } else {
+            page.validate_full_source_scanned()?;
+        }
         Ok(page)
     }
 }
@@ -806,22 +810,22 @@ impl TryFrom<ContentPageCursorWire> for ContentPageCursor {
 
 impl ContentPageCursor {
     fn derived_identity(&self) -> String {
-        hex_digest(
-            CURSOR_IDENTITY_PREFIX,
-            &[
-                self.reference.as_bytes(),
-                self.sha256.as_bytes(),
-                &self.bytes.to_be_bytes(),
-                self.media_type.as_bytes(),
-                &self.offset.to_be_bytes(),
-                &self.page_size.to_be_bytes(),
-                self.limits.identity.as_bytes(),
-                self.binding_identity
-                    .as_deref()
-                    .unwrap_or("none")
-                    .as_bytes(),
-            ],
-        )
+        let bytes = self.bytes.to_be_bytes();
+        let offset = self.offset.to_be_bytes();
+        let page_size = self.page_size.to_be_bytes();
+        let mut values = vec![
+            self.reference.as_bytes(),
+            self.sha256.as_bytes(),
+            bytes.as_slice(),
+            self.media_type.as_bytes(),
+            offset.as_slice(),
+            page_size.as_slice(),
+            self.limits.identity.as_bytes(),
+        ];
+        if let Some(binding_identity) = self.binding_identity.as_deref() {
+            values.push(binding_identity.as_bytes());
+        }
+        hex_digest(CURSOR_IDENTITY_PREFIX, &values)
     }
 
     pub fn validate(&self) -> Result<(), ContentReferenceError> {
@@ -940,29 +944,44 @@ impl ContentPage {
             .next_cursor
             .as_ref()
             .map_or_else(|| "none".to_owned(), |cursor| cursor.identity.clone());
-        hex_digest(
-            PAGE_IDENTITY_PREFIX,
-            &[
-                self.reference.as_bytes(),
-                self.sha256.as_bytes(),
-                &self.bytes.to_be_bytes(),
-                self.media_type.as_bytes(),
-                &self.offset.to_be_bytes(),
-                &self.page_size.to_be_bytes(),
-                &self.page_bytes.to_be_bytes(),
-                &inline_hash,
-                &[u8::from(self.inline_truncated)],
-                self.limits.identity.as_bytes(),
-                self.binding_identity
-                    .as_deref()
-                    .unwrap_or("none")
-                    .as_bytes(),
-                next_identity.as_bytes(),
-            ],
-        )
+        let bytes = self.bytes.to_be_bytes();
+        let offset = self.offset.to_be_bytes();
+        let page_size = self.page_size.to_be_bytes();
+        let page_bytes = self.page_bytes.to_be_bytes();
+        let inline_truncated = [u8::from(self.inline_truncated)];
+        let mut values = vec![
+            self.reference.as_bytes(),
+            self.sha256.as_bytes(),
+            bytes.as_slice(),
+            self.media_type.as_bytes(),
+            offset.as_slice(),
+            page_size.as_slice(),
+            page_bytes.as_slice(),
+            inline_hash.as_slice(),
+            inline_truncated.as_slice(),
+            self.limits.identity.as_bytes(),
+        ];
+        if let Some(binding_identity) = self.binding_identity.as_deref() {
+            values.push(binding_identity.as_bytes());
+        }
+        values.push(next_identity.as_bytes());
+        hex_digest(PAGE_IDENTITY_PREFIX, &values)
     }
 
     pub fn validate(&self) -> Result<(), ContentReferenceError> {
+        self.validate_internal(true)
+    }
+
+    // Reachable only from the private builder after it scans the complete source.
+    // Untrusted wire deserialization always uses the strict public validation path.
+    fn validate_full_source_scanned(&self) -> Result<(), ContentReferenceError> {
+        self.validate_internal(false)
+    }
+
+    fn validate_internal(
+        &self,
+        reject_inline_secret_shape: bool,
+    ) -> Result<(), ContentReferenceError> {
         if self.schema_version != PAGE_SCHEMA_VERSION
             || !valid_sha_identity(&self.identity, PAGE_IDENTITY_PREFIX)
             || self.bytes > MAX_CONTENT_BYTES
@@ -997,6 +1016,11 @@ impl ContentPage {
             || !self.limits.allows(inline_bytes, inline_bytes)
             || self.inline_truncated != (inline_bytes < self.page_bytes)
             || (!is_text_media_type(&self.media_type) && self.inline.is_some())
+            || (reject_inline_secret_shape
+                && self
+                    .inline
+                    .as_ref()
+                    .is_some_and(|value| secret_value_shaped(value)))
         {
             return Err(error(
                 "content-page-inline-invalid",
@@ -1189,6 +1213,100 @@ mod tests {
     }
 
     #[test]
+    fn legacy_unbound_page_and_cursor_keep_the_fixed_zero_one_identities() {
+        let source = "abcdef";
+        let sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
+        let content = ContentReference::new(
+            format!("content:sha256:{sha256}"),
+            sha256,
+            source.len() as u64,
+            "text/plain; charset=utf-8",
+            None,
+        )
+        .unwrap();
+        let page = content
+            .page(
+                InlineSizeLimits::new(4, 8).unwrap(),
+                0,
+                4,
+                4,
+                Some("abcd".into()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            page.limits.identity,
+            "content-inline-limits:sha256:\
+             2093b1974c59acb69989ef3cab60a4b77098bb5d801a891ac90b89b1de97f8fc"
+        );
+        assert_eq!(
+            page.next_cursor.as_ref().unwrap().identity,
+            "content-reference-cursor:sha256:\
+             87116127b2d7a8dfdb11b79f20a80cec89360c2ed1d0ede2c810e39cd634f029"
+        );
+        assert_eq!(
+            page.identity,
+            "content-reference-page:sha256:\
+             5085fcde4966cde1054d75976ff16a37335ed5333e374c1bbfdb4cae9e0e48e1"
+        );
+        assert!(page.binding_identity.is_none());
+        assert!(page
+            .next_cursor
+            .as_ref()
+            .unwrap()
+            .binding_identity
+            .is_none());
+
+        let encoded = serde_json::to_value(&page).unwrap();
+        assert!(encoded.get("binding_identity").is_none());
+        assert!(encoded["next_cursor"].get("binding_identity").is_none());
+        assert_eq!(
+            serde_json::from_value::<ContentPage>(encoded).unwrap(),
+            page
+        );
+
+        let legacy_json = r#"{
+            "schema_version":"content-reference-page/0.1",
+            "reference":"content:sha256:bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721",
+            "sha256":"bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721",
+            "bytes":6,
+            "media_type":"text/plain; charset=utf-8",
+            "offset":0,
+            "page_size":4,
+            "page_bytes":4,
+            "inline":"abcd",
+            "inline_truncated":false,
+            "limits":{
+                "schema_version":"content-inline-limits/0.1",
+                "max_item_bytes":4,
+                "max_total_bytes":8,
+                "identity":"content-inline-limits:sha256:2093b1974c59acb69989ef3cab60a4b77098bb5d801a891ac90b89b1de97f8fc"
+            },
+            "next_cursor":{
+                "schema_version":"content-reference-cursor/0.1",
+                "reference":"content:sha256:bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721",
+                "sha256":"bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721",
+                "bytes":6,
+                "media_type":"text/plain; charset=utf-8",
+                "offset":4,
+                "page_size":4,
+                "limits":{
+                    "schema_version":"content-inline-limits/0.1",
+                    "max_item_bytes":4,
+                    "max_total_bytes":8,
+                    "identity":"content-inline-limits:sha256:2093b1974c59acb69989ef3cab60a4b77098bb5d801a891ac90b89b1de97f8fc"
+                },
+                "identity":"content-reference-cursor:sha256:87116127b2d7a8dfdb11b79f20a80cec89360c2ed1d0ede2c810e39cd634f029"
+            },
+            "identity":"content-reference-page:sha256:5085fcde4966cde1054d75976ff16a37335ed5333e374c1bbfdb4cae9e0e48e1"
+        }"#;
+        assert_eq!(
+            serde_json::from_str::<ContentPage>(legacy_json).unwrap(),
+            page
+        );
+    }
+
+    #[test]
     fn serde_unknown_fields_and_secret_shaped_inline_fail_closed() {
         let content = content();
         let mut encoded = serde_json::to_value(&content).unwrap();
@@ -1199,10 +1317,20 @@ mod tests {
         forged_mime["media_type"] = json!("text/x-unknown");
         assert!(serde_json::from_value::<ContentReference>(forged_mime).is_err());
 
+        let leaked = "api_key=sk-123456789012345678901234";
+        let safe = "x".repeat(leaked.len());
         let mut page = content
-            .page(limits(), 0, 4, 4, Some("safe".into()))
+            .page(
+                limits(),
+                0,
+                leaked.len() as u64,
+                leaked.len() as u64,
+                Some(safe),
+            )
             .unwrap();
-        page.inline = Some("api_key=sk-123456789012345678901234".into());
+        page.inline = Some(leaked.into());
+        page.identity = page.derived_identity();
+        assert!(page.validate_full_source_scanned().is_ok());
         assert!(page.validate().is_err());
         let mut encoded = serde_json::to_value(&page).unwrap();
         assert!(serde_json::from_value::<ContentPage>(encoded.clone()).is_err());
@@ -1250,7 +1378,8 @@ mod tests {
             .page_text_with_binding(limits(), 0, 10, safe_full, None)
             .unwrap();
         assert_eq!(split_placeholder.inline.as_deref(), Some("API_KEY=[R"));
-        assert!(split_placeholder.validate().is_ok());
+        assert!(split_placeholder.validate_full_source_scanned().is_ok());
+        assert!(split_placeholder.validate().is_err());
 
         let unsafe_full = "API_KEY=actual-secret-value";
         let unsafe_hash = format!("{:x}", Sha256::digest(unsafe_full.as_bytes()));

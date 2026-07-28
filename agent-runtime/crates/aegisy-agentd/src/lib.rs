@@ -2653,46 +2653,40 @@ struct CommandArtifactPageParams {
     max_total_inline_bytes: Option<u64>,
 }
 
-#[derive(Serialize)]
-struct CommandArtifactPageBindingMaterial<'a> {
-    schema_version: &'a str,
-    session_id: &'a str,
-    reference: &'a str,
-    sha256: &'a str,
-    content_type: &'a str,
-    item_id: &'a str,
-    created_at_ms: u64,
-    source_bytes: u64,
-    redacted_count: u64,
-    redacted: bool,
-    total_bytes: u64,
-    retained_bytes: usize,
-    omitted_bytes: u64,
-    truncated: bool,
-}
-
 fn command_artifact_page_binding_identity(
     session_id: &str,
     artifact: &command_artifact::CommandOutputArtifact,
 ) -> String {
-    let material = CommandArtifactPageBindingMaterial {
-        schema_version: "command-output-artifact-page-binding/0.1",
-        session_id,
-        reference: &artifact.reference,
-        sha256: &artifact.sha256,
-        content_type: &artifact.content_type,
-        item_id: &artifact.item_id,
-        created_at_ms: artifact.created_at_ms,
-        source_bytes: artifact.source_bytes,
-        redacted_count: artifact.redacted_count,
-        redacted: artifact.redacted,
-        total_bytes: artifact.total_bytes,
-        retained_bytes: artifact.retained_bytes,
-        omitted_bytes: artifact.omitted_bytes,
-        truncated: artifact.truncated,
-    };
     let mut bytes = b"command-output-artifact-page-binding\0".to_vec();
-    bytes.extend(serde_json::to_vec(&material).expect("command artifact binding serialization"));
+    let created_at_ms = artifact.created_at_ms.to_be_bytes();
+    let source_bytes = artifact.source_bytes.to_be_bytes();
+    let redacted_count = artifact.redacted_count.to_be_bytes();
+    let redacted = [u8::from(artifact.redacted)];
+    let total_bytes = artifact.total_bytes.to_be_bytes();
+    let retained_bytes = u64::try_from(artifact.retained_bytes)
+        .expect("validated command Artifact retained bytes fit u64")
+        .to_be_bytes();
+    let omitted_bytes = artifact.omitted_bytes.to_be_bytes();
+    let truncated = [u8::from(artifact.truncated)];
+    for component in [
+        b"command-output-artifact-page-binding/0.1".as_slice(),
+        session_id.as_bytes(),
+        artifact.reference.as_bytes(),
+        artifact.sha256.as_bytes(),
+        artifact.content_type.as_bytes(),
+        artifact.item_id.as_bytes(),
+        created_at_ms.as_slice(),
+        source_bytes.as_slice(),
+        redacted_count.as_slice(),
+        redacted.as_slice(),
+        total_bytes.as_slice(),
+        retained_bytes.as_slice(),
+        omitted_bytes.as_slice(),
+        truncated.as_slice(),
+    ] {
+        bytes.extend((component.len() as u64).to_be_bytes());
+        bytes.extend(component);
+    }
     format!(
         "content-reference-binding:sha256:{}",
         ContentHash::for_bytes(&bytes).sha256
@@ -23290,6 +23284,42 @@ mod command_timeline_tests {
     }
 
     #[test]
+    fn command_artifact_page_binding_matches_the_cross_language_vector() {
+        let sha256 = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03";
+        let artifact = command_artifact::CommandOutputArtifact {
+            reference: format!("command-output:sha256:{sha256}"),
+            sha256: sha256.into(),
+            content_type: "text/plain; charset=utf-8".into(),
+            item_id: "command.item:1".into(),
+            created_at_ms: 1_700_000_000_123,
+            source_bytes: 6,
+            redacted_count: 0,
+            redacted: false,
+            total_bytes: 6,
+            retained_bytes: 6,
+            omitted_bytes: 0,
+            truncated: false,
+            content: "hello\n".into(),
+        };
+        artifact.validate().unwrap();
+
+        assert_eq!(
+            command_artifact_page_binding_identity("session-vector-1", &artifact),
+            "content-reference-binding:sha256:\
+             d6a8d1c07d2e2a8d0817b50a191e02a0ac677eddacd17bceaeb6c5f67f24216f"
+        );
+
+        let mut escaped_item = artifact;
+        escaped_item.item_id = "command.\"slash/\\:1".into();
+        escaped_item.validate().unwrap();
+        assert_eq!(
+            command_artifact_page_binding_identity("session-vector-1", &escaped_item),
+            "content-reference-binding:sha256:\
+             a0b5b2ca29247112b19796e03fafed08972eef39e3f4cd8bb769a7906f8b78a3"
+        );
+    }
+
+    #[test]
     fn command_artifact_durable_conversion_rejects_semantic_tampering() {
         fn durable(content: &[u8]) -> DurableBlobRead {
             let content_hash = ContentHash::for_bytes(content);
@@ -24479,14 +24509,14 @@ mod durable_runtime_tests {
             .unwrap();
         let second_artifact = runtime.command_artifacts.record_diagnostic_source(
             &session_id,
-            "command-restart-2",
+            "command.restart:2",
             &output,
             23,
             0,
         );
         assert_eq!(second_artifact.reference, artifact.reference);
         let second_item = TimelineItem {
-            id: "command-restart-2".into(),
+            id: "command.restart:2".into(),
             kind: "command".into(),
             role: "tool".into(),
             state: "completed".into(),
@@ -24526,7 +24556,7 @@ mod durable_runtime_tests {
         ));
         assert_eq!(read[0]["result"]["content"], "durable command output\n");
         assert_eq!(read[0]["result"]["session_id"], session_id);
-        assert_eq!(read[0]["result"]["item_id"], "command-restart-2");
+        assert_eq!(read[0]["result"]["item_id"], "command.restart:2");
         let page = restarted.handle_line(&request(
             "artifact-page",
             "artifact/read-command-output-page",
@@ -24556,12 +24586,12 @@ mod durable_runtime_tests {
             "artifact/read-command-output-page",
             json!({
                 "session_id": &session_id,
-                "item_id": "command-restart-2",
+                "item_id": "command.restart:2",
                 "reference": &reference,
                 "limit": 64
             }),
         ));
-        assert_eq!(second_page[0]["result"]["item_id"], "command-restart-2");
+        assert_eq!(second_page[0]["result"]["item_id"], "command.restart:2");
         assert_eq!(
             second_page[0]["result"]["page"]["inline"],
             "durable command output\n"

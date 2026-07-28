@@ -1161,10 +1161,41 @@ and complete immutable command-Artifact metadata. The response returns the bound
 `created_at_ms` needed to independently reproduce that binding. In-memory lookup is exact by
 `(item_id, reference)` and durable lookup is exact by Session/Item/reference, so two
 Items with identical output remain independently bound across Runtime restart.
+The binding identity byte contract is fixed. Begin with the UTF-8 bytes
+`command-output-artifact-page-binding` followed by one NUL byte. Append each field
+below in order as an unsigned 64-bit big-endian byte length followed by the field
+bytes. Strings use their exact UTF-8 bytes without JSON escaping, integers use eight
+unsigned big-endian bytes, and booleans use one byte (`0` or `1`). SHA-256 the result
+and prefix the lowercase digest with `content-reference-binding:sha256:`:
+
+```json
+{"schema_version":"command-output-artifact-page-binding/0.1","session_id":"session-vector-1","reference":"command-output:sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03","sha256":"5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03","content_type":"text/plain; charset=utf-8","item_id":"command.item:1","created_at_ms":1700000000123,"source_bytes":6,"redacted_count":0,"redacted":false,"total_bytes":6,"retained_bytes":6,"omitted_bytes":0,"truncated":false}
+```
+
+The JSON object is illustrative only; it is not hashed. Its fixed result is
+`content-reference-binding:sha256:d6a8d1c07d2e2a8d0817b50a191e02a0ac677eddacd17bceaeb6c5f67f24216f`.
+Changing only `item_id` to the exact ASCII-graphical string
+`command.\"slash/\\:1` produces
+`content-reference-binding:sha256:a0b5b2ca29247112b19796e03fafed08972eef39e3f4cd8bb769a7906f8b78a3`.
+The second vector proves that JSON quote, slash, and backslash escaping cannot affect
+the binding bytes.
+Content page, cursor, and limit identities use SHA-256 over the UTF-8 identity prefix,
+one NUL byte, then for every listed component an unsigned 64-bit big-endian byte length
+followed by the component bytes. An absent `binding_identity` contributes no component,
+preserving existing `0.1` identities; a present binding is inserted immediately before
+the cursor end or the page `next_cursor.identity` component. The fixed legacy unbound
+`abcdef`/4-byte page vector is
+`content-inline-limits:sha256:2093b1974c59acb69989ef3cab60a4b77098bb5d801a891ac90b89b1de97f8fc`,
+`content-reference-cursor:sha256:87116127b2d7a8dfdb11b79f20a80cec89360c2ed1d0ede2c810e39cd634f029`,
+and
+`content-reference-page:sha256:5085fcde4966cde1054d75976ff16a37335ed5333e374c1bbfdb4cae9e0e48e1`.
 Runtime re-derives the durable Blob-reference identity and revalidates owner, MIME,
 exact metadata shape, truncation/redaction arithmetic, UTF-8, and content hash. A
 truncated Artifact must contain exactly one omission marker at the canonical
-head/tail boundary. The complete Artifact is hash/length/secret-scanned before any
+head/tail boundary. Any identical source marker retained in the head or tail is first
+changed with a byte-length-preserving `[` to `{` substitution, so only the Runtime-owned
+canonical marker remains. This intentionally changes those retained source bytes; they
+cannot be reconstructed from the Artifact. The complete Artifact is hash/length/secret-scanned before any
 slice is selected; pages then split only on UTF-8 scalar boundaries. This permits a
 complete `[REDACTED]` placeholder to cross a page boundary without allowing a secret
 shape to evade detection across pages. Cursor drift, cross-Session or cross-Item use,

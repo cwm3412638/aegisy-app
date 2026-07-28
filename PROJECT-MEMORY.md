@@ -3781,6 +3781,31 @@ Implemented visual baseline:
   use, purged/missing/corrupt content, unknown params, limit drift, cursor substitution,
   and scalar-splitting pages fail closed. The legacy whole-artifact route remains for
   Qt compatibility and uses a deterministic creation-time/Item-ID owner selection.
+- The command page binding hashes the UTF-8 bytes
+  `command-output-artifact-page-binding\0` followed by the exact
+  `schema_version`, Session, reference, SHA-256, MIME, Item, creation/source/redaction,
+  and truncation fields. Every field has an unsigned 64-bit big-endian length;
+  strings use exact UTF-8, integers use eight unsigned big-endian bytes, and booleans
+  use one `0`/`1` byte. This avoids JSON serializer escape drift for every legal
+  ASCII-graphical Item ID. The fixed simple and quote/slash/backslash results are
+  `content-reference-binding:sha256:d6a8d1c07d2e2a8d0817b50a191e02a0ac677eddacd17bceaeb6c5f67f24216f`
+  and
+  `content-reference-binding:sha256:a0b5b2ca29247112b19796e03fafed08972eef39e3f4cd8bb769a7906f8b78a3`.
+  Generic limit/cursor/page identities use prefix plus NUL and unsigned 64-bit
+  big-endian length framing. A missing binding contributes no component, preserving
+  legacy `0.1`; fixed Rust vectors lock the unbound limit/cursor/page identities for
+  Qt reproduction. Generic page deserialization still rejects secret-shaped inline
+  text, while only the producer path that already scanned the full source may admit a
+  page fragment splitting `[REDACTED]`. Source text identical to the generated omission
+  marker is escaped with a byte-length-preserving substitution before the single
+  canonical marker is inserted; the retained source marker bytes are intentionally
+  changed and cannot be reconstructed from the Artifact.
+  Durable Item IDs use the AAP 1-128-byte ASCII-graphical boundary. Existing
+  alphanumeric/`-`/`_` IDs retain their legacy internal event operation ID; a legal
+  Item ID outside that narrower internal alphabet receives a deterministic
+  `item-<sha256>` operation ID while the exact public Item ID remains unchanged in
+  correlation and payload fields. This avoids rewriting legacy events while keeping
+  restart and portable-session paths compatible with the public Item contract.
 - Focused command-artifact tests plus explicit redaction and owner-rebinding tests cover
   compatible legacy reads, empty and UTF-8 pages, terminal cursors, continuation
   renegotiation/tamper, Session and Item isolation, durable semantic tampering, and
@@ -3788,12 +3813,21 @@ Implemented visual baseline:
   mutation, Approval, or execution authority. OpenSpec `3.8` remains unchecked until
   Qt paging, remaining content domains, generated types, and cross-platform evidence
   are complete.
-- The final local command-output paging gate passes `1043` Rust tests with one
-  explicitly ignored live Codex fixture, strict workspace Clippy and formatting,
-  the complete desktop build and all `23/23` CTests, strict OpenSpec validation,
-  and `git diff --check`. This is macOS/local evidence only and cannot close Qt
-  paging, remaining content domains, generated protocol types, clean Windows, or
-  live-provider gates.
+- The final backend command-output paging gate passes `1050` Rust tests with one
+  explicitly ignored live Codex fixture, strict workspace Clippy and formatting.
+  Three earlier complete runs exposed only the large PTY correctness fixture's
+  five-second exit wait under workspace-test contention; that fixture passed alone
+  each time and now uses a test-only 20-second correctness deadline. Product terminal
+  behavior and the separately declared performance budgets did not change. The final
+  complete run passes after the length-framed binding and equal-length secret fixture.
+  Strict OpenSpec and diff gates pass before the backend commit. A clean isolated
+  desktop configure and complete build pass. The first aggregate CTest run passed
+  21 targets but its timer incorrectly expired `agent_runtime_protocol` and
+  `aap_generated_types`; exact isolated reruns passed in 67.32s and 8.55s, so every
+  one of the 23 desktop targets has successful execution evidence. This is recorded
+  as 21 aggregate plus two exact reruns, not as one uninterrupted aggregate success.
+  The main worktree already contains the next uncommitted Qt paging slice. This is macOS/local evidence only and cannot close Qt paging, remaining
+  content domains, generated protocol types, clean Windows, or live-provider gates.
 
 ## Next Product Priorities
 

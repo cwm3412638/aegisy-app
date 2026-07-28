@@ -618,11 +618,27 @@ Content references and bounded pages (`3.8`, partial):
   tests cover empty output, UTF-8 boundaries, terminal cursor, continuation
   renegotiation rejection, cursor substitution and owner isolation, durable semantic
   tampering, Runtime restart/Store reload, and the legacy whole-artifact path's stable
-  creation-time/Item-ID selection. Qt paging, remaining content domains, generated protocol types, and clean
+  creation-time/Item-ID selection. A fixed unbound `0.1` limit/cursor/page vector proves
+  the optional binding did not rewrite legacy identities, and fixed simple plus
+  quote/slash/backslash command-binding vectors lock the domain prefix, field order,
+  unsigned length framing, exact UTF-8, numeric big-endian, and boolean bytes for
+  independent Qt reproduction. A marker-collision fixture proves retained source text cannot create a
+  second canonical omission marker. The restart fixture uses a legal `.`/`:` Item ID
+  and verifies its deterministic event operation mapping and exact durable lookup. Qt
+  paging, remaining content domains, generated protocol types, and clean
   Windows execution remain absent; keep `3.8` unchecked.
-- The final local gate passes `1043` Rust tests with one explicitly ignored live
-  Codex fixture, strict workspace Clippy and formatting, the complete desktop build
-  and all `23/23` CTests, strict OpenSpec validation, and `git diff --check`. This is
+- The final backend gate passes `1050` Rust tests with one explicitly ignored live
+  Codex fixture plus strict workspace Clippy and formatting. Three earlier complete
+  runs failed only the large PTY correctness fixture's five-second wait under full
+  workspace contention; its focused runs passed, and the final complete run passes
+  with a test-only 20-second correctness deadline. Product behavior and dedicated
+  performance budgets are unchanged. Strict OpenSpec and diff gates pass before the
+  backend commit. A clean isolated desktop configure/build passes. Its first aggregate
+  CTest run passed 21 targets while the CTest timer incorrectly expired
+  `agent_runtime_protocol` and `aap_generated_types`; exact isolated reruns pass in
+  67.32s and 8.55s, giving successful execution evidence for all 23 targets. This is
+  recorded as 21 aggregate plus two exact reruns rather than one uninterrupted
+  aggregate success. The main worktree already contains the next uncommitted Qt paging slice. This is
   local macOS evidence and cannot satisfy Qt paging, remaining content domains,
   generated protocol types, clean Windows, or live-provider gates.
 

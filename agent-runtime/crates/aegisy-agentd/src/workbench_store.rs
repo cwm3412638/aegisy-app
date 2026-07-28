@@ -3267,7 +3267,7 @@ impl WorkbenchStore {
         content_reference: &str,
         accessed_at_ms: u64,
     ) -> Result<DurableBlobRead, WorkbenchStoreError> {
-        validate_identifier(item_id, "durable blob Item ID")?;
+        validate_item_identifier(item_id, "durable blob Item ID")?;
         self.read_durable_blob_for_session_binding_read_only(
             session_id,
             content_reference,
@@ -10427,11 +10427,21 @@ impl WorkbenchStore {
                             .get(turn_id)
                             .is_some_and(|turn| turn.session_id == parsed.session_id)
                     });
+                    let expected_operation_id = parsed
+                        .turn_id
+                        .clone()
+                        .unwrap_or_else(|| item_event_operation_id(&parsed.item_id));
                     if parsed.session_id != session_id
                         || parsed.sequence != expected_sequence
-                        || validate_identifier(&parsed.item_id, "item ID").is_err()
+                        || validate_item_identifier(&parsed.item_id, "item ID").is_err()
                         || ContentHash::for_bytes(payload_json.as_bytes()) != parsed.payload_hash
                         || !turn_valid
+                        || event.correlation_id != parsed.item_id
+                        || event.operation_id != expected_operation_id
+                        || event.event_id
+                            != derived_event_id("item-appended", parsed.item_id.as_bytes())
+                        || event.timestamp_ms != parsed.created_at_ms
+                        || event.generation != 0
                     {
                         push_projection_issue(&mut issues, "item-appended-event-invalid");
                         continue;
@@ -11033,7 +11043,7 @@ impl WorkbenchStore {
             }
         }
         for item in &candidate.items {
-            validate_identifier(&item.item_id, "item ID")?;
+            validate_item_identifier(&item.item_id, "item ID")?;
             if item.session_id != candidate.session_id
                 || item.sequence != expected_item_sequence
                 || item.turn_id.as_ref().is_some_and(|turn_id| {
@@ -20035,7 +20045,7 @@ fn prepare_item_append(
     request: &StoredItemAppend,
 ) -> Result<PreparedItemAppend, WorkbenchStoreError> {
     validate_identifier(&request.session_id, "item session ID")?;
-    validate_identifier(&request.item_id, "item ID")?;
+    validate_item_identifier(&request.item_id, "item ID")?;
     if let Some(turn_id) = &request.turn_id {
         validate_identifier(turn_id, "item turn ID")?;
     }
@@ -20096,7 +20106,7 @@ fn validate_workspace_edit_proposal_timeline_reference(
     proposal: &WorkspaceEditProposal,
     item_id: &str,
 ) -> Result<(), WorkbenchStoreError> {
-    validate_identifier(item_id, "workspace edit proposal Timeline item ID")?;
+    validate_item_identifier(item_id, "workspace edit proposal Timeline item ID")?;
     validate_event_identifier(
         &reference.reference_id,
         "workspace edit proposal Timeline reference ID",
@@ -20493,6 +20503,14 @@ fn projected_timeline_item(
     })
 }
 
+fn item_event_operation_id(item_id: &str) -> String {
+    if validate_identifier(item_id, "item event operation ID").is_ok() {
+        item_id.to_owned()
+    } else {
+        format!("item-{}", ContentHash::for_bytes(item_id.as_bytes()).sha256)
+    }
+}
+
 fn append_item_tx(
     transaction: &Transaction<'_>,
     request: &StoredItemAppend,
@@ -20569,7 +20587,10 @@ fn append_item_tx(
             .map_err(|_| error("cannot advance turn state"))?;
     }
     let event_id = derived_event_id("item-appended", request.item_id.as_bytes());
-    let operation_id = request.turn_id.as_deref().unwrap_or(&request.item_id);
+    let operation_id = request
+        .turn_id
+        .clone()
+        .unwrap_or_else(|| item_event_operation_id(&request.item_id));
     append_event_tx(
         transaction,
         EventInput {
@@ -20579,7 +20600,7 @@ fn append_item_tx(
             correlation_id: &request.item_id,
             event_kind: "item.appended",
             project_id: project_id.as_deref(),
-            operation_id,
+            operation_id: &operation_id,
             generation: 0,
             payload: json!({
                 "schema_version": "item.appended/0.1",
@@ -22334,6 +22355,14 @@ fn validate_identifier(value: &str, label: &str) -> Result<(), WorkbenchStoreErr
     Ok(())
 }
 
+fn validate_item_identifier(value: &str, label: &str) -> Result<(), WorkbenchStoreError> {
+    if value.is_empty() || value.len() > 128 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(error(format!("{label} is invalid")));
+    }
+    validate_persisted_text(value, label)?;
+    Ok(())
+}
+
 fn validate_session_identifier(value: &str, label: &str) -> Result<(), WorkbenchStoreError> {
     validate_identifier(value, label)?;
     if value.starts_with(MODEL_PROFILE_EVENT_STREAM_PREFIX) {
@@ -22805,7 +22834,7 @@ fn validate_portable_session_package(
                 "portable session item sequence is invalid",
             ));
         }
-        validate_identifier(&item.source_item_id, "portable source item ID")?;
+        validate_item_identifier(&item.source_item_id, "portable source item ID")?;
         if !source_item_ids.insert(&item.source_item_id) {
             return Err(coded_error(
                 "portable-session-item-duplicate",
@@ -23059,6 +23088,15 @@ mod tests {
     use std::time::Instant;
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn item_event_operation_mapping_preserves_legacy_and_hashes_graphical_ids() {
+        assert_eq!(item_event_operation_id("command-1"), "command-1");
+        assert_eq!(
+            item_event_operation_id("command.restart:2"),
+            "item-3c0f1ff7995c09dfc00b08fe7d49c3819d3137d9acd244e3f7dab363e9f0bdc6"
+        );
+    }
 
     struct Root {
         parent: PathBuf,
@@ -32144,6 +32182,62 @@ mod tests {
         let reopened = WorkbenchStore::open(&root.path).unwrap();
         let replayed = reopened.read_session_items("trace-session", 0, 10).unwrap();
         assert_eq!(replayed, vec![committed]);
+    }
+
+    #[test]
+    fn graphical_item_event_operation_mapping_is_durable_and_tamper_evident() {
+        let root = Root::new("graphical-item-event-operation");
+        let mut store = WorkbenchStore::open(&root.path).unwrap();
+        create_turn_trace_fixture(&mut store, &root, "trace-session", "trace-turn");
+        store
+            .append_item(StoredItemAppend {
+                session_id: "trace-session".into(),
+                turn_id: None,
+                item_id: "command.restart:2".into(),
+                item_kind: "command".into(),
+                role: "tool".into(),
+                state: "completed".into(),
+                payload: json!({"content": "Completed", "data": null}),
+                created_at_ms: 4,
+            })
+            .unwrap();
+
+        let operation_id: String = store
+            .connection
+            .query_row(
+                "SELECT operation_id FROM events
+                 WHERE session_id = 'trace-session'
+                   AND correlation_id = 'command.restart:2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            operation_id,
+            "item-3c0f1ff7995c09dfc00b08fe7d49c3819d3137d9acd244e3f7dab363e9f0bdc6"
+        );
+        assert!(
+            store
+                .verify_session_projection("trace-session")
+                .unwrap()
+                .consistent
+        );
+
+        store
+            .connection
+            .execute(
+                "UPDATE events SET operation_id = 'item-forged'
+                 WHERE session_id = 'trace-session'
+                   AND correlation_id = 'command.restart:2'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            !store
+                .verify_session_projection("trace-session")
+                .unwrap()
+                .consistent
+        );
     }
 
     #[test]

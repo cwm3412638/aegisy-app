@@ -668,7 +668,15 @@ mod tests {
     }
 
     fn wait_for_exit(manager: &mut TerminalManager, terminal_id: &str) -> TerminalSnapshot {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        wait_for_exit_with_timeout(manager, terminal_id, Duration::from_secs(5))
+    }
+
+    fn wait_for_exit_with_timeout(
+        manager: &mut TerminalManager,
+        terminal_id: &str,
+        timeout: Duration,
+    ) -> TerminalSnapshot {
+        let deadline = Instant::now() + timeout;
         loop {
             let snapshot = manager.snapshot(terminal_id, "session", 0).unwrap();
             if !snapshot.running {
@@ -717,7 +725,11 @@ mod tests {
             .unwrap();
         let command = BASE64_STANDARD.encode("yes x | head -c 1200000; exit\n");
         manager.input_user("terminal", "session", &command).unwrap();
-        let snapshot = wait_for_exit(&mut manager, "terminal");
+        // This fixture transfers more than the complete retained PTY budget. Keep
+        // its correctness deadline independent from workspace-test CPU contention;
+        // performance budgets are measured by the dedicated release fixture.
+        let snapshot =
+            wait_for_exit_with_timeout(&mut manager, "terminal", Duration::from_secs(20));
         let output = BASE64_STANDARD.decode(snapshot.output_base64).unwrap();
         assert_eq!(output.len(), CAPTURE_LIMIT);
         assert!(snapshot.omitted_before_start > 0);

@@ -82,8 +82,15 @@ impl CommandOutputCapture {
         } else {
             String::new()
         };
+        // Preserve a unique Runtime-owned omission boundary even when command
+        // output deliberately contains the exact same marker text. The brace
+        // substitution preserves byte length, so retained/source arithmetic
+        // and UTF-8 boundaries remain unchanged.
+        let escaped_marker = marker.replacen('[', "{", 1);
+        let head = self.artifact_head.replace(&marker, &escaped_marker);
+        let tail = tail.replace(&marker, &escaped_marker);
         CommandOutputArtifactCapture {
-            content: format!("{}{}{}", self.artifact_head, marker, tail),
+            content: format!("{head}{marker}{tail}"),
             total_bytes: self.total_bytes,
             retained_bytes,
             omitted_bytes,
@@ -220,5 +227,29 @@ mod tests {
         assert!(snapshot.tail.len() <= INLINE_TAIL_LIMIT);
         assert!(artifact.retained_bytes <= ARTIFACT_HEAD_LIMIT + ARTIFACT_TAIL_LIMIT);
         assert_eq!(snapshot.total_bytes, 1_100_000);
+    }
+
+    #[test]
+    fn source_text_equal_to_the_omission_marker_is_escaped_without_changing_counts() {
+        let omitted_bytes = 1024 * 1024;
+        let marker = format!("\n[Aegisy omitted {omitted_bytes} command output bytes]\n");
+        let head = format!("{marker}{}", "h".repeat(ARTIFACT_HEAD_LIMIT - marker.len()));
+        let middle = "m".repeat(omitted_bytes);
+        let tail = "t".repeat(ARTIFACT_TAIL_LIMIT);
+        let mut capture = CommandOutputCapture::default();
+        capture.append(&format!("{head}{middle}{tail}"));
+
+        let artifact = capture.artifact();
+        assert_eq!(artifact.omitted_bytes, omitted_bytes as u64);
+        assert_eq!(
+            artifact.retained_bytes,
+            ARTIFACT_HEAD_LIMIT + ARTIFACT_TAIL_LIMIT
+        );
+        assert_eq!(artifact.content.match_indices(&marker).count(), 1);
+        assert!(artifact.content.contains(&marker.replacen('[', "{", 1)));
+        assert_eq!(
+            artifact.content.len(),
+            artifact.retained_bytes + marker.len()
+        );
     }
 }

@@ -332,6 +332,43 @@ mod tests {
     }
 
     #[test]
+    fn retained_source_marker_cannot_collide_with_the_runtime_omission_marker() {
+        let omitted_bytes = 1024 * 1024;
+        let marker = format!("\n[Aegisy omitted {omitted_bytes} command output bytes]\n");
+        let head = format!(
+            "{marker}{}",
+            "h".repeat(crate::command_output::ARTIFACT_HEAD_LIMIT - marker.len())
+        );
+        let tail = format!(
+            "{marker}{}",
+            "t".repeat(crate::command_output::ARTIFACT_TAIL_LIMIT - marker.len())
+        );
+        let mut output = CommandOutputCapture::default();
+        output.append(&format!("{head}{}{}", "m".repeat(omitted_bytes), tail));
+
+        let artifact = CommandArtifactStore::default()
+            .record(
+                "session-marker",
+                "command.marker:1",
+                &output,
+                (crate::command_output::ARTIFACT_HEAD_LIMIT
+                    + omitted_bytes
+                    + crate::command_output::ARTIFACT_TAIL_LIMIT) as u64,
+                0,
+            )
+            .unwrap();
+        assert!(artifact.validate().is_ok());
+        assert_eq!(artifact.content.match_indices(&marker).count(), 1);
+        assert_eq!(
+            artifact
+                .content
+                .match_indices(&marker.replacen('[', "{", 1))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn diagnostic_source_forces_a_session_scoped_small_artifact() {
         let mut output = CommandOutputCapture::default();
         output.append("src/main.rs:2:1: error: missing\n");
