@@ -3656,17 +3656,28 @@ Implemented visual baseline:
   signed-package, long-path, and full cross-platform release evidence remain
   open, and the OpenSpec baseline is 55/235 completed tasks.
 
-## Windows Packaging Policy Foundation (2026-07-26)
+## Windows Packaging Policy Foundation (2026-07-29)
 
 - `installer.iss` now declares `MinVersion=10.0.17763`, matching the Windows 10
   1809 ConPTY technical floor. The CMake Windows resource script embeds a
   requested `asInvoker` execution level and the generated application manifest
   sets `longPathAware=true`.
 - The cross-platform `windows_packaging_policy` CTest checks the installer,
-  manifest template, and resource script, and passes alongside the desktop build.
+  manifest template, resource script, complete Windows Qt module selection, and
+  fail-closed explicit Qt 6 SDK discovery, and passes alongside the desktop build.
   This proves source policy wiring only; clean Windows OS long-path policy,
   installer/TLS behavior, signed package, upgrade, and runtime evidence remain
   open. Do not advertise Windows release support from this static gate.
+- Windows validation run `#204` at commit `1121e52` passed the Rust Runtime gate
+  but failed during Qt configure because the selected Qt 6.8.3 SDK lacked required
+  add-on components. Quiet Qt 6 discovery hid that component failure and produced a
+  misleading Qt 5 fallback diagnostic. The workflow must install
+  `qtdeclarative`, `qtpositioning`, `qtwebchannel`, `qtwebengine`, and
+  `qtwebsockets`; an explicitly supplied `Qt6_DIR` is a release input and missing
+  components must fail through `find_package(Qt6 REQUIRED ...)` with the original
+  Qt diagnostic. The local policy/environment tests pass after this correction,
+  but a fresh clean Windows runner is still required before the CI or release gate
+  is considered verified.
 
 ## Chat Streaming Boundary (2026-07-26)
 

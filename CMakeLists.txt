@@ -19,16 +19,22 @@ if(WIN32)
     enable_language(RC)
 endif()
 
-# 查找 Qt6
-find_package(Qt6 COMPONENTS Core Widgets Network Sql WebSockets QUIET)
-
-if(NOT Qt6_FOUND)
-    message(STATUS "Qt6 not found, trying Qt5...")
-    find_package(Qt5 5.14 REQUIRED COMPONENTS Core Widgets Network Sql WebSockets)
-    set(QT_VERSION_MAJOR 5)
+# An explicitly selected Qt 6 SDK is a release input. Missing components must fail
+# with the original Qt diagnostic instead of being hidden behind a Qt 5 fallback.
+set(AEGISY_QT_BASE_COMPONENTS Core Widgets Network Sql WebSockets)
+if(DEFINED Qt6_DIR AND NOT Qt6_DIR STREQUAL "")
+    find_package(Qt6 REQUIRED COMPONENTS ${AEGISY_QT_BASE_COMPONENTS})
 else()
+    find_package(Qt6 COMPONENTS ${AEGISY_QT_BASE_COMPONENTS} QUIET)
+endif()
+
+if(Qt6_FOUND)
     set(QT_VERSION_MAJOR 6)
     find_package(Qt6 QUIET COMPONENTS WebChannel WebEngineWidgets)
+else()
+    message(STATUS "Qt6 not found, trying Qt5...")
+    find_package(Qt5 5.14 REQUIRED COMPONENTS ${AEGISY_QT_BASE_COMPONENTS})
+    set(QT_VERSION_MAJOR 5)
 endif()
 
 # 查找 OpenSSL
