@@ -101,6 +101,14 @@ export interface UnixSocketTransportSecurity {
   "transport": string;
 }
 
+export interface WindowsNamedPipeTransportSecurity {
+  "authenticated": boolean;
+  "encrypted": boolean;
+  "local": boolean;
+  "peer_verified": boolean;
+  "transport": string;
+}
+
 export interface Backend {
   "adapter": string;
   "status": BackendStatus;
@@ -209,7 +217,7 @@ export interface TimelineSubscriptionRequestErrorResponse {
   "jsonrpc": string;
 }
 
-export type TransportSecurity = StdioTransportSecurity | UnixSocketTransportSecurity;
+export type TransportSecurity = StdioTransportSecurity | UnixSocketTransportSecurity | WindowsNamedPipeTransportSecurity;
 
 export interface InitializeIncompatibleData {
   "client": ProtocolRange;

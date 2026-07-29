@@ -82,6 +82,8 @@ pub mod turn_trace;
 mod turn_trace_producer;
 mod unified_execution;
 pub mod usage_authority;
+#[cfg(target_os = "windows")]
+pub mod windows_named_pipe;
 mod workbench_migration;
 pub mod workbench_store;
 mod workspace;
@@ -5533,6 +5535,24 @@ impl Runtime {
         }
         self.transport_security = TransportSecurity {
             transport: "unix-domain-socket".into(),
+            local: true,
+            authenticated: false,
+            encrypted: false,
+            peer_verified: true,
+        };
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn bind_verified_named_pipe_transport(
+        &mut self,
+        _pipe: &windows_named_pipe::VerifiedNamedPipe,
+    ) -> Result<(), &'static str> {
+        if self.initialized || self.client_ready {
+            return Err("runtime transport is already initialized");
+        }
+        self.transport_security = TransportSecurity {
+            transport: "windows-named-pipe".into(),
             local: true,
             authenticated: false,
             encrypted: false,

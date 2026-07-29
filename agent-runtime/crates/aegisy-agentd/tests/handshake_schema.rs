@@ -541,10 +541,29 @@ fn stable_schema_defines_strict_handshake_and_json_rpc_envelopes() {
         true
     );
     assert_eq!(
+        definitions["windowsNamedPipeTransportSecurity"]["properties"]["transport"]["const"],
+        "windows-named-pipe"
+    );
+    assert_eq!(
+        definitions["windowsNamedPipeTransportSecurity"]["properties"]["local"]["const"],
+        true
+    );
+    for denied in ["authenticated", "encrypted"] {
+        assert_eq!(
+            definitions["windowsNamedPipeTransportSecurity"]["properties"][denied]["const"],
+            false
+        );
+    }
+    assert_eq!(
+        definitions["windowsNamedPipeTransportSecurity"]["properties"]["peer_verified"]["const"],
+        true
+    );
+    assert_eq!(
         definitions["transportSecurity"]["oneOf"],
         json!([
             {"$ref": "#/$defs/stdioTransportSecurity"},
-            {"$ref": "#/$defs/unixSocketTransportSecurity"}
+            {"$ref": "#/$defs/unixSocketTransportSecurity"},
+            {"$ref": "#/$defs/windowsNamedPipeTransportSecurity"}
         ])
     );
     assert_eq!(
@@ -578,7 +597,7 @@ fn protocol_version_schema_shape_allows_future_major_without_leading_zeroes() {
 }
 
 #[test]
-fn transport_security_union_accepts_only_truthful_stdio_or_verified_unix_socket_facts() {
+fn transport_security_union_accepts_only_truthful_local_transport_facts() {
     let messages = fixture_messages("aap-initialize-compatible.jsonl");
     let stdio_params = messages[0]["params"].clone();
     let stdio_result = messages[1]["result"].clone();
@@ -607,6 +626,28 @@ fn transport_security_union_accepts_only_truthful_stdio_or_verified_unix_socket_
         &unix_response["result"]
     ));
 
+    let windows_security = json!({
+        "transport": "windows-named-pipe",
+        "local": true,
+        "authenticated": false,
+        "encrypted": false,
+        "peer_verified": true
+    });
+    let mut windows_request = messages[0].clone();
+    windows_request["params"]["transport_security"] = windows_security.clone();
+    let mut windows_response = messages[1].clone();
+    windows_response["result"]["transport_security"] = windows_security;
+    assert!(strict_envelope_valid(&windows_request));
+    assert!(strict_envelope_valid(&windows_response));
+    assert!(schema_definition_valid(
+        "initializeParams",
+        &windows_request["params"]
+    ));
+    assert!(schema_definition_valid(
+        "initializeResult",
+        &windows_response["result"]
+    ));
+
     let invalid_security = [
         json!({
             "transport": "unix-domain-socket",
@@ -626,6 +667,20 @@ fn transport_security_union_accepts_only_truthful_stdio_or_verified_unix_socket_
             "transport": "stdio",
             "local": true,
             "authenticated": false,
+            "encrypted": false,
+            "peer_verified": true
+        }),
+        json!({
+            "transport": "windows-named-pipe",
+            "local": true,
+            "authenticated": false,
+            "encrypted": false,
+            "peer_verified": false
+        }),
+        json!({
+            "transport": "windows-named-pipe",
+            "local": true,
+            "authenticated": true,
             "encrypted": false,
             "peer_verified": true
         }),

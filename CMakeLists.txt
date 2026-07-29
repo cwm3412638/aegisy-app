@@ -735,6 +735,35 @@ if(BUILD_TESTING)
     add_test(NAME agent_runtime_environment
         COMMAND AegisyAgentRuntimeEnvironmentTest)
 
+    if(WIN32 AND CARGO_EXECUTABLE)
+        add_executable(AegisyAgentRuntimeWindowsNamedPipeTest
+            tests/agent_runtime_windows_named_pipe_compile_test.cpp
+            src/agent_runtime_client.cpp
+            src/artifact_manifest.cpp
+            include/agent_runtime_client.h
+            include/artifact_manifest.h
+        )
+        target_compile_definitions(AegisyAgentRuntimeWindowsNamedPipeTest PRIVATE
+            AEGISY_APP_VERSION="${PROJECT_VERSION}"
+            AEGISY_AGENTD_DEV_PATH="${AEGISY_AGENTD_BINARY}"
+        )
+        target_include_directories(AegisyAgentRuntimeWindowsNamedPipeTest PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        if(QT_VERSION_MAJOR EQUAL 6)
+            target_link_libraries(AegisyAgentRuntimeWindowsNamedPipeTest PRIVATE
+                Qt6::Core Qt6::Network AegisyAapTransport)
+        else()
+            target_link_libraries(AegisyAgentRuntimeWindowsNamedPipeTest PRIVATE
+                Qt5::Core Qt5::Network AegisyAapTransport)
+        endif()
+        target_link_libraries(AegisyAgentRuntimeWindowsNamedPipeTest PRIVATE Advapi32)
+        add_dependencies(AegisyAgentRuntimeWindowsNamedPipeTest aegisy_agentd)
+        add_test(NAME agent_runtime_windows_named_pipe
+            COMMAND AegisyAgentRuntimeWindowsNamedPipeTest)
+        set_tests_properties(agent_runtime_windows_named_pipe PROPERTIES
+            TIMEOUT 180)
+    endif()
+
     if(APPLE AND CARGO_EXECUTABLE)
         add_executable(AegisyAgentRuntimeMacosSocketTest
             tests/agent_runtime_macos_socket_test.cpp

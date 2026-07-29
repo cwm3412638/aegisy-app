@@ -99,16 +99,10 @@ bool integerField(const JsonObject &object, const QString &key, qint64 *output)
         return false;
     }
     const auto *number = std::get_if<TransportJsonNumber>(&iterator.value().value);
-    if (!number || !number->integer) {
-        return false;
-    }
-    bool valid = false;
-    const qint64 parsed = number->canonical.toLongLong(&valid);
-    if (!valid) {
-        return false;
-    }
-    *output = parsed;
-    return true;
+    return number
+        && aegisy::aap::transport_runtime::transportJsonIntegerToQint64(
+               *number, output)
+            == aegisy::aap::transport_runtime::TransportIntegerConversion::Ok;
 }
 
 bool readMetadata(const QString &path, JsonObject *output, QString *error)
@@ -170,7 +164,7 @@ int emitFixtureIdentity(const QString &path)
         || schemaId != QString::fromLatin1(kSchemaId)
         || !stringField(catalog, QStringLiteral("canonical_sha256"), &expectedHash)
         || !integerField(catalog, QStringLiteral("canonical_bytes"), &expectedBytes)
-        || expectedBytes <= 0 || !entries || entries->size() != 101) {
+        || expectedBytes <= 0 || !entries || entries->size() != 102) {
         return fail(QStringLiteral("fixture identity or coverage is invalid"), 5);
     }
 

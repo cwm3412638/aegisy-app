@@ -1,4 +1,4 @@
-name: Build Windows Installer
+name: Validate Windows Runtime and Build Installer
 
 on:
   workflow_dispatch:
@@ -11,6 +11,7 @@ on:
       - include/**
       - src/**
       - tests/agent_runtime_environment_test.cpp
+      - tests/agent_runtime_windows_named_pipe_compile_test.cpp
       - assets/**
       - installer.iss
       - package-windows.bat
@@ -21,16 +22,21 @@ on:
       - release/notes/*-windows.md
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: windows-package-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  package:
+  validate:
     runs-on: windows-2022
     timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      reused: ${{ steps.release_version.outputs.reused }}
+      version: ${{ steps.release_version.outputs.version }}
 
     steps:
       - name: Check out source
@@ -38,7 +44,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Reject a reused release version
+      - name: Detect release version reuse
+        id: release_version
         shell: pwsh
         run: |
           $cmake = Get-Content CMakeLists.txt -Raw
@@ -47,9 +54,27 @@ jobs:
               throw "Cannot read the AegisyClient version from CMakeLists.txt"
           }
           $version = $match.Groups[1].Value
-          $publishedInstaller = "dist/AegisyClientSetup-$version.exe"
-          if (Test-Path -LiteralPath $publishedInstaller) {
-              throw "Version $version is already published. Bump the project version before rebuilding Windows artifacts."
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $publishedPaths = @(
+              "dist/AegisyClientSetup-$version.exe",
+              "dist/updates/windows/AegisyClientSetup-$version.exe"
+          ) | Where-Object { Test-Path -LiteralPath $_ }
+          $publishedAppcasts = @(
+              "dist/windows-appcast.xml",
+              "dist/updates/windows/appcast.xml"
+          ) | Where-Object {
+              (Test-Path -LiteralPath $_) -and
+              (Select-String -LiteralPath $_ -SimpleMatch "AegisyClientSetup-$version.exe" -Quiet)
+          }
+          $publishedTags = @(git tag --list "v$version" "$version") |
+              Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          if ($publishedPaths.Count -gt 0 -or
+              $publishedAppcasts.Count -gt 0 -or
+              $publishedTags.Count -gt 0) {
+              Write-Host "Version $version is already published; validation will run without rebuilding release artifacts."
+              "reused=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+              "reused=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
 
       - name: Verify Windows agent runtime
@@ -68,12 +93,8 @@ jobs:
           cargo deny check --config ..\deny.toml
           Pop-Location
 
-      - name: Mark build as running
-        shell: pwsh
-        run: git push --force origin HEAD:refs/heads/ci/windows-package-running
-
       - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+        uses: jurplel/install-qt-action@48d3ad6db93f3627c8ee7a0454bc6f3744f7e730 # v4
         with:
           version: 6.8.3
           arch: win64_msvc2022_64
@@ -127,24 +148,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           cmake --build build --config Release `
-              --target AegisyAgentRuntimeEnvironmentTest
+              --target AegisyAgentRuntimeEnvironmentTest AegisyAgentRuntimeWindowsNamedPipeTest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           ctest --test-dir build -C Release `
-              --tests-regex '^agent_runtime_environment$' `
+              --tests-regex '^(agent_runtime_environment|agent_runtime_windows_named_pipe)$' `
               --no-tests=error `
               --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install Inno Setup
+        if: github.ref == 'refs/heads/main' && steps.release_version.outputs.reused != 'true'
         shell: pwsh
         run: choco install innosetup --yes --no-progress
 
       - name: Build installer
+        if: github.ref == 'refs/heads/main' && steps.release_version.outputs.reused != 'true'
         shell: cmd
         run: package-windows.bat
 
       - name: Verify package contents
+        if: github.ref == 'refs/heads/main' && steps.release_version.outputs.reused != 'true'
         shell: pwsh
         run: |
           $version = (Get-Content build\aegisy-version.txt -Raw).Trim()
@@ -166,29 +190,52 @@ jobs:
               ForEach-Object { Write-Host $_.Name }
 
       - name: Upload installer artifact
+        if: github.ref == 'refs/heads/main' && steps.release_version.outputs.reused != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: AegisyClient-Windows-${{ github.run_number }}
+          name: AegisyClient-Windows-${{ github.run_id }}
           path: dist/AegisyClientSetup-*.exe
           if-no-files-found: error
           retention-days: 14
 
+  publish:
+    needs: validate
+    if: github.ref == 'refs/heads/main' && needs.validate.outputs.reused != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out validated source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download validated installer
+        uses: actions/download-artifact@v4
+        with:
+          name: AegisyClient-Windows-${{ github.run_id }}
+          path: .windows-installer
+
       - name: Commit installer to repository
-        shell: pwsh
+        shell: bash
+        env:
+          AEGISY_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          $version = (Get-Content build\aegisy-version.txt -Raw).Trim()
-          $installer = "dist/AegisyClientSetup-$version.exe"
+          set -euo pipefail
+          installer=".windows-installer/AegisyClientSetup-${AEGISY_RELEASE_VERSION}.exe"
+          if [[ ! -f "$installer" ]]; then
+              echo "Installer artifact is missing: $installer" >&2
+              exit 1
+          fi
+          cp "$installer" "dist/AegisyClientSetup-${AEGISY_RELEASE_VERSION}.exe"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f -- $installer
+          git add -f -- "dist/AegisyClientSetup-${AEGISY_RELEASE_VERSION}.exe"
           if (git diff --cached --quiet) {
-              Write-Host "Installer is already up to date"
+              echo "Installer is already up to date"
               exit 0
-          }
-          git commit -m "build: add Windows $version installer [skip ci]"
+          fi
+          git commit -m "build: add Windows ${AEGISY_RELEASE_VERSION} installer [skip ci]"
           git push origin HEAD:main
-
-      - name: Clear build marker
-        if: success()
-        shell: pwsh
-        run: git push origin --delete ci/windows-package-running

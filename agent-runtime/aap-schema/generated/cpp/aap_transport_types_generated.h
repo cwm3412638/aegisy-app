@@ -29,6 +29,7 @@ struct JsonRpcError;
 struct Limits;
 struct StdioTransportSecurity;
 struct UnixSocketTransportSecurity;
+struct WindowsNamedPipeTransportSecurity;
 struct Backend;
 struct Capabilities;
 struct DurableMutationCursor;
@@ -196,6 +197,14 @@ struct UnixSocketTransportSecurity {
     QString transport;
 };
 
+struct WindowsNamedPipeTransportSecurity {
+    bool authenticated;
+    bool encrypted;
+    bool local;
+    bool peer_verified;
+    QString transport;
+};
+
 struct Backend {
     QString adapter;
     BackendStatus status;
@@ -304,7 +313,7 @@ struct TimelineSubscriptionRequestErrorResponse {
     QString jsonrpc;
 };
 
-struct TransportSecurity { std::variant<StdioTransportSecurity, UnixSocketTransportSecurity> value; };
+struct TransportSecurity { std::variant<StdioTransportSecurity, UnixSocketTransportSecurity, WindowsNamedPipeTransportSecurity> value; };
 
 struct InitializeIncompatibleData {
     ProtocolRange client;

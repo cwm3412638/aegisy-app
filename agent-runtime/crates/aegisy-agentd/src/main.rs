@@ -328,6 +328,59 @@ fn main() {
         return;
     }
 
+    #[cfg(target_os = "windows")]
+    if let Some(name) = std::env::var_os("AEGISY_AGENTD_NAMED_PIPE") {
+        use aegisy_agentd::windows_named_pipe::{
+            current_parent_process_identity, OwnerOnlyNamedPipeListener,
+        };
+
+        let Some(name) = name.to_str() else {
+            eprintln!("Aegisy Windows transport unavailable: windows-named-pipe-invalid-name");
+            return;
+        };
+        let expected_parent = match current_parent_process_identity() {
+            Ok(pid) => pid,
+            Err(error) => {
+                eprintln!("Aegisy Windows transport unavailable: {error}");
+                return;
+            }
+        };
+        let listener =
+            match OwnerOnlyNamedPipeListener::bind_fresh_with_identity(name, expected_parent) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    eprintln!("Aegisy Windows transport unavailable: {error}");
+                    return;
+                }
+            };
+        let connection = match listener.accept_one() {
+            Ok(connection) => connection,
+            Err(error) => {
+                eprintln!("Aegisy Windows transport rejected: {error}");
+                return;
+            }
+        };
+        let reader = match connection.try_clone() {
+            Ok(reader) => reader,
+            Err(_) => {
+                eprintln!("Aegisy Windows transport unavailable: windows-named-pipe-clone-failed");
+                return;
+            }
+        };
+        let mut runtime = create_runtime();
+        if runtime
+            .bind_verified_named_pipe_transport(&connection)
+            .is_err()
+        {
+            eprintln!(
+                "Aegisy Windows transport unavailable: windows-named-pipe-runtime-bind-failed"
+            );
+            return;
+        }
+        serve_connection(runtime, reader, connection);
+        return;
+    }
+
     serve_connection(create_runtime(), io::stdin(), io::stdout());
 }
 

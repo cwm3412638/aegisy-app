@@ -882,10 +882,30 @@
         "peer_verified": { "const": true }
       }
     },
+    "windowsNamedPipeTransportSecurity": {
+      "$comment": "Windows named pipe with a protected current-user DACL, remote-client rejection, and exact supervised peer PID verification. Bootstrap authentication is a separate capability and remains false.",
+      "type": "object",
+      "required": [
+        "transport",
+        "local",
+        "authenticated",
+        "encrypted",
+        "peer_verified"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "transport": { "const": "windows-named-pipe" },
+        "local": { "const": true },
+        "authenticated": { "const": false },
+        "encrypted": { "const": false },
+        "peer_verified": { "const": true }
+      }
+    },
     "transportSecurity": {
       "oneOf": [
         { "$ref": "#/$defs/stdioTransportSecurity" },
-        { "$ref": "#/$defs/unixSocketTransportSecurity" }
+        { "$ref": "#/$defs/unixSocketTransportSecurity" },
+        { "$ref": "#/$defs/windowsNamedPipeTransportSecurity" }
       ]
     },
     "backend": {

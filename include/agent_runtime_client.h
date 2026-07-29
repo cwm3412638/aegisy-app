@@ -27,6 +27,7 @@ public:
     enum class TransportMode {
         Stdio,
         VerifiedUnixSocket,
+        VerifiedWindowsNamedPipe,
     };
 
     enum class ReconnectState {
@@ -517,6 +518,7 @@ private:
     void processSocketInput();
     void processTransportBytes(const QByteArray &bytes);
     bool usesVerifiedUnixSocket() const;
+    bool usesVerifiedWindowsNamedPipe() const;
     bool prepareUnixSocketEndpoint();
     void cleanupUnixSocketEndpoint();
     void scheduleUnixSocketConnect(quint64 generation);

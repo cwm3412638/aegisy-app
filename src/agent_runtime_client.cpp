@@ -31,6 +31,14 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#elif defined(Q_OS_WIN)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 namespace {
@@ -195,6 +203,17 @@ QJsonObject verifiedUnixSocketTransportSecurity()
 {
     return {
         {QStringLiteral("transport"), QStringLiteral("unix-domain-socket")},
+        {QStringLiteral("local"), true},
+        {QStringLiteral("authenticated"), false},
+        {QStringLiteral("encrypted"), false},
+        {QStringLiteral("peer_verified"), true},
+    };
+}
+
+QJsonObject verifiedWindowsNamedPipeTransportSecurity()
+{
+    return {
+        {QStringLiteral("transport"), QStringLiteral("windows-named-pipe")},
         {QStringLiteral("local"), true},
         {QStringLiteral("authenticated"), false},
         {QStringLiteral("encrypted"), false},
@@ -2488,8 +2507,11 @@ AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
             return;
         }
         if (!verifyUnixSocketPeer()) {
-            const QString detail = QStringLiteral(
-                "Unix 运行时对端校验失败（unix-socket-peer-mismatch）");
+            const QString detail = usesVerifiedWindowsNamedPipe()
+                ? QStringLiteral(
+                    "Windows named pipe 运行时对端校验失败（named-pipe-peer-mismatch）")
+                : QStringLiteral(
+                    "Unix 运行时对端校验失败（unix-socket-peer-mismatch）");
             suppressAutomaticReconnect();
             clearNegotiationState();
             failPending(detail);
@@ -3661,11 +3683,22 @@ QString AgentRuntimeClient::runtimePath() const
 
 bool AgentRuntimeClient::usesVerifiedUnixSocket() const
 {
-    return m_transportMode == TransportMode::VerifiedUnixSocket;
+    // This predicate is retained for the shared QLocalSocket transport path.
+    // Platform-specific endpoint creation and peer checks remain guarded below.
+    return m_transportMode == TransportMode::VerifiedUnixSocket
+        || m_transportMode == TransportMode::VerifiedWindowsNamedPipe;
+}
+
+bool AgentRuntimeClient::usesVerifiedWindowsNamedPipe() const
+{
+    return m_transportMode == TransportMode::VerifiedWindowsNamedPipe;
 }
 
 QJsonObject AgentRuntimeClient::expectedTransportSecurity() const
 {
+    if (usesVerifiedWindowsNamedPipe()) {
+        return verifiedWindowsNamedPipeTransportSecurity();
+    }
     return usesVerifiedUnixSocket() ? verifiedUnixSocketTransportSecurity()
                                     : stdioTransportSecurity();
 }
@@ -3673,6 +3706,7 @@ QJsonObject AgentRuntimeClient::expectedTransportSecurity() const
 bool AgentRuntimeClient::prepareUnixSocketEndpoint()
 {
 #if defined(Q_OS_MACOS)
+    if (usesVerifiedWindowsNamedPipe()) return false;
     const QString base = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
     struct stat baseStatus {};
     const QByteArray encodedBase = QFile::encodeName(base);
@@ -3696,6 +3730,23 @@ bool AgentRuntimeClient::prepareUnixSocketEndpoint()
     }
     m_unixSocketDirectory = directory;
     m_unixSocketPath = socket;
+    m_unixSocketDirectoryDevice = 0;
+    m_unixSocketDirectoryInode = 0;
+    m_unixSocketDevice = 0;
+    m_unixSocketInode = 0;
+    m_unixSocketIdentityCaptured = false;
+    m_unixSocketCleanupRetryCount = 0;
+    return true;
+#elif defined(Q_OS_WIN)
+    // QLocalSocket maps this opaque server name to a Windows named pipe.  The
+    // Rust listener owns the ACL; Qt verifies the supervised server PID after
+    // connecting and never treats the pipe as authenticated.
+    if (!usesVerifiedWindowsNamedPipe()) return false;
+    QString suffix = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    suffix.remove(QLatin1Char('-'));
+    suffix = suffix.left(24).toLower();
+    m_unixSocketDirectory.clear();
+    m_unixSocketPath = QStringLiteral("aegisy-agent-%1").arg(suffix);
     m_unixSocketDirectoryDevice = 0;
     m_unixSocketDirectoryInode = 0;
     m_unixSocketDevice = 0;
@@ -3861,6 +3912,19 @@ void AgentRuntimeClient::connectUnixSocket(quint64 generation)
     m_unixSocketIdentityCaptured = true;
     m_localSocket->abort();
     m_localSocket->connectToServer(m_unixSocketPath, QIODevice::ReadWrite);
+#elif defined(Q_OS_WIN)
+    if (!usesVerifiedWindowsNamedPipe() || generation == 0
+        || generation != m_processGeneration
+        || generation != m_unixSocketConnectGeneration
+        || !m_startupTimer->isActive()
+        || m_process->state() == QProcess::NotRunning
+        || m_localSocket->state() == QLocalSocket::ConnectedState
+        || m_localSocket->state() == QLocalSocket::ConnectingState
+        || m_unixSocketPath.isEmpty()) {
+        return;
+    }
+    m_localSocket->abort();
+    m_localSocket->connectToServer(m_unixSocketPath, QIODevice::ReadWrite);
 #else
     Q_UNUSED(generation)
 #endif
@@ -3869,7 +3933,7 @@ void AgentRuntimeClient::connectUnixSocket(quint64 generation)
 bool AgentRuntimeClient::verifyUnixSocketPeer() const
 {
 #if defined(Q_OS_MACOS)
-    if (!usesVerifiedUnixSocket()
+    if (!usesVerifiedUnixSocket() || usesVerifiedWindowsNamedPipe()
         || m_localSocket->state() != QLocalSocket::ConnectedState
         || m_process->state() == QProcess::NotRunning) {
         return false;
@@ -3887,6 +3951,25 @@ bool AgentRuntimeClient::verifyUnixSocketPeer() const
                      &pid, &length) != 0
         || length != sizeof(pid)
         || pid != pid_t(m_process->processId())) {
+        return false;
+    }
+    return true;
+#elif defined(Q_OS_WIN)
+    if (!usesVerifiedWindowsNamedPipe()
+        || m_localSocket->state() != QLocalSocket::ConnectedState
+        || m_process->state() == QProcess::NotRunning) {
+        return false;
+    }
+    // Qt's Windows QLocalSocket backend stores the named-pipe HANDLE in its
+    // native descriptor; GetNamedPipeServerProcessId is therefore valid here.
+    const qintptr descriptor = m_localSocket->socketDescriptor();
+    if (descriptor == qintptr(-1) || descriptor == 0) return false;
+    const HANDLE pipe = reinterpret_cast<HANDLE>(descriptor);
+    if (pipe == nullptr || pipe == INVALID_HANDLE_VALUE) return false;
+    ULONG serverPid = 0;
+    if (!GetNamedPipeServerProcessId(pipe, &serverPid)
+        || serverPid == 0
+        || serverPid != static_cast<ULONG>(m_process->processId())) {
         return false;
     }
     return true;
@@ -3911,7 +3994,9 @@ void AgentRuntimeClient::handleUnixSocketDisconnected()
     }
     if (m_unixSocketDisconnectGeneration == m_processGeneration) return;
     m_unixSocketDisconnectGeneration = m_processGeneration;
-    const QString detail = QStringLiteral("Unix 运行时连接已断开");
+    const QString detail = usesVerifiedWindowsNamedPipe()
+        ? QStringLiteral("Windows named pipe 运行时连接已断开")
+        : QStringLiteral("Unix 运行时连接已断开");
     clearNegotiationState();
     failPending(detail);
     emit connectionStateChanged(false, detail);
@@ -4088,7 +4173,11 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
     QProcessEnvironment environment = sanitizedSidecarEnvironment(
         QProcessEnvironment::systemEnvironment());
     environment.remove(QStringLiteral("AEGISY_AGENTD_UNIX_SOCKET_DIR"));
-    if (usesVerifiedUnixSocket()) {
+    environment.remove(QStringLiteral("AEGISY_AGENTD_NAMED_PIPE"));
+    if (usesVerifiedWindowsNamedPipe()) {
+        environment.insert(QStringLiteral("AEGISY_AGENTD_NAMED_PIPE"),
+                           m_unixSocketPath);
+    } else if (usesVerifiedUnixSocket()) {
         environment.insert(QStringLiteral("AEGISY_AGENTD_UNIX_SOCKET_DIR"),
                            m_unixSocketDirectory);
     }

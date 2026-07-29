@@ -260,6 +260,27 @@
     socket E2E runs, the 1062-test Rust workspace, strict Clippy, locked Release
     build, and all 24 desktop CTests on macOS.
 - [ ] 4.3 Implement Windows named-pipe transport with current-user ACL and peer validation
+  - Implementation is present but remains unchecked until the complete negative
+    matrix and dedicated end-to-end test execute on a clean Windows runner. Rust
+    creates exactly one first-instance
+    byte-mode pipe with a protected DACL for the current token-user SID, rejects
+    remote clients, bounds the full UTF-16 name and accept time, retains the parent
+    process handle, and revalidates parent/client PID, creation time, and liveness.
+    Qt connects through `QLocalSocket`, independently verifies the named-pipe server
+    PID against the exact supervised sidecar generation, and fails closed without
+    stdio fallback. AAP reports `windows-named-pipe`,
+    `local=true`, `peer_verified=true`, and deliberately keeps
+    `authenticated=false`/`encrypted=false` until `4.4`. The Windows packaging
+    validation workflow runs the real E2E for initialization, protected DACL,
+    restart generation, supervising-parent exit, selected-pipe failure against a
+    valid fake stdio sidecar, malformed names, same-name collision, wrong client PID,
+    and cleanup. Validation remains read-only and always runs for a reused release
+    version; main-only installer publication has a separate minimal write-permission
+    job. Local macOS build, generator, Schema, Rust, desktop regression, and extracted
+    Windows-API compile gates pass, but are not Windows runtime evidence. Remote-form
+    rejection, Qt wrong-server-PID rejection, old endpoint/stale-callback isolation,
+    and creation-time/PID-reuse mismatch still require deterministic Windows runtime
+    coverage before this task can close.
 - [ ] 4.4 Implement one-time host/sidecar bootstrap authentication without secrets in process arguments or ordinary logs
 - [ ] 4.5 Implement bounded ingress, per-client outbound queues, overload errors, heartbeat, and graceful shutdown
 - [ ] 4.6 Implement Qt-side process supervision, version check, startup timeout, health state, restart, and crash-loop protection

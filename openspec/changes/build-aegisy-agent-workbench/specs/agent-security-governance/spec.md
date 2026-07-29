@@ -90,6 +90,14 @@ and SHALL minimize exposed local transport surface.
 - **WHEN** endpoint ownership, permissions, extended ACL, device/inode identity, supervising parent, peer UID/PID, or generation binding cannot be proven
 - **THEN** the host and sidecar SHALL process no AAP frame, SHALL NOT fall back to stdio, SHALL terminate and reap the owned process generation, and SHALL preserve any replacement object whose identity is not the recorded launch object
 
+#### Scenario: Windows peer identity is verified before bootstrap authentication exists
+- **WHEN** the first-instance named pipe has a protected DACL for the current token-user SID and both peers verify the exact supervised parent/client PID and process generation but no one-time bootstrap proof has been exchanged
+- **THEN** the connection SHALL report `peer_verified: true` and `authenticated: false`, SHALL expose no additional authority, and SHALL NOT satisfy the authenticated-channel release gate
+
+#### Scenario: Windows pipe ACL or peer generation becomes uncertain
+- **WHEN** the current token-user SID, protected DACL, first-instance ownership, remote-client rejection, supervising parent liveness, client/server PID, process creation time, or generation binding cannot be proven
+- **THEN** the host and sidecar SHALL process no AAP frame, SHALL NOT fall back to stdio, and SHALL terminate and reap the owned process generation
+
 #### Scenario: Browser-originated request reaches runtime transport
 - **WHEN** a web page attempts direct socket or WebSocket access
 - **THEN** origin and authentication checks SHALL reject it; embedded workbench content SHALL communicate only through the constrained host bridge

@@ -10,7 +10,7 @@ set(method_registry "${schema_root}/fixtures/aap-transport-methods.json")
 set(fixture "${schema_root}/fixtures/aap-transport-definitions.fixture-map.json")
 set(corpus "${schema_root}/fixtures/aap-transport-validation-corpus.json")
 set(expected_fixture_identity
-    "29903 d2961275431323f968bd18c4d8c2535cb8b05bda003ff0dea97f6e73be124757")
+    "30050 af1c71890f5eaf43914915ab88adb10186e15765ba830f1efdafee2efa04e20d")
 set(expected_corpus_identity
     "72 f0ce6bdc14c815b2b80b273126da8b20a80ec47371d39128c7e2155246f60404")
 

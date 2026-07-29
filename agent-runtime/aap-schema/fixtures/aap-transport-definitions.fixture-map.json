@@ -1,8 +1,8 @@
 {
   "schema_version": "aap-transport-fixture-catalog/0.1",
   "schema_id": "https://aegisy.cc/schemas/aap/stable/v0.1/aap.schema.json",
-  "canonical_bytes": 29903,
-  "canonical_sha256": "d2961275431323f968bd18c4d8c2535cb8b05bda003ff0dea97f6e73be124757",
+  "canonical_bytes": 30050,
+  "canonical_sha256": "af1c71890f5eaf43914915ab88adb10186e15765ba830f1efdafee2efa04e20d",
   "entries": [
     {
       "definition": "backend",
@@ -407,6 +407,10 @@
     {
       "definition": "unixSocketTransportSecurity",
       "value_json": "{\"transport\":\"unix-domain-socket\",\"local\":true,\"authenticated\":false,\"encrypted\":false,\"peer_verified\":true}"
+    },
+    {
+      "definition": "windowsNamedPipeTransportSecurity",
+      "value_json": "{\"transport\":\"windows-named-pipe\",\"local\":true,\"authenticated\":false,\"encrypted\":false,\"peer_verified\":true}"
     }
   ]
 }

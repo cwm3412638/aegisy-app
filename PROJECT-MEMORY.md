@@ -52,8 +52,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   transport instead of being dropped. The default stdio transport is local but not
   authenticated, encrypted, or peer-verified. The optional macOS Unix socket from
   `4.2` is owner-only and peer-verified but deliberately still unauthenticated;
-  Windows named-pipe peer validation and one-time channel authentication remain
-  under OpenSpec `4.3` and `4.4`.
+  Windows named-pipe ACL/peer-validation implementation is now present and wired to
+  a dedicated Windows initialization E2E, but task `4.3` remains open until its
+  complete negative matrix executes on a clean Windows runner. One-time channel
+  authentication remains under OpenSpec `4.4`.
   Negotiated `runtime.heartbeat.out-of-band` now proves only local Runtime connection
   liveness through the independent stdio control reader. Qt sends one nonce-bound
   heartbeat every five seconds with a 15-second deadline. Expiry enters a separate
@@ -235,6 +237,45 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   explicit installed-Codex live fixture ignored, strict Clippy, locked Release
   build, and all 24/24 desktop CTests. This is macOS evidence only and grants no
   Agent/Codex mutation authority.
+- OpenSpec task `4.3` has an implementation-present, evidence-pending slice. The
+  Rust sidecar creates a first-instance Windows byte-mode named pipe with a protected
+  `D:P(A;;GA;;;<TokenUser SID>)` DACL for the exact current token user,
+  non-inheritable handle, remote-client rejection, full canonical UTF-16 name bound,
+  and bounded nonblocking accept using the documented `PIPE_NOWAIT` result/error
+  distinction. It retains a query/synchronization handle to the supervising parent,
+  revalidates PID, creation time, and liveness around accept, and requires the client
+  PID plus creation time to match before constructing Runtime/Store/Codex.
+  Qt has an explicit `VerifiedWindowsNamedPipe` mode, passes only a randomized
+  `aegisy-agent-*` name through the sanitized environment, connects through
+  `QLocalSocket`, verifies `GetNamedPipeServerProcessId` against the exact supervised
+  sidecar generation, and gates ingress, writes, and initialize on that proof.
+  Selected-pipe failure does not fall back to stdio. Stable AAP now includes the
+  generated `windows-named-pipe` transport union with `local=true`,
+  `peer_verified=true`, and `authenticated=false`/`encrypted=false`; this is still
+  peer verification, not the `4.4` bootstrap authentication boundary. The Windows
+  validation workflow builds and runs the named-pipe E2E. That test now
+  covers exact security facts, protected current-token-user DACL inspection,
+  stop/restart process generation, supervising-parent exit, selected-pipe failure
+  against a fake sidecar capable of a valid stdio handshake, malformed names,
+  same-name collision, wrong-client-PID rejection, and bounded cleanup.
+  Validation runs in a read-only GitHub Actions job even when the release version is
+  already published. Installer construction remains a separate main-only path, and
+  only a minimal dependent publication job receives `contents: write`; a reused
+  version is validation evidence only and never installer evidence. Release-version
+  reuse checks the canonical installer locations, Windows appcasts, and matching
+  tags. The Qt installer Action is pinned to a full reviewed commit. The obsolete
+  global build-marker branch is no longer produced by the workflow.
+  Local evidence passes Schema generation/freshness, 24 handshake tests, strict
+  Clippy/formatting, the complete Rust workspace, the Release desktop build, all
+  24/24 macOS desktop CTests, strict OpenSpec validation, and diff checks. A minimal
+  extracted Windows API crate passes Windows-target check, test compilation, and
+  strict Clippy, but the full cross-target build is blocked on this macOS host by
+  native C dependencies. The latest Windows-only E2E source additions have not yet
+  compiled or executed on Windows. Runtime evidence is still missing for remote-form
+  client rejection, Qt rejection of a wrong named-pipe server PID, old endpoint and
+  stale-callback isolation, and process-creation-time/PID-reuse mismatch. Do not check
+  `4.3` until those negative paths and the complete dedicated E2E pass on a clean
+  Windows runner.
 - OpenSpec task `3.1` is complete. `agent-runtime/aap-schema` is now an explicit
   private package with independent package/wire/provider versioning, one stable
   registry, and one experimental registry. Stable AAP `0.1` is additive-only and

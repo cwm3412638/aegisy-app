@@ -104,6 +104,14 @@ accepted.
 - **WHEN** socket bytes arrive before peer verification, after disconnect, or from a process generation other than the currently supervised generation
 - **THEN** the Qt host SHALL NOT decode or dispatch them as AAP, SHALL clear the peer proof on failure, and SHALL require a new verified connection and complete two-stage handshake
 
+#### Scenario: Verified Windows named-pipe security is reported truthfully
+- **WHEN** the Qt host explicitly selects the Windows named-pipe transport, the sidecar creates a first-instance protected current-token-user pipe, and both peers verify the exact supervised process generation before any AAP frame is processed
+- **THEN** both peers SHALL report `transport: windows-named-pipe`, `local: true`, `peer_verified: true`, and `authenticated` and `encrypted` as false, SHALL reject any mismatched declaration, and SHALL NOT treat peer verification as the one-time bootstrap authentication owned by task `4.4`
+
+#### Scenario: Named-pipe bytes arrive outside the verified process generation
+- **WHEN** pipe bytes arrive before client/server PID and generation verification, after disconnect, or from a process generation other than the currently supervised generation
+- **THEN** the Qt host SHALL NOT decode or dispatch them as AAP, SHALL clear the peer proof on failure, and SHALL require a new first-instance pipe, verified connection, and complete two-stage handshake
+
 #### Scenario: AAP frame reaches the transport limit
 - **WHEN** either peer would send or receives a newline-delimited JSON frame larger than the exact AAP 0.1 `max_frame_bytes` value of 4 MiB
 - **THEN** it SHALL refuse the write or drain and reject the input with bounded content-free behavior, SHALL NOT allocate an unbounded frame, and SHALL preserve framing for a later valid message when the transport remains usable
