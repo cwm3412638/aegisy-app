@@ -153,6 +153,26 @@ fn query_process_identity(
     }
 }
 
+/// Resolve and verify the process generation behind an already connected pipe.
+///
+/// Keeping the query injectable makes PID-reuse rejection deterministic in the
+/// Windows unit suite. Production supplies `query_process_identity`, and no
+/// `VerifiedNamedPipe` can be constructed until this boundary returns success.
+fn verify_connected_peer_with<F>(
+    expected_parent: &ProcessIdentity,
+    client_pid: u32,
+    query_identity: F,
+) -> Result<ProcessIdentity, WindowsNamedPipeError>
+where
+    F: FnOnce(u32) -> Result<ProcessIdentity, WindowsNamedPipeError>,
+{
+    let client = query_identity(client_pid)?;
+    if !client.is_alive() || client != *expected_parent {
+        return Err(WindowsNamedPipeError::PeerMismatch);
+    }
+    Ok(client)
+}
+
 /// Return the current parent process identity from a point-in-time ToolHelp
 /// snapshot plus its kernel creation time. A failed or inconsistent snapshot
 /// is never treated as a valid supervising generation.
@@ -422,10 +442,9 @@ impl OwnerOnlyNamedPipeListener {
         if unsafe { GetNamedPipeClientProcessId(raw, &mut client_pid) } == 0 {
             return Err(WindowsNamedPipeError::PeerQueryFailed);
         }
-        let client = query_process_identity(client_pid, WindowsNamedPipeError::PeerQueryFailed)?;
-        if !client.is_alive() || client != self.expected_parent {
-            return Err(WindowsNamedPipeError::PeerMismatch);
-        }
+        let client = verify_connected_peer_with(&self.expected_parent, client_pid, |pid| {
+            query_process_identity(pid, WindowsNamedPipeError::PeerQueryFailed)
+        })?;
         Ok(VerifiedNamedPipe { pipe, peer: client })
     }
 }
@@ -512,7 +531,8 @@ impl Write for VerifiedNamedPipe {
 #[cfg(test)]
 mod tests {
     use super::{
-        current_token_user_sddl, query_process_identity, validate_name, WindowsNamedPipeError,
+        current_token_user_sddl, query_process_identity, validate_name, verify_connected_peer_with,
+        WindowsNamedPipeError,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 
@@ -573,5 +593,25 @@ mod tests {
         assert!(identity.is_alive());
         assert!(clone.is_alive());
         assert_eq!(identity, clone);
+    }
+
+    #[test]
+    fn peer_admission_rejects_same_pid_with_different_creation_time() {
+        let pid = unsafe { GetCurrentProcessId() };
+        let expected = query_process_identity(pid, WindowsNamedPipeError::ParentQueryFailed)
+            .expect("current process identity");
+        let mut reused_pid = expected.try_clone().expect("duplicate identity handle");
+        reused_pid.creation_time_100ns ^= 1;
+        assert_eq!(reused_pid.pid, expected.pid);
+        assert!(reused_pid.is_alive());
+        assert_ne!(reused_pid.creation_time_100ns, expected.creation_time_100ns);
+
+        let error = verify_connected_peer_with(&expected, pid, |queried_pid| {
+            assert_eq!(queried_pid, pid);
+            Ok(reused_pid)
+        })
+        .expect_err("a reused PID must not cross the verified-pipe admission boundary");
+
+        assert_eq!(error, WindowsNamedPipeError::PeerMismatch);
     }
 }

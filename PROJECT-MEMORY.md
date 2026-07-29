@@ -276,6 +276,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   stale-callback isolation, and process-creation-time/PID-reuse mismatch. Do not check
   `4.3` until those negative paths and the complete dedicated E2E pass on a clean
   Windows runner.
+  The Rust admission boundary now exposes a private injectable process-identity
+  verifier for deterministic tests. Production still queries the real Windows
+  process handle and creation time, while the focused negative fixture proves that
+  an otherwise live client with the same PID but a different creation time is
+  rejected before `VerifiedNamedPipe` construction and before Runtime/Store/Codex
+  creation. This is implementation evidence only; clean Windows execution and the
+  remaining remote, Qt wrong-server, and stale-callback fixtures are still required.
 - OpenSpec task `3.1` is complete. `agent-runtime/aap-schema` is now an explicit
   private package with independent package/wire/provider versioning, one stable
   registry, and one experimental registry. Stable AAP `0.1` is additive-only and
