@@ -19,18 +19,24 @@ if(WIN32)
     enable_language(RC)
 endif()
 
-# An explicitly selected Qt 6 SDK is a release input. Missing components must fail
-# with the original Qt diagnostic instead of being hidden behind a Qt 5 fallback.
+# Release packaging requires the complete Qt 6 workbench SDK. Developer builds keep
+# the Qt 5 and native-editor fallback unless the release gate is explicitly enabled.
+option(AEGISY_REQUIRE_QT6 "Require the complete Qt 6 workbench SDK" OFF)
 set(AEGISY_QT_BASE_COMPONENTS Core Widgets Network Sql WebSockets)
-if(DEFINED Qt6_DIR AND NOT Qt6_DIR STREQUAL "")
-    find_package(Qt6 REQUIRED COMPONENTS ${AEGISY_QT_BASE_COMPONENTS})
+set(AEGISY_QT_WORKBENCH_COMPONENTS WebChannel WebEngineWidgets)
+if(AEGISY_REQUIRE_QT6)
+    find_package(Qt6 REQUIRED COMPONENTS
+        ${AEGISY_QT_BASE_COMPONENTS}
+        ${AEGISY_QT_WORKBENCH_COMPONENTS})
 else()
     find_package(Qt6 COMPONENTS ${AEGISY_QT_BASE_COMPONENTS} QUIET)
 endif()
 
 if(Qt6_FOUND)
     set(QT_VERSION_MAJOR 6)
-    find_package(Qt6 QUIET COMPONENTS WebChannel WebEngineWidgets)
+    if(NOT AEGISY_REQUIRE_QT6)
+        find_package(Qt6 QUIET COMPONENTS ${AEGISY_QT_WORKBENCH_COMPONENTS})
+    endif()
 else()
     message(STATUS "Qt6 not found, trying Qt5...")
     find_package(Qt5 5.14 REQUIRED COMPONENTS ${AEGISY_QT_BASE_COMPONENTS})
@@ -825,6 +831,14 @@ if(BUILD_TESTING)
                 -DAEGISY_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
                 -DAEGISY_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_packaging_policy_test.cmake")
+    if(QT_VERSION_MAJOR EQUAL 6)
+        add_test(NAME qt6_release_policy
+            COMMAND "${CMAKE_COMMAND}"
+                    -DAEGISY_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                    -DAEGISY_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                    -DAEGISY_QT6_DIR=${Qt6_DIR}
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/qt6_release_policy_test.cmake")
+    endif()
 
     if(AEGISY_MONACO_ENABLED)
         add_executable(AegisyMonacoEditorRenderTest

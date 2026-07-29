@@ -3673,9 +3673,13 @@ Implemented visual baseline:
   add-on components. Quiet Qt 6 discovery hid that component failure and produced a
   misleading Qt 5 fallback diagnostic. The workflow must install
   `qtdeclarative`, `qtpositioning`, `qtwebchannel`, `qtwebengine`, and
-  `qtwebsockets`; an explicitly supplied `Qt6_DIR` is a release input and missing
-  components must fail through `find_package(Qt6 REQUIRED ...)` with the original
-  Qt diagnostic. The local policy/environment tests pass after this correction,
+  `qtwebsockets`. Both Windows validation and installer construction set the
+  explicit `AEGISY_REQUIRE_QT6=ON` release gate and pass `Qt6_DIR`; CMake then
+  requires Core, Widgets, Network, SQL, WebSockets, WebChannel, and WebEngineWidgets
+  in one `find_package(Qt6 REQUIRED ...)` call with the original Qt diagnostic.
+  Developer Qt 5/native-editor fallback remains available only when that release
+  gate is off, including across repeated configure runs. The Windows job executes
+  the policy test itself. Local policy/environment tests pass after this correction,
   but a fresh clean Windows runner is still required before the CI or release gate
   is considered verified.
 

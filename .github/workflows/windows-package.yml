@@ -12,6 +12,9 @@ on:
       - src/**
       - tests/agent_runtime_environment_test.cpp
       - tests/agent_runtime_windows_named_pipe_compile_test.cpp
+      - tests/windows_packaging_policy_test.cmake
+      - tests/qt6_release_policy_test.cmake
+      - tests/qt6_release_gate_fixture/CMakeLists.txt
       - assets/**
       - installer.iss
       - package-windows.bat
@@ -144,6 +147,7 @@ jobs:
         run: |
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
               -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON `
+              -DAEGISY_REQUIRE_QT6=ON `
               "-DQt6_DIR=$env:QT_CMAKE_DIR" `
               "-DOPENSSL_ROOT_DIR=$env:OPENSSL_ROOT_DIR"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -153,7 +157,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           ctest --test-dir build -C Release `
-              --tests-regex '^(agent_runtime_environment|agent_runtime_windows_named_pipe)$' `
+              --tests-regex '^(agent_runtime_environment|agent_runtime_windows_named_pipe|windows_packaging_policy|qt6_release_policy)$' `
               --no-tests=error `
               --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
