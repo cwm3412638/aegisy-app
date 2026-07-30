@@ -3498,7 +3498,17 @@ Implemented visual baseline:
   canonical in-tree files, symlink/path escape, unknown-field rejection, and
   streaming SHA-256. A failure suppresses launch and automatic reconnect;
   developer builds may omit the manifest. `artifact_manifest_verification` and
-  `agent_runtime_environment` pass. Rust Runtime now parses the same exact
+  `agent_runtime_environment` pass. The production-path
+  `artifact_manifest_runtime_startup` fixture copies the real Release
+  `aegisy-agentd` and a fixed `codex-cli 0.144.5` test adapter into a Unicode
+  temporary directory, invokes the production manifest generator, sets a bogus
+  `AEGISY_CODEX_PATH`, and proves exact manifest-bound AAP initialize, initialized,
+  shutdown, and clean process exit. Its initial handshake correctly failed with
+  `-32006` until the fixture declared the required `runtime.codex-app-server`
+  capability; the corrected local run passes. The CTest timeout is 120 seconds so
+  Windows antivirus or cold startup can consume the bounded internal waits without
+  turning infrastructure delay into a false product failure.
+  Rust Runtime now parses the same exact
   contract before Codex resolution, rejects duplicate/unknown fields, non-portable
   paths, a Windows adapter path without an explicit `.exe`, every symlink/reparse-
   point path component, any extra hard-link alias, version/hash/path/file-identity
@@ -3511,7 +3521,9 @@ Implemented visual baseline:
   the final 23/23 stdio/Codex target. Formatting and strict package Clippy pass
   locally. The complete desktop build plus focused Runtime
   environment, manifest verification/generation, and Windows packaging-policy
-  CTests pass 4/4 on macOS.
+  CTests pass 5/5 on macOS, including the real daemon startup fixture.
+  The complete serial desktop gate passes 26/26; strict OpenSpec validation and
+  `git diff --check` also pass.
 - A deterministic packaging foundation now exists at
   `cmake/generate_artifact_manifest.cmake`. It accepts only explicit regular
   files inside a caller-provided bundle root, requires a canonical in-root output
@@ -3528,9 +3540,11 @@ Implemented visual baseline:
   creation still has a replacement window that must be closed by a reviewed
   file-handle/platform-signature and install-permission boundary. Updater
   compatibility binding, signed release integration, and clean Windows execution
-  remain required. The macOS-to-Windows Cargo check is still blocked before this
-  Rust module by missing Windows SDK C headers in SQLite/Tree-sitter. Keep `22.5`
-  unchecked. See `docs/AEGISY-ARTIFACT-MANIFEST-PACKAGING.md`.
+  remain required. The clean Windows Unicode workflow is configured to execute the
+  new real-daemon fixture through its unfiltered CTest run, but that source wiring is
+  not Windows execution evidence. The macOS-to-Windows Cargo check is still blocked
+  before this Rust module by missing Windows SDK C headers in SQLite/Tree-sitter.
+  Keep `22.5` unchecked. See `docs/AEGISY-ARTIFACT-MANIFEST-PACKAGING.md`.
 
 ## Live Timeline Subscription And Ownership Recovery (2026-07-26)
 

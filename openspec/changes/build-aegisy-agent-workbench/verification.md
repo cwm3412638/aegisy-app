@@ -2560,6 +2560,13 @@ Known limitations:
   suppresses launch and automatic reconnect; a missing manifest remains allowed
   only for developer-build compatibility.
 - `artifact_manifest_verification` and `agent_runtime_environment` CTests pass.
+- `artifact_manifest_runtime_startup` copies the real Release `aegisy-agentd`
+  and a fixed `codex-cli 0.144.5` test adapter into a Unicode temporary directory,
+  invokes the production generator, sets a bogus `AEGISY_CODEX_PATH`, and proves
+  exact manifest-owned adapter selection through AAP initialize, initialized,
+  shutdown, and clean daemon exit. The fixture declares the backend-required
+  `runtime.codex-app-server` plus `permission.read-only` capabilities. Its bounded
+  CTest timeout is 120 seconds for slow Windows antivirus/cold-start runners.
 - `cmake/generate_artifact_manifest.cmake` deterministically generates the same
   contract from explicit final bundle files. It rejects missing, oversized,
   duplicate, symlinked, or out-of-bundle artifacts; output parents outside the
@@ -2586,16 +2593,21 @@ Known limitations:
   the final 23/23 stdio/Codex target. Rust formatting and strict package Clippy pass
   on macOS. The complete desktop build and the focused
   `agent_runtime_environment`, `artifact_manifest_verification`,
-  `artifact_manifest_generation`, and `windows_packaging_policy` CTests pass 4/4.
+  `artifact_manifest_runtime_startup`, `artifact_manifest_generation`, and
+  `windows_packaging_policy` CTests pass 5/5 on macOS.
+- The complete serial desktop gate passes 26/26. Strict OpenSpec validation and
+  `git diff --check` pass.
 - Current macOS and Windows scripts do not bundle a pinned Codex adapter and do
   not invoke the generator. Packaged Runtime has no compile/package identity that
   makes manifest absence non-downgradable, and path verification followed by
   path-based process creation retains a replacement window that needs a reviewed
   handle/platform-signature and install-permission boundary. Updater compatibility,
-  signed package evidence, and clean Windows execution remain absent. The local
-  macOS-to-Windows Cargo check stops earlier in SQLite/Tree-sitter C because Windows
-  SDK headers are unavailable, so it supplies no Windows result. Task `22.5`
-  remains unchecked.
+  signed package evidence, and clean Windows execution remain absent. The clean
+  Windows Unicode workflow's unfiltered CTest is configured to execute the new
+  real-daemon fixture, but source/workflow inspection is not Windows execution. The
+  local macOS-to-Windows Cargo check stops earlier in SQLite/Tree-sitter C because
+  Windows SDK headers are unavailable, so it supplies no Windows result. Task
+  `22.5` remains unchecked.
 
 ## 22.6 Emergency Workbench Disable Foundation
 

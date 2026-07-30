@@ -826,6 +826,16 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME artifact_manifest_verification
         COMMAND AegisyArtifactManifestTest)
+    if(CARGO_EXECUTABLE)
+        add_dependencies(AegisyArtifactManifestTest aegisy_agentd)
+        add_test(NAME artifact_manifest_runtime_startup
+            COMMAND AegisyArtifactManifestTest
+                    --runtime-startup
+                    "${AEGISY_AGENTD_BINARY}"
+                    "${CMAKE_COMMAND}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_artifact_manifest.cmake")
+        set_tests_properties(artifact_manifest_runtime_startup PROPERTIES TIMEOUT 120)
+    endif()
     add_test(NAME artifact_manifest_generation
         COMMAND "${CMAKE_COMMAND}"
                 -DAEGISY_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
