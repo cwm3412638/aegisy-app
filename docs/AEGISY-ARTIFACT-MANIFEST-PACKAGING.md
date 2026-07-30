@@ -57,15 +57,28 @@ also rejects reserved device basenames and requires an exact lowercase `.exe`;
 macOS requires an exact lowercase `.zip`.
 
 Production evaluation requires an opaque `InstalledArtifactSetAuthority`; callers
-cannot construct the installed tuple directly. `verifyInstalledAuthority` reads the
-exact adjacent `aegisy-update-artifact-set.json` and
-`aegisy-agentd.manifest.json`, verifies the receipt signature and target, verifies the
-Runtime/adapter Manifest bytes, identity, version, ordinary-file/link policy, and
-SHA-256 values, and derives an authority identity from the receipt, complete installed
-tuple, and verification-key hash. `verifyCandidate` rereads and revalidates that graph
-before every decision, so receipt, Manifest, Runtime, adapter, expectation, or key
-drift invalidates a cached authority. The scalar tuple helper is compiled only into
-the dedicated compatibility test target.
+cannot construct the installed tuple or select verification paths. The only production
+factory, `verifyCurrentInstallationAuthority`, derives the layout from
+`QCoreApplication::applicationFilePath()`: Windows uses the directory containing the
+exact `AegisyClient.exe`, while macOS requires
+`AegisyClient.app/Contents/MacOS/AegisyClient` and uses that `MacOS` directory because
+the current package places the sidecar there. The exact adjacent files are
+`aegisy-update-artifact-set.json`, `aegisy-agentd.manifest.json`, and
+`aegisy-agentd[.exe]`. The receipt and Manifest must be ordinary, non-reparse,
+single-link files.
+
+The factory verifies the receipt signature and target, verifies the Runtime/adapter
+Manifest bytes, identity, version, ordinary-file/link policy, and SHA-256 values, and
+derives an authority identity from the receipt, complete installed tuple,
+verification-key hash, canonical layout, directory identities, and the current
+application file identity, size, and SHA-256. The application and layout are observed
+again after artifact verification. `verifyCandidate` derives and revalidates that
+same current layout before every decision, so application, directory, receipt,
+Manifest, Runtime, adapter, expectation, or key drift invalidates a cached authority.
+The scalar tuple and arbitrary-root factory are compiled only into the dedicated
+compatibility test target. A production-shaped child-process fixture copies the test
+image into the fixed `AegisyClient` layout and proves the public factory plus candidate
+revalidation path end to end.
 
 The verifier also requires the selected channel and an accepted release-sequence
 high-water value. Its evaluation identity binds the candidate identity, installed-set
@@ -74,12 +87,13 @@ evaluation time so a cached result cannot be reused after any of those inputs ch
 A result may set only `candidateCompatible=true`; `downloadAuthorized` and
 `installAuthorized` remain
 false for every result. The ordinary integer high-water argument is not proof of
-durable, integrity-checked, anti-deletion storage. That storage and atomic advance
-remain release gates. The current verification factory still accepts caller-selected
-paths and expected application metadata. It proves a signed, internally consistent
-artifact set at those paths, not that those paths are the currently executing signed
-Aegisy installation. Host integration must derive the fixed bundle layout from the
-current executable and must not accept configuration paths as installed authority.
+durable, integrity-checked, anti-deletion storage. The fixed-layout factory proves
+that the currently executing image and adjacent artifact graph stayed byte- and
+identity-stable during evaluation. It does not verify macOS code signing/notarization,
+Windows Authenticode, an outer installer signature, or a signed field that binds the
+application image hash into the installed artifact set. It therefore is not yet proof
+that the current process belongs to the signed Aegisy package described by the
+receipt.
 The same verification key currently validates both historical receipts and new
 candidates; Key IDs, validity/revocation, rotation lineage, and a bound Key Ring
 identity remain required. A production recovery record must bind at least the
@@ -87,6 +101,30 @@ release sequence, exact artifact-set identity, and update phase. Exact-identity 
 may then resume idempotently while a same-sequence different identity fails closed;
 advancing an unqualified scalar before or after download cannot provide both crash
 recovery and replay resistance.
+
+### Update Progress Continuity Foundation
+
+`update-progress-record/0.1` is an internal, single-writer continuity foundation for
+that future recovery record. It stores an exact release sequence, artifact-set
+identity, ordered phase, revision, timestamp, prior-record identity, and current
+record identity. The phases are `candidate-evaluated`, `download-started`,
+`download-verified`, `install-started`, and `installation-observed`. Same-sequence
+identity conflicts, skipped phases, non-monotonic revisions/time, incomplete-release
+replacement, rollback below an externally supplied floor, malformed JSON, duplicate
+keys, links, extra hard links, and Unix owner-execute, group/other, or
+setuid/setgid/sticky modes fail closed.
+Writes use `QSaveFile`, checked private Unix permissions, and post-commit reread;
+exact uncertain retries may return the same record. Every download/install/rollback
+authority field is fixed false.
+
+The Store is not connected to either updater and is deliberately not an anti-deletion
+anchor. Deleting both the record and its external high-water evidence permits a fresh
+record, and the current API depends on a trusted caller-supplied record identity/floor
+to detect deletion or rollback. A local `QLockFile` gate serializes writers, but the
+Store still lacks a reviewed secure-storage anchor, cross-resource CAS, signed package
+binding, update-framework compensation, clean Windows multi-process evidence, and
+crash-injection evidence. It must not be used to authorize network, download, install,
+rollback, or resume operations.
 
 Framework integration also remains open. Sparkle 2.9.4 can synchronously reject a
 newly discovered candidate through `SPUUpdaterDelegate`, but its resume path skips
@@ -130,12 +168,12 @@ The following work remains required for OpenSpec 22.5:
   boundary; repeated path hashing narrows but does not eliminate that race;
 - integrate the signed artifact-set decision into a reviewed updater while
   rechecking resumed downloads and preserving all policy/authority gates;
-- persist and atomically advance an integrity-checked, anti-deletion update record
-  that binds release sequence, artifact-set identity, and phase, supports exact-
-  identity crash recovery, and rejects same-sequence identity conflicts;
-- derive the installed artifact tuple from a verified, non-downgradable signed
-  current application package/manifest authority instead of accepting caller-selected
-  paths or expected version/platform values;
+- promote the current update-progress continuity Store only after it has a reviewed
+  secure anti-deletion anchor, clean-platform/crash validation of its writer lock,
+  cross-resource CAS, crash recovery, and framework compensation; then integrate its
+  exact sequence, artifact-set identity, and phase transitions into the updater;
+- bind the now fixed current-installation layout and application image hash to a
+  verified, non-downgradable signed application package/manifest authority;
 - introduce a reviewed update-signing Key Ring so an active historical receipt and a
   new candidate may use different valid keys while rollback, revocation, expiry, and
   same-generation conflicts fail closed;

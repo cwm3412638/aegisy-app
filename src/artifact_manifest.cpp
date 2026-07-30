@@ -1,11 +1,13 @@
 #include "artifact_manifest.h"
 
+#include "aap_transport_runtime.h"
+
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
-#include <QJsonDocument>
+#include <QJsonValue>
 #include <QSet>
 #include <QRegularExpression>
 
@@ -281,8 +283,18 @@ VerificationResult verifyFile(const QString &manifestPath, const QString &runtim
     const QFileInfo manifestInfo(manifestPath);
     const QString manifestCanonical = manifestInfo.canonicalFilePath();
     if (!manifestInfo.isFile() || !manifestInfo.isReadable()
-        || manifestInfo.isSymLink() || manifestCanonical.isEmpty()) {
+        || manifestInfo.isSymLink() || pathIsLinkLike(manifestPath)
+        || manifestCanonical.isEmpty()) {
         return fail(QStringLiteral("manifest-path-invalid"));
+    }
+    const ArtifactFileStatus manifestStatus = inspectArtifactFile(
+        manifestInfo.absoluteFilePath());
+    if (manifestStatus == ArtifactFileStatus::Invalid
+        || manifestStatus == ArtifactFileStatus::LinkLike) {
+        return fail(QStringLiteral("manifest-path-invalid"));
+    }
+    if (manifestStatus == ArtifactFileStatus::MultipleLinks) {
+        return fail(QStringLiteral("manifest-hard-link"));
     }
     QFile file(manifestCanonical);
     if (!file.open(QIODevice::ReadOnly)) return fail(QStringLiteral("manifest-unreadable"));
@@ -295,13 +307,20 @@ VerificationResult verifyFile(const QString &manifestPath, const QString &runtim
         || !file.atEnd()) {
         return fail(QStringLiteral("manifest-read-failed"));
     }
-    QJsonParseError parseError;
-    const QJsonDocument document = QJsonDocument::fromJson(manifestBytes, &parseError);
-    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+    using namespace aegisy::aap::transport_runtime;
+    TransportJsonValue parsed;
+    QString parseError;
+    if (!parseTransportJsonRaw(manifestBytes, &parsed, &parseError)) {
+        return fail(QStringLiteral("manifest-invalid-json"));
+    }
+    QJsonValue projected;
+    TransportProjectionError projectionError = TransportProjectionError::None;
+    if (!projectJsonSafeTransportValue(parsed, &projected, &projectionError)
+        || !projected.isObject()) {
         return fail(QStringLiteral("manifest-invalid-json"));
     }
     VerificationResult result = verifyObject(
-        document.object(), QFileInfo(manifestCanonical).absolutePath(), runtimePath);
+        projected.toObject(), QFileInfo(manifestCanonical).absolutePath(), runtimePath);
     if (result.ok) {
         result.manifestSha256 = QString::fromLatin1(QCryptographicHash::hash(
             manifestBytes, QCryptographicHash::Sha256).toHex());

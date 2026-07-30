@@ -211,7 +211,8 @@ if(NOT cmake_source MATCHES "Qt6 REQUIRED COMPONENTS")
 endif()
 foreach(required_release_test
         artifact_manifest_runtime_startup
-        update_artifact_set_compatibility)
+        update_artifact_set_compatibility
+        update_progress_record_integrity)
     string(FIND "${cmake_source}" "add_test(NAME ${required_release_test}"
         required_release_test_offset)
     if(required_release_test_offset EQUAL -1)
@@ -229,4 +230,4 @@ foreach(release_source workflow package_script)
     endif()
 endforeach()
 message(STATUS
-    "Windows packaging policy includes OS, manifest, Unicode, complete Qt SDK, full CTest, artifact-set, trigger, and artifact gates")
+    "Windows packaging policy includes OS, manifest, Unicode, complete Qt SDK, full CTest, artifact-set, update-record, trigger, and artifact gates")

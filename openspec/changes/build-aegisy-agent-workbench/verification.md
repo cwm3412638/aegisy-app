@@ -2608,12 +2608,17 @@ Known limitations:
   Runtime/adapter identity/version, and one to 64 strictly increasing compatible
   source artifact sets.
 - Production compatibility no longer accepts a publicly constructible installed
-  tuple. `verifyInstalledAuthority` requires the exact adjacent receipt and Manifest
-  names, verifies the signed receipt target plus complete Manifest/Runtime/adapter
-  bytes, identity, version, ordinary-file/link policy, and derives an opaque authority
-  whose identity binds the receipt, installed tuple, and verification-key hash. Each
-  candidate evaluation rereads that graph and rejects drift before compatibility is
-  evaluated. The scalar tuple helper is available only to the CTest target through
+  tuple or caller-selected verification paths. `verifyCurrentInstallationAuthority`
+  requires the executing image to be the fixed Windows `AegisyClient.exe` layout or
+  macOS `AegisyClient.app/Contents/MacOS/AegisyClient` layout. It derives the exact
+  adjacent receipt, Manifest, and Runtime paths; verifies the signed receipt target
+  plus complete Manifest/Runtime/adapter bytes, identity, version, ordinary-file/link
+  policy; and derives an opaque authority whose identity binds the receipt, installed
+  tuple, verification-key hash, canonical directory/file identities, and the current
+  application size/SHA-256. It reobserves the application and directories after
+  artifact verification. Each candidate evaluation rederives and rereads that graph
+  and rejects drift before compatibility is evaluated. The scalar tuple and
+  arbitrary-root helpers are available only to the CTest target through
   `AEGISY_UPDATE_ARTIFACT_SET_TESTING`. Compatibility still requires the selected
   channel and release sequence above both the installed sequence and caller-supplied
   accepted high-water value. The returned evaluation identity binds those inputs,
@@ -2631,10 +2636,36 @@ Known limitations:
   drift, a valid signed receipt replacement with a changed release sequence, signed
   receipt Runtime/adapter version disagreement, Manifest byte replacement, Runtime/
   adapter content drift, separated receipt/Manifest directories, and revalidation of
-  a cached authority. The shared Manifest fixture rejects in-bundle Runtime and adapter
-  links, linked parent components, and extra hard links.
+  a cached authority. It also replaces the application image after authority creation
+  and runs a copied test image through the public factory in a Unicode, production-
+  shaped `AegisyClient` layout. The shared Manifest fixture rejects duplicate decoded
+  JSON keys, invalid UTF-8/BOM/surrogates, unsafe numbers/depth, in-bundle Runtime and
+  adapter links, linked parent components, and extra hard links; the Manifest and
+  installed receipt themselves must also be single-link ordinary files.
   `windows_packaging_policy` requires this CTest and the real manifest startup fixture
   in the complete release test graph.
+- `include/update_progress_record.h` and `src/update_progress_record.cpp` add the
+  internal `aegisy-update-progress-record/0.1` continuity Store. Its exact current
+  record binds release sequence, artifact-set identity, ordered phase, revision,
+  monotonic update time, previous identity, and current identity. It admits only
+  candidate-evaluated -> download-started -> download-verified -> install-started ->
+  installation-observed, allows an exact uncertain retry, blocks same-sequence
+  identity conflict and replacing an incomplete release, and uses bounded lossless
+  JSON, single-link files, private Unix permissions that reject owner-execute,
+  group/other, and setuid/setgid/sticky bits, `QSaveFile`, and post-commit reread.
+  `update_progress_record_integrity` covers transition/retry/conflict,
+  rollback/deletion against an external anchor, duplicate-key/tamper, forged
+  authority flags, over-permissive Unix modes, symlink, and hard-link cases.
+  Download/install/rollback authority is fixed false in every API and persisted
+  record.
+- This Store is continuity evidence, not the required anti-deletion authority. A
+  trusted caller must retain the expected identity/floor elsewhere; deleting both
+  permits a fresh record. `QLockFile` provides a local single-writer gate, but the
+  Store has no secure-storage anchor, cross-resource CAS, crash-injection/framework
+  compensation, `UpdateManager` integration, or signed package identity. The local
+  lock fixture passes and the Windows release-policy test keeps the focused target in
+  the complete clean-runner graph, but no clean Windows or process-crash execution
+  result exists yet.
 - Current macOS and Windows scripts do not bundle a pinned Codex adapter and do
   not invoke the generator. Packaged Runtime has no compile/package identity that
   makes manifest absence non-downgradable, and path verification followed by
@@ -2645,20 +2676,23 @@ Known limitations:
   real-daemon fixture, but source/workflow inspection is not Windows execution. The
   local macOS-to-Windows Cargo check stops earlier in SQLite/Tree-sitter C because
   Windows SDK headers are unavailable, so it supplies no Windows result. The signed
-  compatibility evaluator is not called by either `UpdateManager`. Its verification
-  factory still accepts caller-selected local paths and expected application metadata;
-  trusted host integration must derive the fixed current signed-bundle layout and bind
-  it to the executing application rather than configuration. Receipt and candidate
+  compatibility evaluator is not called by either `UpdateManager`. Its fixed-layout
+  factory binds the current application bytes and file identity locally, but the
+  signed receipt does not bind that application SHA-256 and the factory does not
+  verify macOS code signing/notarization, Windows Authenticode, or the outer installer;
+  it therefore is not signed-package membership authority. Receipt and candidate
   verification currently share one key and have no Key ID, validity/revocation, or
   rotation chain. Path inspection/open/hash and later process/install actions retain
-  TOCTOU windows. The scalar high-water input has no trusted persistent authority.
-  Production recovery must durably bind sequence, artifact-set identity, and phase so an exact
-  retry can resume while a same-sequence identity conflict fails closed. Sparkle candidate
+  TOCTOU windows. The scalar high-water and new local progress file have no trusted
+  anti-deletion anchor or cross-resource updater/secure-anchor transaction.
+  Production recovery must bind
+  their sequence, artifact-set identity, phase, and current record identity to secure
+  durable authority before an exact retry can resume. Sparkle candidate
   veto does not cover resumed updates, the current contract binds no generated delta,
   and WinSparkle 0.9.3 has no pre-download candidate veto. Server feed filtering or
   post-download callbacks cannot replace that local gate. Task `22.5` remains
   unchecked.
-- The final local gate passes the complete application build, all `27/27` serial
+- The final local gate passes the complete application build, all `28/28` serial
   desktop CTests, strict OpenSpec validation, and `git diff --check`. This supplies
   macOS/local contract evidence only; it is not signed-package, real updater,
   zero-byte incompatible-download, resume/install recheck, or Windows execution

@@ -35,6 +35,21 @@ QByteArray writeArtifact(const QString &path, const QByteArray &bytes)
     return QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex();
 }
 
+bool expectManifestBytesRejected(const QString &manifestPath,
+                                 const QString &runtimePath,
+                                 const QByteArray &bytes,
+                                 const char *message)
+{
+    if (writeArtifact(manifestPath, bytes).isEmpty()) {
+        return expect(false, "manifest parser fixture could not be written");
+    }
+    const ArtifactManifest::VerificationResult result =
+        ArtifactManifest::verifyFile(manifestPath, runtimePath);
+    return expect(!result.ok
+                      && result.reason == QStringLiteral("manifest-invalid-json"),
+                  message);
+}
+
 QString runtimeFileName()
 {
 #ifdef Q_OS_WIN
@@ -375,9 +390,11 @@ int main(int argc, char **argv)
     const QByteArray runtimeHash = writeArtifact(runtimePath, QByteArrayLiteral("runtime"));
     const QByteArray adapterHash = writeArtifact(adapterPath, QByteArrayLiteral("adapter"));
     const QString manifestPath = QDir(directory.path()).filePath(QStringLiteral("manifest.json"));
+    const QByteArray validManifestBytes = QJsonDocument(
+        manifest(runtimeHash, adapterHash)).toJson(QJsonDocument::Compact);
     QFile manifestFile(manifestPath);
     if (!expect(manifestFile.open(QIODevice::WriteOnly), "manifest cannot be written")) return 1;
-    manifestFile.write(QJsonDocument(manifest(runtimeHash, adapterHash)).toJson(QJsonDocument::Compact));
+    manifestFile.write(validManifestBytes);
     manifestFile.close();
 
     auto result = ArtifactManifest::verifyFile(manifestPath, runtimePath);
@@ -386,9 +403,7 @@ int main(int argc, char **argv)
                         == QStringLiteral("0.1.0/codex-cli 0.144.5")
                     && result.manifestSha256
                         == QString::fromLatin1(QCryptographicHash::hash(
-                            QJsonDocument(manifest(runtimeHash, adapterHash)).toJson(
-                                QJsonDocument::Compact),
-                            QCryptographicHash::Sha256).toHex())
+                            validManifestBytes, QCryptographicHash::Sha256).toHex())
                     && result.runtimeId == QStringLiteral("aegisy-agentd")
                     && result.runtimeVersion == QStringLiteral("0.1.0")
                     && result.adapterId == QStringLiteral("codex-app-server")
@@ -396,7 +411,85 @@ int main(int argc, char **argv)
                         == QStringLiteral("codex-cli 0.144.5"),
                 "valid artifact manifest was rejected")) return 1;
 
+    QByteArray invalidManifest = validManifestBytes;
+    invalidManifest.insert(
+        1, QByteArrayLiteral(
+               "\"schema_version\":\"aegisy-artifact-manifest/0.1\","));
+    if (!expectManifestBytesRejected(
+            manifestPath, runtimePath, invalidManifest,
+            "duplicate outer manifest key was accepted")) return 1;
+
+    invalidManifest = validManifestBytes;
+    const QByteArray runtimeId = QByteArrayLiteral("\"id\":\"aegisy-agentd\"");
+    const qsizetype runtimeIdOffset = invalidManifest.indexOf(runtimeId);
+    if (!expect(runtimeIdOffset >= 0, "runtime ID fixture was not found")) return 1;
+    invalidManifest.insert(
+        runtimeIdOffset + runtimeId.size(),
+        QByteArrayLiteral(",\"\\u0069d\":\"aegisy-agentd\""));
+    if (!expectManifestBytesRejected(
+            manifestPath, runtimePath, invalidManifest,
+            "escaped duplicate nested manifest key was accepted")) return 1;
+
+    invalidManifest = QByteArray::fromHex("efbbbf") + validManifestBytes;
+    if (!expectManifestBytesRejected(
+            manifestPath, runtimePath, invalidManifest,
+            "manifest with a UTF-8 BOM was accepted")) return 1;
+
+    invalidManifest = validManifestBytes;
+    const qsizetype versionOffset = invalidManifest.indexOf(
+        QByteArrayLiteral("codex-cli 0.144.5"));
+    if (!expect(versionOffset >= 0, "adapter version fixture was not found")) return 1;
+    invalidManifest.replace(versionOffset, 1, QByteArray::fromHex("c328"));
+    if (!expectManifestBytesRejected(
+            manifestPath, runtimePath, invalidManifest,
+            "manifest with invalid UTF-8 was accepted")) return 1;
+
+    invalidManifest = validManifestBytes;
+    const QByteArray adapterPathJson = QByteArrayLiteral("\"path\":\"")
+        + adapterFileName().toUtf8() + QByteArrayLiteral("\"");
+    const qsizetype adapterPathOffset = invalidManifest.indexOf(adapterPathJson);
+    if (!expect(adapterPathOffset >= 0, "adapter path fixture was not found")) return 1;
+    invalidManifest.replace(
+        adapterPathOffset, adapterPathJson.size(),
+        QByteArrayLiteral("\"path\":\"\\ud800\""));
+    if (!expectManifestBytesRejected(
+            manifestPath, runtimePath, invalidManifest,
+            "manifest with an unpaired surrogate was accepted")) return 1;
+
+    invalidManifest = validManifestBytes;
+    invalidManifest.insert(
+        invalidManifest.size() - 1,
+        QByteArrayLiteral(",\"unsafe\":9007199254740992"));
+    if (!expectManifestBytesRejected(
+            manifestPath, runtimePath, invalidManifest,
+            "manifest with an unsafe JSON number was accepted")) return 1;
+
+    invalidManifest = validManifestBytes;
+    QByteArray excessiveDepth = QByteArrayLiteral(",\"deep\":");
+    excessiveDepth.append(QByteArray(129, '['));
+    excessiveDepth.append(QByteArrayLiteral("null"));
+    excessiveDepth.append(QByteArray(129, ']'));
+    invalidManifest.insert(invalidManifest.size() - 1, excessiveDepth);
+    if (!expectManifestBytesRejected(
+            manifestPath, runtimePath, invalidManifest,
+            "manifest above the JSON depth limit was accepted")) return 1;
+
+    if (!expect(!writeArtifact(manifestPath, validManifestBytes).isEmpty(),
+                "valid manifest could not be restored after parser tests")) return 1;
+
 #ifndef Q_OS_WIN
+    const QString hardLinkedManifestPath = QDir(directory.path()).filePath(
+        QStringLiteral("hard-linked-manifest.json"));
+    if (!expect(::link(QFile::encodeName(manifestPath).constData(),
+                       QFile::encodeName(hardLinkedManifestPath).constData()) == 0,
+                "manifest hard link could not be created")) return 1;
+    result = ArtifactManifest::verifyFile(manifestPath, runtimePath);
+    if (!expect(!result.ok
+                    && result.reason == QStringLiteral("manifest-hard-link"),
+                "multiply linked manifest was accepted")) return 1;
+    if (!expect(QFile::remove(hardLinkedManifestPath),
+                "manifest hard link could not be removed")) return 1;
+
     const QString linkedRuntimeTarget = QDir(directory.path()).filePath(
         QStringLiteral("linked-runtime-target"));
     const QByteArray linkedRuntimeHash = writeArtifact(

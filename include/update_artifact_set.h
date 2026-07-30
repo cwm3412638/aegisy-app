@@ -16,6 +16,14 @@ enum class State {
 struct InstalledAuthorityResult;
 struct Decision;
 
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
+namespace Testing {
+InstalledAuthorityResult verifyInstalledAuthorityAtRoot(
+    const QString &, const QByteArray &, qint64, const QString &,
+    const QString &, const QString &, const QString &);
+}
+#endif
+
 class InstalledArtifactSetAuthority
 {
 public:
@@ -23,11 +31,16 @@ public:
     QString authorityIdentity() const { return m_authorityIdentity; }
 
 private:
+    class Verifier;
+
     friend struct InstalledAuthorityResult;
-    friend InstalledAuthorityResult verifyInstalledAuthority(
-        const QString &, const QString &, const QString &, const QByteArray &,
-        qint64, const QString &, const QString &, const QString &,
-        const QString &);
+    friend InstalledAuthorityResult verifyCurrentInstallationAuthority(
+        const QByteArray &, qint64, const QString &);
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
+    friend InstalledAuthorityResult Testing::verifyInstalledAuthorityAtRoot(
+        const QString &, const QByteArray &, qint64, const QString &,
+        const QString &, const QString &, const QString &);
+#endif
     friend Decision verifyCandidate(
         const QByteArray &, const QByteArray &, qint64,
         const InstalledArtifactSetAuthority &, const QString &, quint64);
@@ -45,10 +58,16 @@ private:
     QString m_adapterVersion;
     QString m_receiptIdentity;
     QString m_installedArtifactSetIdentity;
+    QString m_installationLayoutIdentity;
     QString m_authorityIdentity;
+    QString m_applicationPath;
+    QString m_installationRoot;
     QString m_receiptPath;
     QString m_manifestPath;
     QString m_runtimePath;
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
+    bool m_testOnlyLayout = false;
+#endif
 };
 
 struct InstalledAuthorityResult
@@ -93,16 +112,10 @@ struct Decision
 
 QByteArray signaturePayload(const QJsonObject &envelope,
                             QString *errorCode = nullptr);
-InstalledAuthorityResult verifyInstalledAuthority(
-    const QString &receiptPath,
-    const QString &manifestPath,
-    const QString &runtimePath,
+InstalledAuthorityResult verifyCurrentInstallationAuthority(
     const QByteArray &publicKeyBase64,
     qint64 nowMs,
-    const QString &expectedApplicationVersion,
-    const QString &expectedChannel,
-    const QString &expectedPlatform,
-    const QString &expectedArchitecture);
+    const QString &expectedChannel);
 Decision verifyCandidate(const QByteArray &envelopeJson,
                          const QByteArray &publicKeyBase64,
                          qint64 nowMs,
@@ -134,6 +147,15 @@ Decision verifyCandidateWithUntrustedInputs(
     const InstalledArtifactSet &installed,
     const QString &selectedChannel,
     quint64 acceptedReleaseSequenceHighWater);
+
+InstalledAuthorityResult verifyInstalledAuthorityAtRoot(
+    const QString &artifactRoot,
+    const QByteArray &publicKeyBase64,
+    qint64 nowMs,
+    const QString &expectedApplicationVersion,
+    const QString &expectedChannel,
+    const QString &expectedPlatform,
+    const QString &expectedArchitecture);
 
 } // namespace Testing
 

@@ -822,9 +822,11 @@ if(BUILD_TESTING)
     target_include_directories(AegisyArtifactManifestTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
     if(QT_VERSION_MAJOR EQUAL 6)
-        target_link_libraries(AegisyArtifactManifestTest PRIVATE Qt6::Core)
+        target_link_libraries(AegisyArtifactManifestTest PRIVATE
+            Qt6::Core AegisyAapTransport)
     else()
-        target_link_libraries(AegisyArtifactManifestTest PRIVATE Qt5::Core)
+        target_link_libraries(AegisyArtifactManifestTest PRIVATE
+            Qt5::Core AegisyAapTransport)
     endif()
     add_test(NAME artifact_manifest_verification
         COMMAND AegisyArtifactManifestTest)
@@ -871,6 +873,29 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME update_artifact_set_compatibility
         COMMAND AegisyUpdateArtifactSetTest)
+
+    add_executable(AegisyUpdateProgressRecordTest
+        tests/update_progress_record_test.cpp
+        src/update_progress_record.cpp
+        include/update_progress_record.h
+    )
+    target_include_directories(AegisyUpdateProgressRecordTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyUpdateProgressRecordTest PRIVATE
+            Qt6::Core AegisyAapTransport)
+    else()
+        target_link_libraries(AegisyUpdateProgressRecordTest PRIVATE
+            Qt5::Core AegisyAapTransport)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyUpdateProgressRecordTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyUpdateProgressRecordTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME update_progress_record_integrity
+        COMMAND AegisyUpdateProgressRecordTest)
 
     add_test(NAME windows_packaging_policy
         COMMAND "${CMAKE_COMMAND}"

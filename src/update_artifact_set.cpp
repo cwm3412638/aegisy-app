@@ -3,6 +3,7 @@
 #include "aap_transport_runtime.h"
 #include "artifact_manifest.h"
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -13,18 +14,48 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QStringList>
+#include <QSysInfo>
 #include <QUrl>
 
 #include <openssl/evp.h>
 
 #include <cmath>
 
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#endif
+
 namespace UpdateArtifactSet {
+
+struct InstallationLayout
+{
+    QString applicationPath;
+    QString installationRoot;
+    QString artifactRoot;
+    QString receiptPath;
+    QString manifestPath;
+    QString runtimePath;
+    QString applicationFileIdentity;
+    QString applicationSha256;
+    quint64 applicationSizeBytes = 0;
+    QString installationRootFileIdentity;
+    QString artifactRootFileIdentity;
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
+    bool testOnly = false;
+#endif
+};
+
 namespace {
 
 constexpr double kMaximumSafeJsonInteger = 9007199254740991.0;
 constexpr quint64 kMaximumInstallerBytes = 2ULL * 1024 * 1024 * 1024;
 constexpr qint64 kMaximumClockSkewMs = 5LL * 60 * 1000;
+constexpr qint64 kMaximumApplicationBytes = 512LL * 1024 * 1024;
 constexpr int kMaximumCompatibleSources = 64;
 constexpr qsizetype kMaximumEnvelopeBytes = 256 * 1024;
 const QString kSchema = QStringLiteral("aegisy-update-artifact-set/0.1");
@@ -46,6 +77,307 @@ struct InstalledSetData
     QString adapterId;
     QString adapterVersion;
 };
+
+bool fail(QString *errorCode, const QString &code);
+
+struct NativePathMetadata
+{
+    QString identity;
+    quint64 sizeBytes = 0;
+};
+
+struct LayoutPathObservation
+{
+    QString canonicalPath;
+    QString fileIdentity;
+    QString sha256;
+    quint64 sizeBytes = 0;
+};
+
+bool inspectNativePath(const QString &path, bool expectDirectory,
+                       NativePathMetadata *metadata)
+{
+    if (!metadata) return false;
+#ifdef Q_OS_WIN
+    const QString nativePath = QDir::toNativeSeparators(path);
+    const DWORD flags = FILE_FLAG_OPEN_REPARSE_POINT
+        | (expectDirectory ? FILE_FLAG_BACKUP_SEMANTICS : 0);
+    HANDLE handle = CreateFileW(
+        reinterpret_cast<LPCWSTR>(nativePath.utf16()), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, flags, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    BY_HANDLE_FILE_INFORMATION information{};
+    const bool inspected = GetFileInformationByHandle(handle, &information) != 0;
+    CloseHandle(handle);
+    if (!inspected
+        || (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        || (((information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            != expectDirectory)
+        || (!expectDirectory && information.nNumberOfLinks != 1)) {
+        return false;
+    }
+    const quint64 fileIndex = (static_cast<quint64>(information.nFileIndexHigh)
+                               << 32)
+        | static_cast<quint64>(information.nFileIndexLow);
+    metadata->identity = QStringLiteral("windows:%1:%2")
+        .arg(static_cast<quint64>(information.dwVolumeSerialNumber))
+        .arg(fileIndex);
+    metadata->sizeBytes = (static_cast<quint64>(information.nFileSizeHigh) << 32)
+        | static_cast<quint64>(information.nFileSizeLow);
+#else
+    const QByteArray encodedPath = QFile::encodeName(path);
+    struct stat information {};
+    if (::lstat(encodedPath.constData(), &information) != 0
+        || (expectDirectory ? !S_ISDIR(information.st_mode)
+                            : !S_ISREG(information.st_mode))
+        || (!expectDirectory
+            && (information.st_nlink != 1 || information.st_size < 0))) {
+        return false;
+    }
+    metadata->identity = QStringLiteral("unix:%1:%2")
+        .arg(static_cast<qulonglong>(information.st_dev))
+        .arg(static_cast<qulonglong>(information.st_ino));
+    metadata->sizeBytes = expectDirectory
+        ? 0 : static_cast<quint64>(information.st_size);
+#endif
+    return !metadata->identity.isEmpty();
+}
+
+bool observeLayoutDirectory(const QString &path,
+                            LayoutPathObservation *observation)
+{
+    if (!observation) return false;
+    const QFileInfo info(path);
+    const QString canonicalPath = info.canonicalFilePath();
+    NativePathMetadata before;
+    NativePathMetadata after;
+    if (!info.isDir() || info.isSymLink() || canonicalPath.isEmpty()
+        || !inspectNativePath(canonicalPath, true, &before)
+        || !inspectNativePath(canonicalPath, true, &after)
+        || before.identity != after.identity) {
+        return false;
+    }
+    observation->canonicalPath = canonicalPath;
+    observation->fileIdentity = before.identity;
+    observation->sha256.clear();
+    observation->sizeBytes = 0;
+    return true;
+}
+
+bool observeLayoutApplication(const QString &path,
+                              LayoutPathObservation *observation)
+{
+    if (!observation) return false;
+    const QFileInfo info(path);
+    const QString canonicalPath = info.canonicalFilePath();
+    NativePathMetadata before;
+    if (!info.isFile() || !info.isReadable() || info.isSymLink()
+        || canonicalPath.isEmpty()
+        || !inspectNativePath(canonicalPath, false, &before)
+        || before.sizeBytes == 0
+        || before.sizeBytes > static_cast<quint64>(kMaximumApplicationBytes)) {
+        return false;
+    }
+
+    QFile file(canonicalPath);
+    if (!file.open(QIODevice::ReadOnly)) return false;
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    qint64 totalBytes = 0;
+    while (!file.atEnd()) {
+        const QByteArray chunk = file.read(64 * 1024);
+        if (chunk.isEmpty() && !file.atEnd()) return false;
+        if (chunk.size() > kMaximumApplicationBytes - totalBytes) return false;
+        totalBytes += chunk.size();
+        hash.addData(chunk);
+    }
+    if (file.error() != QFile::NoError
+        || static_cast<quint64>(totalBytes) != before.sizeBytes) {
+        return false;
+    }
+    NativePathMetadata after;
+    if (!inspectNativePath(canonicalPath, false, &after)
+        || after.identity != before.identity
+        || after.sizeBytes != before.sizeBytes) {
+        return false;
+    }
+    observation->canonicalPath = canonicalPath;
+    observation->fileIdentity = before.identity;
+    observation->sha256 = QString::fromLatin1(hash.result().toHex());
+    observation->sizeBytes = before.sizeBytes;
+    return true;
+}
+
+QString runtimeFileName()
+{
+#ifdef Q_OS_WIN
+    return QStringLiteral("aegisy-agentd.exe");
+#else
+    return QStringLiteral("aegisy-agentd");
+#endif
+}
+
+bool currentReleaseTarget(QString *platform, QString *architecture)
+{
+#ifdef Q_OS_WIN
+    *platform = QStringLiteral("windows");
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    *platform = QStringLiteral("macos");
+#else
+    Q_UNUSED(platform);
+    Q_UNUSED(architecture);
+    return false;
+#endif
+
+    const QString buildArchitecture = QSysInfo::buildCpuArchitecture().toLower();
+    if (buildArchitecture == QStringLiteral("x86_64")
+        || buildArchitecture == QStringLiteral("amd64")) {
+        *architecture = QStringLiteral("x86_64");
+    } else if (buildArchitecture == QStringLiteral("arm64")
+               || buildArchitecture == QStringLiteral("aarch64")) {
+        *architecture = QStringLiteral("arm64");
+    } else {
+        return false;
+    }
+    return true;
+}
+
+QString canonicalDirectory(const QString &path)
+{
+    const QFileInfo info(path);
+    if (!info.isDir() || info.isSymLink()) return {};
+    return info.canonicalFilePath();
+}
+
+bool samePath(const QString &left, const QString &right)
+{
+#ifdef Q_OS_WIN
+    return left.compare(right, Qt::CaseInsensitive) == 0;
+#else
+    return left == right;
+#endif
+}
+
+bool pathWithin(const QString &parent, const QString &path)
+{
+    const QString prefix = parent + QDir::separator();
+#ifdef Q_OS_WIN
+    return path.startsWith(prefix, Qt::CaseInsensitive);
+#else
+    return path.startsWith(prefix);
+#endif
+}
+
+bool deriveCurrentInstallationLayout(InstallationLayout *layout,
+                                     QString *errorCode)
+{
+    if (!layout) return fail(errorCode,
+                             QStringLiteral("installed-authority-layout-invalid"));
+    const QFileInfo applicationInfo(QCoreApplication::applicationFilePath());
+    const QString applicationPath = applicationInfo.canonicalFilePath();
+#ifdef Q_OS_WIN
+    const bool expectedExecutableName = applicationInfo.fileName().compare(
+        QStringLiteral("AegisyClient.exe"), Qt::CaseInsensitive) == 0;
+#else
+    const bool expectedExecutableName = applicationInfo.fileName()
+        == QStringLiteral("AegisyClient");
+#endif
+    if (!expectedExecutableName || !applicationInfo.isFile()
+        || !applicationInfo.isExecutable() || applicationInfo.isSymLink()
+        || applicationPath.isEmpty()) {
+        return fail(errorCode,
+                    QStringLiteral("installed-authority-application-invalid"));
+    }
+
+    QString installationRoot;
+    QString artifactRoot;
+#ifdef Q_OS_WIN
+    installationRoot = canonicalDirectory(applicationInfo.absolutePath());
+    artifactRoot = installationRoot;
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    QDir macOsDirectory(applicationInfo.absolutePath());
+    if (macOsDirectory.dirName() != QStringLiteral("MacOS")
+        || !macOsDirectory.cdUp()
+        || macOsDirectory.dirName() != QStringLiteral("Contents")) {
+        return fail(errorCode,
+                    QStringLiteral("installed-authority-layout-invalid"));
+    }
+    artifactRoot = canonicalDirectory(applicationInfo.absolutePath());
+    QDir bundleDirectory(macOsDirectory);
+    if (!bundleDirectory.cdUp()) {
+        return fail(errorCode,
+                    QStringLiteral("installed-authority-layout-invalid"));
+    }
+    installationRoot = canonicalDirectory(bundleDirectory.absolutePath());
+#else
+    return fail(errorCode,
+                QStringLiteral("installed-authority-platform-unsupported"));
+#endif
+    if (installationRoot.isEmpty() || artifactRoot.isEmpty()
+        || (!samePath(artifactRoot, installationRoot)
+            && !pathWithin(installationRoot, artifactRoot))) {
+        return fail(errorCode,
+                    QStringLiteral("installed-authority-layout-invalid"));
+    }
+
+    layout->applicationPath = applicationPath;
+    layout->installationRoot = installationRoot;
+    layout->artifactRoot = artifactRoot;
+    layout->receiptPath = QDir(artifactRoot).filePath(
+        kInstalledReceiptFileName);
+    layout->manifestPath = QDir(artifactRoot).filePath(
+        kArtifactManifestFileName);
+    layout->runtimePath = QDir(artifactRoot).filePath(runtimeFileName());
+    if (errorCode) errorCode->clear();
+    return true;
+}
+
+QString installationLayoutIdentity(const InstallationLayout &layout)
+{
+    if (layout.applicationPath.isEmpty()
+        || layout.installationRoot.isEmpty()
+        || layout.artifactRoot.isEmpty()
+        || layout.applicationFileIdentity.isEmpty()
+        || layout.applicationSha256.size() != 64
+        || layout.applicationSizeBytes == 0
+        || layout.installationRootFileIdentity.isEmpty()
+        || layout.artifactRootFileIdentity.isEmpty()) {
+        return {};
+    }
+    QByteArray payload = QByteArrayLiteral(
+        "aegisy-current-installation-layout/0.1\n");
+    const auto appendValue = [&payload](const QByteArray &name,
+                                        const QByteArray &value) {
+        payload += name;
+        payload += '=';
+        payload += value;
+        payload += '\n';
+    };
+    const auto appendPathHash = [&appendValue](const QByteArray &name,
+                                               const QString &path) {
+        appendValue(name, QCryptographicHash::hash(
+            path.toUtf8(), QCryptographicHash::Sha256).toHex());
+    };
+    appendPathHash(QByteArrayLiteral("application.path_sha256"),
+                   layout.applicationPath);
+    appendValue(QByteArrayLiteral("application.file_identity"),
+                layout.applicationFileIdentity.toUtf8());
+    appendValue(QByteArrayLiteral("application.sha256"),
+                layout.applicationSha256.toLatin1());
+    appendValue(QByteArrayLiteral("application.size_bytes"),
+                QByteArray::number(layout.applicationSizeBytes));
+    appendPathHash(QByteArrayLiteral("installation_root.path_sha256"),
+                   layout.installationRoot);
+    appendValue(QByteArrayLiteral("installation_root.file_identity"),
+                layout.installationRootFileIdentity.toUtf8());
+    appendPathHash(QByteArrayLiteral("artifact_root.path_sha256"),
+                   layout.artifactRoot);
+    appendValue(QByteArrayLiteral("artifact_root.file_identity"),
+                layout.artifactRootFileIdentity.toUtf8());
+    return QStringLiteral("current-installation-layout:sha256:%1")
+        .arg(QString::fromLatin1(QCryptographicHash::hash(
+            payload, QCryptographicHash::Sha256).toHex()));
+}
 
 struct Application
 {
@@ -608,12 +940,15 @@ QString installedArtifactSetIdentity(const InstalledSetData &installed)
 
 QString installedAuthorityIdentity(const QString &receiptIdentity,
                                    const QString &installedIdentity,
+                                   const QString &layoutIdentity,
                                    const QByteArray &publicKey)
 {
     QByteArray payload = QByteArrayLiteral(
         "aegisy-installed-artifact-set-authority/0.1\n");
     appendLine(&payload, QByteArrayLiteral("receipt.identity"), receiptIdentity);
     appendLine(&payload, QByteArrayLiteral("installed.identity"), installedIdentity);
+    appendLine(&payload, QByteArrayLiteral("installation.layout_identity"),
+               layoutIdentity);
     appendLine(&payload, QByteArrayLiteral("verification_key.sha256"),
                QString::fromLatin1(QCryptographicHash::hash(
                    publicKey, QCryptographicHash::Sha256).toHex()));
@@ -824,125 +1159,253 @@ QByteArray signaturePayload(const QJsonObject &envelope, QString *errorCode)
     return buildPayload(candidate);
 }
 
-InstalledAuthorityResult verifyInstalledAuthority(
-    const QString &receiptPath,
-    const QString &manifestPath,
-    const QString &runtimePath,
+class InstalledArtifactSetAuthority::Verifier
+{
+public:
+    static InstalledAuthorityResult verify(
+        const InstallationLayout &layout,
+        const QByteArray &publicKeyBase64,
+        qint64 nowMs,
+        const QString &expectedApplicationVersion,
+        const QString &expectedChannel,
+        const QString &expectedPlatform,
+        const QString &expectedArchitecture)
+    {
+        InstalledAuthorityResult result;
+        const auto reject = [&result](const QString &errorCode) {
+            result.ok = false;
+            result.authority = InstalledArtifactSetAuthority{};
+            result.errorCode = errorCode;
+            return result;
+        };
+        if (!validVersion(expectedApplicationVersion)
+            || !validChannel(expectedChannel)
+            || !validPlatformArchitecture(expectedPlatform,
+                                            expectedArchitecture)) {
+            return reject(QStringLiteral(
+                "installed-authority-expectation-invalid"));
+        }
+        LayoutPathObservation applicationObservation;
+        LayoutPathObservation installationRootObservation;
+        LayoutPathObservation artifactRootObservation;
+        if (!observeLayoutApplication(layout.applicationPath,
+                                      &applicationObservation)
+            || !observeLayoutDirectory(layout.installationRoot,
+                                       &installationRootObservation)
+            || !observeLayoutDirectory(layout.artifactRoot,
+                                       &artifactRootObservation)) {
+            return reject(QStringLiteral("installed-authority-layout-invalid"));
+        }
+        const QString artifactRoot = artifactRootObservation.canonicalPath;
+        const QString installationRoot =
+            installationRootObservation.canonicalPath;
+        const QString applicationCanonical = applicationObservation.canonicalPath;
+        const QString expectedReceiptPath = QDir(artifactRoot).filePath(
+            kInstalledReceiptFileName);
+        const QString expectedManifestPath = QDir(artifactRoot).filePath(
+            kArtifactManifestFileName);
+        const QString expectedRuntimePath = QDir(artifactRoot).filePath(
+            runtimeFileName());
+        if ((!samePath(artifactRoot, installationRoot)
+             && !pathWithin(installationRoot, artifactRoot))
+            || !pathWithin(installationRoot, applicationCanonical)
+            || samePath(applicationCanonical, expectedReceiptPath)
+            || samePath(applicationCanonical, expectedManifestPath)
+            || samePath(applicationCanonical, expectedRuntimePath)
+            || QFileInfo(layout.receiptPath).absoluteFilePath()
+                != QFileInfo(expectedReceiptPath).absoluteFilePath()
+            || QFileInfo(layout.manifestPath).absoluteFilePath()
+                != QFileInfo(expectedManifestPath).absoluteFilePath()
+            || QFileInfo(layout.runtimePath).absoluteFilePath()
+                != QFileInfo(expectedRuntimePath).absoluteFilePath()) {
+            return reject(QStringLiteral("installed-authority-layout-invalid"));
+        }
+
+        const QFileInfo receiptInfo(expectedReceiptPath);
+        const QFileInfo manifestInfo(expectedManifestPath);
+        if (receiptInfo.fileName() != kInstalledReceiptFileName
+            || manifestInfo.fileName() != kArtifactManifestFileName
+            || !receiptInfo.isFile() || !manifestInfo.isFile()
+            || receiptInfo.isSymLink() || manifestInfo.isSymLink()
+            || receiptInfo.canonicalFilePath().isEmpty()
+            || manifestInfo.canonicalFilePath().isEmpty()
+            || QFileInfo(receiptInfo.absolutePath()).canonicalFilePath()
+                != QFileInfo(manifestInfo.absolutePath()).canonicalFilePath()) {
+            return reject(QStringLiteral("installed-authority-path-invalid"));
+        }
+        NativePathMetadata receiptMetadata;
+        NativePathMetadata manifestMetadata;
+        if (!inspectNativePath(receiptInfo.absoluteFilePath(), false,
+                               &receiptMetadata)
+            || !inspectNativePath(manifestInfo.absoluteFilePath(), false,
+                                  &manifestMetadata)) {
+            return reject(QStringLiteral("installed-authority-path-invalid"));
+        }
+        const QString receiptCanonical = receiptInfo.canonicalFilePath();
+        const QString manifestCanonical = manifestInfo.canonicalFilePath();
+        const QFileInfo runtimeInfo(expectedRuntimePath);
+        const QString runtimeCanonical = runtimeInfo.canonicalFilePath();
+        if (!runtimeInfo.isFile() || !runtimeInfo.isReadable()
+            || runtimeInfo.isSymLink() || runtimeCanonical.isEmpty()) {
+            return reject(QStringLiteral("installed-authority-path-invalid"));
+        }
+        QFile receiptFile(receiptCanonical);
+        if (!receiptFile.open(QIODevice::ReadOnly)) {
+            return reject(QStringLiteral("installed-receipt-unreadable"));
+        }
+        const qint64 receiptSize = receiptFile.size();
+        if (receiptSize <= 0 || receiptSize > kMaximumEnvelopeBytes) {
+            return reject(QStringLiteral("installed-receipt-size-invalid"));
+        }
+        const QByteArray receiptBytes = receiptFile.read(
+            kMaximumEnvelopeBytes + 1);
+        if (receiptBytes.size() != receiptSize
+            || receiptFile.error() != QFile::NoError || !receiptFile.atEnd()) {
+            return reject(QStringLiteral("installed-receipt-read-failed"));
+        }
+        Candidate candidate;
+        QByteArray publicKey;
+        QByteArray payload;
+        QString errorCode;
+        if (!parseVerifiedCandidate(receiptBytes, publicKeyBase64, nowMs,
+                                    &candidate, &publicKey, &payload,
+                                    &errorCode)) {
+            return reject(QStringLiteral("installed-receipt-") + errorCode);
+        }
+        if (candidate.application.version != expectedApplicationVersion
+            || candidate.channel != expectedChannel
+            || candidate.application.platform != expectedPlatform
+            || candidate.application.architecture != expectedArchitecture) {
+            return reject(QStringLiteral("installed-receipt-target-mismatch"));
+        }
+        const ArtifactManifest::VerificationResult manifest =
+            ArtifactManifest::verifyFile(manifestCanonical, runtimeCanonical);
+        if (!manifest.ok) {
+            return reject(QStringLiteral("installed-manifest-invalid"));
+        }
+        if (manifest.manifestSha256 != candidate.manifest.sha256
+            || manifest.runtimeId != candidate.manifest.runtime.id
+            || manifest.runtimeVersion != candidate.manifest.runtime.version
+            || manifest.adapterId != candidate.manifest.adapter.id
+            || manifest.adapterVersion != candidate.manifest.adapter.version) {
+            return reject(QStringLiteral("installed-manifest-mismatch"));
+        }
+
+        LayoutPathObservation finalApplicationObservation;
+        LayoutPathObservation finalInstallationRootObservation;
+        LayoutPathObservation finalArtifactRootObservation;
+        if (!observeLayoutApplication(applicationCanonical,
+                                      &finalApplicationObservation)
+            || !observeLayoutDirectory(installationRoot,
+                                       &finalInstallationRootObservation)
+            || !observeLayoutDirectory(artifactRoot,
+                                       &finalArtifactRootObservation)
+            || !samePath(finalApplicationObservation.canonicalPath,
+                         applicationCanonical)
+            || finalApplicationObservation.fileIdentity
+                != applicationObservation.fileIdentity
+            || finalApplicationObservation.sha256
+                != applicationObservation.sha256
+            || finalApplicationObservation.sizeBytes
+                != applicationObservation.sizeBytes
+            || finalInstallationRootObservation.fileIdentity
+                != installationRootObservation.fileIdentity
+            || finalArtifactRootObservation.fileIdentity
+                != artifactRootObservation.fileIdentity) {
+            return reject(QStringLiteral("installed-authority-layout-drift"));
+        }
+
+        InstalledSetData installed;
+        installed.releaseSequence = candidate.releaseSequence;
+        installed.channel = candidate.channel;
+        installed.applicationVersion = candidate.application.version;
+        installed.platform = candidate.application.platform;
+        installed.architecture = candidate.application.architecture;
+        installed.manifestSha256 = candidate.manifest.sha256;
+        installed.runtimeId = candidate.manifest.runtime.id;
+        installed.runtimeVersion = candidate.manifest.runtime.version;
+        installed.adapterId = candidate.manifest.adapter.id;
+        installed.adapterVersion = candidate.manifest.adapter.version;
+        const QString receiptIdentity = QStringLiteral(
+            "update-artifact-set:sha256:%1")
+            .arg(QString::fromLatin1(QCryptographicHash::hash(
+                payload, QCryptographicHash::Sha256).toHex()));
+        const QString installedIdentity = installedArtifactSetIdentity(installed);
+
+        result.authority.m_valid = true;
+        result.authority.m_releaseSequence = installed.releaseSequence;
+        result.authority.m_channel = installed.channel;
+        result.authority.m_applicationVersion = installed.applicationVersion;
+        result.authority.m_platform = installed.platform;
+        result.authority.m_architecture = installed.architecture;
+        result.authority.m_manifestSha256 = installed.manifestSha256;
+        result.authority.m_runtimeId = installed.runtimeId;
+        result.authority.m_runtimeVersion = installed.runtimeVersion;
+        result.authority.m_adapterId = installed.adapterId;
+        result.authority.m_adapterVersion = installed.adapterVersion;
+        result.authority.m_receiptIdentity = receiptIdentity;
+        result.authority.m_installedArtifactSetIdentity = installedIdentity;
+        InstallationLayout verifiedLayout = layout;
+        verifiedLayout.applicationPath = applicationCanonical;
+        verifiedLayout.installationRoot = installationRoot;
+        verifiedLayout.artifactRoot = artifactRoot;
+        verifiedLayout.receiptPath = receiptCanonical;
+        verifiedLayout.manifestPath = manifestCanonical;
+        verifiedLayout.runtimePath = runtimeCanonical;
+        verifiedLayout.applicationFileIdentity =
+            finalApplicationObservation.fileIdentity;
+        verifiedLayout.applicationSha256 = finalApplicationObservation.sha256;
+        verifiedLayout.applicationSizeBytes =
+            finalApplicationObservation.sizeBytes;
+        verifiedLayout.installationRootFileIdentity =
+            finalInstallationRootObservation.fileIdentity;
+        verifiedLayout.artifactRootFileIdentity =
+            finalArtifactRootObservation.fileIdentity;
+        const QString layoutIdentity = installationLayoutIdentity(verifiedLayout);
+        if (layoutIdentity.isEmpty()) {
+            return reject(QStringLiteral("installed-authority-layout-invalid"));
+        }
+        result.authority.m_installationLayoutIdentity = layoutIdentity;
+        result.authority.m_authorityIdentity = installedAuthorityIdentity(
+            receiptIdentity, installedIdentity, layoutIdentity, publicKey);
+        result.authority.m_applicationPath = applicationCanonical;
+        result.authority.m_installationRoot = installationRoot;
+        result.authority.m_receiptPath = receiptCanonical;
+        result.authority.m_manifestPath = manifestCanonical;
+        result.authority.m_runtimePath = runtimeCanonical;
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
+        result.authority.m_testOnlyLayout = verifiedLayout.testOnly;
+#endif
+        result.ok = true;
+        return result;
+    }
+};
+
+InstalledAuthorityResult verifyCurrentInstallationAuthority(
     const QByteArray &publicKeyBase64,
     qint64 nowMs,
-    const QString &expectedApplicationVersion,
-    const QString &expectedChannel,
-    const QString &expectedPlatform,
-    const QString &expectedArchitecture)
+    const QString &expectedChannel)
 {
-    InstalledAuthorityResult result;
-    const auto reject = [&result](const QString &errorCode) {
-        result.ok = false;
-        result.authority = InstalledArtifactSetAuthority{};
+    InstallationLayout layout;
+    QString errorCode;
+    if (!deriveCurrentInstallationLayout(&layout, &errorCode)) {
+        InstalledAuthorityResult result;
         result.errorCode = errorCode;
         return result;
-    };
-    if (!validVersion(expectedApplicationVersion)
-        || !validChannel(expectedChannel)
-        || !validPlatformArchitecture(expectedPlatform, expectedArchitecture)) {
-        return reject(QStringLiteral("installed-authority-expectation-invalid"));
     }
-    const QFileInfo receiptInfo(receiptPath);
-    const QFileInfo manifestInfo(manifestPath);
-    if (receiptInfo.fileName() != kInstalledReceiptFileName
-        || manifestInfo.fileName() != kArtifactManifestFileName
-        || !receiptInfo.isFile() || !manifestInfo.isFile()
-        || receiptInfo.isSymLink() || manifestInfo.isSymLink()
-        || receiptInfo.canonicalFilePath().isEmpty()
-        || manifestInfo.canonicalFilePath().isEmpty()
-        || QFileInfo(receiptInfo.absolutePath()).canonicalFilePath()
-            != QFileInfo(manifestInfo.absolutePath()).canonicalFilePath()) {
-        return reject(QStringLiteral("installed-authority-path-invalid"));
+    QString platform;
+    QString architecture;
+    const QString applicationVersion = QCoreApplication::applicationVersion();
+    if (!currentReleaseTarget(&platform, &architecture)
+        || !validVersion(applicationVersion)) {
+        InstalledAuthorityResult result;
+        result.errorCode = QStringLiteral(
+            "installed-authority-application-invalid");
+        return result;
     }
-    const QString receiptCanonical = receiptInfo.canonicalFilePath();
-    const QString manifestCanonical = manifestInfo.canonicalFilePath();
-    const QFileInfo runtimeInfo(runtimePath);
-    const QString runtimeCanonical = runtimeInfo.canonicalFilePath();
-    if (!runtimeInfo.isFile() || !runtimeInfo.isReadable()
-        || runtimeInfo.isSymLink() || runtimeCanonical.isEmpty()) {
-        return reject(QStringLiteral("installed-authority-path-invalid"));
-    }
-    QFile receiptFile(receiptCanonical);
-    if (!receiptFile.open(QIODevice::ReadOnly)) {
-        return reject(QStringLiteral("installed-receipt-unreadable"));
-    }
-    const qint64 receiptSize = receiptFile.size();
-    if (receiptSize <= 0 || receiptSize > kMaximumEnvelopeBytes) {
-        return reject(QStringLiteral("installed-receipt-size-invalid"));
-    }
-    const QByteArray receiptBytes = receiptFile.read(kMaximumEnvelopeBytes + 1);
-    if (receiptBytes.size() != receiptSize
-        || receiptFile.error() != QFile::NoError || !receiptFile.atEnd()) {
-        return reject(QStringLiteral("installed-receipt-read-failed"));
-    }
-    Candidate candidate;
-    QByteArray publicKey;
-    QByteArray payload;
-    QString errorCode;
-    if (!parseVerifiedCandidate(receiptBytes, publicKeyBase64, nowMs,
-                                &candidate, &publicKey, &payload, &errorCode)) {
-        return reject(QStringLiteral("installed-receipt-") + errorCode);
-    }
-    if (candidate.application.version != expectedApplicationVersion
-        || candidate.channel != expectedChannel
-        || candidate.application.platform != expectedPlatform
-        || candidate.application.architecture != expectedArchitecture) {
-        return reject(QStringLiteral("installed-receipt-target-mismatch"));
-    }
-    const ArtifactManifest::VerificationResult manifest =
-        ArtifactManifest::verifyFile(manifestCanonical, runtimeCanonical);
-    if (!manifest.ok) {
-        return reject(QStringLiteral("installed-manifest-invalid"));
-    }
-    if (manifest.manifestSha256 != candidate.manifest.sha256
-        || manifest.runtimeId != candidate.manifest.runtime.id
-        || manifest.runtimeVersion != candidate.manifest.runtime.version
-        || manifest.adapterId != candidate.manifest.adapter.id
-        || manifest.adapterVersion != candidate.manifest.adapter.version) {
-        return reject(QStringLiteral("installed-manifest-mismatch"));
-    }
-
-    InstalledSetData installed;
-    installed.releaseSequence = candidate.releaseSequence;
-    installed.channel = candidate.channel;
-    installed.applicationVersion = candidate.application.version;
-    installed.platform = candidate.application.platform;
-    installed.architecture = candidate.application.architecture;
-    installed.manifestSha256 = candidate.manifest.sha256;
-    installed.runtimeId = candidate.manifest.runtime.id;
-    installed.runtimeVersion = candidate.manifest.runtime.version;
-    installed.adapterId = candidate.manifest.adapter.id;
-    installed.adapterVersion = candidate.manifest.adapter.version;
-    const QString receiptIdentity = QStringLiteral("update-artifact-set:sha256:%1")
-        .arg(QString::fromLatin1(QCryptographicHash::hash(
-            payload, QCryptographicHash::Sha256).toHex()));
-    const QString installedIdentity = installedArtifactSetIdentity(installed);
-
-    result.authority.m_valid = true;
-    result.authority.m_releaseSequence = installed.releaseSequence;
-    result.authority.m_channel = installed.channel;
-    result.authority.m_applicationVersion = installed.applicationVersion;
-    result.authority.m_platform = installed.platform;
-    result.authority.m_architecture = installed.architecture;
-    result.authority.m_manifestSha256 = installed.manifestSha256;
-    result.authority.m_runtimeId = installed.runtimeId;
-    result.authority.m_runtimeVersion = installed.runtimeVersion;
-    result.authority.m_adapterId = installed.adapterId;
-    result.authority.m_adapterVersion = installed.adapterVersion;
-    result.authority.m_receiptIdentity = receiptIdentity;
-    result.authority.m_installedArtifactSetIdentity = installedIdentity;
-    result.authority.m_authorityIdentity = installedAuthorityIdentity(
-        receiptIdentity, installedIdentity, publicKey);
-    result.authority.m_receiptPath = receiptCanonical;
-    result.authority.m_manifestPath = manifestCanonical;
-    result.authority.m_runtimePath = runtimeCanonical;
-    result.ok = true;
-    return result;
+    return InstalledArtifactSetAuthority::Verifier::verify(
+        layout, publicKeyBase64, nowMs, applicationVersion,
+        expectedChannel, platform, architecture);
 }
 
 Decision verifyCandidate(const QByteArray &envelopeJson,
@@ -955,11 +1418,31 @@ Decision verifyCandidate(const QByteArray &envelopeJson,
     if (!authority.m_valid) {
         return invalidDecision(QStringLiteral("installed-artifact-authority-invalid"));
     }
-    const InstalledAuthorityResult refreshed = verifyInstalledAuthority(
-        authority.m_receiptPath, authority.m_manifestPath,
-        authority.m_runtimePath, publicKeyBase64, nowMs,
-        authority.m_applicationVersion, authority.m_channel,
-        authority.m_platform, authority.m_architecture);
+    InstallationLayout layout;
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
+    if (authority.m_testOnlyLayout) {
+        layout.applicationPath = authority.m_applicationPath;
+        layout.installationRoot = authority.m_installationRoot;
+        layout.artifactRoot = QFileInfo(authority.m_receiptPath).absolutePath();
+        layout.receiptPath = authority.m_receiptPath;
+        layout.manifestPath = authority.m_manifestPath;
+        layout.runtimePath = authority.m_runtimePath;
+        layout.testOnly = true;
+    } else
+#endif
+    {
+        QString layoutError;
+        if (!deriveCurrentInstallationLayout(&layout, &layoutError)
+            || QCoreApplication::applicationVersion()
+                != authority.m_applicationVersion) {
+            return invalidDecision(
+                QStringLiteral("installed-artifact-authority-invalid"));
+        }
+    }
+    const InstalledAuthorityResult refreshed =
+        InstalledArtifactSetAuthority::Verifier::verify(
+            layout, publicKeyBase64, nowMs, authority.m_applicationVersion,
+            authority.m_channel, authority.m_platform, authority.m_architecture);
     if (!refreshed.ok
         || refreshed.authority.m_authorityIdentity != authority.m_authorityIdentity) {
         return invalidDecision(QStringLiteral("installed-artifact-authority-invalid"));
@@ -981,8 +1464,10 @@ Decision verifyCandidate(const QByteArray &envelopeJson,
     const QString installedIdentity = installedArtifactSetIdentity(installed);
     if (publicKey.isEmpty() || !validInstalled(installed)
         || current.m_installedArtifactSetIdentity != installedIdentity
+        || current.m_installationLayoutIdentity.isEmpty()
         || current.m_authorityIdentity != installedAuthorityIdentity(
-            current.m_receiptIdentity, installedIdentity, publicKey)) {
+            current.m_receiptIdentity, installedIdentity,
+            current.m_installationLayoutIdentity, publicKey)) {
         return invalidDecision(QStringLiteral("installed-artifact-authority-invalid"));
     }
 
@@ -1035,6 +1520,30 @@ Decision verifyCandidateWithUntrustedInputs(
     return evaluateCandidate(
         candidate, payload, publicKey, nowMs, installed, QString(),
         selectedChannel, acceptedReleaseSequenceHighWater);
+}
+
+InstalledAuthorityResult verifyInstalledAuthorityAtRoot(
+    const QString &artifactRoot,
+    const QByteArray &publicKeyBase64,
+    qint64 nowMs,
+    const QString &expectedApplicationVersion,
+    const QString &expectedChannel,
+    const QString &expectedPlatform,
+    const QString &expectedArchitecture)
+{
+    InstallationLayout layout;
+    const QString canonicalRoot = canonicalDirectory(artifactRoot);
+    layout.applicationPath = QDir(canonicalRoot).filePath(
+        QStringLiteral("AegisyClient.test-image"));
+    layout.installationRoot = canonicalRoot;
+    layout.artifactRoot = canonicalRoot;
+    layout.receiptPath = QDir(canonicalRoot).filePath(kInstalledReceiptFileName);
+    layout.manifestPath = QDir(canonicalRoot).filePath(kArtifactManifestFileName);
+    layout.runtimePath = QDir(canonicalRoot).filePath(runtimeFileName());
+    layout.testOnly = true;
+    return InstalledArtifactSetAuthority::Verifier::verify(
+        layout, publicKeyBase64, nowMs, expectedApplicationVersion,
+        expectedChannel, expectedPlatform, expectedArchitecture);
 }
 
 } // namespace Testing

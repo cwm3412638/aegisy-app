@@ -3558,32 +3558,50 @@ Implemented visual baseline:
   surrogates, unsafe numbers, excessive depth/nodes, and unknown fields. A valid
   result can set only `candidateCompatible`; download and install authority remain
   false. Production candidate evaluation no longer accepts a publicly constructible
-  installed tuple. `verifyInstalledAuthority` derives a private
-  `InstalledArtifactSetAuthority` from the exact adjacent
-  `aegisy-update-artifact-set.json`, `aegisy-agentd.manifest.json`, Runtime, and
-  adapter bytes. It verifies the signed receipt target, complete Manifest SHA-256 and
-  Runtime/adapter identity/version, ordinary-file/link policy, and artifact hashes,
-  then binds receipt, installed-set, and verification-key identities. Candidate
-  evaluation rereads and revalidates that complete local graph before every decision;
-  receipt, Manifest, Runtime, adapter, expectation, or key drift invalidates a cached
-  authority. The scalar tuple entry point exists only under the dedicated CTest
-  compile definition. The evaluation identity binds candidate, installed tuple,
-  installed authority, verification-key hash, selected channel, caller-supplied
-  release-sequence high-water value, and evaluation time.
-- This evaluator is not integrated into either platform `UpdateManager`, performs no
-  network/download/install operation, and still has no authority binding those
-  caller-selected paths and expected application tuple to the currently executing
-  signed Aegisy installation. Future host integration must derive all paths from the
-  fixed current bundle layout; configuration or arbitrary caller paths cannot become
-  installed-package authority. The current receipt and candidate also use one
+  installed tuple or caller-selected verification paths. The only production factory,
+  `verifyCurrentInstallationAuthority`, derives the fixed Windows application
+  directory or macOS `AegisyClient.app/Contents/MacOS` layout from the executing
+  `AegisyClient`. It verifies exact-name adjacent signed receipt, Manifest, Runtime,
+  and adapter bytes; rejects link/reparse/multiple-link metadata; and binds the signed
+  artifact tuple together with canonical directory identities and the current
+  application file identity, size, and SHA-256. It reobserves the application/layout
+  after verification, and candidate evaluation rederives and revalidates the entire
+  graph. Application replacement, receipt/Manifest/Runtime/adapter drift, expectation,
+  or key drift invalidates cached authority. The scalar tuple and arbitrary-root
+  entry points exist only under the dedicated CTest compile definition. A Unicode
+  child-process fixture copies the test image into the production-shaped layout and
+  proves the public factory and candidate revalidation path. The evaluation identity
+  binds candidate, installed tuple, installed authority, verification-key hash,
+  selected channel, caller-supplied release-sequence high-water value, and time.
+- `aegisy-update-progress-record/0.1` is an internal single-writer continuity
+  foundation. It binds release sequence, artifact-set identity, ordered update phase,
+  revision, monotonic time, previous identity, and current identity. Bounded lossless
+  parsing, exact uncertain retry, same-sequence conflict, phase/rollback checks,
+  single-link files, private Unix permissions with owner-execute, group/other, and
+  setuid/setgid/sticky mode rejection,
+  atomic replacement, and post-commit reread are covered. Persisted and returned
+  download/install/rollback authority is fixed false. This Store is not connected to
+  either updater and is not an anti-
+  deletion anchor: it depends on a trusted external identity/floor. `QLockFile`
+  supplies the local single-writer gate, but there is no secure-storage anchor,
+  cross-resource CAS, crash/framework compensation, or signed-package binding;
+  deleting both local and external evidence permits a fresh record. The local lock
+  fixture passes and `windows_packaging_policy` keeps the focused CTest in the clean-
+  runner graph, but no clean Windows or process-crash execution evidence exists.
+- This evaluator is not integrated into either platform `UpdateManager` and performs
+  no network/download/install operation. Its current-image hash and file identity are
+  locally bound, but the signed receipt does not bind that hash and the verifier does
+  not prove macOS code signing/notarization, Windows Authenticode, or outer-installer
+  membership; it is therefore not current signed-package authority. The current
+  receipt and candidate also use one
   verification key, so reviewed Key IDs, validity/revocation, rotation lineage, and a
   Key Ring identity remain required before historical receipts can survive release-key
   rotation. Path checks, opens, hashes, and later process/install actions still have
-  cross-file TOCTOU windows. There is no durable integrity-checked anti-deletion update
-  record. A scalar high-water cannot safely choose both when to block replay and when
-  to permit crash recovery; the production record must atomically bind
-  `{sequence, artifact-set identity, phase}`, permit only exact-identity idempotent
-  recovery, and reject same-sequence identity conflicts. Sparkle 2.9.4 can veto
+  cross-file TOCTOU windows. The progress Store does not close anti-deletion or
+  cross-resource updater/secure-anchor recovery; its exact
+  `{sequence, artifact-set identity, phase, revision}`
+  record must be bound to a secure durable anchor and updater transaction before it
+  can permit recovery. Sparkle 2.9.4 can veto
   a new candidate through a strongly retained synchronous delegate, but resume skips
   that callback; current generated deltas also lack a signed source-to-target binding.
   WinSparkle 0.9.3 exposes no candidate object or pre-download veto, so Windows needs
@@ -3601,7 +3619,7 @@ Implemented visual baseline:
   string conversion, channel/platform expectation drift, a valid signed receipt
   replacement with a different release sequence, Manifest replacement after authority
   creation, and signed receipt Runtime/adapter version disagreement with the local
-  Manifest. The final local gate passes the complete application build, all `27/27`
+  Manifest. The final local gate passes the complete application build, all `28/28`
   serial desktop
   CTests, strict OpenSpec validation, and `git diff --check`; this is macOS source and
   runtime evidence only and grants no packaged-update or Windows authority.

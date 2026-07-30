@@ -1,12 +1,15 @@
 #include "update_artifact_set.h"
 
 #include <QByteArray>
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QString>
 #include <QTemporaryDir>
 #include <QVector>
@@ -14,6 +17,15 @@
 #include <openssl/evp.h>
 
 #include <cstdio>
+
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -283,6 +295,29 @@ QByteArray writeBytes(const QString &path, const QByteArray &bytes)
     return QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex();
 }
 
+bool copyExecutable(const QString &source, const QString &destination)
+{
+    if (!QFile::copy(source, destination)) return false;
+    const QFileDevice::Permissions permissions = QFile::permissions(destination)
+        | QFileDevice::ExeOwner | QFileDevice::ExeUser
+        | QFileDevice::ExeGroup | QFileDevice::ExeOther;
+    return QFile::setPermissions(destination, permissions);
+}
+
+bool createHardLink(const QString &existingPath, const QString &linkPath)
+{
+#ifdef Q_OS_WIN
+    const QString nativeExisting = QDir::toNativeSeparators(existingPath);
+    const QString nativeLink = QDir::toNativeSeparators(linkPath);
+    return CreateHardLinkW(
+        reinterpret_cast<LPCWSTR>(nativeLink.utf16()),
+        reinterpret_cast<LPCWSTR>(nativeExisting.utf16()), nullptr) != 0;
+#else
+    return ::link(QFile::encodeName(existingPath).constData(),
+                  QFile::encodeName(linkPath).constData()) == 0;
+#endif
+}
+
 QJsonObject signedSetEnvelope(
     quint64 releaseSequence,
     const QString &applicationVersion,
@@ -331,6 +366,147 @@ QJsonObject signedSetEnvelope(
          }},
         {QStringLiteral("signature"), QString()},
     };
+}
+
+int currentInstallationChildMain(const QStringList &arguments)
+{
+    if (arguments.size() != 4) return 2;
+    QCoreApplication::setApplicationVersion(QStringLiteral("2.5.2"));
+    const QByteArray publicKey = arguments.at(2).toLatin1();
+    const UpdateArtifactSet::InstalledAuthorityResult installed =
+        UpdateArtifactSet::verifyCurrentInstallationAuthority(
+            publicKey, kNowMs, QStringLiteral("stable"));
+    if (!installed.ok) {
+        std::fprintf(stderr, "current installation authority failed: %s\n",
+                     installed.errorCode.toUtf8().constData());
+        return 1;
+    }
+
+    QFile candidateFile(arguments.at(3));
+    if (!candidateFile.open(QIODevice::ReadOnly)
+        || candidateFile.size() <= 0
+        || candidateFile.size() > kMaximumEnvelopeBytes) {
+        return 1;
+    }
+    const QByteArray candidate = candidateFile.read(kMaximumEnvelopeBytes + 1);
+    if (candidate.size() != candidateFile.size() || !candidateFile.atEnd()) {
+        return 1;
+    }
+    const UpdateArtifactSet::Decision decision = UpdateArtifactSet::verifyCandidate(
+        candidate, publicKey, kNowMs, installed.authority,
+        QStringLiteral("stable"), 41);
+    return decision.state == UpdateArtifactSet::State::Compatible
+            && decision.candidateCompatible
+            && !decision.downloadAuthorized
+            && !decision.installAuthorized
+            && decision.installedAuthorityIdentity
+                == installed.authority.authorityIdentity()
+        ? 0 : 1;
+}
+
+bool productionInstallationLayoutTest(
+    const SigningKey &key,
+    const QByteArray &receiptBytes,
+    const QByteArray &manifestBytes,
+    const QByteArray &runtimeBytes,
+    const QByteArray &adapterBytes,
+    const QByteArray &candidateBytes)
+{
+#if !defined(Q_OS_WIN) && !defined(Q_OS_MACOS)
+    Q_UNUSED(key);
+    Q_UNUSED(receiptBytes);
+    Q_UNUSED(manifestBytes);
+    Q_UNUSED(runtimeBytes);
+    Q_UNUSED(adapterBytes);
+    Q_UNUSED(candidateBytes);
+    return true;
+#else
+    QTemporaryDir directory(
+        QDir::tempPath()
+        + QStringLiteral("/aegisy-current-install-\u9a8c\u8bc1-XXXXXX"));
+    if (!expect(directory.isValid(),
+                "production installation fixture directory is unavailable")) {
+        return false;
+    }
+
+    QString artifactRoot = directory.path();
+#ifdef Q_OS_MACOS
+    artifactRoot = QDir(directory.path()).filePath(
+        QStringLiteral("AegisyClient.app/Contents/MacOS"));
+#endif
+    if (!expect(QDir().mkpath(artifactRoot),
+                "production installation fixture layout could not be created")) {
+        return false;
+    }
+#ifdef Q_OS_WIN
+    const QString applicationName = QStringLiteral("AegisyClient.exe");
+#else
+    const QString applicationName = QStringLiteral("AegisyClient");
+#endif
+    const QString applicationPath = QDir(artifactRoot).filePath(applicationName);
+    const QString candidatePath = QDir(artifactRoot).filePath(
+        QStringLiteral("candidate-update.json"));
+    if (!expect(copyExecutable(QCoreApplication::applicationFilePath(),
+                               applicationPath),
+                "production AegisyClient fixture could not be copied")
+        || !expect(!writeBytes(
+                        QDir(artifactRoot).filePath(authorityRuntimeFileName()),
+                        runtimeBytes).isEmpty(),
+                   "production Runtime fixture could not be written")
+        || !expect(!writeBytes(
+                        QDir(artifactRoot).filePath(authorityAdapterFileName()),
+                        adapterBytes).isEmpty(),
+                   "production adapter fixture could not be written")
+        || !expect(!writeBytes(
+                        QDir(artifactRoot).filePath(
+                            QStringLiteral("aegisy-agentd.manifest.json")),
+                        manifestBytes).isEmpty(),
+                   "production Manifest fixture could not be written")
+        || !expect(!writeBytes(
+                        QDir(artifactRoot).filePath(
+                            QStringLiteral("aegisy-update-artifact-set.json")),
+                        receiptBytes).isEmpty(),
+                   "production receipt fixture could not be written")
+        || !expect(!writeBytes(candidatePath, candidateBytes).isEmpty(),
+                   "production candidate fixture could not be written")) {
+        return false;
+    }
+
+    QProcess child;
+    child.setProgram(applicationPath);
+    child.setArguments({
+        QStringLiteral("--verify-current-installation"),
+        QString::fromLatin1(key.publicKeyBase64()),
+        candidatePath,
+    });
+#ifdef Q_OS_WIN
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(
+        QStringLiteral("PATH"),
+        QFileInfo(QCoreApplication::applicationFilePath()).absolutePath()
+            + QLatin1Char(';') + environment.value(QStringLiteral("PATH")));
+    child.setProcessEnvironment(environment);
+#endif
+    child.setProcessChannelMode(QProcess::SeparateChannels);
+    child.start();
+    const bool started = child.waitForStarted(10000);
+    const bool finished = started && child.waitForFinished(30000);
+    if (!finished) {
+        child.kill();
+        child.waitForFinished();
+    }
+    if (!started || !finished || child.exitStatus() != QProcess::NormalExit
+        || child.exitCode() != 0) {
+        const QByteArray error = child.readAllStandardError();
+        if (!error.isEmpty()) {
+            std::fprintf(stderr, "production fixture stderr: %s\n",
+                         error.constData());
+        }
+        return expect(false,
+                      "fixed production installation authority was rejected");
+    }
+    return true;
+#endif
 }
 
 bool expectInvalid(const QJsonObject &envelope, const SigningKey &key,
@@ -1284,11 +1460,18 @@ bool installedAuthorityTests(const SigningKey &key)
         authorityRuntimeFileName());
     const QString adapterPath = QDir(directory.path()).filePath(
         authorityAdapterFileName());
+    const QString applicationPath = QDir(directory.path()).filePath(
+        QStringLiteral("AegisyClient.test-image"));
     const QByteArray runtimeBytes = QByteArrayLiteral("installed runtime bytes");
     const QByteArray adapterBytes = QByteArrayLiteral("installed adapter bytes");
+    const QByteArray applicationBytes = QByteArrayLiteral(
+        "installed application bytes");
     const QByteArray runtimeSha256 = writeBytes(runtimePath, runtimeBytes);
     const QByteArray adapterSha256 = writeBytes(adapterPath, adapterBytes);
-    if (!expect(runtimeSha256.size() == 64 && adapterSha256.size() == 64,
+    const QByteArray applicationSha256 = writeBytes(
+        applicationPath, applicationBytes);
+    if (!expect(runtimeSha256.size() == 64 && adapterSha256.size() == 64
+                    && applicationSha256.size() == 64,
                 "installed authority artifacts could not be written")) {
         return false;
     }
@@ -1337,9 +1520,9 @@ bool installedAuthorityTests(const SigningKey &key)
     }
 
     const auto loadAuthority = [&]() {
-        return UpdateArtifactSet::verifyInstalledAuthority(
-            receiptPath, manifestPath, runtimePath, key.publicKeyBase64(),
-            kNowMs, QStringLiteral("2.5.2"), QStringLiteral("stable"),
+        return UpdateArtifactSet::Testing::verifyInstalledAuthorityAtRoot(
+            directory.path(), key.publicKeyBase64(), kNowMs,
+            QStringLiteral("2.5.2"), QStringLiteral("stable"),
             authorityPlatform(), authorityArchitecture());
     };
     UpdateArtifactSet::InstalledAuthorityResult authorityResult = loadAuthority();
@@ -1349,6 +1532,16 @@ bool installedAuthorityTests(const SigningKey &key)
                              QStringLiteral(
                                  "installed-artifact-set-authority:sha256:")),
                      "valid installed artifact authority was rejected");
+
+    const UpdateArtifactSet::InstalledAuthorityResult productionFactoryFromTest =
+        UpdateArtifactSet::verifyCurrentInstallationAuthority(
+            key.publicKeyBase64(), kNowMs, QStringLiteral("stable"));
+    ok = expect(!productionFactoryFromTest.ok
+                    && productionFactoryFromTest.errorCode
+                        == QStringLiteral(
+                            "installed-authority-application-invalid"),
+                "production authority factory accepted a non-Aegisy test executable")
+        && ok;
 
     QJsonObject candidate = signedSetEnvelope(
         42, QStringLiteral("2.6.0"), hashString('2'),
@@ -1371,11 +1564,40 @@ bool installedAuthorityTests(const SigningKey &key)
                     && compatible.compatibilityEvaluationIdentity.startsWith(
                         QStringLiteral("update-artifact-set-evaluation:sha256:")),
                 "candidate was not bound to the verified installed authority") && ok;
+    ok = productionInstallationLayoutTest(
+             key, receiptBytes, manifestBytes, runtimeBytes, adapterBytes,
+             candidateBytes)
+        && ok;
+
+    writeBytes(applicationPath, QByteArrayLiteral("replaced application bytes"));
+    const UpdateArtifactSet::Decision replacedApplicationAuthority =
+        UpdateArtifactSet::verifyCandidate(
+            candidateBytes, key.publicKeyBase64(), kNowMs,
+            authorityResult.authority, QStringLiteral("stable"), 41);
+    ok = expect(replacedApplicationAuthority.state
+                        == UpdateArtifactSet::State::Invalid
+                    && replacedApplicationAuthority.errorCode
+                        == QStringLiteral("installed-artifact-authority-invalid"),
+                "cached authority survived application image replacement") && ok;
+    writeBytes(applicationPath, applicationBytes);
+
+    const QString hardLinkedApplicationPath = QDir(directory.path()).filePath(
+        QStringLiteral("hard-linked-application-image"));
+    ok = expect(createHardLink(applicationPath, hardLinkedApplicationPath),
+                "application image hard link could not be created") && ok;
+    const UpdateArtifactSet::InstalledAuthorityResult hardLinkedApplication =
+        loadAuthority();
+    ok = expect(!hardLinkedApplication.ok
+                    && hardLinkedApplication.errorCode
+                        == QStringLiteral("installed-authority-layout-invalid"),
+                "multiply linked application image was accepted") && ok;
+    ok = expect(QFile::remove(hardLinkedApplicationPath),
+                "application image hard link could not be removed") && ok;
 
     UpdateArtifactSet::InstalledAuthorityResult rejected =
-        UpdateArtifactSet::verifyInstalledAuthority(
-            receiptPath, manifestPath, runtimePath, key.publicKeyBase64(),
-            kNowMs, QStringLiteral("2.5.2"), QStringLiteral("beta"),
+        UpdateArtifactSet::Testing::verifyInstalledAuthorityAtRoot(
+            directory.path(), key.publicKeyBase64(), kNowMs,
+            QStringLiteral("2.5.2"), QStringLiteral("beta"),
             authorityPlatform(), authorityArchitecture());
     ok = expect(!rejected.ok
                     && rejected.errorCode
@@ -1389,9 +1611,9 @@ bool installedAuthorityTests(const SigningKey &key)
     const QString otherPlatform = QStringLiteral("windows");
     const QString otherArchitecture = QStringLiteral("x86_64");
 #endif
-    rejected = UpdateArtifactSet::verifyInstalledAuthority(
-        receiptPath, manifestPath, runtimePath, key.publicKeyBase64(),
-        kNowMs, QStringLiteral("2.5.2"), QStringLiteral("stable"),
+    rejected = UpdateArtifactSet::Testing::verifyInstalledAuthorityAtRoot(
+        directory.path(), key.publicKeyBase64(), kNowMs,
+        QStringLiteral("2.5.2"), QStringLiteral("stable"),
         otherPlatform, otherArchitecture);
     ok = expect(!rejected.ok
                     && rejected.errorCode
@@ -1532,9 +1754,9 @@ bool installedAuthorityTests(const SigningKey &key)
                 "cached authority survived installed runtime drift") && ok;
     writeBytes(runtimePath, runtimeBytes);
 
-    rejected = UpdateArtifactSet::verifyInstalledAuthority(
-        receiptPath, manifestPath, runtimePath, key.publicKeyBase64(),
-        kNowMs, QStringLiteral("2.5.3"), QStringLiteral("stable"),
+    rejected = UpdateArtifactSet::Testing::verifyInstalledAuthorityAtRoot(
+        directory.path(), key.publicKeyBase64(), kNowMs,
+        QStringLiteral("2.5.3"), QStringLiteral("stable"),
         authorityPlatform(), authorityArchitecture());
     ok = expect(!rejected.ok
                     && rejected.errorCode
@@ -1543,15 +1765,27 @@ bool installedAuthorityTests(const SigningKey &key)
 
     const QString wrongReceiptPath = QDir(directory.path()).filePath(
         QStringLiteral("receipt.json"));
-    writeBytes(wrongReceiptPath, receiptBytes);
-    rejected = UpdateArtifactSet::verifyInstalledAuthority(
-        wrongReceiptPath, manifestPath, runtimePath, key.publicKeyBase64(),
-        kNowMs, QStringLiteral("2.5.2"), QStringLiteral("stable"),
-        authorityPlatform(), authorityArchitecture());
+    ok = expect(QFile::rename(receiptPath, wrongReceiptPath),
+                "installed receipt could not be moved to a noncanonical name") && ok;
+    rejected = loadAuthority();
     ok = expect(!rejected.ok
                     && rejected.errorCode
                         == QStringLiteral("installed-authority-path-invalid"),
                 "noncanonical installed receipt path was accepted") && ok;
+    ok = expect(QFile::rename(wrongReceiptPath, receiptPath),
+                "installed receipt could not be restored") && ok;
+
+    const QString hardLinkedReceiptPath = QDir(directory.path()).filePath(
+        QStringLiteral("hard-linked-installed-receipt.json"));
+    ok = expect(createHardLink(receiptPath, hardLinkedReceiptPath),
+                "installed receipt hard link could not be created") && ok;
+    rejected = loadAuthority();
+    ok = expect(!rejected.ok
+                    && rejected.errorCode
+                        == QStringLiteral("installed-authority-path-invalid"),
+                "multiply linked installed receipt was accepted") && ok;
+    ok = expect(QFile::remove(hardLinkedReceiptPath),
+                "installed receipt hard link could not be removed") && ok;
 
     QTemporaryDir otherDirectory;
     ok = expect(otherDirectory.isValid(),
@@ -1559,33 +1793,80 @@ bool installedAuthorityTests(const SigningKey &key)
     const QString separatedReceiptPath = QDir(otherDirectory.path()).filePath(
         QStringLiteral("aegisy-update-artifact-set.json"));
     writeBytes(separatedReceiptPath, receiptBytes);
-    rejected = UpdateArtifactSet::verifyInstalledAuthority(
-        separatedReceiptPath, manifestPath, runtimePath, key.publicKeyBase64(),
-        kNowMs, QStringLiteral("2.5.2"), QStringLiteral("stable"),
+    writeBytes(QDir(otherDirectory.path()).filePath(
+                   QStringLiteral("AegisyClient.test-image")),
+               applicationBytes);
+    rejected = UpdateArtifactSet::Testing::verifyInstalledAuthorityAtRoot(
+        otherDirectory.path(), key.publicKeyBase64(), kNowMs,
+        QStringLiteral("2.5.2"), QStringLiteral("stable"),
         authorityPlatform(), authorityArchitecture());
     ok = expect(!rejected.ok
                     && rejected.errorCode
                         == QStringLiteral("installed-authority-path-invalid"),
-                "receipt outside the manifest directory was accepted") && ok;
+                "incomplete alternate installation root was accepted") && ok;
 
     SigningKey otherKey;
     ok = expect(otherKey.initialize(), "second Ed25519 test key unavailable") && ok;
-    rejected = UpdateArtifactSet::verifyInstalledAuthority(
-        receiptPath, manifestPath, runtimePath, otherKey.publicKeyBase64(),
-        kNowMs, QStringLiteral("2.5.2"), QStringLiteral("stable"),
+    rejected = UpdateArtifactSet::Testing::verifyInstalledAuthorityAtRoot(
+        directory.path(), otherKey.publicKeyBase64(), kNowMs,
+        QStringLiteral("2.5.2"), QStringLiteral("stable"),
         authorityPlatform(), authorityArchitecture());
     ok = expect(!rejected.ok && !rejected.authority.isValid()
                     && rejected.errorCode
                         == QStringLiteral(
                             "installed-receipt-artifact-set-signature-invalid"),
                 "installed receipt verified under the wrong release key") && ok;
+
+    const QFileInfo rootInfo(directory.path());
+    QDir parentDirectory(rootInfo.absolutePath());
+    const QString preservedRootName = rootInfo.fileName()
+        + QStringLiteral("-preserved");
+    const QString preservedRootPath = parentDirectory.filePath(preservedRootName);
+    ok = expect(parentDirectory.rename(rootInfo.fileName(), preservedRootName),
+                "installed root could not be preserved for replacement test") && ok;
+    bool replacementCreated = false;
+    if (QFileInfo::exists(preservedRootPath)) {
+        replacementCreated = QDir().mkpath(directory.path())
+            && !writeBytes(applicationPath, applicationBytes).isEmpty()
+            && !writeBytes(runtimePath, runtimeBytes).isEmpty()
+            && !writeBytes(adapterPath, adapterBytes).isEmpty()
+            && !writeBytes(manifestPath, manifestBytes).isEmpty()
+            && !writeBytes(receiptPath, receiptBytes).isEmpty();
+        ok = expect(replacementCreated,
+                    "exact-byte replacement installation root could not be built")
+            && ok;
+        if (replacementCreated) {
+            const UpdateArtifactSet::Decision replacedRootAuthority =
+                UpdateArtifactSet::verifyCandidate(
+                    candidateBytes, key.publicKeyBase64(), kNowMs,
+                    authorityResult.authority, QStringLiteral("stable"), 41);
+            ok = expect(replacedRootAuthority.state
+                            == UpdateArtifactSet::State::Invalid
+                        && replacedRootAuthority.errorCode
+                            == QStringLiteral(
+                                "installed-artifact-authority-invalid"),
+                        "cached authority survived installation-root replacement")
+                && ok;
+        }
+        ok = expect(QDir(directory.path()).removeRecursively(),
+                    "replacement installation root could not be removed") && ok;
+        ok = expect(parentDirectory.rename(preservedRootName,
+                                           rootInfo.fileName()),
+                    "preserved installation root could not be restored") && ok;
+    }
     return ok;
 }
 
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
+    QCoreApplication application(argc, argv);
+    if (application.arguments().size() > 1
+        && application.arguments().at(1)
+            == QStringLiteral("--verify-current-installation")) {
+        return currentInstallationChildMain(application.arguments());
+    }
     SigningKey key;
     if (!expect(key.initialize(), "could not create Ed25519 test key")) return 1;
 
