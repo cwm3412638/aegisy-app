@@ -3545,6 +3545,42 @@ Implemented visual baseline:
   not Windows execution evidence. The macOS-to-Windows Cargo check is still blocked
   before this Rust module by missing Windows SDK C headers in SQLite/Tree-sitter.
   Keep `22.5` unchecked. See `docs/AEGISY-ARTIFACT-MANIFEST-PACKAGING.md`.
+- The platform-neutral signed-update compatibility foundation now defines
+  `aegisy-update-artifact-set/0.1`. It losslessly parses at most 256 KiB, verifies
+  an outer Ed25519 signature over a fixed ordered payload, and binds the release,
+  channel, `macos/arm64` or `windows/x86_64` target, full-installer URL/name/size/
+  SHA-256/Sparkle signature, target artifact-manifest plus exact Runtime/adapter,
+  and one to 64 strictly increasing complete compatible source artifact sets.
+  Canonical URL policy rejects userinfo, query, fragment, non-443 ports, encoded or
+  ambiguous path segments, basename drift, Windows device names, and wrong package
+  suffixes. The lossless parser rejects duplicate decoded keys, invalid UTF-8 or
+  surrogates, unsafe numbers, excessive depth/nodes, and unknown fields. A valid
+  result can set only `candidateCompatible`; download and install authority remain
+  false. Its evaluation identity binds candidate, caller-supplied installed tuple,
+  verification-key hash, selected channel, caller-supplied release-sequence
+  high-water value, and evaluation time.
+- This evaluator is not integrated into either platform `UpdateManager`, performs no
+  network/download/install operation, and has no trusted installed-tuple derivation
+  or durable integrity-checked anti-deletion update record. A scalar high-water cannot
+  safely choose both when to block replay and when to permit crash recovery; the
+  production record must atomically bind `{sequence, artifact-set identity, phase}`,
+  permit only exact-identity idempotent recovery, and reject same-sequence identity
+  conflicts. Sparkle 2.9.4 can veto
+  a new candidate through a strongly retained synchronous delegate, but resume skips
+  that callback; current generated deltas also lack a signed source-to-target binding.
+  WinSparkle 0.9.3 exposes no candidate object or pre-download veto, so Windows needs
+  an audited Aegisy-owned flow or reviewed maintained fork. Server-side feed filtering,
+  custom fields, and post-download callbacks grant no local compatibility authority.
+  The focused CTest passes the macOS/Windows positive cases, exact payload/identity,
+  signature/tamper, installed tuple/channel/replay, source count/order, URL/path,
+  BOM/UTF-8/surrogate/duplicate/depth/node/raw-size, integer/time, and fixed-false
+  authority boundaries; `windows_packaging_policy` locks it into the release test
+  graph. OpenSpec `22.5` remains unchecked pending real updater integration, nested-
+  binary-sign-then-manifest-then-outer-seal packaging order, delta/resume handling,
+  signed clean Windows/macOS evidence, and the earlier manifest/spawn gates. The
+  final local gate passes the complete application build, all `27/27` serial desktop
+  CTests, strict OpenSpec validation, and `git diff --check`; this is macOS source and
+  runtime evidence only and grants no packaged-update or Windows authority.
 
 ## Live Timeline Subscription And Ownership Recovery (2026-07-26)
 

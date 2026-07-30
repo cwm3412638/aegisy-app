@@ -209,6 +209,16 @@ endforeach()
 if(NOT cmake_source MATCHES "Qt6 REQUIRED COMPONENTS")
     message(FATAL_ERROR "Qt 6 release gate does not fail closed on missing components")
 endif()
+foreach(required_release_test
+        artifact_manifest_runtime_startup
+        update_artifact_set_compatibility)
+    string(FIND "${cmake_source}" "add_test(NAME ${required_release_test}"
+        required_release_test_offset)
+    if(required_release_test_offset EQUAL -1)
+        message(FATAL_ERROR
+            "CMake does not register required release test: ${required_release_test}")
+    endif()
+endforeach()
 
 file(READ "${AEGISY_SOURCE_DIR}/package-windows.bat" package_script)
 foreach(release_source workflow package_script)
@@ -219,4 +229,4 @@ foreach(release_source workflow package_script)
     endif()
 endforeach()
 message(STATUS
-    "Windows packaging policy includes OS, manifest, Unicode, complete Qt SDK, full CTest, trigger, and artifact gates")
+    "Windows packaging policy includes OS, manifest, Unicode, complete Qt SDK, full CTest, artifact-set, trigger, and artifact gates")

@@ -109,6 +109,7 @@ set(SOURCES
     src/help_dialog.cpp
     src/agent_runtime_client.cpp
     src/artifact_manifest.cpp
+    src/update_artifact_set.cpp
     src/workbench_emergency_policy.cpp
     src/agent_workbench_widget.cpp
     resources.qrc
@@ -155,6 +156,7 @@ set(HEADERS
     include/help_dialog.h
     include/agent_runtime_client.h
     include/artifact_manifest.h
+    include/update_artifact_set.h
     include/workbench_emergency_policy.h
     include/agent_workbench_widget.h
 )
@@ -842,6 +844,29 @@ if(BUILD_TESTING)
                 -DAEGISY_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
                 -DMANIFEST_VERIFIER=$<TARGET_FILE:AegisyArtifactManifestTest>
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/artifact_manifest_generator_test.cmake")
+
+    add_executable(AegisyUpdateArtifactSetTest
+        tests/update_artifact_set_test.cpp
+        src/update_artifact_set.cpp
+        include/update_artifact_set.h
+    )
+    target_include_directories(AegisyUpdateArtifactSetTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyUpdateArtifactSetTest PRIVATE
+            Qt6::Core OpenSSL::Crypto AegisyAapTransport)
+    else()
+        target_link_libraries(AegisyUpdateArtifactSetTest PRIVATE
+            Qt5::Core OpenSSL::Crypto AegisyAapTransport)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyUpdateArtifactSetTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyUpdateArtifactSetTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME update_artifact_set_compatibility
+        COMMAND AegisyUpdateArtifactSetTest)
 
     add_test(NAME windows_packaging_policy
         COMMAND "${CMAKE_COMMAND}"

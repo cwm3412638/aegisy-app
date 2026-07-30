@@ -2597,6 +2597,30 @@ Known limitations:
   `windows_packaging_policy` CTests pass 5/5 on macOS.
 - The complete serial desktop gate passes 26/26. Strict OpenSpec validation and
   `git diff --check` pass.
+- `include/update_artifact_set.h` and `src/update_artifact_set.cpp` add the
+  platform-neutral `aegisy-update-artifact-set/0.1` compatibility foundation. The
+  256 KiB envelope uses the generated lossless Transport JSON parser and rejects
+  duplicate decoded keys, invalid UTF-8/surrogates, unsafe numbers, excessive
+  depth/nodes, unknown fields, unsafe canonical HTTPS paths, noncanonical Base64,
+  and unsupported platform/installer combinations before accepting an outer
+  Ed25519 signature. Its fixed ordered payload binds release/channel/application,
+  full-installer URL/name/size/SHA-256/Sparkle signature, target manifest plus exact
+  Runtime/adapter identity/version, and one to 64 strictly increasing compatible
+  source artifact sets.
+- Compatibility requires the complete caller-supplied installed tuple, selected
+  channel, and release sequence above both the installed sequence and caller-supplied
+  accepted high-water value. The returned evaluation identity binds those inputs,
+  evaluation time, candidate identity, and verification-key hash. Compatible and
+  incompatible results both keep `downloadAuthorized` and `installAuthorized`
+  false. The focused `update_artifact_set_compatibility` CTest passes with macOS and
+  Windows positives, the exact canonical payload/identities, an externally generated
+  fixed Ed25519 vector, signature and nested field tampering, installed tuple
+  matching/mismatch, source ordering/count bounds including
+  a valid 64-source set, URL encoding/dot/device-name rejection, BOM/invalid UTF-8/
+  escaped duplicate/lone-surrogate/depth/node rejection, exact 256 KiB, installer
+  size, JSON-safe integer, clock-skew, key/signature, replay, and false-authority
+  boundaries. `windows_packaging_policy` requires this CTest and the real manifest
+  startup fixture in the complete release test graph.
 - Current macOS and Windows scripts do not bundle a pinned Codex adapter and do
   not invoke the generator. Packaged Runtime has no compile/package identity that
   makes manifest absence non-downgradable, and path verification followed by
@@ -2606,8 +2630,20 @@ Known limitations:
   Windows Unicode workflow's unfiltered CTest is configured to execute the new
   real-daemon fixture, but source/workflow inspection is not Windows execution. The
   local macOS-to-Windows Cargo check stops earlier in SQLite/Tree-sitter C because
-  Windows SDK headers are unavailable, so it supplies no Windows result. Task
-  `22.5` remains unchecked.
+  Windows SDK headers are unavailable, so it supplies no Windows result. The signed
+  compatibility evaluator is not called by either `UpdateManager`; its installed
+  tuple and scalar high-water inputs have no trusted persistent authority. Production
+  recovery must durably bind sequence, artifact-set identity, and phase so an exact
+  retry can resume while a same-sequence identity conflict fails closed. Sparkle candidate
+  veto does not cover resumed updates, the current contract binds no generated delta,
+  and WinSparkle 0.9.3 has no pre-download candidate veto. Server feed filtering or
+  post-download callbacks cannot replace that local gate. Task `22.5` remains
+  unchecked.
+- The final local gate passes the complete application build, all `27/27` serial
+  desktop CTests, strict OpenSpec validation, and `git diff --check`. This supplies
+  macOS/local contract evidence only; it is not signed-package, real updater,
+  zero-byte incompatible-download, resume/install recheck, or Windows execution
+  evidence.
 
 ## 22.6 Emergency Workbench Disable Foundation
 
