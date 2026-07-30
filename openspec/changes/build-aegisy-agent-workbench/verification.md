@@ -2777,6 +2777,15 @@ Known limitations:
   connection state is unchanged. The complete desktop build, focused Runtime
   environment and real macOS socket tests, and all `25/25` serial macOS CTests pass;
   the focused Runtime environment target also passes ten consecutive repetitions.
+- The dedicated Windows E2E source now retains both launch endpoint names, requires
+  rotation across process generations, proves the retired endpoint cannot connect
+  while the replacement remains ready, and exercises remote-form access only after
+  a control pipe with the same protected current-token-user DACL but without
+  `PIPE_REJECT_REMOTE_CLIENTS` proves that the host route is available. A local
+  connection must still succeed after the rejected remote-form
+  attempt. A supervised fake sidecar plus a parent-owned `QLocalServer` also proves
+  Qt observes `named-pipe-peer-mismatch`, sends no initialize bytes, does not fall
+  back to stdio, suppresses reconnect, and reaps the exact fake process generation.
 - This remains partial implementation evidence. It does not replace a clean Windows
   run proving wrong-server-PID rejection, remote-form client rejection, real named-
   pipe old-endpoint/callback ordering, or the complete dedicated Windows E2E. Keep
@@ -2785,7 +2794,10 @@ Known limitations:
   unfiltered CTest from the clean `windows-验证-源码` checkout, so the Qt
   environment fixture and dedicated named-pipe E2E will execute in the same checkout
   and validation run as the generated-protocol and desktop gates. The workflow has
-  not yet completed after this expansion. Remote-form rejection, Qt wrong-server-PID, and
-  old-endpoint checks still need dedicated Windows assertions; PID/creation-time
-  mismatch already has a deterministic Rust fixture but still needs Windows-runner
-  execution. Do not infer any of these results from workflow configuration.
+  not yet completed after this expansion. The new remote-form, Qt wrong-server-PID,
+  and old-endpoint assertions have not compiled or executed on Windows;
+  PID/creation-time mismatch already has a deterministic Rust fixture but likewise
+  still needs Windows-runner execution. Focused local
+  `agent_runtime_environment` and `windows_packaging_policy` CTests pass, but neither
+  compiles the Windows-only E2E branch. Do not infer Windows results from source or
+  workflow configuration.

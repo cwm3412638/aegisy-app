@@ -285,18 +285,22 @@
     `local=true`, `peer_verified=true`, and deliberately keeps
     `authenticated=false`/`encrypted=false` until `4.4`. The Windows packaging
     validation workflow runs the real E2E for initialization, protected DACL,
-    restart generation, supervising-parent exit, selected-pipe failure against a
-    valid fake stdio sidecar, malformed names, same-name collision, wrong client PID,
-    and cleanup. Validation remains read-only and always runs for a reused release
+    restart generation and endpoint isolation, supervising-parent exit, selected-pipe
+    failure against a valid fake stdio sidecar, malformed names, same-name collision,
+    remote-form rejection with a matching current-user DACL control that omits the
+    remote-rejection flag, wrong client PID, Qt
+    wrong-server-PID rejection before initialize, and cleanup. Validation remains
+    read-only and always runs for a reused release
     version; main-only installer publication has a separate minimal write-permission
     job. The validation checkout is now a clean Unicode path and its complete Release
     build plus unfiltered CTest includes this dedicated E2E, but that expanded job has
     not yet completed on Windows. Local macOS build, generator, Schema, Rust,
     `25/25` desktop regression, and extracted
-    Windows-API compile gates pass, but are not Windows runtime evidence. Remote-form
-    rejection, Qt wrong-server-PID rejection, old endpoint/stale-callback isolation,
-    and creation-time/PID-reuse mismatch still require deterministic Windows runtime
-    coverage before this task can close.
+    Windows-API compile gates pass, but are not Windows runtime evidence. Deterministic
+    source fixtures are present for remote-form rejection, Qt wrong-server-PID
+    rejection, old endpoint/stale-callback isolation, and creation-time/PID-reuse
+    mismatch; all still require successful execution in the complete clean Windows
+    run before this task can close.
 - [ ] 4.4 Implement one-time host/sidecar bootstrap authentication without secrets in process arguments or ordinary logs
 - [ ] 4.5 Implement bounded ingress, per-client outbound queues, overload errors, heartbeat, and graceful shutdown
 - [ ] 4.6 Implement Qt-side process supervision, version check, startup timeout, health state, restart, and crash-loop protection

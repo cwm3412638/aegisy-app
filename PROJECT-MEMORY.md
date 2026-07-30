@@ -261,11 +261,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   generated `windows-named-pipe` transport union with `local=true`,
   `peer_verified=true`, and `authenticated=false`/`encrypted=false`; this is still
   peer verification, not the `4.4` bootstrap authentication boundary. The Windows
-  validation workflow builds and runs the named-pipe E2E. That test now
+  validation workflow builds and runs the named-pipe E2E. That test source now
   covers exact security facts, protected current-token-user DACL inspection,
-  stop/restart process generation, supervising-parent exit, selected-pipe failure
-  against a fake sidecar capable of a valid stdio handshake, malformed names,
-  same-name collision, wrong-client-PID rejection, and bounded cleanup.
+  stop/restart process generation and endpoint rotation, retired-endpoint isolation,
+  supervising-parent exit, selected-pipe failure against a fake sidecar capable of a
+  valid stdio handshake, malformed names, same-name collision, remote-form rejection
+  after a matching protected current-user DACL control without the rejection flag
+  proves host route availability, wrong-client-PID rejection, Qt wrong-server-PID
+  rejection before initialize, no stdio fallback, and bounded cleanup.
   Validation runs in a read-only GitHub Actions job even when the release version is
   already published. Installer construction remains a separate main-only path, and
   only a minimal dependent publication job receives `contents: write`; a reused
@@ -284,20 +287,20 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   from a retired/deferred-deleted socket, peer-proof preservation, absence of
   termination/handshake state changes, and actual stale socket bytes remaining
   unread. The focused Runtime environment target passes ten consecutive repetitions;
-  the complete desktop build and all 25/25 serial macOS CTests pass. This is not real
-  Windows named-pipe signal-order evidence. Runtime evidence is still missing for
-  remote-form client rejection, Qt rejection of a wrong named-pipe server PID, and
-  old endpoint/callback isolation on a clean Windows host. Do not
-  check `4.3` until those negative paths and the complete dedicated E2E pass on a
-  clean Windows runner.
+  the complete desktop build and all 25/25 serial macOS CTests pass. After adding the
+  Windows-only endpoint, remote-form, and wrong-server-PID assertions, focused local
+  `agent_runtime_environment` and `windows_packaging_policy` CTests pass. This is not
+  real Windows named-pipe signal-order evidence, and the new Windows-only source has
+  not compiled or executed on Windows. Do not check `4.3` until those negative paths
+  and the complete dedicated E2E pass on a clean Windows runner.
   The Rust admission boundary now exposes a private injectable process-identity
   verifier for deterministic tests. Production still queries the real Windows
   process handle and creation time, while the focused negative fixture proves that
   an otherwise live client with the same PID but a different creation time is
   rejected before `VerifiedNamedPipe` construction and before Runtime/Store/Codex
-  creation. This is implementation evidence only; clean Windows execution and the
-  remaining remote, Qt wrong-server, and real Windows callback fixtures are still
-  required.
+  creation. This is implementation evidence only; the complete remote, Qt
+  wrong-server, endpoint/callback, and PID-identity fixture matrix still requires
+  clean Windows execution.
 - OpenSpec task `3.1` is complete. `agent-runtime/aap-schema` is now an explicit
   private package with independent package/wire/provider versioning, one stable
   registry, and one experimental registry. Stable AAP `0.1` is additive-only and
