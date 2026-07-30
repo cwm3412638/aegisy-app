@@ -217,6 +217,14 @@
   CTests pass, including those focused Unicode-path gates. Locked offline Cargo
   package, workflow YAML parsing, strict OpenSpec validation, and `git diff --check`
   also pass locally.
+  The repository-owned Windows policy test now checks the complete 18-entry trigger
+  set, requires exactly one unfiltered CTest invocation, and requires the installer
+  upload to use the absolute `${{ github.workspace }}/windows-验证-源码/...` path.
+  It constructs three in-memory negative workflows and rejects a removed
+  `agent-runtime/**` trigger, an appended CTest `-R` filter, and a relative artifact
+  path. The workflow is fixed to LF by `.gitattributes`; a generated CRLF copy must
+  independently pass the same validator. The direct script and focused CTest pass;
+  this remains configuration evidence rather than Windows execution evidence.
   A clean Windows runner has not yet executed this expanded job, so this remains
   configuration and macOS evidence only and `3.10` stays unchecked.
   Stable `0.1` remains lossless rather than silently narrowing generic numbers; the

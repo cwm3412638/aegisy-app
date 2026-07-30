@@ -29,59 +29,164 @@ if(NOT resource MATCHES "RT_MANIFEST")
     message(FATAL_ERROR "Windows resource script does not embed the application manifest")
 endif()
 
-file(READ "${AEGISY_SOURCE_DIR}/.github/workflows/windows-package.yml" workflow)
-foreach(required_qt_module
-        qtdeclarative
-        qtpositioning
-        qtwebchannel
-        qtwebengine
-        qtwebsockets)
-    if(NOT workflow MATCHES "modules:[^\n]*${required_qt_module}")
-        message(FATAL_ERROR
-            "Windows workflow does not install required Qt module: ${required_qt_module}")
-    endif()
-endforeach()
-
 set(unicode_checkout "windows-验证-源码")
-foreach(required_unicode_fragment
-        "working-directory: ${unicode_checkout}"
-        "path: ${unicode_checkout}"
-        "Verify clean Unicode checkout"
-        "Validated clean Unicode checkout")
-    string(FIND "${workflow}" "${required_unicode_fragment}" fragment_offset)
-    if(fragment_offset EQUAL -1)
-        message(FATAL_ERROR
-            "Windows workflow is missing Unicode-checkout gate: ${required_unicode_fragment}")
+set(required_ctest_command
+    "ctest --test-dir build -C Release --no-tests=error --output-on-failure")
+string(CONCAT required_artifact_path
+    "path: $" "{{ github.workspace }}/" "${unicode_checkout}"
+    "/dist/AegisyClientSetup-*.exe")
+
+function(validate_windows_workflow workflow_text out_errors)
+    set(errors)
+    string(REPLACE "\r\n" "\n" workflow_text "${workflow_text}")
+    string(REPLACE "\r" "\n" workflow_text "${workflow_text}")
+
+    foreach(required_qt_module
+            qtdeclarative
+            qtpositioning
+            qtwebchannel
+            qtwebengine
+            qtwebsockets)
+        if(NOT workflow_text MATCHES "modules:[^\n]*${required_qt_module}")
+            list(APPEND errors
+                "missing required Qt module: ${required_qt_module}")
+        endif()
+    endforeach()
+
+    foreach(required_unicode_fragment
+            "working-directory: ${unicode_checkout}"
+            "path: ${unicode_checkout}"
+            "Verify clean Unicode checkout"
+            "Validated clean Unicode checkout")
+        string(FIND "${workflow_text}" "${required_unicode_fragment}" fragment_offset)
+        if(fragment_offset EQUAL -1)
+            list(APPEND errors
+                "missing Unicode-checkout gate: ${required_unicode_fragment}")
+        endif()
+    endforeach()
+
+    foreach(required_trigger
+            ".gitattributes"
+            "CMakeLists.txt"
+            "deny.toml"
+            "cmake/**"
+            "include/**"
+            "src/**"
+            "tests/**"
+            "workbench-web/**"
+            "resources.qrc"
+            "assets/**"
+            "installer.iss"
+            "package-windows.bat"
+            "agent-runtime/**"
+            ".github/workflows/windows-package.yml"
+            "release/generate-windows-appcast.ps1"
+            "release/smoke-test-windows-runtime.ps1"
+            "release/verify-windows-tls-runtime.ps1"
+            "release/notes/*-windows.md")
+        string(FIND "${workflow_text}" "      - ${required_trigger}\n" trigger_offset)
+        if(trigger_offset EQUAL -1)
+            list(APPEND errors
+                "missing validation trigger: ${required_trigger}")
+        endif()
+    endforeach()
+
+    foreach(required_complete_gate
+            "cmake --build build --config Release"
+            "cargo package --locked --offline --manifest-path agent-runtime\\Cargo.toml -p aegisy-aap --allow-dirty")
+        string(FIND "${workflow_text}" "${required_complete_gate}" gate_offset)
+        if(gate_offset EQUAL -1)
+            list(APPEND errors
+                "missing complete desktop gate: ${required_complete_gate}")
+        endif()
+    endforeach()
+
+    string(REGEX MATCHALL "[^\r\n]*ctest[^\r\n]*" ctest_lines "${workflow_text}")
+    list(LENGTH ctest_lines ctest_line_count)
+    if(NOT ctest_line_count EQUAL 1)
+        list(APPEND errors
+            "expected exactly one CTest command, found ${ctest_line_count}")
+    else()
+        list(GET ctest_lines 0 ctest_line)
+        string(STRIP "${ctest_line}" ctest_line)
+        if(NOT ctest_line STREQUAL required_ctest_command)
+            list(APPEND errors
+                "CTest command must be exactly: ${required_ctest_command}")
+        endif()
     endif()
-endforeach()
-foreach(required_trigger
-        ".gitattributes"
-        "deny.toml"
-        "tests/**"
-        "workbench-web/**"
-        "resources.qrc"
-        "release/verify-windows-tls-runtime.ps1")
-    string(FIND "${workflow}" "- ${required_trigger}" trigger_offset)
-    if(trigger_offset EQUAL -1)
+
+    foreach(required_artifact_fragment
+            "uses: actions/upload-artifact@v4"
+            "${required_artifact_path}"
+            "if-no-files-found: error")
+        string(FIND "${workflow_text}" "${required_artifact_fragment}" artifact_offset)
+        if(artifact_offset EQUAL -1)
+            list(APPEND errors
+                "missing Unicode-checkout artifact gate: ${required_artifact_fragment}")
+        endif()
+    endforeach()
+
+    set(${out_errors} "${errors}" PARENT_SCOPE)
+endfunction()
+
+function(expect_workflow_rejection case_name workflow_text expected_error)
+    validate_windows_workflow("${workflow_text}" actual_errors)
+    string(JOIN "\n" actual_error_text ${actual_errors})
+    string(FIND "${actual_error_text}" "${expected_error}" expected_error_offset)
+    if(expected_error_offset EQUAL -1)
         message(FATAL_ERROR
-            "Windows workflow is missing validation trigger: ${required_trigger}")
+            "Windows workflow negative case '${case_name}' was not rejected as expected. "
+            "Expected '${expected_error}', got '${actual_error_text}'")
     endif()
-endforeach()
-foreach(required_complete_gate
-        "cmake --build build --config Release"
-        "ctest --test-dir build -C Release --no-tests=error --output-on-failure"
-        "cargo package --locked --offline --manifest-path agent-runtime\\Cargo.toml -p aegisy-aap --allow-dirty")
-    string(FIND "${workflow}" "${required_complete_gate}" gate_offset)
-    if(gate_offset EQUAL -1)
-        message(FATAL_ERROR
-            "Windows workflow is missing complete desktop gate: ${required_complete_gate}")
-    endif()
-endforeach()
-string(FIND "${workflow}" "--tests-regex" narrowed_ctest_offset)
-if(NOT narrowed_ctest_offset EQUAL -1)
-    message(FATAL_ERROR
-        "Windows validation must run the complete CTest suite from the Unicode checkout")
+endfunction()
+
+file(READ "${AEGISY_SOURCE_DIR}/.github/workflows/windows-package.yml" workflow)
+validate_windows_workflow("${workflow}" workflow_errors)
+if(workflow_errors)
+    string(JOIN "\n" workflow_error_text ${workflow_errors})
+    message(FATAL_ERROR "Windows workflow policy failed:\n${workflow_error_text}")
 endif()
+
+set(crlf_workflow "${workflow}")
+string(REPLACE "\r\n" "\n" crlf_workflow "${crlf_workflow}")
+string(REPLACE "\r" "\n" crlf_workflow "${crlf_workflow}")
+string(REPLACE "\n" "\r\n" crlf_workflow "${crlf_workflow}")
+validate_windows_workflow("${crlf_workflow}" crlf_workflow_errors)
+if(crlf_workflow_errors)
+    string(JOIN "\n" crlf_workflow_error_text ${crlf_workflow_errors})
+    message(FATAL_ERROR
+        "Windows workflow policy is not CRLF-safe:\n${crlf_workflow_error_text}")
+endif()
+
+set(missing_trigger_workflow "${workflow}")
+string(REPLACE "      - agent-runtime/**\n" ""
+    missing_trigger_workflow "${missing_trigger_workflow}")
+expect_workflow_rejection(
+    "missing-agent-runtime-trigger"
+    "${missing_trigger_workflow}"
+    "missing validation trigger: agent-runtime/**")
+
+set(filtered_ctest_workflow "${workflow}")
+string(REPLACE
+    "${required_ctest_command}"
+    "${required_ctest_command} -R agent_runtime_environment"
+    filtered_ctest_workflow
+    "${filtered_ctest_workflow}")
+expect_workflow_rejection(
+    "filtered-ctest"
+    "${filtered_ctest_workflow}"
+    "CTest command must be exactly: ${required_ctest_command}")
+
+set(relative_artifact_workflow "${workflow}")
+string(REPLACE
+    "${required_artifact_path}"
+    "path: dist/AegisyClientSetup-*.exe"
+    relative_artifact_workflow
+    "${relative_artifact_workflow}")
+expect_workflow_rejection(
+    "relative-artifact-path"
+    "${relative_artifact_workflow}"
+    "missing Unicode-checkout artifact gate: ${required_artifact_path}")
 
 file(READ "${AEGISY_SOURCE_DIR}/CMakeLists.txt" cmake_source)
 string(FIND "${cmake_source}" "option(AEGISY_REQUIRE_QT6" require_qt6_option)
@@ -114,4 +219,4 @@ foreach(release_source workflow package_script)
     endif()
 endforeach()
 message(STATUS
-    "Windows packaging policy includes OS, manifest, Unicode, and complete Qt SDK gates")
+    "Windows packaging policy includes OS, manifest, Unicode, complete Qt SDK, full CTest, trigger, and artifact gates")

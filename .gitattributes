@@ -18,5 +18,6 @@ agent-runtime/aap-schema/runtime/cpp/*.cpp text eol=lf
 # Cross-language generation gate sources use the same line-ending contract.
 **/CMakeLists.txt text eol=lf
 *.cmake text eol=lf
+.github/workflows/windows-package.yml text eol=lf
 tests/aap_generated_types_test.cpp text eol=lf
 tests/aap_transport_generated_types_test.cpp text eol=lf

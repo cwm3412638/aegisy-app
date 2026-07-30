@@ -3718,12 +3718,19 @@ Implemented visual baseline:
   `QCoreApplication::arguments()` rather than the local 8-bit encoding, and their
   local fixtures force Chinese schema/manifest paths.
   `tests/windows_packaging_policy_test.cmake` prevents narrowing this back to the
-  earlier four-test subset or dropping the complete trigger set. The complete local
-  desktop build and all `25/25` serial CTests pass, including the three focused
-  Unicode-path gates. Locked offline Cargo package verification, workflow YAML
-  parsing, strict OpenSpec validation, and `git diff --check` also pass. The new
-  workflow has not yet run on Windows, so OpenSpec `3.10`, `4.3`, and all
-  release/runtime claims remain open.
+  earlier four-test subset: it requires the complete 18-entry trigger set, exactly
+  one unfiltered CTest command, and the installer artifact path rooted at
+  `${{ github.workspace }}/windows-验证-源码`. The test also mutates each of those
+  three policies in memory and proves that a missing Runtime trigger, appended
+  CTest `-R` filter, or relative artifact path is rejected. The workflow is fixed
+  to LF in `.gitattributes`, while the validator additionally proves that a CRLF
+  copy has identical policy results. The hardened script passes directly and
+  through its focused CTest. The complete local desktop build
+  and all `25/25` serial CTests from the preceding workflow slice pass, including
+  the three focused Unicode-path gates. Locked offline Cargo package verification,
+  workflow YAML parsing, strict OpenSpec validation, and `git diff --check` also
+  pass. The new workflow has not yet run on Windows, so OpenSpec `3.10`, `4.3`,
+  and all release/runtime claims remain open.
 
 ## Chat Streaming Boundary (2026-07-26)
 

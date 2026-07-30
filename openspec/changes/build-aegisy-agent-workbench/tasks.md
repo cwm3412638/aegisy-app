@@ -219,6 +219,13 @@
     this remains configuration evidence and `3.10` stays unchecked. Local native-
     argument Unicode fixtures, the complete build and `25/25` serial CTests, locked
     offline Cargo package, strict OpenSpec, YAML, and diff gates pass. The
+    repository policy test now requires the complete 18-entry Windows trigger set,
+    the single exact unfiltered CTest command, and the absolute Unicode installer
+    artifact path under `${{ github.workspace }}`. In-memory negative mutations
+    prove that deleting the Runtime trigger, appending `-R`, or restoring a relative
+    artifact path fails the gate. The workflow is LF-pinned and the validator also
+    proves the same result for a CRLF copy. This strengthens configuration evidence
+    only and does not replace clean Windows execution. The
     migration grants no capability, permission, Approval, mutation, execution,
     experimental, remote, or Windows release authority.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
