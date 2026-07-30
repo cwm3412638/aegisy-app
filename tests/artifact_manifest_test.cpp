@@ -50,14 +50,15 @@ QJsonObject manifest(const QByteArray &runtimeHash, const QByteArray &adapterHas
 int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
-    if (argc == 3) {
+    const QStringList arguments = app.arguments();
+    if (arguments.size() == 3) {
         const auto generatedResult = ArtifactManifest::verifyFile(
-            QString::fromLocal8Bit(argv[1]), QString::fromLocal8Bit(argv[2]));
+            arguments.at(1), arguments.at(2));
         return expect(generatedResult.ok,
                       "generated artifact manifest was rejected by the production verifier")
             ? 0 : 1;
     }
-    if (argc != 1) {
+    if (arguments.size() != 1) {
         std::fprintf(stderr, "usage: AegisyArtifactManifestTest [manifest runtime]\n");
         return 2;
     }

@@ -212,7 +212,13 @@
     plus Qt consumers and focused tests to that single library.
   - Keep `3.10` unchecked: the production Qt consumer now uses the generated
     lossless ingress, parsed-message dispatch, indivisible pending context, and
-    safe projection; clean Windows Unicode-checkout execution is absent. The
+    safe projection. The Windows validation workflow now checks out directly under
+    `windows-验证-源码`, rejects an ASCII path or dirty Git state, builds the
+    complete Release target graph, and runs the unfiltered CTest suite from that
+    directory. The workflow has not yet completed on a clean Windows runner, so
+    this remains configuration evidence and `3.10` stays unchecked. Local native-
+    argument Unicode fixtures, the complete build and `25/25` serial CTests, locked
+    offline Cargo package, strict OpenSpec, YAML, and diff gates pass. The
     migration grants no capability, permission, Approval, mutation, execution,
     experimental, remote, or Windows release authority.
 - [x] 3.11 Add schema compatibility tests that reject accidental breaking changes in the stable namespace
@@ -276,7 +282,10 @@
     valid fake stdio sidecar, malformed names, same-name collision, wrong client PID,
     and cleanup. Validation remains read-only and always runs for a reused release
     version; main-only installer publication has a separate minimal write-permission
-    job. Local macOS build, generator, Schema, Rust, desktop regression, and extracted
+    job. The validation checkout is now a clean Unicode path and its complete Release
+    build plus unfiltered CTest includes this dedicated E2E, but that expanded job has
+    not yet completed on Windows. Local macOS build, generator, Schema, Rust,
+    `25/25` desktop regression, and extracted
     Windows-API compile gates pass, but are not Windows runtime evidence. Remote-form
     rejection, Qt wrong-server-PID rejection, old endpoint/stale-callback isolation,
     and creation-time/PID-reuse mismatch still require deterministic Windows runtime

@@ -1,4 +1,4 @@
-set(fixture "${AEGISY_BINARY_DIR}/artifact-manifest-generator-fixture")
+set(fixture "${AEGISY_BINARY_DIR}/artifact-manifest-验证-生成")
 file(REMOVE_RECURSE "${fixture}")
 file(MAKE_DIRECTORY "${fixture}")
 file(WRITE "${fixture}/aegisy-agentd" "runtime fixture\n")

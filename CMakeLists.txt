@@ -473,9 +473,16 @@ if(BUILD_TESTING)
             target_compile_options(${transport_target} PRIVATE -Wall -Wextra -Werror)
         endif()
     endforeach()
+    set(AEGISY_AAP_TRANSPORT_TEST_SCHEMA_DIR
+        "${CMAKE_CURRENT_BINARY_DIR}/aap-传输-验证")
+    file(MAKE_DIRECTORY "${AEGISY_AAP_TRANSPORT_TEST_SCHEMA_DIR}")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/stable/v0.1/aap.schema.json"
+        "${AEGISY_AAP_TRANSPORT_TEST_SCHEMA_DIR}/aap.schema.json"
+        COPYONLY)
     add_test(NAME aap_transport_runtime
         COMMAND AegisyAapTransportRuntimeTest
-            ${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/stable/v0.1/aap.schema.json)
+            "${AEGISY_AAP_TRANSPORT_TEST_SCHEMA_DIR}/aap.schema.json")
     add_test(NAME aap_transport_generated_types
         COMMAND ${CMAKE_COMMAND}
             -DAEGISY_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}

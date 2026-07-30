@@ -1,5 +1,6 @@
 #include "aap_transport_runtime.h"
 
+#include <QCoreApplication>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -151,11 +152,13 @@ void expectProjectionFailure(const QByteArray &raw,
 
 int main(int argc, char **argv)
 {
-    if (argc != 2) {
+    QCoreApplication application(argc, argv);
+    const QStringList arguments = application.arguments();
+    if (arguments.size() != 2) {
         std::cerr << "usage: aap_transport_runtime_test <aap.schema.json>\n";
         return 2;
     }
-    QFile schemaFile(QString::fromLocal8Bit(argv[1]));
+    QFile schemaFile(arguments.at(1));
     require(schemaFile.open(QIODevice::ReadOnly), QStringLiteral("cannot open transport schema"));
     QString error;
     std::unique_ptr<TransportSchemaRuntime> runtime =

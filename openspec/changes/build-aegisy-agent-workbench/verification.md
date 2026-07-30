@@ -133,7 +133,7 @@
   node agent-runtime/aap-schema/scripts/generate-core-types.mjs --check
   cmake --build build --target AegisyAapGeneratedTypesTest -j4
   ctest --test-dir build -R '^aap_generated_types$' --output-on-failure
-  cargo package --manifest-path agent-runtime/Cargo.toml \
+  cargo package --locked --offline --manifest-path agent-runtime/Cargo.toml \
     -p aegisy-aap --allow-dirty
   ```
 
@@ -207,7 +207,18 @@
   protocol rerun passed, and the final serial 23/23 CTest run passed.
 - Keep `3.10` unchecked. Production Rust and Qt consumers now use the generated
   lossless Transport path, parsed dispatch, indivisible pending contexts, and safe
-  projection, but a clean Windows Unicode checkout has not executed the gate.
+  projection. The Windows validation job now checks out directly under
+  `windows-验证-源码`, proves the path is non-ASCII and the Git state is clean,
+  builds the complete Release target graph, runs the unfiltered CTest suite, and
+  verifies the locked `aegisy-aap` package offline after dependency resolution.
+  The Transport Runtime and Artifact Manifest verifier consume native
+  `QCoreApplication::arguments()` paths, and their local fixtures now force Chinese
+  schema/manifest directories. The complete desktop build and all `25/25` serial
+  CTests pass, including those focused Unicode-path gates. Locked offline Cargo
+  package, workflow YAML parsing, strict OpenSpec validation, and `git diff --check`
+  also pass locally.
+  A clean Windows runner has not yet executed this expanded job, so this remains
+  configuration and macOS evidence only and `3.10` stays unchecked.
   Stable `0.1` remains lossless rather than silently narrowing generic numbers; the
   slice grants no capability, permission, Approval, mutation, execution,
   experimental, remote, or Windows release authority.
@@ -2762,3 +2773,11 @@ Known limitations:
   run proving wrong-server-PID rejection, remote-form client rejection, real named-
   pipe old-endpoint/callback ordering, or the complete dedicated Windows E2E. Keep
   task `4.3` unchecked.
+- The read-only Windows validation job now performs its complete Release build and
+  unfiltered CTest from the clean `windows-验证-源码` checkout, so the Qt
+  environment fixture and dedicated named-pipe E2E will execute in the same checkout
+  and validation run as the generated-protocol and desktop gates. The workflow has
+  not yet completed after this expansion. Remote-form rejection, Qt wrong-server-PID, and
+  old-endpoint checks still need dedicated Windows assertions; PID/creation-time
+  mismatch already has a deterministic Rust fixture but still needs Windows-runner
+  execution. Do not infer any of these results from workflow configuration.

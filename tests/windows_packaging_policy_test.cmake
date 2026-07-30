@@ -42,6 +42,47 @@ foreach(required_qt_module
     endif()
 endforeach()
 
+set(unicode_checkout "windows-验证-源码")
+foreach(required_unicode_fragment
+        "working-directory: ${unicode_checkout}"
+        "path: ${unicode_checkout}"
+        "Verify clean Unicode checkout"
+        "Validated clean Unicode checkout")
+    string(FIND "${workflow}" "${required_unicode_fragment}" fragment_offset)
+    if(fragment_offset EQUAL -1)
+        message(FATAL_ERROR
+            "Windows workflow is missing Unicode-checkout gate: ${required_unicode_fragment}")
+    endif()
+endforeach()
+foreach(required_trigger
+        ".gitattributes"
+        "deny.toml"
+        "tests/**"
+        "workbench-web/**"
+        "resources.qrc"
+        "release/verify-windows-tls-runtime.ps1")
+    string(FIND "${workflow}" "- ${required_trigger}" trigger_offset)
+    if(trigger_offset EQUAL -1)
+        message(FATAL_ERROR
+            "Windows workflow is missing validation trigger: ${required_trigger}")
+    endif()
+endforeach()
+foreach(required_complete_gate
+        "cmake --build build --config Release"
+        "ctest --test-dir build -C Release --no-tests=error --output-on-failure"
+        "cargo package --locked --offline --manifest-path agent-runtime\\Cargo.toml -p aegisy-aap --allow-dirty")
+    string(FIND "${workflow}" "${required_complete_gate}" gate_offset)
+    if(gate_offset EQUAL -1)
+        message(FATAL_ERROR
+            "Windows workflow is missing complete desktop gate: ${required_complete_gate}")
+    endif()
+endforeach()
+string(FIND "${workflow}" "--tests-regex" narrowed_ctest_offset)
+if(NOT narrowed_ctest_offset EQUAL -1)
+    message(FATAL_ERROR
+        "Windows validation must run the complete CTest suite from the Unicode checkout")
+endif()
+
 file(READ "${AEGISY_SOURCE_DIR}/CMakeLists.txt" cmake_source)
 string(FIND "${cmake_source}" "option(AEGISY_REQUIRE_QT6" require_qt6_option)
 if(require_qt6_option EQUAL -1)
@@ -72,12 +113,5 @@ foreach(release_source workflow package_script)
             "Windows release path does not enable the complete Qt 6 gate: ${release_source}")
     endif()
 endforeach()
-foreach(required_policy_test windows_packaging_policy qt6_release_policy)
-    if(NOT workflow MATCHES "${required_policy_test}")
-        message(FATAL_ERROR
-            "Windows validation job does not run policy test: ${required_policy_test}")
-    endif()
-endforeach()
-
 message(STATUS
-    "Windows packaging policy includes OS, manifest, and complete Qt SDK gates")
+    "Windows packaging policy includes OS, manifest, Unicode, and complete Qt SDK gates")

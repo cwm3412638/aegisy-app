@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-30
+Last updated: 2026-07-31
 
 ## Mandatory First Step
 
@@ -422,9 +422,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   formatting, `1018` workspace tests with one explicitly ignored live Codex fixture,
   strict Clippy, Cargo packaging, the complete desktop build and `23/23` CTests,
   strict OpenSpec validation, and `git diff --check`.
-  Keep `3.10` unchecked: the production Qt consumer still uses its reviewed
-  hand-written/QJsonDocument wire path, and clean Windows Unicode-checkout execution
-  remains absent. The
+  Keep `3.10` unchecked: the production Qt consumer now uses the generated
+  lossless ingress, parsed-message dispatch, indivisible pending context, and safe
+  projection. The Windows validation job is configured to check out directly under
+  `windows-验证-源码`, prove that the path contains non-ASCII characters and
+  the Git checkout is clean, then run the complete Release build and unfiltered
+  CTest suite from that directory. This workflow change has not yet completed on a
+  clean Windows runner, so it is configuration evidence only. The
   `jsonschema` 0.48.5 Rust dependency also has an internal exponent-materialization
   limit at 1,000,000; this is an implementation limit, not permission to narrow
   stable `0.1`. A future reviewed AAP `0.2` may define JSON-safe generic integers
@@ -3704,6 +3708,22 @@ Implemented visual baseline:
   the policy test itself. Local policy/environment tests pass after this correction,
   but a fresh clean Windows runner is still required before the CI or release gate
   is considered verified.
+- The validation checkout is now placed directly under the Unicode relative path
+  `windows-验证-源码`; a pre-build PowerShell gate rejects an ASCII path or a
+  dirty Git state. The validation job builds the complete Release target graph and
+  runs the unfiltered CTest suite plus locked offline `aegisy-aap` package
+  verification, so the generated AAP, Qt consumer, desktop, packaging-policy, and
+  Windows named-pipe tests share the same Unicode checkout.
+  Transport Runtime and Artifact Manifest test executables now consume
+  `QCoreApplication::arguments()` rather than the local 8-bit encoding, and their
+  local fixtures force Chinese schema/manifest paths.
+  `tests/windows_packaging_policy_test.cmake` prevents narrowing this back to the
+  earlier four-test subset or dropping the complete trigger set. The complete local
+  desktop build and all `25/25` serial CTests pass, including the three focused
+  Unicode-path gates. Locked offline Cargo package verification, workflow YAML
+  parsing, strict OpenSpec validation, and `git diff --check` also pass. The new
+  workflow has not yet run on Windows, so OpenSpec `3.10`, `4.3`, and all
+  release/runtime claims remain open.
 
 ## Chat Streaming Boundary (2026-07-26)
 
@@ -3981,10 +4001,11 @@ Implemented visual baseline:
 
 ## Next Product Priorities
 
-1. Finish OpenSpec `3.10` by running the complete generator and desktop gate from a
-   clean Windows Unicode checkout. The Qt consumer migration, generated dispatch,
+1. Finish OpenSpec `3.10` by obtaining a successful Windows validation run from the
+   new clean `windows-验证-源码` checkout. The workflow now runs the complete
+   generator and desktop gate there; the Qt consumer migration, generated dispatch,
    exact pending correlation, and safe projection are implemented without changing
-   stable `0.1` wire behavior; do not claim Windows evidence from macOS.
+   stable `0.1` wire behavior. Do not claim Windows evidence until that run succeeds.
 2. Continue OpenSpec `3.5` by obtaining complete Windows reconnect/runtime evidence,
    then add reviewed acknowledgement producers for approval/file/Git/job mutations.
    Durable Turn-start acknowledgement, fixed-watermark replay, structured

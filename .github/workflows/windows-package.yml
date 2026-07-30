@@ -6,15 +6,15 @@ on:
     branches:
       - main
     paths:
+      - .gitattributes
       - CMakeLists.txt
+      - deny.toml
       - cmake/**
       - include/**
       - src/**
-      - tests/agent_runtime_environment_test.cpp
-      - tests/agent_runtime_windows_named_pipe_compile_test.cpp
-      - tests/windows_packaging_policy_test.cmake
-      - tests/qt6_release_policy_test.cmake
-      - tests/qt6_release_gate_fixture/CMakeLists.txt
+      - tests/**
+      - workbench-web/**
+      - resources.qrc
       - assets/**
       - installer.iss
       - package-windows.bat
@@ -22,6 +22,7 @@ on:
       - .github/workflows/windows-package.yml
       - release/generate-windows-appcast.ps1
       - release/smoke-test-windows-runtime.ps1
+      - release/verify-windows-tls-runtime.ps1
       - release/notes/*-windows.md
 
 permissions:
@@ -34,9 +35,12 @@ concurrency:
 jobs:
   validate:
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 90
     permissions:
       contents: read
+    defaults:
+      run:
+        working-directory: windows-验证-源码
     outputs:
       reused: ${{ steps.release_version.outputs.reused }}
       version: ${{ steps.release_version.outputs.version }}
@@ -46,6 +50,23 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          path: windows-验证-源码
+
+      - name: Verify clean Unicode checkout
+        shell: pwsh
+        run: |
+          $checkout = (Get-Location).Path
+          if ($checkout -notmatch '[^\x00-\x7F]') {
+              throw "Windows validation checkout is not a Unicode path: $checkout"
+          }
+          $status = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0) {
+              throw "Could not inspect the Windows validation checkout"
+          }
+          if ($status.Count -ne 0) {
+              throw "Windows validation checkout is not clean: $($status -join ', ')"
+          }
+          Write-Host "Validated clean Unicode checkout: $checkout"
 
       - name: Detect release version reuse
         id: release_version
@@ -91,6 +112,7 @@ jobs:
           cargo test --locked --workspace --manifest-path agent-runtime\Cargo.toml
           cargo clippy --locked --workspace --all-targets --manifest-path agent-runtime\Cargo.toml -- -D warnings
           cargo build --locked --workspace --manifest-path agent-runtime\Cargo.toml --release
+          cargo package --locked --offline --manifest-path agent-runtime\Cargo.toml -p aegisy-aap --allow-dirty
           cargo install --locked cargo-deny --version 0.19.9
           Push-Location agent-runtime
           cargo deny check --config ..\deny.toml
@@ -152,14 +174,10 @@ jobs:
               "-DOPENSSL_ROOT_DIR=$env:OPENSSL_ROOT_DIR"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          cmake --build build --config Release `
-              --target AegisyAgentRuntimeEnvironmentTest AegisyAgentRuntimeWindowsNamedPipeTest
+          cmake --build build --config Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          ctest --test-dir build -C Release `
-              --tests-regex '^(agent_runtime_environment|agent_runtime_windows_named_pipe|windows_packaging_policy|qt6_release_policy)$' `
-              --no-tests=error `
-              --output-on-failure
+          ctest --test-dir build -C Release --no-tests=error --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install Inno Setup
@@ -199,7 +217,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AegisyClient-Windows-${{ github.run_id }}
-          path: dist/AegisyClientSetup-*.exe
+          path: ${{ github.workspace }}/windows-验证-源码/dist/AegisyClientSetup-*.exe
           if-no-files-found: error
           retention-days: 14
 
