@@ -3494,9 +3494,10 @@ Implemented visual baseline:
   checks pass.
 - OpenSpec `22.5` has partial Qt, generator, and Rust Runtime foundations. The local
   `aegisy-artifact-manifest/0.1` verifier checks a present sidecar/adapter
-  manifest before launch, including fixed identities, versions, bounded sizes,
-  canonical in-tree files, symlink/path escape, unknown-field rejection, and
-  streaming SHA-256. A failure suppresses launch and automatic reconnect;
+  manifest before launch, including fixed identities, versions, bounded reads,
+  portable relative paths, canonical in-tree ordinary files, link/reparse and
+  extra-hard-link rejection, unknown-field rejection, and streaming SHA-256. A
+  failure suppresses launch and automatic reconnect;
   developer builds may omit the manifest. `artifact_manifest_verification` and
   `agent_runtime_environment` pass. The production-path
   `artifact_manifest_runtime_startup` fixture copies the real Release
@@ -3556,16 +3557,33 @@ Implemented visual baseline:
   suffixes. The lossless parser rejects duplicate decoded keys, invalid UTF-8 or
   surrogates, unsafe numbers, excessive depth/nodes, and unknown fields. A valid
   result can set only `candidateCompatible`; download and install authority remain
-  false. Its evaluation identity binds candidate, caller-supplied installed tuple,
-  verification-key hash, selected channel, caller-supplied release-sequence
-  high-water value, and evaluation time.
+  false. Production candidate evaluation no longer accepts a publicly constructible
+  installed tuple. `verifyInstalledAuthority` derives a private
+  `InstalledArtifactSetAuthority` from the exact adjacent
+  `aegisy-update-artifact-set.json`, `aegisy-agentd.manifest.json`, Runtime, and
+  adapter bytes. It verifies the signed receipt target, complete Manifest SHA-256 and
+  Runtime/adapter identity/version, ordinary-file/link policy, and artifact hashes,
+  then binds receipt, installed-set, and verification-key identities. Candidate
+  evaluation rereads and revalidates that complete local graph before every decision;
+  receipt, Manifest, Runtime, adapter, expectation, or key drift invalidates a cached
+  authority. The scalar tuple entry point exists only under the dedicated CTest
+  compile definition. The evaluation identity binds candidate, installed tuple,
+  installed authority, verification-key hash, selected channel, caller-supplied
+  release-sequence high-water value, and evaluation time.
 - This evaluator is not integrated into either platform `UpdateManager`, performs no
-  network/download/install operation, and has no trusted installed-tuple derivation
-  or durable integrity-checked anti-deletion update record. A scalar high-water cannot
-  safely choose both when to block replay and when to permit crash recovery; the
-  production record must atomically bind `{sequence, artifact-set identity, phase}`,
-  permit only exact-identity idempotent recovery, and reject same-sequence identity
-  conflicts. Sparkle 2.9.4 can veto
+  network/download/install operation, and still has no authority binding those
+  caller-selected paths and expected application tuple to the currently executing
+  signed Aegisy installation. Future host integration must derive all paths from the
+  fixed current bundle layout; configuration or arbitrary caller paths cannot become
+  installed-package authority. The current receipt and candidate also use one
+  verification key, so reviewed Key IDs, validity/revocation, rotation lineage, and a
+  Key Ring identity remain required before historical receipts can survive release-key
+  rotation. Path checks, opens, hashes, and later process/install actions still have
+  cross-file TOCTOU windows. There is no durable integrity-checked anti-deletion update
+  record. A scalar high-water cannot safely choose both when to block replay and when
+  to permit crash recovery; the production record must atomically bind
+  `{sequence, artifact-set identity, phase}`, permit only exact-identity idempotent
+  recovery, and reject same-sequence identity conflicts. Sparkle 2.9.4 can veto
   a new candidate through a strongly retained synchronous delegate, but resume skips
   that callback; current generated deltas also lack a signed source-to-target binding.
   WinSparkle 0.9.3 exposes no candidate object or pre-download veto, so Windows needs
@@ -3573,12 +3591,18 @@ Implemented visual baseline:
   custom fields, and post-download callbacks grant no local compatibility authority.
   The focused CTest passes the macOS/Windows positive cases, exact payload/identity,
   signature/tamper, installed tuple/channel/replay, source count/order, URL/path,
-  BOM/UTF-8/surrogate/duplicate/depth/node/raw-size, integer/time, and fixed-false
-  authority boundaries; `windows_packaging_policy` locks it into the release test
-  graph. OpenSpec `22.5` remains unchecked pending real updater integration, nested-
+  BOM/UTF-8/surrogate/duplicate/depth/node/raw-size, integer/time, fixed-false
+  authority, opaque authority derivation, receipt/Manifest/artifact drift, and
+  link/hard-link boundaries; `windows_packaging_policy` locks it into the release
+  test graph. OpenSpec `22.5` remains unchecked pending real updater integration, nested-
   binary-sign-then-manifest-then-outer-seal packaging order, delta/resume handling,
   signed clean Windows/macOS evidence, and the earlier manifest/spawn gates. The
-  final local gate passes the complete application build, all `27/27` serial desktop
+  authority regression matrix also covers an oversized public-key argument before
+  string conversion, channel/platform expectation drift, a valid signed receipt
+  replacement with a different release sequence, Manifest replacement after authority
+  creation, and signed receipt Runtime/adapter version disagreement with the local
+  Manifest. The final local gate passes the complete application build, all `27/27`
+  serial desktop
   CTests, strict OpenSpec validation, and `git diff --check`; this is macOS source and
   runtime evidence only and grants no packaged-update or Windows authority.
 

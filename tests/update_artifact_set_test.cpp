@@ -2,10 +2,13 @@
 
 #include <QByteArray>
 #include <QCryptographicHash>
+#include <QDir>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QString>
+#include <QTemporaryDir>
 #include <QVector>
 
 #include <openssl/evp.h>
@@ -56,6 +59,18 @@ QJsonObject manifest(char hashCharacter, const QString &runtimeVersion,
 {
     return {
         {QStringLiteral("sha256"), hashString(hashCharacter)},
+        {QStringLiteral("runtime"), component(
+             QStringLiteral("aegisy-agentd"), runtimeVersion)},
+        {QStringLiteral("adapter"), component(
+             QStringLiteral("codex-app-server"), adapterVersion)},
+    };
+}
+
+QJsonObject manifest(const QString &sha256, const QString &runtimeVersion,
+                     const QString &adapterVersion)
+{
+    return {
+        {QStringLiteral("sha256"), sha256},
         {QStringLiteral("runtime"), component(
              QStringLiteral("aegisy-agentd"), runtimeVersion)},
         {QStringLiteral("adapter"), component(
@@ -211,6 +226,112 @@ private:
     EVP_PKEY *m_key = nullptr;
     QByteArray m_publicKeyBase64;
 };
+
+QString authorityPlatform()
+{
+#ifdef Q_OS_WIN
+    return QStringLiteral("windows");
+#else
+    return QStringLiteral("macos");
+#endif
+}
+
+QString authorityArchitecture()
+{
+#ifdef Q_OS_WIN
+    return QStringLiteral("x86_64");
+#else
+    return QStringLiteral("arm64");
+#endif
+}
+
+QString authorityRuntimeFileName()
+{
+#ifdef Q_OS_WIN
+    return QStringLiteral("aegisy-agentd.exe");
+#else
+    return QStringLiteral("aegisy-agentd");
+#endif
+}
+
+QString authorityAdapterFileName()
+{
+#ifdef Q_OS_WIN
+    return QStringLiteral("codex.exe");
+#else
+    return QStringLiteral("codex");
+#endif
+}
+
+QString authorityInstallerFileName(const QString &version)
+{
+#ifdef Q_OS_WIN
+    return QStringLiteral("AegisyClientSetup-") + version + QStringLiteral(".exe");
+#else
+    return QStringLiteral("AegisyClient-") + version + QStringLiteral(".zip");
+#endif
+}
+
+QByteArray writeBytes(const QString &path, const QByteArray &bytes)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+        || file.write(bytes) != bytes.size()) {
+        return {};
+    }
+    file.close();
+    return QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex();
+}
+
+QJsonObject signedSetEnvelope(
+    quint64 releaseSequence,
+    const QString &applicationVersion,
+    const QString &manifestSha256,
+    const QString &runtimeVersion,
+    const QString &adapterVersion,
+    quint64 sourceSequence,
+    const QString &sourceApplicationVersion,
+    const QString &sourceManifestSha256,
+    const QString &sourceRuntimeVersion,
+    const QString &sourceAdapterVersion)
+{
+    const QString platform = authorityPlatform();
+    const QString architecture = authorityArchitecture();
+    const QString fileName = authorityInstallerFileName(applicationVersion);
+    return {
+        {QStringLiteral("schema_version"),
+         QStringLiteral("aegisy-update-artifact-set/0.1")},
+        {QStringLiteral("release_sequence"), static_cast<double>(releaseSequence)},
+        {QStringLiteral("published_at_ms"),
+         static_cast<double>(kNowMs - 1000)},
+        {QStringLiteral("channel"), QStringLiteral("stable")},
+        {QStringLiteral("application"), application(
+             applicationVersion, platform, architecture)},
+        {QStringLiteral("installer"), QJsonObject{
+             {QStringLiteral("url"),
+              QStringLiteral("https://downloads.aegisy.cc/releases/") + fileName},
+             {QStringLiteral("file_name"), fileName},
+             {QStringLiteral("size_bytes"), 1234567.0},
+             {QStringLiteral("sha256"), hashString('3')},
+             {QStringLiteral("sparkle_ed_signature"), sparkleSignature()},
+         }},
+        {QStringLiteral("target_manifest"), manifest(
+             manifestSha256, runtimeVersion, adapterVersion)},
+        {QStringLiteral("compatible_sources"), QJsonArray{
+             QJsonObject{
+                 {QStringLiteral("release_sequence"),
+                  static_cast<double>(sourceSequence)},
+                 {QStringLiteral("channel"), QStringLiteral("stable")},
+                 {QStringLiteral("application"), application(
+                      sourceApplicationVersion, platform, architecture)},
+                 {QStringLiteral("manifest"), manifest(
+                      sourceManifestSha256, sourceRuntimeVersion,
+                      sourceAdapterVersion)},
+             },
+         }},
+        {QStringLiteral("signature"), QString()},
+    };
+}
 
 bool expectInvalid(const QJsonObject &envelope, const SigningKey &key,
                    const UpdateArtifactSet::InstalledArtifactSet &installed,
@@ -1124,6 +1245,16 @@ bool installerAndValueTests(const SigningKey &key)
                         == QStringLiteral("artifact-set-public-key-invalid"),
                 "invalid update public key was accepted") && ok;
 
+    const UpdateArtifactSet::Decision oversizedKey =
+        UpdateArtifactSet::verifyCandidate(
+            encodedEnvelope(candidate), QByteArray(1024 * 1024, 'A'), kNowMs,
+            installed,
+            QStringLiteral("stable"), installed.releaseSequence);
+    ok = expect(oversizedKey.state == UpdateArtifactSet::State::Invalid
+                    && oversizedKey.errorCode
+                        == QStringLiteral("artifact-set-public-key-invalid"),
+                "oversized update public key was accepted") && ok;
+
     candidate.insert(QStringLiteral("signature"), QStringLiteral("not-base64"));
     ok = expectInvalid(candidate, key, installed,
                        QStringLiteral("artifact-set-signature-encoding-invalid"),
@@ -1142,6 +1273,315 @@ bool installerAndValueTests(const SigningKey &key)
     return ok;
 }
 
+bool installedAuthorityTests(const SigningKey &key)
+{
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "installed authority temporary directory is unavailable")) {
+        return false;
+    }
+    const QString runtimePath = QDir(directory.path()).filePath(
+        authorityRuntimeFileName());
+    const QString adapterPath = QDir(directory.path()).filePath(
+        authorityAdapterFileName());
+    const QByteArray runtimeBytes = QByteArrayLiteral("installed runtime bytes");
+    const QByteArray adapterBytes = QByteArrayLiteral("installed adapter bytes");
+    const QByteArray runtimeSha256 = writeBytes(runtimePath, runtimeBytes);
+    const QByteArray adapterSha256 = writeBytes(adapterPath, adapterBytes);
+    if (!expect(runtimeSha256.size() == 64 && adapterSha256.size() == 64,
+                "installed authority artifacts could not be written")) {
+        return false;
+    }
+
+    const QJsonObject localManifest{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("aegisy-artifact-manifest/0.1")},
+        {QStringLiteral("runtime"), QJsonObject{
+             {QStringLiteral("id"), QStringLiteral("aegisy-agentd")},
+             {QStringLiteral("version"), QStringLiteral("0.1.0")},
+             {QStringLiteral("path"), authorityRuntimeFileName()},
+             {QStringLiteral("sha256"), QString::fromLatin1(runtimeSha256)},
+         }},
+        {QStringLiteral("adapter"), QJsonObject{
+             {QStringLiteral("id"), QStringLiteral("codex-app-server")},
+             {QStringLiteral("version"), QStringLiteral("codex-cli 0.144.5")},
+             {QStringLiteral("path"), authorityAdapterFileName()},
+             {QStringLiteral("sha256"), QString::fromLatin1(adapterSha256)},
+         }},
+    };
+    const QByteArray manifestBytes = QJsonDocument(localManifest).toJson(
+        QJsonDocument::Compact);
+    const QString manifestPath = QDir(directory.path()).filePath(
+        QStringLiteral("aegisy-agentd.manifest.json"));
+    const QByteArray manifestSha256 = writeBytes(manifestPath, manifestBytes);
+    if (!expect(manifestSha256.size() == 64,
+                "installed authority manifest could not be written")) {
+        return false;
+    }
+
+    QJsonObject receipt = signedSetEnvelope(
+        41, QStringLiteral("2.5.2"), QString::fromLatin1(manifestSha256),
+        QStringLiteral("0.1.0"), QStringLiteral("codex-cli 0.144.5"),
+        40, QStringLiteral("2.5.1"), hashString('0'),
+        QStringLiteral("0.0.9"), QStringLiteral("codex-cli 0.143.0"));
+    if (!expect(key.sign(&receipt),
+                "installed artifact-set receipt could not be signed")) {
+        return false;
+    }
+    const QByteArray receiptBytes = encodedEnvelope(receipt);
+    const QString receiptPath = QDir(directory.path()).filePath(
+        QStringLiteral("aegisy-update-artifact-set.json"));
+    if (!expect(writeBytes(receiptPath, receiptBytes).size() == 64,
+                "installed artifact-set receipt could not be written")) {
+        return false;
+    }
+
+    const auto loadAuthority = [&]() {
+        return UpdateArtifactSet::verifyInstalledAuthority(
+            receiptPath, manifestPath, runtimePath, key.publicKeyBase64(),
+            kNowMs, QStringLiteral("2.5.2"), QStringLiteral("stable"),
+            authorityPlatform(), authorityArchitecture());
+    };
+    UpdateArtifactSet::InstalledAuthorityResult authorityResult = loadAuthority();
+    bool ok = expect(authorityResult.ok && authorityResult.errorCode.isEmpty()
+                         && authorityResult.authority.isValid()
+                         && authorityResult.authority.authorityIdentity().startsWith(
+                             QStringLiteral(
+                                 "installed-artifact-set-authority:sha256:")),
+                     "valid installed artifact authority was rejected");
+
+    QJsonObject candidate = signedSetEnvelope(
+        42, QStringLiteral("2.6.0"), hashString('2'),
+        QStringLiteral("0.2.0"), QStringLiteral("codex-cli 0.145.0"),
+        41, QStringLiteral("2.5.2"), QString::fromLatin1(manifestSha256),
+        QStringLiteral("0.1.0"), QStringLiteral("codex-cli 0.144.5"));
+    ok = expect(key.sign(&candidate),
+                "authority-bound candidate could not be signed") && ok;
+    const QByteArray candidateBytes = encodedEnvelope(candidate);
+    const UpdateArtifactSet::Decision compatible =
+        UpdateArtifactSet::verifyCandidate(
+            candidateBytes, key.publicKeyBase64(), kNowMs,
+            authorityResult.authority, QStringLiteral("stable"), 41);
+    ok = expect(compatible.state == UpdateArtifactSet::State::Compatible
+                    && compatible.candidateCompatible
+                    && !compatible.downloadAuthorized
+                    && !compatible.installAuthorized
+                    && compatible.installedAuthorityIdentity
+                        == authorityResult.authority.authorityIdentity()
+                    && compatible.compatibilityEvaluationIdentity.startsWith(
+                        QStringLiteral("update-artifact-set-evaluation:sha256:")),
+                "candidate was not bound to the verified installed authority") && ok;
+
+    UpdateArtifactSet::InstalledAuthorityResult rejected =
+        UpdateArtifactSet::verifyInstalledAuthority(
+            receiptPath, manifestPath, runtimePath, key.publicKeyBase64(),
+            kNowMs, QStringLiteral("2.5.2"), QStringLiteral("beta"),
+            authorityPlatform(), authorityArchitecture());
+    ok = expect(!rejected.ok
+                    && rejected.errorCode
+                        == QStringLiteral("installed-receipt-target-mismatch"),
+                "wrong installed channel expectation was accepted") && ok;
+
+#ifdef Q_OS_WIN
+    const QString otherPlatform = QStringLiteral("macos");
+    const QString otherArchitecture = QStringLiteral("arm64");
+#else
+    const QString otherPlatform = QStringLiteral("windows");
+    const QString otherArchitecture = QStringLiteral("x86_64");
+#endif
+    rejected = UpdateArtifactSet::verifyInstalledAuthority(
+        receiptPath, manifestPath, runtimePath, key.publicKeyBase64(),
+        kNowMs, QStringLiteral("2.5.2"), QStringLiteral("stable"),
+        otherPlatform, otherArchitecture);
+    ok = expect(!rejected.ok
+                    && rejected.errorCode
+                        == QStringLiteral("installed-receipt-target-mismatch"),
+                "wrong installed platform expectation was accepted") && ok;
+
+    QJsonObject replacedReceipt = signedSetEnvelope(
+        40, QStringLiteral("2.5.2"), QString::fromLatin1(manifestSha256),
+        QStringLiteral("0.1.0"), QStringLiteral("codex-cli 0.144.5"),
+        39, QStringLiteral("2.5.1"), hashString('0'),
+        QStringLiteral("0.0.9"), QStringLiteral("codex-cli 0.143.0"));
+    ok = expect(key.sign(&replacedReceipt),
+                "replacement installed receipt could not be signed") && ok;
+    writeBytes(receiptPath, encodedEnvelope(replacedReceipt));
+    const UpdateArtifactSet::Decision replacedReceiptAuthority =
+        UpdateArtifactSet::verifyCandidate(
+            candidateBytes, key.publicKeyBase64(), kNowMs,
+            authorityResult.authority, QStringLiteral("stable"), 41);
+    ok = expect(replacedReceiptAuthority.state
+                        == UpdateArtifactSet::State::Invalid
+                    && replacedReceiptAuthority.errorCode
+                        == QStringLiteral("installed-artifact-authority-invalid"),
+                "cached authority survived a valid receipt sequence replacement")
+        && ok;
+    writeBytes(receiptPath, receiptBytes);
+
+    const UpdateArtifactSet::Decision missingAuthority =
+        UpdateArtifactSet::verifyCandidate(
+            candidateBytes, key.publicKeyBase64(), kNowMs,
+            UpdateArtifactSet::InstalledArtifactSetAuthority{},
+            QStringLiteral("stable"), 41);
+    ok = expect(missingAuthority.state == UpdateArtifactSet::State::Invalid
+                    && missingAuthority.errorCode
+                        == QStringLiteral("installed-artifact-authority-invalid")
+                    && missingAuthority.artifactSetIdentity.isEmpty()
+                    && !missingAuthority.candidateCompatible
+                    && !missingAuthority.downloadAuthorized
+                    && !missingAuthority.installAuthorized,
+                "missing installed authority did not fail closed") && ok;
+
+    QJsonObject tamperedReceipt = receipt;
+    tamperedReceipt.insert(QStringLiteral("channel"), QStringLiteral("beta"));
+    writeBytes(receiptPath, encodedEnvelope(tamperedReceipt));
+    rejected = loadAuthority();
+    ok = expect(!rejected.ok && !rejected.authority.isValid()
+                    && rejected.errorCode
+                        == QStringLiteral(
+                            "installed-receipt-artifact-set-signature-invalid"),
+                "tampered installed receipt was accepted") && ok;
+    const UpdateArtifactSet::Decision staleReceiptAuthority =
+        UpdateArtifactSet::verifyCandidate(
+            candidateBytes, key.publicKeyBase64(), kNowMs,
+            authorityResult.authority, QStringLiteral("stable"), 41);
+    ok = expect(staleReceiptAuthority.state == UpdateArtifactSet::State::Invalid
+                    && staleReceiptAuthority.errorCode
+                        == QStringLiteral("installed-artifact-authority-invalid"),
+                "cached authority survived installed receipt drift") && ok;
+    writeBytes(receiptPath, receiptBytes);
+
+    writeBytes(manifestPath, manifestBytes + QByteArrayLiteral("\n"));
+    rejected = loadAuthority();
+    ok = expect(!rejected.ok
+                    && rejected.errorCode
+                        == QStringLiteral("installed-manifest-mismatch"),
+                "installed manifest byte drift was accepted") && ok;
+    const UpdateArtifactSet::Decision staleManifestBytesAuthority =
+        UpdateArtifactSet::verifyCandidate(
+            candidateBytes, key.publicKeyBase64(), kNowMs,
+            authorityResult.authority, QStringLiteral("stable"), 41);
+    ok = expect(staleManifestBytesAuthority.state
+                        == UpdateArtifactSet::State::Invalid
+                    && staleManifestBytesAuthority.errorCode
+                        == QStringLiteral("installed-artifact-authority-invalid"),
+                "cached authority survived installed manifest replacement") && ok;
+    writeBytes(manifestPath, manifestBytes);
+
+    QJsonObject mismatchedReceipt = receipt;
+    QJsonObject mismatchedTarget = mismatchedReceipt.value(
+        QStringLiteral("target_manifest")).toObject();
+    mismatchedTarget.insert(QStringLiteral("runtime"), component(
+        QStringLiteral("aegisy-agentd"), QStringLiteral("0.1.1")));
+    mismatchedReceipt.insert(QStringLiteral("target_manifest"), mismatchedTarget);
+    ok = expect(key.sign(&mismatchedReceipt),
+                "runtime-version mismatch receipt could not be signed") && ok;
+    writeBytes(receiptPath, encodedEnvelope(mismatchedReceipt));
+    rejected = loadAuthority();
+    ok = expect(!rejected.ok
+                    && rejected.errorCode
+                        == QStringLiteral("installed-manifest-mismatch"),
+                "receipt runtime-version mismatch was accepted") && ok;
+
+    mismatchedReceipt = receipt;
+    mismatchedTarget = mismatchedReceipt.value(
+        QStringLiteral("target_manifest")).toObject();
+    mismatchedTarget.insert(QStringLiteral("adapter"), component(
+        QStringLiteral("codex-app-server"),
+        QStringLiteral("codex-cli 0.144.4")));
+    mismatchedReceipt.insert(QStringLiteral("target_manifest"), mismatchedTarget);
+    ok = expect(key.sign(&mismatchedReceipt),
+                "adapter-version mismatch receipt could not be signed") && ok;
+    writeBytes(receiptPath, encodedEnvelope(mismatchedReceipt));
+    rejected = loadAuthority();
+    ok = expect(!rejected.ok
+                    && rejected.errorCode
+                        == QStringLiteral("installed-manifest-mismatch"),
+                "receipt adapter-version mismatch was accepted") && ok;
+    writeBytes(receiptPath, receiptBytes);
+
+    writeBytes(adapterPath, adapterBytes + QByteArrayLiteral("tamper"));
+    rejected = loadAuthority();
+    ok = expect(!rejected.ok
+                    && rejected.errorCode
+                        == QStringLiteral("installed-manifest-invalid"),
+                "installed adapter byte drift was accepted") && ok;
+    const UpdateArtifactSet::Decision staleManifestAuthority =
+        UpdateArtifactSet::verifyCandidate(
+            candidateBytes, key.publicKeyBase64(), kNowMs,
+            authorityResult.authority, QStringLiteral("stable"), 41);
+    ok = expect(staleManifestAuthority.state == UpdateArtifactSet::State::Invalid
+                    && staleManifestAuthority.errorCode
+                        == QStringLiteral("installed-artifact-authority-invalid"),
+                "cached authority survived installed adapter drift") && ok;
+    writeBytes(adapterPath, adapterBytes);
+
+    writeBytes(runtimePath, runtimeBytes + QByteArrayLiteral("tamper"));
+    rejected = loadAuthority();
+    ok = expect(!rejected.ok
+                    && rejected.errorCode
+                        == QStringLiteral("installed-manifest-invalid"),
+                "installed runtime byte drift was accepted") && ok;
+    const UpdateArtifactSet::Decision staleRuntimeAuthority =
+        UpdateArtifactSet::verifyCandidate(
+            candidateBytes, key.publicKeyBase64(), kNowMs,
+            authorityResult.authority, QStringLiteral("stable"), 41);
+    ok = expect(staleRuntimeAuthority.state == UpdateArtifactSet::State::Invalid
+                    && staleRuntimeAuthority.errorCode
+                        == QStringLiteral("installed-artifact-authority-invalid"),
+                "cached authority survived installed runtime drift") && ok;
+    writeBytes(runtimePath, runtimeBytes);
+
+    rejected = UpdateArtifactSet::verifyInstalledAuthority(
+        receiptPath, manifestPath, runtimePath, key.publicKeyBase64(),
+        kNowMs, QStringLiteral("2.5.3"), QStringLiteral("stable"),
+        authorityPlatform(), authorityArchitecture());
+    ok = expect(!rejected.ok
+                    && rejected.errorCode
+                        == QStringLiteral("installed-receipt-target-mismatch"),
+                "wrong running application version was accepted") && ok;
+
+    const QString wrongReceiptPath = QDir(directory.path()).filePath(
+        QStringLiteral("receipt.json"));
+    writeBytes(wrongReceiptPath, receiptBytes);
+    rejected = UpdateArtifactSet::verifyInstalledAuthority(
+        wrongReceiptPath, manifestPath, runtimePath, key.publicKeyBase64(),
+        kNowMs, QStringLiteral("2.5.2"), QStringLiteral("stable"),
+        authorityPlatform(), authorityArchitecture());
+    ok = expect(!rejected.ok
+                    && rejected.errorCode
+                        == QStringLiteral("installed-authority-path-invalid"),
+                "noncanonical installed receipt path was accepted") && ok;
+
+    QTemporaryDir otherDirectory;
+    ok = expect(otherDirectory.isValid(),
+                "second installed authority directory is unavailable") && ok;
+    const QString separatedReceiptPath = QDir(otherDirectory.path()).filePath(
+        QStringLiteral("aegisy-update-artifact-set.json"));
+    writeBytes(separatedReceiptPath, receiptBytes);
+    rejected = UpdateArtifactSet::verifyInstalledAuthority(
+        separatedReceiptPath, manifestPath, runtimePath, key.publicKeyBase64(),
+        kNowMs, QStringLiteral("2.5.2"), QStringLiteral("stable"),
+        authorityPlatform(), authorityArchitecture());
+    ok = expect(!rejected.ok
+                    && rejected.errorCode
+                        == QStringLiteral("installed-authority-path-invalid"),
+                "receipt outside the manifest directory was accepted") && ok;
+
+    SigningKey otherKey;
+    ok = expect(otherKey.initialize(), "second Ed25519 test key unavailable") && ok;
+    rejected = UpdateArtifactSet::verifyInstalledAuthority(
+        receiptPath, manifestPath, runtimePath, otherKey.publicKeyBase64(),
+        kNowMs, QStringLiteral("2.5.2"), QStringLiteral("stable"),
+        authorityPlatform(), authorityArchitecture());
+    ok = expect(!rejected.ok && !rejected.authority.isValid()
+                    && rejected.errorCode
+                        == QStringLiteral(
+                            "installed-receipt-artifact-set-signature-invalid"),
+                "installed receipt verified under the wrong release key") && ok;
+    return ok;
+}
+
 } // namespace
 
 int main()
@@ -1157,5 +1597,6 @@ int main()
     ok = sourceStructureTests(key) && ok;
     ok = rawJsonBoundaryTests(key) && ok;
     ok = installerAndValueTests(key) && ok;
+    ok = installedAuthorityTests(key) && ok;
     return ok ? 0 : 1;
 }

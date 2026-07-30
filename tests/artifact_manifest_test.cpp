@@ -12,6 +12,10 @@
 #include <QTemporaryDir>
 
 #include <cstdio>
+
+#ifndef Q_OS_WIN
+#include <unistd.h>
+#endif
 #include <iostream>
 
 namespace {
@@ -377,8 +381,108 @@ int main(int argc, char **argv)
     manifestFile.close();
 
     auto result = ArtifactManifest::verifyFile(manifestPath, runtimePath);
-    if (!expect(result.ok && result.version == QStringLiteral("0.1.0/codex-cli 0.144.5"),
+    if (!expect(result.ok
+                    && result.version
+                        == QStringLiteral("0.1.0/codex-cli 0.144.5")
+                    && result.manifestSha256
+                        == QString::fromLatin1(QCryptographicHash::hash(
+                            QJsonDocument(manifest(runtimeHash, adapterHash)).toJson(
+                                QJsonDocument::Compact),
+                            QCryptographicHash::Sha256).toHex())
+                    && result.runtimeId == QStringLiteral("aegisy-agentd")
+                    && result.runtimeVersion == QStringLiteral("0.1.0")
+                    && result.adapterId == QStringLiteral("codex-app-server")
+                    && result.adapterVersion
+                        == QStringLiteral("codex-cli 0.144.5"),
                 "valid artifact manifest was rejected")) return 1;
+
+#ifndef Q_OS_WIN
+    const QString linkedRuntimeTarget = QDir(directory.path()).filePath(
+        QStringLiteral("linked-runtime-target"));
+    const QByteArray linkedRuntimeHash = writeArtifact(
+        linkedRuntimeTarget, QByteArrayLiteral("linked runtime"));
+    const QString linkedRuntimePath = QDir(directory.path()).filePath(
+        QStringLiteral("linked-runtime"));
+    if (!expect(::symlink(QFile::encodeName(linkedRuntimeTarget).constData(),
+                          QFile::encodeName(linkedRuntimePath).constData()) == 0,
+                "runtime symlink could not be created")) return 1;
+    QJsonObject linkedRuntimeManifest = manifest(linkedRuntimeHash, adapterHash);
+    QJsonObject linkedRuntimeEntry = linkedRuntimeManifest.value(
+        QStringLiteral("runtime")).toObject();
+    linkedRuntimeEntry.insert(QStringLiteral("path"),
+                              QFileInfo(linkedRuntimePath).fileName());
+    linkedRuntimeManifest.insert(QStringLiteral("runtime"), linkedRuntimeEntry);
+    result = ArtifactManifest::verifyObject(
+        linkedRuntimeManifest, directory.path(), linkedRuntimePath);
+    if (!expect(!result.ok
+                    && result.reason == QStringLiteral("artifact-path-invalid"),
+                "runtime symlink inside the bundle was accepted")) return 1;
+
+    const QString linkedAdapterTarget = QDir(directory.path()).filePath(
+        QStringLiteral("linked-adapter-target"));
+    const QByteArray linkedAdapterHash = writeArtifact(
+        linkedAdapterTarget, QByteArrayLiteral("linked adapter"));
+    const QString linkedAdapterPath = QDir(directory.path()).filePath(
+        QStringLiteral("linked-adapter"));
+    if (!expect(::symlink(QFile::encodeName(linkedAdapterTarget).constData(),
+                          QFile::encodeName(linkedAdapterPath).constData()) == 0,
+                "adapter symlink could not be created")) return 1;
+    QJsonObject linkedAdapterManifest = manifest(runtimeHash, linkedAdapterHash);
+    QJsonObject linkedAdapterEntry = linkedAdapterManifest.value(
+        QStringLiteral("adapter")).toObject();
+    linkedAdapterEntry.insert(QStringLiteral("path"),
+                              QFileInfo(linkedAdapterPath).fileName());
+    linkedAdapterManifest.insert(QStringLiteral("adapter"), linkedAdapterEntry);
+    result = ArtifactManifest::verifyObject(
+        linkedAdapterManifest, directory.path(), runtimePath);
+    if (!expect(!result.ok
+                    && result.reason == QStringLiteral("artifact-path-invalid"),
+                "adapter symlink inside the bundle was accepted")) return 1;
+
+    const QString nestedTargetDirectory = QDir(directory.path()).filePath(
+        QStringLiteral("nested-target"));
+    if (!expect(QDir().mkpath(nestedTargetDirectory),
+                "nested target directory could not be created")) return 1;
+    const QString nestedAdapterTarget = QDir(nestedTargetDirectory).filePath(
+        QStringLiteral("adapter"));
+    const QByteArray nestedAdapterHash = writeArtifact(
+        nestedAdapterTarget, QByteArrayLiteral("nested adapter"));
+    const QString linkedDirectory = QDir(directory.path()).filePath(
+        QStringLiteral("linked-directory"));
+    if (!expect(::symlink(QFile::encodeName(nestedTargetDirectory).constData(),
+                          QFile::encodeName(linkedDirectory).constData()) == 0,
+                "parent directory symlink could not be created")) return 1;
+    QJsonObject linkedParentManifest = manifest(runtimeHash, nestedAdapterHash);
+    QJsonObject linkedParentAdapter = linkedParentManifest.value(
+        QStringLiteral("adapter")).toObject();
+    linkedParentAdapter.insert(QStringLiteral("path"),
+                               QStringLiteral("linked-directory/adapter"));
+    linkedParentManifest.insert(QStringLiteral("adapter"), linkedParentAdapter);
+    result = ArtifactManifest::verifyObject(
+        linkedParentManifest, directory.path(), runtimePath);
+    if (!expect(!result.ok
+                    && result.reason == QStringLiteral("artifact-path-invalid"),
+                "artifact below an in-bundle parent symlink was accepted")) return 1;
+
+    const QString hardLinkedAdapterPath = QDir(directory.path()).filePath(
+        QStringLiteral("hard-linked-adapter"));
+    if (!expect(::link(QFile::encodeName(adapterPath).constData(),
+                       QFile::encodeName(hardLinkedAdapterPath).constData()) == 0,
+                "adapter hard link could not be created")) return 1;
+    QJsonObject hardLinkManifest = manifest(runtimeHash, adapterHash);
+    QJsonObject hardLinkAdapter = hardLinkManifest.value(
+        QStringLiteral("adapter")).toObject();
+    hardLinkAdapter.insert(QStringLiteral("path"),
+                           QFileInfo(hardLinkedAdapterPath).fileName());
+    hardLinkManifest.insert(QStringLiteral("adapter"), hardLinkAdapter);
+    result = ArtifactManifest::verifyObject(
+        hardLinkManifest, directory.path(), runtimePath);
+    if (!expect(!result.ok
+                    && result.reason == QStringLiteral("artifact-hard-link"),
+                "multiply linked adapter was accepted")) return 1;
+    if (!expect(QFile::remove(hardLinkedAdapterPath),
+                "adapter hard link could not be removed")) return 1;
+#endif
 
 #ifdef Q_OS_WIN
     const QString extensionlessPath = QDir(directory.path()).filePath(QStringLiteral("codex"));

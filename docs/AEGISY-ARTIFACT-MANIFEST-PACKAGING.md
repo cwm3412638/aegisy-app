@@ -56,17 +56,33 @@ dot path segments, Unicode/control ambiguity, and a basename mismatch. Windows
 also rejects reserved device basenames and requires an exact lowercase `.exe`;
 macOS requires an exact lowercase `.zip`.
 
-The verifier requires the caller's complete installed artifact set, selected
-channel, and an accepted release-sequence high-water value. Its evaluation
-identity binds the candidate identity, installed-set identity, verification-key
-hash, channel, high-water value, and evaluation time so a cached result cannot be
-reused after any of those inputs changes. A result may set only
-`candidateCompatible=true`; `downloadAuthorized` and `installAuthorized` remain
+Production evaluation requires an opaque `InstalledArtifactSetAuthority`; callers
+cannot construct the installed tuple directly. `verifyInstalledAuthority` reads the
+exact adjacent `aegisy-update-artifact-set.json` and
+`aegisy-agentd.manifest.json`, verifies the receipt signature and target, verifies the
+Runtime/adapter Manifest bytes, identity, version, ordinary-file/link policy, and
+SHA-256 values, and derives an authority identity from the receipt, complete installed
+tuple, and verification-key hash. `verifyCandidate` rereads and revalidates that graph
+before every decision, so receipt, Manifest, Runtime, adapter, expectation, or key
+drift invalidates a cached authority. The scalar tuple helper is compiled only into
+the dedicated compatibility test target.
+
+The verifier also requires the selected channel and an accepted release-sequence
+high-water value. Its evaluation identity binds the candidate identity, installed-set
+and authority identities, verification-key hash, channel, high-water value, and
+evaluation time so a cached result cannot be reused after any of those inputs changes.
+A result may set only `candidateCompatible=true`; `downloadAuthorized` and
+`installAuthorized` remain
 false for every result. The ordinary integer high-water argument is not proof of
 durable, integrity-checked, anti-deletion storage. That storage and atomic advance
-remain release gates. The current caller-provided installed tuple is likewise not
-derived from the verified installed manifest or signed package identity and supplies
-no release authority by itself. A production recovery record must bind at least the
+remain release gates. The current verification factory still accepts caller-selected
+paths and expected application metadata. It proves a signed, internally consistent
+artifact set at those paths, not that those paths are the currently executing signed
+Aegisy installation. Host integration must derive the fixed bundle layout from the
+current executable and must not accept configuration paths as installed authority.
+The same verification key currently validates both historical receipts and new
+candidates; Key IDs, validity/revocation, rotation lineage, and a bound Key Ring
+identity remain required. A production recovery record must bind at least the
 release sequence, exact artifact-set identity, and update phase. Exact-identity retries
 may then resume idempotently while a same-sequence different identity fails closed;
 advancing an unqualified scalar before or after download cannot provide both crash
@@ -118,7 +134,11 @@ The following work remains required for OpenSpec 22.5:
   that binds release sequence, artifact-set identity, and phase, supports exact-
   identity crash recovery, and rejects same-sequence identity conflicts;
 - derive the installed artifact tuple from a verified, non-downgradable signed
-  package/manifest authority instead of accepting caller-selected scalar values;
+  current application package/manifest authority instead of accepting caller-selected
+  paths or expected version/platform values;
+- introduce a reviewed update-signing Key Ring so an active historical receipt and a
+  new candidate may use different valid keys while rollback, revocation, expiry, and
+  same-generation conflicts fail closed;
 - select an audited Windows pre-download implementation instead of treating
   WinSparkle's post-download callbacks as compatibility authority;
 - disable Sparkle deltas or bind and revalidate every delta as a complete signed

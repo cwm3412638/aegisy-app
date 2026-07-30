@@ -13,18 +13,49 @@ enum class State {
     Compatible,
 };
 
-struct InstalledArtifactSet
+struct InstalledAuthorityResult;
+struct Decision;
+
+class InstalledArtifactSetAuthority
 {
-    quint64 releaseSequence = 0;
-    QString channel;
-    QString applicationVersion;
-    QString platform;
-    QString architecture;
-    QString manifestSha256;
-    QString runtimeId;
-    QString runtimeVersion;
-    QString adapterId;
-    QString adapterVersion;
+public:
+    bool isValid() const { return m_valid; }
+    QString authorityIdentity() const { return m_authorityIdentity; }
+
+private:
+    friend struct InstalledAuthorityResult;
+    friend InstalledAuthorityResult verifyInstalledAuthority(
+        const QString &, const QString &, const QString &, const QByteArray &,
+        qint64, const QString &, const QString &, const QString &,
+        const QString &);
+    friend Decision verifyCandidate(
+        const QByteArray &, const QByteArray &, qint64,
+        const InstalledArtifactSetAuthority &, const QString &, quint64);
+
+    bool m_valid = false;
+    quint64 m_releaseSequence = 0;
+    QString m_channel;
+    QString m_applicationVersion;
+    QString m_platform;
+    QString m_architecture;
+    QString m_manifestSha256;
+    QString m_runtimeId;
+    QString m_runtimeVersion;
+    QString m_adapterId;
+    QString m_adapterVersion;
+    QString m_receiptIdentity;
+    QString m_installedArtifactSetIdentity;
+    QString m_authorityIdentity;
+    QString m_receiptPath;
+    QString m_manifestPath;
+    QString m_runtimePath;
+};
+
+struct InstalledAuthorityResult
+{
+    bool ok = false;
+    QString errorCode;
+    InstalledArtifactSetAuthority authority;
 };
 
 struct Decision
@@ -37,6 +68,7 @@ struct Decision
     QString errorCode;
     QString artifactSetIdentity;
     QString installedArtifactSetIdentity;
+    QString installedAuthorityIdentity;
     QString compatibilityEvaluationIdentity;
     QString evaluatedSelectedChannel;
     quint64 evaluatedAcceptedReleaseSequenceHighWater = 0;
@@ -61,12 +93,65 @@ struct Decision
 
 QByteArray signaturePayload(const QJsonObject &envelope,
                             QString *errorCode = nullptr);
+InstalledAuthorityResult verifyInstalledAuthority(
+    const QString &receiptPath,
+    const QString &manifestPath,
+    const QString &runtimePath,
+    const QByteArray &publicKeyBase64,
+    qint64 nowMs,
+    const QString &expectedApplicationVersion,
+    const QString &expectedChannel,
+    const QString &expectedPlatform,
+    const QString &expectedArchitecture);
 Decision verifyCandidate(const QByteArray &envelopeJson,
                          const QByteArray &publicKeyBase64,
                          qint64 nowMs,
-                         const InstalledArtifactSet &installed,
+                         const InstalledArtifactSetAuthority &installedAuthority,
                          const QString &selectedChannel,
                          quint64 acceptedReleaseSequenceHighWater);
+
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
+namespace Testing {
+
+struct InstalledArtifactSet
+{
+    quint64 releaseSequence = 0;
+    QString channel;
+    QString applicationVersion;
+    QString platform;
+    QString architecture;
+    QString manifestSha256;
+    QString runtimeId;
+    QString runtimeVersion;
+    QString adapterId;
+    QString adapterVersion;
+};
+
+Decision verifyCandidateWithUntrustedInputs(
+    const QByteArray &envelopeJson,
+    const QByteArray &publicKeyBase64,
+    qint64 nowMs,
+    const InstalledArtifactSet &installed,
+    const QString &selectedChannel,
+    quint64 acceptedReleaseSequenceHighWater);
+
+} // namespace Testing
+
+using InstalledArtifactSet = Testing::InstalledArtifactSet;
+
+inline Decision verifyCandidate(
+    const QByteArray &envelopeJson,
+    const QByteArray &publicKeyBase64,
+    qint64 nowMs,
+    const InstalledArtifactSet &installed,
+    const QString &selectedChannel,
+    quint64 acceptedReleaseSequenceHighWater)
+{
+    return Testing::verifyCandidateWithUntrustedInputs(
+        envelopeJson, publicKeyBase64, nowMs, installed, selectedChannel,
+        acceptedReleaseSequenceHighWater);
+}
+#endif
 
 } // namespace UpdateArtifactSet
 

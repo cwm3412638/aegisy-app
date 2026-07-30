@@ -11,6 +11,11 @@ struct VerificationResult
     QString reason;
     QString artifactId;
     QString version;
+    QString manifestSha256;
+    QString runtimeId;
+    QString runtimeVersion;
+    QString adapterId;
+    QString adapterVersion;
 };
 
 // Verifies a bounded, local artifact manifest. The manifest is data-only: it

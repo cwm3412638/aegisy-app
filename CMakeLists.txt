@@ -849,9 +849,13 @@ if(BUILD_TESTING)
         tests/update_artifact_set_test.cpp
         src/update_artifact_set.cpp
         include/update_artifact_set.h
+        src/artifact_manifest.cpp
+        include/artifact_manifest.h
     )
     target_include_directories(AegisyUpdateArtifactSetTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(AegisyUpdateArtifactSetTest PRIVATE
+        AEGISY_UPDATE_ARTIFACT_SET_TESTING=1)
     if(QT_VERSION_MAJOR EQUAL 6)
         target_link_libraries(AegisyUpdateArtifactSetTest PRIVATE
             Qt6::Core OpenSSL::Crypto AegisyAapTransport)

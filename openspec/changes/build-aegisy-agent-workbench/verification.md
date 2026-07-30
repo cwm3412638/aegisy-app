@@ -2607,20 +2607,34 @@ Known limitations:
   full-installer URL/name/size/SHA-256/Sparkle signature, target manifest plus exact
   Runtime/adapter identity/version, and one to 64 strictly increasing compatible
   source artifact sets.
-- Compatibility requires the complete caller-supplied installed tuple, selected
-  channel, and release sequence above both the installed sequence and caller-supplied
+- Production compatibility no longer accepts a publicly constructible installed
+  tuple. `verifyInstalledAuthority` requires the exact adjacent receipt and Manifest
+  names, verifies the signed receipt target plus complete Manifest/Runtime/adapter
+  bytes, identity, version, ordinary-file/link policy, and derives an opaque authority
+  whose identity binds the receipt, installed tuple, and verification-key hash. Each
+  candidate evaluation rereads that graph and rejects drift before compatibility is
+  evaluated. The scalar tuple helper is available only to the CTest target through
+  `AEGISY_UPDATE_ARTIFACT_SET_TESTING`. Compatibility still requires the selected
+  channel and release sequence above both the installed sequence and caller-supplied
   accepted high-water value. The returned evaluation identity binds those inputs,
-  evaluation time, candidate identity, and verification-key hash. Compatible and
-  incompatible results both keep `downloadAuthorized` and `installAuthorized`
-  false. The focused `update_artifact_set_compatibility` CTest passes with macOS and
-  Windows positives, the exact canonical payload/identities, an externally generated
-  fixed Ed25519 vector, signature and nested field tampering, installed tuple
-  matching/mismatch, source ordering/count bounds including
+  evaluation time, candidate identity, verification-key hash, and installed authority.
+  Compatible and incompatible results both keep `downloadAuthorized` and
+  `installAuthorized` false. The focused `update_artifact_set_compatibility` CTest
+  passes with macOS and Windows positives, the exact canonical payload/identities, an
+  externally generated fixed Ed25519 vector, signature and nested field tampering,
+  installed tuple matching/mismatch, source ordering/count bounds including
   a valid 64-source set, URL encoding/dot/device-name rejection, BOM/invalid UTF-8/
   escaped duplicate/lone-surrogate/depth/node rejection, exact 256 KiB, installer
   size, JSON-safe integer, clock-skew, key/signature, replay, and false-authority
-  boundaries. `windows_packaging_policy` requires this CTest and the real manifest
-  startup fixture in the complete release test graph.
+  boundaries. New authority fixtures cover missing authority, bounded/oversized public
+  keys, signed-receipt tamper and wrong key, application/channel/platform expectation
+  drift, a valid signed receipt replacement with a changed release sequence, signed
+  receipt Runtime/adapter version disagreement, Manifest byte replacement, Runtime/
+  adapter content drift, separated receipt/Manifest directories, and revalidation of
+  a cached authority. The shared Manifest fixture rejects in-bundle Runtime and adapter
+  links, linked parent components, and extra hard links.
+  `windows_packaging_policy` requires this CTest and the real manifest startup fixture
+  in the complete release test graph.
 - Current macOS and Windows scripts do not bundle a pinned Codex adapter and do
   not invoke the generator. Packaged Runtime has no compile/package identity that
   makes manifest absence non-downgradable, and path verification followed by
@@ -2631,9 +2645,14 @@ Known limitations:
   real-daemon fixture, but source/workflow inspection is not Windows execution. The
   local macOS-to-Windows Cargo check stops earlier in SQLite/Tree-sitter C because
   Windows SDK headers are unavailable, so it supplies no Windows result. The signed
-  compatibility evaluator is not called by either `UpdateManager`; its installed
-  tuple and scalar high-water inputs have no trusted persistent authority. Production
-  recovery must durably bind sequence, artifact-set identity, and phase so an exact
+  compatibility evaluator is not called by either `UpdateManager`. Its verification
+  factory still accepts caller-selected local paths and expected application metadata;
+  trusted host integration must derive the fixed current signed-bundle layout and bind
+  it to the executing application rather than configuration. Receipt and candidate
+  verification currently share one key and have no Key ID, validity/revocation, or
+  rotation chain. Path inspection/open/hash and later process/install actions retain
+  TOCTOU windows. The scalar high-water input has no trusted persistent authority.
+  Production recovery must durably bind sequence, artifact-set identity, and phase so an exact
   retry can resume while a same-sequence identity conflict fails closed. Sparkle candidate
   veto does not cover resumed updates, the current contract binds no generated delta,
   and WinSparkle 0.9.3 has no pre-download candidate veto. Server feed filtering or
