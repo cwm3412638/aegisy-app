@@ -1,4 +1,5 @@
 pub mod approval_ack;
+mod artifact_manifest;
 pub mod background_job;
 pub mod background_notification;
 pub mod background_process_observation;

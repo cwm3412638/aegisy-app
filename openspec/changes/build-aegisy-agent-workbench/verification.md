@@ -2571,10 +2571,28 @@ Known limitations:
   rejects outside artifact and output paths, and invokes the production Qt
   verifier on the generated file. Together with `artifact_manifest_verification`,
   the focused CTest run passes 2/2.
+- Rust Runtime now consumes the same adjacent manifest before Codex selection.
+  A present manifest has priority over `AEGISY_CODEX_PATH`; exact Runtime and
+  `codex-cli 0.144.5` versions, canonical paths, opened-file identities, and
+  streaming SHA-256 values are checked. Duplicate or unknown JSON fields,
+  non-portable paths, symlink/reparse-point components, a Runtime/adapter hard-link
+  alias, file drift, or a changed manifest identity within one startup attempt fail
+  closed. Verification occurs immediately before both the `--version` probe and
+  `app-server --stdio`, and a malformed present manifest never falls back to the
+  developer override. Thirteen focused Rust tests, the complete Rust workspace
+  (including the final 23/23 stdio/Codex target), Rust formatting, and strict
+  package Clippy pass on macOS. The complete desktop build and the focused
+  `agent_runtime_environment`, `artifact_manifest_verification`,
+  `artifact_manifest_generation`, and `windows_packaging_policy` CTests pass 4/4.
 - Current macOS and Windows scripts do not bundle a pinned Codex adapter and do
-  not invoke the generator. Rust adapter-side verification, updater compatibility
-  integration, signed package evidence, and Windows execution are not implemented;
-  task `22.5` remains unchecked.
+  not invoke the generator. Packaged Runtime has no compile/package identity that
+  makes manifest absence non-downgradable, and path verification followed by
+  path-based process creation retains a replacement window that needs a reviewed
+  handle/platform-signature and install-permission boundary. Updater compatibility,
+  signed package evidence, and clean Windows execution remain absent. The local
+  macOS-to-Windows Cargo check stops earlier in SQLite/Tree-sitter C because Windows
+  SDK headers are unavailable, so it supplies no Windows result. Task `22.5`
+  remains unchecked.
 
 ## 22.6 Emergency Workbench Disable Foundation
 

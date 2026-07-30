@@ -77,6 +77,13 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   --stdio`, translated into stable AAP sessions, turns, and timeline items. The
   adapter requires pinned `codex-cli 0.144.5` and rejects other versions before
   launch; its generated v2 schema is checked in under `agent-runtime/aap-schema`.
+  When an adjacent `aegisy-artifact-manifest/0.1` is present, Runtime resolves
+  Codex only from that manifest, ignores `AEGISY_CODEX_PATH`, binds the exact
+  Runtime/adapter versions, paths, file identities, and SHA-256 values, and
+  revalidates the fixed manifest identity before version probing and App Server
+  spawn. A malformed or drifted present manifest never falls back to developer
+  discovery. Manifest absence still permits developer resolution until signed
+  packaging can require the manifest without breaking current developer builds.
   The pin and schema-driven lifecycle fixtures pass the full Rust workspace test
   and Clippy gates; cross-platform binary contract and upgrade/rollback evidence
   remain open under OpenSpec task `7.1`.
@@ -3484,15 +3491,23 @@ Implemented visual baseline:
   approvals, Git, or jobs. Five focused tests and the `aegisy-agentd` library
   target (763 passed, one ignored live fixture) plus strict Clippy and format
   checks pass.
-- OpenSpec `22.5` has a partial Qt foundation. The local
+- OpenSpec `22.5` has partial Qt, generator, and Rust Runtime foundations. The local
   `aegisy-artifact-manifest/0.1` verifier checks a present sidecar/adapter
   manifest before launch, including fixed identities, versions, bounded sizes,
   canonical in-tree files, symlink/path escape, unknown-field rejection, and
   streaming SHA-256. A failure suppresses launch and automatic reconnect;
   developer builds may omit the manifest. `artifact_manifest_verification` and
-  `agent_runtime_environment` pass. Formal manifest generation, Rust adapter
-  verification, updater compatibility, signed packaging, and Windows evidence
-  remain open.
+  `agent_runtime_environment` pass. Rust Runtime now parses the same exact
+  contract before Codex resolution, rejects duplicate/unknown fields, non-portable
+  paths, every symlink/reparse-point path component, hard-linked Runtime/adapter
+  aliases, version/hash/path drift, and a manifest identity change within one
+  startup attempt. A present manifest owns adapter selection and cannot fall back
+  to `AEGISY_CODEX_PATH`; Runtime revalidates immediately before both `--version`
+  and `app-server --stdio`. Thirteen focused Rust tests, the complete Rust
+  workspace (including the final 23/23 stdio/Codex target), formatting, and strict
+  package Clippy pass locally. The complete desktop build plus focused Runtime
+  environment, manifest verification/generation, and Windows packaging-policy
+  CTests pass 4/4 on macOS.
 - A deterministic packaging foundation now exists at
   `cmake/generate_artifact_manifest.cmake`. It accepts only explicit regular
   files inside a caller-provided bundle root, requires a canonical in-root output
@@ -3504,9 +3519,14 @@ Implemented visual baseline:
   proves that the production Qt verifier accepts the generated file. The focused
   manifest CTest run passes 2/2. macOS and Windows
   packaging do not invoke it yet because neither script currently bundles a
-  pinned Codex adapter executable; Rust adapter verification, updater
-  compatibility binding, signed release integration, and Windows evidence remain
-  required. See `docs/AEGISY-ARTIFACT-MANIFEST-PACKAGING.md`.
+  pinned Codex adapter executable. Packaged builds also lack a non-downgradable
+  require-manifest identity, and path verification followed by path-based process
+  creation still has a replacement window that must be closed by a reviewed
+  file-handle/platform-signature and install-permission boundary. Updater
+  compatibility binding, signed release integration, and clean Windows execution
+  remain required. The macOS-to-Windows Cargo check is still blocked before this
+  Rust module by missing Windows SDK C headers in SQLite/Tree-sitter. Keep `22.5`
+  unchecked. See `docs/AEGISY-ARTIFACT-MANIFEST-PACKAGING.md`.
 
 ## Live Timeline Subscription And Ownership Recovery (2026-07-26)
 
@@ -4034,9 +4054,11 @@ Implemented visual baseline:
    retention-gap snapshot recovery, out-of-band heartbeat, bounded reconnect, and
    live subscribe/sync-or-snapshot/activate are implemented. Keep automatic pruning
    disabled until the remaining mutation-producer and cross-platform gates are verified.
-3. Finish OpenSpec `22.5` by generating the trusted manifest in signed packaging,
-   binding Rust adapter launch and updater compatibility to the same artifact
-   set, then validate it on a clean Windows runner.
+3. Finish OpenSpec `22.5` by bundling the reviewed pinned adapter, generating the
+   trusted manifest in signed packaging, making manifest presence non-downgradable
+   for packaged Runtime, closing the remaining path-to-spawn replacement window,
+   binding updater compatibility to the same artifact set, and validating it on a
+   clean Windows runner.
 4. Validate the hardened TLS installer on a clean Windows x64 VM.
 5. Reproduce and correlate any remaining streaming disconnect with redacted logs.
 6. Continue consolidating widget-local QSS and replace remaining Qt stock icons;

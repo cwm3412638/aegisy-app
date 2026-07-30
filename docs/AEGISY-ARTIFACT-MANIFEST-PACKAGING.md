@@ -31,12 +31,22 @@ until that adapter packaging decision, source, version, and license inventory
 are fixed by the release process. The generator is therefore intentionally not
 called from either script yet.
 
+Rust Runtime consumes the same adjacent manifest when it exists. That path takes
+priority over `AEGISY_CODEX_PATH`, validates the exact Runtime and pinned adapter
+versions/files, fixes one manifest identity for a startup attempt, and revalidates
+before the version probe and App Server spawn. A malformed present manifest fails
+closed. Manifest absence still enables developer discovery because current packages
+do not yet bundle the reviewed adapter or generate the contract.
+
 The following work remains required for OpenSpec 22.5:
 
 - package the pinned adapter as a reviewed artifact and generate the manifest
   after deployment/copying and before signing;
-- make Rust adapter startup verify the same manifest entry before spawning
-  Codex, without trusting a UI or user-provided environment variable;
+- add a non-downgradable packaged-build identity that requires the manifest while
+  preserving manifest-free developer builds;
+- close the remaining verification-to-process-creation replacement window with a
+  reviewed file-handle/platform-signature and installed-directory permission
+  boundary; repeated path hashing narrows but does not eliminate that race;
 - bind the manifest's runtime/adapter versions to updater compatibility checks,
   rejecting an update that would leave an incompatible pair;
 - add signed macOS and Windows release evidence. This foundation does not claim

@@ -42,6 +42,28 @@ const MAX_UNKNOWN_NOTIFICATION_METHODS: usize = 16;
 const MAX_FILE_CHANGE_ITEMS_PER_TURN: usize = 256;
 const MAX_FILE_CHANGE_RETAINED_BYTES_PER_TURN: usize = 16 * 1024 * 1024;
 
+#[derive(Debug)]
+pub(crate) enum CodexExecutable {
+    Bundled(crate::artifact_manifest::VerifiedBundledAdapter),
+    Developer(PathBuf),
+}
+
+impl CodexExecutable {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Bundled(verified) => verified.path(),
+            Self::Developer(path) => path,
+        }
+    }
+
+    fn reverify_before_execution(&self) -> Result<(), String> {
+        match self {
+            Self::Bundled(verified) => verified.reverify().map_err(|error| error.to_string()),
+            Self::Developer(_) => Ok(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BackendInfo {
     pub adapter: String,
@@ -607,15 +629,17 @@ impl CodexAdapter {
     }
 
     fn start_once() -> Result<Self, String> {
-        let executable = locate_codex();
+        let executable = locate_codex()?;
         let process_environment = codex_process_environment()?;
-        let version = codex_version(&executable, &process_environment);
+        executable.reverify_before_execution()?;
+        let version = codex_version(executable.path(), &process_environment);
         if !codex_version_is_pinned(&version) {
             return Err(format!(
                 "unsupported Codex App Server version {version}; Aegisy requires {PINNED_CODEX_VERSION}"
             ));
         }
-        let mut command = codex_command(&executable, &process_environment);
+        executable.reverify_before_execution()?;
+        let mut command = codex_command(executable.path(), &process_environment);
         command
             .args(["app-server", "--stdio"])
             .stdin(Stdio::piped())
@@ -2318,16 +2342,36 @@ impl Drop for CodexAdapter {
     }
 }
 
-fn locate_codex() -> PathBuf {
-    if let Some(path) = env::var_os("AEGISY_CODEX_PATH") {
-        return PathBuf::from(path);
+fn locate_codex() -> Result<CodexExecutable, String> {
+    let runtime_path = env::current_exe()
+        .map_err(|_| "cannot resolve the Aegisy Runtime executable".to_owned())?;
+    resolve_codex_for_runtime(
+        &runtime_path,
+        env::var_os("AEGISY_CODEX_PATH").map(PathBuf::from),
+    )
+}
+
+pub(crate) fn resolve_codex_for_runtime(
+    runtime_path: &Path,
+    developer_override: Option<PathBuf>,
+) -> Result<CodexExecutable, String> {
+    if let Some(verified) =
+        crate::artifact_manifest::verified_bundled_adapter(runtime_path, PINNED_CODEX_VERSION)
+            .map_err(|error| error.to_string())?
+    {
+        return Ok(CodexExecutable::Bundled(verified));
+    }
+    if let Some(path) = developer_override {
+        return Ok(CodexExecutable::Developer(path));
     }
     for path in ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"] {
         if Path::new(path).is_file() {
-            return PathBuf::from(path);
+            return Ok(CodexExecutable::Developer(PathBuf::from(path)));
         }
     }
-    PathBuf::from(if cfg!(windows) { "codex.exe" } else { "codex" })
+    Ok(CodexExecutable::Developer(PathBuf::from(
+        if cfg!(windows) { "codex.exe" } else { "codex" },
+    )))
 }
 
 fn codex_process_environment() -> Result<ProcessEnvironment, String> {
