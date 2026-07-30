@@ -42,6 +42,19 @@ bool safeRelativePath(const QString &path)
     return true;
 }
 
+bool validBundledAdapterPath(const QString &path)
+{
+#ifdef Q_OS_WIN
+    // std::process::Command appends .exe on Windows. Requiring the manifest to
+    // name that exact image prevents an extensionless file from being verified
+    // while a same-directory .exe shadow is executed.
+    return path.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive);
+#else
+    Q_UNUSED(path);
+    return true;
+#endif
+}
+
 bool hasExactKeys(const QJsonObject &object, const QSet<QString> &expected)
 {
     const QStringList keys = object.keys();
@@ -54,7 +67,8 @@ bool hasExactKeys(const QJsonObject &object, const QSet<QString> &expected)
 
 ArtifactManifest::VerificationResult verifyArtifact(const QJsonObject &artifact,
                                                      const QString &baseDirectory,
-                                                     const QString &expectedPath)
+                                                     const QString &expectedPath,
+                                                     bool bundledAdapter)
 {
     const QString id = artifact.value(QStringLiteral("id")).toString();
     const QString version = artifact.value(QStringLiteral("version")).toString();
@@ -65,6 +79,7 @@ ArtifactManifest::VerificationResult verifyArtifact(const QJsonObject &artifact,
             QStringLiteral("sha256")
         })
         || !validText(id, 128) || !validText(version, 128) || !safeRelativePath(path)
+        || (bundledAdapter && !validBundledAdapterPath(path))
         || !validSha256(expectedHash)) {
         return fail(QStringLiteral("invalid-artifact-entry"), id);
     }
@@ -128,9 +143,10 @@ VerificationResult verifyObject(const QJsonObject &manifest,
             != QStringLiteral("codex-app-server")) {
         return fail(QStringLiteral("artifact-identity-invalid"));
     }
-    const auto runtimeResult = verifyArtifact(runtime.toObject(), baseDirectory, runtimePath);
+    const auto runtimeResult = verifyArtifact(
+        runtime.toObject(), baseDirectory, runtimePath, false);
     if (!runtimeResult.ok) return runtimeResult;
-    const auto adapterResult = verifyArtifact(adapter.toObject(), baseDirectory, {});
+    const auto adapterResult = verifyArtifact(adapter.toObject(), baseDirectory, {}, true);
     if (!adapterResult.ok) return adapterResult;
     return {true, {}, runtimeResult.artifactId,
             runtimeResult.version + QStringLiteral("/") + adapterResult.version};

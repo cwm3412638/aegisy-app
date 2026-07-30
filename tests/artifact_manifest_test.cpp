@@ -26,6 +26,24 @@ QByteArray writeArtifact(const QString &path, const QByteArray &bytes)
     return QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex();
 }
 
+QString runtimeFileName()
+{
+#ifdef Q_OS_WIN
+    return QStringLiteral("aegisy-agentd.exe");
+#else
+    return QStringLiteral("aegisy-agentd");
+#endif
+}
+
+QString adapterFileName()
+{
+#ifdef Q_OS_WIN
+    return QStringLiteral("codex.exe");
+#else
+    return QStringLiteral("codex");
+#endif
+}
+
 QJsonObject manifest(const QByteArray &runtimeHash, const QByteArray &adapterHash)
 {
     return {
@@ -33,13 +51,13 @@ QJsonObject manifest(const QByteArray &runtimeHash, const QByteArray &adapterHas
         {QStringLiteral("runtime"), QJsonObject{
             {QStringLiteral("id"), QStringLiteral("aegisy-agentd")},
             {QStringLiteral("version"), QStringLiteral("0.1.0")},
-            {QStringLiteral("path"), QStringLiteral("aegisy-agentd")},
+            {QStringLiteral("path"), runtimeFileName()},
             {QStringLiteral("sha256"), QString::fromLatin1(runtimeHash)},
         }},
         {QStringLiteral("adapter"), QJsonObject{
             {QStringLiteral("id"), QStringLiteral("codex-app-server")},
             {QStringLiteral("version"), QStringLiteral("codex-cli 0.144.5")},
-            {QStringLiteral("path"), QStringLiteral("codex")},
+            {QStringLiteral("path"), adapterFileName()},
             {QStringLiteral("sha256"), QString::fromLatin1(adapterHash)},
         }},
     };
@@ -64,8 +82,8 @@ int main(int argc, char **argv)
     }
     QTemporaryDir directory;
     if (!expect(directory.isValid(), "temporary directory unavailable")) return 1;
-    const QString runtimePath = QDir(directory.path()).filePath(QStringLiteral("aegisy-agentd"));
-    const QString adapterPath = QDir(directory.path()).filePath(QStringLiteral("codex"));
+    const QString runtimePath = QDir(directory.path()).filePath(runtimeFileName());
+    const QString adapterPath = QDir(directory.path()).filePath(adapterFileName());
     const QByteArray runtimeHash = writeArtifact(runtimePath, QByteArrayLiteral("runtime"));
     const QByteArray adapterHash = writeArtifact(adapterPath, QByteArrayLiteral("adapter"));
     const QString manifestPath = QDir(directory.path()).filePath(QStringLiteral("manifest.json"));
@@ -77,6 +95,19 @@ int main(int argc, char **argv)
     auto result = ArtifactManifest::verifyFile(manifestPath, runtimePath);
     if (!expect(result.ok && result.version == QStringLiteral("0.1.0/codex-cli 0.144.5"),
                 "valid artifact manifest was rejected")) return 1;
+
+#ifdef Q_OS_WIN
+    const QString extensionlessPath = QDir(directory.path()).filePath(QStringLiteral("codex"));
+    const QByteArray extensionlessHash = writeArtifact(
+        extensionlessPath, QByteArrayLiteral("manifested non-executable"));
+    QJsonObject shadowed = manifest(runtimeHash, extensionlessHash);
+    QJsonObject shadowedAdapter = shadowed.value(QStringLiteral("adapter")).toObject();
+    shadowedAdapter.insert(QStringLiteral("path"), QStringLiteral("codex"));
+    shadowed.insert(QStringLiteral("adapter"), shadowedAdapter);
+    result = ArtifactManifest::verifyObject(shadowed, directory.path(), runtimePath);
+    if (!expect(!result.ok && result.reason == QStringLiteral("invalid-artifact-entry"),
+                "extensionless adapter with an executable shadow was accepted")) return 1;
+#endif
 
     QFile tampered(adapterPath);
     if (!expect(tampered.open(QIODevice::Append), "tampered artifact cannot be opened")) return 1;

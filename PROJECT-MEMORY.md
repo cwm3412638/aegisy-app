@@ -79,9 +79,10 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   launch; its generated v2 schema is checked in under `agent-runtime/aap-schema`.
   When an adjacent `aegisy-artifact-manifest/0.1` is present, Runtime resolves
   Codex only from that manifest, ignores `AEGISY_CODEX_PATH`, binds the exact
-  Runtime/adapter versions, paths, file identities, and SHA-256 values, and
-  revalidates the fixed manifest identity before version probing and App Server
-  spawn. A malformed or drifted present manifest never falls back to developer
+  Runtime/adapter versions, paths, single-link file identities, and SHA-256 values,
+  requires the exact `.exe` adapter image on Windows, and revalidates the fixed
+  manifest identity before version probing and App Server spawn. A malformed or
+  drifted present manifest never falls back to developer
   discovery. Manifest absence still permits developer resolution until signed
   packaging can require the manifest without breaking current developer builds.
   The pin and schema-driven lifecycle fixtures pass the full Rust workspace test
@@ -3499,13 +3500,16 @@ Implemented visual baseline:
   developer builds may omit the manifest. `artifact_manifest_verification` and
   `agent_runtime_environment` pass. Rust Runtime now parses the same exact
   contract before Codex resolution, rejects duplicate/unknown fields, non-portable
-  paths, every symlink/reparse-point path component, hard-linked Runtime/adapter
-  aliases, version/hash/path drift, and a manifest identity change within one
-  startup attempt. A present manifest owns adapter selection and cannot fall back
-  to `AEGISY_CODEX_PATH`; Runtime revalidates immediately before both `--version`
-  and `app-server --stdio`. Thirteen focused Rust tests, the complete Rust
-  workspace (including the final 23/23 stdio/Codex target), formatting, and strict
-  package Clippy pass locally. The complete desktop build plus focused Runtime
+  paths, a Windows adapter path without an explicit `.exe`, every symlink/reparse-
+  point path component, any extra hard-link alias, version/hash/path/file-identity
+  drift, and a manifest identity change within one startup attempt. Artifact hashing
+  uses a bounded 64 KiB heap buffer rather than a large main-thread stack frame. A
+  present manifest owns adapter selection and cannot fall back to
+  `AEGISY_CODEX_PATH`; Runtime revalidates immediately before both `--version` and
+  `app-server --stdio`. Sixteen focused Rust tests and the complete Rust workspace
+  pass with 1,078 tests and one explicitly ignored live Codex fixture, including
+  the final 23/23 stdio/Codex target. Formatting and strict package Clippy pass
+  locally. The complete desktop build plus focused Runtime
   environment, manifest verification/generation, and Windows packaging-policy
   CTests pass 4/4 on macOS.
 - A deterministic packaging foundation now exists at

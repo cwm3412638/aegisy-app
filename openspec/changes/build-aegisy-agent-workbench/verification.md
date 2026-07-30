@@ -2575,13 +2575,16 @@ Known limitations:
   A present manifest has priority over `AEGISY_CODEX_PATH`; exact Runtime and
   `codex-cli 0.144.5` versions, canonical paths, opened-file identities, and
   streaming SHA-256 values are checked. Duplicate or unknown JSON fields,
-  non-portable paths, symlink/reparse-point components, a Runtime/adapter hard-link
-  alias, file drift, or a changed manifest identity within one startup attempt fail
-  closed. Verification occurs immediately before both the `--version` probe and
+  non-portable paths, a Windows adapter path without an exact `.exe`, symlink/
+  reparse-point components, any extra hard-link alias, path/content/file-identity
+  drift, or a changed manifest identity within one startup attempt fail closed.
+  Hashing uses a bounded 64 KiB heap buffer rather than a 1 MiB main-thread stack
+  frame. Verification occurs immediately before both the `--version` probe and
   `app-server --stdio`, and a malformed present manifest never falls back to the
-  developer override. Thirteen focused Rust tests, the complete Rust workspace
-  (including the final 23/23 stdio/Codex target), Rust formatting, and strict
-  package Clippy pass on macOS. The complete desktop build and the focused
+  developer override. Sixteen focused Rust tests and the complete Rust workspace
+  pass with 1,078 tests and one explicitly ignored live Codex fixture, including
+  the final 23/23 stdio/Codex target. Rust formatting and strict package Clippy pass
+  on macOS. The complete desktop build and the focused
   `agent_runtime_environment`, `artifact_manifest_verification`,
   `artifact_manifest_generation`, and `windows_packaging_policy` CTests pass 4/4.
 - Current macOS and Windows scripts do not bundle a pinned Codex adapter and do

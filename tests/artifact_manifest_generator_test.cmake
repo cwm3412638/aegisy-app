@@ -1,8 +1,17 @@
 set(fixture "${AEGISY_BINARY_DIR}/artifact-manifest-验证-生成")
 file(REMOVE_RECURSE "${fixture}")
 file(MAKE_DIRECTORY "${fixture}")
-file(WRITE "${fixture}/aegisy-agentd" "runtime fixture\n")
-file(WRITE "${fixture}/codex" "adapter fixture\n")
+if(WIN32)
+    set(runtime_name "aegisy-agentd.exe")
+    set(adapter_name "codex.exe")
+else()
+    set(runtime_name "aegisy-agentd")
+    set(adapter_name "codex")
+endif()
+set(runtime_path "${fixture}/${runtime_name}")
+set(adapter_path "${fixture}/${adapter_name}")
+file(WRITE "${runtime_path}" "runtime fixture\n")
+file(WRITE "${adapter_path}" "adapter fixture\n")
 set(output "${fixture}/aegisy-agentd.manifest.json")
 set(generator "${AEGISY_SOURCE_DIR}/cmake/generate_artifact_manifest.cmake")
 if(NOT EXISTS "${MANIFEST_VERIFIER}")
@@ -13,10 +22,10 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}"
         -DBASE_DIR=${fixture}
         -DOUTPUT=${output}
-        -DRUNTIME_PATH=${fixture}/aegisy-agentd
+        -DRUNTIME_PATH=${runtime_path}
         -DRUNTIME_ID=aegisy-agentd
         -DRUNTIME_VERSION=0.1.0
-        -DADAPTER_PATH=${fixture}/codex
+        -DADAPTER_PATH=${adapter_path}
         -DADAPTER_ID=codex-app-server
         "-DADAPTER_VERSION=codex-cli 0.144.5"
         -P "${generator}"
@@ -27,16 +36,16 @@ if(NOT first_result EQUAL 0)
 endif()
 file(SHA256 "${output}" first_hash)
 file(READ "${output}" first_content)
-file(SHA256 "${fixture}/aegisy-agentd" runtime_hash)
-file(SHA256 "${fixture}/codex" adapter_hash)
+file(SHA256 "${runtime_path}" runtime_hash)
+file(SHA256 "${adapter_path}" adapter_hash)
 execute_process(
     COMMAND "${CMAKE_COMMAND}"
         -DBASE_DIR=${fixture}
         -DOUTPUT=${output}
-        -DRUNTIME_PATH=${fixture}/aegisy-agentd
+        -DRUNTIME_PATH=${runtime_path}
         -DRUNTIME_ID=aegisy-agentd
         -DRUNTIME_VERSION=0.1.0
-        -DADAPTER_PATH=${fixture}/codex
+        -DADAPTER_PATH=${adapter_path}
         -DADAPTER_ID=codex-app-server
         "-DADAPTER_VERSION=codex-cli 0.144.5"
         -P "${generator}"
@@ -60,11 +69,32 @@ if(NOT first_content MATCHES "\"version\": \"codex-cli 0\\.144\\.5\"")
     message(FATAL_ERROR "manifest adapter version is not exact")
 endif()
 execute_process(
-    COMMAND "${MANIFEST_VERIFIER}" "${output}" "${fixture}/aegisy-agentd"
+    COMMAND "${MANIFEST_VERIFIER}" "${output}" "${runtime_path}"
     RESULT_VARIABLE verification_result
 )
 if(NOT verification_result EQUAL 0)
     message(FATAL_ERROR "production verifier rejected the generated manifest")
+endif()
+
+if(WIN32)
+    set(extensionless_adapter "${fixture}/codex")
+    file(WRITE "${extensionless_adapter}" "manifested non-executable\n")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}"
+            -DBASE_DIR=${fixture}
+            -DOUTPUT=${fixture}/invalid-shadow.json
+            -DRUNTIME_PATH=${runtime_path}
+            -DRUNTIME_ID=aegisy-agentd
+            -DRUNTIME_VERSION=0.1.0
+            -DADAPTER_PATH=${extensionless_adapter}
+            -DADAPTER_ID=codex-app-server
+            "-DADAPTER_VERSION=codex-cli 0.144.5"
+            -P "${generator}"
+        RESULT_VARIABLE shadow_result
+    )
+    if(shadow_result EQUAL 0)
+        message(FATAL_ERROR "manifest generator accepted an extensionless Windows adapter")
+    endif()
 endif()
 
 file(WRITE "${AEGISY_BINARY_DIR}/artifact-manifest-outside" "outside fixture\n")
@@ -75,7 +105,7 @@ execute_process(
         -DRUNTIME_PATH=${AEGISY_BINARY_DIR}/artifact-manifest-outside
         -DRUNTIME_ID=aegisy-agentd
         -DRUNTIME_VERSION=0.1.0
-        -DADAPTER_PATH=${fixture}/codex
+        -DADAPTER_PATH=${adapter_path}
         -DADAPTER_ID=codex-app-server
         "-DADAPTER_VERSION=codex-cli 0.144.5"
         -P "${generator}"
@@ -89,10 +119,10 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}"
         -DBASE_DIR=${fixture}
         -DOUTPUT=${AEGISY_BINARY_DIR}/artifact-manifest-outside.json
-        -DRUNTIME_PATH=${fixture}/aegisy-agentd
+        -DRUNTIME_PATH=${runtime_path}
         -DRUNTIME_ID=aegisy-agentd
         -DRUNTIME_VERSION=0.1.0
-        -DADAPTER_PATH=${fixture}/codex
+        -DADAPTER_PATH=${adapter_path}
         -DADAPTER_ID=codex-app-server
         "-DADAPTER_VERSION=codex-cli 0.144.5"
         -P "${generator}"

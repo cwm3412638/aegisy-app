@@ -33,10 +33,12 @@ called from either script yet.
 
 Rust Runtime consumes the same adjacent manifest when it exists. That path takes
 priority over `AEGISY_CODEX_PATH`, validates the exact Runtime and pinned adapter
-versions/files, fixes one manifest identity for a startup attempt, and revalidates
-before the version probe and App Server spawn. A malformed present manifest fails
-closed. Manifest absence still enables developer discovery because current packages
-do not yet bundle the reviewed adapter or generate the contract.
+versions/files, requires one-link artifact identities, requires the exact `.exe`
+adapter path on Windows, fixes the manifest and opened-file identities for a startup
+attempt, and revalidates before the version probe and App Server spawn. Hashing uses
+a bounded heap buffer. A malformed present manifest fails closed. Manifest absence
+still enables developer discovery because current packages do not yet bundle the
+reviewed adapter or generate the contract.
 
 The following work remains required for OpenSpec 22.5:
 

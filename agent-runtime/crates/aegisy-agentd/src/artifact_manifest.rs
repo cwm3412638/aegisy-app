@@ -13,11 +13,14 @@ const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 128;
 const MAX_RELATIVE_PATH_BYTES: usize = 1024;
+const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedBundledAdapter {
     runtime_path: PathBuf,
+    runtime_identity: FileIdentity,
     path: PathBuf,
+    adapter_identity: FileIdentity,
     expected_adapter_version: String,
     manifest_sha256: String,
 }
@@ -58,9 +61,21 @@ impl VerifiedBundledAdapter {
                 "runtime",
             ));
         }
+        if verified.runtime_identity != self.runtime_identity {
+            return Err(ArtifactManifestError::artifact(
+                "artifact-identity-mismatch",
+                "runtime",
+            ));
+        }
         if verified.path != self.path {
             return Err(ArtifactManifestError::artifact(
                 "artifact-path-mismatch",
+                "adapter",
+            ));
+        }
+        if verified.adapter_identity != self.adapter_identity {
+            return Err(ArtifactManifestError::artifact(
+                "artifact-identity-mismatch",
                 "adapter",
             ));
         }
@@ -191,7 +206,9 @@ pub(crate) fn verified_bundled_adapter(
 
     Ok(Some(VerifiedBundledAdapter {
         runtime_path: verified_runtime.path,
+        runtime_identity: verified_runtime.identity,
         path: verified_adapter.path,
+        adapter_identity: verified_adapter.identity,
         expected_adapter_version: expected_adapter_version.to_owned(),
         manifest_sha256,
     }))
@@ -206,6 +223,7 @@ fn parse_artifact_entry(
         || !valid_printable_metadata(&entry.id)
         || !valid_printable_metadata(&entry.version)
         || !safe_portable_relative_path(&entry.path)
+        || (artifact == "adapter" && !valid_bundled_adapter_path(&entry.path))
         || !valid_sha256(&entry.sha256)
     {
         return Err(ArtifactManifestError::artifact(
@@ -214,6 +232,17 @@ fn parse_artifact_entry(
         ));
     }
     Ok(entry)
+}
+
+fn valid_bundled_adapter_path(path: &str) -> bool {
+    valid_bundled_adapter_path_for_platform(path, cfg!(windows))
+}
+
+fn valid_bundled_adapter_path_for_platform(path: &str, windows: bool) -> bool {
+    !windows
+        || path
+            .get(path.len().saturating_sub(4)..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".exe"))
 }
 
 fn valid_printable_metadata(value: &str) -> bool {
@@ -344,10 +373,16 @@ fn sha256_bounded_file(
             artifact,
         ));
     }
-    let identity = file_identity(&file, &metadata, artifact)?;
+    let (identity, link_count) = file_identity(&file, &metadata, artifact)?;
+    if link_count != 1 {
+        return Err(ArtifactManifestError::artifact(
+            "artifact-hard-link",
+            artifact,
+        ));
+    }
     let mut hash = Sha256::new();
     let mut total_bytes = 0_u64;
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     loop {
         let bytes_read = file
             .read(&mut buffer)
@@ -374,13 +409,16 @@ fn file_identity(
     _file: &File,
     metadata: &fs::Metadata,
     _artifact: &'static str,
-) -> Result<FileIdentity, ArtifactManifestError> {
+) -> Result<(FileIdentity, u64), ArtifactManifestError> {
     use std::os::unix::fs::MetadataExt;
 
-    Ok(FileIdentity::Unix {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
+    Ok((
+        FileIdentity::Unix {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        },
+        metadata.nlink(),
+    ))
 }
 
 #[cfg(windows)]
@@ -388,7 +426,7 @@ fn file_identity(
     file: &File,
     _metadata: &fs::Metadata,
     artifact: &'static str,
-) -> Result<FileIdentity, ArtifactManifestError> {
+) -> Result<(FileIdentity, u64), ArtifactManifestError> {
     use std::mem::MaybeUninit;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -407,10 +445,13 @@ fn file_identity(
     let information = unsafe { information.assume_init() };
     let file_index =
         (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
-    Ok(FileIdentity::Windows {
-        volume: information.dwVolumeSerialNumber,
-        file_index,
-    })
+    Ok((
+        FileIdentity::Windows {
+            volume: information.dwVolumeSerialNumber,
+            file_index,
+        },
+        u64::from(information.nNumberOfLinks),
+    ))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -418,7 +459,7 @@ fn file_identity(
     _file: &File,
     _metadata: &fs::Metadata,
     artifact: &'static str,
-) -> Result<FileIdentity, ArtifactManifestError> {
+) -> Result<(FileIdentity, u64), ArtifactManifestError> {
     Err(ArtifactManifestError::artifact(
         "artifact-identity-unavailable",
         artifact,
@@ -444,7 +485,10 @@ fn read_bounded_file(
 
 #[cfg(test)]
 mod tests {
-    use super::{verified_bundled_adapter, ArtifactManifestError, MANIFEST_NAME};
+    use super::{
+        valid_bundled_adapter_path_for_platform, verified_bundled_adapter, ArtifactManifestError,
+        MANIFEST_NAME,
+    };
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -485,8 +529,14 @@ mod tests {
 
     fn fixture(label: &str) -> (TestDirectory, PathBuf, PathBuf, Value) {
         let directory = TestDirectory::new(label);
-        let runtime = directory.path().join("aegisy-agentd");
-        let adapter = directory.path().join("codex");
+        let runtime_name = if cfg!(windows) {
+            "aegisy-agentd.exe"
+        } else {
+            "aegisy-agentd"
+        };
+        let adapter_name = if cfg!(windows) { "codex.exe" } else { "codex" };
+        let runtime = directory.path().join(runtime_name);
+        let adapter = directory.path().join(adapter_name);
         let runtime_bytes = b"runtime fixture";
         let adapter_bytes = b"adapter fixture";
         fs::write(&runtime, runtime_bytes).unwrap();
@@ -496,13 +546,13 @@ mod tests {
             "runtime": {
                 "id": "aegisy-agentd",
                 "version": env!("CARGO_PKG_VERSION"),
-                "path": "aegisy-agentd",
+                "path": runtime_name,
                 "sha256": sha256(runtime_bytes)
             },
             "adapter": {
                 "id": "codex-app-server",
                 "version": PINNED_ADAPTER_VERSION,
-                "path": "codex",
+                "path": adapter_name,
                 "sha256": sha256(adapter_bytes)
             }
         });
@@ -613,6 +663,26 @@ mod tests {
         );
     }
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn byte_identical_adapter_replacement_changes_the_bound_file_identity() {
+        let (directory, runtime, adapter, manifest) = fixture("identity-replacement");
+        write_manifest(&directory, &manifest);
+        let verified = verified_bundled_adapter(&runtime, PINNED_ADAPTER_VERSION)
+            .unwrap()
+            .unwrap();
+
+        let replacement = directory.path().join("replacement-codex");
+        fs::write(&replacement, b"adapter fixture").unwrap();
+        fs::remove_file(&adapter).unwrap();
+        fs::rename(replacement, adapter).unwrap();
+
+        assert_eq!(
+            verified.reverify().unwrap_err().code(),
+            "artifact-identity-mismatch"
+        );
+    }
+
     #[test]
     fn runtime_and_adapter_hash_drift_fail_closed() {
         let (directory, runtime, adapter, manifest) = fixture("hash");
@@ -670,6 +740,40 @@ mod tests {
     }
 
     #[test]
+    fn windows_adapter_path_must_name_the_exact_executable_image() {
+        assert!(valid_bundled_adapter_path_for_platform("codex.exe", true));
+        assert!(valid_bundled_adapter_path_for_platform(
+            "bin/CODEX.EXE",
+            true
+        ));
+        assert!(!valid_bundled_adapter_path_for_platform("codex", true));
+        assert!(!valid_bundled_adapter_path_for_platform("codex.cmd", true));
+        assert!(!valid_bundled_adapter_path_for_platform(
+            "codex.exe.backup",
+            true
+        ));
+        assert!(valid_bundled_adapter_path_for_platform("codex", false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extensionless_adapter_cannot_be_shadowed_by_an_unverified_executable() {
+        let (directory, runtime, adapter, mut manifest) = fixture("exe-shadow");
+        fs::write(&adapter, b"unverified executable").unwrap();
+        let extensionless = directory.path().join("codex");
+        let extensionless_bytes = b"manifested non-executable";
+        fs::write(&extensionless, extensionless_bytes).unwrap();
+        manifest["adapter"]["path"] = json!("codex");
+        manifest["adapter"]["sha256"] = json!(sha256(extensionless_bytes));
+        write_manifest(&directory, &manifest);
+
+        assert_eq!(
+            error_code(verified_bundled_adapter(&runtime, PINNED_ADAPTER_VERSION)),
+            "invalid-artifact-entry"
+        );
+    }
+
+    #[test]
     fn duplicate_manifest_fields_are_rejected() {
         let (directory, runtime, _adapter, manifest) = fixture("duplicate");
         let serialized = serde_json::to_string(&manifest).unwrap();
@@ -719,7 +823,20 @@ mod tests {
 
         assert_eq!(
             error_code(verified_bundled_adapter(&runtime, PINNED_ADAPTER_VERSION)),
-            "artifact-path-duplicate"
+            "artifact-hard-link"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn an_extra_hard_link_alias_for_one_artifact_is_rejected() {
+        let (directory, runtime, adapter, manifest) = fixture("hard-link-alias");
+        fs::hard_link(&adapter, directory.path().join("adapter-alias")).unwrap();
+        write_manifest(&directory, &manifest);
+
+        assert_eq!(
+            error_code(verified_bundled_adapter(&runtime, PINNED_ADAPTER_VERSION)),
+            "artifact-hard-link"
         );
     }
 
