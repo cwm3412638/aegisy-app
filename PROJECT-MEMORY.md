@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-29
+Last updated: 2026-07-30
 
 ## Mandatory First Step
 
@@ -249,6 +249,14 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   `aegisy-agent-*` name through the sanitized environment, connects through
   `QLocalSocket`, verifies `GetNamedPipeServerProcessId` against the exact supervised
   sidecar generation, and gates ingress, writes, and initialize on that proof.
+  Every local-socket connection attempt owns a fresh `QLocalSocket` and a
+  monotonically increasing attempt epoch. All ready-read, connected, error, and
+  disconnected callbacks capture the socket, process generation, and epoch and are
+  inert unless all three still identify the current attempt. The peer proof is bound
+  to both generation and epoch; retiring a socket clears that exact proof before
+  disconnect/abort/deferred deletion, so a delayed old callback cannot read bytes,
+  clear a new proof, schedule reconnect, terminate the current sidecar, or send
+  initialize.
   Selected-pipe failure does not fall back to stdio. Stable AAP now includes the
   generated `windows-named-pipe` transport union with `local=true`,
   `peer_verified=true`, and `authenticated=false`/`encrypted=false`; this is still
@@ -271,18 +279,25 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   extracted Windows API crate passes Windows-target check, test compilation, and
   strict Clippy, but the full cross-target build is blocked on this macOS host by
   native C dependencies. The latest Windows-only E2E source additions have not yet
-  compiled or executed on Windows. Runtime evidence is still missing for remote-form
-  client rejection, Qt rejection of a wrong named-pipe server PID, old endpoint and
-  stale-callback isolation, and process-creation-time/PID-reuse mismatch. Do not check
-  `4.3` until those negative paths and the complete dedicated E2E pass on a clean
-  Windows runner.
+  compiled or executed on Windows. The platform-neutral Qt callback fixture now
+  covers directly delivered old-generation and old-attempt signals, queued signals
+  from a retired/deferred-deleted socket, peer-proof preservation, absence of
+  termination/handshake state changes, and actual stale socket bytes remaining
+  unread. The focused Runtime environment target passes ten consecutive repetitions;
+  the complete desktop build and all 25/25 serial macOS CTests pass. This is not real
+  Windows named-pipe signal-order evidence. Runtime evidence is still missing for
+  remote-form client rejection, Qt rejection of a wrong named-pipe server PID, and
+  old endpoint/callback isolation on a clean Windows host. Do not
+  check `4.3` until those negative paths and the complete dedicated E2E pass on a
+  clean Windows runner.
   The Rust admission boundary now exposes a private injectable process-identity
   verifier for deterministic tests. Production still queries the real Windows
   process handle and creation time, while the focused negative fixture proves that
   an otherwise live client with the same PID but a different creation time is
   rejected before `VerifiedNamedPipe` construction and before Runtime/Store/Codex
   creation. This is implementation evidence only; clean Windows execution and the
-  remaining remote, Qt wrong-server, and stale-callback fixtures are still required.
+  remaining remote, Qt wrong-server, and real Windows callback fixtures are still
+  required.
 - OpenSpec task `3.1` is complete. `agent-runtime/aap-schema` is now an explicit
   private package with independent package/wire/provider versioning, one stable
   registry, and one experimental registry. Stable AAP `0.1` is additive-only and

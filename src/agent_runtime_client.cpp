@@ -12,6 +12,7 @@
 #include <QLocalSocket>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QSet>
 #include <QStandardPaths>
@@ -2429,7 +2430,6 @@ AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
                                        TransportMode transportMode)
     : QObject(parent)
     , m_process(new QProcess(this))
-    , m_localSocket(new QLocalSocket(this))
     , m_transportMode(transportMode)
     , m_startupTimer(new QTimer(this))
     , m_heartbeatIntervalTimer(new QTimer(this))
@@ -2497,56 +2497,6 @@ AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
     });
     connect(m_process, &QProcess::readyReadStandardOutput,
             this, &AgentRuntimeClient::processStdout);
-    connect(m_localSocket, &QLocalSocket::readyRead,
-            this, &AgentRuntimeClient::processSocketInput);
-    connect(m_localSocket, &QLocalSocket::connected, this, [this]() {
-        if (!usesVerifiedUnixSocket()
-            || m_unixSocketConnectGeneration != m_processGeneration
-            || m_process->state() == QProcess::NotRunning) {
-            m_localSocket->abort();
-            return;
-        }
-        if (!verifyUnixSocketPeer()) {
-            const QString detail = usesVerifiedWindowsNamedPipe()
-                ? QStringLiteral(
-                    "Windows named pipe 运行时对端校验失败（named-pipe-peer-mismatch）")
-                : QStringLiteral(
-                    "Unix 运行时对端校验失败（unix-socket-peer-mismatch）");
-            suppressAutomaticReconnect();
-            clearNegotiationState();
-            failPending(detail);
-            emit connectionStateChanged(false, detail);
-            m_localSocket->abort();
-            terminateOwnedProcessGeneration(m_processGeneration);
-            return;
-        }
-        m_unixSocketPeerVerifiedGeneration = m_processGeneration;
-        sendInitializeRequest();
-    });
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    connect(m_localSocket, &QLocalSocket::errorOccurred, this,
-            [this](QLocalSocket::LocalSocketError error) {
-#else
-    connect(m_localSocket,
-            QOverload<QLocalSocket::LocalSocketError>::of(&QLocalSocket::error), this,
-            [this](QLocalSocket::LocalSocketError error) {
-#endif
-        if (!usesVerifiedUnixSocket()
-            || m_unixSocketConnectGeneration != m_processGeneration
-            || m_stopping || m_autoReconnectSuppressed) {
-            return;
-        }
-        if ((error == QLocalSocket::ServerNotFoundError
-             || error == QLocalSocket::ConnectionRefusedError)
-            && m_startupTimer->isActive()
-            && m_process->state() != QProcess::NotRunning) {
-            scheduleUnixSocketConnect(m_processGeneration);
-            return;
-        }
-        handleUnixSocketDisconnected();
-    });
-    connect(m_localSocket, &QLocalSocket::disconnected,
-            this, &AgentRuntimeClient::handleUnixSocketDisconnected);
     connect(m_process, &QProcess::readyReadStandardError, this, [this]() {
         const QString output = QString::fromUtf8(m_process->readAllStandardError()).trimmed();
         if (!output.isEmpty()) emit diagnosticMessage(output);
@@ -2577,12 +2527,11 @@ AgentRuntimeClient::AgentRuntimeClient(QObject *parent,
         m_startupGeneration = 0;
         m_unixSocketConnectGeneration = 0;
         m_unixSocketPeerVerifiedGeneration = 0;
+        m_localSocketPeerVerifiedAttemptEpoch = 0;
         const bool ownedTermination =
             m_ownedTerminationGeneration == m_processGeneration;
         m_ownedTerminationGeneration = 0;
-        if (m_localSocket->state() != QLocalSocket::UnconnectedState) {
-            m_localSocket->abort();
-        }
+        retireLocalSocket();
         cleanupUnixSocketEndpoint();
         const bool expected = m_stopping;
         if (expected) m_stopping = false;
@@ -2642,7 +2591,7 @@ AgentRuntimeClient::~AgentRuntimeClient()
         m_process->kill();
         m_process->waitForFinished(500);
     }
-    m_localSocket->abort();
+    retireLocalSocket();
     if (m_process->state() == QProcess::NotRunning) {
         cleanupUnixSocketEndpoint();
     }
@@ -3883,8 +3832,9 @@ void AgentRuntimeClient::connectUnixSocket(quint64 generation)
         || generation != m_unixSocketConnectGeneration
         || !m_startupTimer->isActive()
         || m_process->state() == QProcess::NotRunning
-        || m_localSocket->state() == QLocalSocket::ConnectedState
-        || m_localSocket->state() == QLocalSocket::ConnectingState) {
+        || (m_localSocket
+            && (m_localSocket->state() == QLocalSocket::ConnectedState
+                || m_localSocket->state() == QLocalSocket::ConnectingState))) {
         return;
     }
     UnixEndpointIdentity identity;
@@ -3910,35 +3860,141 @@ void AgentRuntimeClient::connectUnixSocket(quint64 generation)
     m_unixSocketDevice = identity.socketDevice;
     m_unixSocketInode = identity.socketInode;
     m_unixSocketIdentityCaptured = true;
-    m_localSocket->abort();
-    m_localSocket->connectToServer(m_unixSocketPath, QIODevice::ReadWrite);
 #elif defined(Q_OS_WIN)
     if (!usesVerifiedWindowsNamedPipe() || generation == 0
         || generation != m_processGeneration
         || generation != m_unixSocketConnectGeneration
         || !m_startupTimer->isActive()
         || m_process->state() == QProcess::NotRunning
-        || m_localSocket->state() == QLocalSocket::ConnectedState
-        || m_localSocket->state() == QLocalSocket::ConnectingState
+        || (m_localSocket
+            && (m_localSocket->state() == QLocalSocket::ConnectedState
+                || m_localSocket->state() == QLocalSocket::ConnectingState))
         || m_unixSocketPath.isEmpty()) {
         return;
     }
-    m_localSocket->abort();
-    m_localSocket->connectToServer(m_unixSocketPath, QIODevice::ReadWrite);
 #else
     Q_UNUSED(generation)
+    return;
+#endif
+
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    retireLocalSocket();
+    if (++m_localSocketAttemptEpoch == 0) ++m_localSocketAttemptEpoch;
+    auto *socket = new QLocalSocket(this);
+    m_localSocket = socket;
+    configureLocalSocket(socket, generation, m_localSocketAttemptEpoch);
+    socket->connectToServer(m_unixSocketPath, QIODevice::ReadWrite);
 #endif
 }
 
-bool AgentRuntimeClient::verifyUnixSocketPeer() const
+void AgentRuntimeClient::configureLocalSocket(QLocalSocket *socket,
+                                              quint64 generation,
+                                              quint64 attemptEpoch)
+{
+    if (!socket || generation == 0 || attemptEpoch == 0) return;
+    const QPointer<QLocalSocket> guardedSocket(socket);
+    connect(socket, &QLocalSocket::readyRead, this,
+            [this, guardedSocket, generation, attemptEpoch]() {
+        if (!guardedSocket
+            || !isCurrentLocalSocket(guardedSocket.data(), generation,
+                                     attemptEpoch)) {
+            return;
+        }
+        processSocketInput(guardedSocket.data(), generation, attemptEpoch);
+    });
+    connect(socket, &QLocalSocket::connected, this,
+            [this, guardedSocket, generation, attemptEpoch]() {
+        if (!guardedSocket
+            || !isCurrentLocalSocket(guardedSocket.data(), generation,
+                                     attemptEpoch)) {
+            return;
+        }
+        if (!usesVerifiedUnixSocket()
+            || m_unixSocketConnectGeneration != generation
+            || m_process->state() == QProcess::NotRunning) {
+            retireLocalSocket();
+            return;
+        }
+        if (!verifyUnixSocketPeer(guardedSocket.data())) {
+            const QString detail = usesVerifiedWindowsNamedPipe()
+                ? QStringLiteral(
+                    "Windows named pipe 运行时对端校验失败（named-pipe-peer-mismatch）")
+                : QStringLiteral(
+                    "Unix 运行时对端校验失败（unix-socket-peer-mismatch）");
+            suppressAutomaticReconnect();
+            clearNegotiationState();
+            failPending(detail);
+            emit connectionStateChanged(false, detail);
+            retireLocalSocket();
+            terminateOwnedProcessGeneration(generation);
+            return;
+        }
+        m_unixSocketPeerVerifiedGeneration = generation;
+        m_localSocketPeerVerifiedAttemptEpoch = attemptEpoch;
+        sendInitializeRequest();
+    });
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    connect(socket, &QLocalSocket::errorOccurred, this,
+            [this, guardedSocket, generation,
+             attemptEpoch](QLocalSocket::LocalSocketError error) {
+#else
+    connect(socket,
+            QOverload<QLocalSocket::LocalSocketError>::of(&QLocalSocket::error), this,
+            [this, guardedSocket, generation,
+             attemptEpoch](QLocalSocket::LocalSocketError error) {
+#endif
+        if (!guardedSocket
+            || !isCurrentLocalSocket(guardedSocket.data(), generation,
+                                     attemptEpoch)) {
+            return;
+        }
+        if (!usesVerifiedUnixSocket()
+            || m_unixSocketConnectGeneration != generation
+            || m_stopping || m_autoReconnectSuppressed) {
+            return;
+        }
+        if ((error == QLocalSocket::ServerNotFoundError
+             || error == QLocalSocket::ConnectionRefusedError)
+            && m_startupTimer->isActive()
+            && m_process->state() != QProcess::NotRunning) {
+            retireLocalSocket();
+            scheduleUnixSocketConnect(generation);
+            return;
+        }
+        handleUnixSocketDisconnected(guardedSocket.data(), generation,
+                                     attemptEpoch);
+    });
+    connect(socket, &QLocalSocket::disconnected, this,
+            [this, guardedSocket, generation, attemptEpoch]() {
+        if (!guardedSocket
+            || !isCurrentLocalSocket(guardedSocket.data(), generation,
+                                     attemptEpoch)) {
+            return;
+        }
+        handleUnixSocketDisconnected(guardedSocket.data(), generation,
+                                     attemptEpoch);
+    });
+}
+
+bool AgentRuntimeClient::isCurrentLocalSocket(const QLocalSocket *socket,
+                                              quint64 generation,
+                                              quint64 attemptEpoch) const
+{
+    return socket && socket == m_localSocket && usesVerifiedUnixSocket()
+        && generation != 0 && generation == m_processGeneration
+        && generation == m_unixSocketConnectGeneration
+        && attemptEpoch != 0 && attemptEpoch == m_localSocketAttemptEpoch;
+}
+
+bool AgentRuntimeClient::verifyUnixSocketPeer(const QLocalSocket *socket) const
 {
 #if defined(Q_OS_MACOS)
     if (!usesVerifiedUnixSocket() || usesVerifiedWindowsNamedPipe()
-        || m_localSocket->state() != QLocalSocket::ConnectedState
+        || !socket || socket->state() != QLocalSocket::ConnectedState
         || m_process->state() == QProcess::NotRunning) {
         return false;
     }
-    const qintptr descriptor = m_localSocket->socketDescriptor();
+    const qintptr descriptor = socket->socketDescriptor();
     if (descriptor < 0) return false;
     uid_t uid = 0;
     gid_t gid = 0;
@@ -3956,13 +4012,13 @@ bool AgentRuntimeClient::verifyUnixSocketPeer() const
     return true;
 #elif defined(Q_OS_WIN)
     if (!usesVerifiedWindowsNamedPipe()
-        || m_localSocket->state() != QLocalSocket::ConnectedState
+        || !socket || socket->state() != QLocalSocket::ConnectedState
         || m_process->state() == QProcess::NotRunning) {
         return false;
     }
     // Qt's Windows QLocalSocket backend stores the named-pipe HANDLE in its
     // native descriptor; GetNamedPipeServerProcessId is therefore valid here.
-    const qintptr descriptor = m_localSocket->socketDescriptor();
+    const qintptr descriptor = socket->socketDescriptor();
     if (descriptor == qintptr(-1) || descriptor == 0) return false;
     const HANDLE pipe = reinterpret_cast<HANDLE>(descriptor);
     if (pipe == nullptr || pipe == INVALID_HANDLE_VALUE) return false;
@@ -3978,29 +4034,46 @@ bool AgentRuntimeClient::verifyUnixSocketPeer() const
 #endif
 }
 
-void AgentRuntimeClient::handleUnixSocketDisconnected()
+void AgentRuntimeClient::handleUnixSocketDisconnected(QLocalSocket *socket,
+                                                      quint64 generation,
+                                                      quint64 attemptEpoch)
 {
+    if (!isCurrentLocalSocket(socket, generation, attemptEpoch)) return;
     m_unixSocketPeerVerifiedGeneration = 0;
+    m_localSocketPeerVerifiedAttemptEpoch = 0;
     if (!usesVerifiedUnixSocket() || m_stopping
         || m_autoReconnectSuppressed || m_processTerminationPending
         || m_process->state() == QProcess::NotRunning
-        || m_unixSocketConnectGeneration != m_processGeneration) {
+        || m_unixSocketConnectGeneration != generation) {
         return;
     }
     if (!m_handshakeComplete && m_initializeRequestId.isEmpty()
         && m_startupTimer->isActive() && !m_autoReconnectSuppressed) {
-        scheduleUnixSocketConnect(m_processGeneration);
+        retireLocalSocket();
+        scheduleUnixSocketConnect(generation);
         return;
     }
-    if (m_unixSocketDisconnectGeneration == m_processGeneration) return;
-    m_unixSocketDisconnectGeneration = m_processGeneration;
+    if (m_unixSocketDisconnectGeneration == generation) return;
+    m_unixSocketDisconnectGeneration = generation;
     const QString detail = usesVerifiedWindowsNamedPipe()
         ? QStringLiteral("Windows named pipe 运行时连接已断开")
         : QStringLiteral("Unix 运行时连接已断开");
+    retireLocalSocket();
     clearNegotiationState();
     failPending(detail);
     emit connectionStateChanged(false, detail);
-    terminateOwnedProcessGeneration(m_processGeneration);
+    terminateOwnedProcessGeneration(generation);
+}
+
+void AgentRuntimeClient::retireLocalSocket()
+{
+    QLocalSocket *socket = std::exchange(m_localSocket, nullptr);
+    if (!socket) return;
+    m_unixSocketPeerVerifiedGeneration = 0;
+    m_localSocketPeerVerifiedAttemptEpoch = 0;
+    QObject::disconnect(socket, nullptr, this, nullptr);
+    if (socket->state() != QLocalSocket::UnconnectedState) socket->abort();
+    socket->deleteLater();
 }
 
 void AgentRuntimeClient::terminateOwnedProcessGeneration(quint64 generation)
@@ -4009,6 +4082,7 @@ void AgentRuntimeClient::terminateOwnedProcessGeneration(quint64 generation)
         return;
     }
     m_unixSocketPeerVerifiedGeneration = 0;
+    m_localSocketPeerVerifiedAttemptEpoch = 0;
     m_ownedTerminationGeneration = generation;
     if (m_process->state() == QProcess::NotRunning) {
         cleanupUnixSocketEndpoint();
@@ -4028,7 +4102,8 @@ void AgentRuntimeClient::terminateOwnedProcessGeneration(quint64 generation)
 void AgentRuntimeClient::closeTransportWrite()
 {
     if (usesVerifiedUnixSocket()) {
-        if (m_localSocket->state() != QLocalSocket::UnconnectedState) {
+        if (m_localSocket
+            && m_localSocket->state() != QLocalSocket::UnconnectedState) {
             m_localSocket->disconnectFromServer();
         }
         return;
@@ -4142,8 +4217,9 @@ bool AgentRuntimeClient::launchProcess(bool reconnectAttempt)
     m_unixSocketConnectGeneration = 0;
     m_unixSocketDisconnectGeneration = 0;
     m_unixSocketPeerVerifiedGeneration = 0;
+    m_localSocketPeerVerifiedAttemptEpoch = 0;
     m_ownedTerminationGeneration = 0;
-    m_localSocket->abort();
+    retireLocalSocket();
     cleanupUnixSocketEndpoint();
     if (usesVerifiedUnixSocket() && !m_unixSocketDirectory.isEmpty()) {
         const QString detail = QStringLiteral(
@@ -4228,8 +4304,11 @@ void AgentRuntimeClient::sendInitializeRequest()
 {
     if (m_process->state() == QProcess::NotRunning
         || (usesVerifiedUnixSocket()
-            && (m_localSocket->state() != QLocalSocket::ConnectedState
-                || m_unixSocketPeerVerifiedGeneration != m_processGeneration))
+            && (!m_localSocket
+                || m_localSocket->state() != QLocalSocket::ConnectedState
+                || m_unixSocketPeerVerifiedGeneration != m_processGeneration
+                || m_localSocketPeerVerifiedAttemptEpoch
+                    != m_localSocketAttemptEpoch))
         || !m_initializeRequestId.isEmpty()) {
         return;
     }
@@ -5954,8 +6033,11 @@ int AgentRuntimeClient::writeMessage(const QJsonObject &message)
     if (maximumFrameBytes <= 0 || frame.size() > maximumFrameBytes) return -32005;
     frame.append('\n');
     const qint64 written = usesVerifiedUnixSocket()
-        ? (m_localSocket->state() == QLocalSocket::ConnectedState
+        ? (m_localSocket
+               && m_localSocket->state() == QLocalSocket::ConnectedState
                && m_unixSocketPeerVerifiedGeneration == m_processGeneration
+               && m_localSocketPeerVerifiedAttemptEpoch
+                   == m_localSocketAttemptEpoch
                ? m_localSocket->write(frame) : -1)
         : m_process->write(frame);
     return written == frame.size() ? 0 : -1;
@@ -5968,14 +6050,17 @@ void AgentRuntimeClient::processStdout()
     processTransportBytes(bytes);
 }
 
-void AgentRuntimeClient::processSocketInput()
+void AgentRuntimeClient::processSocketInput(QLocalSocket *socket,
+                                            quint64 generation,
+                                            quint64 attemptEpoch)
 {
-    if (!usesVerifiedUnixSocket()
-        || m_unixSocketPeerVerifiedGeneration != m_processGeneration) {
-        m_localSocket->readAll();
+    if (!isCurrentLocalSocket(socket, generation, attemptEpoch)) return;
+    if (m_unixSocketPeerVerifiedGeneration != generation
+        || m_localSocketPeerVerifiedAttemptEpoch != attemptEpoch) {
+        socket->readAll();
         return;
     }
-    processTransportBytes(m_localSocket->readAll());
+    processTransportBytes(socket->readAll());
 }
 
 void AgentRuntimeClient::processTransportBytes(const QByteArray &bytes)
@@ -6825,6 +6910,7 @@ void AgentRuntimeClient::clearNegotiationState()
     m_negotiatedStableCapabilities.clear();
     m_negotiatedMaximumFrameBytes = 0;
     m_unixSocketPeerVerifiedGeneration = 0;
+    m_localSocketPeerVerifiedAttemptEpoch = 0;
     if (livenessWasKnown) {
         emit runtimeLivenessChanged(false, QStringLiteral("运行时连接不可用"));
     }

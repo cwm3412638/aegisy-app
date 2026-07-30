@@ -474,6 +474,8 @@ signals:
     void diagnosticMessage(const QString &message);
 
 private:
+    friend struct AgentRuntimeClientSocketTestAccess;
+
     struct TimelineSyncValidation {
         QJsonObject request;
     };
@@ -515,7 +517,8 @@ private:
     bool sendNotification(const QString &method, const QJsonObject &params = {});
     int writeMessage(const QJsonObject &message);
     void processStdout();
-    void processSocketInput();
+    void processSocketInput(QLocalSocket *socket, quint64 generation,
+                            quint64 attemptEpoch);
     void processTransportBytes(const QByteArray &bytes);
     bool usesVerifiedUnixSocket() const;
     bool usesVerifiedWindowsNamedPipe() const;
@@ -523,8 +526,14 @@ private:
     void cleanupUnixSocketEndpoint();
     void scheduleUnixSocketConnect(quint64 generation);
     void connectUnixSocket(quint64 generation);
-    bool verifyUnixSocketPeer() const;
-    void handleUnixSocketDisconnected();
+    void configureLocalSocket(QLocalSocket *socket, quint64 generation,
+                              quint64 attemptEpoch);
+    bool isCurrentLocalSocket(const QLocalSocket *socket, quint64 generation,
+                              quint64 attemptEpoch) const;
+    bool verifyUnixSocketPeer(const QLocalSocket *socket) const;
+    void handleUnixSocketDisconnected(QLocalSocket *socket, quint64 generation,
+                                      quint64 attemptEpoch);
+    void retireLocalSocket();
     void terminateOwnedProcessGeneration(quint64 generation);
     void sendInitializeRequest();
     void closeTransportWrite();
@@ -598,6 +607,8 @@ private:
     quint64 m_unixSocketConnectGeneration = 0;
     quint64 m_unixSocketDisconnectGeneration = 0;
     quint64 m_unixSocketPeerVerifiedGeneration = 0;
+    quint64 m_localSocketAttemptEpoch = 0;
+    quint64 m_localSocketPeerVerifiedAttemptEpoch = 0;
     quint64 m_ownedTerminationGeneration = 0;
     bool m_ready = false;
     bool m_heartbeatNegotiated = false;

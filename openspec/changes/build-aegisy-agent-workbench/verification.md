@@ -2740,3 +2740,25 @@ Known limitations:
 - This is local macOS evidence, not signed-package evidence. Windows named-pipe
   ACL/peer validation remains `4.3`; one-time bootstrap authentication remains
   `4.4`; `authenticated` MUST stay false until that proof exists.
+
+## 4.3 Windows Named-Pipe Qt Attempt Isolation (Partial Evidence)
+
+- Qt creates one `QLocalSocket` per Unix-socket or Windows named-pipe connection
+  attempt. Ready-read, connected, error, and disconnected handlers capture a guarded
+  socket pointer, process generation, and monotonic attempt epoch and validate all
+  three before any state change or input read.
+- Peer verification is bound to both the process generation and attempt epoch.
+  Initialize, socket ingress, and writes require that exact proof. Retiring a socket
+  clears the proof, disconnects callbacks, aborts the endpoint, and uses deferred
+  deletion, so old callbacks cannot clear a newer proof, schedule reconnect,
+  terminate a newer process, or initialize a newer connection.
+- The platform-neutral Qt fixture drives all four signal classes from an old process
+  generation and an old attempt, verifies actual stale bytes remain unread, and runs
+  queued signals through retirement and deferred deletion before confirming the new
+  connection state is unchanged. The complete desktop build, focused Runtime
+  environment and real macOS socket tests, and all `25/25` serial macOS CTests pass;
+  the focused Runtime environment target also passes ten consecutive repetitions.
+- This remains partial implementation evidence. It does not replace a clean Windows
+  run proving wrong-server-PID rejection, remote-form client rejection, real named-
+  pipe old-endpoint/callback ordering, or the complete dedicated Windows E2E. Keep
+  task `4.3` unchecked.

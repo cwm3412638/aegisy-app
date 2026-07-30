@@ -3,19 +3,68 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QElapsedTimer>
+#include <QEvent>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QPointer>
 #include <QProcessEnvironment>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QUuid>
 
 #include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <iostream>
 #include <iterator>
+
+struct AgentRuntimeClientSocketTestAccess {
+    static void configure(AgentRuntimeClient &client, QLocalSocket *socket,
+                          quint64 generation, quint64 attemptEpoch)
+    {
+        client.configureLocalSocket(socket, generation, attemptEpoch);
+    }
+
+    static void installCurrent(AgentRuntimeClient &client, QLocalSocket *socket,
+                               quint64 generation, quint64 attemptEpoch)
+    {
+        client.m_localSocket = socket;
+        client.m_processGeneration = generation;
+        client.m_unixSocketConnectGeneration = generation;
+        client.m_localSocketAttemptEpoch = attemptEpoch;
+        client.m_unixSocketPeerVerifiedGeneration = generation;
+        client.m_localSocketPeerVerifiedAttemptEpoch = attemptEpoch;
+        client.m_unixSocketDisconnectGeneration = 0;
+        client.m_ownedTerminationGeneration = 0;
+        client.m_handshakeComplete = true;
+    }
+
+    static bool retainedNewConnectionState(const AgentRuntimeClient &client,
+                                           QLocalSocket *socket,
+                                           quint64 generation,
+                                           quint64 attemptEpoch)
+    {
+        return client.m_localSocket == socket
+            && client.m_processGeneration == generation
+            && client.m_unixSocketConnectGeneration == generation
+            && client.m_localSocketAttemptEpoch == attemptEpoch
+            && client.m_unixSocketPeerVerifiedGeneration == generation
+            && client.m_localSocketPeerVerifiedAttemptEpoch == attemptEpoch
+            && client.m_unixSocketDisconnectGeneration == 0
+            && client.m_ownedTerminationGeneration == 0
+            && client.m_handshakeComplete
+            && !client.m_autoReconnectSuppressed;
+    }
+
+    static void retire(AgentRuntimeClient &client)
+    {
+        client.retireLocalSocket();
+    }
+};
 
 namespace {
 
@@ -37,6 +86,124 @@ bool waitUntil(const std::function<bool()> &condition, int timeoutMs = 3000)
     }
     QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
     return condition();
+}
+
+bool staleLocalSocketCallbacksAreInert()
+{
+    constexpr quint64 currentGeneration = 41;
+    constexpr quint64 currentAttemptEpoch = 6;
+    const QString serverName = QStringLiteral("as-%1").arg(
+        QUuid::createUuid().toString(QUuid::WithoutBraces).left(8));
+    QLocalServer::removeServer(serverName);
+    QLocalServer server;
+    if (!expect(server.listen(serverName),
+                "could not create stale-callback local socket server")) {
+        return false;
+    }
+    AgentRuntimeClient client(
+        nullptr, 5000, 15000, {0},
+        AgentRuntimeClient::TransportMode::VerifiedUnixSocket);
+    auto *retiredSocket = new QLocalSocket(&client);
+    const QPointer<QLocalSocket> retiredSocketGuard(retiredSocket);
+    AgentRuntimeClientSocketTestAccess::configure(
+        client, retiredSocket, currentGeneration - 2,
+        currentAttemptEpoch - 2);
+    AgentRuntimeClientSocketTestAccess::installCurrent(
+        client, retiredSocket, currentGeneration - 2,
+        currentAttemptEpoch - 2);
+    bool queuedCallbacks = QMetaObject::invokeMethod(
+        retiredSocket, "readyRead", Qt::QueuedConnection);
+    queuedCallbacks = QMetaObject::invokeMethod(
+        retiredSocket, "connected", Qt::QueuedConnection) && queuedCallbacks;
+    queuedCallbacks = QMetaObject::invokeMethod(
+        retiredSocket, "disconnected", Qt::QueuedConnection) && queuedCallbacks;
+    AgentRuntimeClientSocketTestAccess::retire(client);
+
+    auto *oldGenerationSocket = new QLocalSocket(&client);
+    oldGenerationSocket->connectToServer(serverName, QIODevice::ReadWrite);
+    if (!expect(oldGenerationSocket->waitForConnected(1000)
+                    && server.waitForNewConnection(1000),
+                "could not create old-generation local socket fixture")) {
+        return false;
+    }
+    QLocalSocket *fixturePeer = server.nextPendingConnection();
+    if (!expect(fixturePeer != nullptr,
+                "stale-callback local socket fixture has no peer")) {
+        return false;
+    }
+    const QByteArray staleBytes = QByteArrayLiteral("stale-aap-frame\n");
+    const qint64 queuedBytes = fixturePeer->write(staleBytes);
+    const bool bytesFlushed = fixturePeer->bytesToWrite() == 0
+        || fixturePeer->waitForBytesWritten(1000);
+    if (!expect(queuedBytes == staleBytes.size() && bytesFlushed
+                    && oldGenerationSocket->waitForReadyRead(1000),
+                "could not queue bytes on the old-generation local socket")) {
+        return false;
+    }
+    auto *oldAttemptSocket = new QLocalSocket(&client);
+    AgentRuntimeClientSocketTestAccess::configure(
+        client, oldGenerationSocket, currentGeneration - 1,
+        currentAttemptEpoch - 1);
+    AgentRuntimeClientSocketTestAccess::configure(
+        client, oldAttemptSocket, currentGeneration,
+        currentAttemptEpoch - 1);
+    AgentRuntimeClientSocketTestAccess::installCurrent(
+        client, oldAttemptSocket, currentGeneration, currentAttemptEpoch);
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+
+    const auto emitStaleCallbacks = [](QLocalSocket *socket) {
+        bool invoked = QMetaObject::invokeMethod(
+            socket, "readyRead", Qt::DirectConnection);
+        invoked = QMetaObject::invokeMethod(
+            socket, "connected", Qt::DirectConnection) && invoked;
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+        invoked = QMetaObject::invokeMethod(
+            socket, "errorOccurred", Qt::DirectConnection,
+            Q_ARG(QLocalSocket::LocalSocketError,
+                  QLocalSocket::UnknownSocketError)) && invoked;
+#else
+        invoked = QMetaObject::invokeMethod(
+            socket, "error", Qt::DirectConnection,
+            Q_ARG(QLocalSocket::LocalSocketError,
+                  QLocalSocket::UnknownSocketError)) && invoked;
+#endif
+        invoked = QMetaObject::invokeMethod(
+            socket, "disconnected", Qt::DirectConnection) && invoked;
+        return invoked;
+    };
+
+    bool ok = expect(queuedCallbacks,
+                     "could not queue callbacks for a retired local socket");
+    ok = expect(!retiredSocketGuard,
+                "retired local socket was not deleted after queued callbacks") && ok;
+    ok = expect(AgentRuntimeClientSocketTestAccess::retainedNewConnectionState(
+                    client, oldAttemptSocket, currentGeneration,
+                    currentAttemptEpoch),
+                "queued retired-socket callbacks changed the current connection")
+        && ok;
+    ok = expect(emitStaleCallbacks(oldGenerationSocket),
+                "could not emit old-generation local socket callbacks") && ok;
+    ok = expect(oldGenerationSocket->bytesAvailable() == staleBytes.size(),
+                "old-generation readyRead consumed stale transport bytes") && ok;
+    ok = expect(AgentRuntimeClientSocketTestAccess::retainedNewConnectionState(
+                    client, oldAttemptSocket, currentGeneration,
+                    currentAttemptEpoch),
+                "old-generation local socket callbacks changed the current connection")
+        && ok;
+    ok = expect(emitStaleCallbacks(oldAttemptSocket),
+                "could not emit old-attempt local socket callbacks") && ok;
+    ok = expect(AgentRuntimeClientSocketTestAccess::retainedNewConnectionState(
+                    client, oldAttemptSocket, currentGeneration,
+                    currentAttemptEpoch),
+                "old-attempt local socket callbacks changed the current connection")
+        && ok;
+    AgentRuntimeClientSocketTestAccess::retire(client);
+    fixturePeer->disconnectFromServer();
+    oldGenerationSocket->disconnectFromServer();
+    server.close();
+    QLocalServer::removeServer(serverName);
+    return ok;
 }
 
 void appendLogLine(QFile *log, const QByteArray &line)
@@ -4687,6 +4854,7 @@ int main(int argc, char *argv[])
                   "authenticated proxy reached the sidecar environment")
         && expect(sanitized.value(QStringLiteral("MODEL_NAME")) == QStringLiteral("aegisy-coding"),
                   "ordinary model setting was removed");
+    ok = staleLocalSocketCallbacksAreInert() && ok;
     ok = expect(verifyRustTimelineIdentityFixture(),
                 "Qt Timeline Event identity diverged from the Rust fixture") && ok;
     ok = verifyRustTimelineSnapshotIdentityFixture() && ok;

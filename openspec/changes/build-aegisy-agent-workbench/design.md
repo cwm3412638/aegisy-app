@@ -158,6 +158,14 @@ identity and random quarantine. Replacement objects are preserved, while Qt may
 finish removing a matching sidecar quarantine if termination interrupted cleanup;
 unknown or mismatched entries are never deleted.
 
+Qt also binds each connection attempt to a fresh `QLocalSocket` and monotonically
+increasing attempt epoch. Every socket signal captures a guarded pointer, process
+generation, and epoch and validates that triple before reading, changing peer proof,
+scheduling reconnect, terminating a process, or sending initialize. Peer proof is
+valid only for the exact generation and epoch. Retiring the current socket clears
+that proof, disconnects its callbacks, aborts it, and defers deletion; already queued
+or subsequently delivered callbacks from an older socket or epoch remain inert.
+
 The verified socket truthfully negotiates `transport: unix-domain-socket`,
 `local: true`, `peer_verified: true`, and `authenticated`/`encrypted` as false.
 Same-UID and exact-PID verification narrows the local peer but is not the one-time
