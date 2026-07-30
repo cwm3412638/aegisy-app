@@ -299,8 +299,11 @@
     Windows-API compile gates pass, but are not Windows runtime evidence. Deterministic
     source fixtures are present for remote-form rejection, Qt wrong-server-PID
     rejection, old endpoint/stale-callback isolation, and creation-time/PID-reuse
-    mismatch; all still require successful execution in the complete clean Windows
-    run before this task can close.
+    mismatch. An independent review corrected Unicode fake-sidecar path injection,
+    startup-timeout versus process-reconnect assertions, remote-rejection evidence,
+    and overlapped-I/O lifetime before the required run; all paths still require
+    successful execution in the complete clean Windows run before this task can
+    close.
 - [ ] 4.4 Implement one-time host/sidecar bootstrap authentication without secrets in process arguments or ordinary logs
 - [ ] 4.5 Implement bounded ingress, per-client outbound queues, overload errors, heartbeat, and graceful shutdown
 - [ ] 4.6 Implement Qt-side process supervision, version check, startup timeout, health state, restart, and crash-loop protection

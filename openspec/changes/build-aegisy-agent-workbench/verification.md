@@ -2786,6 +2786,20 @@ Known limitations:
   attempt. A supervised fake sidecar plus a parent-owned `QLocalServer` also proves
   Qt observes `named-pipe-peer-mismatch`, sends no initialize bytes, does not fall
   back to stdio, suppresses reconnect, and reaps the exact fake process generation.
+- Independent review of commit `0f36ae1` found that the Windows-only fixture could
+  lose the fake executable path through the ANSI environment boundary in the required
+  Unicode checkout, expected six-second process reconnect exhaustion where production
+  actually performs same-generation endpoint retries until its 60-second startup
+  deadline, accepted any remote-form error as security evidence, and could release an
+  `OVERLAPPED` before cancellation completed. The corrected source sets the path with
+  `SetEnvironmentVariableW` and asserts the exact selected executable, shortens only
+  the active test timer while requiring multiple endpoint attempts and no process
+  reconnect, requires `ERROR_ACCESS_DENIED` and independently observes
+  `PIPE_REJECT_REMOTE_CLIENTS`, and drains exact cancellation through
+  `CancelIoEx`/`GetOverlappedResult` before closing handles. The complete local build
+  plus focused Runtime environment, macOS socket, and Windows packaging-policy tests
+  pass after this correction. A workflow run for `0f36ae1` is not completion evidence;
+  the corrected commit must run again.
 - This remains partial implementation evidence. It does not replace a clean Windows
   run proving wrong-server-PID rejection, remote-form client rejection, real named-
   pipe old-endpoint/callback ordering, or the complete dedicated Windows E2E. Keep

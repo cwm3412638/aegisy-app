@@ -16,6 +16,7 @@
 #include <QProcessEnvironment>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <QUuid>
 
 #include <functional>
@@ -45,6 +46,18 @@ struct AgentRuntimeClientSocketTestAccess {
     static bool automaticReconnectSuppressed(const AgentRuntimeClient &client)
     {
         return client.m_autoReconnectSuppressed;
+    }
+
+    static quint64 localSocketAttemptEpoch(const AgentRuntimeClient &client)
+    {
+        return client.m_localSocketAttemptEpoch;
+    }
+
+    static void shortenActiveStartupTimeout(AgentRuntimeClient &client, int timeoutMs)
+    {
+        if (client.m_startupTimer->isActive()) {
+            client.m_startupTimer->start(timeoutMs);
+        }
     }
 };
 
@@ -181,6 +194,17 @@ bool waitForPipeConnection(QLocalSocket &socket, const QString &pipeName,
 }
 
 #ifdef Q_OS_WIN
+bool setWideEnvironmentVariable(const wchar_t *name, const QString &value)
+{
+    return SetEnvironmentVariableW(
+               name, reinterpret_cast<LPCWSTR>(value.utf16())) != FALSE;
+}
+
+void clearWideEnvironmentVariable(const wchar_t *name)
+{
+    SetEnvironmentVariableW(name, nullptr);
+}
+
 HANDLE createCurrentUserControlPipe(const QString &path)
 {
     HANDLE token = nullptr;
@@ -348,6 +372,39 @@ bool pipeHasProtectedCurrentUserDacl(QLocalSocket &socket)
     LocalFree(descriptor);
     return matchesCurrentUser;
 }
+
+bool pipeRejectsRemoteClients(QLocalSocket &socket)
+{
+    DWORD flags = 0;
+    return GetNamedPipeInfo(
+               reinterpret_cast<HANDLE>(socket.socketDescriptor()), &flags,
+               nullptr, nullptr, nullptr) != FALSE
+        && (flags & PIPE_REJECT_REMOTE_CLIENTS) == PIPE_REJECT_REMOTE_CLIENTS;
+}
+
+bool finishOverlappedConnect(HANDLE pipe, HANDLE event, OVERLAPPED *overlapped,
+                             bool pending)
+{
+    if (!pending) return true;
+
+    bool cancellationAccepted = true;
+    if (WaitForSingleObject(event, 1000) != WAIT_OBJECT_0) {
+        if (!CancelIoEx(pipe, overlapped)) {
+            cancellationAccepted = GetLastError() == ERROR_NOT_FOUND;
+        }
+    }
+
+    DWORD transferred = 0;
+    const bool completed = GetOverlappedResult(
+        pipe, overlapped, &transferred, TRUE) != FALSE;
+    const DWORD completionError = completed ? ERROR_SUCCESS : GetLastError();
+    const bool terminalCompletion = completed
+        || completionError == ERROR_OPERATION_ABORTED
+        || completionError == ERROR_BROKEN_PIPE
+        || completionError == ERROR_NO_DATA
+        || completionError == ERROR_PIPE_NOT_CONNECTED;
+    return cancellationAccepted && terminalCompletion;
+}
 #endif
 }
 
@@ -490,14 +547,19 @@ int main(int argc, char *argv[])
     }, 3000), "verified Windows named-pipe restart did not stop cleanly") && ok;
 
     // Point the supervised process at a real Windows executable that never
-    // creates the selected pipe. A verified transport must fail closed after
-    // bounded retries; it must not silently fall back to stdio and report a
-    // successful initialize response.
+    // creates the selected pipe. The socket attempts remain inside one process
+    // generation until the bounded startup deadline; they are not process-level
+    // reconnect attempts. The transport must then fail closed without stdio.
     const QString fakeStdioRuntime = QCoreApplication::applicationFilePath();
     ok = expect(QFileInfo(fakeStdioRuntime).isFile(),
                 "fake stdio sidecar executable is unavailable") && ok;
     if (QFileInfo(fakeStdioRuntime).isFile()) {
-        qputenv("AEGISY_AGENTD_PATH", QFile::encodeName(fakeStdioRuntime));
+        const bool fakeRuntimePathSet = setWideEnvironmentVariable(
+            L"AEGISY_AGENTD_PATH", fakeStdioRuntime);
+        if (!expect(fakeRuntimePathSet,
+                    "could not set the Unicode fake sidecar path")) {
+            return 1;
+        }
         qputenv("AEGISY_WINDOWS_PIPE_FAKE_STDIO", QByteArrayLiteral("1"));
         bool fallbackInitialized = false;
         AgentRuntimeClient missingPipeClient(
@@ -508,21 +570,39 @@ int main(int argc, char *argv[])
             fallbackInitialized = true;
         });
         missingPipeClient.start();
+        const quint64 missingPipeGeneration = missingPipeClient.processGeneration();
+        AgentRuntimeClientSocketTestAccess::shortenActiveStartupTimeout(
+            missingPipeClient, 750);
+        ok = expect(missingPipeClient.runtimePath()
+                        == QFileInfo(fakeStdioRuntime).absoluteFilePath(),
+                    "selected named-pipe failure did not use the requested "
+                    "Unicode child executable")
+            && ok;
         ok = expect(waitUntil([&]() {
             return missingPipeClient.reconnectState()
                 == AgentRuntimeClient::ReconnectState::Exhausted;
-        }, 6000), "selected Windows named-pipe failure did not exhaust retries") && ok;
+        }, 3000),
+                    "selected Windows named-pipe failure did not reach its "
+                    "startup deadline")
+            && ok;
+        ok = expect(waitUntil([&]() {
+            return AgentRuntimeClientSocketTestAccess::processState(missingPipeClient)
+                == QProcess::NotRunning;
+        }, 3000), "selected Windows named-pipe failure did not stop its fake child") && ok;
         ok = expect(!fallbackInitialized && !missingPipeClient.isReady(),
                     "selected named-pipe failure silently fell back to stdio") && ok;
-        ok = expect(missingPipeClient.runtimePath()
-                        == QFileInfo(fakeStdioRuntime).absoluteFilePath(),
-                    "selected named-pipe failure did not use the requested child executable") && ok;
-        ok = expect(missingPipeClient.reconnectAttempt()
-                        == missingPipeClient.maximumReconnectAttempts(),
-                    "selected named-pipe failure exceeded its bounded retry budget") && ok;
+        ok = expect(AgentRuntimeClientSocketTestAccess::localSocketAttemptEpoch(
+                        missingPipeClient) > 1,
+                    "selected named-pipe failure did not retry the local endpoint") && ok;
+        ok = expect(AgentRuntimeClientSocketTestAccess::automaticReconnectSuppressed(
+                        missingPipeClient)
+                        && missingPipeClient.reconnectAttempt() == 0
+                        && missingPipeClient.processGeneration() == missingPipeGeneration,
+                    "selected named-pipe startup failure incorrectly entered process reconnect")
+            && ok;
         missingPipeClient.stop();
         qunsetenv("AEGISY_WINDOWS_PIPE_FAKE_STDIO");
-        qunsetenv("AEGISY_AGENTD_PATH");
+        clearWideEnvironmentVariable(L"AEGISY_AGENTD_PATH");
     }
 
     // Establish that this Windows host can reach a local pipe through its
@@ -561,16 +641,17 @@ int main(int argc, char *argv[])
                 "host cannot prove remote-form named-pipe connectivity with the control pipe")
         && ok;
     if (remoteControlClient != INVALID_HANDLE_VALUE) CloseHandle(remoteControlClient);
+    bool remoteControlConnectFinished = true;
     if (remoteControlServer != INVALID_HANDLE_VALUE) {
-        if (remoteControlPending
-            && WaitForSingleObject(remoteControlEvent, 1000) != WAIT_OBJECT_0) {
-            CancelIo(remoteControlServer);
-            WaitForSingleObject(remoteControlEvent, 1000);
-        }
+        remoteControlConnectFinished = finishOverlappedConnect(
+            remoteControlServer, remoteControlEvent, &remoteControlConnect,
+            remoteControlPending);
         DisconnectNamedPipe(remoteControlServer);
         CloseHandle(remoteControlServer);
     }
     if (remoteControlEvent != nullptr) CloseHandle(remoteControlEvent);
+    ok = expect(remoteControlConnectFinished,
+                "remote-form control left overlapped pipe I/O pending") && ok;
 
     const QString remoteRejectPipe = QStringLiteral("aegisy-agent-remote-reject-%1")
         .arg(QUuid::createUuid().toString(QUuid::WithoutBraces).remove(QLatin1Char('-'))
@@ -586,12 +667,17 @@ int main(int argc, char *argv[])
                 "remote-rejection named-pipe listener did not become available") && ok;
     DWORD remoteRejectError = ERROR_SUCCESS;
     HANDLE rejectedRemoteClient = remoteRejectReady
-        ? openPipeOnce(remotePipePath(remoteRejectPipe), &remoteRejectError)
+        ? openPipeWithRetry(remotePipePath(remoteRejectPipe), 1000,
+                            &remoteRejectError)
         : INVALID_HANDLE_VALUE;
     const bool remoteFormRejected = remoteRejectReady
         && rejectedRemoteClient == INVALID_HANDLE_VALUE
-        && remoteRejectError != ERROR_SUCCESS;
+        && remoteRejectError == ERROR_ACCESS_DENIED;
     if (rejectedRemoteClient != INVALID_HANDLE_VALUE) CloseHandle(rejectedRemoteClient);
+    if (!remoteFormRejected) {
+        std::cerr << "remote-form rejection returned Windows error "
+                  << remoteRejectError << std::endl;
+    }
     ok = expect(remoteControlConnected && remoteFormRejected,
                 "PIPE_REJECT_REMOTE_CLIENTS did not reject the remote-form client") && ok;
     QLocalSocket remoteRejectLocalClient;
@@ -599,6 +685,9 @@ int main(int argc, char *argv[])
         remoteRejectLocalClient, remoteRejectPipe, 3000);
     ok = expect(localStillConnected,
                 "remote-form rejection consumed or disabled the local named-pipe listener") && ok;
+    ok = expect(localStillConnected
+                    && pipeRejectsRemoteClients(remoteRejectLocalClient),
+                "named-pipe listener did not expose PIPE_REJECT_REMOTE_CLIENTS") && ok;
     if (remoteRejectLocalClient.state() != QLocalSocket::UnconnectedState) {
         remoteRejectLocalClient.disconnectFromServer();
         if (remoteRejectLocalClient.state() != QLocalSocket::UnconnectedState) {
@@ -612,7 +701,12 @@ int main(int argc, char *argv[])
     // rogue local server in this parent process has the right user but the
     // wrong server PID, so no initialize frame may cross the connection.
     if (QFileInfo(fakeStdioRuntime).isFile()) {
-        qputenv("AEGISY_AGENTD_PATH", QFile::encodeName(fakeStdioRuntime));
+        const bool fakeRuntimePathSet = setWideEnvironmentVariable(
+            L"AEGISY_AGENTD_PATH", fakeStdioRuntime);
+        if (!expect(fakeRuntimePathSet,
+                    "could not set the wrong-PID Unicode fake sidecar path")) {
+            return 1;
+        }
         qputenv("AEGISY_WINDOWS_PIPE_FAKE_STDIO", QByteArrayLiteral("1"));
         bool rogueInitialized = false;
         bool roguePeerMismatchObserved = false;
@@ -632,6 +726,10 @@ int main(int argc, char *argv[])
             }
         });
         wrongServerClient.start();
+        ok = expect(wrongServerClient.runtimePath()
+                        == QFileInfo(fakeStdioRuntime).absoluteFilePath(),
+                    "wrong-PID test did not use the requested Unicode fake sidecar")
+            && ok;
         const QString rogueEndpoint =
             AgentRuntimeClientSocketTestAccess::endpointName(wrongServerClient);
         const quint64 rogueGeneration = wrongServerClient.processGeneration();
@@ -683,7 +781,7 @@ int main(int argc, char *argv[])
         rogueServer.close();
         wrongServerClient.stop();
         qunsetenv("AEGISY_WINDOWS_PIPE_FAKE_STDIO");
-        qunsetenv("AEGISY_AGENTD_PATH");
+        clearWideEnvironmentVariable(L"AEGISY_AGENTD_PATH");
     }
 
     // Exercise the Rust listener's malformed-name guard directly. This keeps

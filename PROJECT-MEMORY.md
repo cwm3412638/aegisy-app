@@ -281,17 +281,29 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
   24/24 macOS desktop CTests, strict OpenSpec validation, and diff checks. A minimal
   extracted Windows API crate passes Windows-target check, test compilation, and
   strict Clippy, but the full cross-target build is blocked on this macOS host by
-  native C dependencies. The latest Windows-only E2E source additions have not yet
-  compiled or executed on Windows. The platform-neutral Qt callback fixture now
+  native C dependencies. The platform-neutral Qt callback fixture now
   covers directly delivered old-generation and old-attempt signals, queued signals
   from a retired/deferred-deleted socket, peer-proof preservation, absence of
   termination/handshake state changes, and actual stale socket bytes remaining
   unread. The focused Runtime environment target passes ten consecutive repetitions;
   the complete desktop build and all 25/25 serial macOS CTests pass. After adding the
-  Windows-only endpoint, remote-form, and wrong-server-PID assertions, focused local
-  `agent_runtime_environment` and `windows_packaging_policy` CTests pass. This is not
-  real Windows named-pipe signal-order evidence, and the new Windows-only source has
-  not compiled or executed on Windows. Do not check `4.3` until those negative paths
+  Windows-only endpoint, remote-form, and wrong-server-PID assertions, an independent
+  review of commit `0f36ae1` found four test-evidence defects: the fake sidecar path
+  crossed the ANSI environment boundary in the required Unicode checkout; the
+  missing-pipe case expected process reconnect exhaustion after six seconds even
+  though production performs same-generation endpoint retries until its 60-second
+  startup deadline; any remote-form error counted as rejection; and cancelled
+  overlapped connect state could outlive its stack storage. The corrected test uses
+  `SetEnvironmentVariableW` and exact Runtime-path assertions, shortens only the
+  active test timer while requiring multiple endpoint attempts and zero process
+  reconnects, requires `ERROR_ACCESS_DENIED` plus an independently observed
+  `PIPE_REJECT_REMOTE_CLIENTS` flag, and drains exact cancellation with
+  `CancelIoEx`/`GetOverlappedResult` before cleanup. The complete local desktop build
+  and focused `agent_runtime_environment`, `agent_runtime_macos_socket`, and
+  `windows_packaging_policy` CTests pass after the correction. This is not real
+  Windows named-pipe signal-order evidence, and the corrected Windows-only source has
+  not compiled or executed on Windows. A workflow result from `0f36ae1` cannot close
+  the task; rerun the corrected commit. Do not check `4.3` until those negative paths
   and the complete dedicated E2E pass on a clean Windows runner.
   The Rust admission boundary now exposes a private injectable process-identity
   verifier for deterministic tests. Production still queries the real Windows
