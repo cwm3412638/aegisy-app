@@ -17,6 +17,8 @@
     provides usage guidelines, preferred terms, and notes that the public product
     name remains under product review. Document created 2026-07-31 and awaits
     product owner approval before task completion.
+  - `docs/ROADMAP.md` provides comprehensive product roadmap with milestones,
+    feature plans, and success metrics. Created 2026-07-31.
 - [x] 1.3 Convert all nine unresolved architecture questions in `design.md` into owned ADRs with due gates
   - `docs/adr/README.md` is the architecture decision register and links one ADR
     for every current Open Question: embedded WebEngine, Codex distribution/client
