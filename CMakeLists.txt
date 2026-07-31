@@ -1053,3 +1053,24 @@ if(BUILD_TESTING)
                 "QT_QPA_PLATFORM=offscreen;AEGISY_AGENT_BACKEND=preview;AEGISY_WORKBENCH_WEB_ROOT=${AEGISY_WORKBENCH_WEB_BUILD_DIR};QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu")
     endif()
 endif()
+
+# Isolated Qt WebEngine experiment (task 2.1)
+option(AEGISY_BUILD_WEBENGINE_EXPERIMENT "Build isolated Qt WebEngine experiment" OFF)
+if(AEGISY_BUILD_WEBENGINE_EXPERIMENT)
+    add_executable(aegisy_webengine_experiment
+        experiments/webengine/main.cpp
+    )
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(aegisy_webengine_experiment PRIVATE
+            Qt6::Core
+            Qt6::Widgets
+            Qt6::WebEngineWidgets
+        )
+    else()
+        target_link_libraries(aegisy_webengine_experiment PRIVATE
+            Qt5::Core
+            Qt5::Widgets
+            Qt5::WebEngineWidgets
+        )
+    endif()
+endif()
