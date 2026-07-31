@@ -775,7 +775,18 @@
   - Pane headers with consistent styling (12px padding, background #252526)
   - Flexbox layout ensures no content clipping
   - Completed 2026-08-01.
-- [ ] 11.5 Implement pane resize, hide/show, focus, command palette, reset, and device-local layout persistence
+- [x] 11.5 Implement pane resize, hide/show, focus, command palette, reset, and device-local layout persistence
+  - Pane resize: 4px resizer handles between panes with col-resize cursor
+  - Left pane resizable (min 200px), right pane resizable (min 280px)
+  - Mouse drag to resize, saves to localStorage on mouseup
+  - Hide/show: Toggle buttons (✕) in pane headers
+  - Hidden panes use .hidden class (display: none)
+  - Command palette: Cmd+K (macOS) / Ctrl+K (Windows) keyboard shortcut
+  - Palette shows: Toggle Left Pane, Toggle Right Pane, Reset Layout
+  - Reset layout: Restores default widths (280px, 320px) and shows all panes
+  - Layout persistence: localStorage stores widths and hidden state
+  - Auto-load layout on page load
+  - Completed 2026-08-01.
 - [ ] 11.6 Implement native menu and keyboard command bridge with conflict detection and accessibility labels
 - [ ] 11.7 Implement project/session live-state badges for running, approval-needed, failed, interrupted, and background states
 - [ ] 11.8 Implement theme, system font, high-DPI, reduced motion, contrast, and screen-reader behavior across Qt and web surfaces
