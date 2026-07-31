@@ -879,6 +879,12 @@
     border color change. Foundation ready for backend integration. Live context updates,
     model selection, permission changes, and turn submission remain pending.
 - [ ] 12.7 Implement file/image/diagnostic/terminal/Git attachment preview with provenance, size, inclusion, and removal
+  - Partial UI foundation: Attachment component implemented with icon, name, size, and remove
+    button. File attachments show 📄 icon, images show 🖼️, diagnostics show ⚠️. Name
+    truncated with ellipsis at 150px. Size displayed in KB. Remove button (✕) with hover
+    state changes to red. Attachments displayed in flex wrap layout above composer input.
+    Hover state shows accent border. Foundation ready for backend integration. Actual
+    file selection, preview modal, provenance display, and inclusion management remain pending.
 - [ ] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
 - [ ] 12.9 Implement Chat-to-Work conversion preserving non-mutating source history and explicit new Work bindings
 - [ ] 12.10 Add timeline stress tests for long sessions, concurrent events, large output references, reconnect replay, and unknown item types
