@@ -73,7 +73,7 @@ int main(int argc, char *argv[]) {
     channel->registerObject("bridge", api);
     page->setWebChannel(channel);
 
-    QString html = R"(
+    QString html = R"HTML(
 <!DOCTYPE html>
 <html>
 <head>
@@ -135,7 +135,7 @@ int main(int argc, char *argv[]) {
     </script>
 </body>
 </html>
-)";
+)HTML";
 
     view.setHtml(html, QUrl("qrc:///workbench/bridge.html"));
     view.resize(1024, 768);
