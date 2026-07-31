@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+    <style>
+        body { margin: 0; padding: 0; background: #000; font-family: monospace; }
+        #container { height: 100vh; display: flex; flex-direction: column; }
+        #toolbar { padding: 8px; background: #1e1e1e; color: #ccc; display: flex; gap: 8px; align-items: center; }
+        #terminal { flex: 1; padding: 8px; }
+        button { padding: 6px 12px; background: #0e639c; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
+        button:hover { background: #1177bb; }
+        #status { margin-left: auto; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="toolbar">
+            <button onclick="testThroughput()">Throughput Test</button>
+            <button onclick="testResize()">Resize Test</button>
+            <button onclick="testUnicode()">Unicode Test</button>
+            <button onclick="testLinks()">Link Test</button>
+            <button onclick="testLongOutput()">Long Output</button>
+            <span id="status">Loading xterm.js...</span>
+        </div>
+        <div id="terminal"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qwebchannel@1.0.0/qwebchannel.js"></script>
+    <script>
+        let term, fitAddon, terminalAPI;
+
+        new QWebChannel(qt.webChannelTransport, function(channel) {
+            terminalAPI = channel.objects.terminalAPI;
+
+            term = new Terminal({
+                cursorBlink: true,
+                fontSize: 14,
+                fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                theme: {
+                    background: '#1e1e1e',
+                    foreground: '#d4d4d4'
+                }
+            });
+
+            fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+
+            const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+            term.loadAddon(webLinksAddon);
+
+            term.open(document.getElementById('terminal'));
+            fitAddon.fit();
+
+            term.onData(data => {
+                if (terminalAPI) terminalAPI.writeInput(data);
+            });
+
+            term.onResize(({ cols, rows }) => {
+                if (terminalAPI) terminalAPI.resize(cols, rows);
+            });
+
+            terminalAPI.output.connect(data => {
+                term.write(data);
+            });
+
+            window.addEventListener('resize', () => fitAddon.fit());
+
+            document.getElementById('status').textContent = 'xterm.js loaded ✓';
+            term.writeln('\x1b[1;32mxterm.js Terminal Test - Task 2.5\x1b[0m');
+            term.writeln('Ready for testing. Click buttons above or type commands.');
+            term.writeln('');
+        });
+
+        function testThroughput() {
+            const start = Date.now();
+            const lines = 1000;
+            for (let i = 0; i < lines; i++) {
+                term.writeln(`Line ${i}: Testing throughput with repeated content`);
+            }
+            const elapsed = Date.now() - start;
+            document.getElementById('status').textContent = `Throughput: ${lines} lines in ${elapsed}ms`;
+        }
+
+        function testResize() {
+            const { cols, rows } = term;
+            term.writeln(`\x1b[1;33mCurrent size: ${cols} cols × ${rows} rows\x1b[0m`);
+            term.writeln('Resize window to test automatic fitting...');
+            document.getElementById('status').textContent = `Terminal: ${cols}×${rows}`;
+        }
+
+        function testUnicode() {
+            term.writeln('\x1b[1;36m=== Unicode Test ===\x1b[0m');
+            term.writeln('Chinese: 你好世界 测试中文显示');
+            term.writeln('Japanese: こんにちは 日本語テスト');
+            term.writeln('Korean: 안녕하세요 한국어 테스트');
+            term.writeln('Emoji: 🚀 ✨ 🎉 💻 🔥');
+            term.writeln('Box drawing: ┌─┬─┐ │ │ │ └─┴─┘');
+            document.getElementById('status').textContent = 'Unicode test complete';
+        }
+
+        function testLinks() {
+            term.writeln('\x1b[1;35m=== Link Test ===\x1b[0m');
+            term.writeln('Click these links (Cmd+Click):');
+            term.writeln('https://github.com/xtermjs/xterm.js');
+            term.writeln('http://example.com/test');
+            term.writeln('file:///Users/test/file.txt');
+            document.getElementById('status').textContent = 'Links rendered - Cmd+Click to open';
+        }
+
+        function testLongOutput() {
+            term.writeln('\x1b[1;31m=== Long Output Virtualization Test ===\x1b[0m');
+            const lines = 10000;
+            for (let i = 0; i < lines; i++) {
+                term.writeln(`Line ${i.toString().padStart(5, '0')}: Long output test with virtualization`);
+            }
+            document.getElementById('status').textContent = `${lines} lines rendered - scroll to test virtualization`;
+        }
+
+        function runAllTests() {
+            term.clear();
+            term.writeln('\x1b[1;32m=== Running All Tests ===\x1b[0m');
+            term.writeln('');
+            testUnicode();
+            term.writeln('');
+            testLinks();
+            term.writeln('');
+            testResize();
+            term.writeln('');
+            term.writeln('\x1b[1;33mThroughput and long output tests available via buttons\x1b[0m');
+        }
+    </script>
+</body>
+</html>

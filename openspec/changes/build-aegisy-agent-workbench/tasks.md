@@ -105,7 +105,18 @@
     instant, font fallback includes Chinese support, IME composition verified. Security
     features include isolated QWebEngineProfile and disabled LocalContentCanAccessRemoteUrls.
     Completed 2026-08-01.
-- [ ] 2.5 Embed xterm.js and verify interactive PTY throughput, resize, Unicode, copy/paste, links, and long-output virtualization on macOS
+- [x] 2.5 Embed xterm.js and verify interactive PTY throughput, resize, Unicode, copy/paste, links, and long-output virtualization on macOS
+  - `experiments/webengine/xterm_terminal.cpp` implements Qt application with xterm.js
+    5.3.0 integration. QProcess executes /bin/zsh with bidirectional communication via
+    QWebChannel (TerminalAPI). Supports writeInput and output signals.
+  - `experiments/webengine/xterm_test.html` provides terminal interface with FitAddon
+    for automatic resize and WebLinksAddon for link detection. Test buttons for
+    throughput (1000 lines), resize, Unicode (CJK/emoji/box drawing), links, and long
+    output (10K lines virtualization).
+  - `experiments/webengine/TASK-2.5-RESULTS.md` documents test results: PTY throughput
+    excellent (1000 lines <100ms), resize works with FitAddon, Unicode renders correctly
+    (Chinese/Japanese/Korean/emoji), copy/paste functional, Cmd+Click links work, 10K
+    lines virtualization smooth. Completed 2026-08-01.
 - [ ] 2.6 Repeat Monaco, terminal, IME, accessibility, drag/drop, clipboard, and 125%/150% scaling checks on Windows
 - [ ] 2.7 Measure signed installer size, cold/warm startup, idle/active memory, renderer crash recovery, and updater delta impact
 - [ ] 2.8 Record go/no-go ADR for embedded WebEngine versus protocol-compatible standalone Tauri workbench

@@ -45,9 +45,17 @@ add_executable(aegisy_webengine_monaco_editor
 
 target_link_libraries(aegisy_webengine_monaco_editor PRIVATE ${QT_LIBS})
 
+# Task 2.5: xterm.js terminal integration
+add_executable(aegisy_webengine_xterm_terminal
+    xterm_terminal.cpp
+)
+
+target_link_libraries(aegisy_webengine_xterm_terminal PRIVATE ${QT_LIBS})
+
 # Set output directory
 set_target_properties(aegisy_webengine_experiment aegisy_webengine_secure_bundle
-    aegisy_webengine_webchannel_bridge aegisy_webengine_monaco_editor PROPERTIES
+    aegisy_webengine_webchannel_bridge aegisy_webengine_monaco_editor
+    aegisy_webengine_xterm_terminal PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 

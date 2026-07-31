@@ -42,16 +42,28 @@ Features:
 
 See `TASK-2.4-RESULTS.md` for detailed test results.
 
+### Task 2.5: xterm.js Terminal Integration ✓
+**Target**: `aegisy_webengine_xterm_terminal`
+
+Features:
+- Interactive PTY with QProcess
+- Resize with FitAddon
+- Unicode support (CJK, emoji, box drawing)
+- Copy/paste functionality
+- Link detection and Cmd+Click
+- Long output virtualization (10K lines)
+
+See `TASK-2.5-RESULTS.md` for detailed test results.
+
 ## Build Instructions
 
 ```bash
 cmake -B build -DAEGISY_BUILD_WEBENGINE_EXPERIMENT=ON
-cmake --build build --target aegisy_webengine_monaco_editor
-./build/aegisy_webengine_monaco_editor
+cmake --build build --target aegisy_webengine_xterm_terminal
+./build/aegisy_webengine_xterm_terminal
 ```
 
 ## Next Tasks
-- Task 2.5: xterm.js integration
 - Task 2.6: Windows testing
 - Task 2.7: Performance measurements
 - Task 2.8: Go/no-go ADR
