@@ -78,7 +78,11 @@
 
 ## 2. Milestone 0 UI Technology Spike
 
-- [ ] 2.1 Add an isolated build experiment that links Qt WebEngine without changing the production target
+- [x] 2.1 Add an isolated build experiment that links Qt WebEngine without changing the production target
+  - `experiments/webengine/` contains isolated WebEngine experiment with optional
+    CMakeLists.txt. Build with `-DAEGISY_BUILD_WEBENGINE_EXPERIMENT=ON` to create
+    `aegisy_webengine_experiment` target. Minimal QWebEngineView application verifies
+    Qt WebEngine linking works without affecting production build. Completed 2026-08-01.
 - [ ] 2.2 Render a local signed workbench bundle in `QWebEngineView` with all network navigation disabled by default
 - [ ] 2.3 Prove a minimal `QWebChannel` bridge with typed request IDs, origin checks, size limits, and cancellation
 - [ ] 2.4 Embed Monaco and verify open/edit/save, large file behavior, diff view, theme, font fallback, and Chinese IME on macOS
