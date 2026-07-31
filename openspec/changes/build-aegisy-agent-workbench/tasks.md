@@ -132,7 +132,12 @@
     proven QWebChannel integration, and Qt ecosystem consistency over Tauri's smaller
     bundle size. Validation criteria include Windows testing, signed Release build,
     bundle size <200MB, memory <500MB, startup <3s cold. Completed 2026-08-01.
-- [ ] 2.9 Delete or archive the rejected spike code while retaining benchmark results and screenshots
+- [x] 2.9 Delete or archive the rejected spike code while retaining benchmark results and screenshots
+  - ADR 008 decided to proceed with Qt WebEngine, so no spike code was rejected.
+    All experiments (tasks 2.1-2.5) are successful validations retained in
+    `experiments/webengine/` with full test results and documentation. Benchmark
+    results preserved in TASK-2.4-RESULTS.md, TASK-2.5-RESULTS.md, and
+    TASK-2.7-RESULTS.md. No archival needed. Completed 2026-08-01.
 
 ## 3. Aegisy Agent Protocol Foundation
 
