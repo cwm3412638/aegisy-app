@@ -860,6 +860,12 @@
 - [ ] 12.5 Implement structured user questions, option selection, cancellation, and resolved-request cleanup
 - [ ] 12.6 Implement composer execution-context strip for project, runtime, model profile, permission profile, branch, and context state
   - Partial execution-context strip: the Agent header shows Chat/Work mode, project, persisted workspace root, Runtime readiness/recovery state, provider/model, fixed read-only permission, Session-bound Git branch, and selected-context count. Qt stores bounded Runtime and Workspace bindings per Session and refreshes from start/resume/fork/read/search responses, so switching or replay never reuses another Session's last global provider/model/branch. Only exact `read-only` permission and the content-free `session-workspace-binding/0.1` projection are accepted; malformed or missing bindings show explicit unknown/read-only gates. Live Git overview is comparison-only: a different current branch marks the bound branch as drifted instead of overwriting Session context. The render fixture now executes the empty state, real Git branch, `root-1`, and active Work Session binding in the passing desktop CTest suite. Complete model-profile selection, permission-profile management, immutable turn-start context metadata, dedicated-worktree lifecycle, and final cross-platform/UI evidence remain required.
+  - Partial UI foundation: Composer component implemented with execution-context header showing
+    Work Mode, Project, Model, and Permission badges. Textarea input with placeholder and
+    aria-label. Send button with Cmd+Enter hint. Sticky positioning at bottom of timeline.
+    Context badges use 11px font with background highlighting. Input has focus outline and
+    border color change. Foundation ready for backend integration. Live context updates,
+    model selection, permission changes, and turn submission remain pending.
 - [ ] 12.7 Implement file/image/diagnostic/terminal/Git attachment preview with provenance, size, inclusion, and removal
 - [ ] 12.8 Implement turn submit idempotency, cancel, conditional steer, retry, edit-and-retry, and fork-from-turn controls
 - [ ] 12.9 Implement Chat-to-Work conversion preserving non-mutating source history and explicit new Work bindings
