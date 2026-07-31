@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-31
+Last updated: 2026-07-31 23:30
 
 ## Mandatory First Step
 
@@ -208,6 +208,17 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 - OpenSpec task baseline: 57 of 235 checkbox tasks are complete and 178 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
+- OpenSpec change `modernize-ui-and-runtime-status-bar` completed all 20 tasks
+  and was archived on 2026-07-31. The change modernized the UI with profile
+  activation correctness, runtime telemetry, background status bar, modern desktop
+  UI, and responsive background work. All automated tests pass on macOS; Windows
+  platform verification remains a follow-up item.
+- OpenSpec tasks `1.1` and `1.2` now have foundational documents created:
+  `docs/CHAT-WORK-BEHAVIORAL-CONTRACT.md` defines the Chat versus Work behavioral
+  contract and mutation guarantees, while `docs/AEGISY-CODING-TERMINOLOGY.md`
+  defines canonical terminology for Project, Session, Turn, Timeline, Task,
+  Runtime, and Workspace. Both documents await product and security owner approval
+  before tasks can be marked complete.
 - OpenSpec task `4.1` is complete. `agent-runtime` is a locked two-crate Rust
   workspace with formatting, unit/integration tests, strict all-target Clippy, and a
   Thin-LTO/single-codegen-unit/stripped Release profile. Pinned `cargo-deny 0.19.9`
