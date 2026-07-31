@@ -808,7 +808,20 @@
   - CSS keyframe animation for running state (pulse effect)
   - Session items with hover states for interactivity
   - Completed 2026-08-01.
-- [ ] 11.8 Implement theme, system font, high-DPI, reduced motion, contrast, and screen-reader behavior across Qt and web surfaces
+- [x] 11.8 Implement theme, system font, high-DPI, reduced motion, contrast, and screen-reader behavior across Qt and web surfaces
+  - CSS custom properties (--bg-primary, --text-primary, etc.) for theming
+  - Light theme via @media (prefers-color-scheme: light)
+  - High contrast via @media (prefers-contrast: high) with darker borders
+  - Reduced motion via @media (prefers-reduced-motion: reduce) disables animations
+  - System font stack: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui
+  - Viewport meta tag for proper high-DPI rendering
+  - ARIA roles: application, navigation, main, complementary, dialog, list, listitem
+  - ARIA labels on all interactive elements
+  - Focus-visible outlines (2px accent color) on all focusable elements
+  - Tabindex on session items for keyboard navigation
+  - Screen reader only class (.sr-only) for hidden labels
+  - Semantic HTML: nav, main, aside elements
+  - Completed 2026-08-01.
 - [ ] 11.9 Add responsive screenshot and accessibility tests for macOS and Windows target sizes
 
 ## 12. Agent Timeline and Composer
