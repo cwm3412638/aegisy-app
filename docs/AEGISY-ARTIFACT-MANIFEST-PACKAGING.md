@@ -103,6 +103,14 @@ paths and different native files. The application and directories are observed a
 after artifact verification. `verifyCandidate` derives and revalidates that same current
 layout before every decision, so even an exact-byte replacement with a different file
 identity invalidates a cached authority.
+Qt returns canonical paths with `/` separators on Windows as well as macOS. Both the
+Manifest and installed-layout verifiers therefore use one explicit path-flavor policy
+instead of appending `QDir::separator()`. Windows comparisons normalize `/` and `\\`,
+compare case-insensitively, support drive and UNC roots, and require a strict
+separator-delimited descendant; Posix comparison stays case-sensitive. The portable
+fixture covers equal paths, sibling prefixes, different drives, roots, separators,
+case, and UNC paths. The Windows packaging policy statically requires both consumers
+to retain this helper, but a clean Windows run remains mandatory.
 The legacy raw-key, scalar tuple, arbitrary-root, and Artifact Set `0.1` entry
 points are compiled only into dedicated compatibility tests. A separate
 production-shaped child-process target is compiled without either testing macro.

@@ -161,6 +161,7 @@ set(HEADERS
     include/help_dialog.h
     include/agent_runtime_client.h
     include/artifact_manifest.h
+    include/canonical_path_policy.h
     include/update_signing_key_ring.h
     include/update_artifact_set.h
     include/workbench_emergency_policy.h
@@ -826,6 +827,7 @@ if(BUILD_TESTING)
         tests/artifact_manifest_test.cpp
         src/artifact_manifest.cpp
         include/artifact_manifest.h
+        include/canonical_path_policy.h
     )
     target_include_directories(AegisyArtifactManifestTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)

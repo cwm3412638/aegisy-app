@@ -2,10 +2,27 @@ foreach(required_file
         "${AEGISY_SOURCE_DIR}/installer.iss"
         "${AEGISY_SOURCE_DIR}/.github/workflows/windows-package.yml"
         "${AEGISY_SOURCE_DIR}/package-windows.bat"
+        "${AEGISY_SOURCE_DIR}/include/canonical_path_policy.h"
+        "${AEGISY_SOURCE_DIR}/src/artifact_manifest.cpp"
+        "${AEGISY_SOURCE_DIR}/src/update_artifact_set.cpp"
         "${AEGISY_SOURCE_DIR}/cmake/windows/AegisyClient.manifest.in"
         "${AEGISY_SOURCE_DIR}/cmake/windows/AegisyClient.rc.in")
     if(NOT EXISTS "${required_file}")
         message(FATAL_ERROR "Windows packaging policy file is missing: ${required_file}")
+    endif()
+endforeach()
+
+file(READ "${AEGISY_SOURCE_DIR}/src/artifact_manifest.cpp" artifact_manifest_source)
+file(READ "${AEGISY_SOURCE_DIR}/src/update_artifact_set.cpp" artifact_set_source)
+foreach(path_consumer artifact_manifest_source artifact_set_source)
+    if(NOT "${${path_consumer}}" MATCHES
+            "CanonicalPathPolicy::isStrictDescendant")
+        message(FATAL_ERROR
+            "Windows canonical path consumer bypasses the shared policy: ${path_consumer}")
+    endif()
+    if("${${path_consumer}}" MATCHES "QDir::separator\\(\\)")
+        message(FATAL_ERROR
+            "Windows canonical containment reintroduced a native separator: ${path_consumer}")
     endif()
 endforeach()
 

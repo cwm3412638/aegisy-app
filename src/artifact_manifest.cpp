@@ -1,6 +1,7 @@
 #include "artifact_manifest.h"
 
 #include "aap_transport_runtime.h"
+#include "canonical_path_policy.h"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -272,8 +273,12 @@ ArtifactManifest::VerificationResult verifyArtifact(const QJsonObject &artifact,
     }
     const QString artifactCanonical = info.canonicalFilePath();
     if (baseCanonical.isEmpty() || artifactCanonical.isEmpty()
-        || artifactCanonical == baseCanonical
-        || !artifactCanonical.startsWith(baseCanonical + QDir::separator())) {
+        || CanonicalPathPolicy::equals(
+            artifactCanonical, baseCanonical,
+            CanonicalPathPolicy::nativeFlavor())
+        || !CanonicalPathPolicy::isStrictDescendant(
+            baseCanonical, artifactCanonical,
+            CanonicalPathPolicy::nativeFlavor())) {
         return fail(QStringLiteral("artifact-path-escape"), id);
     }
     if (before.identity.isEmpty()
@@ -284,7 +289,10 @@ ArtifactManifest::VerificationResult verifyArtifact(const QJsonObject &artifact,
     }
     if (!expectedPath.isEmpty()) {
         const QString expectedCanonical = QFileInfo(expectedPath).canonicalFilePath();
-        if (expectedCanonical.isEmpty() || expectedCanonical != artifactCanonical) {
+        if (expectedCanonical.isEmpty()
+            || !CanonicalPathPolicy::equals(
+                expectedCanonical, artifactCanonical,
+                CanonicalPathPolicy::nativeFlavor())) {
             return fail(QStringLiteral("artifact-path-mismatch"), id);
         }
     }

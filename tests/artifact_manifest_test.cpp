@@ -1,4 +1,5 @@
 #include "artifact_manifest.h"
+#include "canonical_path_policy.h"
 
 #include <QCryptographicHash>
 #include <QCoreApplication>
@@ -24,6 +25,76 @@ bool expect(bool condition, const char *message)
 {
     if (!condition) std::fprintf(stderr, "%s\n", message);
     return condition;
+}
+
+bool canonicalPathPolicyTests()
+{
+    using CanonicalPathPolicy::Flavor;
+    using CanonicalPathPolicy::equals;
+    using CanonicalPathPolicy::isStrictDescendant;
+
+    bool ok = true;
+    ok = expect(isStrictDescendant(
+                    QStringLiteral("C:/Program Files/Aegisy"),
+                    QStringLiteral("c:/program files/aegisy/aegisy-agentd.exe"),
+                    Flavor::Windows),
+                "Windows slash canonical child was rejected") && ok;
+    ok = expect(isStrictDescendant(
+                    QStringLiteral("C:\\Program Files\\Aegisy\\"),
+                    QStringLiteral("C:\\Program Files\\Aegisy\\codex.exe"),
+                    Flavor::Windows),
+                "Windows native-separator child was rejected") && ok;
+    ok = expect(isStrictDescendant(
+                    QStringLiteral("C:/"),
+                    QStringLiteral("c:/Aegisy/AegisyClient.exe"),
+                    Flavor::Windows),
+                "Windows drive-root child was rejected") && ok;
+    ok = expect(isStrictDescendant(
+                    QStringLiteral("/"),
+                    QStringLiteral("/Applications/Aegisy/AegisyClient"),
+                    Flavor::Posix),
+                "POSIX root child was rejected") && ok;
+    ok = expect(equals(QStringLiteral("C://"), QStringLiteral("c:/"),
+                       Flavor::Windows),
+                "Windows drive root with redundant separator drifted") && ok;
+    ok = expect(isStrictDescendant(
+                    QStringLiteral("//server/share"),
+                    QStringLiteral("\\\\SERVER\\SHARE\\Aegisy\\codex.exe"),
+                    Flavor::Windows),
+                "Windows UNC child was rejected") && ok;
+    ok = expect(equals(QStringLiteral("C:/Aegisy/"),
+                       QStringLiteral("c:\\aegisy"), Flavor::Windows),
+                "Windows equivalent canonical paths did not compare equal") && ok;
+    ok = expect(!isStrictDescendant(
+                    QStringLiteral("C:/Aegisy"),
+                    QStringLiteral("C:/Aegisy"), Flavor::Windows)
+                    && !isStrictDescendant(
+                        QStringLiteral("C:/Aegisy"),
+                        QStringLiteral("C:/Aegisy-old/codex.exe"),
+                        Flavor::Windows)
+                    && !isStrictDescendant(
+                        QStringLiteral("C:/Aegisy"),
+                        QStringLiteral("D:/Aegisy/codex.exe"),
+                        Flavor::Windows),
+                "Windows equal, sibling-prefix, or cross-drive path escaped") && ok;
+    ok = expect(isStrictDescendant(
+                    QStringLiteral("/Applications/Aegisy"),
+                    QStringLiteral("/Applications/Aegisy/codex"),
+                    Flavor::Posix)
+                    && !isStrictDescendant(
+                        QStringLiteral("/Applications/Aegisy"),
+                        QStringLiteral("/applications/aegisy/codex"),
+                        Flavor::Posix)
+                    && isStrictDescendant(
+                        QStringLiteral("/opt/aegisy\\bundle"),
+                        QStringLiteral("/opt/aegisy\\bundle/codex"),
+                        Flavor::Posix)
+                    && !isStrictDescendant(
+                        QStringLiteral("/opt/aegisy\\bundle"),
+                        QStringLiteral("/opt/aegisy/bundle/codex"),
+                        Flavor::Posix),
+                "POSIX case or backslash policy drifted") && ok;
+    return ok;
 }
 
 QByteArray writeArtifact(const QString &path, const QByteArray &bytes)
@@ -383,6 +454,7 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "usage: AegisyArtifactManifestTest [manifest runtime]\n");
         return 2;
     }
+    if (!canonicalPathPolicyTests()) return 1;
     QTemporaryDir directory;
     if (!expect(directory.isValid(), "temporary directory unavailable")) return 1;
     const QString runtimePath = QDir(directory.path()).filePath(runtimeFileName());

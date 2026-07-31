@@ -3591,7 +3591,15 @@ Implemented visual baseline:
   observation; Runtime and adapter must be distinct paths and native files. Candidate
   evaluation rederives and revalidates the entire graph. Exact-byte replacement of any
   bound file, content drift, expectation drift, or key drift invalidates cached
-  authority. The macOS outer bundle basename is intentionally not an authority field.
+  authority. Qt canonical paths use `/` on every platform; a shared explicit
+  Windows/Posix containment policy now prevents Windows verification from combining
+  those paths with native `\\` separators. Windows comparison is case-insensitive,
+  accepts drive and UNC roots, and requires a strict separator-delimited descendant,
+  while Posix remains case-sensitive. Platform-neutral string fixtures cover equal,
+  sibling-prefix, cross-drive, root, separator, case, and UNC boundaries, and the
+  Windows packaging policy requires both verifiers to use the shared helper. This is
+  source-level regression evidence, not clean Windows execution evidence. The macOS
+  outer bundle basename is intentionally not an authority field.
   The raw-key, legacy `0.1`, scalar-tuple, and arbitrary-root entry points exist only
   under dedicated CTest compile definitions. A separate no-testing-macro Unicode
   child-process target copies the test image into the production-shaped layout and
@@ -3664,8 +3672,13 @@ Implemented visual baseline:
   Authority-based Artifact Set `0.2` candidate/installation entry points and the
   Key Ring bootstrap/rotation entry points; no testing namespace, raw-key, or
   arbitrary-root helper is exported. Strict OpenSpec validation reports the change
-  valid and `git diff --check` passes. This is macOS source and runtime evidence only
-  and grants no packaged-update or Windows authority.
+  valid and `git diff --check` passes. After the Windows canonical-containment fix,
+  the complete application build, the five focused Manifest/Artifact Set/packaging
+  CTests, and all `29/29` serial desktop CTests pass; the serial run completes in
+  114.43 seconds. Both production consumers contain no `QDir::separator()` call,
+  strict OpenSpec validation again returns valid with exit code zero, and
+  `git diff --check` passes. This is macOS source and runtime evidence only and
+  grants no packaged-update or Windows authority.
 
 ## Live Timeline Subscription And Ownership Recovery (2026-07-26)
 

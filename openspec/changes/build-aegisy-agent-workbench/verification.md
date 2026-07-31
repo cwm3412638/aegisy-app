@@ -2637,7 +2637,16 @@ Known limitations:
   directory/file identities, and the current application size/SHA-256. It reobserves
   the application and directories after
   artifact verification. Each candidate evaluation rederives and rereads that graph
-  and rejects drift before compatibility is evaluated. The scalar tuple and
+  and rejects drift before compatibility is evaluated. A post-stage review found that
+  Qt canonical Windows paths use `/` while the two containment checks appended native
+  `\\`, which would reject a valid installed layout. Both production consumers now
+  use one explicit path-flavor helper: Windows normalizes `/` and `\\`, compares
+  case-insensitively, handles drive and UNC roots, and requires a strict
+  separator-delimited descendant; Posix remains case-sensitive. A platform-neutral
+  fixture covers equal, sibling-prefix, cross-drive, root, separator, case, and UNC
+  strings, while `windows_packaging_policy` requires both source consumers to retain
+  the shared helper. This closes the source regression but is not clean Windows
+  execution evidence. The scalar tuple and
   arbitrary-root, raw-key, and legacy helpers are available only to the CTest target
   through `AEGISY_UPDATE_ARTIFACT_SET_TESTING` and
   `AEGISY_UPDATE_SIGNING_KEY_RING_TESTING`. Compatibility still requires the selected
@@ -2743,6 +2752,15 @@ Known limitations:
   macOS/local contract evidence only; it is not signed-package, real updater,
   zero-byte incompatible-download, resume/install recheck, persistent
   Ring/anti-rollback, or Windows execution evidence.
+- After correcting the Windows canonical-containment regression, the complete
+  application build and the focused `artifact_manifest_verification`,
+  `artifact_manifest_runtime_startup`, `artifact_manifest_generation`,
+  `update_artifact_set_compatibility`, and `windows_packaging_policy` CTests pass
+  `5/5`. The complete serial desktop gate passes `29/29` in 114.43 seconds. Both
+  production consumers contain no `QDir::separator()` call, strict OpenSpec
+  validation returns valid with exit code zero, and `git diff --check` passes. The
+  PostHog DNS warning occurs only after the successful validation result and is not
+  Windows execution evidence.
 
 ## 22.6 Emergency Workbench Disable Foundation
 

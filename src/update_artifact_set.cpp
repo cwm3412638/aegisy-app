@@ -2,6 +2,7 @@
 
 #include "aap_transport_runtime.h"
 #include "artifact_manifest.h"
+#include "canonical_path_policy.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -314,21 +315,14 @@ QString canonicalDirectory(const QString &path)
 
 bool samePath(const QString &left, const QString &right)
 {
-#ifdef Q_OS_WIN
-    return left.compare(right, Qt::CaseInsensitive) == 0;
-#else
-    return left == right;
-#endif
+    return CanonicalPathPolicy::equals(
+        left, right, CanonicalPathPolicy::nativeFlavor());
 }
 
 bool pathWithin(const QString &parent, const QString &path)
 {
-    const QString prefix = parent + QDir::separator();
-#ifdef Q_OS_WIN
-    return path.startsWith(prefix, Qt::CaseInsensitive);
-#else
-    return path.startsWith(prefix);
-#endif
+    return CanonicalPathPolicy::isStrictDescendant(
+        parent, path, CanonicalPathPolicy::nativeFlavor());
 }
 
 bool deriveCurrentInstallationLayout(InstallationLayout *layout,
