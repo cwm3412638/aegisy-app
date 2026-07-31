@@ -114,6 +114,7 @@ set(SOURCES
     src/agent_runtime_client.cpp
     src/artifact_manifest.cpp
     src/update_signing_key_ring.cpp
+    src/update_signing_key_ring_cache.cpp
     src/update_artifact_set.cpp
     src/workbench_emergency_policy.cpp
     src/agent_workbench_widget.cpp
@@ -163,6 +164,7 @@ set(HEADERS
     include/artifact_manifest.h
     include/canonical_path_policy.h
     include/update_signing_key_ring.h
+    include/update_signing_key_ring_cache.h
     include/update_artifact_set.h
     include/workbench_emergency_policy.h
     include/agent_workbench_widget.h
@@ -881,6 +883,34 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME update_signing_key_ring_contract
         COMMAND AegisyUpdateSigningKeyRingTest)
+
+    add_executable(AegisyUpdateSigningKeyRingCacheTest
+        tests/update_signing_key_ring_cache_test.cpp
+        src/update_signing_key_ring_cache.cpp
+        include/update_signing_key_ring_cache.h
+        src/update_signing_key_ring.cpp
+        include/update_signing_key_ring.h
+    )
+    target_include_directories(AegisyUpdateSigningKeyRingCacheTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(AegisyUpdateSigningKeyRingCacheTest PRIVATE
+        AEGISY_UPDATE_SIGNING_KEY_RING_TESTING=1)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyUpdateSigningKeyRingCacheTest PRIVATE
+            Qt6::Core OpenSSL::Crypto AegisyAapTransport)
+    else()
+        target_link_libraries(AegisyUpdateSigningKeyRingCacheTest PRIVATE
+            Qt5::Core OpenSSL::Crypto AegisyAapTransport)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyUpdateSigningKeyRingCacheTest PRIVATE
+            /W4 /WX)
+    else()
+        target_compile_options(AegisyUpdateSigningKeyRingCacheTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME update_signing_key_ring_cache_integrity
+        COMMAND AegisyUpdateSigningKeyRingCacheTest)
 
     add_executable(AegisyUpdateArtifactSetProductionFixture
         tests/update_artifact_set_production_fixture.cpp

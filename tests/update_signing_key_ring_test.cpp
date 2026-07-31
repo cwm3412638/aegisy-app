@@ -1015,6 +1015,319 @@ bool rotationNegativeTests(const SigningKey &root, const SigningKey &next,
     return ok;
 }
 
+bool envelopeChainTests(const SigningKey &root, const SigningKey &next,
+                        const SigningKey &third)
+{
+    using UpdateSigningKeyRing::EnvelopeChainStatus;
+
+    bool ok = true;
+    const auto anchor = UpdateSigningKeyRing::testingTrustAnchor(
+        QStringLiteral("chain-root"), root.publicKeyBase64());
+    const QJsonObject rootRecord =
+        keyObject(QStringLiteral("chain-root"), root, 1000, 10000, false,
+                  QJsonValue(QJsonValue::Null));
+    const QJsonObject nextRecord =
+        keyObject(QStringLiteral("chain-second"), next, 1800, 10000, false,
+                  QJsonValue(QStringLiteral("chain-root")));
+    const QJsonObject thirdRecord =
+        keyObject(QStringLiteral("chain-third"), third, 2200, 10000, false,
+                  QJsonValue(QStringLiteral("chain-second")));
+    const QJsonObject ring1 = ringObject(1, QJsonArray{rootRecord});
+    const QJsonObject ring2 = ringObject(2, QJsonArray{rootRecord, nextRecord});
+    const QJsonObject ring3 =
+        ringObject(3, QJsonArray{rootRecord, nextRecord, thirdRecord});
+    const QByteArray envelope1 = encoded(
+        signedRingObject(QStringLiteral("chain-root"), 1500, ring1, root));
+    const QByteArray envelope2 = encoded(
+        signedRingObject(QStringLiteral("chain-root"), 1900, ring2, root));
+    const QByteArray envelope3 = encoded(
+        signedRingObject(QStringLiteral("chain-second"), 2300, ring3, next));
+    const QVector<QByteArray> activeChain{envelope1, envelope2, envelope3};
+
+    const auto authoritative =
+        UpdateSigningKeyRing::verifyEnvelopeChain(activeChain, anchor, 2500);
+    ok = expect(
+             authoritative.status == EnvelopeChainStatus::Authoritative &&
+                 authoritative.errorCode.isEmpty() &&
+                 authoritative.strictVerificationError.isEmpty() &&
+                 authoritative.authority.isValid() &&
+                 authoritative.generation == 3 &&
+                 authoritative.generation ==
+                     authoritative.authority.generation() &&
+                 authoritative.ringIdentity ==
+                     ring3.value(QStringLiteral("ring_identity")).toString() &&
+                 authoritative.ringIdentity ==
+                     authoritative.authority.ringIdentity() &&
+                 authoritative.trustAnchorIdentity == anchor.anchorIdentity() &&
+                 authoritative.trustAnchorIdentity ==
+                     authoritative.authority.trustAnchorIdentity() &&
+                 authoritative.authorityIdentity ==
+                     authoritative.authority.authorityIdentity() &&
+                 authoritative.checkpoints.size() == 3 &&
+                 authoritative.checkpoints.at(0).generation == 1 &&
+                 authoritative.checkpoints.at(0).ringIdentity ==
+                     ring1.value(QStringLiteral("ring_identity")).toString() &&
+                 authoritative.checkpoints.at(1).generation == 2 &&
+                 authoritative.checkpoints.at(1).ringIdentity ==
+                     ring2.value(QStringLiteral("ring_identity")).toString() &&
+                 authoritative.checkpoints.at(2).generation == 3 &&
+                 authoritative.checkpoints.at(2).authorityIdentity ==
+                     authoritative.authorityIdentity,
+             "active generation 1->2->3 chain was not authoritative") &&
+         ok;
+
+    const auto empty =
+        UpdateSigningKeyRing::verifyEnvelopeChain({}, anchor, 2500);
+    ok = expect(empty.status == EnvelopeChainStatus::Invalid &&
+                    empty.errorCode ==
+                        QStringLiteral("update-signing-key-ring-chain-empty") &&
+                    empty.strictVerificationError == empty.errorCode &&
+                    !empty.authority.isValid() && empty.generation == 0 &&
+                    empty.ringIdentity.isEmpty() &&
+                    empty.trustAnchorIdentity.isEmpty() &&
+                    empty.authorityIdentity.isEmpty() &&
+                    empty.checkpoints.isEmpty(),
+                "empty key-ring chain was not rejected without metadata") &&
+         ok;
+
+    const auto invalidClock =
+        UpdateSigningKeyRing::verifyEnvelopeChain({envelope1}, anchor, 0);
+    ok = expect(
+             invalidClock.status == EnvelopeChainStatus::Invalid &&
+                 invalidClock.errorCode ==
+                     QStringLiteral("update-signing-key-ring-clock-invalid") &&
+                 invalidClock.strictVerificationError ==
+                     invalidClock.errorCode &&
+                 !invalidClock.authority.isValid(),
+             "invalid chain verification clock was accepted") &&
+         ok;
+
+    const auto duplicate = UpdateSigningKeyRing::verifyEnvelopeChain(
+        {envelope1, envelope2, envelope2}, anchor, 2500);
+    ok = expect(duplicate.status == EnvelopeChainStatus::Invalid &&
+                    duplicate.errorCode ==
+                        QStringLiteral(
+                            "update-signing-key-ring-chain-duplicate") &&
+                    duplicate.strictVerificationError == duplicate.errorCode &&
+                    !duplicate.authority.isValid(),
+                "duplicate envelope in a key-ring chain was accepted") &&
+         ok;
+
+    const auto outOfOrder = UpdateSigningKeyRing::verifyEnvelopeChain(
+        {envelope1, envelope3, envelope2}, anchor, 2500);
+    ok = expect(
+             outOfOrder.status == EnvelopeChainStatus::Invalid &&
+                 outOfOrder.errorCode ==
+                     QStringLiteral("update-signing-key-ring-signer-unknown") &&
+                 outOfOrder.strictVerificationError == outOfOrder.errorCode &&
+                 !outOfOrder.authority.isValid(),
+             "out-of-order key-ring chain was accepted") &&
+         ok;
+
+    const QJsonObject ring4 =
+        ringObject(4, QJsonArray{rootRecord, nextRecord, thirdRecord});
+    const QByteArray envelope4 = encoded(
+        signedRingObject(QStringLiteral("chain-second"), 2400, ring4, next));
+    const auto gap = UpdateSigningKeyRing::verifyEnvelopeChain(
+        {envelope1, envelope2, envelope4}, anchor, 2500);
+    ok = expect(
+             gap.status == EnvelopeChainStatus::Invalid &&
+                 gap.errorCode ==
+                     QStringLiteral("update-signing-key-ring-generation-gap") &&
+                 gap.strictVerificationError == gap.errorCode &&
+                 !gap.authority.isValid(),
+             "generation gap in a key-ring chain was accepted") &&
+         ok;
+
+    const QByteArray futureEnvelope = encoded(
+        signedRingObject(QStringLiteral("chain-second"), 2501, ring3, next));
+    const auto future = UpdateSigningKeyRing::verifyEnvelopeChain(
+        {envelope1, envelope2, futureEnvelope}, anchor, 2500);
+    ok =
+        expect(future.status == EnvelopeChainStatus::Invalid &&
+                   future.errorCode ==
+                       QStringLiteral(
+                           "update-signing-key-ring-envelope-fields-invalid") &&
+                   future.strictVerificationError == future.errorCode &&
+                   !future.authority.isValid(),
+               "future-signed key-ring chain became cached authority") &&
+        ok;
+
+    const auto expiredRoot =
+        UpdateSigningKeyRing::verifyEnvelopeChain(activeChain, anchor, 11000);
+    ok = expect(
+             expiredRoot.status ==
+                     EnvelopeChainStatus::CachedButNotAuthoritative &&
+                 expiredRoot.errorCode.isEmpty() &&
+                 expiredRoot.strictVerificationError ==
+                     QStringLiteral(
+                         "update-signing-key-ring-bootstrap-root-invalid") &&
+                 !expiredRoot.authority.isValid() &&
+                 expiredRoot.generation == 3 &&
+                 expiredRoot.ringIdentity ==
+                     ring3.value(QStringLiteral("ring_identity")).toString() &&
+                 expiredRoot.trustAnchorIdentity == anchor.anchorIdentity() &&
+                 !expiredRoot.authorityIdentity.isEmpty() &&
+                 expiredRoot.checkpoints.size() == 3 &&
+                 expiredRoot.checkpoints.constLast().authorityIdentity ==
+                     expiredRoot.authorityIdentity,
+             "historically valid chain with an expired Root was not "
+             "cached-only") &&
+         ok;
+
+    QJsonObject tamperedEnvelope2 = QJsonDocument::fromJson(envelope2).object();
+    QString tamperedSignature =
+        tamperedEnvelope2.value(QStringLiteral("signature")).toString();
+    tamperedSignature[0] = tamperedSignature.at(0) == QLatin1Char('A')
+                               ? QLatin1Char('B')
+                               : QLatin1Char('A');
+    tamperedEnvelope2.insert(QStringLiteral("signature"), tamperedSignature);
+    const auto tamperedExpired = UpdateSigningKeyRing::verifyEnvelopeChain(
+        {envelope1, encoded(tamperedEnvelope2), envelope3}, anchor, 11000);
+    ok = expect(tamperedExpired.status == EnvelopeChainStatus::Invalid &&
+                    tamperedExpired.errorCode ==
+                        QStringLiteral(
+                            "update-signing-key-ring-signature-invalid") &&
+                    tamperedExpired.strictVerificationError ==
+                        QStringLiteral(
+                            "update-signing-key-ring-bootstrap-root-invalid") &&
+                    !tamperedExpired.authority.isValid() &&
+                    tamperedExpired.generation == 0 &&
+                    tamperedExpired.authorityIdentity.isEmpty() &&
+                    tamperedExpired.checkpoints.isEmpty(),
+                "tampered expired envelope was accepted as cached-only") &&
+         ok;
+
+    const QByteArray admissionBackdatedEnvelope = encoded(
+        signedRingObject(QStringLiteral("chain-second"), 1850, ring3, next));
+    const auto admissionBackdated = UpdateSigningKeyRing::verifyEnvelopeChain(
+        {envelope1, envelope2, admissionBackdatedEnvelope}, anchor, 11000);
+    ok =
+        expect(admissionBackdated.status == EnvelopeChainStatus::Invalid &&
+                   admissionBackdated.errorCode ==
+                       QStringLiteral(
+                           "update-signing-key-ring-signer-not-yet-admitted") &&
+                   admissionBackdated.strictVerificationError ==
+                       QStringLiteral(
+                           "update-signing-key-ring-bootstrap-root-invalid") &&
+                   !admissionBackdated.authority.isValid(),
+               "expired chain bypassed signer admission history") &&
+        ok;
+
+    const QByteArray signedTimeRollbackEnvelope = encoded(
+        signedRingObject(QStringLiteral("chain-root"), 1800, ring3, root));
+    const auto signedTimeRollback = UpdateSigningKeyRing::verifyEnvelopeChain(
+        {envelope1, envelope2, signedTimeRollbackEnvelope}, anchor, 11000);
+    ok = expect(signedTimeRollback.status == EnvelopeChainStatus::Invalid &&
+                    signedTimeRollback.errorCode ==
+                        QStringLiteral(
+                            "update-signing-key-ring-signed-time-rollback") &&
+                    signedTimeRollback.strictVerificationError ==
+                        QStringLiteral(
+                            "update-signing-key-ring-bootstrap-root-invalid") &&
+                    !signedTimeRollback.authority.isValid(),
+                "expired chain bypassed signed-time monotonicity") &&
+         ok;
+
+    const QJsonObject orphanThirdRecord =
+        keyObject(QStringLiteral("chain-third"), third, 2200, 10000, false,
+                  QJsonValue(QStringLiteral("chain-missing")));
+    const QJsonObject orphanRing3 =
+        ringObject(3, QJsonArray{rootRecord, nextRecord, orphanThirdRecord});
+    const QByteArray orphanEnvelope3 = encoded(signedRingObject(
+        QStringLiteral("chain-second"), 2300, orphanRing3, next));
+    const auto invalidLineage = UpdateSigningKeyRing::verifyEnvelopeChain(
+        {envelope1, envelope2, orphanEnvelope3}, anchor, 11000);
+    ok = expect(invalidLineage.status == EnvelopeChainStatus::Invalid &&
+                    invalidLineage.errorCode ==
+                        QStringLiteral("update-signing-key-lineage-unknown") &&
+                    invalidLineage.strictVerificationError ==
+                        QStringLiteral(
+                            "update-signing-key-ring-bootstrap-root-invalid") &&
+                    !invalidLineage.authority.isValid(),
+                "expired chain bypassed lineage validation") &&
+         ok;
+
+    QJsonObject wrongIdentityRing3 = ring3;
+    wrongIdentityRing3.insert(
+        QStringLiteral("ring_identity"),
+        QStringLiteral("update-signing-key-ring:sha256:"
+                       "0000000000000000000000000000000000000000000000000000000"
+                       "000000000"));
+    const QByteArray wrongIdentityEnvelope3 = encoded(signedRingObject(
+        QStringLiteral("chain-second"), 2300, wrongIdentityRing3, next));
+    const auto invalidIdentity = UpdateSigningKeyRing::verifyEnvelopeChain(
+        {envelope1, envelope2, wrongIdentityEnvelope3}, anchor, 11000);
+    ok = expect(invalidIdentity.status == EnvelopeChainStatus::Invalid &&
+                    invalidIdentity.errorCode ==
+                        QStringLiteral(
+                            "update-signing-key-ring-identity-mismatch") &&
+                    invalidIdentity.strictVerificationError ==
+                        QStringLiteral(
+                            "update-signing-key-ring-bootstrap-root-invalid") &&
+                    !invalidIdentity.authority.isValid(),
+                "expired chain bypassed Ring identity validation") &&
+         ok;
+
+    const QJsonObject shortNextRecord =
+        keyObject(QStringLiteral("chain-second"), next, 1800, 3000, false,
+                  QJsonValue(QStringLiteral("chain-root")));
+    const QJsonObject shortRing2 =
+        ringObject(2, QJsonArray{rootRecord, shortNextRecord});
+    const QJsonObject shortRing3 =
+        ringObject(3, QJsonArray{rootRecord, shortNextRecord, thirdRecord});
+    const QByteArray shortEnvelope2 = encoded(
+        signedRingObject(QStringLiteral("chain-root"), 1900, shortRing2, root));
+    const QByteArray shortEnvelope3 = encoded(signedRingObject(
+        QStringLiteral("chain-second"), 2300, shortRing3, next));
+    const auto expiredIntermediate = UpdateSigningKeyRing::verifyEnvelopeChain(
+        {envelope1, shortEnvelope2, shortEnvelope3}, anchor, 3500);
+    ok = expect(expiredIntermediate.status ==
+                        EnvelopeChainStatus::CachedButNotAuthoritative &&
+                    expiredIntermediate.errorCode.isEmpty() &&
+                    expiredIntermediate.strictVerificationError ==
+                        QStringLiteral(
+                            "update-signing-key-ring-signer-inactive") &&
+                    !expiredIntermediate.authority.isValid() &&
+                    expiredIntermediate.generation == 3 &&
+                    expiredIntermediate.ringIdentity ==
+                        shortRing3.value(QStringLiteral("ring_identity"))
+                            .toString() &&
+                    expiredIntermediate.trustAnchorIdentity ==
+                        anchor.anchorIdentity() &&
+                    !expiredIntermediate.authorityIdentity.isEmpty(),
+                "expired intermediate signer restored current authority") &&
+         ok;
+
+    const QJsonObject shortenedRoot =
+        keyObject(QStringLiteral("chain-root"), root, 1000, 3000, false,
+                  QJsonValue(QJsonValue::Null));
+    const QJsonObject ringOnlyNext = keyObject(
+        QStringLiteral("chain-second"), next, 1800, 10000, false,
+        QJsonValue(QStringLiteral("chain-root")), {QStringLiteral("key-ring")});
+    const QJsonObject usageExpiredRing =
+        ringObject(2, QJsonArray{shortenedRoot, ringOnlyNext});
+    const QByteArray usageExpiredEnvelope = encoded(signedRingObject(
+        QStringLiteral("chain-root"), 2500, usageExpiredRing, root));
+    const auto expiredUsage = UpdateSigningKeyRing::verifyEnvelopeChain(
+        {envelope1, usageExpiredEnvelope}, anchor, 3500);
+    ok =
+        expect(expiredUsage.status ==
+                       EnvelopeChainStatus::CachedButNotAuthoritative &&
+                   expiredUsage.errorCode.isEmpty() &&
+                   expiredUsage.strictVerificationError ==
+                       QStringLiteral(
+                           "update-signing-key-ring-no-current-active-usage") &&
+                   !expiredUsage.authority.isValid() &&
+                   expiredUsage.generation == 2 &&
+                   expiredUsage.ringIdentity ==
+                       usageExpiredRing.value(QStringLiteral("ring_identity"))
+                           .toString(),
+               "historically valid expired usage restored current authority") &&
+        ok;
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -1032,5 +1345,6 @@ int main(int argc, char **argv)
     ok = rotationAndArtifactTests(root, next) && ok;
     ok = admissionHistoryBindingTests(root, next) && ok;
     ok = rotationNegativeTests(root, next, third) && ok;
+    ok = envelopeChainTests(root, next, third) && ok;
     return ok ? 0 : 1;
 }

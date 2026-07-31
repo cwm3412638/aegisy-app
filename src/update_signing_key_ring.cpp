@@ -868,6 +868,18 @@ QSharedPointer<const Authority::Data> makeAuthorityData(
     return data;
 }
 
+bool permitsHistoricalChainReplay(const QString &strictError)
+{
+    return strictError
+            == QStringLiteral(
+                "update-signing-key-ring-bootstrap-root-invalid")
+        || strictError
+            == QStringLiteral("update-signing-key-ring-signer-inactive")
+        || strictError
+            == QStringLiteral(
+                "update-signing-key-ring-no-current-active-usage");
+}
+
 } // namespace
 
 class Verifier
@@ -901,9 +913,11 @@ public:
         return authority;
     }
 
-    static AuthorityResult bootstrap(const QByteArray &bytes,
-                                     const TrustAnchorAuthority &trustAnchor,
-                                     qint64 nowMs)
+    static AuthorityResult bootstrapEnvelope(
+        const QByteArray &bytes,
+        const TrustAnchorAuthority &trustAnchor,
+        qint64 nowMs,
+        bool requireCurrentActivity)
     {
         AuthorityResult result;
         if (!trustAnchor.m_data
@@ -945,7 +959,7 @@ public:
             || !root.usages.contains(kArtifactUsage)
             || !root.usages.contains(kRingUsage)
             || !keyActiveAt(root, signedRing.signedAtMs)
-            || !keyActiveAt(root, now)) {
+            || (requireCurrentActivity && !keyActiveAt(root, now))) {
             result.errorCode = QStringLiteral(
                 "update-signing-key-ring-bootstrap-root-invalid");
             return result;
@@ -956,9 +970,10 @@ public:
         return result;
     }
 
-    static AuthorityResult rotate(const QByteArray &bytes,
-                                  const Authority &previous,
-                                  qint64 nowMs)
+    static AuthorityResult rotateEnvelope(const QByteArray &bytes,
+                                          const Authority &previous,
+                                          qint64 nowMs,
+                                          bool requireCurrentActivity)
     {
         AuthorityResult result;
         if (!previous.m_data
@@ -997,7 +1012,7 @@ public:
         // signed_at_ms is signer-controlled metadata, not a trusted timestamp.
         // First admission must therefore also observe a currently active signer.
         if (!keyActiveAt(*signer, signedRing.signedAtMs)
-            || !keyActiveAt(*signer, now)) {
+            || (requireCurrentActivity && !keyActiveAt(*signer, now))) {
             result.errorCode = signer->revoked
                 ? QStringLiteral("update-signing-key-ring-signer-revoked")
                 : QStringLiteral("update-signing-key-ring-signer-inactive");
@@ -1036,8 +1051,11 @@ public:
                 signedRing.ring, kArtifactUsage, signedRing.signedAtMs)
             || !hasActiveUsageAt(
                 signedRing.ring, kRingUsage, signedRing.signedAtMs)
-            || !hasActiveUsageAt(signedRing.ring, kArtifactUsage, now)
-            || !hasActiveUsageAt(signedRing.ring, kRingUsage, now)) {
+            || (requireCurrentActivity
+                && (!hasActiveUsageAt(
+                        signedRing.ring, kArtifactUsage, now)
+                    || !hasActiveUsageAt(
+                        signedRing.ring, kRingUsage, now)))) {
             result.errorCode = QStringLiteral(
                 "update-signing-key-ring-no-current-active-usage");
             return result;
@@ -1050,6 +1068,108 @@ public:
         result.authority.m_data = makeAuthorityData(
             anchor, signedRing, previous.m_data.data());
         result.ok = true;
+        return result;
+    }
+
+    static AuthorityResult replayEnvelopeChain(
+        const QVector<QByteArray> &chain,
+        const TrustAnchorAuthority &trustAnchor,
+        qint64 nowMs,
+        bool requireCurrentActivity,
+        QVector<EnvelopeChainCheckpoint> *verifiedCheckpoints)
+    {
+        AuthorityResult result;
+        if (chain.isEmpty()) {
+            result.errorCode = QStringLiteral(
+                "update-signing-key-ring-chain-empty");
+            return result;
+        }
+        result = bootstrapEnvelope(
+            chain.constFirst(), trustAnchor, nowMs,
+            requireCurrentActivity);
+        if (!result.ok) return result;
+        QVector<EnvelopeChainCheckpoint> checkpoints;
+        checkpoints.reserve(chain.size());
+        checkpoints.append(EnvelopeChainCheckpoint{
+            result.authority.generation(), result.authority.ringIdentity(),
+            result.authority.authorityIdentity()});
+        for (int index = 1; index < chain.size(); ++index) {
+            AuthorityResult next = rotateEnvelope(
+                chain.at(index), result.authority, nowMs,
+                requireCurrentActivity);
+            if (!next.ok) return next;
+            if (next.idempotent) {
+                AuthorityResult duplicate;
+                duplicate.errorCode = QStringLiteral(
+                    "update-signing-key-ring-chain-duplicate");
+                return duplicate;
+            }
+            result = next;
+            checkpoints.append(EnvelopeChainCheckpoint{
+                result.authority.generation(),
+                result.authority.ringIdentity(),
+                result.authority.authorityIdentity()});
+        }
+        if (verifiedCheckpoints) *verifiedCheckpoints = checkpoints;
+        return result;
+    }
+
+    static AuthorityResult bootstrap(const QByteArray &bytes,
+                                     const TrustAnchorAuthority &trustAnchor,
+                                     qint64 nowMs)
+    {
+        return bootstrapEnvelope(bytes, trustAnchor, nowMs, true);
+    }
+
+    static AuthorityResult rotate(const QByteArray &bytes,
+                                  const Authority &previous,
+                                  qint64 nowMs)
+    {
+        return rotateEnvelope(bytes, previous, nowMs, true);
+    }
+
+    static EnvelopeChainResult envelopeChain(
+        const QVector<QByteArray> &chain,
+        const TrustAnchorAuthority &trustAnchor,
+        qint64 nowMs)
+    {
+        EnvelopeChainResult result;
+        QVector<EnvelopeChainCheckpoint> strictCheckpoints;
+        const AuthorityResult strict = replayEnvelopeChain(
+            chain, trustAnchor, nowMs, true, &strictCheckpoints);
+        if (strict.ok) {
+            result.status = EnvelopeChainStatus::Authoritative;
+            result.generation = strict.authority.generation();
+            result.ringIdentity = strict.authority.ringIdentity();
+            result.trustAnchorIdentity =
+                strict.authority.trustAnchorIdentity();
+            result.authorityIdentity = strict.authority.authorityIdentity();
+            result.checkpoints = strictCheckpoints;
+            result.authority = strict.authority;
+            return result;
+        }
+
+        result.strictVerificationError = strict.errorCode;
+        if (!permitsHistoricalChainReplay(strict.errorCode)) {
+            result.errorCode = strict.errorCode;
+            return result;
+        }
+
+        QVector<EnvelopeChainCheckpoint> historicalCheckpoints;
+        const AuthorityResult historical = replayEnvelopeChain(
+            chain, trustAnchor, nowMs, false, &historicalCheckpoints);
+        if (!historical.ok) {
+            result.errorCode = historical.errorCode;
+            return result;
+        }
+        result.status = EnvelopeChainStatus::CachedButNotAuthoritative;
+        result.generation = historical.authority.generation();
+        result.ringIdentity = historical.authority.ringIdentity();
+        result.trustAnchorIdentity =
+            historical.authority.trustAnchorIdentity();
+        result.authorityIdentity =
+            historical.authority.authorityIdentity();
+        result.checkpoints = historicalCheckpoints;
         return result;
     }
 
@@ -1195,6 +1315,15 @@ AuthorityResult verifyRotation(const QByteArray &signedRingJson,
                                qint64 nowMs)
 {
     return Verifier::rotate(signedRingJson, previous, nowMs);
+}
+
+EnvelopeChainResult verifyEnvelopeChain(
+    const QVector<QByteArray> &signedRingJsonChain,
+    const TrustAnchorAuthority &trustAnchor,
+    qint64 nowMs)
+{
+    return Verifier::envelopeChain(
+        signedRingJsonChain, trustAnchor, nowMs);
 }
 
 ArtifactSignatureResult verifyArtifactSetSignature(

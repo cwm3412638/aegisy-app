@@ -4,11 +4,13 @@
 #include <QByteArray>
 #include <QSharedPointer>
 #include <QString>
+#include <QVector>
 
 namespace UpdateSigningKeyRing {
 
 struct AuthorityResult;
 struct ArtifactSignatureResult;
+struct EnvelopeChainResult;
 class Verifier;
 
 class TrustAnchorAuthority
@@ -75,6 +77,32 @@ struct ArtifactSignatureResult
     QString ringAuthorityIdentity;
 };
 
+enum class EnvelopeChainStatus {
+    Invalid,
+    Authoritative,
+    CachedButNotAuthoritative,
+};
+
+struct EnvelopeChainCheckpoint
+{
+    quint64 generation = 0;
+    QString ringIdentity;
+    QString authorityIdentity;
+};
+
+struct EnvelopeChainResult
+{
+    EnvelopeChainStatus status = EnvelopeChainStatus::Invalid;
+    QString errorCode;
+    QString strictVerificationError;
+    quint64 generation = 0;
+    QString ringIdentity;
+    QString trustAnchorIdentity;
+    QString authorityIdentity;
+    QVector<EnvelopeChainCheckpoint> checkpoints;
+    Authority authority;
+};
+
 TrustAnchorAuthority embeddedTrustAnchor();
 AuthorityResult verifyBootstrap(const QByteArray &signedRingJson,
                                 const TrustAnchorAuthority &trustAnchor,
@@ -82,6 +110,10 @@ AuthorityResult verifyBootstrap(const QByteArray &signedRingJson,
 AuthorityResult verifyRotation(const QByteArray &signedRingJson,
                                const Authority &previous,
                                qint64 nowMs);
+EnvelopeChainResult verifyEnvelopeChain(
+    const QVector<QByteArray> &signedRingJsonChain,
+    const TrustAnchorAuthority &trustAnchor,
+    qint64 nowMs);
 ArtifactSignatureResult verifyArtifactSetSignature(
     const Authority &authority,
     const QString &signerKeyId,
