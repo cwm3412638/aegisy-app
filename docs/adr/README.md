@@ -25,6 +25,7 @@ An ADR status has precise meaning:
 | [0007](0007-local-content-retention.md) | Terminal/diff/image/session retention | Provisional | Data Governance | Product Security, Product, Support, Enterprise Administration | Dedicated enterprise-retention OpenSpec before beta mutation; `5.8` and `22.9` remain prerequisites |
 | [0008](0008-editor-language-intelligence.md) | LSP in the first editor milestone | Accepted | Editor Platform | Runtime Integrations, Product Security, Performance | Recheck when supported-language scope changes |
 | [0009](0009-public-product-name.md) | Public product name and compatibility signal | Proposed | Product | Brand, Legal, Documentation, Support | OpenSpec `1.2`, before public beta and `23.1` |
+| [0011](011-editor-language-intelligence.md) | Editor language intelligence architecture | Accepted | Editor Platform | Runtime Integrations, Product Security, Performance | Supported-language scope changes |
 
 Closing an ADR requires updating its file, this index, the relevant OpenSpec task,
 and `PROJECT-MEMORY.md` when the decision changes architecture, security, packaging,
