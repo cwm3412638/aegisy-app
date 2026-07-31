@@ -857,6 +857,12 @@
     accumulation. Live streaming updates and complete backend integration remain pending.
 - [ ] 12.3 Implement live plan view with stable step status and links to child sessions or evidence
 - [ ] 12.4 Implement inline approvals showing command/diff/scope/risk/reason and exact available decision scopes
+  - Partial UI foundation: Approval card component implemented with command display, scope,
+    risk level (high/medium/low with color coding), reason, and approve/deny buttons.
+    High risk shown in red, medium in orange, low in green. Command displayed in monospace
+    with background. Card has warning border and tertiary background. Approve button green,
+    deny button red. Foundation ready for backend integration. Actual approval submission,
+    scope validation, and permission checks remain pending.
 - [ ] 12.5 Implement structured user questions, option selection, cancellation, and resolved-request cleanup
 - [ ] 12.6 Implement composer execution-context strip for project, runtime, model profile, permission profile, branch, and context state
   - Partial execution-context strip: the Agent header shows Chat/Work mode, project, persisted workspace root, Runtime readiness/recovery state, provider/model, fixed read-only permission, Session-bound Git branch, and selected-context count. Qt stores bounded Runtime and Workspace bindings per Session and refreshes from start/resume/fork/read/search responses, so switching or replay never reuses another Session's last global provider/model/branch. Only exact `read-only` permission and the content-free `session-workspace-binding/0.1` projection are accepted; malformed or missing bindings show explicit unknown/read-only gates. Live Git overview is comparison-only: a different current branch marks the bound branch as drifted instead of overwriting Session context. The render fixture now executes the empty state, real Git branch, `root-1`, and active Work Session binding in the passing desktop CTest suite. Complete model-profile selection, permission-profile management, immutable turn-start context metadata, dedicated-worktree lifecycle, and final cross-platform/UI evidence remain required.
