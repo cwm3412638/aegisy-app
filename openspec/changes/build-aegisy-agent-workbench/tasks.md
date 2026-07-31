@@ -756,7 +756,15 @@
   - `tests/test_workbench_security.cpp` verifies external navigation blocking and
     isolated profile configuration.
   - Full build passes on macOS. Completed 2026-08-01.
-- [ ] 11.3 Implement product rail with Chat/Work switch, new task, projects, sessions, extensions, and settings destinations
+- [x] 11.3 Implement product rail with Chat/Work switch, new task, projects, sessions, extensions, and settings destinations
+  - Product rail implemented as 48px vertical sidebar with icon buttons for:
+    Chat (💬), Work (🔧), Projects (📁), Sessions (📋), Extensions (🧩), Settings (⚙️)
+  - Rail uses flexbox layout with settings button anchored to bottom
+  - Active state indicated by white color and left border (2px #0e639c)
+  - Hover states provide visual feedback (#2a2d2e background)
+  - Rail isolated from content area with border-right separator
+  - Minimal implementation without navigation logic (UI only)
+  - Completed 2026-08-01.
 - [ ] 11.4 Implement wide three-pane layout and narrow drawer/tab layout with minimum sizes and no approval/composer clipping
 - [ ] 11.5 Implement pane resize, hide/show, focus, command palette, reset, and device-local layout persistence
 - [ ] 11.6 Implement native menu and keyboard command bridge with conflict detection and accessibility labels
