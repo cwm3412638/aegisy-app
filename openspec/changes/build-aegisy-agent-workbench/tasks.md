@@ -88,7 +88,11 @@
     acceptNavigationRequest() to block all non-local URLs. Uses isolated QWebEngineProfile
     with no cache/cookies. Disables LocalContentCanAccessRemoteUrls. Renders local HTML
     bundle via setHtml(). Includes security test with blocked external link. Completed 2026-08-01.
-- [ ] 2.3 Prove a minimal `QWebChannel` bridge with typed request IDs, origin checks, size limits, and cancellation
+- [x] 2.3 Prove a minimal `QWebChannel` bridge with typed request IDs, origin checks, size limits, and cancellation
+  - `experiments/webengine/webchannel_bridge.cpp` implements BridgeAPI with typed
+    request IDs, 1MB size limit enforcement, request cancellation support, and origin
+    check placeholders. Uses QWebChannel to expose API to JavaScript. Test UI verifies
+    echo, version, cancellation, and size limit handling. Completed 2026-08-01.
 - [ ] 2.4 Embed Monaco and verify open/edit/save, large file behavior, diff view, theme, font fallback, and Chinese IME on macOS
 - [ ] 2.5 Embed xterm.js and verify interactive PTY throughput, resize, Unicode, copy/paste, links, and long-output virtualization on macOS
 - [ ] 2.6 Repeat Monaco, terminal, IME, accessibility, drag/drop, clipboard, and 125%/150% scaling checks on Windows
