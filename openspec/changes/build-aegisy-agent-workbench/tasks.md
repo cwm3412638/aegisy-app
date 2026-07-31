@@ -797,7 +797,17 @@
   - executeCommand() method provides clean bridge between Qt and web
   - No shortcut conflicts with system or browser defaults
   - Completed 2026-08-01.
-- [ ] 11.7 Implement project/session live-state badges for running, approval-needed, failed, interrupted, and background states
+- [x] 11.7 Implement project/session live-state badges for running, approval-needed, failed, interrupted, and background states
+  - Badge system with 8px circular indicators
+  - Running state: green (#4ec9b0) with pulse animation
+  - Approval-needed: orange (#f48771)
+  - Failed: red (#f14c4c)
+  - Interrupted: brown (#ce9178)
+  - Background: gray (#858585)
+  - Badges positioned in session list items with 8px gap
+  - CSS keyframe animation for running state (pulse effect)
+  - Session items with hover states for interactivity
+  - Completed 2026-08-01.
 - [ ] 11.8 Implement theme, system font, high-DPI, reduced motion, contrast, and screen-reader behavior across Qt and web surfaces
 - [ ] 11.9 Add responsive screenshot and accessibility tests for macOS and Windows target sizes
 
