@@ -849,6 +849,12 @@
     corners, padding, and semantic borders. Foundation ready for backend integration.
     Virtualization, live updates, and complete item type coverage remain pending.
 - [ ] 12.2 Implement deterministic delta accumulation and terminal-state rendering for every item type
+  - Partial UI foundation: Timeline items support streaming and complete states via CSS classes.
+    Streaming items have 0.8 opacity, complete items have 1.0 opacity. Terminal states rendered
+    with timeline-status component showing exit codes, error states, and approval status.
+    Error items (red border, ❌) and approval items (orange border, ✋) added to type system.
+    Status indicators use 6px badges and 12px text. Foundation ready for backend delta
+    accumulation. Live streaming updates and complete backend integration remain pending.
 - [ ] 12.3 Implement live plan view with stable step status and links to child sessions or evidence
 - [ ] 12.4 Implement inline approvals showing command/diff/scope/risk/reason and exact available decision scopes
 - [ ] 12.5 Implement structured user questions, option selection, cancellation, and resolved-request cleanup
