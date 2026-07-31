@@ -123,6 +123,8 @@ set(SOURCES
     src/update_artifact_set.cpp
     src/workbench_emergency_policy.cpp
     src/agent_workbench_widget.cpp
+    src/feature_flags.cpp
+    src/agent_workbench_window.cpp
     resources.qrc
 )
 
@@ -173,6 +175,8 @@ set(HEADERS
     include/update_artifact_set.h
     include/workbench_emergency_policy.h
     include/agent_workbench_widget.h
+    include/feature_flags.h
+    include/agent_workbench_window.h
 )
 
 # 可执行文件

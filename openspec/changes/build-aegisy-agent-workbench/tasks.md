@@ -728,7 +728,20 @@
 
 ## 11. Workbench Host and Navigation
 
-- [ ] 11.1 Add Agent Workbench destination behind a disabled feature flag without changing legacy startup behavior
+- [x] 11.1 Add Agent Workbench destination behind a disabled feature flag without changing legacy startup behavior
+  - `include/feature_flags.h` and `src/feature_flags.cpp` implement a feature flag
+    system with channel detection (Internal/Preview/Beta/Stable). Agent Workbench
+    feature is disabled by default and stored in QSettings.
+  - `include/agent_workbench_window.h` and `src/agent_workbench_window.cpp` provide
+    a minimal Agent Workbench window placeholder that displays "Agent Workbench
+    (Feature Preview)" label.
+  - `src/main.cpp` checks `FeatureFlags::isAgentWorkbenchEnabled()` before showing
+    the main window. When disabled (default), legacy chat client behavior is
+    preserved. When enabled, Agent Workbench window is shown instead.
+  - `tests/test_feature_flags.cpp` verifies feature flag is disabled by default,
+    can be toggled, and channel detection works correctly.
+  - Build system updated in `CMakeLists.txt` to include new source files. Full
+    build passes on macOS. Completed 2026-08-01.
 - [ ] 11.2 Implement trusted local bundle loading, content security policy, blocked external navigation, and renderer crash page
 - [ ] 11.3 Implement product rail with Chat/Work switch, new task, projects, sessions, extensions, and settings destinations
 - [ ] 11.4 Implement wide three-pane layout and narrow drawer/tab layout with minimum sizes and no approval/composer clipping

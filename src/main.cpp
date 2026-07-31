@@ -8,12 +8,27 @@
 #include "secure_storage.h"
 #include "app_theme.h"
 #include "update_manager.h"
+#include "feature_flags.h"
+#include "agent_workbench_window.h"
 
 // 显示登录对话框并在成功后打开主窗口
 static void showLoginFlow(ApiClient *apiClient, UpdateManager *updateManager);
 
+static void showAgentWorkbench()
+{
+    auto *workbench = new AgentWorkbenchWindow();
+    workbench->setAttribute(Qt::WA_DeleteOnClose);
+    workbench->show();
+}
+
 static void showMainWindow(const QString &token, UpdateManager *updateManager)
 {
+    // Check if Agent Workbench is enabled
+    if (FeatureFlags::isAgentWorkbenchEnabled()) {
+        showAgentWorkbench();
+        return;
+    }
+
     MainWindow *mainWindow = new MainWindow(updateManager);
     mainWindow->setAttribute(Qt::WA_DeleteOnClose);
 
