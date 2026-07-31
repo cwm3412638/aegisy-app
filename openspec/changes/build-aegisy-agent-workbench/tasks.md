@@ -31,6 +31,14 @@
   - `docs/THIRD-PARTY-COMPONENT-INVENTORY.md` records exact repository pins, integration status (`Bundled`, `External`, or `Planned`), license identifiers, source-of-truth files, and release obligations for Codex/AAP/ACP, Monaco/xterm/FitAddon/esbuild, every pinned Tree-sitter grammar, external language-server families, terminal/crypto/storage dependencies, the unselected OS-sandbox boundary, Sparkle/WinSparkle, Lucide, Qt, and OpenSSL.
   - The inventory explicitly separates an installed developer binary from a signed product artifact, forbids claiming ACP or an Aegisy OS sandbox before a dependency is selected, and requires a complete bundle-matched NOTICE/license set. Legal approval and redistribution review remain separate under `1.5`; signed bundle inclusion remains under `22.4`.
 - [ ] 1.5 Complete legal review for process-level Codex integration, Apache-2.0/MIT notices, Claude public examples, and product branding boundaries
+  - `docs/LEGAL-REVIEW-CHECKLIST.md` provides a comprehensive checklist for legal
+    team review covering: Codex process-level integration model and distribution
+    requirements, Apache-2.0/MIT license compliance for all components from the
+    third-party inventory, Claude public examples usage considerations, product
+    branding boundaries and trademark usage, export compliance, and LGPL source
+    availability. The checklist references specific component versions and provides
+    structured review items with sign-off section. Document created 2026-07-31 and
+    awaits legal team approval before task completion.
 - [x] 1.6 Define measurable Milestone 0 budgets for installer growth, startup, idle memory, editor latency, terminal throughput, indexing CPU, and crash recovery
   - `docs/AEGISY-MILESTONE-0-PERFORMANCE-BUDGETS.md` defines clean macOS/Windows reference classes, signed Release measurement rules, 20-run median/p95/max reporting, a bounded standard repository/Timeline/editor/terminal fixture, monotonic timing and process-tree memory/CPU accounting.
   - It sets absolute budgets for compressed/installed growth, legacy and Workbench cold/warm readiness, idle/active memory, editor open/input/save, PTY echo/throughput, initial/incremental indexing, renderer/sidecar/full-app crash recovery, plus non-waivable correctness gates and a 10% regression-review threshold. These are predeclared limits only; task `2.7` remains responsible for measured signed macOS/Windows evidence.
