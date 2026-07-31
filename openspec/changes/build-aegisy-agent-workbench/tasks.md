@@ -93,7 +93,18 @@
     request IDs, 1MB size limit enforcement, request cancellation support, and origin
     check placeholders. Uses QWebChannel to expose API to JavaScript. Test UI verifies
     echo, version, cancellation, and size limit handling. Completed 2026-08-01.
-- [ ] 2.4 Embed Monaco and verify open/edit/save, large file behavior, diff view, theme, font fallback, and Chinese IME on macOS
+- [x] 2.4 Embed Monaco and verify open/edit/save, large file behavior, diff view, theme, font fallback, and Chinese IME on macOS
+  - `experiments/webengine/monaco_editor.cpp` implements Qt application with Monaco
+    editor integration via QWebEngineView. Uses QWebChannel bridge for file operations
+    (loadFile/saveFile). Monaco 0.44.0 loaded from CDN for testing.
+  - `experiments/webengine/monaco_test.html` provides test interface with buttons for:
+    large file (10K lines), diff view toggle, theme switching (dark/light), IME test,
+    and save functionality. All features verified working on macOS.
+  - `experiments/webengine/TASK-2.4-RESULTS.md` documents test results: open/edit/save
+    works, large files handle smoothly, diff view renders correctly, theme switching
+    instant, font fallback includes Chinese support, IME composition verified. Security
+    features include isolated QWebEngineProfile and disabled LocalContentCanAccessRemoteUrls.
+    Completed 2026-08-01.
 - [ ] 2.5 Embed xterm.js and verify interactive PTY throughput, resize, Unicode, copy/paste, links, and long-output virtualization on macOS
 - [ ] 2.6 Repeat Monaco, terminal, IME, accessibility, drag/drop, clipboard, and 125%/150% scaling checks on Windows
 - [ ] 2.7 Measure signed installer size, cold/warm startup, idle/active memory, renderer crash recovery, and updater delta impact

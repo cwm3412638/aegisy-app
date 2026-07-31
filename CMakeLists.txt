@@ -1059,23 +1059,6 @@ if(BUILD_TESTING)
     endif()
 endif()
 
-# Isolated Qt WebEngine experiment (task 2.1)
+# Isolated Qt WebEngine experiments (tasks 2.1-2.4) - now in experiments/webengine/CMakeLists.txt
 option(AEGISY_BUILD_WEBENGINE_EXPERIMENT "Build isolated Qt WebEngine experiment" OFF)
-if(AEGISY_BUILD_WEBENGINE_EXPERIMENT)
-    add_executable(aegisy_webengine_experiment
-        experiments/webengine/main.cpp
-    )
-    if(QT_VERSION_MAJOR EQUAL 6)
-        target_link_libraries(aegisy_webengine_experiment PRIVATE
-            Qt6::Core
-            Qt6::Widgets
-            Qt6::WebEngineWidgets
-        )
-    else()
-        target_link_libraries(aegisy_webengine_experiment PRIVATE
-            Qt5::Core
-            Qt5::Widgets
-            Qt5::WebEngineWidgets
-        )
-    endif()
-endif()
+

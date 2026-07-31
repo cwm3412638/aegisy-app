@@ -38,9 +38,16 @@ add_executable(aegisy_webengine_webchannel_bridge
 
 target_link_libraries(aegisy_webengine_webchannel_bridge PRIVATE ${QT_LIBS})
 
+# Task 2.4: Monaco editor integration
+add_executable(aegisy_webengine_monaco_editor
+    monaco_editor.cpp
+)
+
+target_link_libraries(aegisy_webengine_monaco_editor PRIVATE ${QT_LIBS})
+
 # Set output directory
 set_target_properties(aegisy_webengine_experiment aegisy_webengine_secure_bundle
-    aegisy_webengine_webchannel_bridge PROPERTIES
+    aegisy_webengine_webchannel_bridge aegisy_webengine_monaco_editor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
