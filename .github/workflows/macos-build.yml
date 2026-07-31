@@ -1,0 +1,45 @@
+name: macOS Build and Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Qt
+      run: brew install qt@6
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+
+    - name: Configure CMake
+      run: |
+        export Qt6_DIR=$(brew --prefix qt@6)/lib/cmake/Qt6
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build --target AegisyClient -j4
+
+    - name: Run Tests
+      run: |
+        cd build
+        ctest --output-on-failure
+
+    - name: Check Workbench Feature Flag
+      run: |
+        if grep -q "isAgentWorkbenchEnabled" src/feature_flags.cpp; then
+          echo "✓ Agent Workbench feature flag found"
+        else
+          echo "✗ Agent Workbench feature flag missing"
+          exit 1
+        fi
