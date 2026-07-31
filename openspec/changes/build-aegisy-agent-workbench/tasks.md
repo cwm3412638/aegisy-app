@@ -1,7 +1,22 @@
 ## 1. Product Baseline and Decision Gates
 
 - [ ] 1.1 Approve the Chat versus Work behavioral contract and mutation guarantees with product and security owners
+  - `docs/CHAT-WORK-BEHAVIORAL-CONTRACT.md` defines the behavioral contract
+    between Chat and Work modes, mutation guarantees for each mode, permission
+    profiles (Read Only, Workspace Write, Developer, Full Access), security
+    boundaries, and mode comparison matrix. The contract specifies that Chat is
+    non-mutating by default while Work enables bounded mutations with approval
+    workflows. Document created 2026-07-31 and awaits product and security owner
+    approval before task completion.
 - [ ] 1.2 Select the public product name and define original Aegisy terminology for project, session, turn, task, runtime, and workspace
+  - `docs/AEGISY-CODING-TERMINOLOGY.md` defines canonical terminology for all
+    core concepts: Project (bounded workspace with filesystem roots), Session
+    (durable conversation thread), Turn (request-response cycle), Timeline
+    (ordered event sequence), Task (discrete work unit), Runtime (execution
+    environment), and Workspace (filesystem state within project). The document
+    provides usage guidelines, preferred terms, and notes that the public product
+    name remains under product review. Document created 2026-07-31 and awaits
+    product owner approval before task completion.
 - [x] 1.3 Convert all nine unresolved architecture questions in `design.md` into owned ADRs with due gates
   - `docs/adr/README.md` is the architecture decision register and links one ADR
     for every current Open Question: embedded WebEngine, Codex distribution/client
