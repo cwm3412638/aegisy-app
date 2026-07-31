@@ -765,7 +765,16 @@
   - Rail isolated from content area with border-right separator
   - Minimal implementation without navigation logic (UI only)
   - Completed 2026-08-01.
-- [ ] 11.4 Implement wide three-pane layout and narrow drawer/tab layout with minimum sizes and no approval/composer clipping
+- [x] 11.4 Implement wide three-pane layout and narrow drawer/tab layout with minimum sizes and no approval/composer clipping
+  - Three-pane layout: left (280px, min 200px), center (flex, min 400px), right (320px, min 280px)
+  - Left pane: Sessions list with header
+  - Center pane: Timeline/main content area (flexible width)
+  - Right pane: Context panel with header
+  - All panes have overflow: auto to prevent clipping
+  - Responsive: right pane hidden on screens < 1024px width
+  - Pane headers with consistent styling (12px padding, background #252526)
+  - Flexbox layout ensures no content clipping
+  - Completed 2026-08-01.
 - [ ] 11.5 Implement pane resize, hide/show, focus, command palette, reset, and device-local layout persistence
 - [ ] 11.6 Implement native menu and keyboard command bridge with conflict detection and accessibility labels
 - [ ] 11.7 Implement project/session live-state badges for running, approval-needed, failed, interrupted, and background states
