@@ -2597,16 +2597,35 @@ Known limitations:
   `windows_packaging_policy` CTests pass 5/5 on macOS.
 - The complete serial desktop gate passes 26/26. Strict OpenSpec validation and
   `git diff --check` pass.
-- `include/update_artifact_set.h` and `src/update_artifact_set.cpp` add the
-  platform-neutral `aegisy-update-artifact-set/0.1` compatibility foundation. The
-  256 KiB envelope uses the generated lossless Transport JSON parser and rejects
-  duplicate decoded keys, invalid UTF-8/surrogates, unsafe numbers, excessive
-  depth/nodes, unknown fields, unsafe canonical HTTPS paths, noncanonical Base64,
-  and unsupported platform/installer combinations before accepting an outer
-  Ed25519 signature. Its fixed ordered payload binds release/channel/application,
+- `include/update_signing_key_ring.h` and `src/update_signing_key_ring.cpp` add the
+  bounded production trust authority for signed update metadata. A compile-time
+  `aegisy-update-signing-trust-anchor/0.1` verifies generation-one bootstrap, and a
+  prior validated authority verifies each exact `+1`
+  `aegisy-update-signing-key-ring/0.1` rotation. The Ring retains every prior Key
+  ID/public key, cannot widen prior validity or usage or reverse revocation, rejects
+  lineage gaps/branches/cycles, and requires monotonic Ring signing time. Authority
+  state binds each key's first admitted generation/time; a Ring or Artifact Set
+  signature before admission fails. Since `signed_at_ms` is signer-controlled,
+  first-time bootstrap/rotation requires the signer to be active both at the declared
+  time and at local verification time. An already accepted exact envelope may replay
+  idempotently after expiry, but offline expired-signer recovery requires a future
+  independent witness/checkpoint. Explicit revocation still blocks use. Generation
+  one preserves its fixed authority identity, while later generations bind the
+  complete admission history even when different histories converge on one later
+  Ring envelope.
+- Production Artifact Set verification is now
+  `aegisy-update-artifact-set/0.2`. Its 256 KiB envelope uses the generated lossless
+  Transport JSON parser and rejects duplicate decoded keys, invalid UTF-8/surrogates,
+  unsafe numbers, excessive depth/nodes, unknown fields, unsafe canonical HTTPS
+  paths, noncanonical Base64, and unsupported platform/installer combinations. The
+  fixed ordered payload binds release/channel, Key ID, signed/exclusive-expiry time,
+  payload identity, target application version/platform/architecture/size/SHA-256,
   full-installer URL/name/size/SHA-256/Sparkle signature, target manifest plus exact
   Runtime/adapter identity/version, and one to 64 strictly increasing compatible
-  source artifact sets.
+  sources with complete application size/SHA-256 and Manifest identity. Candidate
+  signatures require a currently active Artifact Set key; historical installed
+  receipts require validity at their signed time but remain subject to latest-Ring
+  revocation and validity cutoffs.
 - Production compatibility no longer accepts a publicly constructible installed
   tuple or caller-selected verification paths. `verifyCurrentInstallationAuthority`
   requires the executing image to be the fixed Windows `AegisyClient.exe` layout or
@@ -2614,15 +2633,18 @@ Known limitations:
   adjacent receipt, Manifest, and Runtime paths; verifies the signed receipt target
   plus complete Manifest/Runtime/adapter bytes, identity, version, ordinary-file/link
   policy; and derives an opaque authority whose identity binds the receipt, installed
-  tuple, verification-key hash, canonical directory/file identities, and the current
-  application size/SHA-256. It reobserves the application and directories after
+  tuple, trust anchor, Ring generation/identity/authority, receipt signer, canonical
+  directory/file identities, and the current application size/SHA-256. It reobserves
+  the application and directories after
   artifact verification. Each candidate evaluation rederives and rereads that graph
   and rejects drift before compatibility is evaluated. The scalar tuple and
-  arbitrary-root helpers are available only to the CTest target through
-  `AEGISY_UPDATE_ARTIFACT_SET_TESTING`. Compatibility still requires the selected
+  arbitrary-root, raw-key, and legacy helpers are available only to the CTest target
+  through `AEGISY_UPDATE_ARTIFACT_SET_TESTING` and
+  `AEGISY_UPDATE_SIGNING_KEY_RING_TESTING`. Compatibility still requires the selected
   channel and release sequence above both the installed sequence and caller-supplied
   accepted high-water value. The returned evaluation identity binds those inputs,
-  evaluation time, candidate identity, verification-key hash, and installed authority.
+  evaluation time, candidate identity and signer, trust-anchor/Ring authority, and
+  installed authority.
   Compatible and incompatible results both keep `downloadAuthorized` and
   `installAuthorized` false. The focused `update_artifact_set_compatibility` CTest
   passes with macOS and Windows positives, the exact canonical payload/identities, an
@@ -2642,6 +2664,16 @@ Known limitations:
   JSON keys, invalid UTF-8/BOM/surrogates, unsafe numbers/depth, in-bundle Runtime and
   adapter links, linked parent components, and extra hard links; the Manifest and
   installed receipt themselves must also be single-link ordinary files.
+  A separate `AegisyUpdateArtifactSetProductionFixture` target compiles without either
+  testing macro and with a fixed fixture Root. The parent copies that binary into the
+  real macOS/Windows layout, then proves embedded Root bootstrap, generation-two
+  rotation, a historical Root-signed installed receipt, a rotated-Key candidate, and
+  production rejection of a validly signed legacy `0.1` envelope. Both decisions keep
+  download/install authority false. Focused Key Ring fixtures additionally cover
+  first-time bootstrap/rotation denial after signer expiry, exact accepted-envelope
+  replay, admission-time backdating, converged-Ring admission-history separation,
+  Ring signed-time rollback, revocation, validity narrowing, lineage, identity,
+  bounds, and signature failures.
   `windows_packaging_policy` requires this CTest and the real manifest startup fixture
   in the complete release test graph.
 - `include/update_progress_record.h` and `src/update_progress_record.cpp` add the
@@ -2683,11 +2715,13 @@ Known limitations:
   Runtime and adapter must be distinct canonical paths and native files. Cached
   authority rejects exact-byte replacement of each of the five files. This still
   observes the current application path rather than proving the image loaded at process
-  start. The signed receipt does not bind that application SHA-256 and the factory does
+  start. Artifact Set `0.2` binds the application size/SHA-256, but the factory does
   not verify macOS code signing/notarization, Windows Authenticode, or the outer installer;
-  it therefore is not signed-package membership authority. Receipt and candidate
-  verification currently share one key and have no Key ID, validity/revocation, or
-  rotation chain. The verified read handles are not retained through later process or
+  it therefore is not signed-package membership authority. Key IDs, validity,
+  revocation, sequential rotation, and admission history are locally enforced, but
+  the release Root defaults empty and no authenticated Ring fetch, persistent
+  high-water, or cross-restart anti-rollback authority exists. The verified read
+  handles are not retained through later process or
   install actions, so those cross-file TOCTOU windows remain. The scalar high-water and
   new local progress file have no trusted
   anti-deletion anchor or cross-resource updater/secure-anchor transaction.
@@ -2698,11 +2732,17 @@ Known limitations:
   and WinSparkle 0.9.3 has no pre-download candidate veto. Server feed filtering or
   post-download callbacks cannot replace that local gate. Task `22.5` remains
   unchecked.
-- The final local gate passes the complete application build, all `28/28` serial
-  desktop CTests in 316.91 seconds, strict OpenSpec validation, and `git diff --check`. This supplies
+- After the Key Ring/Artifact Set `0.2` stage, the complete application build and all
+  `29/29` serial desktop CTests pass in 121.72 seconds. An independent read-only
+  security review finds no remaining P1/P2 defect in dual-time admission,
+  exact-envelope replay, generation-two admission-history binding, or production API
+  isolation. `nm -gU -C` on the application and no-testing-macro fixture exposes the
+  Authority-based Artifact Set `0.2` and Key Ring bootstrap/rotation entry points,
+  with no testing namespace, raw-key, or arbitrary-root helper. Strict OpenSpec
+  validation reports the change valid and `git diff --check` passes. This supplies
   macOS/local contract evidence only; it is not signed-package, real updater,
-  zero-byte incompatible-download, resume/install recheck, or Windows execution
-  evidence.
+  zero-byte incompatible-download, resume/install recheck, persistent
+  Ring/anti-rollback, or Windows execution evidence.
 
 ## 22.6 Emergency Workbench Disable Foundation
 

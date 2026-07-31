@@ -3546,24 +3546,45 @@ Implemented visual baseline:
   not Windows execution evidence. The macOS-to-Windows Cargo check is still blocked
   before this Rust module by missing Windows SDK C headers in SQLite/Tree-sitter.
   Keep `22.5` unchecked. See `docs/AEGISY-ARTIFACT-MANIFEST-PACKAGING.md`.
-- The platform-neutral signed-update compatibility foundation now defines
-  `aegisy-update-artifact-set/0.1`. It losslessly parses at most 256 KiB, verifies
-  an outer Ed25519 signature over a fixed ordered payload, and binds the release,
-  channel, `macos/arm64` or `windows/x86_64` target, full-installer URL/name/size/
-  SHA-256/Sparkle signature, target artifact-manifest plus exact Runtime/adapter,
-  and one to 64 strictly increasing complete compatible source artifact sets.
+- The platform-neutral update-signing foundation now defines a compile-time
+  `aegisy-update-signing-trust-anchor/0.1` and bounded
+  `aegisy-update-signing-key-ring/0.1`. Generation-one bootstrap must be signed by
+  and contain the exact Root. Rotation advances exactly one generation, retains
+  all prior Key IDs/public keys, cannot widen prior validity or usage or reverse
+  revocation, and requires monotonic Ring signing time. Authority state binds each
+  key's first admitted generation/time, so neither Ring nor Artifact Set signatures
+  may predate key admission. Because `signed_at_ms` is signer-controlled metadata,
+  first-time bootstrap and rotation require the signer to be active both at that
+  declared time and at local verification time. An already accepted exact envelope
+  remains idempotently replayable after signer expiry, but an offline client cannot
+  first admit it after expiry without a future independent witness/checkpoint trust
+  path. Explicit revocation remains effective. Generation one keeps its fixed
+  authority identity; later authority identities additionally bind complete admission
+  history, including when distinct histories converge on the same later Ring envelope.
+- Production signed-update compatibility now requires
+  `aegisy-update-artifact-set/0.2`. It losslessly parses at most 256 KiB, verifies
+  an Ed25519 signature selected through the current Ring, and binds the release,
+  channel, signer Key ID, signing/exclusive-expiry times, payload identity,
+  `macos/arm64` or `windows/x86_64` target application version/size/SHA-256,
+  full-installer URL/name/size/SHA-256/Sparkle signature, target artifact-manifest
+  plus exact Runtime/adapter, and one to 64 strictly increasing complete compatible
+  source artifact sets including application size/SHA-256.
   Canonical URL policy rejects userinfo, query, fragment, non-443 ports, encoded or
   ambiguous path segments, basename drift, Windows device names, and wrong package
   suffixes. The lossless parser rejects duplicate decoded keys, invalid UTF-8 or
   surrogates, unsafe numbers, excessive depth/nodes, and unknown fields. A valid
   result can set only `candidateCompatible`; download and install authority remain
-  false. Production candidate evaluation no longer accepts a publicly constructible
-  installed tuple or caller-selected verification paths. The only production factory,
+  false. A current candidate requires its signing key to remain active at evaluation;
+  a historical installed receipt requires validity at its signing time but remains
+  subject to the latest Ring's revocation and validity cutoff. Production candidate
+  evaluation no longer accepts a publicly constructible installed tuple or caller-
+  selected verification paths. The only production factory,
   `verifyCurrentInstallationAuthority`, derives the fixed Windows application
   directory or macOS `Contents/MacOS/AegisyClient` layout from the current
   application path. It verifies exact-name adjacent signed receipt, Manifest, Runtime,
   and adapter bytes; rejects link/reparse/multiple-link metadata; and binds the signed
-  artifact tuple together with canonical directory identities plus canonical path,
+  artifact tuple, trust anchor, Ring generation/identity/authority, and receipt
+  signer together with canonical directory identities plus canonical path,
   native file identity, size, and SHA-256 for the application-path target, receipt,
   Manifest, Runtime, and adapter. Every hashed file must preserve one identity across
   the pre-open path observation, actual opened read handle, and post-read path
@@ -3571,11 +3592,13 @@ Implemented visual baseline:
   evaluation rederives and revalidates the entire graph. Exact-byte replacement of any
   bound file, content drift, expectation drift, or key drift invalidates cached
   authority. The macOS outer bundle basename is intentionally not an authority field.
-  The scalar tuple and arbitrary-root entry points exist only under the dedicated
-  CTest compile definition. A Unicode
-  child-process fixture copies the test image into the production-shaped layout and
-  proves the public factory and candidate revalidation path. The evaluation identity
-  binds candidate, installed tuple, installed authority, verification-key hash,
+  The raw-key, legacy `0.1`, scalar-tuple, and arbitrary-root entry points exist only
+  under dedicated CTest compile definitions. A separate no-testing-macro Unicode
+  child-process target copies the test image into the production-shaped layout and
+  proves embedded Root bootstrap, generation-two rotation, historical installed
+  receipt verification, rotated-key candidate evaluation, production `0.1`
+  rejection, and fixed-false download/install authority. The evaluation identity
+  binds candidate/signer, installed tuple and authority, trust-anchor/Ring authority,
   selected channel, caller-supplied release-sequence high-water value, and time.
 - `aegisy-update-progress-record/0.1` is an internal single-writer continuity
   foundation. It binds release sequence, artifact-set identity, ordered update phase,
@@ -3596,14 +3619,14 @@ Implemented visual baseline:
 - This evaluator is not integrated into either platform `UpdateManager` and performs
   no network/download/install operation. The hash and file identity are locally bound
   for the path currently named by `applicationFilePath()`, but that does not prove the
-  image loaded when the process started. The signed receipt does not bind the
-  application hash and the verifier does not prove macOS code signing/notarization,
+  image loaded when the process started. Artifact Set `0.2` binds the application
+  size/SHA-256, but the verifier does not prove macOS code signing/notarization,
   Windows Authenticode, or outer-installer membership; it is therefore not current
-  signed-package authority. The current
-  receipt and candidate also use one
-  verification key, so reviewed Key IDs, validity/revocation, rotation lineage, and a
-  Key Ring identity remain required before historical receipts can survive release-key
-  rotation. Read handles are identity-matched to their before/after path observations,
+  signed-package authority. Key IDs, validity/revocation, sequential rotation, and
+  admission history are locally enforced, but the release Root defaults empty and
+  there is no authenticated Ring fetch, durable Ring Store, secure generation
+  high-water, or cross-restart anti-rollback authority. Read handles are
+  identity-matched to their before/after path observations,
   but path-derived verification and later process/install actions still have cross-file
   TOCTOU windows and no retained-handle/platform-signature boundary. The progress Store
   does not close anti-deletion or
@@ -3621,18 +3644,28 @@ Implemented visual baseline:
   BOM/UTF-8/surrogate/duplicate/depth/node/raw-size, integer/time, fixed-false
   authority, opaque authority derivation, exact-byte application/receipt/Manifest/
   Runtime/adapter identity replacement, content drift, Runtime/adapter duplicate-file
-  rejection, and link/hard-link boundaries; `windows_packaging_policy` locks it into
-  the release test graph. OpenSpec `22.5` remains unchecked pending real updater integration, nested-
+  rejection, and link/hard-link boundaries. The Key Ring matrix covers denial of
+  first-time bootstrap/rotation after signer expiry, exact accepted-envelope replay,
+  revocation, validity narrowing, signed-time rollback, admission backdating,
+  converged-Ring admission-history separation, lineage, signature, and identity failures;
+  `windows_packaging_policy` locks it into the release test graph. OpenSpec `22.5`
+  remains unchecked pending persistent/authenticated Ring integration, real updater integration, nested-
   binary-sign-then-manifest-then-outer-seal packaging order, delta/resume handling,
   signed clean Windows/macOS evidence, and the earlier manifest/spawn gates. The
   authority regression matrix also covers an oversized public-key argument before
   string conversion, channel/platform expectation drift, a valid signed receipt
   replacement with a different release sequence, Manifest replacement after authority
   creation, and signed receipt Runtime/adapter version disagreement with the local
-  Manifest. The final local gate passes the complete application build, all `28/28`
-  serial desktop CTests in 316.91 seconds, strict OpenSpec validation, and
-  `git diff --check`; this is macOS source and
-  runtime evidence only and grants no packaged-update or Windows authority.
+  Manifest. An independent read-only security review found no remaining P1/P2 defect
+  in dual-time admission, exact-envelope replay, generation-two admission-history
+  binding, or production API isolation. The final local gate passes the complete
+  application build and all `29/29` serial desktop CTests in 121.72 seconds.
+  `nm -gU -C` on both the application and no-testing-macro fixture exposes only the
+  Authority-based Artifact Set `0.2` candidate/installation entry points and the
+  Key Ring bootstrap/rotation entry points; no testing namespace, raw-key, or
+  arbitrary-root helper is exported. Strict OpenSpec validation reports the change
+  valid and `git diff --check` passes. This is macOS source and runtime evidence only
+  and grants no packaged-update or Windows authority.
 
 ## Live Timeline Subscription And Ownership Recovery (2026-07-26)
 

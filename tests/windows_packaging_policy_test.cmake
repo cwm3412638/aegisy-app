@@ -211,6 +211,7 @@ if(NOT cmake_source MATCHES "Qt6 REQUIRED COMPONENTS")
 endif()
 foreach(required_release_test
         artifact_manifest_runtime_startup
+        update_signing_key_ring_contract
         update_artifact_set_compatibility
         update_progress_record_integrity)
     string(FIND "${cmake_source}" "add_test(NAME ${required_release_test}"

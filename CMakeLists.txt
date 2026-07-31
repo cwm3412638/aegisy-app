@@ -49,6 +49,10 @@ find_package(OpenSSL REQUIRED)
 set(AEGISY_UPDATE_PUBLIC_KEY
     "9DkeQEQcqz6Trrcmr1XRlZHDQHyeOj3DaVA2rtS3WA0="
     CACHE STRING "Ed25519 update and emergency-policy public key")
+set(AEGISY_UPDATE_ARTIFACT_ROOT_KEY_ID ""
+    CACHE STRING "Pinned update artifact Key Ring root Key ID")
+set(AEGISY_UPDATE_ARTIFACT_ROOT_PUBLIC_KEY ""
+    CACHE STRING "Pinned update artifact Key Ring root Ed25519 public key")
 
 set(AEGISY_AAP_TRANSPORT_GENERATED_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/agent-runtime/aap-schema/generated/cpp")
@@ -109,6 +113,7 @@ set(SOURCES
     src/help_dialog.cpp
     src/agent_runtime_client.cpp
     src/artifact_manifest.cpp
+    src/update_signing_key_ring.cpp
     src/update_artifact_set.cpp
     src/workbench_emergency_policy.cpp
     src/agent_workbench_widget.cpp
@@ -156,6 +161,7 @@ set(HEADERS
     include/help_dialog.h
     include/agent_runtime_client.h
     include/artifact_manifest.h
+    include/update_signing_key_ring.h
     include/update_artifact_set.h
     include/workbench_emergency_policy.h
     include/agent_workbench_widget.h
@@ -168,6 +174,8 @@ file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/aegisy-version.txt"
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     AEGISY_APP_VERSION="${PROJECT_VERSION}"
     AEGISY_UPDATE_PUBLIC_KEY="${AEGISY_UPDATE_PUBLIC_KEY}"
+    AEGISY_UPDATE_ARTIFACT_ROOT_KEY_ID="${AEGISY_UPDATE_ARTIFACT_ROOT_KEY_ID}"
+    AEGISY_UPDATE_ARTIFACT_ROOT_PUBLIC_KEY="${AEGISY_UPDATE_ARTIFACT_ROOT_PUBLIC_KEY}"
 )
 
 # Build the trusted local Monaco bundle only when the complete host toolchain is
@@ -847,8 +855,64 @@ if(BUILD_TESTING)
                 -DMANIFEST_VERIFIER=$<TARGET_FILE:AegisyArtifactManifestTest>
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/artifact_manifest_generator_test.cmake")
 
+    add_executable(AegisyUpdateSigningKeyRingTest
+        tests/update_signing_key_ring_test.cpp
+        src/update_signing_key_ring.cpp
+        include/update_signing_key_ring.h
+    )
+    target_include_directories(AegisyUpdateSigningKeyRingTest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(AegisyUpdateSigningKeyRingTest PRIVATE
+        AEGISY_UPDATE_SIGNING_KEY_RING_TESTING=1)
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyUpdateSigningKeyRingTest PRIVATE
+            Qt6::Core OpenSSL::Crypto AegisyAapTransport)
+    else()
+        target_link_libraries(AegisyUpdateSigningKeyRingTest PRIVATE
+            Qt5::Core OpenSSL::Crypto AegisyAapTransport)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyUpdateSigningKeyRingTest PRIVATE /W4 /WX)
+    else()
+        target_compile_options(AegisyUpdateSigningKeyRingTest PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME update_signing_key_ring_contract
+        COMMAND AegisyUpdateSigningKeyRingTest)
+
+    add_executable(AegisyUpdateArtifactSetProductionFixture
+        tests/update_artifact_set_production_fixture.cpp
+        src/update_signing_key_ring.cpp
+        include/update_signing_key_ring.h
+        src/update_artifact_set.cpp
+        include/update_artifact_set.h
+        src/artifact_manifest.cpp
+        include/artifact_manifest.h
+    )
+    target_include_directories(AegisyUpdateArtifactSetProductionFixture PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_definitions(AegisyUpdateArtifactSetProductionFixture PRIVATE
+        AEGISY_UPDATE_ARTIFACT_ROOT_KEY_ID="artifact-fixture-root"
+        AEGISY_UPDATE_ARTIFACT_ROOT_PUBLIC_KEY="LJuaQtV63/1Q5usdpUPek62X022XbSorlzXnFC8/uFk=")
+    if(QT_VERSION_MAJOR EQUAL 6)
+        target_link_libraries(AegisyUpdateArtifactSetProductionFixture PRIVATE
+            Qt6::Core OpenSSL::Crypto AegisyAapTransport)
+    else()
+        target_link_libraries(AegisyUpdateArtifactSetProductionFixture PRIVATE
+            Qt5::Core OpenSSL::Crypto AegisyAapTransport)
+    endif()
+    if(MSVC)
+        target_compile_options(AegisyUpdateArtifactSetProductionFixture PRIVATE
+            /W4 /WX)
+    else()
+        target_compile_options(AegisyUpdateArtifactSetProductionFixture PRIVATE
+            -Wall -Wextra -Werror)
+    endif()
+
     add_executable(AegisyUpdateArtifactSetTest
         tests/update_artifact_set_test.cpp
+        src/update_signing_key_ring.cpp
+        include/update_signing_key_ring.h
         src/update_artifact_set.cpp
         include/update_artifact_set.h
         src/artifact_manifest.cpp
@@ -857,7 +921,10 @@ if(BUILD_TESTING)
     target_include_directories(AegisyUpdateArtifactSetTest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_definitions(AegisyUpdateArtifactSetTest PRIVATE
-        AEGISY_UPDATE_ARTIFACT_SET_TESTING=1)
+        AEGISY_UPDATE_ARTIFACT_SET_TESTING=1
+        AEGISY_UPDATE_SIGNING_KEY_RING_TESTING=1)
+    add_dependencies(AegisyUpdateArtifactSetTest
+        AegisyUpdateArtifactSetProductionFixture)
     if(QT_VERSION_MAJOR EQUAL 6)
         target_link_libraries(AegisyUpdateArtifactSetTest PRIVATE
             Qt6::Core OpenSSL::Crypto AegisyAapTransport)
@@ -872,7 +939,8 @@ if(BUILD_TESTING)
             -Wall -Wextra -Werror)
     endif()
     add_test(NAME update_artifact_set_compatibility
-        COMMAND AegisyUpdateArtifactSetTest)
+        COMMAND AegisyUpdateArtifactSetTest
+                $<TARGET_FILE:AegisyUpdateArtifactSetProductionFixture>)
 
     add_executable(AegisyUpdateProgressRecordTest
         tests/update_progress_record_test.cpp

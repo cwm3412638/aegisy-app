@@ -58,6 +58,19 @@ QJsonObject application(const QString &version, const QString &platform,
     };
 }
 
+QJsonObject applicationV2(const QString &version, const QString &platform,
+                          const QString &architecture, quint64 sizeBytes,
+                          const QString &sha256)
+{
+    return {
+        {QStringLiteral("version"), version},
+        {QStringLiteral("platform"), platform},
+        {QStringLiteral("architecture"), architecture},
+        {QStringLiteral("size_bytes"), static_cast<double>(sizeBytes)},
+        {QStringLiteral("sha256"), sha256},
+    };
+}
+
 QJsonObject component(const QString &id, const QString &version)
 {
     return {
@@ -173,14 +186,26 @@ public:
         EVP_PKEY_free(m_key);
     }
 
-    bool initialize()
+    bool initialize(const QByteArray &privateKey = {})
     {
-        EVP_PKEY_CTX *context = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
-        if (!context) return false;
-        const bool generated = EVP_PKEY_keygen_init(context) == 1
-            && EVP_PKEY_keygen(context, &m_key) == 1;
-        EVP_PKEY_CTX_free(context);
-        if (!generated || !m_key) return false;
+        if (m_key) return false;
+        if (privateKey.isEmpty()) {
+            EVP_PKEY_CTX *context = EVP_PKEY_CTX_new_id(
+                EVP_PKEY_ED25519, nullptr);
+            if (!context) return false;
+            const bool generated = EVP_PKEY_keygen_init(context) == 1
+                && EVP_PKEY_keygen(context, &m_key) == 1;
+            EVP_PKEY_CTX_free(context);
+            if (!generated || !m_key) return false;
+        } else {
+            if (privateKey.size() != 32) return false;
+            m_key = EVP_PKEY_new_raw_private_key(
+                EVP_PKEY_ED25519, nullptr,
+                reinterpret_cast<const unsigned char *>(
+                    privateKey.constData()),
+                static_cast<size_t>(privateKey.size()));
+            if (!m_key) return false;
+        }
 
         QByteArray publicKey(32, '\0');
         size_t publicKeySize = static_cast<size_t>(publicKey.size());
@@ -198,11 +223,27 @@ public:
     bool sign(QJsonObject *envelope) const
     {
         envelope->insert(QStringLiteral("signature"), QString());
+        if (envelope->value(QStringLiteral("schema_version")).toString()
+            == QStringLiteral("aegisy-update-artifact-set/0.2")) {
+            QString identityError;
+            const QString identity = UpdateArtifactSet::payloadIdentity(
+                *envelope, &identityError);
+            if (identity.isEmpty() || !identityError.isEmpty()) return false;
+            envelope->insert(QStringLiteral("payload_identity"), identity);
+        }
         QString errorCode;
         const QByteArray payload = UpdateArtifactSet::signaturePayload(
             *envelope, &errorCode);
         if (payload.isEmpty() || !errorCode.isEmpty()) return false;
 
+        const QString signature = signPayload(payload);
+        if (signature.isEmpty()) return false;
+        envelope->insert(QStringLiteral("signature"), signature);
+        return true;
+    }
+
+    QString signPayload(const QByteArray &payload) const
+    {
         EVP_MD_CTX *context = EVP_MD_CTX_new();
         size_t signatureSize = 0;
         const bool measured = context
@@ -213,7 +254,7 @@ public:
                    static_cast<size_t>(payload.size())) == 1;
         if (!measured || signatureSize != 64) {
             EVP_MD_CTX_free(context);
-            return false;
+            return {};
         }
         QByteArray signature(static_cast<int>(signatureSize), '\0');
         const bool signedPayload = EVP_DigestSign(
@@ -223,10 +264,8 @@ public:
             reinterpret_cast<const unsigned char *>(payload.constData()),
             static_cast<size_t>(payload.size())) == 1;
         EVP_MD_CTX_free(context);
-        if (!signedPayload || signatureSize != 64) return false;
-        envelope->insert(QStringLiteral("signature"),
-                         QString::fromLatin1(signature.toBase64()));
-        return true;
+        return signedPayload && signatureSize == 64
+            ? QString::fromLatin1(signature.toBase64()) : QString();
     }
 
     const QByteArray &publicKeyBase64() const
@@ -238,6 +277,160 @@ private:
     EVP_PKEY *m_key = nullptr;
     QByteArray m_publicKeyBase64;
 };
+
+void appendSigningLine(QByteArray *payload, const QByteArray &key,
+                       const QString &value)
+{
+    payload->append(key);
+    payload->append('=');
+    payload->append(value.toUtf8());
+    payload->append('\n');
+}
+
+void appendSigningLine(QByteArray *payload, const QByteArray &key,
+                       quint64 value)
+{
+    appendSigningLine(payload, key,
+                      QString::fromLatin1(QByteArray::number(value)));
+}
+
+void appendSigningLine(QByteArray *payload, const QByteArray &key, bool value)
+{
+    appendSigningLine(payload, key, static_cast<quint64>(value ? 1 : 0));
+}
+
+QString signingIdentity(const QByteArray &payload, const QString &prefix)
+{
+    return prefix + QString::fromLatin1(QCryptographicHash::hash(
+        payload, QCryptographicHash::Sha256).toHex());
+}
+
+void appendSigningKey(QByteArray *payload, const QByteArray &prefix,
+                      const QJsonObject &key, bool includeIdentity)
+{
+    appendSigningLine(payload, prefix + ".key_id",
+                      key.value(QStringLiteral("key_id")).toString());
+    appendSigningLine(
+        payload, prefix + ".public_key_base64",
+        key.value(QStringLiteral("public_key_base64")).toString());
+    appendSigningLine(
+        payload, prefix + ".valid_from_ms",
+        static_cast<quint64>(
+            key.value(QStringLiteral("valid_from_ms")).toDouble()));
+    appendSigningLine(
+        payload, prefix + ".valid_until_ms",
+        static_cast<quint64>(
+            key.value(QStringLiteral("valid_until_ms")).toDouble()));
+    appendSigningLine(payload, prefix + ".revoked",
+                      key.value(QStringLiteral("revoked")).toBool());
+    const QJsonValue replaces = key.value(QStringLiteral("replaces"));
+    appendSigningLine(payload, prefix + ".replaces.present",
+                      !replaces.isNull());
+    if (!replaces.isNull()) {
+        appendSigningLine(payload, prefix + ".replaces", replaces.toString());
+    }
+    const QJsonArray usages = key.value(QStringLiteral("usages")).toArray();
+    appendSigningLine(payload, prefix + ".usages.count",
+                      static_cast<quint64>(usages.size()));
+    for (int index = 0; index < usages.size(); ++index) {
+        appendSigningLine(payload,
+                          prefix + ".usages." + QByteArray::number(index),
+                          usages.at(index).toString());
+    }
+    if (includeIdentity) {
+        appendSigningLine(
+            payload, prefix + ".key_identity",
+            key.value(QStringLiteral("key_identity")).toString());
+    }
+}
+
+QJsonObject signingKeyRecord(const QString &keyId, const SigningKey &key,
+                             quint64 validFromMs, quint64 validUntilMs,
+                             bool revoked, const QJsonValue &replaces)
+{
+    QJsonObject record{
+        {QStringLiteral("key_id"), keyId},
+        {QStringLiteral("public_key_base64"),
+         QString::fromLatin1(key.publicKeyBase64())},
+        {QStringLiteral("valid_from_ms"), static_cast<double>(validFromMs)},
+        {QStringLiteral("valid_until_ms"), static_cast<double>(validUntilMs)},
+        {QStringLiteral("revoked"), revoked},
+        {QStringLiteral("replaces"), replaces},
+        {QStringLiteral("usages"), QJsonArray{
+             QStringLiteral("artifact-set"), QStringLiteral("key-ring")}},
+        {QStringLiteral("key_identity"), QString()},
+    };
+    QByteArray payload = QByteArrayLiteral("aegisy-update-signing-key/0.1\n");
+    appendSigningKey(&payload, QByteArrayLiteral("key"), record, false);
+    record.insert(
+        QStringLiteral("key_identity"),
+        signingIdentity(payload, QStringLiteral("update-signing-key:sha256:")));
+    return record;
+}
+
+QJsonObject signingRing(quint64 generation, const QJsonArray &keys)
+{
+    QJsonObject ring{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("aegisy-update-signing-key-ring/0.1")},
+        {QStringLiteral("generation"), static_cast<double>(generation)},
+        {QStringLiteral("keys"), keys},
+        {QStringLiteral("ring_identity"), QString()},
+    };
+    QByteArray payload = QByteArrayLiteral(
+        "aegisy-update-signing-key-ring/0.1\n");
+    appendSigningLine(&payload, QByteArrayLiteral("generation"), generation);
+    appendSigningLine(&payload, QByteArrayLiteral("keys.count"),
+                      static_cast<quint64>(keys.size()));
+    for (int index = 0; index < keys.size(); ++index) {
+        appendSigningKey(&payload,
+                         QByteArrayLiteral("keys.")
+                             + QByteArray::number(index),
+                         keys.at(index).toObject(), true);
+    }
+    ring.insert(
+        QStringLiteral("ring_identity"),
+        signingIdentity(payload,
+                        QStringLiteral("update-signing-key-ring:sha256:")));
+    return ring;
+}
+
+QByteArray signingRingPayload(const QString &signerKeyId, quint64 signedAtMs,
+                              const QJsonObject &ring)
+{
+    QByteArray payload = QByteArrayLiteral(
+        "aegisy-update-signing-key-ring-signature/0.1\n");
+    appendSigningLine(&payload, QByteArrayLiteral("signer_key_id"),
+                      signerKeyId);
+    appendSigningLine(&payload, QByteArrayLiteral("signed_at_ms"), signedAtMs);
+    appendSigningLine(
+        &payload, QByteArrayLiteral("key_ring.generation"),
+        static_cast<quint64>(
+            ring.value(QStringLiteral("generation")).toDouble()));
+    appendSigningLine(&payload, QByteArrayLiteral("key_ring.identity"),
+                      ring.value(QStringLiteral("ring_identity")).toString());
+    return payload;
+}
+
+QJsonObject signedSigningRing(const QString &signerKeyId, quint64 signedAtMs,
+                              const QJsonObject &ring,
+                              const SigningKey &signer)
+{
+    const QByteArray payload = signingRingPayload(
+        signerKeyId, signedAtMs, ring);
+    return {
+        {QStringLiteral("schema_version"),
+         QStringLiteral("aegisy-update-signing-key-ring-signature/0.1")},
+        {QStringLiteral("signer_key_id"), signerKeyId},
+        {QStringLiteral("signed_at_ms"), static_cast<double>(signedAtMs)},
+        {QStringLiteral("key_ring"), ring},
+        {QStringLiteral("payload_identity"),
+         signingIdentity(
+             payload,
+             QStringLiteral("update-signing-key-ring-payload:sha256:"))},
+        {QStringLiteral("signature"), signer.signPayload(payload)},
+    };
+}
 
 QString authorityPlatform()
 {
@@ -359,6 +552,68 @@ QJsonObject signedSetEnvelope(
                  {QStringLiteral("channel"), QStringLiteral("stable")},
                  {QStringLiteral("application"), application(
                       sourceApplicationVersion, platform, architecture)},
+                 {QStringLiteral("manifest"), manifest(
+                      sourceManifestSha256, sourceRuntimeVersion,
+                      sourceAdapterVersion)},
+             },
+         }},
+        {QStringLiteral("signature"), QString()},
+    };
+}
+
+QJsonObject signedSetEnvelopeV2(
+    const QString &signingKeyId,
+    quint64 signedAtMs,
+    quint64 expiresAtMs,
+    quint64 releaseSequence,
+    const QString &applicationVersion,
+    quint64 applicationSizeBytes,
+    const QString &applicationSha256,
+    const QString &manifestSha256,
+    const QString &runtimeVersion,
+    const QString &adapterVersion,
+    quint64 sourceSequence,
+    const QString &sourceApplicationVersion,
+    quint64 sourceApplicationSizeBytes,
+    const QString &sourceApplicationSha256,
+    const QString &sourceManifestSha256,
+    const QString &sourceRuntimeVersion,
+    const QString &sourceAdapterVersion)
+{
+    const QString platform = authorityPlatform();
+    const QString architecture = authorityArchitecture();
+    const QString fileName = authorityInstallerFileName(applicationVersion);
+    return {
+        {QStringLiteral("schema_version"),
+         QStringLiteral("aegisy-update-artifact-set/0.2")},
+        {QStringLiteral("release_sequence"), static_cast<double>(releaseSequence)},
+        {QStringLiteral("signing_key_id"), signingKeyId},
+        {QStringLiteral("signed_at_ms"), static_cast<double>(signedAtMs)},
+        {QStringLiteral("expires_at_ms"), static_cast<double>(expiresAtMs)},
+        {QStringLiteral("payload_identity"), QString()},
+        {QStringLiteral("channel"), QStringLiteral("stable")},
+        {QStringLiteral("application"), applicationV2(
+             applicationVersion, platform, architecture,
+             applicationSizeBytes, applicationSha256)},
+        {QStringLiteral("installer"), QJsonObject{
+             {QStringLiteral("url"),
+              QStringLiteral("https://downloads.aegisy.cc/releases/") + fileName},
+             {QStringLiteral("file_name"), fileName},
+             {QStringLiteral("size_bytes"), 1234567.0},
+             {QStringLiteral("sha256"), hashString('3')},
+             {QStringLiteral("sparkle_ed_signature"), sparkleSignature()},
+         }},
+        {QStringLiteral("target_manifest"), manifest(
+             manifestSha256, runtimeVersion, adapterVersion)},
+        {QStringLiteral("compatible_sources"), QJsonArray{
+             QJsonObject{
+                 {QStringLiteral("release_sequence"),
+                  static_cast<double>(sourceSequence)},
+                 {QStringLiteral("channel"), QStringLiteral("stable")},
+                 {QStringLiteral("application"), applicationV2(
+                      sourceApplicationVersion, platform, architecture,
+                      sourceApplicationSizeBytes,
+                      sourceApplicationSha256)},
                  {QStringLiteral("manifest"), manifest(
                       sourceManifestSha256, sourceRuntimeVersion,
                       sourceAdapterVersion)},
@@ -504,6 +759,233 @@ bool productionInstallationLayoutTest(
         }
         return expect(false,
                       "fixed production installation authority was rejected");
+    }
+    return true;
+#endif
+}
+
+bool productionInstallationLayoutV2Test(const QString &fixtureExecutable)
+{
+#if !defined(Q_OS_WIN) && !defined(Q_OS_MACOS)
+    Q_UNUSED(fixtureExecutable);
+    return true;
+#else
+    const QByteArray fixtureRootPublicKey = QByteArrayLiteral(
+        "LJuaQtV63/1Q5usdpUPek62X022XbSorlzXnFC8/uFk=");
+    SigningKey rootKey;
+    SigningKey nextKey;
+    if (!expect(rootKey.initialize(QByteArray(32, 'u'))
+                    && rootKey.publicKeyBase64() == fixtureRootPublicKey,
+                "production v2 fixture root key drifted")
+        || !expect(nextKey.initialize(QByteArray(32, 'v')),
+                   "production v2 fixture rotation key is unavailable")) {
+        return false;
+    }
+    QFile executableFile(fixtureExecutable);
+    if (!expect(executableFile.open(QIODevice::ReadOnly),
+                "production v2 fixture executable is unavailable")) {
+        return false;
+    }
+    const QByteArray applicationBytes = executableFile.readAll();
+    if (!expect(!applicationBytes.isEmpty() && executableFile.atEnd(),
+                "production v2 fixture executable could not be read")) {
+        return false;
+    }
+    const QString applicationSha256 = QString::fromLatin1(
+        QCryptographicHash::hash(
+            applicationBytes, QCryptographicHash::Sha256).toHex());
+
+    QTemporaryDir directory(
+        QDir::tempPath()
+        + QStringLiteral("/aegisy-current-v2-\u9a8c\u8bc1-XXXXXX"));
+    if (!expect(directory.isValid(),
+                "production v2 installation directory is unavailable")) {
+        return false;
+    }
+    QString artifactRoot = directory.path();
+#ifdef Q_OS_MACOS
+    artifactRoot = QDir(directory.path()).filePath(
+        QStringLiteral("AegisyClient.app/Contents/MacOS"));
+#endif
+    if (!expect(QDir().mkpath(artifactRoot),
+                "production v2 installation layout could not be created")) {
+        return false;
+    }
+#ifdef Q_OS_WIN
+    const QString applicationName = QStringLiteral("AegisyClient.exe");
+#else
+    const QString applicationName = QStringLiteral("AegisyClient");
+#endif
+    const QString applicationPath = QDir(artifactRoot).filePath(applicationName);
+    const QString runtimePath = QDir(artifactRoot).filePath(
+        authorityRuntimeFileName());
+    const QString adapterPath = QDir(artifactRoot).filePath(
+        authorityAdapterFileName());
+    const QByteArray runtimeBytes = QByteArrayLiteral(
+        "production v2 runtime bytes");
+    const QByteArray adapterBytes = QByteArrayLiteral(
+        "production v2 adapter bytes");
+    const QByteArray runtimeSha256 = QCryptographicHash::hash(
+        runtimeBytes, QCryptographicHash::Sha256).toHex();
+    const QByteArray adapterSha256 = QCryptographicHash::hash(
+        adapterBytes, QCryptographicHash::Sha256).toHex();
+    const QJsonObject manifestObject{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("aegisy-artifact-manifest/0.1")},
+        {QStringLiteral("runtime"), QJsonObject{
+             {QStringLiteral("id"), QStringLiteral("aegisy-agentd")},
+             {QStringLiteral("version"), QStringLiteral("0.1.0")},
+             {QStringLiteral("path"), authorityRuntimeFileName()},
+             {QStringLiteral("sha256"), QString::fromLatin1(runtimeSha256)},
+         }},
+        {QStringLiteral("adapter"), QJsonObject{
+             {QStringLiteral("id"), QStringLiteral("codex-app-server")},
+             {QStringLiteral("version"), QStringLiteral("codex-cli 0.144.5")},
+             {QStringLiteral("path"), authorityAdapterFileName()},
+             {QStringLiteral("sha256"), QString::fromLatin1(adapterSha256)},
+         }},
+    };
+    const QByteArray manifestBytes = QJsonDocument(manifestObject).toJson(
+        QJsonDocument::Compact);
+    const QByteArray manifestSha256 = QCryptographicHash::hash(
+        manifestBytes, QCryptographicHash::Sha256).toHex();
+
+    const QJsonObject rootRecord = signingKeyRecord(
+        QStringLiteral("artifact-fixture-root"), rootKey,
+        static_cast<quint64>(kNowMs - 10000),
+        static_cast<quint64>(kNowMs + 10000), false,
+        QJsonValue(QJsonValue::Null));
+    const QJsonObject bootstrapRing = signingRing(1, QJsonArray{rootRecord});
+    const QByteArray signedBootstrapRing = encodedEnvelope(signedSigningRing(
+        QStringLiteral("artifact-fixture-root"),
+        static_cast<quint64>(kNowMs - 5000), bootstrapRing, rootKey));
+    const QJsonObject nextRecord = signingKeyRecord(
+        QStringLiteral("artifact-fixture-next"), nextKey,
+        static_cast<quint64>(kNowMs - 4000),
+        static_cast<quint64>(kNowMs + 10000), false,
+        QStringLiteral("artifact-fixture-root"));
+    const QJsonObject rotatedRing = signingRing(
+        2, QJsonArray{nextRecord, rootRecord});
+    const QByteArray signedRotationRing = encodedEnvelope(signedSigningRing(
+        QStringLiteral("artifact-fixture-root"),
+        static_cast<quint64>(kNowMs - 3000), rotatedRing, rootKey));
+
+    QJsonObject receipt = signedSetEnvelopeV2(
+        QStringLiteral("artifact-fixture-root"),
+        static_cast<quint64>(kNowMs - 4000),
+        static_cast<quint64>(kNowMs + 5000), 41,
+        QStringLiteral("2.5.2"),
+        static_cast<quint64>(applicationBytes.size()), applicationSha256,
+        QString::fromLatin1(manifestSha256), QStringLiteral("0.1.0"),
+        QStringLiteral("codex-cli 0.144.5"), 40,
+        QStringLiteral("2.5.1"), 100, hashString('0'), hashString('1'),
+        QStringLiteral("0.0.9"), QStringLiteral("codex-cli 0.143.0"));
+    if (!expect(rootKey.sign(&receipt),
+                "production v2 receipt could not be signed")) {
+        return false;
+    }
+    const QByteArray targetApplication = QByteArrayLiteral(
+        "production v2 candidate application");
+    QJsonObject candidate = signedSetEnvelopeV2(
+        QStringLiteral("artifact-fixture-next"),
+        static_cast<quint64>(kNowMs - 1000),
+        static_cast<quint64>(kNowMs + 5000), 42,
+        QStringLiteral("2.6.0"),
+        static_cast<quint64>(targetApplication.size()),
+        QString::fromLatin1(QCryptographicHash::hash(
+            targetApplication, QCryptographicHash::Sha256).toHex()),
+        hashString('2'), QStringLiteral("0.2.0"),
+        QStringLiteral("codex-cli 0.145.0"), 41,
+        QStringLiteral("2.5.2"),
+        static_cast<quint64>(applicationBytes.size()), applicationSha256,
+        QString::fromLatin1(manifestSha256), QStringLiteral("0.1.0"),
+        QStringLiteral("codex-cli 0.144.5"));
+    if (!expect(nextKey.sign(&candidate),
+                "production v2 candidate could not be signed")) {
+        return false;
+    }
+    QJsonObject legacyCandidate = signedSetEnvelope(
+        42, QStringLiteral("2.6.0"), hashString('2'),
+        QStringLiteral("0.2.0"), QStringLiteral("codex-cli 0.145.0"),
+        41, QStringLiteral("2.5.2"),
+        QString::fromLatin1(manifestSha256), QStringLiteral("0.1.0"),
+        QStringLiteral("codex-cli 0.144.5"));
+    if (!expect(nextKey.sign(&legacyCandidate),
+                "production legacy-negative candidate could not be signed")) {
+        return false;
+    }
+
+    const QString bootstrapRingPath = QDir(artifactRoot).filePath(
+        QStringLiteral("fixture-update-signing-key-ring-bootstrap.json"));
+    const QString rotationRingPath = QDir(artifactRoot).filePath(
+        QStringLiteral("fixture-update-signing-key-ring-rotation.json"));
+    const QString candidatePath = QDir(artifactRoot).filePath(
+        QStringLiteral("fixture-candidate-update.json"));
+    const QString legacyCandidatePath = QDir(artifactRoot).filePath(
+        QStringLiteral("fixture-legacy-candidate-update.json"));
+    if (!expect(copyExecutable(fixtureExecutable, applicationPath),
+                "production v2 application fixture could not be copied")
+        || !expect(!writeBytes(runtimePath, runtimeBytes).isEmpty(),
+                   "production v2 Runtime could not be written")
+        || !expect(!writeBytes(adapterPath, adapterBytes).isEmpty(),
+                   "production v2 adapter could not be written")
+        || !expect(!writeBytes(
+                        QDir(artifactRoot).filePath(
+                            QStringLiteral("aegisy-agentd.manifest.json")),
+                        manifestBytes).isEmpty(),
+                   "production v2 Manifest could not be written")
+        || !expect(!writeBytes(
+                        QDir(artifactRoot).filePath(QStringLiteral(
+                            "aegisy-update-artifact-set.json")),
+                        encodedEnvelope(receipt)).isEmpty(),
+                   "production v2 receipt could not be written")
+        || !expect(!writeBytes(
+                        bootstrapRingPath, signedBootstrapRing).isEmpty(),
+                   "production v2 bootstrap Key Ring could not be written")
+        || !expect(!writeBytes(
+                        rotationRingPath, signedRotationRing).isEmpty(),
+                   "production v2 rotation Key Ring could not be written")
+        || !expect(!writeBytes(candidatePath, encodedEnvelope(candidate)).isEmpty(),
+                   "production v2 candidate could not be written")
+        || !expect(!writeBytes(
+                        legacyCandidatePath,
+                        encodedEnvelope(legacyCandidate)).isEmpty(),
+                   "production legacy-negative candidate could not be written")) {
+        return false;
+    }
+
+    QProcess child;
+    child.setProgram(applicationPath);
+    child.setArguments({
+        QStringLiteral("--verify-current-installation-v2"),
+        bootstrapRingPath, rotationRingPath, candidatePath,
+        legacyCandidatePath,
+    });
+#ifdef Q_OS_WIN
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(
+        QStringLiteral("PATH"),
+        QFileInfo(fixtureExecutable).absolutePath() + QLatin1Char(';')
+            + environment.value(QStringLiteral("PATH")));
+    child.setProcessEnvironment(environment);
+#endif
+    child.setProcessChannelMode(QProcess::SeparateChannels);
+    child.start();
+    const bool started = child.waitForStarted(10000);
+    const bool finished = started && child.waitForFinished(30000);
+    if (!finished) {
+        child.kill();
+        child.waitForFinished();
+    }
+    if (!started || !finished || child.exitStatus() != QProcess::NormalExit
+        || child.exitCode() != 0) {
+        const QByteArray error = child.readAllStandardError();
+        if (!error.isEmpty()) {
+            std::fprintf(stderr, "production v2 fixture stderr: %s\n",
+                         error.constData());
+        }
+        return expect(false,
+                      "production Authority + Artifact Set 0.2 was rejected");
     }
     return true;
 #endif
@@ -1906,6 +2388,430 @@ bool installedAuthorityTests(const SigningKey &key)
     return ok;
 }
 
+bool keyRingArtifactSetV2Tests(const QString &productionFixture)
+{
+    constexpr quint64 receiptSignedAtMs =
+        static_cast<quint64>(kNowMs - 1000);
+    constexpr quint64 rotationAtMs =
+        static_cast<quint64>(kNowMs + 1000);
+    constexpr qint64 evaluationNowMs = kNowMs + 5000;
+
+    SigningKey rootKey;
+    SigningKey candidateKey;
+    if (!expect(rootKey.initialize() && candidateKey.initialize(),
+                "v2 signing keys could not be created")) {
+        return false;
+    }
+    QString anchorError;
+    const auto trustAnchor = UpdateSigningKeyRing::testingTrustAnchor(
+        QStringLiteral("artifact-2026-01"), rootKey.publicKeyBase64(),
+        &anchorError);
+    if (!expect(anchorError.isEmpty() && trustAnchor.isValid(),
+                "v2 trust anchor could not be created")) {
+        return false;
+    }
+
+    const QJsonObject rootRecord = signingKeyRecord(
+        QStringLiteral("artifact-2026-01"), rootKey,
+        static_cast<quint64>(kNowMs - 5000),
+        static_cast<quint64>(kNowMs + 2000), false,
+        QJsonValue(QJsonValue::Null));
+    const QJsonObject ring1 = signingRing(1, QJsonArray{rootRecord});
+    const auto generation1 = UpdateSigningKeyRing::verifyBootstrap(
+        encodedEnvelope(signedSigningRing(
+            QStringLiteral("artifact-2026-01"),
+            static_cast<quint64>(kNowMs - 2000), ring1, rootKey)),
+        trustAnchor, kNowMs);
+    if (!expect(generation1.ok && generation1.authority.isValid(),
+                "v2 generation-one ring was rejected")) {
+        return false;
+    }
+    const QJsonObject candidateRecord = signingKeyRecord(
+        QStringLiteral("artifact-2026-02"), candidateKey,
+        static_cast<quint64>(kNowMs - 1000),
+        static_cast<quint64>(kNowMs + 50000), false,
+        QJsonValue(QStringLiteral("artifact-2026-01")));
+    const QJsonObject ring2 = signingRing(
+        2, QJsonArray{rootRecord, candidateRecord});
+    const auto generation2 = UpdateSigningKeyRing::verifyRotation(
+        encodedEnvelope(signedSigningRing(
+            QStringLiteral("artifact-2026-01"), rotationAtMs, ring2,
+            rootKey)),
+        generation1.authority, static_cast<qint64>(rotationAtMs));
+    if (!expect(generation2.ok && generation2.authority.isValid()
+                    && generation2.authority.generation() == 2,
+                "v2 generation-two ring was rejected")) {
+        return false;
+    }
+
+    QTemporaryDir directory;
+    if (!expect(directory.isValid(),
+                "v2 installed authority directory is unavailable")) {
+        return false;
+    }
+    const QString runtimePath = QDir(directory.path()).filePath(
+        authorityRuntimeFileName());
+    const QString adapterPath = QDir(directory.path()).filePath(
+        authorityAdapterFileName());
+    const QString applicationPath = QDir(directory.path()).filePath(
+        QStringLiteral("AegisyClient.test-image"));
+    const QByteArray runtimeSha256 = writeBytes(
+        runtimePath, QByteArrayLiteral("v2 installed runtime bytes"));
+    const QByteArray adapterSha256 = writeBytes(
+        adapterPath, QByteArrayLiteral("v2 installed adapter bytes"));
+    const QByteArray applicationBytes = QByteArrayLiteral(
+        "v2 installed application bytes");
+    const QByteArray applicationSha256 = writeBytes(
+        applicationPath, applicationBytes);
+    if (!expect(runtimeSha256.size() == 64 && adapterSha256.size() == 64
+                    && applicationSha256.size() == 64,
+                "v2 installed artifacts could not be written")) {
+        return false;
+    }
+    const QJsonObject localManifest{
+        {QStringLiteral("schema_version"),
+         QStringLiteral("aegisy-artifact-manifest/0.1")},
+        {QStringLiteral("runtime"), QJsonObject{
+             {QStringLiteral("id"), QStringLiteral("aegisy-agentd")},
+             {QStringLiteral("version"), QStringLiteral("0.1.0")},
+             {QStringLiteral("path"), authorityRuntimeFileName()},
+             {QStringLiteral("sha256"), QString::fromLatin1(runtimeSha256)},
+         }},
+        {QStringLiteral("adapter"), QJsonObject{
+             {QStringLiteral("id"), QStringLiteral("codex-app-server")},
+             {QStringLiteral("version"), QStringLiteral("codex-cli 0.144.5")},
+             {QStringLiteral("path"), authorityAdapterFileName()},
+             {QStringLiteral("sha256"), QString::fromLatin1(adapterSha256)},
+         }},
+    };
+    const QByteArray manifestBytes = QJsonDocument(localManifest).toJson(
+        QJsonDocument::Compact);
+    const QString manifestPath = QDir(directory.path()).filePath(
+        QStringLiteral("aegisy-agentd.manifest.json"));
+    const QByteArray manifestSha256 = writeBytes(manifestPath, manifestBytes);
+    if (!expect(manifestSha256.size() == 64,
+                "v2 installed manifest could not be written")) {
+        return false;
+    }
+
+    QJsonObject receipt = signedSetEnvelopeV2(
+        QStringLiteral("artifact-2026-01"), receiptSignedAtMs,
+        static_cast<quint64>(kNowMs + 1000), 41,
+        QStringLiteral("2.5.2"),
+        static_cast<quint64>(applicationBytes.size()),
+        QString::fromLatin1(applicationSha256),
+        QString::fromLatin1(manifestSha256), QStringLiteral("0.1.0"),
+        QStringLiteral("codex-cli 0.144.5"), 40,
+        QStringLiteral("2.5.1"), 100, hashString('0'), hashString('1'),
+        QStringLiteral("0.0.9"), QStringLiteral("codex-cli 0.143.0"));
+    if (!expect(rootKey.sign(&receipt),
+                "v2 installed receipt could not be signed")) {
+        return false;
+    }
+    const QByteArray receiptBytes = encodedEnvelope(receipt);
+    const QString receiptPath = QDir(directory.path()).filePath(
+        QStringLiteral("aegisy-update-artifact-set.json"));
+    if (!expect(writeBytes(receiptPath, receiptBytes).size() == 64,
+                "v2 installed receipt could not be written")) {
+        return false;
+    }
+    const auto loadAuthority = [&](const UpdateSigningKeyRing::Authority &ring,
+                                   qint64 nowMs) {
+        return UpdateArtifactSet::Testing::verifyInstalledAuthorityAtRoot(
+            directory.path(), ring, nowMs, QStringLiteral("2.5.2"),
+            QStringLiteral("stable"), authorityPlatform(),
+            authorityArchitecture());
+    };
+    const auto generation1Installed = loadAuthority(
+        generation1.authority, kNowMs);
+    const auto installed = loadAuthority(
+        generation2.authority, evaluationNowMs);
+    bool ok = expect(generation1Installed.ok
+                         && generation1Installed.authority.isValid()
+                         && installed.ok && installed.authority.isValid(),
+                     "historical v2 receipt was not valid across rotation");
+
+    const QByteArray targetApplicationBytes = QByteArrayLiteral(
+        "v2 candidate application image bytes");
+    const QString targetApplicationSha256 = QString::fromLatin1(
+        QCryptographicHash::hash(
+            targetApplicationBytes, QCryptographicHash::Sha256).toHex());
+    QJsonObject candidate = signedSetEnvelopeV2(
+        QStringLiteral("artifact-2026-02"),
+        static_cast<quint64>(evaluationNowMs - 1000),
+        static_cast<quint64>(evaluationNowMs + 5000), 42,
+        QStringLiteral("2.6.0"),
+        static_cast<quint64>(targetApplicationBytes.size()),
+        targetApplicationSha256, hashString('2'), QStringLiteral("0.2.0"),
+        QStringLiteral("codex-cli 0.145.0"), 41,
+        QStringLiteral("2.5.2"),
+        static_cast<quint64>(applicationBytes.size()),
+        QString::fromLatin1(applicationSha256),
+        QString::fromLatin1(manifestSha256), QStringLiteral("0.1.0"),
+        QStringLiteral("codex-cli 0.144.5"));
+    ok = expect(candidateKey.sign(&candidate),
+                "v2 candidate could not be signed") && ok;
+    const QByteArray candidateBytes = encodedEnvelope(candidate);
+    const UpdateArtifactSet::Decision compatible =
+        UpdateArtifactSet::verifyCandidate(
+            candidateBytes, generation2.authority, evaluationNowMs,
+            installed.authority, QStringLiteral("stable"), 41);
+    ok = expect(compatible.state == UpdateArtifactSet::State::Compatible
+                    && compatible.candidateCompatible
+                    && !compatible.downloadAuthorized
+                    && !compatible.installAuthorized
+                    && compatible.signingKeyId
+                        == QStringLiteral("artifact-2026-02")
+                    && compatible.signerKeyIdentity
+                        == candidateRecord.value(
+                            QStringLiteral("key_identity")).toString()
+                    && compatible.signingRingGeneration == 2
+                    && compatible.signingRingIdentity
+                        == generation2.authority.ringIdentity()
+                    && compatible.signingRingAuthorityIdentity
+                        == generation2.authority.authorityIdentity()
+                    && compatible.signingTrustAnchorIdentity
+                        == trustAnchor.anchorIdentity()
+                    && compatible.targetApplicationSizeBytes
+                        == static_cast<quint64>(targetApplicationBytes.size())
+                    && compatible.targetApplicationSha256
+                        == targetApplicationSha256
+                    && compatible.payloadIdentity.startsWith(
+                        QStringLiteral(
+                            "update-artifact-set-payload:sha256:"))
+                    && compatible.compatibilityEvaluationIdentity.startsWith(
+                        QStringLiteral(
+                            "update-artifact-set-evaluation:sha256:")),
+                "rotated v2 candidate did not bind complete authority") && ok;
+
+    const UpdateArtifactSet::Decision staleAuthority =
+        UpdateArtifactSet::verifyCandidate(
+            candidateBytes, generation2.authority, evaluationNowMs,
+            generation1Installed.authority, QStringLiteral("stable"), 41);
+    ok = expect(staleAuthority.state == UpdateArtifactSet::State::Invalid
+                    && staleAuthority.errorCode
+                        == QStringLiteral(
+                            "installed-artifact-authority-invalid"),
+                "cached generation-one installed authority survived rotation")
+        && ok;
+
+    QJsonObject expiredCandidate = signedSetEnvelopeV2(
+        QStringLiteral("artifact-2026-02"),
+        static_cast<quint64>(evaluationNowMs - 1000),
+        static_cast<quint64>(evaluationNowMs), 42,
+        QStringLiteral("2.6.0"),
+        static_cast<quint64>(targetApplicationBytes.size()),
+        targetApplicationSha256, hashString('2'), QStringLiteral("0.2.0"),
+        QStringLiteral("codex-cli 0.145.0"), 41,
+        QStringLiteral("2.5.2"),
+        static_cast<quint64>(applicationBytes.size()),
+        QString::fromLatin1(applicationSha256),
+        QString::fromLatin1(manifestSha256), QStringLiteral("0.1.0"),
+        QStringLiteral("codex-cli 0.144.5"));
+    ok = expect(candidateKey.sign(&expiredCandidate),
+                "exclusive-expiry v2 candidate could not be signed") && ok;
+    const auto expiredDecision = UpdateArtifactSet::verifyCandidate(
+        encodedEnvelope(expiredCandidate), generation2.authority,
+        evaluationNowMs, installed.authority, QStringLiteral("stable"), 41);
+    ok = expect(expiredDecision.state == UpdateArtifactSet::State::Invalid
+                    && expiredDecision.errorCode
+                        == QStringLiteral("artifact-set-expired"),
+                "candidate expires_at_ms was not exclusive") && ok;
+
+    QJsonObject naturallyExpiredKeyCandidate = candidate;
+    naturallyExpiredKeyCandidate.insert(
+        QStringLiteral("signing_key_id"),
+        QStringLiteral("artifact-2026-01"));
+    naturallyExpiredKeyCandidate.insert(
+        QStringLiteral("signed_at_ms"), static_cast<double>(receiptSignedAtMs));
+    ok = expect(rootKey.sign(&naturallyExpiredKeyCandidate),
+                "expired-key candidate could not be signed") && ok;
+    const auto expiredKeyDecision = UpdateArtifactSet::verifyCandidate(
+        encodedEnvelope(naturallyExpiredKeyCandidate), generation2.authority,
+        evaluationNowMs, installed.authority, QStringLiteral("stable"), 41);
+    ok = expect(expiredKeyDecision.state == UpdateArtifactSet::State::Invalid
+                    && expiredKeyDecision.errorCode
+                        == QStringLiteral(
+                            "artifact-set-signing-key-expired"),
+                "naturally expired key signed a current candidate") && ok;
+
+    QJsonObject substitutedKeyCandidate = candidate;
+    ok = expect(rootKey.sign(&substitutedKeyCandidate),
+                "key-substitution candidate could not be signed") && ok;
+    const auto substitutedKeyDecision = UpdateArtifactSet::verifyCandidate(
+        encodedEnvelope(substitutedKeyCandidate), generation2.authority,
+        evaluationNowMs, installed.authority, QStringLiteral("stable"), 41);
+    ok = expect(substitutedKeyDecision.state
+                    == UpdateArtifactSet::State::Invalid
+                    && substitutedKeyDecision.errorCode
+                        == QStringLiteral("artifact-set-signature-invalid"),
+                "candidate Key ID/signature substitution was accepted") && ok;
+
+    QJsonObject substitutedPayloadIdentity = candidate;
+    substitutedPayloadIdentity.insert(
+        QStringLiteral("payload_identity"),
+        QStringLiteral("update-artifact-set-payload:sha256:")
+            + hashString('f'));
+    const auto substitutedPayloadDecision = UpdateArtifactSet::verifyCandidate(
+        encodedEnvelope(substitutedPayloadIdentity), generation2.authority,
+        evaluationNowMs, installed.authority, QStringLiteral("stable"), 41);
+    ok = expect(substitutedPayloadDecision.state
+                    == UpdateArtifactSet::State::Invalid
+                    && substitutedPayloadDecision.errorCode
+                        == QStringLiteral(
+                            "artifact-set-payload-identity-invalid"),
+                "artifact-set payload identity substitution was accepted") && ok;
+
+    QJsonObject driftedSourceCandidate = candidate;
+    QJsonArray driftedSources = driftedSourceCandidate.value(
+        QStringLiteral("compatible_sources")).toArray();
+    QJsonObject driftedSource = driftedSources.at(0).toObject();
+    QJsonObject driftedApplication = driftedSource.value(
+        QStringLiteral("application")).toObject();
+    driftedApplication.insert(QStringLiteral("sha256"), hashString('9'));
+    driftedSource.insert(QStringLiteral("application"), driftedApplication);
+    driftedSources.replace(0, driftedSource);
+    driftedSourceCandidate.insert(
+        QStringLiteral("compatible_sources"), driftedSources);
+    ok = expect(candidateKey.sign(&driftedSourceCandidate),
+                "source-application drift candidate could not be signed") && ok;
+    const auto driftedSourceDecision = UpdateArtifactSet::verifyCandidate(
+        encodedEnvelope(driftedSourceCandidate), generation2.authority,
+        evaluationNowMs, installed.authority, QStringLiteral("stable"), 41);
+    ok = expect(driftedSourceDecision.state
+                    == UpdateArtifactSet::State::Incompatible
+                    && driftedSourceDecision.errorCode
+                        == QStringLiteral("artifact-set-source-incompatible"),
+                "source application image drift remained compatible") && ok;
+
+    QJsonObject legacyCandidate = signedSetEnvelope(
+        42, QStringLiteral("2.6.0"), hashString('2'),
+        QStringLiteral("0.2.0"), QStringLiteral("codex-cli 0.145.0"),
+        41, QStringLiteral("2.5.2"), QString::fromLatin1(manifestSha256),
+        QStringLiteral("0.1.0"), QStringLiteral("codex-cli 0.144.5"));
+    ok = expect(candidateKey.sign(&legacyCandidate),
+                "legacy production-negative candidate could not be signed") && ok;
+    const auto legacyDecision = UpdateArtifactSet::verifyCandidate(
+        encodedEnvelope(legacyCandidate), generation2.authority,
+        evaluationNowMs, installed.authority, QStringLiteral("stable"), 41);
+    ok = expect(legacyDecision.state == UpdateArtifactSet::State::Invalid
+                    && legacyDecision.errorCode
+                        == QStringLiteral("artifact-set-fields-invalid"),
+                "production Key Ring path accepted legacy artifact-set 0.1") && ok;
+
+    QJsonObject mismatchedReceipt = signedSetEnvelopeV2(
+        QStringLiteral("artifact-2026-01"), receiptSignedAtMs,
+        static_cast<quint64>(kNowMs + 1000), 41,
+        QStringLiteral("2.5.2"),
+        static_cast<quint64>(applicationBytes.size()), hashString('9'),
+        QString::fromLatin1(manifestSha256), QStringLiteral("0.1.0"),
+        QStringLiteral("codex-cli 0.144.5"), 40,
+        QStringLiteral("2.5.1"), 100, hashString('0'), hashString('1'),
+        QStringLiteral("0.0.9"), QStringLiteral("codex-cli 0.143.0"));
+    ok = expect(rootKey.sign(&mismatchedReceipt),
+                "application-mismatch receipt could not be signed") && ok;
+    writeBytes(receiptPath, encodedEnvelope(mismatchedReceipt));
+    const auto applicationMismatch = loadAuthority(
+        generation2.authority, evaluationNowMs);
+    ok = expect(!applicationMismatch.ok
+                    && applicationMismatch.errorCode
+                        == QStringLiteral(
+                            "installed-receipt-application-mismatch"),
+                "installed receipt did not bind application image bytes") && ok;
+    writeBytes(receiptPath, receiptBytes);
+
+    const QJsonObject narrowedRootRecord = signingKeyRecord(
+        QStringLiteral("artifact-2026-01"), rootKey,
+        static_cast<quint64>(kNowMs - 5000),
+        static_cast<quint64>(kNowMs + 1500), false,
+        QJsonValue(QJsonValue::Null));
+    const QJsonObject narrowedRing = signingRing(
+        3, QJsonArray{narrowedRootRecord, candidateRecord});
+    const auto narrowedGeneration = UpdateSigningKeyRing::verifyRotation(
+        encodedEnvelope(signedSigningRing(
+            QStringLiteral("artifact-2026-02"),
+            static_cast<quint64>(evaluationNowMs), narrowedRing,
+            candidateKey)),
+        generation2.authority, evaluationNowMs);
+    ok = expect(narrowedGeneration.ok,
+                "v2 non-cutoff ring rotation failed") && ok;
+    if (narrowedGeneration.ok) {
+        const auto reboundInstalled = loadAuthority(
+            narrowedGeneration.authority, evaluationNowMs);
+        const auto reboundDecision = UpdateArtifactSet::verifyCandidate(
+            candidateBytes, narrowedGeneration.authority, evaluationNowMs,
+            reboundInstalled.authority, QStringLiteral("stable"), 41);
+        const auto staleAfterNarrowing = UpdateArtifactSet::verifyCandidate(
+            candidateBytes, narrowedGeneration.authority, evaluationNowMs,
+            installed.authority, QStringLiteral("stable"), 41);
+        ok = expect(reboundInstalled.ok
+                        && reboundInstalled.authority.authorityIdentity()
+                            != installed.authority.authorityIdentity()
+                        && reboundDecision.state
+                            == UpdateArtifactSet::State::Compatible
+                        && reboundDecision.compatibilityEvaluationIdentity
+                            != compatible.compatibilityEvaluationIdentity
+                        && staleAfterNarrowing.state
+                            == UpdateArtifactSet::State::Invalid
+                        && staleAfterNarrowing.errorCode
+                            == QStringLiteral(
+                                "installed-artifact-authority-invalid"),
+                    "ring change did not invalidate cached authority/evaluation")
+            && ok;
+    }
+
+    const QJsonObject cutoffRootRecord = signingKeyRecord(
+        QStringLiteral("artifact-2026-01"), rootKey,
+        static_cast<quint64>(kNowMs - 5000), receiptSignedAtMs, false,
+        QJsonValue(QJsonValue::Null));
+    const QJsonObject cutoffRing = signingRing(
+        3, QJsonArray{cutoffRootRecord, candidateRecord});
+    const auto cutoffGeneration = UpdateSigningKeyRing::verifyRotation(
+        encodedEnvelope(signedSigningRing(
+            QStringLiteral("artifact-2026-02"),
+            static_cast<quint64>(evaluationNowMs), cutoffRing,
+            candidateKey)),
+        generation2.authority, evaluationNowMs);
+    ok = expect(cutoffGeneration.ok,
+                "v2 historical-key cutoff rotation failed") && ok;
+    if (cutoffGeneration.ok) {
+        const auto cutoffReceipt = loadAuthority(
+            cutoffGeneration.authority, evaluationNowMs);
+        ok = expect(!cutoffReceipt.ok
+                        && cutoffReceipt.errorCode
+                            == QStringLiteral(
+                                "installed-receipt-artifact-set-signing-key-expired"),
+                    "latest key validity cutoff did not invalidate receipt") && ok;
+    }
+
+    const QJsonObject revokedRootRecord = signingKeyRecord(
+        QStringLiteral("artifact-2026-01"), rootKey,
+        static_cast<quint64>(kNowMs - 5000),
+        static_cast<quint64>(kNowMs + 2000), true,
+        QJsonValue(QJsonValue::Null));
+    const QJsonObject revokedRing = signingRing(
+        3, QJsonArray{revokedRootRecord, candidateRecord});
+    const auto revokedGeneration = UpdateSigningKeyRing::verifyRotation(
+        encodedEnvelope(signedSigningRing(
+            QStringLiteral("artifact-2026-02"),
+            static_cast<quint64>(evaluationNowMs), revokedRing,
+            candidateKey)),
+        generation2.authority, evaluationNowMs);
+    ok = expect(revokedGeneration.ok,
+                "v2 receipt-key revocation rotation failed") && ok;
+    if (revokedGeneration.ok) {
+        const auto revokedReceipt = loadAuthority(
+            revokedGeneration.authority, evaluationNowMs);
+        ok = expect(!revokedReceipt.ok
+                        && revokedReceipt.errorCode
+                            == QStringLiteral(
+                                "installed-receipt-artifact-set-signing-key-revoked"),
+                    "revoked receipt key retained historical authority") && ok;
+    }
+    ok = productionInstallationLayoutV2Test(productionFixture) && ok;
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -1928,5 +2834,12 @@ int main(int argc, char **argv)
     ok = rawJsonBoundaryTests(key) && ok;
     ok = installerAndValueTests(key) && ok;
     ok = installedAuthorityTests(key) && ok;
+    const QString productionFixture = application.arguments().size() == 2
+        ? application.arguments().at(1) : QString();
+    ok = expect(!productionFixture.isEmpty(),
+                "production v2 fixture executable was not provided") && ok;
+    if (!productionFixture.isEmpty()) {
+        ok = keyRingArtifactSetV2Tests(productionFixture) && ok;
+    }
     return ok ? 0 : 1;
 }

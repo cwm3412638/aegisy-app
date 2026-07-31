@@ -72,7 +72,9 @@ constexpr qint64 kMaximumClockSkewMs = 5LL * 60 * 1000;
 constexpr qint64 kMaximumApplicationBytes = 512LL * 1024 * 1024;
 constexpr int kMaximumCompatibleSources = 64;
 constexpr qsizetype kMaximumEnvelopeBytes = 256 * 1024;
-const QString kSchema = QStringLiteral("aegisy-update-artifact-set/0.1");
+const QString kLegacySchema =
+    QStringLiteral("aegisy-update-artifact-set/0.1");
+const QString kSchema = QStringLiteral("aegisy-update-artifact-set/0.2");
 const QString kInstalledReceiptFileName =
     QStringLiteral("aegisy-update-artifact-set.json");
 const QString kArtifactManifestFileName =
@@ -80,11 +82,14 @@ const QString kArtifactManifestFileName =
 
 struct InstalledSetData
 {
+    QString schemaVersion;
     quint64 releaseSequence = 0;
     QString channel;
     QString applicationVersion;
     QString platform;
     QString architecture;
+    quint64 applicationSizeBytes = 0;
+    QString applicationSha256;
     QString manifestSha256;
     QString runtimeId;
     QString runtimeVersion;
@@ -483,6 +488,8 @@ struct Application
     QString version;
     QString platform;
     QString architecture;
+    quint64 sizeBytes = 0;
+    QString sha256;
 };
 
 struct Component
@@ -517,8 +524,13 @@ struct Source
 
 struct Candidate
 {
+    QString schemaVersion;
     quint64 releaseSequence = 0;
     quint64 publishedAtMs = 0;
+    quint64 signedAtMs = 0;
+    quint64 expiresAtMs = 0;
+    QString signingKeyId;
+    QString payloadIdentity;
     QString channel;
     Application application;
     Installer installer;
@@ -596,6 +608,13 @@ bool validSha256(const QString &sha256)
     return matches(sha256, pattern);
 }
 
+bool validKeyId(const QString &keyId)
+{
+    static const QRegularExpression pattern(
+        QStringLiteral("\\A[a-z0-9][a-z0-9._-]{0,63}\\z"));
+    return matches(keyId, pattern);
+}
+
 bool validPlatformArchitecture(const QString &platform, const QString &architecture)
 {
     return (platform == QStringLiteral("macos")
@@ -649,8 +668,8 @@ SignatureVerification verifyEd25519(const QByteArray &publicKey,
     return SignatureVerification::Unavailable;
 }
 
-bool parseApplication(const QJsonValue &value, Application *application,
-                      QString *errorCode)
+bool parseLegacyApplication(const QJsonValue &value, Application *application,
+                            QString *errorCode)
 {
     if (!value.isObject()) {
         return fail(errorCode, QStringLiteral("artifact-set-application-invalid"));
@@ -666,6 +685,36 @@ bool parseApplication(const QJsonValue &value, Application *application,
         || !validVersion(application->version)
         || !validPlatformArchitecture(application->platform,
                                       application->architecture)) {
+        return fail(errorCode, QStringLiteral("artifact-set-application-invalid"));
+    }
+    return true;
+}
+
+bool parseApplication(const QJsonValue &value, Application *application,
+                      QString *errorCode)
+{
+    if (!value.isObject()) {
+        return fail(errorCode, QStringLiteral("artifact-set-application-invalid"));
+    }
+    const QJsonObject object = value.toObject();
+    if (!hasExactKeys(object, {
+            QStringLiteral("version"), QStringLiteral("platform"),
+            QStringLiteral("architecture"), QStringLiteral("size_bytes"),
+            QStringLiteral("sha256"),
+        })
+        || !exactString(object, QStringLiteral("version"), &application->version)
+        || !exactString(object, QStringLiteral("platform"), &application->platform)
+        || !exactString(object, QStringLiteral("architecture"),
+                        &application->architecture)
+        || !safePositiveInteger(object.value(QStringLiteral("size_bytes")),
+                                &application->sizeBytes)
+        || application->sizeBytes
+            > static_cast<quint64>(kMaximumApplicationBytes)
+        || !exactString(object, QStringLiteral("sha256"), &application->sha256)
+        || !validVersion(application->version)
+        || !validPlatformArchitecture(application->platform,
+                                      application->architecture)
+        || !validSha256(application->sha256)) {
         return fail(errorCode, QStringLiteral("artifact-set-application-invalid"));
     }
     return true;
@@ -823,6 +872,106 @@ bool parseInstaller(const QJsonValue &value, const Application &application,
     return true;
 }
 
+bool parseLegacySource(const QJsonValue &value, Source *source,
+                       QString *errorCode)
+{
+    if (!value.isObject()) {
+        return fail(errorCode, QStringLiteral("artifact-set-source-invalid"));
+    }
+    const QJsonObject object = value.toObject();
+    if (!hasExactKeys(object, {
+            QStringLiteral("release_sequence"), QStringLiteral("channel"),
+            QStringLiteral("application"), QStringLiteral("manifest"),
+        })
+        || !safePositiveInteger(object.value(QStringLiteral("release_sequence")),
+                                &source->releaseSequence)
+        || !exactString(object, QStringLiteral("channel"), &source->channel)
+        || !validChannel(source->channel)
+        || !parseLegacyApplication(object.value(QStringLiteral("application")),
+                                   &source->application, errorCode)
+        || !parseManifest(object.value(QStringLiteral("manifest")),
+                          &source->manifest, errorCode)) {
+        if (errorCode && errorCode->isEmpty()) {
+            *errorCode = QStringLiteral("artifact-set-source-invalid");
+        }
+        return false;
+    }
+    return true;
+}
+
+bool parseLegacyCandidate(const QJsonObject &envelope, Candidate *candidate,
+                          QString *errorCode)
+{
+    if (!hasExactKeys(envelope, {
+            QStringLiteral("schema_version"), QStringLiteral("release_sequence"),
+            QStringLiteral("published_at_ms"), QStringLiteral("channel"),
+            QStringLiteral("application"), QStringLiteral("installer"),
+            QStringLiteral("target_manifest"), QStringLiteral("compatible_sources"),
+            QStringLiteral("signature"),
+        })) {
+        return fail(errorCode, QStringLiteral("artifact-set-fields-invalid"));
+    }
+    QString schema;
+    if (!exactString(envelope, QStringLiteral("schema_version"), &schema)
+        || schema != kLegacySchema) {
+        return fail(errorCode, QStringLiteral("artifact-set-schema-invalid"));
+    }
+    candidate->schemaVersion = schema;
+    if (!safePositiveInteger(envelope.value(QStringLiteral("release_sequence")),
+                             &candidate->releaseSequence)
+        || !safePositiveInteger(envelope.value(QStringLiteral("published_at_ms")),
+                                &candidate->publishedAtMs)
+        || !exactString(envelope, QStringLiteral("channel"), &candidate->channel)
+        || !validChannel(candidate->channel)
+        || !exactString(envelope, QStringLiteral("signature"), &candidate->signature)
+        || candidate->signature.size() > 128
+        || !parseLegacyApplication(
+            envelope.value(QStringLiteral("application")),
+            &candidate->application, errorCode)
+        || !parseInstaller(envelope.value(QStringLiteral("installer")),
+                           candidate->application, &candidate->installer, errorCode)
+        || !parseManifest(envelope.value(QStringLiteral("target_manifest")),
+                          &candidate->manifest, errorCode)) {
+        if (errorCode && errorCode->isEmpty()) {
+            *errorCode = QStringLiteral("artifact-set-value-invalid");
+        }
+        return false;
+    }
+    const QJsonValue sourcesValue = envelope.value(QStringLiteral("compatible_sources"));
+    if (!sourcesValue.isArray()) {
+        return fail(errorCode, QStringLiteral("artifact-set-sources-invalid"));
+    }
+    const QJsonArray sources = sourcesValue.toArray();
+    if (sources.isEmpty() || sources.size() > kMaximumCompatibleSources) {
+        return fail(errorCode, QStringLiteral("artifact-set-sources-invalid"));
+    }
+    quint64 previousSequence = 0;
+    for (const QJsonValue &sourceValue : sources) {
+        Source source;
+        if (!parseLegacySource(sourceValue, &source, errorCode)) return false;
+        if (source.releaseSequence <= previousSequence
+            || source.releaseSequence >= candidate->releaseSequence) {
+            return fail(errorCode, QStringLiteral("artifact-set-source-sequence-invalid"));
+        }
+        if (source.application.platform != candidate->application.platform
+            || source.application.architecture != candidate->application.architecture
+            || source.application.version == candidate->application.version) {
+            return fail(errorCode, QStringLiteral("artifact-set-source-target-invalid"));
+        }
+        previousSequence = source.releaseSequence;
+        candidate->sources.append(source);
+    }
+    if (errorCode) errorCode->clear();
+    return true;
+}
+
+bool validPayloadIdentity(const QString &identity)
+{
+    static const QRegularExpression pattern(QStringLiteral(
+        "\\Aupdate-artifact-set-payload:sha256:[0-9a-f]{64}\\z"));
+    return matches(identity, pattern);
+}
+
 bool parseSource(const QJsonValue &value, Source *source, QString *errorCode)
 {
     if (!value.isObject()) {
@@ -850,14 +999,15 @@ bool parseSource(const QJsonValue &value, Source *source, QString *errorCode)
 }
 
 bool parseCandidate(const QJsonObject &envelope, Candidate *candidate,
-                    QString *errorCode)
+                    bool allowEmptyPayloadIdentity, QString *errorCode)
 {
     if (!hasExactKeys(envelope, {
             QStringLiteral("schema_version"), QStringLiteral("release_sequence"),
-            QStringLiteral("published_at_ms"), QStringLiteral("channel"),
-            QStringLiteral("application"), QStringLiteral("installer"),
-            QStringLiteral("target_manifest"), QStringLiteral("compatible_sources"),
-            QStringLiteral("signature"),
+            QStringLiteral("signing_key_id"), QStringLiteral("signed_at_ms"),
+            QStringLiteral("expires_at_ms"), QStringLiteral("payload_identity"),
+            QStringLiteral("channel"), QStringLiteral("application"),
+            QStringLiteral("installer"), QStringLiteral("target_manifest"),
+            QStringLiteral("compatible_sources"), QStringLiteral("signature"),
         })) {
         return fail(errorCode, QStringLiteral("artifact-set-fields-invalid"));
     }
@@ -866,10 +1016,22 @@ bool parseCandidate(const QJsonObject &envelope, Candidate *candidate,
         || schema != kSchema) {
         return fail(errorCode, QStringLiteral("artifact-set-schema-invalid"));
     }
+    candidate->schemaVersion = schema;
     if (!safePositiveInteger(envelope.value(QStringLiteral("release_sequence")),
                              &candidate->releaseSequence)
-        || !safePositiveInteger(envelope.value(QStringLiteral("published_at_ms")),
-                                &candidate->publishedAtMs)
+        || !exactString(envelope, QStringLiteral("signing_key_id"),
+                        &candidate->signingKeyId)
+        || !validKeyId(candidate->signingKeyId)
+        || !safePositiveInteger(envelope.value(QStringLiteral("signed_at_ms")),
+                                &candidate->signedAtMs)
+        || !safePositiveInteger(envelope.value(QStringLiteral("expires_at_ms")),
+                                &candidate->expiresAtMs)
+        || candidate->signedAtMs >= candidate->expiresAtMs
+        || !exactString(envelope, QStringLiteral("payload_identity"),
+                        &candidate->payloadIdentity)
+        || (!validPayloadIdentity(candidate->payloadIdentity)
+            && !(allowEmptyPayloadIdentity
+                 && candidate->payloadIdentity.isEmpty()))
         || !exactString(envelope, QStringLiteral("channel"), &candidate->channel)
         || !validChannel(candidate->channel)
         || !exactString(envelope, QStringLiteral("signature"), &candidate->signature)
@@ -885,7 +1047,8 @@ bool parseCandidate(const QJsonObject &envelope, Candidate *candidate,
         }
         return false;
     }
-    const QJsonValue sourcesValue = envelope.value(QStringLiteral("compatible_sources"));
+    const QJsonValue sourcesValue =
+        envelope.value(QStringLiteral("compatible_sources"));
     if (!sourcesValue.isArray()) {
         return fail(errorCode, QStringLiteral("artifact-set-sources-invalid"));
     }
@@ -899,12 +1062,15 @@ bool parseCandidate(const QJsonObject &envelope, Candidate *candidate,
         if (!parseSource(sourceValue, &source, errorCode)) return false;
         if (source.releaseSequence <= previousSequence
             || source.releaseSequence >= candidate->releaseSequence) {
-            return fail(errorCode, QStringLiteral("artifact-set-source-sequence-invalid"));
+            return fail(errorCode,
+                        QStringLiteral("artifact-set-source-sequence-invalid"));
         }
         if (source.application.platform != candidate->application.platform
-            || source.application.architecture != candidate->application.architecture
+            || source.application.architecture
+                != candidate->application.architecture
             || source.application.version == candidate->application.version) {
-            return fail(errorCode, QStringLiteral("artifact-set-source-target-invalid"));
+            return fail(errorCode,
+                        QStringLiteral("artifact-set-source-target-invalid"));
         }
         previousSequence = source.releaseSequence;
         candidate->sources.append(source);
@@ -929,12 +1095,20 @@ void appendLine(QByteArray *payload, const QByteArray &key, quint64 value)
     payload->append('\n');
 }
 
-void appendApplication(QByteArray *payload, const QByteArray &prefix,
-                       const Application &application)
+void appendLegacyApplication(QByteArray *payload, const QByteArray &prefix,
+                             const Application &application)
 {
     appendLine(payload, prefix + ".version", application.version);
     appendLine(payload, prefix + ".platform", application.platform);
     appendLine(payload, prefix + ".architecture", application.architecture);
+}
+
+void appendApplication(QByteArray *payload, const QByteArray &prefix,
+                       const Application &application)
+{
+    appendLegacyApplication(payload, prefix, application);
+    appendLine(payload, prefix + ".size_bytes", application.sizeBytes);
+    appendLine(payload, prefix + ".sha256", application.sha256);
 }
 
 void appendManifest(QByteArray *payload, const QByteArray &prefix,
@@ -947,7 +1121,7 @@ void appendManifest(QByteArray *payload, const QByteArray &prefix,
     appendLine(payload, prefix + ".adapter.version", manifest.adapter.version);
 }
 
-QByteArray buildPayload(const Candidate &candidate)
+QByteArray buildLegacyPayload(const Candidate &candidate)
 {
     QByteArray payload = QByteArrayLiteral("aegisy-update-artifact-set/0.1\n");
     appendLine(&payload, QByteArrayLiteral("release_sequence"),
@@ -955,9 +1129,52 @@ QByteArray buildPayload(const Candidate &candidate)
     appendLine(&payload, QByteArrayLiteral("published_at_ms"),
                candidate.publishedAtMs);
     appendLine(&payload, QByteArrayLiteral("channel"), candidate.channel);
+    appendLegacyApplication(&payload, QByteArrayLiteral("application"),
+                            candidate.application);
+    appendLine(&payload, QByteArrayLiteral("installer.url"), candidate.installer.url);
+    appendLine(&payload, QByteArrayLiteral("installer.file_name"),
+               candidate.installer.fileName);
+    appendLine(&payload, QByteArrayLiteral("installer.size_bytes"),
+               candidate.installer.sizeBytes);
+    appendLine(&payload, QByteArrayLiteral("installer.sha256"),
+               candidate.installer.sha256);
+    appendLine(&payload, QByteArrayLiteral("installer.sparkle_ed_signature"),
+               candidate.installer.sparkleSignature);
+    appendManifest(&payload, QByteArrayLiteral("target_manifest"),
+                   candidate.manifest);
+    appendLine(&payload, QByteArrayLiteral("compatible_sources.count"),
+               static_cast<quint64>(candidate.sources.size()));
+    for (int index = 0; index < candidate.sources.size(); ++index) {
+        const Source &source = candidate.sources.at(index);
+        const QByteArray prefix = QByteArrayLiteral("compatible_sources.")
+            + QByteArray::number(index);
+        appendLine(&payload, prefix + ".release_sequence", source.releaseSequence);
+        appendLine(&payload, prefix + ".channel", source.channel);
+        appendLegacyApplication(&payload, prefix + ".application",
+                                source.application);
+        appendManifest(&payload, prefix + ".manifest", source.manifest);
+    }
+    return payload;
+}
+
+
+QByteArray buildPayloadBody(const Candidate &candidate)
+{
+    QByteArray payload = QByteArrayLiteral(
+        "aegisy-update-artifact-set-payload/0.2\n");
+    appendLine(&payload, QByteArrayLiteral("release_sequence"),
+               candidate.releaseSequence);
+    appendLine(&payload, QByteArrayLiteral("signing_key_id"),
+               candidate.signingKeyId);
+    appendLine(&payload, QByteArrayLiteral("signed_at_ms"),
+               candidate.signedAtMs);
+    appendLine(&payload, QByteArrayLiteral("expires_at_ms"),
+               candidate.expiresAtMs);
+    appendLine(&payload, QByteArrayLiteral("channel"), candidate.channel);
     appendApplication(&payload, QByteArrayLiteral("application"),
                       candidate.application);
-    appendLine(&payload, QByteArrayLiteral("installer.url"), candidate.installer.url);
+    appendLine(&payload, QByteArrayLiteral("installer.url"),
+               candidate.installer.url);
     appendLine(&payload, QByteArrayLiteral("installer.file_name"),
                candidate.installer.fileName);
     appendLine(&payload, QByteArrayLiteral("installer.size_bytes"),
@@ -982,7 +1199,23 @@ QByteArray buildPayload(const Candidate &candidate)
     return payload;
 }
 
-bool validInstalled(const InstalledSetData &installed)
+QString candidatePayloadIdentity(const Candidate &candidate)
+{
+    return QStringLiteral("update-artifact-set-payload:sha256:%1")
+        .arg(QString::fromLatin1(QCryptographicHash::hash(
+            buildPayloadBody(candidate), QCryptographicHash::Sha256).toHex()));
+}
+
+QByteArray buildPayload(const Candidate &candidate)
+{
+    QByteArray payload = QByteArrayLiteral("aegisy-update-artifact-set/0.2\n");
+    appendLine(&payload, QByteArrayLiteral("payload_identity"),
+               candidate.payloadIdentity);
+    payload += buildPayloadBody(candidate);
+    return payload;
+}
+
+bool validLegacyInstalled(const InstalledSetData &installed)
 {
     return installed.releaseSequence > 0
         && installed.releaseSequence <= static_cast<quint64>(kMaximumSafeJsonInteger)
@@ -996,6 +1229,16 @@ bool validInstalled(const InstalledSetData &installed)
         && validAdapterVersion(installed.adapterVersion);
 }
 
+bool validInstalled(const InstalledSetData &installed)
+{
+    return installed.schemaVersion == kSchema
+        && validLegacyInstalled(installed)
+        && installed.applicationSizeBytes > 0
+        && installed.applicationSizeBytes
+            <= static_cast<quint64>(kMaximumApplicationBytes)
+        && validSha256(installed.applicationSha256);
+}
+
 bool matchesInstalled(const Source &source, const InstalledSetData &installed)
 {
     return source.releaseSequence == installed.releaseSequence
@@ -1003,6 +1246,8 @@ bool matchesInstalled(const Source &source, const InstalledSetData &installed)
         && source.application.version == installed.applicationVersion
         && source.application.platform == installed.platform
         && source.application.architecture == installed.architecture
+        && source.application.sizeBytes == installed.applicationSizeBytes
+        && source.application.sha256 == installed.applicationSha256
         && source.manifest.sha256 == installed.manifestSha256
         && source.manifest.runtime.id == installed.runtimeId
         && source.manifest.runtime.version == installed.runtimeVersion
@@ -1012,7 +1257,10 @@ bool matchesInstalled(const Source &source, const InstalledSetData &installed)
 
 QString installedArtifactSetIdentity(const InstalledSetData &installed)
 {
-    QByteArray payload = QByteArrayLiteral("aegisy-installed-artifact-set/0.1\n");
+    const bool legacy = installed.schemaVersion != kSchema;
+    QByteArray payload = legacy
+        ? QByteArrayLiteral("aegisy-installed-artifact-set/0.1\n")
+        : QByteArrayLiteral("aegisy-installed-artifact-set/0.2\n");
     appendLine(&payload, QByteArrayLiteral("release_sequence"),
                installed.releaseSequence);
     appendLine(&payload, QByteArrayLiteral("channel"), installed.channel);
@@ -1022,6 +1270,12 @@ QString installedArtifactSetIdentity(const InstalledSetData &installed)
                installed.platform);
     appendLine(&payload, QByteArrayLiteral("application.architecture"),
                installed.architecture);
+    if (!legacy) {
+        appendLine(&payload, QByteArrayLiteral("application.size_bytes"),
+                   installed.applicationSizeBytes);
+        appendLine(&payload, QByteArrayLiteral("application.sha256"),
+                   installed.applicationSha256);
+    }
     appendLine(&payload, QByteArrayLiteral("manifest.sha256"),
                installed.manifestSha256);
     appendLine(&payload, QByteArrayLiteral("manifest.runtime.id"),
@@ -1037,10 +1291,10 @@ QString installedArtifactSetIdentity(const InstalledSetData &installed)
             payload, QCryptographicHash::Sha256).toHex()));
 }
 
-QString installedAuthorityIdentity(const QString &receiptIdentity,
-                                   const QString &installedIdentity,
-                                   const QString &layoutIdentity,
-                                   const QByteArray &publicKey)
+QString legacyInstalledAuthorityIdentity(const QString &receiptIdentity,
+                                         const QString &installedIdentity,
+                                         const QString &layoutIdentity,
+                                         const QByteArray &publicKey)
 {
     QByteArray payload = QByteArrayLiteral(
         "aegisy-installed-artifact-set-authority/0.1\n");
@@ -1056,7 +1310,37 @@ QString installedAuthorityIdentity(const QString &receiptIdentity,
             payload, QCryptographicHash::Sha256).toHex()));
 }
 
-QString compatibilityEvaluationIdentity(
+QString installedAuthorityIdentity(
+    const QString &receiptIdentity,
+    const QString &installedIdentity,
+    const QString &layoutIdentity,
+    const UpdateSigningKeyRing::ArtifactSignatureResult &signature)
+{
+    QByteArray payload = QByteArrayLiteral(
+        "aegisy-installed-artifact-set-authority/0.2\n");
+    appendLine(&payload, QByteArrayLiteral("receipt.identity"), receiptIdentity);
+    appendLine(&payload, QByteArrayLiteral("installed.identity"), installedIdentity);
+    appendLine(&payload, QByteArrayLiteral("installation.layout_identity"),
+               layoutIdentity);
+    appendLine(&payload, QByteArrayLiteral("trust_anchor.identity"),
+               signature.trustAnchorIdentity);
+    appendLine(&payload, QByteArrayLiteral("key_ring.identity"),
+               signature.ringIdentity);
+    appendLine(&payload, QByteArrayLiteral("key_ring.generation"),
+               signature.ringGeneration);
+    appendLine(&payload, QByteArrayLiteral("key_ring.authority_identity"),
+               signature.ringAuthorityIdentity);
+    appendLine(&payload, QByteArrayLiteral("receipt.signer_key_id"),
+               signature.signerKeyId);
+    appendLine(&payload, QByteArrayLiteral("receipt.signer_key_identity"),
+               signature.signerKeyIdentity);
+    return QStringLiteral("installed-artifact-set-authority:sha256:%1")
+        .arg(QString::fromLatin1(QCryptographicHash::hash(
+            payload, QCryptographicHash::Sha256).toHex()));
+}
+
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
+QString legacyCompatibilityEvaluationIdentity(
     const QString &artifactSetIdentity,
     const QString &installedIdentity,
     const QString &installedAuthorityIdentityValue,
@@ -1078,6 +1362,58 @@ QString compatibilityEvaluationIdentity(
     appendLine(&payload, QByteArrayLiteral("verification_key.sha256"),
                QString::fromLatin1(QCryptographicHash::hash(
                    publicKey, QCryptographicHash::Sha256).toHex()));
+    appendLine(&payload, QByteArrayLiteral("selected_channel"), selectedChannel);
+    appendLine(&payload, QByteArrayLiteral("accepted_release_sequence_high_water"),
+               acceptedReleaseSequenceHighWater);
+    appendLine(&payload, QByteArrayLiteral("evaluated_at_ms"), evaluatedAtMs);
+    return QStringLiteral("update-artifact-set-evaluation:sha256:%1")
+        .arg(QString::fromLatin1(QCryptographicHash::hash(
+            payload, QCryptographicHash::Sha256).toHex()));
+}
+#endif
+
+QString compatibilityEvaluationIdentity(
+    const QString &artifactSetIdentity,
+    const QString &payloadIdentity,
+    const QString &installedIdentity,
+    const QString &installedAuthorityIdentityValue,
+    const QString &trustAnchorIdentity,
+    const QString &ringIdentity,
+    quint64 ringGeneration,
+    const QString &ringAuthorityIdentity,
+    const QString &receiptSignerKeyId,
+    const QString &receiptSignerKeyIdentity,
+    const UpdateSigningKeyRing::ArtifactSignatureResult &candidateSignature,
+    const QString &selectedChannel,
+    quint64 acceptedReleaseSequenceHighWater,
+    quint64 evaluatedAtMs)
+{
+    QByteArray payload = QByteArrayLiteral(
+        "aegisy-update-artifact-set-evaluation/0.2\n");
+    appendLine(&payload, QByteArrayLiteral("artifact_set.identity"),
+               artifactSetIdentity);
+    appendLine(&payload, QByteArrayLiteral("artifact_set.payload_identity"),
+               payloadIdentity);
+    appendLine(&payload, QByteArrayLiteral("installed.identity"),
+               installedIdentity);
+    appendLine(&payload, QByteArrayLiteral("installed.authority_identity"),
+               installedAuthorityIdentityValue);
+    appendLine(&payload, QByteArrayLiteral("trust_anchor.identity"),
+               trustAnchorIdentity);
+    appendLine(&payload, QByteArrayLiteral("key_ring.identity"),
+               ringIdentity);
+    appendLine(&payload, QByteArrayLiteral("key_ring.generation"),
+               ringGeneration);
+    appendLine(&payload, QByteArrayLiteral("key_ring.authority_identity"),
+               ringAuthorityIdentity);
+    appendLine(&payload, QByteArrayLiteral("receipt.signer_key_id"),
+               receiptSignerKeyId);
+    appendLine(&payload, QByteArrayLiteral("receipt.signer_key_identity"),
+               receiptSignerKeyIdentity);
+    appendLine(&payload, QByteArrayLiteral("candidate.signer_key_id"),
+               candidateSignature.signerKeyId);
+    appendLine(&payload, QByteArrayLiteral("candidate.signer_key_identity"),
+               candidateSignature.signerKeyIdentity);
     appendLine(&payload, QByteArrayLiteral("selected_channel"), selectedChannel);
     appendLine(&payload, QByteArrayLiteral("accepted_release_sequence_high_water"),
                acceptedReleaseSequenceHighWater);
@@ -1116,13 +1452,13 @@ bool parseEnvelopeJson(const QByteArray &envelopeJson, QJsonObject *envelope,
     return true;
 }
 
-bool parseVerifiedCandidate(const QByteArray &envelopeJson,
-                            const QByteArray &publicKeyBase64,
-                            qint64 nowMs,
-                            Candidate *candidate,
-                            QByteArray *publicKey,
-                            QByteArray *payload,
-                            QString *errorCode)
+bool parseVerifiedLegacyCandidate(const QByteArray &envelopeJson,
+                                  const QByteArray &publicKeyBase64,
+                                  qint64 nowMs,
+                                  Candidate *candidate,
+                                  QByteArray *publicKey,
+                                  QByteArray *payload,
+                                  QString *errorCode)
 {
     // A canonical Base64 encoding of a 32-byte Ed25519 public key is 44 bytes.
     if (publicKeyBase64.size() != 44) {
@@ -1130,10 +1466,10 @@ bool parseVerifiedCandidate(const QByteArray &envelopeJson,
     }
     QJsonObject envelope;
     if (!parseEnvelopeJson(envelopeJson, &envelope, errorCode)
-        || !parseCandidate(envelope, candidate, errorCode)) {
+        || !parseLegacyCandidate(envelope, candidate, errorCode)) {
         return false;
     }
-    *payload = buildPayload(*candidate);
+    *payload = buildLegacyPayload(*candidate);
     *publicKey = decodeCanonicalBase64(
         QString::fromLatin1(publicKeyBase64), 32);
     const QByteArray signature = decodeCanonicalBase64(candidate->signature, 64);
@@ -1167,16 +1503,62 @@ bool parseVerifiedCandidate(const QByteArray &envelopeJson,
     return true;
 }
 
-Decision evaluateCandidate(const Candidate &candidate,
-                           const QByteArray &payload,
-                           const QByteArray &publicKey,
-                           qint64 nowMs,
-                           const InstalledSetData &installed,
-                           const QString &installedAuthorityIdentityValue,
-                           const QString &selectedChannel,
-                           quint64 acceptedReleaseSequenceHighWater)
+bool parseVerifiedCandidate(
+    const QByteArray &envelopeJson,
+    const UpdateSigningKeyRing::Authority &signingAuthority,
+    qint64 nowMs,
+    bool requireCurrentlyActive,
+    Candidate *candidate,
+    QByteArray *payload,
+    UpdateSigningKeyRing::ArtifactSignatureResult *signature,
+    QString *errorCode)
 {
-    if (!validInstalled(installed)) {
+    if (nowMs <= 0
+        || static_cast<quint64>(nowMs)
+            > static_cast<quint64>(kMaximumSafeJsonInteger)) {
+        return fail(errorCode, QStringLiteral("artifact-set-clock-invalid"));
+    }
+    QJsonObject envelope;
+    if (!parseEnvelopeJson(envelopeJson, &envelope, errorCode)
+        || !parseCandidate(envelope, candidate, false, errorCode)) {
+        return false;
+    }
+    const QString expectedPayloadIdentity = candidatePayloadIdentity(*candidate);
+    if (candidate->payloadIdentity != expectedPayloadIdentity) {
+        return fail(errorCode,
+                    QStringLiteral("artifact-set-payload-identity-invalid"));
+    }
+    if (candidate->signedAtMs
+        > static_cast<quint64>(nowMs + kMaximumClockSkewMs)) {
+        return fail(errorCode,
+                    QStringLiteral("artifact-set-signed-time-invalid"));
+    }
+    if (requireCurrentlyActive
+        && static_cast<quint64>(nowMs) >= candidate->expiresAtMs) {
+        return fail(errorCode, QStringLiteral("artifact-set-expired"));
+    }
+    *payload = buildPayload(*candidate);
+    *signature = UpdateSigningKeyRing::verifyArtifactSetSignature(
+        signingAuthority, candidate->signingKeyId, candidate->signedAtMs,
+        static_cast<quint64>(nowMs), requireCurrentlyActive, *payload,
+        candidate->signature);
+    if (!signature->ok) return fail(errorCode, signature->errorCode);
+    if (errorCode) errorCode->clear();
+    return true;
+}
+
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
+Decision evaluateLegacyCandidate(
+    const Candidate &candidate,
+    const QByteArray &payload,
+    const QByteArray &publicKey,
+    qint64 nowMs,
+    const InstalledSetData &installed,
+    const QString &installedAuthorityIdentityValue,
+    const QString &selectedChannel,
+    quint64 acceptedReleaseSequenceHighWater)
+{
+    if (!validLegacyInstalled(installed)) {
         return invalidDecision(QStringLiteral("installed-artifact-set-invalid"));
     }
     if (!validChannel(selectedChannel)) {
@@ -1199,7 +1581,8 @@ Decision evaluateCandidate(const Candidate &candidate,
     decision.evaluatedAcceptedReleaseSequenceHighWater =
         acceptedReleaseSequenceHighWater;
     decision.evaluatedAtMs = static_cast<quint64>(nowMs);
-    decision.compatibilityEvaluationIdentity = compatibilityEvaluationIdentity(
+    decision.compatibilityEvaluationIdentity =
+        legacyCompatibilityEvaluationIdentity(
         decision.artifactSetIdentity, decision.installedArtifactSetIdentity,
         installedAuthorityIdentityValue, publicKey, selectedChannel,
         acceptedReleaseSequenceHighWater, decision.evaluatedAtMs);
@@ -1247,23 +1630,190 @@ Decision evaluateCandidate(const Candidate &candidate,
     decision.errorCode = QStringLiteral("artifact-set-source-incompatible");
     return decision;
 }
+#endif
+
+Decision evaluateCandidate(
+    const Candidate &candidate,
+    const QByteArray &payload,
+    const UpdateSigningKeyRing::ArtifactSignatureResult &candidateSignature,
+    qint64 nowMs,
+    const InstalledSetData &installed,
+    const QString &installedAuthorityIdentityValue,
+    const QString &trustAnchorIdentity,
+    const QString &ringIdentity,
+    quint64 ringGeneration,
+    const QString &ringAuthorityIdentity,
+    const QString &receiptSignerKeyId,
+    const QString &receiptSignerKeyIdentity,
+    const QString &selectedChannel,
+    quint64 acceptedReleaseSequenceHighWater)
+{
+    if (!validInstalled(installed)) {
+        return invalidDecision(QStringLiteral("installed-artifact-set-invalid"));
+    }
+    if (!validChannel(selectedChannel)) {
+        return invalidDecision(QStringLiteral("selected-update-channel-invalid"));
+    }
+    if (acceptedReleaseSequenceHighWater < installed.releaseSequence
+        || acceptedReleaseSequenceHighWater
+            > static_cast<quint64>(kMaximumSafeJsonInteger)) {
+        return invalidDecision(QStringLiteral("artifact-set-high-water-invalid"));
+    }
+
+    Decision decision;
+    decision.state = State::Incompatible;
+    decision.artifactSetIdentity = QStringLiteral("update-artifact-set:sha256:%1")
+        .arg(QString::fromLatin1(QCryptographicHash::hash(
+            payload, QCryptographicHash::Sha256).toHex()));
+    decision.installedArtifactSetIdentity = installedArtifactSetIdentity(installed);
+    decision.installedAuthorityIdentity = installedAuthorityIdentityValue;
+    decision.evaluatedSelectedChannel = selectedChannel;
+    decision.evaluatedAcceptedReleaseSequenceHighWater =
+        acceptedReleaseSequenceHighWater;
+    decision.evaluatedAtMs = static_cast<quint64>(nowMs);
+    decision.payloadIdentity = candidate.payloadIdentity;
+    decision.signingKeyId = candidateSignature.signerKeyId;
+    decision.signerKeyIdentity = candidateSignature.signerKeyIdentity;
+    decision.signingTrustAnchorIdentity =
+        candidateSignature.trustAnchorIdentity;
+    decision.signingRingIdentity = candidateSignature.ringIdentity;
+    decision.signingRingGeneration = candidateSignature.ringGeneration;
+    decision.signingRingAuthorityIdentity =
+        candidateSignature.ringAuthorityIdentity;
+    decision.signedAtMs = candidate.signedAtMs;
+    decision.expiresAtMs = candidate.expiresAtMs;
+    decision.compatibilityEvaluationIdentity = compatibilityEvaluationIdentity(
+        decision.artifactSetIdentity, decision.payloadIdentity,
+        decision.installedArtifactSetIdentity, installedAuthorityIdentityValue,
+        trustAnchorIdentity, ringIdentity, ringGeneration, ringAuthorityIdentity,
+        receiptSignerKeyId, receiptSignerKeyIdentity, candidateSignature,
+        selectedChannel, acceptedReleaseSequenceHighWater,
+        decision.evaluatedAtMs);
+    decision.targetReleaseSequence = candidate.releaseSequence;
+    decision.targetChannel = candidate.channel;
+    decision.targetApplicationVersion = candidate.application.version;
+    decision.targetApplicationSizeBytes = candidate.application.sizeBytes;
+    decision.targetApplicationSha256 = candidate.application.sha256;
+    decision.platform = candidate.application.platform;
+    decision.architecture = candidate.application.architecture;
+    decision.installerUrl = candidate.installer.url;
+    decision.installerFileName = candidate.installer.fileName;
+    decision.installerSizeBytes = candidate.installer.sizeBytes;
+    decision.installerSha256 = candidate.installer.sha256;
+    decision.installerSparkleSignature = candidate.installer.sparkleSignature;
+    decision.targetManifestSha256 = candidate.manifest.sha256;
+    decision.targetRuntimeId = candidate.manifest.runtime.id;
+    decision.targetRuntimeVersion = candidate.manifest.runtime.version;
+    decision.targetAdapterId = candidate.manifest.adapter.id;
+    decision.targetAdapterVersion = candidate.manifest.adapter.version;
+
+    if (candidateSignature.trustAnchorIdentity != trustAnchorIdentity
+        || candidateSignature.ringIdentity != ringIdentity
+        || candidateSignature.ringGeneration != ringGeneration
+        || candidateSignature.ringAuthorityIdentity != ringAuthorityIdentity) {
+        return invalidDecision(
+            QStringLiteral("artifact-set-signing-authority-drift"));
+    }
+    if (candidate.channel != selectedChannel) {
+        decision.errorCode = QStringLiteral("artifact-set-channel-incompatible");
+        return decision;
+    }
+    if (candidate.application.platform != installed.platform
+        || candidate.application.architecture != installed.architecture) {
+        decision.errorCode = QStringLiteral("artifact-set-platform-incompatible");
+        return decision;
+    }
+    if (candidate.releaseSequence <= installed.releaseSequence) {
+        decision.errorCode = QStringLiteral("artifact-set-not-newer");
+        return decision;
+    }
+    if (candidate.releaseSequence <= acceptedReleaseSequenceHighWater) {
+        decision.errorCode = QStringLiteral("artifact-set-sequence-replay");
+        return decision;
+    }
+    for (const Source &source : candidate.sources) {
+        if (matchesInstalled(source, installed)) {
+            decision.state = State::Compatible;
+            decision.candidateCompatible = true;
+            decision.matchedSourceReleaseSequence = source.releaseSequence;
+            return decision;
+        }
+    }
+    decision.errorCode = QStringLiteral("artifact-set-source-incompatible");
+    return decision;
+}
 
 } // namespace
 
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
+namespace Testing {
+
 QByteArray signaturePayload(const QJsonObject &envelope, QString *errorCode)
 {
+    const QString schema = envelope.value(QStringLiteral("schema_version"))
+        .toString();
     Candidate candidate;
-    if (!parseCandidate(envelope, &candidate, errorCode)) return {};
+    if (schema == kLegacySchema) {
+        if (!parseLegacyCandidate(envelope, &candidate, errorCode)) return {};
+        if (errorCode) errorCode->clear();
+        return buildLegacyPayload(candidate);
+    }
+    if (!parseCandidate(envelope, &candidate, false, errorCode)) return {};
     if (errorCode) errorCode->clear();
     return buildPayload(candidate);
 }
+
+QString payloadIdentity(const QJsonObject &envelope, QString *errorCode)
+{
+    Candidate candidate;
+    if (!parseCandidate(envelope, &candidate, true, errorCode)) return {};
+    if (errorCode) errorCode->clear();
+    return candidatePayloadIdentity(candidate);
+}
+
+} // namespace Testing
+#endif
 
 class InstalledArtifactSetAuthority::Verifier
 {
 public:
     static InstalledAuthorityResult verify(
         const InstallationLayout &layout,
+        const UpdateSigningKeyRing::Authority &signingAuthority,
+        qint64 nowMs,
+        const QString &expectedApplicationVersion,
+        const QString &expectedChannel,
+        const QString &expectedPlatform,
+        const QString &expectedArchitecture)
+    {
+        return verifyImpl(
+            layout, &signingAuthority, QByteArray(), nowMs,
+            expectedApplicationVersion, expectedChannel, expectedPlatform,
+            expectedArchitecture);
+    }
+
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
+    static InstalledAuthorityResult verifyLegacy(
+        const InstallationLayout &layout,
         const QByteArray &publicKeyBase64,
+        qint64 nowMs,
+        const QString &expectedApplicationVersion,
+        const QString &expectedChannel,
+        const QString &expectedPlatform,
+        const QString &expectedArchitecture)
+    {
+        return verifyImpl(
+            layout, nullptr, publicKeyBase64, nowMs,
+            expectedApplicationVersion, expectedChannel, expectedPlatform,
+            expectedArchitecture);
+    }
+#endif
+
+private:
+    static InstalledAuthorityResult verifyImpl(
+        const InstallationLayout &layout,
+        const UpdateSigningKeyRing::Authority *signingAuthority,
+        const QByteArray &legacyPublicKeyBase64,
         qint64 nowMs,
         const QString &expectedApplicationVersion,
         const QString &expectedChannel,
@@ -1380,10 +1930,17 @@ public:
         Candidate candidate;
         QByteArray publicKey;
         QByteArray payload;
+        UpdateSigningKeyRing::ArtifactSignatureResult receiptSignature;
         QString errorCode;
-        if (!parseVerifiedCandidate(receiptBytes, publicKeyBase64, nowMs,
-                                    &candidate, &publicKey, &payload,
-                                    &errorCode)) {
+        const bool legacy = signingAuthority == nullptr;
+        const bool verified = legacy
+            ? parseVerifiedLegacyCandidate(
+                receiptBytes, legacyPublicKeyBase64, nowMs, &candidate,
+                &publicKey, &payload, &errorCode)
+            : parseVerifiedCandidate(
+                receiptBytes, *signingAuthority, nowMs, false, &candidate,
+                &payload, &receiptSignature, &errorCode);
+        if (!verified) {
             return reject(QStringLiteral("installed-receipt-") + errorCode);
         }
         if (candidate.application.version != expectedApplicationVersion
@@ -1391,6 +1948,14 @@ public:
             || candidate.application.platform != expectedPlatform
             || candidate.application.architecture != expectedArchitecture) {
             return reject(QStringLiteral("installed-receipt-target-mismatch"));
+        }
+        if (!legacy
+            && (candidate.application.sizeBytes
+                    != applicationObservation.sizeBytes
+                || candidate.application.sha256
+                    != applicationObservation.sha256)) {
+            return reject(QStringLiteral(
+                "installed-receipt-application-mismatch"));
         }
         const ArtifactManifest::VerificationResult manifest =
             ArtifactManifest::verifyFile(manifestCanonical, runtimeCanonical);
@@ -1434,11 +1999,14 @@ public:
         }
 
         InstalledSetData installed;
+        installed.schemaVersion = candidate.schemaVersion;
         installed.releaseSequence = candidate.releaseSequence;
         installed.channel = candidate.channel;
         installed.applicationVersion = candidate.application.version;
         installed.platform = candidate.application.platform;
         installed.architecture = candidate.application.architecture;
+        installed.applicationSizeBytes = candidate.application.sizeBytes;
+        installed.applicationSha256 = candidate.application.sha256;
         installed.manifestSha256 = candidate.manifest.sha256;
         installed.runtimeId = candidate.manifest.runtime.id;
         installed.runtimeVersion = candidate.manifest.runtime.version;
@@ -1451,11 +2019,15 @@ public:
         const QString installedIdentity = installedArtifactSetIdentity(installed);
 
         result.authority.m_valid = true;
+        result.authority.m_schemaVersion = installed.schemaVersion;
         result.authority.m_releaseSequence = installed.releaseSequence;
         result.authority.m_channel = installed.channel;
         result.authority.m_applicationVersion = installed.applicationVersion;
         result.authority.m_platform = installed.platform;
         result.authority.m_architecture = installed.architecture;
+        result.authority.m_applicationSizeBytes =
+            installed.applicationSizeBytes;
+        result.authority.m_applicationSha256 = installed.applicationSha256;
         result.authority.m_manifestSha256 = installed.manifestSha256;
         result.authority.m_runtimeId = installed.runtimeId;
         result.authority.m_runtimeVersion = installed.runtimeVersion;
@@ -1499,8 +2071,26 @@ public:
             return reject(QStringLiteral("installed-authority-layout-invalid"));
         }
         result.authority.m_installationLayoutIdentity = layoutIdentity;
-        result.authority.m_authorityIdentity = installedAuthorityIdentity(
-            receiptIdentity, installedIdentity, layoutIdentity, publicKey);
+        if (legacy) {
+            result.authority.m_authorityIdentity =
+                legacyInstalledAuthorityIdentity(
+                    receiptIdentity, installedIdentity, layoutIdentity,
+                    publicKey);
+        } else {
+            result.authority.m_trustAnchorIdentity =
+                receiptSignature.trustAnchorIdentity;
+            result.authority.m_ringIdentity = receiptSignature.ringIdentity;
+            result.authority.m_ringGeneration = receiptSignature.ringGeneration;
+            result.authority.m_ringAuthorityIdentity =
+                receiptSignature.ringAuthorityIdentity;
+            result.authority.m_receiptSignerKeyId =
+                receiptSignature.signerKeyId;
+            result.authority.m_receiptSignerKeyIdentity =
+                receiptSignature.signerKeyIdentity;
+            result.authority.m_authorityIdentity = installedAuthorityIdentity(
+                receiptIdentity, installedIdentity, layoutIdentity,
+                receiptSignature);
+        }
         result.authority.m_applicationPath = applicationCanonical;
         result.authority.m_installationRoot = installationRoot;
         result.authority.m_receiptPath = receiptCanonical;
@@ -1514,6 +2104,34 @@ public:
     }
 };
 
+InstalledAuthorityResult verifyCurrentInstallationAuthority(
+    const UpdateSigningKeyRing::Authority &signingAuthority,
+    qint64 nowMs,
+    const QString &expectedChannel)
+{
+    InstallationLayout layout;
+    QString errorCode;
+    if (!deriveCurrentInstallationLayout(&layout, &errorCode)) {
+        InstalledAuthorityResult result;
+        result.errorCode = errorCode;
+        return result;
+    }
+    QString platform;
+    QString architecture;
+    const QString applicationVersion = QCoreApplication::applicationVersion();
+    if (!currentReleaseTarget(&platform, &architecture)
+        || !validVersion(applicationVersion)) {
+        InstalledAuthorityResult result;
+        result.errorCode = QStringLiteral(
+            "installed-authority-application-invalid");
+        return result;
+    }
+    return InstalledArtifactSetAuthority::Verifier::verify(
+        layout, signingAuthority, nowMs, applicationVersion,
+        expectedChannel, platform, architecture);
+}
+
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
 InstalledAuthorityResult verifyCurrentInstallationAuthority(
     const QByteArray &publicKeyBase64,
     qint64 nowMs,
@@ -1536,19 +2154,27 @@ InstalledAuthorityResult verifyCurrentInstallationAuthority(
             "installed-authority-application-invalid");
         return result;
     }
-    return InstalledArtifactSetAuthority::Verifier::verify(
+    return InstalledArtifactSetAuthority::Verifier::verifyLegacy(
         layout, publicKeyBase64, nowMs, applicationVersion,
         expectedChannel, platform, architecture);
 }
+#endif
 
 Decision verifyCandidate(const QByteArray &envelopeJson,
-                         const QByteArray &publicKeyBase64,
+                         const UpdateSigningKeyRing::Authority &signingAuthority,
                          qint64 nowMs,
                          const InstalledArtifactSetAuthority &authority,
                          const QString &selectedChannel,
                          quint64 acceptedReleaseSequenceHighWater)
 {
-    if (!authority.m_valid) {
+    if (!authority.m_valid || authority.m_schemaVersion != kSchema
+        || !signingAuthority.isValid()
+        || authority.m_trustAnchorIdentity
+            != signingAuthority.trustAnchorIdentity()
+        || authority.m_ringIdentity != signingAuthority.ringIdentity()
+        || authority.m_ringGeneration != signingAuthority.generation()
+        || authority.m_ringAuthorityIdentity
+            != signingAuthority.authorityIdentity()) {
         return invalidDecision(QStringLiteral("installed-artifact-authority-invalid"));
     }
     InstallationLayout layout;
@@ -1574,16 +2200,106 @@ Decision verifyCandidate(const QByteArray &envelopeJson,
     }
     const InstalledAuthorityResult refreshed =
         InstalledArtifactSetAuthority::Verifier::verify(
-            layout, publicKeyBase64, nowMs, authority.m_applicationVersion,
+            layout, signingAuthority, nowMs, authority.m_applicationVersion,
             authority.m_channel, authority.m_platform, authority.m_architecture);
     if (!refreshed.ok
         || refreshed.authority.m_authorityIdentity != authority.m_authorityIdentity) {
         return invalidDecision(QStringLiteral("installed-artifact-authority-invalid"));
     }
     const InstalledArtifactSetAuthority &current = refreshed.authority;
+    InstalledSetData installed;
+    installed.schemaVersion = current.m_schemaVersion;
+    installed.releaseSequence = current.m_releaseSequence;
+    installed.channel = current.m_channel;
+    installed.applicationVersion = current.m_applicationVersion;
+    installed.platform = current.m_platform;
+    installed.architecture = current.m_architecture;
+    installed.applicationSizeBytes = current.m_applicationSizeBytes;
+    installed.applicationSha256 = current.m_applicationSha256;
+    installed.manifestSha256 = current.m_manifestSha256;
+    installed.runtimeId = current.m_runtimeId;
+    installed.runtimeVersion = current.m_runtimeVersion;
+    installed.adapterId = current.m_adapterId;
+    installed.adapterVersion = current.m_adapterVersion;
+    const QString installedIdentity = installedArtifactSetIdentity(installed);
+    if (!validInstalled(installed)
+        || current.m_installedArtifactSetIdentity != installedIdentity
+        || current.m_installationLayoutIdentity.isEmpty()
+        || current.m_trustAnchorIdentity
+            != signingAuthority.trustAnchorIdentity()
+        || current.m_ringIdentity != signingAuthority.ringIdentity()
+        || current.m_ringGeneration != signingAuthority.generation()
+        || current.m_ringAuthorityIdentity
+            != signingAuthority.authorityIdentity()
+        || current.m_receiptSignerKeyId.isEmpty()
+        || current.m_receiptSignerKeyIdentity.isEmpty()) {
+        return invalidDecision(QStringLiteral("installed-artifact-authority-invalid"));
+    }
+
+    Candidate candidate;
+    QByteArray payload;
+    UpdateSigningKeyRing::ArtifactSignatureResult candidateSignature;
+    QString errorCode;
+    if (!parseVerifiedCandidate(
+            envelopeJson, signingAuthority, nowMs, true, &candidate,
+            &payload, &candidateSignature, &errorCode)) {
+        return invalidDecision(errorCode);
+    }
+    return evaluateCandidate(
+        candidate, payload, candidateSignature, nowMs, installed,
+        current.m_authorityIdentity, current.m_trustAnchorIdentity,
+        current.m_ringIdentity, current.m_ringGeneration,
+        current.m_ringAuthorityIdentity, current.m_receiptSignerKeyId,
+        current.m_receiptSignerKeyIdentity, selectedChannel,
+        acceptedReleaseSequenceHighWater);
+}
+
+#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
+Decision verifyCandidate(const QByteArray &envelopeJson,
+                         const QByteArray &publicKeyBase64,
+                         qint64 nowMs,
+                         const InstalledArtifactSetAuthority &authority,
+                         const QString &selectedChannel,
+                         quint64 acceptedReleaseSequenceHighWater)
+{
+    if (!authority.m_valid || authority.m_schemaVersion != kLegacySchema) {
+        return invalidDecision(QStringLiteral(
+            "installed-artifact-authority-invalid"));
+    }
+    InstallationLayout layout;
+    if (authority.m_testOnlyLayout) {
+        layout.applicationPath = authority.m_applicationPath;
+        layout.installationRoot = authority.m_installationRoot;
+        layout.artifactRoot = QFileInfo(authority.m_receiptPath).absolutePath();
+        layout.receiptPath = authority.m_receiptPath;
+        layout.manifestPath = authority.m_manifestPath;
+        layout.runtimePath = authority.m_runtimePath;
+        layout.testOnly = true;
+    } else {
+        QString layoutError;
+        if (!deriveCurrentInstallationLayout(&layout, &layoutError)
+            || QCoreApplication::applicationVersion()
+                != authority.m_applicationVersion) {
+            return invalidDecision(QStringLiteral(
+                "installed-artifact-authority-invalid"));
+        }
+    }
+    const InstalledAuthorityResult refreshed =
+        InstalledArtifactSetAuthority::Verifier::verifyLegacy(
+            layout, publicKeyBase64, nowMs, authority.m_applicationVersion,
+            authority.m_channel, authority.m_platform,
+            authority.m_architecture);
+    if (!refreshed.ok
+        || refreshed.authority.m_authorityIdentity
+            != authority.m_authorityIdentity) {
+        return invalidDecision(QStringLiteral(
+            "installed-artifact-authority-invalid"));
+    }
+    const InstalledArtifactSetAuthority &current = refreshed.authority;
     const QByteArray publicKey = decodeCanonicalBase64(
         QString::fromLatin1(publicKeyBase64), 32);
     InstalledSetData installed;
+    installed.schemaVersion = kLegacySchema;
     installed.releaseSequence = current.m_releaseSequence;
     installed.channel = current.m_channel;
     installed.applicationVersion = current.m_applicationVersion;
@@ -1595,31 +2311,31 @@ Decision verifyCandidate(const QByteArray &envelopeJson,
     installed.adapterId = current.m_adapterId;
     installed.adapterVersion = current.m_adapterVersion;
     const QString installedIdentity = installedArtifactSetIdentity(installed);
-    if (publicKey.isEmpty() || !validInstalled(installed)
+    if (publicKey.isEmpty() || !validLegacyInstalled(installed)
         || current.m_installedArtifactSetIdentity != installedIdentity
         || current.m_installationLayoutIdentity.isEmpty()
-        || current.m_authorityIdentity != installedAuthorityIdentity(
+        || current.m_authorityIdentity != legacyInstalledAuthorityIdentity(
             current.m_receiptIdentity, installedIdentity,
             current.m_installationLayoutIdentity, publicKey)) {
-        return invalidDecision(QStringLiteral("installed-artifact-authority-invalid"));
+        return invalidDecision(QStringLiteral(
+            "installed-artifact-authority-invalid"));
     }
 
     Candidate candidate;
     QByteArray verifiedPublicKey;
     QByteArray payload;
     QString errorCode;
-    if (!parseVerifiedCandidate(envelopeJson, publicKeyBase64, nowMs,
-                                &candidate, &verifiedPublicKey, &payload,
-                                &errorCode)) {
+    if (!parseVerifiedLegacyCandidate(
+            envelopeJson, publicKeyBase64, nowMs, &candidate,
+            &verifiedPublicKey, &payload, &errorCode)) {
         return invalidDecision(errorCode);
     }
-    return evaluateCandidate(
+    return evaluateLegacyCandidate(
         candidate, payload, verifiedPublicKey, nowMs, installed,
         current.m_authorityIdentity, selectedChannel,
         acceptedReleaseSequenceHighWater);
 }
 
-#ifdef AEGISY_UPDATE_ARTIFACT_SET_TESTING
 namespace Testing {
 
 Decision verifyCandidateWithUntrustedInputs(
@@ -1631,6 +2347,7 @@ Decision verifyCandidateWithUntrustedInputs(
     quint64 acceptedReleaseSequenceHighWater)
 {
     InstalledSetData installed;
+    installed.schemaVersion = kLegacySchema;
     installed.releaseSequence = untrusted.releaseSequence;
     installed.channel = untrusted.channel;
     installed.applicationVersion = untrusted.applicationVersion;
@@ -1646,11 +2363,12 @@ Decision verifyCandidateWithUntrustedInputs(
     QByteArray publicKey;
     QByteArray payload;
     QString errorCode;
-    if (!parseVerifiedCandidate(envelopeJson, publicKeyBase64, nowMs,
-                                &candidate, &publicKey, &payload, &errorCode)) {
+    if (!parseVerifiedLegacyCandidate(
+            envelopeJson, publicKeyBase64, nowMs, &candidate, &publicKey,
+            &payload, &errorCode)) {
         return invalidDecision(errorCode);
     }
-    return evaluateCandidate(
+    return evaluateLegacyCandidate(
         candidate, payload, publicKey, nowMs, installed, QString(),
         selectedChannel, acceptedReleaseSequenceHighWater);
 }
@@ -1674,8 +2392,32 @@ InstalledAuthorityResult verifyInstalledAuthorityAtRoot(
     layout.manifestPath = QDir(canonicalRoot).filePath(kArtifactManifestFileName);
     layout.runtimePath = QDir(canonicalRoot).filePath(runtimeFileName());
     layout.testOnly = true;
-    return InstalledArtifactSetAuthority::Verifier::verify(
+    return InstalledArtifactSetAuthority::Verifier::verifyLegacy(
         layout, publicKeyBase64, nowMs, expectedApplicationVersion,
+        expectedChannel, expectedPlatform, expectedArchitecture);
+}
+
+InstalledAuthorityResult verifyInstalledAuthorityAtRoot(
+    const QString &artifactRoot,
+    const UpdateSigningKeyRing::Authority &signingAuthority,
+    qint64 nowMs,
+    const QString &expectedApplicationVersion,
+    const QString &expectedChannel,
+    const QString &expectedPlatform,
+    const QString &expectedArchitecture)
+{
+    InstallationLayout layout;
+    const QString canonicalRoot = canonicalDirectory(artifactRoot);
+    layout.applicationPath = QDir(canonicalRoot).filePath(
+        QStringLiteral("AegisyClient.test-image"));
+    layout.installationRoot = canonicalRoot;
+    layout.artifactRoot = canonicalRoot;
+    layout.receiptPath = QDir(canonicalRoot).filePath(kInstalledReceiptFileName);
+    layout.manifestPath = QDir(canonicalRoot).filePath(kArtifactManifestFileName);
+    layout.runtimePath = QDir(canonicalRoot).filePath(runtimeFileName());
+    layout.testOnly = true;
+    return InstalledArtifactSetAuthority::Verifier::verify(
+        layout, signingAuthority, nowMs, expectedApplicationVersion,
         expectedChannel, expectedPlatform, expectedArchitecture);
 }
 
