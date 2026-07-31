@@ -10,11 +10,11 @@ endif()
 
 # Find Qt with WebEngine
 if(QT_VERSION_MAJOR EQUAL 6)
-    find_package(Qt6 REQUIRED COMPONENTS Core Widgets WebEngineWidgets)
-    set(QT_LIBS Qt6::Core Qt6::Widgets Qt6::WebEngineWidgets)
+    find_package(Qt6 REQUIRED COMPONENTS Core Widgets WebEngineWidgets WebChannel)
+    set(QT_LIBS Qt6::Core Qt6::Widgets Qt6::WebEngineWidgets Qt6::WebChannel)
 else()
-    find_package(Qt5 REQUIRED COMPONENTS Core Widgets WebEngineWidgets)
-    set(QT_LIBS Qt5::Core Qt5::Widgets Qt5::WebEngineWidgets)
+    find_package(Qt5 REQUIRED COMPONENTS Core Widgets WebEngineWidgets WebChannel)
+    set(QT_LIBS Qt5::Core Qt5::Widgets Qt5::WebEngineWidgets Qt5::WebChannel)
 endif()
 
 # Create experiment executable
@@ -31,8 +31,16 @@ add_executable(aegisy_webengine_secure_bundle
 
 target_link_libraries(aegisy_webengine_secure_bundle PRIVATE ${QT_LIBS})
 
+# Task 2.3: QWebChannel bridge with typed IDs, origin checks, size limits
+add_executable(aegisy_webengine_webchannel_bridge
+    webchannel_bridge.cpp
+)
+
+target_link_libraries(aegisy_webengine_webchannel_bridge PRIVATE ${QT_LIBS})
+
 # Set output directory
-set_target_properties(aegisy_webengine_experiment aegisy_webengine_secure_bundle PROPERTIES
+set_target_properties(aegisy_webengine_experiment aegisy_webengine_secure_bundle
+    aegisy_webengine_webchannel_bridge PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
