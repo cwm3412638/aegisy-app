@@ -2,21 +2,22 @@
 
 ## Summary
 
-Successfully completed 3 tasks in Section 2 (Milestone 0 UI Technology Spike):
+Successfully completed 5 tasks in Section 2 (Milestone 0 UI Technology Spike):
 - Task 2.4: Monaco editor integration ✓
 - Task 2.5: xterm.js terminal integration ✓
 - Task 2.7: Performance measurements ✓
 - Task 2.8: WebEngine vs Tauri ADR ✓
+- Task 2.9: Archive spike code ✓
 
 ## Overall Progress
 
 - **Total Tasks**: 235
-- **Completed**: 64 (27%)
-- **Pending**: 171
+- **Completed**: 65 (28%)
+- **Pending**: 170
 
 ## Section 2: Milestone 0 UI Technology Spike
 
-**Progress**: 7/9 tasks (78%)
+**Progress**: 8/9 tasks (89%)
 
 ### Completed Today
 
@@ -56,10 +57,14 @@ Successfully completed 3 tasks in Section 2 (Milestone 0 UI Technology Spike):
 - Rationale: Proven integration, performance, single-process simplicity
 - Validation criteria defined for final approval
 
+#### Task 2.9: Archive Spike Code
+- No code rejected - ADR 008 chose Qt WebEngine
+- All experiments retained as successful validations
+- Full documentation and benchmarks preserved
+
 ### Remaining Tasks
 
 - **Task 2.6**: Windows testing (requires Windows environment)
-- **Task 2.9**: Archive rejected spike code
 
 ## Key Deliverables
 
@@ -82,11 +87,12 @@ Successfully completed 3 tasks in Section 2 (Milestone 0 UI Technology Spike):
 ## Next Steps
 
 1. **Task 2.6**: Windows testing (requires Windows VM or CI)
-2. **Task 2.9**: Archive spike code
-3. Continue with other high-priority sections:
+2. Continue with other sections:
    - Section 5: Event Store (80% complete, 2 tasks remaining)
    - Section 13: Files/Editor (100% complete)
    - Section 15: Structured Edits (100% complete)
+   - Section 3: AAP Foundation (58% complete)
+   - Section 14: Terminal (56% complete)
 
 ## Technical Highlights
 
