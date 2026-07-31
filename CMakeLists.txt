@@ -46,6 +46,11 @@ endif()
 # 查找 OpenSSL
 find_package(OpenSSL REQUIRED)
 
+# Isolated experiments (optional)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/experiments/webengine/CMakeLists.txt")
+    add_subdirectory(experiments/webengine)
+endif()
+
 set(AEGISY_UPDATE_PUBLIC_KEY
     "9DkeQEQcqz6Trrcmr1XRlZHDQHyeOj3DaVA2rtS3WA0="
     CACHE STRING "Ed25519 update and emergency-policy public key")
