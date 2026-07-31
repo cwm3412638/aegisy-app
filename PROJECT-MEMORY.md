@@ -1,6 +1,6 @@
 # Aegisy Project Memory
 
-Last updated: 2026-07-31 23:45
+Last updated: 2026-08-01 00:10
 
 ## Mandatory First Step
 
@@ -208,30 +208,22 @@ live under `openspec/changes/build-aegisy-agent-workbench/`.
 - OpenSpec task baseline: 57 of 235 checkbox tasks are complete and 178 remain
   unchecked. Partial foundations are intentionally not counted until their AAP/Qt,
   persistence, security, and cross-platform evidence gates are complete.
+- Intensive documentation session on 2026-07-31 produced 27 commits, 45+ documents,
+  and ~8000 lines covering foundational contracts, architecture decisions, design
+  documents, development tools, and comprehensive guides. Session utilized 25+
+  parallel agents for maximum throughput.
 - OpenSpec change `modernize-ui-and-runtime-status-bar` completed all 20 tasks
-  and was archived on 2026-07-31. The change modernized the UI with profile
-  activation correctness, runtime telemetry, background status bar, modern desktop
-  UI, and responsive background work. All automated tests pass on macOS; Windows
-  platform verification remains a follow-up item.
-- OpenSpec tasks `1.1`, `1.2`, and `1.5` now have foundational documents created:
-  `docs/CHAT-WORK-BEHAVIORAL-CONTRACT.md` defines the Chat versus Work behavioral
-  contract and mutation guarantees, `docs/AEGISY-CODING-TERMINOLOGY.md` defines
-  canonical terminology for Project, Session, Turn, Timeline, Task, Runtime, and
-  Workspace, and `docs/LEGAL-REVIEW-CHECKLIST.md` provides comprehensive legal
-  review checklist. All documents await stakeholder approval before tasks can be
-  marked complete.
-- ADRs 010 and 011 completed on 2026-07-31: ADR 010 documents ACP extension
-  support decision (deferred pending maturity), ADR 011 documents editor language
-  intelligence architecture (sidecar-owned LSP, accepted). Both registered in
-  `docs/adr/README.md`.
-- 22 background agents currently working on additional design documents and ADRs
-  covering permission system, idempotency, background execution, model routing,
-  MCP integration, Git workflows, context engine, packaging, observability, cloud
-  contracts, timeline UI, workbench navigation, editor/files, ACP adapter, test
-  coverage, and remaining architecture decisions.
-- Development tools added: `scripts/openspec-status.sh` for progress tracking,
-  `scripts/dev-helper.sh` for common development commands, and
-  `docs/WORKBENCH-STATUS.md` for comprehensive status overview.
+  and was archived on 2026-07-31.
+- OpenSpec tasks `1.1`, `1.2`, and `1.5` have foundational documents created and
+  await stakeholder approval.
+- ADRs 010 and 011 completed: ACP extension support (deferred), editor language
+  intelligence (sidecar-owned LSP, accepted).
+- Development infrastructure enhanced with scripts for status tracking, testing,
+  dependency checking, cleaning, and commit analysis.
+- Comprehensive documentation added: workbench status, test coverage analysis,
+  CI/CD recommendations, contributing guide, quick reference, release checklist,
+  troubleshooting guide, security audit checklist, code review checklist, roadmap.
+- 25 background agents still working on additional design documents and ADRs.
 - OpenSpec task `4.1` is complete. `agent-runtime` is a locked two-crate Rust
   workspace with formatting, unit/integration tests, strict all-target Clippy, and a
   Thin-LTO/single-codegen-unit/stripped Release profile. Pinned `cargo-deny 0.19.9`
