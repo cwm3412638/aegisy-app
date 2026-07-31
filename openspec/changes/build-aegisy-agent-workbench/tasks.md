@@ -842,6 +842,12 @@
     malformed authority fails closed without displaying provider text. The
     timeline is still not virtualized and the remaining item types, stress
     behavior, and cross-platform render evidence are incomplete.
+  - Partial UI foundation: Workbench timeline UI implemented with typed item rendering:
+    user (blue border, 👤), agent (green border, 🤖), command (brown border, ⚡),
+    usage (gray border, 📊). Each item has avatar, content area, and type-specific
+    styling. Timeline uses flexbox column layout with 12px gaps. Items have rounded
+    corners, padding, and semantic borders. Foundation ready for backend integration.
+    Virtualization, live updates, and complete item type coverage remain pending.
 - [ ] 12.2 Implement deterministic delta accumulation and terminal-state rendering for every item type
 - [ ] 12.3 Implement live plan view with stable step status and links to child sessions or evidence
 - [ ] 12.4 Implement inline approvals showing command/diff/scope/risk/reason and exact available decision scopes
