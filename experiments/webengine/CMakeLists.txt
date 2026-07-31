@@ -24,8 +24,15 @@ add_executable(aegisy_webengine_experiment
 
 target_link_libraries(aegisy_webengine_experiment PRIVATE ${QT_LIBS})
 
+# Task 2.2: Secure local bundle with network blocking
+add_executable(aegisy_webengine_secure_bundle
+    secure_bundle.cpp
+)
+
+target_link_libraries(aegisy_webengine_secure_bundle PRIVATE ${QT_LIBS})
+
 # Set output directory
-set_target_properties(aegisy_webengine_experiment PROPERTIES
+set_target_properties(aegisy_webengine_experiment aegisy_webengine_secure_bundle PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
