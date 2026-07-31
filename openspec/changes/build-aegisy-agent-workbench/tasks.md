@@ -83,7 +83,11 @@
     CMakeLists.txt. Build with `-DAEGISY_BUILD_WEBENGINE_EXPERIMENT=ON` to create
     `aegisy_webengine_experiment` target. Minimal QWebEngineView application verifies
     Qt WebEngine linking works without affecting production build. Completed 2026-08-01.
-- [ ] 2.2 Render a local signed workbench bundle in `QWebEngineView` with all network navigation disabled by default
+- [x] 2.2 Render a local signed workbench bundle in `QWebEngineView` with all network navigation disabled by default
+  - `experiments/webengine/secure_bundle.cpp` implements SecureWebPage that overrides
+    acceptNavigationRequest() to block all non-local URLs. Uses isolated QWebEngineProfile
+    with no cache/cookies. Disables LocalContentCanAccessRemoteUrls. Renders local HTML
+    bundle via setHtml(). Includes security test with blocked external link. Completed 2026-08-01.
 - [ ] 2.3 Prove a minimal `QWebChannel` bridge with typed request IDs, origin checks, size limits, and cancellation
 - [ ] 2.4 Embed Monaco and verify open/edit/save, large file behavior, diff view, theme, font fallback, and Chinese IME on macOS
 - [ ] 2.5 Embed xterm.js and verify interactive PTY throughput, resize, Unicode, copy/paste, links, and long-output virtualization on macOS
