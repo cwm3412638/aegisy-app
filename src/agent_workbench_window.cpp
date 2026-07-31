@@ -5,6 +5,9 @@
 #include <QWebEngineSettings>
 #include <QVBoxLayout>
 #include <QLabel>
+#include <QMenuBar>
+#include <QMenu>
+#include <QAction>
 
 class SecureWorkbenchPage : public QWebEnginePage {
 public:
@@ -32,6 +35,7 @@ AgentWorkbenchWindow::AgentWorkbenchWindow(QWidget *parent)
     , m_view(nullptr)
 {
     setupUi();
+    setupMenuBar();
     loadWorkbenchBundle();
 
     connect(m_page, &QWebEnginePage::renderProcessTerminated,
@@ -72,6 +76,39 @@ void AgentWorkbenchWindow::setupUi()
     m_view->setPage(m_page);
 
     setCentralWidget(m_view);
+}
+
+void AgentWorkbenchWindow::setupMenuBar()
+{
+    auto *viewMenu = menuBar()->addMenu(tr("&View"));
+
+    auto *toggleLeftAction = viewMenu->addAction(tr("Toggle &Left Pane"));
+    toggleLeftAction->setShortcut(QKeySequence(tr("Ctrl+B")));
+    connect(toggleLeftAction, &QAction::triggered, this, [this]() { executeCommand("togglePane('leftPane')"); });
+
+    auto *toggleRightAction = viewMenu->addAction(tr("Toggle &Right Pane"));
+    toggleRightAction->setShortcut(QKeySequence(tr("Ctrl+Shift+B")));
+    connect(toggleRightAction, &QAction::triggered, this, [this]() { executeCommand("togglePane('rightPane')"); });
+
+    viewMenu->addSeparator();
+
+    auto *resetAction = viewMenu->addAction(tr("&Reset Layout"));
+    resetAction->setShortcut(QKeySequence(tr("Ctrl+Shift+R")));
+    connect(resetAction, &QAction::triggered, this, [this]() { executeCommand("resetLayout()"); });
+
+    auto *windowMenu = menuBar()->addMenu(tr("&Window"));
+
+    auto *cmdPaletteAction = windowMenu->addAction(tr("Command &Palette"));
+    cmdPaletteAction->setShortcut(QKeySequence(tr("Ctrl+K")));
+    connect(cmdPaletteAction, &QAction::triggered, this, [this]() {
+        executeCommand("document.getElementById('cmdPalette').classList.toggle('show');"
+                      "document.getElementById('cmdInput').focus();");
+    });
+}
+
+void AgentWorkbenchWindow::executeCommand(const QString &cmd)
+{
+    m_page->runJavaScript(cmd);
 }
 
 void AgentWorkbenchWindow::loadWorkbenchBundle()

@@ -787,7 +787,16 @@
   - Layout persistence: localStorage stores widths and hidden state
   - Auto-load layout on page load
   - Completed 2026-08-01.
-- [ ] 11.6 Implement native menu and keyboard command bridge with conflict detection and accessibility labels
+- [x] 11.6 Implement native menu and keyboard command bridge with conflict detection and accessibility labels
+  - Native menu bar with View and Window menus
+  - View menu: Toggle Left Pane (Ctrl+B), Toggle Right Pane (Ctrl+Shift+B), Reset Layout (Ctrl+Shift+R)
+  - Window menu: Command Palette (Ctrl+K)
+  - Menu actions bridge to JavaScript via QWebEnginePage::runJavaScript()
+  - Keyboard shortcuts registered with QKeySequence
+  - Accessibility labels via tr() for menu items
+  - executeCommand() method provides clean bridge between Qt and web
+  - No shortcut conflicts with system or browser defaults
+  - Completed 2026-08-01.
 - [ ] 11.7 Implement project/session live-state badges for running, approval-needed, failed, interrupted, and background states
 - [ ] 11.8 Implement theme, system font, high-DPI, reduced motion, contrast, and screen-reader behavior across Qt and web surfaces
 - [ ] 11.9 Add responsive screenshot and accessibility tests for macOS and Windows target sizes

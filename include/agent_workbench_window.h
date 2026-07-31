@@ -17,7 +17,9 @@ public:
 
 private:
     void setupUi();
+    void setupMenuBar();
     void loadWorkbenchBundle();
+    void executeCommand(const QString &cmd);
 
     QWebEngineProfile *m_profile;
     QWebEnginePage *m_page;
