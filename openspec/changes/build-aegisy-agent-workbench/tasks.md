@@ -742,7 +742,20 @@
     can be toggled, and channel detection works correctly.
   - Build system updated in `CMakeLists.txt` to include new source files. Full
     build passes on macOS. Completed 2026-08-01.
-- [ ] 11.2 Implement trusted local bundle loading, content security policy, blocked external navigation, and renderer crash page
+- [x] 11.2 Implement trusted local bundle loading, content security policy, blocked external navigation, and renderer crash page
+  - `SecureWorkbenchPage` overrides `acceptNavigationRequest()` to block all non-qrc
+    URLs. Only local qrc:// scheme is allowed for workbench bundle.
+  - `QWebEngineProfile` configured with NoCache and NoPersistentCookies for isolation.
+  - Settings disable `LocalContentCanAccessFileUrls` and `LocalContentCanAccessRemoteUrls`
+    to prevent JavaScript from accessing local files or remote URLs.
+  - Content Security Policy enforced via meta tag: `default-src 'none'; style-src
+    'unsafe-inline'; script-src 'unsafe-inline'` blocks all external resources.
+  - `createWindow()` returns nullptr to block popup windows.
+  - Renderer crash handler connected to `renderProcessTerminated` signal. Shows crash
+    page with reload button on CrashedTerminationStatus or AbnormalTerminationStatus.
+  - `tests/test_workbench_security.cpp` verifies external navigation blocking and
+    isolated profile configuration.
+  - Full build passes on macOS. Completed 2026-08-01.
 - [ ] 11.3 Implement product rail with Chat/Work switch, new task, projects, sessions, extensions, and settings destinations
 - [ ] 11.4 Implement wide three-pane layout and narrow drawer/tab layout with minimum sizes and no approval/composer clipping
 - [ ] 11.5 Implement pane resize, hide/show, focus, command palette, reset, and device-local layout persistence
